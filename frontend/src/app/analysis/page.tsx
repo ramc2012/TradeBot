@@ -12,6 +12,7 @@ import {
   listMacdBacktestTasks, getAnalysisBrokerStatus, getFoUnderlyings,
   getResearchCacheStatus, getLatestValidationReport, getLatestGreeksSyncReport, API_URL,
 } from "@/lib/api";
+import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -318,6 +319,27 @@ function getErrorDetail(error: unknown) {
   return (error as any)?.response?.data?.detail || (error as Error)?.message || "Could not load cache status";
 }
 
+function SnapshotBanner({
+  message,
+  snapshotSavedAt,
+}: {
+  message: string;
+  snapshotSavedAt?: string | null;
+}) {
+  return (
+    <div className="rounded border border-accent-amber/30 bg-accent-amber/5 p-3 text-xs text-text-muted">
+      <div className="flex items-center gap-2 text-accent-amber">
+        <AlertCircle size={12} />
+        <span className="font-medium">Showing last successful snapshot</span>
+      </div>
+      <div className="mt-1">
+        {message}
+        {snapshotSavedAt && ` · saved ${formatRelativeTime(snapshotSavedAt)} (${formatLocalTimestamp(snapshotSavedAt)})`}
+      </div>
+    </div>
+  );
+}
+
 function stageTone(stage: ResearchSymbol["stage"]) {
   switch (stage) {
     case "populated":
@@ -365,18 +387,35 @@ function buildFallbackResearchScheduler(nowMs: number, pauseStartedAt: number | 
 // ── BrokerStatusCard ────────────────────────────────────────────────────────────
 
 function BrokerStatusCard() {
-  const { data, isLoading } = useQuery({
+  const {
+    data,
+    error,
+    isError,
+    isLoading,
+    isShowingSnapshot,
+    snapshotSavedAt,
+  } = usePersistentSnapshotQuery({
     queryKey: ["analysisBrokerStatus"],
     queryFn: () => getAnalysisBrokerStatus().then(r => r.data),
     refetchInterval: 10000,
     staleTime: 5000,
+    storageKey: "analysis:broker-status",
   });
 
-  if (isLoading) return (
+  if (isLoading && !data) return (
     <div className="card p-3 flex items-center gap-2 text-xs text-text-muted">
       <Loader2 size={12} className="animate-spin" /> Checking broker connections…
     </div>
   );
+
+  if (!data) {
+    return (
+      <div className="card p-3 flex items-center gap-2 text-xs text-accent-red">
+        <AlertCircle size={12} />
+        {getErrorDetail(error)}
+      </div>
+    );
+  }
 
   const upstoxOk = data?.upstox_connected;
   const upstoxReady = data?.upstox_ready ?? upstoxOk;
@@ -402,6 +441,12 @@ function BrokerStatusCard() {
 
   return (
     <div className="space-y-2">
+      {isShowingSnapshot && (
+        <SnapshotBanner
+          message={getErrorDetail(error)}
+          snapshotSavedAt={snapshotSavedAt}
+        />
+      )}
       {/* Upstox row */}
       <div className={clsx(
         "card p-3 flex items-start justify-between gap-3 text-xs",
@@ -475,10 +520,17 @@ function RunForm({ onStarted }: { onStarted: (taskId: string) => void }) {
   const [toDate] = useState(() => new Date().toISOString().split("T")[0]);
   const [error, setError] = useState("");
 
-  const { data: brokerStatus } = useQuery({
+  const {
+    data: brokerStatus,
+    error: brokerStatusError,
+    isError: brokerStatusUnavailable,
+    isShowingSnapshot: showingBrokerSnapshot,
+    snapshotSavedAt: brokerSnapshotSavedAt,
+  } = usePersistentSnapshotQuery({
     queryKey: ["analysisBrokerStatus"],
     queryFn: () => getAnalysisBrokerStatus().then(r => r.data),
     staleTime: 5000,
+    storageKey: "analysis:broker-status",
   });
 
   const { data: foData, isLoading: loadingFo } = useQuery({
@@ -516,7 +568,8 @@ function RunForm({ onStarted }: { onStarted: (taskId: string) => void }) {
     onError: (e: any) => setError(e?.response?.data?.detail || "Failed to start"),
   });
 
-  const isReady = brokerStatus?.upstox_ready ?? brokerStatus?.upstox_connected;
+  const lastKnownReady = brokerStatus?.upstox_ready ?? brokerStatus?.upstox_connected;
+  const isReady = !brokerStatusUnavailable && lastKnownReady;
   const tokenMessage = brokerStatus?.upstox_token_health?.message;
 
   return (
@@ -599,6 +652,19 @@ function RunForm({ onStarted }: { onStarted: (taskId: string) => void }) {
         </div>
       )}
 
+      {showingBrokerSnapshot && (
+        <div className="flex items-start gap-2 text-xs text-accent-amber bg-accent-amber/5 border border-accent-amber/20 rounded p-2">
+          <AlertCircle size={12} className="mt-0.5 shrink-0" />
+          <span>
+            Live broker verification is unavailable. Last known Upstox state was{" "}
+            <strong className="text-accent-amber">{lastKnownReady ? "ready" : "not ready"}</strong>.
+            {" "}
+            {getErrorDetail(brokerStatusError)}
+            {brokerSnapshotSavedAt && ` · saved ${formatRelativeTime(brokerSnapshotSavedAt)}`}
+          </span>
+        </div>
+      )}
+
       <button
         onClick={() => mut.mutate()}
         disabled={mut.isPending || !isReady || (mode === "custom" && customSelected.length === 0)}
@@ -609,7 +675,9 @@ function RunForm({ onStarted }: { onStarted: (taskId: string) => void }) {
 
       {!isReady && (
         <p className="text-xs text-accent-red text-center">
-          {tokenMessage || "Connect Upstox in Settings first to enable the backtest."}
+          {brokerStatusUnavailable
+            ? "Live Upstox status is unavailable, so starting a new backtest is disabled until the broker check recovers."
+            : (tokenMessage || "Connect Upstox in Settings first to enable the backtest.")}
         </p>
       )}
     </div>
@@ -709,11 +777,21 @@ function PopulationMonitor() {
   const [fallbackPauseStartedAt, setFallbackPauseStartedAt] = useState<number | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
-  const { data, isLoading, isError, error, refetch, isFetching } = useQuery<ResearchCacheStatus>({
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+    refetch,
+    isFetching,
+    isShowingSnapshot,
+    snapshotSavedAt,
+  } = usePersistentSnapshotQuery<ResearchCacheStatus>({
     queryKey: ["researchCacheStatus"],
     queryFn: () => getResearchCacheStatus().then(r => r.data),
     refetchInterval: 5000,
     staleTime: 2000,
+    storageKey: "analysis:research-cache-status",
   });
 
   useEffect(() => {
@@ -730,16 +808,18 @@ function PopulationMonitor() {
   }, [data, isError]);
 
   const fallbackScheduler = buildFallbackResearchScheduler(nowMs, fallbackPauseStartedAt);
-  const scheduler = isError
-    ? (data?.scheduler?.state === "rate_limit_cooldown" ? data.scheduler : fallbackScheduler)
-    : (data?.scheduler ?? fallbackScheduler);
+  const scheduler = !data
+    ? fallbackScheduler
+    : isError && data.scheduler?.state === "rate_limit_cooldown"
+      ? data.scheduler
+      : (data.scheduler ?? fallbackScheduler);
   const estimatedAvailablePct = scheduler.estimated_window_available_pct;
   const estimatedUsedPct = scheduler.estimated_window_used_pct;
   const countdownLabel = formatCountdown(scheduler.seconds_until_next_batch);
-  const showPauseBanner = scheduler.state === "rate_limit_cooldown" || isError;
+  const showPauseBanner = scheduler.state === "rate_limit_cooldown" || (isError && !data);
   const errorDetail = getErrorDetail(error);
 
-  if (isLoading) {
+  if (isLoading && !data) {
     return (
       <div className="card p-4 flex items-center gap-2 text-xs text-text-muted">
         <Loader2 size={12} className="animate-spin" /> Loading research cache status…
@@ -800,6 +880,12 @@ function PopulationMonitor() {
 
   return (
     <div className="card p-5 space-y-4">
+      {isShowingSnapshot && (
+        <SnapshotBanner
+          message={`Research cache polling is unavailable. ${errorDetail}`}
+          snapshotSavedAt={snapshotSavedAt}
+        />
+      )}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-2">
           <Database size={15} className="text-accent-blue" />
@@ -1000,15 +1086,25 @@ function PopulationMonitor() {
 }
 
 function ValidationReportPanel() {
-  const { data, isLoading, isError, error, refetch, isFetching } = useQuery<ValidationReportPayload>({
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+    refetch,
+    isFetching,
+    isShowingSnapshot,
+    snapshotSavedAt,
+  } = usePersistentSnapshotQuery<ValidationReportPayload>({
     queryKey: ["latestValidationReport"],
     queryFn: () => getLatestValidationReport().then(r => r.data),
     staleTime: 5000,
     refetchInterval: 15000,
     refetchOnWindowFocus: false,
+    storageKey: "analysis:validation-report",
   });
 
-  if (isLoading) {
+  if (isLoading && !data) {
     return (
       <div className="card p-4 flex items-center gap-2 text-xs text-text-muted">
         <Loader2 size={12} className="animate-spin" /> Loading validation report…
@@ -1016,7 +1112,7 @@ function ValidationReportPanel() {
     );
   }
 
-  if (isError) {
+  if (isError && !data) {
     return (
       <div className="card p-4 space-y-2">
         <div className="flex items-center gap-2 text-sm font-semibold text-accent-red">
@@ -1032,6 +1128,12 @@ function ValidationReportPanel() {
   if (!data?.available || !data.summary) {
     return (
       <div className="card p-4 space-y-2">
+        {isShowingSnapshot && (
+          <SnapshotBanner
+            message={`Validation report refresh failed. ${getErrorDetail(error)}`}
+            snapshotSavedAt={snapshotSavedAt}
+          />
+        )}
         <div className="flex items-center gap-2 text-sm font-semibold text-text-secondary">
           <FileText size={14} className="text-accent-blue" /> Live Validation Report
         </div>
@@ -1049,6 +1151,12 @@ function ValidationReportPanel() {
 
   return (
     <div className="card p-5 space-y-4">
+      {isShowingSnapshot && (
+        <SnapshotBanner
+          message={`Validation report refresh failed. ${getErrorDetail(error)}`}
+          snapshotSavedAt={snapshotSavedAt}
+        />
+      )}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-2">
           <FileText size={15} className="text-accent-amber" />
@@ -1180,15 +1288,25 @@ function ValidationReportPanel() {
 }
 
 function GreeksSyncReportPanel() {
-  const { data, isLoading, isError, error, refetch, isFetching } = useQuery<GreeksSyncReportPayload>({
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+    refetch,
+    isFetching,
+    isShowingSnapshot,
+    snapshotSavedAt,
+  } = usePersistentSnapshotQuery<GreeksSyncReportPayload>({
     queryKey: ["latestGreeksSyncReport"],
     queryFn: () => getLatestGreeksSyncReport().then(r => r.data),
     staleTime: 5000,
     refetchInterval: 15000,
     refetchOnWindowFocus: false,
+    storageKey: "analysis:greeks-sync-report",
   });
 
-  if (isLoading) {
+  if (isLoading && !data) {
     return (
       <div className="card p-4 flex items-center gap-2 text-xs text-text-muted">
         <Loader2 size={12} className="animate-spin" /> Loading Greeks Sync research…
@@ -1196,7 +1314,7 @@ function GreeksSyncReportPanel() {
     );
   }
 
-  if (isError) {
+  if (isError && !data) {
     return (
       <div className="card p-4 space-y-2">
         <div className="flex items-center gap-2 text-sm font-semibold text-accent-red">
@@ -1212,6 +1330,12 @@ function GreeksSyncReportPanel() {
   if (!data?.available || !data.summary) {
     return (
       <div className="card p-4 space-y-2">
+        {isShowingSnapshot && (
+          <SnapshotBanner
+            message={`Greeks Sync research refresh failed. ${getErrorDetail(error)}`}
+            snapshotSavedAt={snapshotSavedAt}
+          />
+        )}
         <div className="flex items-center gap-2 text-sm font-semibold text-text-secondary">
           <FileText size={14} className="text-accent-purple" /> Greeks Sync Research
         </div>
@@ -1229,6 +1353,12 @@ function GreeksSyncReportPanel() {
 
   return (
     <div className="card p-5 space-y-4">
+      {isShowingSnapshot && (
+        <SnapshotBanner
+          message={`Greeks Sync research refresh failed. ${getErrorDetail(error)}`}
+          snapshotSavedAt={snapshotSavedAt}
+        />
+      )}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-2">
           <FileText size={15} className="text-accent-purple" />

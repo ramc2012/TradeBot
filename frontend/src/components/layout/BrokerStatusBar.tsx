@@ -1,24 +1,29 @@
 "use client";
 import { useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { getBrokerStatus, getPortfolioSummary } from "@/lib/api";
+import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
 import { useStore } from "@/store";
 import { clsx } from "clsx";
 
 export default function BrokerStatusBar() {
   const { mode, activeBroker, portfolio, setPortfolio, setBrokerStatuses } = useStore();
 
-  const { data: statusData } = useQuery({
+  const statusQuery = usePersistentSnapshotQuery({
     queryKey: ["brokerStatus"],
     queryFn: () => getBrokerStatus().then((r) => r.data),
     refetchInterval: 30000,
+    storageKey: "layout:broker-status",
   });
 
-  const { data: portfolioData } = useQuery({
+  const portfolioQuery = usePersistentSnapshotQuery({
     queryKey: ["portfolioSummary"],
     queryFn: () => getPortfolioSummary().then((r) => r.data),
     refetchInterval: 5000,
+    storageKey: "layout:portfolio-summary",
   });
+
+  const statusData = statusQuery.data;
+  const portfolioData = portfolioQuery.data;
 
   useEffect(() => {
     if (statusData) setBrokerStatuses(statusData);
@@ -30,6 +35,12 @@ export default function BrokerStatusBar() {
 
   const connectedBroker = statusData?.find((s: { broker: string; connected: boolean }) => s.connected);
   const dayPnl = portfolio?.day_pnl ?? 0;
+  const showingSnapshot = statusQuery.isShowingSnapshot || portfolioQuery.isShowingSnapshot;
+  const statusMessage = statusQuery.isShowingSnapshot
+    ? "last broker state"
+    : portfolioQuery.isShowingSnapshot
+      ? "last portfolio state"
+      : null;
 
   return (
     <div className="h-8 bg-bg-secondary border-b border-bg-border flex items-center px-4 gap-6 text-xs font-mono shrink-0">
@@ -55,6 +66,10 @@ export default function BrokerStatusBar() {
           <span className="text-text-muted">⚪ No broker connected</span>
         )}
       </span>
+
+      {showingSnapshot && (
+        <span className="text-accent-amber">stale · {statusMessage}</span>
+      )}
 
       <span className="flex-1" />
 
