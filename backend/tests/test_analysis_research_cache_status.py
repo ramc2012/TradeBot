@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -17,10 +18,14 @@ class _FakeResult:
     def all(self) -> list[dict]:
         return self._rows
 
+    def one(self) -> dict:
+        return self._rows[0]
+
 
 class _FakeSession:
-    def __init__(self, rows: list[dict]):
-        self._rows = rows
+    def __init__(self, responses: list[list[dict]]):
+        self._responses = responses
+        self._idx = 0
 
     async def __aenter__(self) -> "_FakeSession":
         return self
@@ -29,7 +34,9 @@ class _FakeSession:
         return None
 
     async def execute(self, _query):
-        return _FakeResult(self._rows)
+        response = self._responses[min(self._idx, len(self._responses) - 1)]
+        self._idx += 1
+        return _FakeResult(response)
 
 
 def test_stage_for_symbol() -> None:
@@ -79,7 +86,7 @@ def test_stage_for_symbol() -> None:
             "pending_contracts": 2446,
             "option_candles": 43250,
         }
-    ) == "populating"
+    ) == "populated"
 
 
 def test_symbol_progress_pct() -> None:
@@ -94,7 +101,7 @@ def test_symbol_progress_pct() -> None:
             "empty_contracts": 8,
         }
     )
-    assert pct == pytest.approx(62.7, abs=0.1)
+    assert pct == pytest.approx(98.8, abs=0.1)
 
     queued_pct = analysis._symbol_progress_pct(
         {
@@ -151,8 +158,59 @@ def test_research_scheduler_keeps_future_waiting_runtime_as_waiting() -> None:
     assert scheduler["seconds_until_next_batch"] == 1500
 
 
-@pytest.mark.asyncio
-async def test_get_research_cache_status_summarises_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_api_budget_summary_uses_runtime_history_and_research_target() -> None:
+    now = datetime(2026, 3, 29, 12, 0, tzinfo=timezone.utc)
+    budget = analysis._build_api_budget_summary(
+        now_utc=now,
+        summary={
+            "universe_total": 3,
+            "underlyings_with_expiries": 2,
+            "underlyings_with_spot": 1,
+            "expiry_total": 10,
+            "expiries_discovered": 4,
+            "research_contract_target": 20,
+            "research_contracts_processed": 8,
+        },
+        runtime_state={
+            "elapsed_seconds": 80,
+            "last_result": {
+                "api_calls": {
+                    "total": 120,
+                    "by_endpoint": {"historical_candle": 115, "expired_contracts": 5},
+                },
+                "rate_limit": {"inter_call_delay_seconds": 1.0},
+            },
+            "history": [
+                {
+                    "completed_at": (now - timedelta(minutes=5)).isoformat(),
+                    "elapsed_seconds": 80,
+                    "api_calls": {
+                        "total": 120,
+                        "by_endpoint": {"historical_candle": 115, "expired_contracts": 5},
+                    },
+                },
+                {
+                    "completed_at": (now - timedelta(minutes=20)).isoformat(),
+                    "elapsed_seconds": 90,
+                    "api_calls": {
+                        "total": 100,
+                        "by_endpoint": {"historical_candle": 92, "historical_day": 8},
+                    },
+                },
+            ],
+        },
+    )
+
+    assert budget["limits"]["per_30_minutes"] == 2000
+    assert budget["configured"]["calls_per_30_minutes"] == pytest.approx(1800.0)
+    assert budget["rolling_30m"]["calls"] == 220
+    assert budget["rolling_30m"]["by_endpoint"]["historical_candle"] == 207
+    assert budget["last_run"]["calls"] == 120
+    assert budget["theoretical"]["total_calls"] == 36
+    assert budget["theoretical"]["remaining_calls"] == 21
+
+
+def test_get_research_cache_status_summarises_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     now = datetime.now(timezone.utc)
     rows = [
         {
@@ -208,9 +266,31 @@ async def test_get_research_cache_status_summarises_rows(monkeypatch: pytest.Mon
         },
     ]
 
-    monkeypatch.setattr(analysis, "AsyncSessionLocal", lambda: _FakeSession(rows))
+    monkeypatch.setattr(
+        analysis,
+        "AsyncSessionLocal",
+        lambda: _FakeSession(
+            [
+                rows,
+                [
+                    {
+                        "last_successful_option_sync_at": now - timedelta(minutes=2),
+                        "option_candles_added_last_30m": 1200,
+                    }
+                ],
+                [
+                    {
+                        "last_complete_contract_sync_at": now - timedelta(minutes=2),
+                        "last_empty_contract_touch_at": now - timedelta(minutes=3),
+                        "complete_contracts_touched_last_30m": 12,
+                        "empty_contracts_touched_last_30m": 1,
+                    }
+                ],
+            ]
+        ),
+    )
 
-    payload = await analysis.get_research_cache_status()
+    payload = asyncio.run(analysis.get_research_cache_status())
 
     assert payload["summary"]["universe_total"] == 3
     assert payload["summary"]["underlyings_with_expiries"] == 2
@@ -218,21 +298,22 @@ async def test_get_research_cache_status_summarises_rows(monkeypatch: pytest.Mon
     assert payload["summary"]["option_candles"] == 43250
     assert payload["summary"]["contracts_complete"] == 262
     assert payload["summary"]["contracts_pending"] == 2803
+    assert payload["api_budget"]["limits"]["per_30_minutes"] == 2000
     assert payload["summary"]["active_symbols"] == 2
     assert payload["summary"]["populated_symbols"] == 1
-    assert payload["summary"]["symbols_in_progress"] == 2
+    assert payload["summary"]["symbols_in_progress"] == 1
     assert payload["summary"]["stage_counts"] == {
         "queued": 1,
         "metadata": 0,
         "spot": 0,
         "contracts": 1,
-        "populating": 1,
-        "populated": 0,
+        "populating": 0,
+        "populated": 1,
     }
 
-    assert [row["symbol"] for row in payload["symbols"]] == ["NIFTY", "ABB", "ZYDUSLIFE"]
-    assert payload["symbols"][0]["stage"] == "populating"
+    assert [row["symbol"] for row in payload["symbols"]] == ["ABB", "NIFTY", "ZYDUSLIFE"]
+    assert payload["symbols"][0]["stage"] == "contracts"
     assert payload["symbols"][0]["active_now"] is True
-    assert payload["symbols"][1]["stage"] == "contracts"
+    assert payload["symbols"][1]["stage"] == "populated"
     assert payload["symbols"][2]["stage"] == "queued"
     assert payload["symbols"][2]["active_now"] is False

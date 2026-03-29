@@ -4,14 +4,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   getBrokerStatus, saveCredentials, getFyersAuthUrl, getUpstoxAuthUrl, connectUpstox,
   getIciciLoginUrl, connectIciciBreeze, connectFivepaisa,
-  disconnectBroker, getRiskStatus, updateRiskConfig,
+  disconnectBroker, getRiskStatus, updateRiskConfig, getResearchCacheStatus,
+  getTelegramSettings, saveTelegramSettings, discoverTelegramChats, sendTelegramTest,
 } from "@/lib/api";
 import { api } from "@/lib/api";
 import { clsx } from "clsx";
 import {
   CheckCircle2, XCircle, Eye, EyeOff, ExternalLink, RefreshCw,
   ChevronDown, ChevronUp, Loader2, Plug, Unplug, AlertCircle, Save,
-  Copy, Info,
+  Copy, Info, Send,
 } from "lucide-react";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -88,6 +89,31 @@ function StatusBadge({ connected }: { connected: boolean }) {
   );
 }
 
+function formatInteger(value?: number | null): string {
+  if (value == null || Number.isNaN(value)) return "—";
+  return new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(value);
+}
+
+function formatDecimal(value?: number | null, digits = 1): string {
+  if (value == null || Number.isNaN(value)) return "—";
+  return new Intl.NumberFormat("en-IN", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  }).format(value);
+}
+
+function formatDuration(seconds?: number | null): string {
+  if (seconds == null || Number.isNaN(seconds) || seconds < 0) return "—";
+  const total = Math.round(seconds);
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${total}s`;
+}
+
 function CredsSavedBadge({ fields }: { fields: Record<string, boolean> }) {
   const total = Object.keys(fields).length;
   const filled = Object.values(fields).filter(Boolean).length;
@@ -110,6 +136,371 @@ function useAllCredsStatus() {
     queryFn: () => api.get("/api/auth/all-credentials-status").then(r => r.data),
     staleTime: 30_000,
   });
+}
+
+function UpstoxApiBudgetCard() {
+  const { data, isLoading, isError, refetch } = useQuery({
+    queryKey: ["settingsResearchCacheStatus"],
+    queryFn: () => getResearchCacheStatus().then((r) => r.data),
+    refetchInterval: 30000,
+    staleTime: 15000,
+  });
+
+  const budget = data?.api_budget;
+  const scheduler = data?.scheduler;
+
+  return (
+    <div className="card p-4 space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="font-semibold text-sm">Upstox API Budget</div>
+          <p className="text-xs text-text-muted mt-1">
+            Rolling call usage, configured pacing, and theoretical useful-dataset ETA for the research sync.
+          </p>
+        </div>
+        <button onClick={() => refetch()} className="text-text-muted hover:text-text-primary p-1 rounded" title="Refresh">
+          <RefreshCw size={14} />
+        </button>
+      </div>
+
+      {isLoading && (
+        <div className="text-xs text-text-muted flex items-center gap-2">
+          <Loader2 size={12} className="animate-spin" /> Loading API budget…
+        </div>
+      )}
+
+      {isError && (
+        <div className="text-xs text-accent-red flex items-center gap-2">
+          <AlertCircle size={12} /> Could not load API budget telemetry.
+        </div>
+      )}
+
+      {!isLoading && !isError && budget && (
+        <>
+          <div className="grid gap-3 md:grid-cols-4">
+            <div className="rounded border border-bg-border bg-bg-secondary/40 p-3">
+              <div className="text-[11px] uppercase tracking-wide text-text-muted">Rolling 30m</div>
+              <div className="mt-1 text-lg font-semibold text-text-primary">
+                {formatInteger(budget.rolling_30m?.calls)} / {formatInteger(budget.limits?.per_30_minutes)}
+              </div>
+              <div className="text-xs text-text-muted">
+                {formatDecimal(budget.rolling_30m?.utilization_pct_of_doc_limit, 1)}% of documented cap
+              </div>
+            </div>
+            <div className="rounded border border-bg-border bg-bg-secondary/40 p-3">
+              <div className="text-[11px] uppercase tracking-wide text-text-muted">Configured Ceiling</div>
+              <div className="mt-1 text-lg font-semibold text-text-primary">
+                {formatInteger(budget.configured?.calls_per_30_minutes)} / {formatInteger(budget.limits?.per_30_minutes)}
+              </div>
+              <div className="text-xs text-text-muted">
+                gap {formatDecimal(budget.configured?.gap_seconds, 1)}s between calls
+              </div>
+            </div>
+            <div className="rounded border border-bg-border bg-bg-secondary/40 p-3">
+              <div className="text-[11px] uppercase tracking-wide text-text-muted">Last Run Rate</div>
+              <div className="mt-1 text-lg font-semibold text-text-primary">
+                {formatDecimal(budget.last_run?.avg_calls_per_second, 2)}/s
+              </div>
+              <div className="text-xs text-text-muted">
+                {formatInteger(budget.last_run?.calls)} calls in {formatDuration(budget.last_run?.elapsed_seconds)}
+              </div>
+            </div>
+            <div className="rounded border border-bg-border bg-bg-secondary/40 p-3">
+              <div className="text-[11px] uppercase tracking-wide text-text-muted">Full Useful Target</div>
+              <div className="mt-1 text-lg font-semibold text-text-primary">
+                {formatDuration(budget.theoretical?.full_seconds_at_configured_rate)}
+              </div>
+              <div className="text-xs text-text-muted">
+                configured-rate estimate from empty cache
+              </div>
+            </div>
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            <div className="rounded border border-bg-border bg-bg-secondary/30 p-3 space-y-2">
+              <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Current Rates vs Limits</div>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
+                  <div className="text-text-muted">Observed avg / min</div>
+                  <div className="font-semibold text-text-primary">{formatDecimal(budget.rolling_30m?.avg_calls_per_minute, 1)}</div>
+                </div>
+                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
+                  <div className="text-text-muted">Doc max / min</div>
+                  <div className="font-semibold text-text-primary">{formatInteger(budget.limits?.per_minute)}</div>
+                </div>
+                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
+                  <div className="text-text-muted">Observed avg / sec</div>
+                  <div className="font-semibold text-text-primary">{formatDecimal(budget.rolling_30m?.avg_calls_per_second, 3)}</div>
+                </div>
+                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
+                  <div className="text-text-muted">Configured / sec</div>
+                  <div className="font-semibold text-text-primary">{formatDecimal(budget.configured?.calls_per_second, 3)}</div>
+                </div>
+              </div>
+              <div className="text-xs text-text-muted">
+                Scheduler: <span className="text-text-primary">{scheduler?.label || "—"}</span>
+              </div>
+            </div>
+
+            <div className="rounded border border-bg-border bg-bg-secondary/30 p-3 space-y-2">
+              <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Useful-Dataset ETA</div>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
+                  <div className="text-text-muted">Total estimated calls</div>
+                  <div className="font-semibold text-text-primary">{formatInteger(budget.theoretical?.total_calls)}</div>
+                </div>
+                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
+                  <div className="text-text-muted">Remaining estimated calls</div>
+                  <div className="font-semibold text-text-primary">{formatInteger(budget.theoretical?.remaining_calls)}</div>
+                </div>
+                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
+                  <div className="text-text-muted">Full ETA at observed rate</div>
+                  <div className="font-semibold text-text-primary">{formatDuration(budget.theoretical?.full_seconds_at_observed_rate)}</div>
+                </div>
+                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
+                  <div className="text-text-muted">Remaining ETA at observed rate</div>
+                  <div className="font-semibold text-text-primary">{formatDuration(budget.theoretical?.remaining_seconds_at_observed_rate)}</div>
+                </div>
+              </div>
+              <div className="text-[11px] text-text-muted">
+                Model: 1 expiry fetch per underlying, 1 spot-history fetch per underlying, 1 contract-discovery fetch per expiry, and 1 historical-candle fetch per required CE/PE research contract.
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded border border-bg-border bg-bg-secondary/30 p-3 space-y-2">
+            <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Call Mix In Last 30 Minutes</div>
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 text-xs">
+              {Object.entries(budget.rolling_30m?.by_endpoint || {}).map(([endpoint, count]) => (
+                <div key={endpoint} className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
+                  <div className="text-text-muted">{endpoint.replaceAll("_", " ")}</div>
+                  <div className="font-semibold text-text-primary">{formatInteger(Number(count))}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function TelegramCard() {
+  const qc = useQueryClient();
+  const { data: savedStatus } = useAllCredsStatus();
+  const savedFields: Record<string, boolean> = {
+    bot_token: Boolean(savedStatus?.telegram?.fields?.bot_token),
+    chat_id: Boolean(savedStatus?.telegram?.fields?.chat_id),
+  };
+  const { data, isLoading } = useQuery({
+    queryKey: ["telegramSettings"],
+    queryFn: () => getTelegramSettings().then((r) => r.data),
+    staleTime: 15000,
+  });
+
+  const [expanded, setExpanded] = useState(false);
+  const [botToken, setBotToken] = useState("");
+  const [chatId, setChatId] = useState("");
+  const [enabled, setEnabled] = useState(false);
+  const [interval, setInterval] = useState("1h");
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    if (!data) return;
+    setEnabled(Boolean(data.enabled));
+    setInterval(String(data.report_interval || "1h"));
+  }, [data]);
+
+  const saveMut = useMutation({
+    mutationFn: saveTelegramSettings,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["telegramSettings"] });
+      qc.invalidateQueries({ queryKey: ["allCredsStatus"] });
+      setMsg("✓ Telegram settings saved");
+      setBotToken("");
+      setChatId("");
+    },
+    onError: (error: any) => {
+      setMsg(error?.response?.data?.detail || "Failed to save Telegram settings");
+    },
+  });
+
+  const discoverMut = useMutation({
+    mutationFn: () => discoverTelegramChats(botToken.trim()),
+    onError: (error: any) => {
+      setMsg(error?.response?.data?.detail || "Failed to discover Telegram chats");
+    },
+  });
+
+  const testMut = useMutation({
+    mutationFn: () => sendTelegramTest(),
+    onSuccess: (res) => {
+      setMsg(res.data?.message || "Telegram test message sent.");
+    },
+    onError: (error: any) => {
+      setMsg(error?.response?.data?.detail || "Failed to send Telegram test message");
+    },
+  });
+
+  return (
+    <div className="card p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="w-8 h-8 rounded bg-accent-blue/15 flex items-center justify-center shrink-0">
+            <span className="text-accent-blue font-bold text-xs">TG</span>
+          </div>
+          <div>
+            <div className="font-semibold text-sm">Telegram Trade Reports</div>
+            <div className="text-xs text-text-muted">
+              Send paper-strategy statistics at the selected interval.
+            </div>
+          </div>
+          <CredsSavedBadge fields={savedFields} />
+          {data?.enabled && data?.has_destination && (
+            <span className="flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded bg-accent-green/15 text-accent-green">
+              <CheckCircle2 size={10} />
+              ACTIVE
+            </span>
+          )}
+        </div>
+        <button onClick={() => setExpanded(!expanded)} className="text-text-muted hover:text-text-primary p-1">
+          {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="space-y-3 pt-2 border-t border-bg-border">
+          <div className="grid gap-3 md:grid-cols-2">
+            <PasswordInput
+              value={botToken}
+              onChange={setBotToken}
+              label="Bot Token"
+              placeholder="123456:ABC..."
+              saved={savedFields["bot_token"]}
+            />
+            <TextInput
+              value={chatId}
+              onChange={setChatId}
+              label="Chat ID"
+              placeholder="-1001234567890"
+              saved={savedFields["chat_id"]}
+            />
+          </div>
+
+          <div className="rounded border border-bg-border bg-bg-secondary/20 p-3 space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Auto Detect Chat ID</div>
+                <div className="text-xs text-text-muted">
+                  Uses the bot token to read recent Telegram updates and list chats the bot has already seen.
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setMsg("");
+                  discoverMut.mutate();
+                }}
+                disabled={discoverMut.isPending || (!botToken.trim() && !savedFields["bot_token"])}
+                className="px-3 py-1.5 rounded text-xs bg-bg-hover border border-bg-border text-text-secondary hover:border-accent-blue/40 disabled:opacity-50 flex items-center gap-1"
+              >
+                {discoverMut.isPending ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+                Detect Chats
+              </button>
+            </div>
+            <div className="text-[11px] text-text-muted">
+              If nothing is found, send <code className="px-1 rounded bg-bg-primary/40 text-accent-green">/start</code> to the bot in a private chat or add the bot to the target group/channel and create one update there, then detect again.
+            </div>
+            {discoverMut.data?.data?.chats?.length ? (
+              <div className="space-y-2">
+                {discoverMut.data.data.chats.map((chat: any) => (
+                  <div key={chat.chat_id} className="flex items-center justify-between gap-3 rounded border border-bg-border bg-bg-primary/30 px-3 py-2 text-xs">
+                    <div>
+                      <div className="text-text-primary font-semibold">{chat.title}</div>
+                      <div className="text-text-muted">
+                        {chat.type} {chat.username ? `| @${chat.username}` : ""} | {chat.chat_id}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setChatId(chat.chat_id)}
+                      className="px-2 py-1 rounded border border-accent-blue/30 bg-accent-blue/10 text-accent-blue hover:bg-accent-blue/20"
+                    >
+                      Use
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : discoverMut.isSuccess ? (
+              <div className="text-xs text-text-muted">{discoverMut.data?.data?.hint || "No chats were discovered yet."}</div>
+            ) : null}
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <div>
+              <label className="text-xs text-text-muted block mb-1">Report Interval</label>
+              <select
+                value={interval}
+                onChange={(e) => setInterval(e.target.value)}
+                className="terminal-input w-full text-sm"
+              >
+                <option value="30m">Every 30 minutes</option>
+                <option value="1h">Hourly</option>
+                <option value="4h">Every 4 hours</option>
+                <option value="daily">Daily</option>
+              </select>
+            </div>
+            <label className="flex items-center gap-2 rounded border border-bg-border bg-bg-secondary/30 px-3 py-2 text-sm text-text-secondary">
+              <input
+                type="checkbox"
+                checked={enabled}
+                onChange={(e) => setEnabled(e.target.checked)}
+                className="rounded"
+              />
+              Enable Telegram reports
+            </label>
+          </div>
+
+          <div className="text-xs text-text-muted">
+            {isLoading
+              ? "Loading current Telegram settings…"
+              : data?.has_destination
+                ? `Current interval: ${data.report_interval}. Reports are ${data.enabled ? "enabled" : "disabled"}.`
+                : "Save a bot token and chat ID to enable Telegram delivery."}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => {
+                setMsg("");
+                saveMut.mutate({
+                  bot_token: botToken,
+                  chat_id: chatId,
+                  enabled,
+                  report_interval: interval,
+                });
+              }}
+              disabled={saveMut.isPending}
+              className="px-3 py-1.5 rounded text-xs bg-accent-blue/15 border border-accent-blue/30 text-accent-blue hover:bg-accent-blue/25 disabled:opacity-50 flex items-center gap-1"
+            >
+              {saveMut.isPending ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
+              Save Telegram Settings
+            </button>
+            <button
+              onClick={() => {
+                setMsg("");
+                testMut.mutate();
+              }}
+              disabled={testMut.isPending || !data?.has_destination}
+              className="px-3 py-1.5 rounded text-xs bg-accent-green/15 border border-accent-green/30 text-accent-green hover:bg-accent-green/25 disabled:opacity-50 flex items-center gap-1"
+            >
+              {testMut.isPending ? <Loader2 size={11} className="animate-spin" /> : <Send size={11} />}
+              Send Test Message
+            </button>
+          </div>
+          {msg && <p className={clsx("text-xs", msg.startsWith("✓") ? "text-accent-green" : "text-accent-red")}>{msg}</p>}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ── Fyers Card ────────────────────────────────────────────────────────────────
@@ -845,6 +1236,8 @@ export default function SettingsPage() {
           Credentials and access tokens are saved permanently to disk.
           Upstox auto-reconnects on restart (JWT token is long-lived). Other brokers require re-auth each session.
         </p>
+        <UpstoxApiBudgetCard />
+        <TelegramCard />
         <FyersCard status={statusMap["fyers"]} onRefresh={handleRefresh} />
         <UpstoxCard status={statusMap["upstox"]} onRefresh={handleRefresh} />
         <FivePaisaCard status={statusMap["fivepaisa"]} onRefresh={handleRefresh} />

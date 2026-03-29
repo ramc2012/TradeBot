@@ -1,8 +1,10 @@
 """Fyers broker adapter using fyers-apiv3 SDK."""
 from __future__ import annotations
+
 import asyncio
-from datetime import datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Callable, Optional
+
 import httpx
 from loguru import logger
 
@@ -12,6 +14,7 @@ from brokers.base import (
     Position, Tick, Trade, UserProfile,
 )
 from core.config import settings
+from analytics.greeks import bs_greeks, implied_volatility
 
 
 class FyersAdapter(BrokerAdapter):
@@ -19,6 +22,7 @@ class FyersAdapter(BrokerAdapter):
 
     broker_name = "fyers"
     BASE_URL = "https://api-t1.fyers.in/api/v3"
+    DATA_URL = "https://api-t1.fyers.in/data"
 
     def __init__(self):
         self._access_token: Optional[str] = None
@@ -37,6 +41,89 @@ class FyersAdapter(BrokerAdapter):
 
     def _auth_header(self) -> dict:
         return {"Authorization": f"{settings.FYERS_APP_ID}:{self._access_token}"}
+
+    async def _get_data_json(self, path: str, params: Optional[dict] = None) -> dict:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(
+                f"{self.DATA_URL}{path}",
+                params=params or {},
+                headers=self._auth_header(),
+            )
+        try:
+            payload = response.json()
+        except Exception as exc:
+            body = response.text[:240]
+            raise ValueError(f"Fyers data API returned non-JSON payload: {body}") from exc
+        if response.status_code != 200:
+            message = payload.get("message") if isinstance(payload, dict) else response.text[:240]
+            raise ValueError(f"Fyers data API error {response.status_code}: {message}")
+        if isinstance(payload, dict) and payload.get("s") == "error":
+            raise ValueError(payload.get("message") or "Fyers data API returned an error")
+        return payload
+
+    @staticmethod
+    def _expiry_date_to_epoch(expiry: str, expiry_rows: list[dict]) -> Optional[str]:
+        try:
+            target = datetime.strptime(expiry, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+        for row in expiry_rows:
+            date_text = str(row.get("date") or "").strip()
+            epoch = str(row.get("expiry") or "").strip()
+            if not date_text or not epoch:
+                continue
+            try:
+                parsed = datetime.strptime(date_text, "%d-%m-%Y").date()
+            except ValueError:
+                continue
+            if parsed == target:
+                return epoch
+        return None
+
+    @staticmethod
+    def _epoch_to_iso_date(value: str) -> Optional[str]:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            return datetime.fromtimestamp(int(raw), UTC).date().isoformat()
+        except Exception:
+            return None
+
+    async def get_historical_candles(
+        self,
+        symbol: str,
+        resolution: str,
+        range_from: str,
+        range_to: str,
+        cont_flag: int = 1,
+    ) -> list[dict]:
+        payload = await self._get_data_json(
+            "/history",
+            {
+                "symbol": symbol,
+                "resolution": resolution,
+                "date_format": "1",
+                "range_from": range_from,
+                "range_to": range_to,
+                "cont_flag": str(cont_flag),
+            },
+        )
+        rows: list[dict] = []
+        for candle in payload.get("candles", []):
+            if not candle or len(candle) < 6:
+                continue
+            rows.append(
+                {
+                    "time": datetime.fromtimestamp(int(candle[0]), UTC).isoformat().replace("+00:00", "Z"),
+                    "open": float(candle[1]),
+                    "high": float(candle[2]),
+                    "low": float(candle[3]),
+                    "close": float(candle[4]),
+                    "volume": int(candle[5] or 0),
+                }
+            )
+        return rows
 
     def get_auth_url(self) -> str:
         """Generate Fyers auth URL for OAuth redirect flow."""
@@ -220,20 +307,39 @@ class FyersAdapter(BrokerAdapter):
         return r.json().get("s") == "ok"
 
     async def get_ltp(self, symbols: list[str]) -> dict[str, float]:
-        joined = ",".join(symbols)
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(
-                f"{self.BASE_URL}/quotes",
-                params={"symbols": joined},
-                headers=self._auth_header(),
-            )
-        quotes = r.json().get("d", [])
+        payload = await self._get_data_json("/quotes", {"symbols": ",".join(symbols)})
+        quotes = payload.get("d", [])
         result = {}
         for q in quotes:
             sym = q.get("n", "")
             ltp = q.get("v", {}).get("lp", 0)
             result[sym] = ltp
         return result
+
+    async def get_option_contracts(self, symbol: str, expiry: Optional[str] = None) -> list[dict]:
+        payload = await self._get_data_json("/options-chain-v3", {"symbol": symbol, "strikecount": "1"})
+        expiry_rows = payload.get("data", {}).get("expiryData", [])
+        rows = []
+        for row in expiry_rows:
+            iso_expiry = None
+            if row.get("date"):
+                try:
+                    iso_expiry = datetime.strptime(str(row["date"]), "%d-%m-%Y").date().isoformat()
+                except ValueError:
+                    iso_expiry = None
+            if not iso_expiry:
+                iso_expiry = self._epoch_to_iso_date(str(row.get("expiry") or ""))
+            if not iso_expiry:
+                continue
+            rows.append(
+                {
+                    "expiry": iso_expiry,
+                    "timestamp": str(row.get("expiry") or "").strip() or None,
+                }
+            )
+        if expiry:
+            rows = [row for row in rows if row.get("expiry") == expiry]
+        return rows
 
     async def subscribe_websocket(
         self,
@@ -281,32 +387,95 @@ class FyersAdapter(BrokerAdapter):
             logger.error(f"Error parsing Fyers tick: {e}")
 
     async def get_option_chain(self, symbol: str, expiry: str) -> OptionChain:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(
-                f"{self.BASE_URL}/options/chain",
-                params={"symbol": symbol, "strikecount": 10, "timestamp": expiry},
-                headers=self._auth_header(),
+        seed_payload = await self._get_data_json(
+            "/options-chain-v3",
+            {"symbol": symbol, "strikecount": "12"},
+        )
+        data = seed_payload.get("data", {})
+        expiry_rows = data.get("expiryData", [])
+        expiry_epoch = self._expiry_date_to_epoch(expiry, expiry_rows)
+        if expiry_epoch:
+            payload = await self._get_data_json(
+                "/options-chain-v3",
+                {"symbol": symbol, "strikecount": "12", "timestamp": expiry_epoch},
             )
-        data = r.json().get("data", {})
+            data = payload.get("data", {})
+
+        expiry_iso = expiry
+        if not expiry_iso:
+            first_expiry = str((data.get("expiryData") or [{}])[0].get("expiry") or "").strip()
+            expiry_iso = self._epoch_to_iso_date(first_expiry) or expiry
+
         entries = []
+        spot_price = 0.0
+        if data.get("optionsChain"):
+            head = data["optionsChain"][0]
+            spot_price = float(head.get("ltp", 0) or head.get("fp", 0) or 0)
+
+        try:
+            expiry_dt = datetime.strptime(expiry_iso, "%Y-%m-%d").date()
+        except ValueError:
+            expiry_dt = date.today()
+        T = max(1e-6, (expiry_dt - date.today()).days / 365)
+
         for opt in data.get("optionsChain", []):
+            option_type = str(opt.get("option_type") or "").upper()
+            if option_type not in {"CE", "PE"}:
+                continue
+            strike = float(opt.get("strike_price", 0) or 0)
+            ltp = float(opt.get("ltp", 0) or 0)
+            prev_close = None
+            if opt.get("ltpch") is not None:
+                prev_close = round(ltp - float(opt.get("ltpch") or 0), 2)
+            iv = delta = gamma = theta = vega = None
+            if strike > 0 and ltp > 0 and spot_price > 0:
+                try:
+                    iv_value = implied_volatility(
+                        market_price=ltp,
+                        S=spot_price,
+                        K=strike,
+                        T=T,
+                        r=0.065,
+                        option_type=option_type,
+                    )
+                    if iv_value > 0:
+                        greeks = bs_greeks(
+                            S=spot_price,
+                            K=strike,
+                            T=T,
+                            r=0.065,
+                            sigma=iv_value,
+                            option_type=option_type,
+                            iv=iv_value,
+                        )
+                        iv = greeks.iv
+                        delta = greeks.delta
+                        gamma = greeks.gamma
+                        theta = greeks.theta
+                        vega = greeks.vega
+                except Exception as exc:
+                    logger.debug(f"Fyers Greek enrichment failed for {symbol} {strike} {option_type}: {exc}")
             entries.append(OptionChainEntry(
-                strike=opt.get("strikePrice", 0),
-                option_type=opt.get("option_type", "CE"),
-                ltp=opt.get("ltp", 0),
-                oi=opt.get("oi", 0),
-                volume=opt.get("volume", 0),
-                bid=opt.get("bid", 0),
-                ask=opt.get("ask", 0),
-                iv=opt.get("iv", None),
-                prev_oi=opt.get("prevOi", None) or opt.get("prev_oi", None),
-                prev_close=opt.get("prevClose", None) or opt.get("close_price", None),
+                strike=strike,
+                option_type=option_type,
+                ltp=ltp,
+                oi=int(opt.get("oi", 0) or 0),
+                volume=int(opt.get("volume", 0) or 0),
+                bid=float(opt.get("bid", 0) or 0),
+                ask=float(opt.get("ask", 0) or 0),
+                iv=iv,
+                delta=delta,
+                gamma=gamma,
+                theta=theta,
+                vega=vega,
+                prev_oi=float(opt.get("prev_oi", 0) or opt.get("prevOi", 0) or 0),
+                prev_close=prev_close,
                 instrument_key=opt.get("symbol", None),
             ))
         return OptionChain(
             symbol=symbol,
-            expiry=expiry,
-            spot_price=data.get("underlyingValue", 0),
+            expiry=expiry_iso,
+            spot_price=spot_price,
             entries=entries,
         )
 

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import date
 
+from analytics.technicals import latest_macd_rsi
 from analytics.sector import SectorRotationTracker
 from brokers.base import OptionChain, OptionChainEntry
+from brokers.fyers import FyersAdapter
 from data.upstox_research_sync import UpstoxResearchSync
 from market_data.option_chain import OptionChainService
 
@@ -61,19 +63,43 @@ def test_option_chain_analytics_include_previous_day_deltas() -> None:
 
 def test_sector_rrg_uses_seeded_baseline_when_only_one_live_sample_exists() -> None:
     tracker = SectorRotationTracker()
-    tracker._baseline_price["NSE:NIFTYIT-INDEX"] = 29671.3
-    tracker._baseline_price["NSE:NIFTY50-INDEX"] = 23306.45
-
     series = tracker._build_rrg_series(
-        "NSE:NIFTYIT-INDEX",
-        "NSE:NIFTY50-INDEX",
-        [29541.65],
-        [22819.6],
+        [29671.3, 29541.65, 29980.0],
+        [23306.45, 22819.6, 22980.0],
     )
 
-    assert len(series) == 2
+    assert len(series) == 3
     assert series[-1]["ratio"] > 100.0
-    assert series[-1]["momentum"] > 100.0
+    assert series[-1]["momentum"] != 100.0
+
+
+def test_sector_rotation_row_carries_source_metadata() -> None:
+    tracker = SectorRotationTracker()
+    row = tracker._build_rotation_row(
+        code="IT",
+        name="IT",
+        symbol="NSE:NIFTYIT-INDEX",
+        closes=[100.0, 101.5, 103.0, 105.0],
+        benchmark_closes=[100.0, 100.5, 101.0, 101.2],
+        trail_limit=4,
+        sample_count=4,
+        series_source="fyers",
+        member_count=12,
+    )
+
+    assert row["series_source"] == "fyers"
+    assert row["member_count"] == 12
+    assert row["quadrant"] in {"leading", "improving", "weakening", "lagging"}
+
+
+def test_fyers_expiry_helpers_convert_dates() -> None:
+    expiry_rows = [
+        {"date": "30-03-2026", "expiry": "1774864800"},
+        {"date": "07-04-2026", "expiry": "1775556000"},
+    ]
+
+    assert FyersAdapter._expiry_date_to_epoch("2026-03-30", expiry_rows) == "1774864800"
+    assert FyersAdapter._epoch_to_iso_date("1774864800") == "2026-03-30"
 
 
 def test_contract_priority_focuses_on_near_atm_common_strikes() -> None:
@@ -137,3 +163,13 @@ def test_contract_reprioritization_preserves_synced_priority_and_skips_noise() -
         current_last_error=None,
         prioritized=False,
     ) == ("skipped", sync.PRIORITY_SKIP_REASON)
+
+
+def test_latest_macd_rsi_returns_values_once_series_is_long_enough() -> None:
+    closes = [100 + (index * 0.8) for index in range(40)]
+    indicators = latest_macd_rsi(closes)
+
+    assert indicators["macd"] is not None
+    assert indicators["macd_signal"] is not None
+    assert indicators["macd_histogram"] is not None
+    assert indicators["rsi"] is not None

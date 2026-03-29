@@ -1,7 +1,20 @@
 "use client";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { placeOrder, getOrders, cancelOrder } from "@/lib/api";
+import {
+  placeOrder,
+  getOrders,
+  cancelOrder,
+  getPositions,
+  getTrades,
+  getStrategyAgentStatus,
+} from "@/lib/api";
+import {
+  StrategyAgentStatus,
+  StrategyMonitorSection,
+  StrategyStatusPanel,
+  formatSigned,
+} from "@/components/trading/StrategyAgentMonitor";
 import { useStore } from "@/store";
 import { clsx } from "clsx";
 import { Plus, X, Zap } from "lucide-react";
@@ -9,6 +22,30 @@ import { Plus, X, Zap } from "lucide-react";
 type OrderType = "MARKET" | "LIMIT" | "SL" | "SL_M";
 type ActionType = "BUY" | "SELL";
 type InstrumentType = "CE" | "PE" | "FUT" | "EQ";
+
+type PortfolioPosition = {
+  symbol: string;
+  action: string;
+  qty: number;
+  avg_price: number;
+  ltp: number;
+  unrealized_pnl: number;
+  instrument_type?: string;
+  expiry?: string | null;
+  strike?: number | null;
+  option_type?: string | null;
+};
+
+type PortfolioTrade = {
+  symbol: string;
+  action: string;
+  qty: number;
+  entry_price?: number | null;
+  exit_price?: number | null;
+  pnl?: number | null;
+  entry_time?: string | null;
+  exit_time?: string | null;
+};
 
 // Quick strategy templates
 const STRATEGIES = [
@@ -59,6 +96,7 @@ function OrderRow({ order, onCancel }: { order: any; onCancel: () => void }) {
   );
 }
 
+
 export default function TradingPage() {
   const { mode } = useStore();
   const qc = useQueryClient();
@@ -82,14 +120,41 @@ export default function TradingPage() {
     refetchInterval: 3000,
   });
 
+  const { data: positions } = useQuery({
+    queryKey: ["positions"],
+    queryFn: () => getPositions().then((r) => r.data as PortfolioPosition[]),
+    refetchInterval: 5000,
+  });
+
+  const { data: trades } = useQuery({
+    queryKey: ["trades"],
+    queryFn: () => getTrades().then((r) => r.data as PortfolioTrade[]),
+    refetchInterval: 10000,
+  });
+
+  const { data: agentStatus } = useQuery({
+    queryKey: ["strategyAgentStatus"],
+    queryFn: () => getStrategyAgentStatus().then((r) => r.data as StrategyAgentStatus),
+    refetchInterval: 15000,
+    staleTime: 10000,
+  });
+
   const placeMut = useMutation({
     mutationFn: placeOrder,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["orders"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["orders"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["trades"] });
+    },
   });
 
   const cancelMut = useMutation({
     mutationFn: cancelOrder,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["orders"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["orders"] });
+      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["trades"] });
+    },
   });
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -112,9 +177,26 @@ export default function TradingPage() {
     placeMut.mutate(payload);
   };
 
+  const positionList = positions || [];
+  const tradeList = trades || [];
+  const manualOpenPositions = positionList.filter((position) => position.qty > 0);
+
   return (
     <div className="max-w-screen-xl space-y-4">
-      <h1 className="text-lg font-bold font-mono text-text-primary">Order Entry</h1>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-lg font-bold font-mono text-text-primary">Trading Desk</h1>
+          <div className="mt-1 text-xs text-text-muted">
+            Manual execution sits alongside the autonomous paper agent. Strategy scanning runs automatically during market hours.
+          </div>
+        </div>
+        <div className="rounded border border-accent-blue/20 bg-accent-blue/10 px-3 py-2 text-xs text-accent-blue">
+          Agent loop active. No manual strategy trigger is required.
+        </div>
+      </div>
+
+      <StrategyStatusPanel agentStatus={agentStatus} />
+      <StrategyMonitorSection agentStatus={agentStatus} />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Order Form */}
@@ -326,6 +408,96 @@ export default function TradingPage() {
                 </tbody>
               </table>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <div className="card p-4">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm text-text-secondary">Portfolio Positions</h2>
+            <div className="text-xs text-text-muted">{manualOpenPositions.length} open</div>
+          </div>
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full text-xs font-mono">
+              <thead>
+                <tr className="border-b border-bg-border text-text-muted">
+                  <th className="pb-2 text-left">Contract</th>
+                  <th className="pb-2 text-left">Side</th>
+                  <th className="pb-2 text-right">Qty</th>
+                  <th className="pb-2 text-right">Avg</th>
+                  <th className="pb-2 text-right">LTP</th>
+                  <th className="pb-2 text-right">P&L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {manualOpenPositions.length ? (
+                  manualOpenPositions.map((position, index) => (
+                    <tr key={`${position.symbol}-${index}`} className="border-b border-bg-border/40">
+                      <td className="py-2 text-text-primary">{position.symbol?.split(":")[1] || position.symbol}</td>
+                      <td className={clsx("py-2", position.action === "BUY" ? "text-accent-green" : "text-accent-red")}>
+                        {position.action}
+                      </td>
+                      <td className="py-2 text-right text-text-primary">{position.qty}</td>
+                      <td className="py-2 text-right text-text-primary">{position.avg_price?.toFixed(2) || "--"}</td>
+                      <td className="py-2 text-right text-text-primary">{position.ltp?.toFixed(2) || "--"}</td>
+                      <td className={clsx("py-2 text-right font-semibold", (position.unrealized_pnl || 0) >= 0 ? "text-accent-green" : "text-accent-red")}>
+                        {formatSigned(position.unrealized_pnl, 2)}
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={6} className="py-6 text-center text-text-muted">
+                      No manual portfolio positions.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="card p-4">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm text-text-secondary">Trade History</h2>
+            <div className="text-xs text-text-muted">{tradeList.length} closed trades</div>
+          </div>
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full text-xs font-mono">
+              <thead>
+                <tr className="border-b border-bg-border text-text-muted">
+                  <th className="pb-2 text-left">Contract</th>
+                  <th className="pb-2 text-left">Side</th>
+                  <th className="pb-2 text-right">Qty</th>
+                  <th className="pb-2 text-right">Entry</th>
+                  <th className="pb-2 text-right">Exit</th>
+                  <th className="pb-2 text-right">P&L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tradeList.length ? (
+                  tradeList.slice().reverse().map((trade, index) => (
+                    <tr key={`${trade.symbol}-${trade.exit_time}-${index}`} className="border-b border-bg-border/40">
+                      <td className="py-2 text-text-primary">{trade.symbol?.split(":")[1] || trade.symbol}</td>
+                      <td className={clsx("py-2", trade.action === "BUY" ? "text-accent-green" : "text-accent-red")}>{trade.action}</td>
+                      <td className="py-2 text-right text-text-primary">{trade.qty}</td>
+                      <td className="py-2 text-right text-text-primary">{trade.entry_price?.toFixed(2) || "--"}</td>
+                      <td className="py-2 text-right text-text-primary">{trade.exit_price?.toFixed(2) || "--"}</td>
+                      <td className={clsx("py-2 text-right font-semibold", (trade.pnl || 0) >= 0 ? "text-accent-green" : "text-accent-red")}>
+                        {formatSigned(trade.pnl, 2)}
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={6} className="py-6 text-center text-text-muted">
+                      No closed trades yet.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
       </div>

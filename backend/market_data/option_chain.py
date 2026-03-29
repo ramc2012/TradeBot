@@ -10,7 +10,7 @@ from loguru import logger
 
 from brokers.base import BrokerAdapter, OptionChain
 from db.redis_client import get_redis
-from market_data.symbols import to_broker_symbol
+from market_data.symbols import to_broker_symbol, to_fyers_symbol
 
 
 POLL_INTERVAL = 30  # seconds
@@ -59,13 +59,16 @@ class OptionChainService:
         if not self._broker:
             return
         try:
-            chain: OptionChain = await self._broker.get_option_chain(to_broker_symbol(symbol), expiry)
+            broker_name = getattr(self._broker, "broker_name", "")
+            lookup_symbol = to_fyers_symbol(symbol) if broker_name == "fyers" else to_broker_symbol(symbol)
+            chain: OptionChain = await self._broker.get_option_chain(lookup_symbol, expiry)
             analytics = self._calculate_analytics(chain)
             payload = {
                 "symbol": symbol,
                 "expiry": expiry,
                 "spot_price": chain.spot_price,
                 "timestamp": datetime.utcnow().isoformat(),
+                "source": getattr(self._broker, "broker_name", "unknown"),
                 "entries": [
                     {
                         "strike": e.strike,

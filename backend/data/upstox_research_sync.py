@@ -148,6 +148,9 @@ class UpstoxResearchSync:
     DISCOVERY_COMMON_STRIKES = 2
     DISCOVERY_SIDE_FALLBACK = 0
     PRIORITY_SKIP_REASON = "Skipped outside prioritized strike window"
+    DISCOVERY_BACKLOG_MULTIPLIER = 2
+    DISCOVERY_BACKLOG_FLOOR = 240
+    SINGLE_CALL_30MINUTE_WINDOW_DAYS = 366
 
     def __init__(
         self,
@@ -165,6 +168,78 @@ class UpstoxResearchSync:
         self.interval = interval
         self.risk_free_rate = risk_free_rate
         self._spot_cache: dict[str, dict[str, float]] = {}
+
+    async def _get_backlog_snapshot(self) -> dict[str, int]:
+        async with AsyncSessionLocal() as session:
+            contract_status = await session.execute(
+                text("""
+                    SELECT
+                        COUNT(*) FILTER (WHERE sync_status = 'pending') AS pending_contracts,
+                        COUNT(*) FILTER (WHERE sync_status = 'complete') AS complete_contracts,
+                        COUNT(*) FILTER (WHERE sync_status = 'empty') AS empty_contracts
+                    FROM fo_contract_catalog
+                """)
+            )
+            expiry_status = await session.execute(
+                text("""
+                    SELECT
+                        COUNT(*) FILTER (WHERE contracts_discovered_at IS NULL) AS undiscovered_expiry_batches
+                    FROM fo_expiry_catalog
+                """)
+            )
+            row = contract_status.fetchone()
+        return {
+            "pending_contracts": int(row.pending_contracts or 0),
+            "complete_contracts": int(row.complete_contracts or 0),
+            "empty_contracts": int(row.empty_contracts or 0),
+            "undiscovered_expiry_batches": int(expiry_status.scalar() or 0),
+        }
+
+    @classmethod
+    def _should_pause_discovery(
+        cls,
+        *,
+        pending_contracts: int,
+        contract_limit: int,
+    ) -> bool:
+        backlog_threshold = max(cls.DISCOVERY_BACKLOG_FLOOR, contract_limit * cls.DISCOVERY_BACKLOG_MULTIPLIER)
+        return pending_contracts > backlog_threshold
+
+    @staticmethod
+    def _select_contract_sync_batch(
+        rows: list[dict[str, Any]],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if limit <= 0 or not rows:
+            return []
+
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            grouped[str(row["underlying"])].append(row)
+
+        ordered_underlyings = sorted(
+            grouped,
+            key=lambda underlying: (
+                int(grouped[underlying][0].get("underlying_pending_contracts") or len(grouped[underlying])),
+                grouped[underlying][0].get("kind") != "INDEX",
+                -int(grouped[underlying][0].get("underlying_complete_contracts") or 0),
+                underlying,
+            ),
+        )
+
+        selected: list[dict[str, Any]] = []
+        for underlying in ordered_underlyings:
+            contracts = grouped[underlying]
+            if selected and len(selected) + len(contracts) > limit:
+                continue
+            if not selected and len(contracts) > limit:
+                selected.extend(contracts[:limit])
+                break
+            selected.extend(contracts)
+            if len(selected) >= limit:
+                break
+
+        return selected[:limit]
 
     async def _prime_underlying_meta_cache(self) -> int:
         async with AsyncSessionLocal() as session:
@@ -196,6 +271,16 @@ class UpstoxResearchSync:
         to_date: date,
         chunk_days: int = 60,
     ) -> list[dict]:
+        if (
+            self.interval == "30minute"
+            and (to_date - from_date).days <= self.SINGLE_CALL_30MINUTE_WINDOW_DAYS
+        ):
+            return await self.client._fetch_candles_from_upstox(
+                instrument_key,
+                from_date,
+                to_date,
+            )
+
         merged: dict[str, dict] = {}
         cursor = from_date
         while cursor <= to_date:
@@ -1036,23 +1121,27 @@ class UpstoxResearchSync:
                         option_type,
                         candle_from_date,
                         candle_to_date,
+                        kind,
                         selection_spot_price,
-                        strike_gap
+                        strike_gap,
+                        underlying_complete_contracts,
+                        underlying_pending_contracts
                     FROM initial_contracts
                     WHERE strike_rank <= 2
-                    ORDER BY underlying_complete_contracts ASC,
-                             CASE WHEN kind = 'STOCK' THEN 0 ELSE 1 END,
+                    ORDER BY underlying_pending_contracts ASC,
+                             underlying_complete_contracts DESC,
+                             CASE WHEN kind = 'INDEX' THEN 0 ELSE 1 END,
                              expiry DESC,
                              strike_rank ASC,
                              underlying ASC,
                              CASE WHEN option_type = 'CE' THEN 0 ELSE 1 END,
                              strike_gap ASC,
                              strike ASC
-                    LIMIT :limit
                 """),
-                {"limit": limit},
             )
-            rows = result.fetchall()
+            rows = [dict(row._mapping) for row in result.fetchall()]
+
+        rows = self._select_contract_sync_batch(rows, limit)
 
         stored_rows = 0
         completed = 0
@@ -1060,12 +1149,12 @@ class UpstoxResearchSync:
         touched_pairs: set[tuple[str, date]] = set()
 
         for row in rows:
-            spot_map = await self._load_spot_map(row.underlying)
+            spot_map = await self._load_spot_map(row["underlying"])
             try:
                 candles = await self.client._fetch_candles_from_upstox(
-                    row.instrument_key,
-                    row.candle_from_date,
-                    row.candle_to_date,
+                    row["instrument_key"],
+                    row["candle_from_date"],
+                    row["candle_to_date"],
                 )
             except UpstoxAuthError as exc:
                 logger.error(
@@ -1078,12 +1167,12 @@ class UpstoxResearchSync:
             if candles:
                 payload = self._build_option_rows(
                     {
-                        "instrument_key": row.instrument_key,
-                        "trading_symbol": row.trading_symbol,
-                        "underlying": row.underlying,
-                        "expiry": row.expiry,
-                        "strike": row.strike,
-                        "option_type": row.option_type,
+                        "instrument_key": row["instrument_key"],
+                        "trading_symbol": row["trading_symbol"],
+                        "underlying": row["underlying"],
+                        "expiry": row["expiry"],
+                        "strike": row["strike"],
+                        "option_type": row["option_type"],
                     },
                     candles,
                     spot_map,
@@ -1145,7 +1234,7 @@ class UpstoxResearchSync:
                         WHERE instrument_key = :instrument_key
                     """),
                     {
-                        "instrument_key": row.instrument_key,
+                        "instrument_key": row["instrument_key"],
                         "sync_status": status,
                         "candle_count": len(payload),
                         "first_candle_time": (
@@ -1161,13 +1250,13 @@ class UpstoxResearchSync:
             if payload:
                 stored_rows += len(payload)
                 completed += 1
-                touched_pairs.add((row.underlying, row.expiry))
+                touched_pairs.add((row["underlying"], row["expiry"]))
                 logger.info(
-                    f"Stored {len(payload)} option candles for {row.trading_symbol}"
+                    f"Stored {len(payload)} option candles for {row['trading_symbol']}"
                 )
             else:
                 empty += 1
-                logger.warning(f"No candles returned for {row.trading_symbol}")
+                logger.warning(f"No candles returned for {row['trading_symbol']}")
 
         refreshed = await self._rebuild_chain_metrics(touched_pairs) if touched_pairs else 0
         return stored_rows, completed, empty, refreshed
@@ -1229,6 +1318,7 @@ class UpstoxResearchSync:
         contract_limit: int = 120,
     ) -> dict:
         summary = SyncSummary()
+        self.client.reset_rate_limit_stats()
         primed = await self._prime_underlying_meta_cache()
         if primed:
             logger.info(f"Primed {primed} underlying metadata rows from Timescale cache")
@@ -1238,9 +1328,21 @@ class UpstoxResearchSync:
         )
         summary.spot_candles_stored = await self._sync_spot_history(limit=spot_limit)
         summary.selection_spots_refreshed = await self._refresh_selection_spots()
-        discovered_expiries, summary.contracts_discovered = await self._discover_contracts(
-            limit=expiry_limit
+        backlog_before = await self._get_backlog_snapshot()
+        discovery_paused = self._should_pause_discovery(
+            pending_contracts=backlog_before["pending_contracts"],
+            contract_limit=contract_limit,
         )
+        discovered_expiries = 0
+        if discovery_paused:
+            logger.info(
+                "Skipping new contract discovery this pass to drain pending backlog "
+                f"({backlog_before['pending_contracts']} pending > focus threshold)."
+            )
+        else:
+            discovered_expiries, summary.contracts_discovered = await self._discover_contracts(
+                limit=expiry_limit
+            )
         await self._reprioritize_contract_backlog()
         (
             summary.option_candles_stored,
@@ -1254,6 +1356,17 @@ class UpstoxResearchSync:
             "run_summary": summary.to_dict(),
             "db_summary": db_summary,
             "discovered_expiry_batches": discovered_expiries,
+            "backlog_before": backlog_before,
+            "focus_mode": "backlog_drain" if discovery_paused else "discovery_and_sync",
+            "api_calls": {
+                "total": int(sum(self.client.api_call_counts.values())),
+                "by_endpoint": dict(sorted(self.client.api_call_counts.items())),
+            },
+            "rate_limit": {
+                "inter_call_delay_seconds": self.client.rate_limit_delay,
+                "hits": self.client.rate_limit_hits,
+                "backoff_seconds": round(self.client.rate_limit_backoff_seconds, 2),
+            },
             "from_date": self.from_date.isoformat(),
             "to_date": self.to_date.isoformat(),
             "interval": self.interval,

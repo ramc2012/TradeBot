@@ -95,6 +95,14 @@ def _persist_access_token(broker: str, access_token: Optional[str]) -> None:
         _reset_upstox_token_health_cache()
 
 
+def _explicit_env(name: str) -> Optional[str]:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
 def _apply_credentials_to_settings(broker: str, creds: dict) -> None:
     """Push saved credentials into the live settings object."""
     if broker == "fyers":
@@ -117,6 +125,11 @@ def _apply_credentials_to_settings(broker: str, creds: dict) -> None:
     elif broker == "icici_breeze":
         if creds.get("api_key"): settings.ICICI_BREEZE_API_KEY = creds["api_key"]
         if creds.get("secret"):  settings.ICICI_BREEZE_SECRET = creds["secret"]
+    elif broker == "telegram":
+        if creds.get("bot_token"): settings.TELEGRAM_BOT_TOKEN = creds["bot_token"]
+        if creds.get("chat_id"): settings.TELEGRAM_CHAT_ID = creds["chat_id"]
+        if "enabled" in creds: settings.TELEGRAM_REPORTS_ENABLED = bool(creds["enabled"])
+        if creds.get("report_interval"): settings.TELEGRAM_REPORT_INTERVAL = str(creds["report_interval"])
 
 
 def _bootstrap_credentials() -> None:
@@ -128,30 +141,37 @@ def _bootstrap_credentials() -> None:
     # Load persisted file first
     _broker_credentials = _load_credentials()
 
-    # Also seed from .env / environment so manually set env vars always win
+    # Only explicit environment variables should override persisted credentials.
+    # Do not treat settings defaults as persisted user intent, or saved values
+    # like broker redirect URIs will appear to "not persist" across restarts.
     env_seed = {
         "fyers": {
-            "app_id": settings.FYERS_APP_ID,
-            "secret": settings.FYERS_SECRET,
-            "redirect_uri": settings.FYERS_REDIRECT_URI,
+            "app_id": _explicit_env("FYERS_APP_ID"),
+            "secret": _explicit_env("FYERS_SECRET"),
+            "redirect_uri": _explicit_env("FYERS_REDIRECT_URI"),
         },
         "upstox": {
-            "api_key": settings.UPSTOX_API_KEY,
-            "secret": settings.UPSTOX_SECRET,
-            "redirect_uri": settings.UPSTOX_REDIRECT_URI,
+            "api_key": _explicit_env("UPSTOX_API_KEY"),
+            "secret": _explicit_env("UPSTOX_SECRET"),
+            "redirect_uri": _explicit_env("UPSTOX_REDIRECT_URI"),
         },
         "fivepaisa": {
-            "app_name":       settings.FIVEPAISA_APP_NAME,
-            "app_source":     settings.FIVEPAISA_APP_SOURCE,
-            "user_id":        settings.FIVEPAISA_USER_ID,
-            "email":          settings.FIVEPAISA_EMAIL,
-            "password":       settings.FIVEPAISA_PASSWORD,
-            "user_key":       settings.FIVEPAISA_USER_KEY,
-            "encryption_key": settings.FIVEPAISA_ENCRYPTION_KEY,
+            "app_name":       _explicit_env("FIVEPAISA_APP_NAME"),
+            "app_source":     _explicit_env("FIVEPAISA_APP_SOURCE"),
+            "user_id":        _explicit_env("FIVEPAISA_USER_ID"),
+            "email":          _explicit_env("FIVEPAISA_EMAIL"),
+            "password":       _explicit_env("FIVEPAISA_PASSWORD"),
+            "user_key":       _explicit_env("FIVEPAISA_USER_KEY"),
+            "encryption_key": _explicit_env("FIVEPAISA_ENCRYPTION_KEY"),
         },
         "icici_breeze": {
-            "api_key": settings.ICICI_BREEZE_API_KEY,
-            "secret":  settings.ICICI_BREEZE_SECRET,
+            "api_key": _explicit_env("ICICI_BREEZE_API_KEY"),
+            "secret":  _explicit_env("ICICI_BREEZE_SECRET"),
+        },
+        "telegram": {
+            "bot_token": _explicit_env("TELEGRAM_BOT_TOKEN"),
+            "chat_id": _explicit_env("TELEGRAM_CHAT_ID"),
+            "report_interval": _explicit_env("TELEGRAM_REPORT_INTERVAL"),
         },
     }
     for broker, env_creds in env_seed.items():
@@ -169,6 +189,16 @@ def _bootstrap_credentials() -> None:
     saved = [b for b, c in _broker_credentials.items() if c]
     if saved:
         logger.info(f"Credentials loaded for: {', '.join(saved)}")
+
+
+def _persist_active_session_tokens() -> None:
+    for broker in ("upstox", "fyers"):
+        info = _active_brokers.get(broker)
+        if not info:
+            continue
+        token = info.get("token")
+        access_token = getattr(token, "access_token", None) if token else None
+        _persist_access_token(broker, access_token)
 
 
 async def _validate_upstox_access_token(access_token: str) -> bool:
@@ -376,6 +406,21 @@ class SaveCredentialsRequest(BaseModel):
     credentials: dict
 
 
+class TelegramSettingsRequest(BaseModel):
+    bot_token: str = ""
+    chat_id: str = ""
+    enabled: bool = False
+    report_interval: str = "1h"
+
+
+class TelegramChatLookupRequest(BaseModel):
+    bot_token: str = ""
+
+
+class TelegramTestRequest(BaseModel):
+    message: str = ""
+
+
 # ── Credential Management ──────────────────────────────────────────────────────
 
 @router.post("/save-credentials")
@@ -434,7 +479,134 @@ async def all_credentials_status():
             "has_credentials": any(bool(v) for v in creds.values()),
             "fields": {k: bool(v) for k, v in creds.items()},
         }
+    telegram = _broker_credentials.get("telegram", {})
+    result["telegram"] = {
+        "has_credentials": bool(telegram.get("bot_token")) and bool(telegram.get("chat_id")),
+        "fields": {k: bool(v) for k, v in telegram.items() if k in {"bot_token", "chat_id", "enabled", "report_interval"}},
+    }
     return result
+
+
+@router.get("/telegram-settings")
+async def get_telegram_settings():
+    saved = _broker_credentials.get("telegram", {})
+    return {
+        "bot_token_saved": bool(saved.get("bot_token")),
+        "chat_id_saved": bool(saved.get("chat_id")),
+        "enabled": bool(saved.get("enabled", settings.TELEGRAM_REPORTS_ENABLED)),
+        "report_interval": str(saved.get("report_interval") or settings.TELEGRAM_REPORT_INTERVAL or "1h"),
+        "has_destination": bool(saved.get("bot_token")) and bool(saved.get("chat_id")),
+    }
+
+
+@router.post("/telegram-discover-chats")
+async def telegram_discover_chats(req: TelegramChatLookupRequest):
+    saved = _broker_credentials.get("telegram", {})
+    bot_token = (req.bot_token or saved.get("bot_token") or "").strip()
+    if not bot_token:
+        raise HTTPException(400, "Provide a bot token first.")
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"https://api.telegram.org/bot{bot_token}/getUpdates",
+                params={"limit": 100},
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        raise HTTPException(400, f"Telegram lookup failed: {exc}")
+
+    if not payload.get("ok"):
+        raise HTTPException(400, payload.get("description") or "Telegram rejected the token.")
+
+    chats: dict[str, dict] = {}
+    for update in payload.get("result") or []:
+        for key in ("message", "edited_message", "channel_post", "edited_channel_post", "my_chat_member", "chat_member"):
+            block = update.get(key)
+            if not isinstance(block, dict):
+                continue
+            chat = block.get("chat")
+            if not isinstance(chat, dict):
+                continue
+            chat_id = chat.get("id")
+            if chat_id is None:
+                continue
+            title = chat.get("title") or " ".join(part for part in [chat.get("first_name"), chat.get("last_name")] if part) or chat.get("username") or str(chat_id)
+            chats[str(chat_id)] = {
+                "chat_id": str(chat_id),
+                "title": title,
+                "type": chat.get("type") or "unknown",
+                "username": chat.get("username"),
+            }
+
+    return {
+        "count": len(chats),
+        "chats": sorted(chats.values(), key=lambda item: (item["type"], item["title"].lower())),
+        "hint": (
+            "If no chats appear, send /start to the bot in a private chat or add the bot to the target group/channel and create one update there, then refresh."
+        ),
+    }
+
+
+@router.post("/telegram-settings")
+async def save_telegram_settings(req: TelegramSettingsRequest):
+    saved = _broker_credentials.get("telegram", {})
+    merged = {
+        **saved,
+        **({
+            "bot_token": req.bot_token.strip(),
+        } if req.bot_token.strip() else {}),
+        **({
+            "chat_id": req.chat_id.strip(),
+        } if req.chat_id.strip() else {}),
+        "enabled": bool(req.enabled),
+        "report_interval": req.report_interval,
+    }
+    _broker_credentials["telegram"] = merged
+    _save_credentials_to_disk(_broker_credentials)
+    _apply_credentials_to_settings("telegram", merged)
+    return {
+        "status": "saved",
+        "enabled": bool(merged.get("enabled")),
+        "report_interval": str(merged.get("report_interval") or "1h"),
+        "bot_token_saved": bool(merged.get("bot_token")),
+        "chat_id_saved": bool(merged.get("chat_id")),
+    }
+
+
+@router.post("/telegram-test")
+async def send_telegram_test(req: TelegramTestRequest):
+    saved = _broker_credentials.get("telegram", {})
+    bot_token = str(saved.get("bot_token") or "").strip()
+    chat_id = str(saved.get("chat_id") or "").strip()
+    if not bot_token or not chat_id:
+        raise HTTPException(400, "Telegram bot token and chat ID must be saved first.")
+
+    text = (req.message or "").strip() or (
+        f"Nomad Curie test message\n"
+        f"Time: {datetime.now(IST).strftime('%d %b %Y %I:%M:%S %p IST')}\n"
+        f"Status: Telegram delivery is configured correctly."
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={"chat_id": chat_id, "text": text},
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        raise HTTPException(400, f"Telegram test failed: {exc}")
+
+    if not payload.get("ok"):
+        raise HTTPException(400, payload.get("description") or "Telegram test failed.")
+
+    return {
+        "status": "sent",
+        "message": "Telegram test message sent.",
+    }
 
 
 # ── Generic Connect/Disconnect ────────────────────────────────────────────────
@@ -482,6 +654,7 @@ async def disconnect_broker(broker: str):
 async def broker_status():
     await ensure_upstox_session(force_validate=False)
     await ensure_fyers_session()
+    _persist_active_session_tokens()
     statuses = []
     for broker, info in _active_brokers.items():
         profile = info.get("profile")
@@ -725,7 +898,7 @@ async def _sync_market_data_feed() -> None:
     from market_data import data_router as market_data_router
     from market_data.symbols import LIVE_INDEX_APP_SYMBOLS
 
-    adapter = get_active_adapter()
+    adapter = get_active_adapter("fyers") or get_active_adapter("upstox") or get_active_adapter()
     if adapter:
         market_data_router.set_broker(adapter)
         await market_data_router.subscribe(list(LIVE_INDEX_APP_SYMBOLS))

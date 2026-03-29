@@ -10,6 +10,7 @@ from api.routers.auth import get_active_adapter, _active_brokers
 from brokers.base import OrderRequest
 from live_engine import LiveOrderManager, RiskManager
 from paper_engine import PaperOrderBook, PaperPortfolio
+from paper_engine.strategy_agent import paper_strategy_agent
 
 router = APIRouter(prefix="/api/trading", tags=["trading"])
 
@@ -246,6 +247,16 @@ async def kill_switch():
 async def portfolio_summary():
     _, portfolio = _get_or_create_paper_session()
     return portfolio.get_summary()
+
+
+@router.get("/strategy-agent/status")
+async def strategy_agent_status():
+    return paper_strategy_agent.get_status()
+
+
+@router.post("/strategy-agent/run-once")
+async def run_strategy_agent_once(force: bool = True):
+    return await paper_strategy_agent.run_once(force=force)
 
 
 @router.get("/risk-status")

@@ -17,6 +17,10 @@ DEFAULT_CREDS_PATH = BACKEND_DIR / "credentials.json"
 RUNTIME_DIR = BACKEND_DIR / "runtime"
 STATE_FILE = RUNTIME_DIR / "research_sync_status.json"
 MAX_DAEMON_SLEEP_SECONDS = 15.0
+DEFAULT_BACKLOG_POLL_SECONDS = 60.0
+DEFAULT_ERROR_POLL_SECONDS = 180.0
+RUNTIME_HISTORY_RETENTION_HOURS = 48
+RUNTIME_HISTORY_MAX_ENTRIES = 256
 
 
 def _load_upstox_token() -> str:
@@ -42,6 +46,34 @@ def _write_runtime_state(payload: dict) -> None:
         logger.warning(f"Could not write research sync runtime state: {exc}")
 
 
+def _load_runtime_state() -> dict:
+    try:
+        if not STATE_FILE.exists():
+            return {}
+        return json.loads(STATE_FILE.read_text())
+    except Exception as exc:
+        logger.warning(f"Could not read research sync runtime state: {exc}")
+        return {}
+
+
+def _trim_history(entries: list[dict], now_utc: datetime) -> list[dict]:
+    cutoff = now_utc - timedelta(hours=RUNTIME_HISTORY_RETENTION_HOURS)
+    trimmed: list[dict] = []
+    for entry in entries:
+        completed_at_raw = entry.get("completed_at")
+        if not isinstance(completed_at_raw, str):
+            continue
+        try:
+            completed_at = datetime.fromisoformat(completed_at_raw)
+        except ValueError:
+            continue
+        if completed_at.tzinfo is None:
+            completed_at = completed_at.replace(tzinfo=timezone.utc)
+        if completed_at >= cutoff:
+            trimmed.append(entry)
+    return trimmed[-RUNTIME_HISTORY_MAX_ENTRIES:]
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Incrementally sync Upstox F&O research data into TimescaleDB."
@@ -61,6 +93,12 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=30,
         help="Recurring sync interval in minutes when --daemon is set.",
+    )
+    parser.add_argument(
+        "--backlog-poll-seconds",
+        type=float,
+        default=DEFAULT_BACKLOG_POLL_SECONDS,
+        help="Short retry gap used while pending contract backlog still exists.",
     )
     parser.add_argument(
         "--underlying-limit",
@@ -114,17 +152,42 @@ def _configure_logging() -> None:
 def _compute_cycle_schedule(
     *,
     cycle_started_at: datetime,
-    poll_minutes: int,
+    sleep_seconds: float,
     now_utc: datetime | None = None,
 ) -> tuple[datetime, float, float]:
     current_time = now_utc or datetime.now(timezone.utc)
     elapsed_seconds = max(0.0, (current_time - cycle_started_at).total_seconds())
-    target_cycle_seconds = max(0.0, poll_minutes * 60)
+    target_cycle_seconds = max(0.0, sleep_seconds)
     sleep_seconds = max(0.0, target_cycle_seconds - elapsed_seconds)
     next_run_at = cycle_started_at + timedelta(seconds=target_cycle_seconds)
     if sleep_seconds <= 0:
         next_run_at = current_time
     return next_run_at, elapsed_seconds, sleep_seconds
+
+
+def _planned_sleep_seconds(
+    *,
+    poll_minutes: int,
+    backlog_poll_seconds: float,
+    last_result: dict | None,
+    errored: bool,
+) -> float:
+    if errored:
+        return DEFAULT_ERROR_POLL_SECONDS
+
+    if not last_result:
+        return max(60.0, poll_minutes * 60.0)
+
+    pending_contracts = int(
+        ((last_result.get("db_summary") or {}).get("contract_status") or {}).get("pending", 0) or 0
+    )
+    rate_limit_hits = int(((last_result.get("rate_limit") or {}).get("hits", 0)) or 0)
+    focus_mode = str(last_result.get("focus_mode") or "")
+    if pending_contracts > 0 and rate_limit_hits == 0:
+        return max(15.0, backlog_poll_seconds)
+    if pending_contracts > 0 and focus_mode == "backlog_drain":
+        return max(60.0, min(poll_minutes * 60.0, backlog_poll_seconds * 2))
+    return max(60.0, poll_minutes * 60.0)
 
 
 async def _sleep_until(next_run_at: datetime) -> None:
@@ -152,6 +215,8 @@ async def _run() -> int:
     )
 
     if args.daemon:
+        persisted_state = _load_runtime_state()
+        history = list(persisted_state.get("history") or [])
         while True:
             cycle_started_at = datetime.now(timezone.utc)
             latest_token = _load_upstox_token().strip()
@@ -169,6 +234,7 @@ async def _run() -> int:
                     "run_started_at": cycle_started_at.isoformat(),
                     "next_run_at": None,
                     "last_result": None,
+                    "history": history,
                 }
             )
 
@@ -187,10 +253,16 @@ async def _run() -> int:
                 error_message = str(exc)
                 logger.exception(f"Recurring research sync failed: {exc}")
 
+            planned_sleep_seconds = _planned_sleep_seconds(
+                poll_minutes=args.poll_minutes,
+                backlog_poll_seconds=args.backlog_poll_seconds,
+                last_result=result,
+                errored=state == "error",
+            )
             completed_at = datetime.now(timezone.utc)
             next_run_at, elapsed_seconds, sleep_seconds = _compute_cycle_schedule(
                 cycle_started_at=cycle_started_at,
-                poll_minutes=args.poll_minutes,
+                sleep_seconds=planned_sleep_seconds,
                 now_utc=completed_at,
             )
 
@@ -205,8 +277,40 @@ async def _run() -> int:
                     "elapsed_seconds": round(elapsed_seconds, 2),
                     "error": error_message if state == "error" else None,
                     "last_result": result,
+                    "history": history,
                 }
             )
+            if result is not None:
+                api_calls = result.get("api_calls") or {}
+                history.append(
+                    {
+                        "started_at": cycle_started_at.isoformat(),
+                        "completed_at": completed_at.isoformat(),
+                        "elapsed_seconds": round(elapsed_seconds, 2),
+                        "sleep_seconds": round(sleep_seconds, 2),
+                        "api_calls": {
+                            "total": int(api_calls.get("total") or 0),
+                            "by_endpoint": dict(api_calls.get("by_endpoint") or {}),
+                        },
+                        "rate_limit": dict(result.get("rate_limit") or {}),
+                        "focus_mode": str(result.get("focus_mode") or ""),
+                    }
+                )
+                history = _trim_history(history, completed_at)
+                _write_runtime_state(
+                    {
+                        "state": state,
+                        "poll_minutes": args.poll_minutes,
+                        "run_started_at": cycle_started_at.isoformat(),
+                        "run_completed_at": completed_at.isoformat(),
+                        "next_run_at": next_run_at.isoformat(),
+                        "sleep_seconds": round(sleep_seconds, 2),
+                        "elapsed_seconds": round(elapsed_seconds, 2),
+                        "error": error_message if state == "error" else None,
+                        "last_result": result,
+                        "history": history,
+                    }
+                )
             logger.info(
                 f"Research sync daemon sleeping {sleep_seconds:.1f}s until {next_run_at.isoformat()}"
             )

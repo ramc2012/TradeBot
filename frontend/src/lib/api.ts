@@ -31,6 +31,12 @@ export const connectFivepaisa = (totp: string) =>
   api.post("/api/auth/fivepaisa/connect", { totp });
 export const disconnectBroker = (broker: string) =>
   api.post("/api/auth/disconnect-broker", null, { params: { broker } });
+export const getTelegramSettings = () => api.get("/api/auth/telegram-settings");
+export const saveTelegramSettings = (payload: object) => api.post("/api/auth/telegram-settings", payload);
+export const discoverTelegramChats = (bot_token = "") =>
+  api.post("/api/auth/telegram-discover-chats", { bot_token });
+export const sendTelegramTest = (message = "") =>
+  api.post("/api/auth/telegram-test", { message });
 
 // ── Trading ───────────────────────────────────────────────────────────────
 export const placeOrder = (order: object) => api.post("/api/trading/orders", order);
@@ -42,6 +48,9 @@ export const setMode = (mode: string, broker?: string) =>
   api.post("/api/trading/mode", { mode, broker });
 export const killSwitch = () => api.post("/api/trading/kill-switch");
 export const getPortfolioSummary = () => api.get("/api/trading/portfolio-summary");
+export const getStrategyAgentStatus = () => api.get("/api/trading/strategy-agent/status");
+export const runStrategyAgentOnce = (force = true) =>
+  api.post("/api/trading/strategy-agent/run-once", null, { params: { force } });
 export const getRiskStatus = () => api.get("/api/trading/risk-status");
 export const updateRiskConfig = (config: object) => api.put("/api/trading/risk-config", config);
 
@@ -50,6 +59,10 @@ export const getOptionChain = (symbol: string, expiry?: string) =>
   api.get(`/api/market/option-chain/${encodeURIComponent(symbol)}`, { params: { expiry } });
 export const getOptionExpiries = (symbol: string) =>
   api.get(`/api/market/expiries/${encodeURIComponent(symbol)}`);
+export const getATMWatchlistExpiries = () =>
+  api.get("/api/market/atm-watchlist/expiries");
+export const getATMWatchlist = (expiry?: string) =>
+  api.get("/api/market/atm-watchlist", { params: { expiry } });
 export const getMarketProfile = (symbol: string, timeframe = "daily") =>
   api.get(`/api/market/market-profile/${encodeURIComponent(symbol)}`, { params: { timeframe } });
 export const getIVRank = (symbol: string) => api.get(`/api/market/iv-rank/${encodeURIComponent(symbol)}`);
@@ -67,7 +80,8 @@ export const getPerformance = (period = "today") =>
 export const getEquityCurve = () => api.get("/api/analytics/equity-curve");
 export const getCalendarHeatmap = () => api.get("/api/analytics/calendar-heatmap");
 export const getPortfolioGreeks = () => api.get("/api/analytics/portfolio-greeks");
-export const getSectorRotation = () => api.get("/api/analytics/sector-rotation");
+export const getSectorRotation = (timeframe = "daily") =>
+  api.get("/api/analytics/sector-rotation", { params: { timeframe } });
 export const getMacroDashboard = () => api.get("/api/analytics/macro-dashboard");
 
 // ── Agent ─────────────────────────────────────────────────────────────────

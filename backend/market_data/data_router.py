@@ -9,7 +9,7 @@ from loguru import logger
 
 from brokers.base import BrokerAdapter, Tick
 from db.redis_client import get_redis
-from market_data.symbols import to_app_symbol, to_broker_symbol
+from market_data.symbols import to_app_symbol, to_broker_symbol, to_fyers_symbol
 
 
 class DataRouter:
@@ -26,6 +26,7 @@ class DataRouter:
         self._callbacks: Dict[str, List[Callable[[Tick], None]]] = {}
         self._tick_buffer: Dict[str, Tick] = {}  # latest tick per symbol
         self._mock_task: Optional[asyncio.Task] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     def set_broker(self, broker: BrokerAdapter):
         self._broker = broker
@@ -39,8 +40,13 @@ class DataRouter:
             return
         await self.stop_mock_feed()
         await self.unsubscribe()
+        self._loop = asyncio.get_running_loop()
         self._subscribed_symbols = symbols
-        broker_symbols = [to_broker_symbol(symbol) for symbol in symbols]
+        broker_name = getattr(self._broker, "broker_name", "")
+        if broker_name == "fyers":
+            broker_symbols = [to_fyers_symbol(symbol) for symbol in symbols]
+        else:
+            broker_symbols = [to_broker_symbol(symbol) for symbol in symbols]
         self._ws_client = await self._broker.subscribe_websocket(
             broker_symbols, self._on_tick
         )
@@ -73,8 +79,15 @@ class DataRouter:
                 cb(tick)
             except Exception as e:
                 logger.error(f"[DataRouter] Callback error for {tick.symbol}: {e}")
-        # Fire-and-forget async publish
-        asyncio.create_task(self._publish_tick(tick))
+        # Fyers websocket callbacks can arrive on a non-async thread.
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop and running_loop is self._loop:
+            asyncio.create_task(self._publish_tick(tick))
+        elif self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._publish_tick(tick), self._loop)
 
     async def _publish_tick(self, tick: Tick):
         try:

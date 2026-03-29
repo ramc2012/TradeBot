@@ -103,6 +103,12 @@ _GREEKS_SYNC_REPORT_CANDIDATES = [
 _RESEARCH_SYNC_STATE_FILE = (
     Path(__file__).resolve().parents[2] / "runtime" / "research_sync_status.json"
 )
+_UPSTOX_STANDARD_API_LIMITS = {
+    "per_second": 50,
+    "per_minute": 500,
+    "per_30_minutes": 2000,
+    "window_minutes": 30,
+}
 
 
 def _stage_for_symbol(row: dict[str, Any]) -> str:
@@ -219,6 +225,16 @@ def _get_int_env(name: str, default: int) -> int:
         return default
 
 
+def _get_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 def _parse_iso_datetime(value: Any) -> Optional[datetime]:
     if not value or not isinstance(value, str):
         return None
@@ -239,6 +255,229 @@ def _load_research_sync_runtime_state() -> dict[str, Any]:
     except Exception as exc:
         logger.debug(f"Could not load research sync runtime state: {exc}")
         return {}
+
+
+def _duration_seconds(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric) or numeric < 0:
+        return None
+    return numeric
+
+
+def _build_api_budget_summary(
+    *,
+    now_utc: datetime,
+    summary: dict[str, Any],
+    runtime_state: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    runtime_state = runtime_state or {}
+    history = list(runtime_state.get("history") or [])
+    rolling_cutoff = now_utc - timedelta(
+        minutes=_UPSTOX_STANDARD_API_LIMITS["window_minutes"]
+    )
+
+    rolling_calls = 0
+    rolling_elapsed_seconds = 0.0
+    rolling_by_endpoint: dict[str, int] = {}
+    completed_runs = 0
+
+    for entry in history:
+        completed_at = _parse_iso_datetime(entry.get("completed_at"))
+        if completed_at is None or completed_at < rolling_cutoff:
+            continue
+        api_calls = entry.get("api_calls") or {}
+        total_calls = int(api_calls.get("total") or 0)
+        rolling_calls += total_calls
+        completed_runs += 1
+        elapsed_seconds = _duration_seconds(entry.get("elapsed_seconds"))
+        if elapsed_seconds is not None:
+            rolling_elapsed_seconds += elapsed_seconds
+        for endpoint, count in dict(api_calls.get("by_endpoint") or {}).items():
+            rolling_by_endpoint[str(endpoint)] = (
+                rolling_by_endpoint.get(str(endpoint), 0) + int(count or 0)
+            )
+
+    last_result = runtime_state.get("last_result") or {}
+    last_api_calls = last_result.get("api_calls") or {}
+    last_run_total_calls = int(last_api_calls.get("total") or 0)
+    last_run_elapsed_seconds = _duration_seconds(runtime_state.get("elapsed_seconds"))
+    configured_gap_seconds = max(
+        0.01,
+        _duration_seconds(
+            (last_result.get("rate_limit") or {}).get("inter_call_delay_seconds")
+        ) or _get_float_env("RESEARCH_UPSTOX_GAP_SECONDS", 1.0),
+    )
+
+    configured_calls_per_second = min(
+        float(_UPSTOX_STANDARD_API_LIMITS["per_second"]),
+        1.0 / configured_gap_seconds,
+    )
+    configured_calls_per_minute = min(
+        float(_UPSTOX_STANDARD_API_LIMITS["per_minute"]),
+        configured_calls_per_second * 60.0,
+    )
+    configured_calls_per_30m = min(
+        float(_UPSTOX_STANDARD_API_LIMITS["per_30_minutes"]),
+        configured_calls_per_minute * _UPSTOX_STANDARD_API_LIMITS["window_minutes"],
+    )
+
+    rolling_calls_per_minute = (
+        rolling_calls / _UPSTOX_STANDARD_API_LIMITS["window_minutes"]
+    )
+    rolling_calls_per_second = (
+        rolling_calls / (_UPSTOX_STANDARD_API_LIMITS["window_minutes"] * 60.0)
+    )
+    active_observed_calls_per_second = (
+        rolling_calls / rolling_elapsed_seconds if rolling_elapsed_seconds > 0 else None
+    )
+    last_run_calls_per_second = (
+        last_run_total_calls / last_run_elapsed_seconds
+        if last_run_elapsed_seconds and last_run_elapsed_seconds > 0
+        else None
+    )
+
+    universe_total = int(summary.get("universe_total") or 0)
+    underlyings_with_expiries = int(summary.get("underlyings_with_expiries") or 0)
+    underlyings_with_spot = int(summary.get("underlyings_with_spot") or 0)
+    expiry_total = int(summary.get("expiry_total") or 0)
+    expiries_discovered = int(summary.get("expiries_discovered") or 0)
+    research_contract_target = int(summary.get("research_contract_target") or 0)
+    research_contracts_processed = int(summary.get("research_contracts_processed") or 0)
+
+    metadata_total_calls = universe_total
+    metadata_completed_calls = min(metadata_total_calls, underlyings_with_expiries)
+    spot_total_calls = universe_total
+    spot_completed_calls = min(spot_total_calls, underlyings_with_spot)
+    contract_discovery_total_calls = expiry_total
+    contract_discovery_completed_calls = min(
+        contract_discovery_total_calls,
+        expiries_discovered,
+    )
+    option_history_total_calls = research_contract_target
+    option_history_completed_calls = min(
+        option_history_total_calls,
+        research_contracts_processed,
+    )
+
+    theoretical_total_calls = (
+        metadata_total_calls
+        + spot_total_calls
+        + contract_discovery_total_calls
+        + option_history_total_calls
+    )
+    theoretical_completed_calls = (
+        metadata_completed_calls
+        + spot_completed_calls
+        + contract_discovery_completed_calls
+        + option_history_completed_calls
+    )
+    theoretical_remaining_calls = max(
+        0,
+        theoretical_total_calls - theoretical_completed_calls,
+    )
+
+    theoretical_full_seconds_at_configured = (
+        theoretical_total_calls / configured_calls_per_second
+        if configured_calls_per_second > 0
+        else None
+    )
+    theoretical_full_seconds_at_documented_cap = (
+        theoretical_total_calls
+        / (_UPSTOX_STANDARD_API_LIMITS["per_30_minutes"] / (_UPSTOX_STANDARD_API_LIMITS["window_minutes"] * 60.0))
+        if _UPSTOX_STANDARD_API_LIMITS["per_30_minutes"] > 0
+        else None
+    )
+    observed_remaining_seconds = (
+        theoretical_remaining_calls / active_observed_calls_per_second
+        if active_observed_calls_per_second and active_observed_calls_per_second > 0
+        else None
+    )
+    observed_full_seconds = (
+        theoretical_total_calls / active_observed_calls_per_second
+        if active_observed_calls_per_second and active_observed_calls_per_second > 0
+        else None
+    )
+
+    return {
+        "limits": dict(_UPSTOX_STANDARD_API_LIMITS),
+        "configured": {
+            "gap_seconds": round(configured_gap_seconds, 3),
+            "calls_per_second": round(configured_calls_per_second, 3),
+            "calls_per_minute": round(configured_calls_per_minute, 1),
+            "calls_per_30_minutes": round(configured_calls_per_30m, 1),
+        },
+        "rolling_30m": {
+            "completed_runs": completed_runs,
+            "calls": rolling_calls,
+            "utilization_pct_of_doc_limit": round(
+                min(
+                    100.0,
+                    (rolling_calls / _UPSTOX_STANDARD_API_LIMITS["per_30_minutes"]) * 100.0,
+                ),
+                1,
+            ) if _UPSTOX_STANDARD_API_LIMITS["per_30_minutes"] else None,
+            "avg_calls_per_minute": round(rolling_calls_per_minute, 1),
+            "avg_calls_per_second": round(rolling_calls_per_second, 3),
+            "active_run_avg_calls_per_second": (
+                round(active_observed_calls_per_second, 3)
+                if active_observed_calls_per_second is not None
+                else None
+            ),
+            "by_endpoint": dict(sorted(rolling_by_endpoint.items())),
+        },
+        "last_run": {
+            "calls": last_run_total_calls,
+            "elapsed_seconds": (
+                round(last_run_elapsed_seconds, 2)
+                if last_run_elapsed_seconds is not None
+                else None
+            ),
+            "avg_calls_per_second": (
+                round(last_run_calls_per_second, 3)
+                if last_run_calls_per_second is not None
+                else None
+            ),
+            "by_endpoint": dict(sorted(dict(last_api_calls.get("by_endpoint") or {}).items())),
+        },
+        "theoretical": {
+            "metadata_calls_total": metadata_total_calls,
+            "metadata_calls_completed": metadata_completed_calls,
+            "spot_calls_total": spot_total_calls,
+            "spot_calls_completed": spot_completed_calls,
+            "contract_discovery_calls_total": contract_discovery_total_calls,
+            "contract_discovery_calls_completed": contract_discovery_completed_calls,
+            "option_history_calls_total": option_history_total_calls,
+            "option_history_calls_completed": option_history_completed_calls,
+            "total_calls": theoretical_total_calls,
+            "completed_calls": theoretical_completed_calls,
+            "remaining_calls": theoretical_remaining_calls,
+            "full_seconds_at_configured_rate": (
+                round(theoretical_full_seconds_at_configured, 1)
+                if theoretical_full_seconds_at_configured is not None
+                else None
+            ),
+            "full_seconds_at_documented_cap": (
+                round(theoretical_full_seconds_at_documented_cap, 1)
+                if theoretical_full_seconds_at_documented_cap is not None
+                else None
+            ),
+            "full_seconds_at_observed_rate": (
+                round(observed_full_seconds, 1)
+                if observed_full_seconds is not None
+                else None
+            ),
+            "remaining_seconds_at_observed_rate": (
+                round(observed_remaining_seconds, 1)
+                if observed_remaining_seconds is not None
+                else None
+            ),
+        },
+    }
 
 
 def _build_research_scheduler_summary(
@@ -933,6 +1172,53 @@ async def get_research_cache_status():
         active_recent_symbols=active_recent_symbols,
         runtime_state=runtime_state,
     )
+    summary_payload = {
+        "universe_total": universe_total,
+        "underlyings_with_expiries": _count(lambda row: row["total_expiries"] > 0),
+        "underlyings_with_spot": _count(lambda row: row["spot_candles"] > 0),
+        "selection_spots_ready": selection_spots_ready,
+        "expiry_total": expiry_total,
+        "expiries_discovered": discovered_expiries,
+        "contracts_total": contracts_total,
+        "contracts_complete": contracts_complete,
+        "contracts_pending": contracts_pending,
+        "contracts_empty": contracts_empty,
+        "research_contract_target": research_contract_target,
+        "research_contracts_processed": research_contracts_processed,
+        "option_contracts": option_contracts,
+        "option_candles": option_candles,
+        "active_symbols": _count(lambda row: row["active_now"]),
+        "active_recent_symbols": active_recent_symbols,
+        "populated_symbols": _count(lambda row: row["research_ready"]),
+        "symbols_in_progress": _count(
+            lambda row: row["stage"] in {"metadata", "spot", "contracts", "populating"}
+        ),
+        "stage_counts": stage_counts,
+        "recent_activity_at": recent_activity_at,
+        "last_successful_option_sync_at": _serialise_ts(
+            freshness_row.get("last_successful_option_sync_at")
+        ),
+        "last_complete_contract_sync_at": _serialise_ts(
+            contract_touch_row.get("last_complete_contract_sync_at")
+        ),
+        "last_empty_contract_touch_at": _serialise_ts(
+            contract_touch_row.get("last_empty_contract_touch_at")
+        ),
+        "option_candles_added_last_30m": int(
+            freshness_row.get("option_candles_added_last_30m") or 0
+        ),
+        "complete_contracts_touched_last_30m": int(
+            contract_touch_row.get("complete_contracts_touched_last_30m") or 0
+        ),
+        "empty_contracts_touched_last_30m": int(
+            contract_touch_row.get("empty_contracts_touched_last_30m") or 0
+        ),
+    }
+    api_budget = _build_api_budget_summary(
+        now_utc=now_utc,
+        summary=summary_payload,
+        runtime_state=runtime_state,
+    )
 
     symbols.sort(
         key=lambda row: (
@@ -944,48 +1230,8 @@ async def get_research_cache_status():
     )
 
     return _json_safe({
-        "summary": {
-            "universe_total": universe_total,
-            "underlyings_with_expiries": _count(lambda row: row["total_expiries"] > 0),
-            "underlyings_with_spot": _count(lambda row: row["spot_candles"] > 0),
-            "selection_spots_ready": selection_spots_ready,
-            "expiry_total": expiry_total,
-            "expiries_discovered": discovered_expiries,
-            "contracts_total": contracts_total,
-            "contracts_complete": contracts_complete,
-            "contracts_pending": contracts_pending,
-            "contracts_empty": contracts_empty,
-            "research_contract_target": research_contract_target,
-            "research_contracts_processed": research_contracts_processed,
-            "option_contracts": option_contracts,
-            "option_candles": option_candles,
-            "active_symbols": _count(lambda row: row["active_now"]),
-            "active_recent_symbols": active_recent_symbols,
-            "populated_symbols": _count(lambda row: row["research_ready"]),
-            "symbols_in_progress": _count(
-                lambda row: row["stage"] in {"metadata", "spot", "contracts", "populating"}
-            ),
-            "stage_counts": stage_counts,
-            "recent_activity_at": recent_activity_at,
-            "last_successful_option_sync_at": _serialise_ts(
-                freshness_row.get("last_successful_option_sync_at")
-            ),
-            "last_complete_contract_sync_at": _serialise_ts(
-                contract_touch_row.get("last_complete_contract_sync_at")
-            ),
-            "last_empty_contract_touch_at": _serialise_ts(
-                contract_touch_row.get("last_empty_contract_touch_at")
-            ),
-            "option_candles_added_last_30m": int(
-                freshness_row.get("option_candles_added_last_30m") or 0
-            ),
-            "complete_contracts_touched_last_30m": int(
-                contract_touch_row.get("complete_contracts_touched_last_30m") or 0
-            ),
-            "empty_contracts_touched_last_30m": int(
-                contract_touch_row.get("empty_contracts_touched_last_30m") or 0
-            ),
-        },
+        "summary": summary_payload,
+        "api_budget": api_budget,
         "scheduler": scheduler,
         "symbols": symbols,
     })

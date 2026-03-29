@@ -15,6 +15,8 @@ import {
 } from "lucide-react";
 
 import {
+  getATMWatchlist,
+  getATMWatchlistExpiries,
   getMarketProfile,
   getOptionChain,
   getOptionExpiries,
@@ -109,6 +111,7 @@ type SectorWatchlistRow = {
 };
 
 type SectorRotationPayload = {
+  timeframe?: string;
   benchmark?: {
     symbol: string;
     name: string;
@@ -125,12 +128,81 @@ type SectorRotationPayload = {
     >;
     quadrant_counts: Record<string, number>;
   };
+  stocks_by_sector?: Record<
+    string,
+    {
+      sector: SectorWatchlistRow;
+      stocks: SectorWatchlistRow[];
+      rrg: {
+        points: Array<SectorWatchlistRow & { trail: Array<{ ratio: number; momentum: number }> }>;
+        quadrant_counts: Record<string, number>;
+      };
+    }
+  >;
+  unassigned_symbols?: string[];
   source?: string;
   detail?: string | null;
   timestamp?: string;
 };
 
-type MarketWorkspace = "options" | "sectors";
+type ATMWatchlistOptionSide = {
+  strike: number;
+  option_type: "CE" | "PE";
+  instrument_key?: string | null;
+  trading_symbol?: string | null;
+  ltp: number;
+  prev_close?: number | null;
+  change?: number | null;
+  change_pct?: number | null;
+  oi: number;
+  prev_oi?: number | null;
+  oi_change?: number | null;
+  oi_change_pct?: number | null;
+  volume: number;
+  iv?: number | null;
+  delta?: number | null;
+  gamma?: number | null;
+  theta?: number | null;
+  vega?: number | null;
+  macd?: number | null;
+  macd_signal?: number | null;
+  macd_histogram?: number | null;
+  rsi?: number | null;
+};
+
+type ATMWatchlistPayload = {
+  expiry: string | null;
+  rows: Array<{
+    underlying: string;
+    kind: string;
+    spot_price: number;
+    expiry: string;
+    atm_strike: number;
+    live_source: string;
+    fyers_symbol?: string | null;
+    ce?: ATMWatchlistOptionSide | null;
+    pe?: ATMWatchlistOptionSide | null;
+  }>;
+  summary: {
+    total_rows: number;
+    ce_ready: number;
+    pe_ready: number;
+    fyers_rows?: number;
+    upstox_rows?: number;
+  };
+  source?: string;
+  detail?: string | null;
+  timestamp?: string;
+};
+
+type ATMWatchlistExpiryPayload = {
+  expiries: string[];
+  default_expiry?: string | null;
+  source?: string;
+  detail?: string | null;
+};
+
+type MarketWorkspace = "options" | "sectors" | "watchlist";
 
 function formatChangePct(ltp?: number, close?: number) {
   if (!ltp || !close) return "--";
@@ -164,10 +236,28 @@ function formatCompact(value?: number | null) {
   return `${Math.round(value)}`;
 }
 
+function formatIndicator(value?: number | null, digits = 2) {
+  if (value == null || Number.isNaN(value)) return "--";
+  const prefix = value > 0 ? "+" : "";
+  return `${prefix}${value.toFixed(digits)}`;
+}
+
 function valueTone(value?: number | null) {
   if (value == null || Number.isNaN(value)) return "text-text-muted";
   if (value > 0) return "text-accent-green";
   if (value < 0) return "text-accent-red";
+  return "text-text-secondary";
+}
+
+function macdTone(value?: number | null) {
+  if (value == null || Number.isNaN(value)) return "text-text-muted";
+  return value >= 0 ? "text-accent-green" : "text-accent-red";
+}
+
+function rsiTone(value?: number | null) {
+  if (value == null || Number.isNaN(value)) return "text-text-muted";
+  if (value >= 70) return "text-accent-red";
+  if (value <= 30) return "text-accent-green";
   return "text-text-secondary";
 }
 
@@ -622,12 +712,80 @@ function SectorQuadrantBoard({
   );
 }
 
+function ATMOptionCell({
+  option,
+  accent,
+}: {
+  option?: ATMWatchlistOptionSide | null;
+  accent: "ce" | "pe";
+}) {
+  const ltpTone = accent === "ce" ? "text-accent-green" : "text-accent-red";
+
+  if (!option) {
+    return (
+      <div className="grid grid-cols-5 gap-2 text-[11px] text-text-muted">
+        <span className="col-span-5">No ATM contract</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid grid-cols-5 gap-x-3 gap-y-1 text-[11px]">
+      <div>
+        <div className="text-text-muted">LTP</div>
+        <div className={clsx("font-mono font-semibold", ltpTone)}>{option.ltp.toFixed(2)}</div>
+      </div>
+      <div>
+        <div className="text-text-muted">Chg</div>
+        <div className={valueTone(option.change_pct)}>{formatSignedPct(option.change_pct)}</div>
+      </div>
+      <div>
+        <div className="text-text-muted">Vol</div>
+        <div className="text-text-secondary">{formatCompact(option.volume)}</div>
+      </div>
+      <div>
+        <div className="text-text-muted">OI</div>
+        <div className="text-text-primary">{formatCompact(option.oi)}</div>
+      </div>
+      <div>
+        <div className="text-text-muted">dOI</div>
+        <div className={valueTone(option.oi_change)}>{formatCompact(option.oi_change)}</div>
+      </div>
+      <div>
+        <div className="text-text-muted">IV</div>
+        <div className="text-text-secondary">{formatIv(option.iv)}</div>
+      </div>
+      <div>
+        <div className="text-text-muted">MACD</div>
+        <div className={macdTone(option.macd_histogram)}>{formatIndicator(option.macd_histogram, 3)}</div>
+      </div>
+      <div>
+        <div className="text-text-muted">RSI</div>
+        <div className={rsiTone(option.rsi)}>{formatIndicator(option.rsi, 1)}</div>
+      </div>
+      <div>
+        <div className="text-text-muted">Delta</div>
+        <div className="text-text-secondary">{formatSigned(option.delta, 3)}</div>
+      </div>
+      <div>
+        <div className="text-text-muted">Symbol</div>
+        <div className="truncate text-text-muted" title={option.trading_symbol || option.instrument_key || undefined}>
+          {option.trading_symbol || option.instrument_key || "--"}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function MarketPage() {
   const [symbol, setSymbol] = useState<MarketIndexSymbol>("NSE:NIFTY50-INDEX");
   const [expiry, setExpiry] = useState("");
   const [profileTimeframe, setProfileTimeframe] = useState<"day" | "week" | "month">("day");
   const [workspace, setWorkspace] = useState<MarketWorkspace>("options");
+  const [sectorTimeframe, setSectorTimeframe] = useState<"hourly" | "daily" | "weekly" | "monthly">("daily");
   const [selectedSectorCode, setSelectedSectorCode] = useState("");
+  const [selectedStockCode, setSelectedStockCode] = useState("");
+  const [watchlistExpiry, setWatchlistExpiry] = useState("");
   const selectedTick = useTickSymbol(symbol);
 
   const expiriesQuery = useQuery<ExpiryPayload>({
@@ -661,9 +819,33 @@ export default function MarketPage() {
   });
 
   const sectorQuery = useQuery<SectorRotationPayload>({
-    queryKey: ["marketSectorRotation"],
-    queryFn: () => getSectorRotation().then((response) => response.data),
-    refetchInterval: 15000,
+    queryKey: ["marketSectorRotation", sectorTimeframe],
+    queryFn: () => getSectorRotation(sectorTimeframe).then((response) => response.data),
+    refetchInterval: 60000,
+    staleTime: 5000,
+  });
+
+  const watchlistExpiryQuery = useQuery<ATMWatchlistExpiryPayload>({
+    queryKey: ["atmWatchlistExpiries"],
+    queryFn: () => getATMWatchlistExpiries().then((response) => response.data),
+    refetchInterval: 300000,
+    staleTime: 60000,
+  });
+
+  useEffect(() => {
+    const available = watchlistExpiryQuery.data?.expiries ?? [];
+    const defaultExpiry = watchlistExpiryQuery.data?.default_expiry || available[0] || "";
+    if (!defaultExpiry) return;
+    if (!watchlistExpiry || !available.includes(watchlistExpiry)) {
+      setWatchlistExpiry(defaultExpiry);
+    }
+  }, [watchlistExpiry, watchlistExpiryQuery.data]);
+
+  const watchlistQuery = useQuery<ATMWatchlistPayload>({
+    queryKey: ["atmWatchlist", watchlistExpiry],
+    queryFn: () => getATMWatchlist(watchlistExpiry || undefined).then((response) => response.data),
+    enabled: Boolean(watchlistExpiry),
+    refetchInterval: 60000,
     staleTime: 5000,
   });
 
@@ -677,6 +859,18 @@ export default function MarketPage() {
       setSelectedSectorCode(available[0].code);
     }
   }, [sectorQuery.data, selectedSectorCode]);
+
+  const selectedSectorStocks = sectorQuery.data?.stocks_by_sector?.[selectedSectorCode]?.rrg?.points ?? [];
+
+  useEffect(() => {
+    if (!selectedSectorStocks.length) {
+      setSelectedStockCode("");
+      return;
+    }
+    if (!selectedStockCode || !selectedSectorStocks.some((stock) => stock.code === selectedStockCode)) {
+      setSelectedStockCode(selectedSectorStocks[0].code);
+    }
+  }, [selectedSectorStocks, selectedStockCode]);
 
   const chain = chainQuery.data;
   const profile = profileQuery.data;
@@ -706,6 +900,11 @@ export default function MarketPage() {
   const improvingSectors = sectorWatchlist.filter((sector) => sector.quadrant === "improving");
   const weakeningSectors = sectorWatchlist.filter((sector) => sector.quadrant === "weakening");
   const laggingSectors = sectorWatchlist.filter((sector) => sector.quadrant === "lagging");
+  const selectedSectorStockRows = sectorRotation?.stocks_by_sector?.[selectedSectorCode]?.stocks ?? [];
+  const stockLeading = selectedSectorStockRows.filter((stock) => stock.quadrant === "leading");
+  const stockImproving = selectedSectorStockRows.filter((stock) => stock.quadrant === "improving");
+  const stockWeakening = selectedSectorStockRows.filter((stock) => stock.quadrant === "weakening");
+  const stockLagging = selectedSectorStockRows.filter((stock) => stock.quadrant === "lagging");
 
   return (
     <div className="mx-auto max-w-[1800px] space-y-4 pb-8">
@@ -729,6 +928,12 @@ export default function MarketPage() {
               label="Sector Rotation"
               description="RRG map and sector watchlist against NIFTY 50."
               onClick={() => setWorkspace("sectors")}
+            />
+            <MarketTabButton
+              active={workspace === "watchlist"}
+              label="ATM Watchlist"
+              description="All-instrument ATM CE/PE board with Greeks and indicators."
+              onClick={() => setWorkspace("watchlist")}
             />
           </div>
         </div>
@@ -1010,7 +1215,7 @@ export default function MarketPage() {
             </section>
           </div>
         </div>
-      ) : (
+      ) : workspace === "sectors" ? (
         <div className="grid gap-5 xl:grid-cols-[1.2fr_0.8fr]">
           <section className="space-y-4">
             <div className="grid gap-3 md:grid-cols-3">
@@ -1036,6 +1241,28 @@ export default function MarketPage() {
                 <div className="mt-2">
                   <SignedPill value={topImproving?.rrg_momentum != null ? topImproving.rrg_momentum - 100 : null} />
                 </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-sm text-text-muted">
+                Sector RRG relative to NIFTY 50 with stock rotation inside the selected sector.
+              </div>
+              <div className="flex items-center gap-2">
+                {(["hourly", "daily", "weekly", "monthly"] as const).map((item) => (
+                  <button
+                    key={item}
+                    onClick={() => setSectorTimeframe(item)}
+                    className={clsx(
+                      "rounded-lg border px-2.5 py-1 text-[11px] uppercase tracking-[0.08em]",
+                      sectorTimeframe === item
+                        ? "border-accent-blue bg-accent-blue/12 text-accent-blue"
+                        : "border-bg-border bg-bg-secondary/45 text-text-muted",
+                    )}
+                  >
+                    {item}
+                  </button>
+                ))}
               </div>
             </div>
 
@@ -1065,6 +1292,57 @@ export default function MarketPage() {
 
             <SectorDetailCard sector={selectedSector} benchmark={sectorRotation?.benchmark} />
 
+            {selectedSectorStocks.length ? (
+              <div className="space-y-4 rounded-2xl border border-bg-border bg-bg-secondary/35 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-[11px] uppercase tracking-[0.14em] text-text-muted">Stocks Vs Sector</div>
+                    <div className="mt-1 text-sm text-text-secondary">
+                      {selectedSector?.name || "Selected sector"} stock RRG relative to the sector index.
+                    </div>
+                  </div>
+                  <div className="text-xs text-text-muted">
+                    {selectedSectorStockRows.length} mapped stocks
+                  </div>
+                </div>
+                <SectorQuadrantBoard
+                  points={selectedSectorStocks}
+                  selectedCode={selectedStockCode}
+                  onSelect={setSelectedStockCode}
+                />
+                <div className="grid gap-3 md:grid-cols-2">
+                  <SectorCluster
+                    title="Leading Stocks"
+                    sectors={stockLeading}
+                    selectedCode={selectedStockCode}
+                    onSelect={setSelectedStockCode}
+                  />
+                  <SectorCluster
+                    title="Improving Stocks"
+                    sectors={stockImproving}
+                    selectedCode={selectedStockCode}
+                    onSelect={setSelectedStockCode}
+                  />
+                  <SectorCluster
+                    title="Weakening Stocks"
+                    sectors={stockWeakening}
+                    selectedCode={selectedStockCode}
+                    onSelect={setSelectedStockCode}
+                  />
+                  <SectorCluster
+                    title="Lagging Stocks"
+                    sectors={stockLagging}
+                    selectedCode={selectedStockCode}
+                    onSelect={setSelectedStockCode}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-dashed border-bg-border px-4 py-5 text-sm text-text-muted">
+                No mapped F&O stocks are available for the selected sector yet.
+              </div>
+            )}
+
             <div className="grid gap-3">
               <SectorCluster
                 title="Leading"
@@ -1093,6 +1371,110 @@ export default function MarketPage() {
             </div>
           </section>
         </div>
+      ) : (
+        <section className="card rounded-2xl p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.14em] text-text-muted">ATM CE / PE Watchlist</div>
+              <div className="mt-1 text-sm text-text-secondary">
+                Instrument-wide monthly options board with live premium, OI, IV, and lightweight MACD / RSI context.
+              </div>
+              {watchlistQuery.data?.detail && (
+                <div className="mt-2 text-xs text-accent-amber">{watchlistQuery.data.detail}</div>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <select
+                value={watchlistExpiry}
+                onChange={(event) => setWatchlistExpiry(event.target.value)}
+                className="terminal-input min-w-[176px] py-1.5 text-xs"
+              >
+                {(watchlistExpiryQuery.data?.expiries ?? []).map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+                {!watchlistExpiryQuery.data?.expiries?.length && <option value="">Expiry loading...</option>}
+              </select>
+              <button
+                onClick={() => {
+                  void watchlistExpiryQuery.refetch();
+                  void watchlistQuery.refetch();
+                }}
+                className="rounded-lg border border-bg-border bg-bg-secondary/45 p-2 text-text-muted transition-colors hover:text-text-primary"
+                aria-label="Refresh watchlist"
+              >
+                <RefreshCw size={14} />
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-3 md:grid-cols-4">
+            <div className="rounded-xl border border-bg-border bg-bg-secondary/50 p-3">
+              <div className="text-[11px] uppercase tracking-[0.14em] text-text-muted">Rows</div>
+              <div className="mt-1 font-mono text-lg font-semibold text-text-primary">
+                {watchlistQuery.data?.summary?.total_rows ?? 0}
+              </div>
+            </div>
+            <div className="rounded-xl border border-bg-border bg-bg-secondary/50 p-3">
+              <div className="text-[11px] uppercase tracking-[0.14em] text-text-muted">CE Ready</div>
+              <div className="mt-1 font-mono text-lg font-semibold text-accent-green">
+                {watchlistQuery.data?.summary?.ce_ready ?? 0}
+              </div>
+            </div>
+            <div className="rounded-xl border border-bg-border bg-bg-secondary/50 p-3">
+              <div className="text-[11px] uppercase tracking-[0.14em] text-text-muted">PE Ready</div>
+              <div className="mt-1 font-mono text-lg font-semibold text-accent-red">
+                {watchlistQuery.data?.summary?.pe_ready ?? 0}
+              </div>
+            </div>
+            <div className="rounded-xl border border-bg-border bg-bg-secondary/50 p-3">
+              <div className="text-[11px] uppercase tracking-[0.14em] text-text-muted">Live Source</div>
+              <div className="mt-1 font-mono text-lg font-semibold text-accent-blue">
+                {watchlistQuery.data?.source?.toUpperCase() || "--"}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full min-w-[1800px] text-left text-xs">
+              <thead>
+                <tr className="border-b border-bg-border text-text-muted">
+                  <th className="pb-2 pr-3">Underlying</th>
+                  <th className="pb-2 pr-3">Spot</th>
+                  <th className="pb-2 pr-3">Expiry</th>
+                  <th className="pb-2 pr-3">ATM</th>
+                  <th className="pb-2 pr-3">CE Snapshot</th>
+                  <th className="pb-2">PE Snapshot</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(watchlistQuery.data?.rows ?? []).map((row) => (
+                  <tr key={`${row.underlying}:${row.expiry}`} className="border-b border-bg-border/40 align-top">
+                    <td className="py-3 pr-3">
+                      <div className="font-medium text-text-primary">{row.underlying}</div>
+                      <div className="mt-1 text-[11px] uppercase tracking-[0.12em] text-text-muted">
+                        {row.kind} · {row.live_source}
+                      </div>
+                    </td>
+                    <td className="py-3 pr-3 font-mono text-text-primary">{row.spot_price.toFixed(2)}</td>
+                    <td className="py-3 pr-3 font-mono text-text-secondary">{row.expiry}</td>
+                    <td className="py-3 pr-3 font-mono text-accent-amber">{row.atm_strike}</td>
+                    <td className="py-3 pr-3"><ATMOptionCell option={row.ce} accent="ce" /></td>
+                    <td className="py-3"><ATMOptionCell option={row.pe} accent="pe" /></td>
+                  </tr>
+                ))}
+                {!watchlistQuery.isLoading && !(watchlistQuery.data?.rows?.length) && (
+                  <tr>
+                    <td colSpan={6} className="py-8 text-center text-sm text-text-muted">
+                      {watchlistQuery.data?.detail || "No ATM watchlist rows are available for the selected expiry."}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
       )}
     </div>
   );
