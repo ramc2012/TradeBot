@@ -281,6 +281,12 @@ def _build_research_scheduler_summary(
     runtime_error = str(runtime_state.get("error") or "").strip()
 
     if contracts_pending > 0 and runtime_name:
+        runtime_overdue = (
+            runtime_name in {"waiting", "error"}
+            and runtime_next_run_at is not None
+            and runtime_next_run_at <= now_utc
+            and active_recent_symbols == 0
+        )
         if runtime_name == "running":
             state = "running"
             label = "Aggregation in progress"
@@ -290,13 +296,28 @@ def _build_research_scheduler_summary(
                 else f"Current Upstox aggregation batch started at {runtime_started_at.isoformat()}."
             )
         elif runtime_name == "waiting":
-            state = "waiting"
-            label = "Waiting for next aggregation pass"
-            detail = "Last aggregation batch completed and the next scheduled pass is pending."
+            if runtime_overdue:
+                state = "stalled"
+                label = "Aggregation overdue"
+                detail = (
+                    "The research sync worker missed its scheduled pass. "
+                    "It should resume on the next daemon wake or after the research-sync service is restarted."
+                )
+            else:
+                state = "waiting"
+                label = "Waiting for next aggregation pass"
+                detail = "Last aggregation batch completed and the next scheduled pass is pending."
         elif runtime_name == "error":
-            state = "waiting"
-            label = "Aggregation waiting after error"
-            detail = runtime_error or "The previous aggregation pass failed and the worker is waiting for the next scheduled retry."
+            if runtime_overdue:
+                state = "stalled"
+                label = "Aggregation retry overdue"
+                detail = runtime_error or (
+                    "The previous aggregation pass failed and the scheduled retry is overdue."
+                )
+            else:
+                state = "waiting"
+                label = "Aggregation waiting after error"
+                detail = runtime_error or "The previous aggregation pass failed and the worker is waiting for the next scheduled retry."
 
         if runtime_next_run_at is not None:
             next_batch_at = runtime_next_run_at

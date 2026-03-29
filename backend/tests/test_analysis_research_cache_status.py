@@ -110,6 +110,47 @@ def test_symbol_progress_pct() -> None:
     assert queued_pct == 0.0
 
 
+def test_research_scheduler_marks_overdue_waiting_runtime_as_stalled() -> None:
+    now = datetime(2026, 3, 29, 12, 0, tzinfo=timezone.utc)
+    scheduler = analysis._build_research_scheduler_summary(
+        now_utc=now,
+        recent_activity_at=now - timedelta(hours=2),
+        contracts_pending=42,
+        active_recent_symbols=0,
+        runtime_state={
+            "state": "waiting",
+            "run_started_at": (now - timedelta(hours=2, minutes=5)).isoformat(),
+            "run_completed_at": (now - timedelta(hours=2)).isoformat(),
+            "next_run_at": (now - timedelta(minutes=30)).isoformat(),
+        },
+    )
+
+    assert scheduler["state"] == "stalled"
+    assert scheduler["label"] == "Aggregation overdue"
+    assert scheduler["seconds_until_next_batch"] == 0
+    assert scheduler["next_batch_at"] == (now - timedelta(minutes=30)).isoformat()
+
+
+def test_research_scheduler_keeps_future_waiting_runtime_as_waiting() -> None:
+    now = datetime(2026, 3, 29, 12, 0, tzinfo=timezone.utc)
+    scheduler = analysis._build_research_scheduler_summary(
+        now_utc=now,
+        recent_activity_at=now - timedelta(minutes=5),
+        contracts_pending=42,
+        active_recent_symbols=0,
+        runtime_state={
+            "state": "waiting",
+            "run_started_at": (now - timedelta(minutes=10)).isoformat(),
+            "run_completed_at": (now - timedelta(minutes=5)).isoformat(),
+            "next_run_at": (now + timedelta(minutes=25)).isoformat(),
+        },
+    )
+
+    assert scheduler["state"] == "waiting"
+    assert scheduler["label"] == "Waiting for next aggregation pass"
+    assert scheduler["seconds_until_next_batch"] == 1500
+
+
 @pytest.mark.asyncio
 async def test_get_research_cache_status_summarises_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     now = datetime.now(timezone.utc)

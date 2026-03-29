@@ -112,7 +112,7 @@ interface ResearchCacheStatus {
     empty_contracts_touched_last_30m: number;
   };
   scheduler: {
-    state: "idle" | "running" | "waiting" | "rate_limit_cooldown";
+    state: "idle" | "running" | "waiting" | "rate_limit_cooldown" | "stalled";
     label: string;
     detail: string;
     pause_assumed: boolean;
@@ -880,6 +880,8 @@ function PopulationMonitor() {
   const syncPct = summary.research_contract_target ? (processedContracts / summary.research_contract_target) * 100 : 0;
   const schedulerTone = scheduler.state === "running"
     ? "border-accent-blue/30 bg-accent-blue/5 text-accent-blue"
+    : scheduler.state === "stalled"
+      ? "border-accent-red/30 bg-accent-red/5 text-accent-red"
     : scheduler.state === "waiting"
       ? "border-accent-amber/30 bg-accent-amber/5 text-accent-amber"
       : scheduler.state === "rate_limit_cooldown"
@@ -887,6 +889,10 @@ function PopulationMonitor() {
         : "border-bg-border bg-bg-secondary text-text-secondary";
   const schedulerMeta = scheduler.state === "running"
     ? `started ${formatRelativeTime(scheduler.last_run_started_at)}`
+    : scheduler.state === "stalled"
+      ? scheduler.next_batch_at
+        ? `overdue since ${formatLocalTimestamp(scheduler.next_batch_at)}`
+        : `last completed ${formatRelativeTime(scheduler.last_run_completed_at)}`
     : scheduler.next_batch_at
       ? `next batch ${formatLocalTimestamp(scheduler.next_batch_at)}`
       : `last completed ${formatRelativeTime(scheduler.last_run_completed_at)}`;

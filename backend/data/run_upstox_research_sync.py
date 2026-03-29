@@ -6,7 +6,6 @@ import json
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from time import monotonic
 
 from loguru import logger
 
@@ -17,6 +16,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_CREDS_PATH = BACKEND_DIR / "credentials.json"
 RUNTIME_DIR = BACKEND_DIR / "runtime"
 STATE_FILE = RUNTIME_DIR / "research_sync_status.json"
+MAX_DAEMON_SLEEP_SECONDS = 15.0
 
 
 def _load_upstox_token() -> str:
@@ -111,6 +111,30 @@ def _configure_logging() -> None:
     logger.add(sys.stderr, level="INFO")
 
 
+def _compute_cycle_schedule(
+    *,
+    cycle_started_at: datetime,
+    poll_minutes: int,
+    now_utc: datetime | None = None,
+) -> tuple[datetime, float, float]:
+    current_time = now_utc or datetime.now(timezone.utc)
+    elapsed_seconds = max(0.0, (current_time - cycle_started_at).total_seconds())
+    target_cycle_seconds = max(0.0, poll_minutes * 60)
+    sleep_seconds = max(0.0, target_cycle_seconds - elapsed_seconds)
+    next_run_at = cycle_started_at + timedelta(seconds=target_cycle_seconds)
+    if sleep_seconds <= 0:
+        next_run_at = current_time
+    return next_run_at, elapsed_seconds, sleep_seconds
+
+
+async def _sleep_until(next_run_at: datetime) -> None:
+    while True:
+        remaining_seconds = (next_run_at - datetime.now(timezone.utc)).total_seconds()
+        if remaining_seconds <= 0:
+            return
+        await asyncio.sleep(min(MAX_DAEMON_SLEEP_SECONDS, remaining_seconds))
+
+
 async def _run() -> int:
     _configure_logging()
     args = _parse_args()
@@ -129,7 +153,6 @@ async def _run() -> int:
 
     if args.daemon:
         while True:
-            cycle_started_mono = monotonic()
             cycle_started_at = datetime.now(timezone.utc)
             latest_token = _load_upstox_token().strip()
             if not latest_token:
@@ -137,6 +160,7 @@ async def _run() -> int:
             elif latest_token != sync.client.access_token:
                 logger.info("Reloaded Upstox access token from saved credentials for research sync")
                 sync.client.set_access_token(latest_token)
+            sync.to_date = max(sync.to_date, date.today())
 
             _write_runtime_state(
                 {
@@ -163,19 +187,19 @@ async def _run() -> int:
                 error_message = str(exc)
                 logger.exception(f"Recurring research sync failed: {exc}")
 
-            elapsed_seconds = max(0.0, monotonic() - cycle_started_mono)
-            target_cycle_seconds = max(0, args.poll_minutes * 60)
-            sleep_seconds = max(0.0, target_cycle_seconds - elapsed_seconds)
-            next_run_at = cycle_started_at + timedelta(seconds=target_cycle_seconds)
-            if sleep_seconds <= 0:
-                next_run_at = datetime.now(timezone.utc)
+            completed_at = datetime.now(timezone.utc)
+            next_run_at, elapsed_seconds, sleep_seconds = _compute_cycle_schedule(
+                cycle_started_at=cycle_started_at,
+                poll_minutes=args.poll_minutes,
+                now_utc=completed_at,
+            )
 
             _write_runtime_state(
                 {
                     "state": state,
                     "poll_minutes": args.poll_minutes,
                     "run_started_at": cycle_started_at.isoformat(),
-                    "run_completed_at": datetime.now(timezone.utc).isoformat(),
+                    "run_completed_at": completed_at.isoformat(),
                     "next_run_at": next_run_at.isoformat(),
                     "sleep_seconds": round(sleep_seconds, 2),
                     "elapsed_seconds": round(elapsed_seconds, 2),
@@ -184,11 +208,10 @@ async def _run() -> int:
                 }
             )
             logger.info(
-                "Research sync daemon sleeping %.1fs until %s",
-                sleep_seconds,
-                next_run_at.isoformat(),
+                f"Research sync daemon sleeping {sleep_seconds:.1f}s until {next_run_at.isoformat()}"
             )
-            await asyncio.sleep(sleep_seconds)
+            if sleep_seconds > 0:
+                await _sleep_until(next_run_at)
         return 0
 
     result = await sync.run_once(
