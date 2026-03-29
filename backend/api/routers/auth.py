@@ -69,6 +69,32 @@ def _save_credentials_to_disk(creds: dict) -> None:
         logger.error(f"Could not write credentials to {_CREDS_FILE}: {e}")
 
 
+def _reset_upstox_token_health_cache() -> None:
+    _upstox_token_health_cache.update(
+        {
+            "token": None,
+            "checked_at": None,
+            "result": None,
+        }
+    )
+
+
+def _persist_access_token(broker: str, access_token: Optional[str]) -> None:
+    """Persist a broker session token when the broker supports restore."""
+    token_value = str(access_token or "").strip()
+    if not token_value:
+        return
+
+    entry = _broker_credentials.setdefault(broker, {})
+    if entry.get("access_token") == token_value:
+        return
+
+    entry["access_token"] = token_value
+    _save_credentials_to_disk(_broker_credentials)
+    if broker == "upstox":
+        _reset_upstox_token_health_cache()
+
+
 def _apply_credentials_to_settings(broker: str, creds: dict) -> None:
     """Push saved credentials into the live settings object."""
     if broker == "fyers":
@@ -239,6 +265,58 @@ async def get_upstox_token_health(force: bool = False) -> dict:
     return result
 
 
+async def ensure_upstox_session(force_validate: bool = False) -> bool:
+    """
+    Restore the Upstox adapter from the saved JWT when the in-memory session is gone.
+
+    This is needed because the backend commonly reloads in Docker dev mode, which
+    clears `_active_brokers` even though credentials.json still contains a valid
+    Upstox access token.
+    """
+    if "upstox" in _active_brokers:
+        return True
+
+    saved_token = str(_broker_credentials.get("upstox", {}).get("access_token", "")).strip()
+    if not saved_token:
+        return False
+
+    if force_validate and not await _validate_upstox_access_token(saved_token):
+        logger.warning("Saved Upstox token is invalid during on-demand restore")
+        return False
+
+    try:
+        from brokers.upstox import UpstoxAdapter
+        from brokers.base import UserProfile
+
+        adapter = UpstoxAdapter()
+        token = await adapter.authenticate({"access_token": saved_token})
+        try:
+            profile = await adapter.get_profile()
+        except Exception as exc:
+            logger.debug(f"Upstox profile fetch during on-demand restore failed: {exc}")
+            profile = UserProfile(
+                user_id="upstox_user",
+                name="Upstox",
+                email="",
+                mobile="",
+                broker="upstox",
+            )
+
+        _active_brokers["upstox"] = {
+            "adapter": adapter,
+            "token": token,
+            "profile": profile,
+            "connected_at": datetime.utcnow().isoformat(),
+            "auto_restored": True,
+        }
+        await _sync_market_data_feed()
+        logger.info(f"✓ Upstox restored from saved credentials (token ends …{saved_token[-8:]})")
+        return True
+    except Exception as exc:
+        logger.warning(f"On-demand Upstox restore failed: {exc}")
+        return False
+
+
 # Bootstrap immediately on module import
 _bootstrap_credentials()
 
@@ -342,6 +420,8 @@ async def connect_broker(req: ConnectBrokerRequest):
             "profile": profile,
             "connected_at": datetime.utcnow().isoformat(),
         }
+        if req.broker == "upstox":
+            _persist_access_token("upstox", getattr(token, "access_token", None))
         await _sync_market_data_feed()
         return {
             "status": "connected",
@@ -363,6 +443,7 @@ async def disconnect_broker(broker: str):
 
 @router.get("/broker-status")
 async def broker_status():
+    await ensure_upstox_session(force_validate=False)
     statuses = []
     for broker, info in _active_brokers.items():
         profile = info.get("profile")
@@ -464,8 +545,7 @@ async def upstox_connect_manual(body: dict):
     }
 
     # Persist the access token so it auto-restores until the daily Upstox expiry.
-    _broker_credentials.setdefault("upstox", {})["access_token"] = token.access_token
-    _save_credentials_to_disk(_broker_credentials)
+    _persist_access_token("upstox", token.access_token)
     logger.info(f"Upstox connected — token persisted for auto-restore (ends …{token.access_token[-8:]})")
     await _sync_market_data_feed()
 
@@ -489,8 +569,7 @@ async def upstox_callback(code: str):
         "adapter": adapter, "token": token, "profile": profile,
         "connected_at": datetime.utcnow().isoformat(),
     }
-    _broker_credentials.setdefault("upstox", {})["access_token"] = token.access_token
-    _save_credentials_to_disk(_broker_credentials)
+    _persist_access_token("upstox", token.access_token)
     await _sync_market_data_feed()
     return HTMLResponse(content="""
     <html><body style="background:#080b18;color:#00ff88;font-family:monospace;padding:2rem">
@@ -582,14 +661,18 @@ def get_active_adapter(broker: Optional[str] = None):
 
 
 def get_broker_token(broker: str) -> Optional[str]:
-    """Return the access token string for an active broker session, or None."""
+    """Return the access token string for an active broker session or saved token."""
     info = _active_brokers.get(broker)
     if not info:
-        return None
+        saved = str(_broker_credentials.get(broker, {}).get("access_token", "")).strip()
+        return saved or None
     token = info.get("token")
     if token is None:
-        return None
-    return getattr(token, "access_token", None)
+        saved = str(_broker_credentials.get(broker, {}).get("access_token", "")).strip()
+        return saved or None
+    return getattr(token, "access_token", None) or str(
+        _broker_credentials.get(broker, {}).get("access_token", "")
+    ).strip() or None
 
 
 def get_connected_brokers() -> list[str]:
@@ -622,35 +705,7 @@ async def auto_restore_sessions() -> None:
       - Upstox: if a saved access_token exists in credentials.json and still validates,
         uses it directly until the daily Upstox expiry.
     """
-    from brokers.base import UserProfile
-
-    # ── Upstox ───────────────────────────────────────────────────────────────
-    upstox_creds = _broker_credentials.get("upstox", {})
-    saved_token = upstox_creds.get("access_token", "").strip()
-    if saved_token and "upstox" not in _active_brokers:
+    if str(_broker_credentials.get("upstox", {}).get("access_token", "")).strip():
         logger.info("Auto-restoring Upstox session from saved access token…")
-        try:
-            from brokers.upstox import UpstoxAdapter
-            adapter = UpstoxAdapter()
-            if await _validate_upstox_access_token(saved_token):
-                token = await adapter.authenticate({"access_token": saved_token})
-            else:
-                raise ValueError("saved access token is invalid and must be regenerated")
-            try:
-                profile = await adapter.get_profile()
-            except Exception as pe:
-                logger.debug(f"Upstox profile fetch during auto-restore failed: {pe}")
-                profile = UserProfile(
-                    user_id="upstox_user", name="Upstox",
-                    email="", mobile="", broker="upstox"
-                )
-            _active_brokers["upstox"] = {
-                "adapter": adapter, "token": token, "profile": profile,
-                "connected_at": datetime.utcnow().isoformat(),
-                "auto_restored": True,
-            }
-            logger.info(
-                f"✓ Upstox auto-restored (token ends …{saved_token[-8:]})"
-            )
-        except Exception as e:
-            logger.warning(f"Upstox auto-restore failed: {e} — manual connect required")
+        if not await ensure_upstox_session(force_validate=True):
+            logger.warning("Upstox auto-restore failed — manual connect required")

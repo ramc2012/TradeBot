@@ -798,7 +798,8 @@ async def get_research_cache_status():
     freshness_row = freshness_result.mappings().one()
     contract_touch_row = contract_touch_result.mappings().one()
 
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(timezone.utc)
+    now_utc_naive = now_utc.replace(tzinfo=None)
     recent_activity_grace = timedelta(
         minutes=max(1, _get_int_env("RESEARCH_ACTIVE_GRACE_MINUTES", 2))
     )
@@ -821,8 +822,8 @@ async def get_research_cache_status():
         last_activity_at_value = _utc_naive(row.get("last_activity_at"))
         active_now = False
         if last_activity_at_value is not None:
-            active_now = last_activity_at_value >= now_utc - timedelta(minutes=20)
-            if last_activity_at_value >= now_utc - recent_activity_grace:
+            active_now = last_activity_at_value >= now_utc_naive - timedelta(minutes=20)
+            if last_activity_at_value >= now_utc_naive - recent_activity_grace:
                 active_recent_symbols += 1
             if recent_activity_at_dt is None or last_activity_at_value > recent_activity_at_dt:
                 recent_activity_at_dt = last_activity_at_value
