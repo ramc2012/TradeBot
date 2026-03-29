@@ -317,6 +317,41 @@ async def ensure_upstox_session(force_validate: bool = False) -> bool:
         return False
 
 
+async def ensure_fyers_session() -> bool:
+    """
+    Restore the Fyers adapter from a saved access token when available.
+
+    Fyers access tokens are also session-scoped, but when the backend reloads
+    during the same trading day we can usually reuse the saved token until it
+    naturally expires.
+    """
+    if "fyers" in _active_brokers:
+        return True
+
+    saved_token = str(_broker_credentials.get("fyers", {}).get("access_token", "")).strip()
+    if not saved_token:
+        return False
+
+    try:
+        from brokers.fyers import FyersAdapter
+
+        adapter = FyersAdapter()
+        token = await adapter.authenticate({"access_token": saved_token})
+        profile = await adapter.get_profile()
+        _active_brokers["fyers"] = {
+            "adapter": adapter,
+            "token": token,
+            "profile": profile,
+            "connected_at": datetime.utcnow().isoformat(),
+            "auto_restored": True,
+        }
+        logger.info("✓ Fyers restored from saved credentials")
+        return True
+    except Exception as exc:
+        logger.warning(f"On-demand Fyers restore failed: {exc}")
+        return False
+
+
 # Bootstrap immediately on module import
 _bootstrap_credentials()
 
@@ -422,6 +457,8 @@ async def connect_broker(req: ConnectBrokerRequest):
         }
         if req.broker == "upstox":
             _persist_access_token("upstox", getattr(token, "access_token", None))
+        if req.broker == "fyers":
+            _persist_access_token("fyers", getattr(token, "access_token", None))
         await _sync_market_data_feed()
         return {
             "status": "connected",
@@ -444,6 +481,7 @@ async def disconnect_broker(broker: str):
 @router.get("/broker-status")
 async def broker_status():
     await ensure_upstox_session(force_validate=False)
+    await ensure_fyers_session()
     statuses = []
     for broker, info in _active_brokers.items():
         profile = info.get("profile")
@@ -489,6 +527,7 @@ async def fyers_callback(auth_code: str = None, code: str = None):
         "adapter": adapter, "token": token, "profile": profile,
         "connected_at": datetime.utcnow().isoformat(),
     }
+    _persist_access_token("fyers", token.access_token)
     await _sync_market_data_feed()
     return HTMLResponse(content="""
     <html><body style="background:#080b18;color:#00ff88;font-family:monospace;padding:2rem">
@@ -653,8 +692,9 @@ async def fivepaisa_connect(body: dict):
 # ── Dependency ────────────────────────────────────────────────────────────────
 
 def get_active_adapter(broker: Optional[str] = None):
-    if broker and broker in _active_brokers:
-        return _active_brokers[broker]["adapter"]
+    if broker:
+        info = _active_brokers.get(broker)
+        return info["adapter"] if info else None
     for info in _active_brokers.values():
         return info["adapter"]
     return None
@@ -709,3 +749,7 @@ async def auto_restore_sessions() -> None:
         logger.info("Auto-restoring Upstox session from saved access token…")
         if not await ensure_upstox_session(force_validate=True):
             logger.warning("Upstox auto-restore failed — manual connect required")
+    if str(_broker_credentials.get("fyers", {}).get("access_token", "")).strip():
+        logger.info("Auto-restoring Fyers session from saved access token…")
+        if not await ensure_fyers_session():
+            logger.warning("Fyers auto-restore failed — manual connect required")

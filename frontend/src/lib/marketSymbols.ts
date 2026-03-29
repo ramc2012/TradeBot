@@ -5,6 +5,17 @@ export const MARKET_INDEX_SYMBOLS = [
   "NSE:MIDCPNIFTY-INDEX",
 ] as const;
 
+export const SECTOR_INDEX_SYMBOLS = [
+  "NSE:NIFTYBANK-INDEX",
+  "NSE:NIFTYIT-INDEX",
+  "NSE:NIFTYAUTO-INDEX",
+  "NSE:NIFTYPHARMA-INDEX",
+  "NSE:NIFTYFMCG-INDEX",
+  "NSE:NIFTYMETAL-INDEX",
+  "NSE:NIFTYENERGY-INDEX",
+  "NSE:NIFTYREALTY-INDEX",
+] as const;
+
 export type MarketIndexSymbol = (typeof MARKET_INDEX_SYMBOLS)[number];
 
 export const MARKET_INDEX_LABELS: Record<MarketIndexSymbol, string> = {
@@ -14,7 +25,18 @@ export const MARKET_INDEX_LABELS: Record<MarketIndexSymbol, string> = {
   "NSE:MIDCPNIFTY-INDEX": "MIDCPNIFTY",
 };
 
-export function getMarketIndexLabel(symbol: string): string {
-  return MARKET_INDEX_LABELS[symbol as MarketIndexSymbol] ?? symbol;
-}
+export const MARKET_SYMBOL_LABELS: Record<string, string> = {
+  ...MARKET_INDEX_LABELS,
+  "NSE:NIFTYBANK-INDEX": "NIFTY BANK",
+  "NSE:NIFTYIT-INDEX": "NIFTY IT",
+  "NSE:NIFTYAUTO-INDEX": "NIFTY AUTO",
+  "NSE:NIFTYPHARMA-INDEX": "NIFTY PHARMA",
+  "NSE:NIFTYFMCG-INDEX": "NIFTY FMCG",
+  "NSE:NIFTYMETAL-INDEX": "NIFTY METAL",
+  "NSE:NIFTYENERGY-INDEX": "NIFTY ENERGY",
+  "NSE:NIFTYREALTY-INDEX": "NIFTY REALTY",
+};
 
+export function getMarketIndexLabel(symbol: string): string {
+  return MARKET_SYMBOL_LABELS[symbol] ?? symbol;
+}

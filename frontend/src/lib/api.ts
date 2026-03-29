@@ -48,6 +48,8 @@ export const updateRiskConfig = (config: object) => api.put("/api/trading/risk-c
 // ── Market ────────────────────────────────────────────────────────────────
 export const getOptionChain = (symbol: string, expiry?: string) =>
   api.get(`/api/market/option-chain/${encodeURIComponent(symbol)}`, { params: { expiry } });
+export const getOptionExpiries = (symbol: string) =>
+  api.get(`/api/market/expiries/${encodeURIComponent(symbol)}`);
 export const getMarketProfile = (symbol: string, timeframe = "daily") =>
   api.get(`/api/market/market-profile/${encodeURIComponent(symbol)}`, { params: { timeframe } });
 export const getIVRank = (symbol: string) => api.get(`/api/market/iv-rank/${encodeURIComponent(symbol)}`);
@@ -90,6 +92,7 @@ export const getAnalysisBrokerStatus = () => api.get("/api/analysis/broker-statu
 export const getFoUnderlyings = () => api.get("/api/analysis/fo-underlyings");
 export const getResearchCacheStatus = () => api.get("/api/analysis/research-cache-status");
 export const getLatestValidationReport = () => api.get("/api/analysis/validation-report/latest");
+export const getLatestGreeksSyncReport = () => api.get("/api/analysis/greeks-sync-report/latest");
 export const getAllCredsStatus = () => api.get("/api/auth/all-credentials-status");
 
 // ── Backtester ────────────────────────────────────────────────────────────

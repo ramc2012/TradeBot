@@ -1,9 +1,11 @@
 """Market data routes."""
 from __future__ import annotations
 from dataclasses import asdict
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import List, Optional
+from urllib.parse import quote
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
@@ -11,9 +13,11 @@ from market_data import data_router, option_chain_service, market_profile_builde
 from market_data.symbols import to_app_symbol, to_broker_symbol
 from analytics.greeks import bs_greeks, implied_volatility
 from analytics.sector import sector_tracker
-from api.routers.auth import get_active_adapter
+from api.routers.auth import get_active_adapter, get_broker_token
 
 router = APIRouter(prefix="/api/market", tags=["market"])
+
+_PROFILE_TIMEFRAMES = {"day", "week", "month", "daily", "hourly"}
 
 
 async def _resolve_option_expiry(adapter, broker_symbol: str, requested_expiry: Optional[str]) -> Optional[str]:
@@ -37,6 +41,66 @@ async def _resolve_option_expiry(adapter, broker_symbol: str, requested_expiry: 
         if expiry >= today:
             return expiry
     return expiries[0]
+
+
+def _normalize_profile_timeframe(timeframe: str) -> str:
+    normalized = (timeframe or "day").lower()
+    if normalized not in _PROFILE_TIMEFRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported timeframe. Use one of: day, week, month, daily, hourly.",
+        )
+    return "day" if normalized == "daily" else normalized
+
+
+async def _fetch_upstox_historical_rows(
+    instrument_key: str,
+    interval: str,
+    from_date: date,
+    to_date: date,
+) -> list[dict]:
+    token = get_broker_token("upstox")
+    if not token:
+        return []
+
+    encoded_key = quote(instrument_key, safe="")
+    url = (
+        f"https://api.upstox.com/v2/historical-candle/"
+        f"{encoded_key}/{interval}/{to_date.isoformat()}/{from_date.isoformat()}"
+    )
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+            },
+        )
+    if resp.status_code != 200:
+        return []
+
+    rows = []
+    for candle in reversed(resp.json().get("data", {}).get("candles", [])):
+        rows.append(
+            {
+                "time": str(candle[0]),
+                "open": float(candle[1]),
+                "high": float(candle[2]),
+                "low": float(candle[3]),
+                "close": float(candle[4]),
+                "volume": int(candle[5] or 0),
+            }
+        )
+    return rows
+
+
+def _merge_rows(primary: list[dict], secondary: list[dict]) -> list[dict]:
+    merged: dict[str, dict] = {}
+    for row in primary + secondary:
+        key = str(row.get("time") or row.get("timestamp"))
+        if key:
+            merged[key] = row
+    return [merged[key] for key in sorted(merged)]
 
 
 @router.get("/option-chain/{symbol}")
@@ -66,24 +130,77 @@ async def get_option_chain(symbol: str, expiry: Optional[str] = Query(None)):
 @router.get("/market-profile/{symbol}")
 async def get_market_profile(
     symbol: str,
-    timeframe: str = Query("daily", regex="^(daily|hourly)$"),
+    timeframe: str = Query("day"),
 ):
     """Get Market Profile (POC, VAH, VAL, IB, TPO data)."""
     app_symbol = to_app_symbol(symbol)
-    profile = await market_profile_builder.get_cached_profile(app_symbol, timeframe)
+    broker_symbol = to_broker_symbol(symbol)
+    normalized_timeframe = _normalize_profile_timeframe(timeframe)
+    profile = await market_profile_builder.get_cached_profile(app_symbol, normalized_timeframe)
     if not profile:
-        built = (
-            market_profile_builder.build_daily_profile(app_symbol)
-            if timeframe == "daily"
-            else market_profile_builder.build_hourly_profile(app_symbol)
-        )
+        built = None
+        today = date.today()
+        if normalized_timeframe == "hourly":
+            built = market_profile_builder.build_hourly_profile(app_symbol)
+        elif normalized_timeframe == "day":
+            live_rows = market_profile_builder.get_tick_rows(app_symbol)
+            rows = live_rows
+            source_interval = "tick"
+            if len(rows) < 50:
+                rows = await _fetch_upstox_historical_rows(
+                    broker_symbol,
+                    "1minute",
+                    today - timedelta(days=5),
+                    today,
+                )
+                source_interval = "1minute"
+            built = market_profile_builder.build_profile_from_rows(
+                app_symbol,
+                rows,
+                normalized_timeframe,
+                source_interval,
+            )
+        elif normalized_timeframe == "week":
+            historical_rows = await _fetch_upstox_historical_rows(
+                broker_symbol,
+                "1minute",
+                today - timedelta(days=9),
+                today,
+            )
+            rows = market_profile_builder.aggregate_rows(historical_rows, 3)
+            rows = _merge_rows(rows, market_profile_builder.get_three_minute_rows(app_symbol))
+            built = market_profile_builder.build_profile_from_rows(
+                app_symbol,
+                rows,
+                normalized_timeframe,
+                "3minute",
+            )
+        elif normalized_timeframe == "month":
+            historical_rows = await _fetch_upstox_historical_rows(
+                broker_symbol,
+                "30minute",
+                today - timedelta(days=40),
+                today,
+            )
+            live_month_rows = market_profile_builder.aggregate_rows(
+                market_profile_builder.get_three_minute_rows(app_symbol),
+                30,
+            )
+            rows = _merge_rows(historical_rows, live_month_rows)
+            built = market_profile_builder.build_profile_from_rows(
+                app_symbol,
+                rows,
+                normalized_timeframe,
+                "30minute",
+            )
         if built:
             payload = asdict(built)
             payload["tpo_data"] = {str(k): v for k, v in built.tpo_data.items()}
+            await market_profile_builder.store_profile(built)
             return payload
         return {
             "symbol": app_symbol,
-            "timeframe": timeframe,
+            "timeframe": normalized_timeframe,
             "error": "No market profile data. Waiting for live tick feed.",
         }
     return profile
@@ -175,11 +292,24 @@ async def get_greeks(
 @router.get("/expiries/{symbol}")
 async def get_expiries(symbol: str):
     """Get available expiry dates for a symbol."""
+    app_symbol = to_app_symbol(symbol)
+    broker_symbol = to_broker_symbol(symbol)
     adapter = get_active_adapter()
     if not adapter:
-        return {"symbol": symbol, "expiries": []}
+        return {"symbol": app_symbol, "expiries": [], "default_expiry": None}
     try:
-        # Most brokers don't have a direct expiry endpoint — derive from option chain
-        return {"symbol": symbol, "expiries": []}
+        get_contracts = getattr(adapter, "get_option_contracts", None)
+        if not callable(get_contracts):
+            return {"symbol": app_symbol, "expiries": [], "default_expiry": None}
+
+        contracts = await get_contracts(broker_symbol)
+        expiries = sorted({row.get("expiry") for row in contracts if row.get("expiry")})
+        default_expiry = await _resolve_option_expiry(adapter, broker_symbol, None) if expiries else None
+        return {
+            "symbol": app_symbol,
+            "expiries": expiries,
+            "default_expiry": default_expiry,
+            "count": len(expiries),
+        }
     except Exception:
-        return {"symbol": symbol, "expiries": []}
+        return {"symbol": app_symbol, "expiries": [], "default_expiry": None}

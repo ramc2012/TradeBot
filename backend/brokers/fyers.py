@@ -299,6 +299,9 @@ class FyersAdapter(BrokerAdapter):
                 bid=opt.get("bid", 0),
                 ask=opt.get("ask", 0),
                 iv=opt.get("iv", None),
+                prev_oi=opt.get("prevOi", None) or opt.get("prev_oi", None),
+                prev_close=opt.get("prevClose", None) or opt.get("close_price", None),
+                instrument_key=opt.get("symbol", None),
             ))
         return OptionChain(
             symbol=symbol,

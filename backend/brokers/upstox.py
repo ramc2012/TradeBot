@@ -373,6 +373,9 @@ class UpstoxAdapter(BrokerAdapter):
                         gamma=greek.get("gamma", None),
                         theta=greek.get("theta", None),
                         vega=greek.get("vega", None),
+                        prev_oi=mkt.get("prev_oi", None),
+                        prev_close=mkt.get("close_price", None),
+                        instrument_key=opt.get("instrument_key", None),
                     ))
         return OptionChain(symbol=symbol, expiry=expiry, spot_price=spot, entries=entries)
 

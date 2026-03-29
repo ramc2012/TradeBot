@@ -10,7 +10,7 @@ import {
 import {
   startMacdBacktest, getMacdBacktestStatus, getMacdBacktestResults,
   listMacdBacktestTasks, getAnalysisBrokerStatus, getFoUnderlyings,
-  getResearchCacheStatus, getLatestValidationReport, API_URL,
+  getResearchCacheStatus, getLatestValidationReport, getLatestGreeksSyncReport, API_URL,
 } from "@/lib/api";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -176,6 +176,64 @@ interface ValidationReportPayload {
   source_updated_at?: string | null;
   summary?: ValidationReportSummary;
   markdown_preview?: string;
+  files?: {
+    report_markdown_url?: string;
+    summary_json_url?: string;
+    trades_csv_url?: string;
+    coverage_csv_url?: string;
+    chain_summary_csv_url?: string;
+  };
+}
+
+interface GreeksSyncTrackRow {
+  track: string;
+  trades: number;
+  avg_oracle_best_exit_return_pct: number;
+  avg_max_return_pct: number;
+  avg_hold_to_expiry_return_pct: number;
+  positive_pct: number;
+}
+
+interface GreeksSyncStrategyRow {
+  strategy: string;
+  trades: number;
+  avg_return_pct: number;
+  median_return_pct: number;
+  positive_pct: number;
+}
+
+interface GreeksSyncReportPayload {
+  available: boolean;
+  live?: boolean;
+  detail?: string;
+  report_key?: string;
+  generated_at?: string | null;
+  source_updated_at?: string | null;
+  summary?: {
+    generated_at: string;
+    coverage: {
+      underlyings_with_option_data: number;
+      atm_monthly_pairs: number;
+      complete_cached_contracts: number;
+      cached_option_candles: number;
+    };
+    signals: {
+      total_signals: number;
+      strong_signals: number;
+      avg_score: number;
+      median_score: number;
+      avg_theta_overwhelm_ratio: number;
+      macd_confirmed_pct: number;
+    };
+    comparison: {
+      track_ranking: GreeksSyncTrackRow[];
+    };
+    exit_analysis: {
+      best_strategy: string;
+      best_strategy_avg_return_pct: number;
+      strategy_ranking: GreeksSyncStrategyRow[];
+    };
+  };
   files?: {
     report_markdown_url?: string;
     summary_json_url?: string;
@@ -1121,6 +1179,164 @@ function ValidationReportPanel() {
   );
 }
 
+function GreeksSyncReportPanel() {
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery<GreeksSyncReportPayload>({
+    queryKey: ["latestGreeksSyncReport"],
+    queryFn: () => getLatestGreeksSyncReport().then(r => r.data),
+    staleTime: 5000,
+    refetchInterval: 15000,
+    refetchOnWindowFocus: false,
+  });
+
+  if (isLoading) {
+    return (
+      <div className="card p-4 flex items-center gap-2 text-xs text-text-muted">
+        <Loader2 size={12} className="animate-spin" /> Loading Greeks Sync research…
+      </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <div className="card p-4 space-y-2">
+        <div className="flex items-center gap-2 text-sm font-semibold text-accent-red">
+          <AlertCircle size={14} /> Greeks Sync Report Unavailable
+        </div>
+        <div className="text-xs text-text-muted">
+          {(error as any)?.response?.data?.detail || (error as Error)?.message || "Could not load Greeks Sync report"}
+        </div>
+      </div>
+    );
+  }
+
+  if (!data?.available || !data.summary) {
+    return (
+      <div className="card p-4 space-y-2">
+        <div className="flex items-center gap-2 text-sm font-semibold text-text-secondary">
+          <FileText size={14} className="text-accent-purple" /> Greeks Sync Research
+        </div>
+        <div className="text-xs text-text-muted">
+          {data?.detail || "Greeks Sync research is waiting for complete cached CE/PE history."}
+        </div>
+      </div>
+    );
+  }
+
+  const summary = data.summary;
+  const trackRows = summary.comparison.track_ranking.slice(0, 4);
+  const strategyRows = summary.exit_analysis.strategy_ranking.slice(0, 3);
+  const linkHref = (path?: string) => (path ? `${API_URL}${path}` : "#");
+
+  return (
+    <div className="card p-5 space-y-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-2">
+          <FileText size={15} className="text-accent-purple" />
+          <div>
+            <div className="text-sm font-semibold text-text-secondary">Greeks Sync Research</div>
+            <div className="text-xs text-text-muted">
+              Located here in Analysis as a separate research track against the MACD baseline
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="text-[11px] text-text-muted mr-1">
+            Source updated {formatRelativeTime(data.source_updated_at || summary.generated_at)}
+          </div>
+          <a
+            href={linkHref(data.files?.report_markdown_url)}
+            target="_blank"
+            rel="noreferrer"
+            className="px-2.5 py-1.5 rounded border border-bg-border text-xs text-text-secondary hover:border-accent-purple/40 hover:text-accent-purple flex items-center gap-1"
+          >
+            <FileText size={11} /> Markdown
+          </a>
+          <a
+            href={linkHref(data.files?.summary_json_url)}
+            target="_blank"
+            rel="noreferrer"
+            className="px-2.5 py-1.5 rounded border border-bg-border text-xs text-text-secondary hover:border-accent-purple/40 hover:text-accent-purple flex items-center gap-1"
+          >
+            <Download size={11} /> Summary JSON
+          </a>
+          <button onClick={() => refetch()} className="text-text-muted hover:text-text-primary">
+            {isFetching ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <StatCard
+          label="Signals"
+          value={summary.signals.total_signals}
+          sub={`${summary.signals.strong_signals} strong`}
+          color="text-accent-purple"
+        />
+        <StatCard
+          label="Average Score"
+          value={summary.signals.avg_score.toFixed(1)}
+          sub={`Median ${summary.signals.median_score.toFixed(1)}`}
+          color="text-accent-green"
+        />
+        <StatCard
+          label="MACD Confirmed"
+          value={`${summary.signals.macd_confirmed_pct.toFixed(1)}%`}
+          sub={`${summary.coverage.atm_monthly_pairs} ATM monthly pairs`}
+          color="text-accent-amber"
+        />
+        <StatCard
+          label="Best Fixed Exit"
+          value={summary.exit_analysis.best_strategy}
+          sub={`${summary.exit_analysis.best_strategy_avg_return_pct.toFixed(2)}% avg`}
+          color="text-accent-blue"
+        />
+      </div>
+
+      <div className="grid xl:grid-cols-2 gap-4">
+        <div className="space-y-2">
+          <div className="text-xs font-semibold text-text-secondary uppercase tracking-wide">
+            Track Comparison
+          </div>
+          <div className="space-y-2">
+            {trackRows.map((row) => (
+              <div key={row.track} className="bg-bg-secondary border border-bg-border rounded p-3 flex items-center justify-between gap-3 text-xs">
+                <div className="space-y-1">
+                  <div className="font-semibold text-text-primary">{row.track}</div>
+                  <div className="text-text-muted">{row.trades} trades · hold {row.avg_hold_to_expiry_return_pct.toFixed(2)}%</div>
+                </div>
+                <div className="text-right space-y-1">
+                  <ReturnBadge pct={row.avg_oracle_best_exit_return_pct} />
+                  <div className="text-text-muted">{row.positive_pct.toFixed(2)}% positive</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <div className="text-xs font-semibold text-text-secondary uppercase tracking-wide">
+            Fixed Exit Ranking
+          </div>
+          <div className="space-y-2">
+            {strategyRows.map((row) => (
+              <div key={row.strategy} className="bg-bg-secondary border border-bg-border rounded p-3 flex items-center justify-between gap-3 text-xs">
+                <div className="space-y-1">
+                  <div className="font-semibold text-text-primary">{row.strategy}</div>
+                  <div className="text-text-muted">{row.trades} trades · median {row.median_return_pct.toFixed(2)}%</div>
+                </div>
+                <div className="text-right space-y-1">
+                  <ReturnBadge pct={row.avg_return_pct} />
+                  <div className="text-text-muted">{row.positive_pct.toFixed(2)}% positive</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Results Components ─────────────────────────────────────────────────────────
 
 function ExitStrategyPanel({ analysis }: { analysis: BacktestResults["exit_analysis"] }) {
@@ -1426,6 +1642,7 @@ export default function AnalysisPage() {
       <BrokerStatusCard />
       <PopulationMonitor />
       <ValidationReportPanel />
+      <GreeksSyncReportPanel />
       <PreviousTasks onResume={(id) => { setActiveTaskId(id); setResults(null); }} />
       <RunForm onStarted={handleStarted} />
       {activeTaskId && <TaskMonitor taskId={activeTaskId} onResults={setResults} />}
