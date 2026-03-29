@@ -366,30 +366,39 @@ function stageTone(stage: ResearchSymbol["stage"]) {
 
 function buildFallbackResearchScheduler(nowMs: number, pauseStartedAt: number | null) {
   const pollMinutes = 30;
-  const cooldownMinutes = 10;
-  const effectivePauseStart = pauseStartedAt ?? nowMs;
-  const nextBatchAtMs = effectivePauseStart + cooldownMinutes * 60_000;
+  const effectiveRefreshStart = pauseStartedAt ?? nowMs;
+  const nextBatchAtMs = effectiveRefreshStart + pollMinutes * 60_000;
   const secondsUntilNextBatch = Math.max(0, Math.ceil((nextBatchAtMs - nowMs) / 1000));
-  const estimatedWindowAvailablePct = Math.min(
-    100,
-    Math.max(0, Number((((cooldownMinutes * 60 - secondsUntilNextBatch) / (cooldownMinutes * 60)) * 100).toFixed(1))),
-  );
 
   return {
-    state: "rate_limit_cooldown" as const,
-    label: "Aggregation paused due to rate limit",
-    detail: `Status polling timed out. Assuming the Upstox ${pollMinutes}-minute request window is cooling down before the next batch resumes.`,
-    pause_assumed: true,
+    state: "waiting" as const,
+    label: "Live status refresh delayed",
+    detail: `Status polling timed out. The worker may still be running, but the latest scheduler state could not be confirmed.`,
+    pause_assumed: false,
     poll_minutes: pollMinutes,
     rate_limit_window_minutes: pollMinutes,
-    cooldown_minutes: cooldownMinutes,
+    cooldown_minutes: Math.max(1, Math.floor(pollMinutes / 3)),
     next_batch_at: new Date(nextBatchAtMs).toISOString(),
     seconds_until_next_batch: secondsUntilNextBatch,
-    estimated_window_available_pct: estimatedWindowAvailablePct,
-    estimated_window_used_pct: Number((100 - estimatedWindowAvailablePct).toFixed(1)),
+    estimated_window_available_pct: null,
+    estimated_window_used_pct: null,
     last_batch_activity_at: pauseStartedAt ? new Date(pauseStartedAt).toISOString() : null,
-    last_run_started_at: pauseStartedAt ? new Date(pauseStartedAt).toISOString() : null,
+    last_run_started_at: null,
     last_run_completed_at: null,
+  };
+}
+
+function normaliseSnapshotScheduler(scheduler: ResearchCacheStatus["scheduler"], isSnapshot: boolean) {
+  if (!isSnapshot || scheduler.state !== "rate_limit_cooldown") {
+    return scheduler;
+  }
+
+  return {
+    ...scheduler,
+    state: "waiting" as const,
+    label: "Showing cached scheduler snapshot",
+    detail: "The last live refresh failed, so the previous cooldown state may be stale. Wait for the next successful poll to confirm current ingestion status.",
+    pause_assumed: false,
   };
 }
 
@@ -819,13 +828,11 @@ function PopulationMonitor() {
   const fallbackScheduler = buildFallbackResearchScheduler(nowMs, fallbackPauseStartedAt);
   const scheduler = !data
     ? fallbackScheduler
-    : isError && data.scheduler?.state === "rate_limit_cooldown"
-      ? data.scheduler
-      : (data.scheduler ?? fallbackScheduler);
+    : normaliseSnapshotScheduler(data.scheduler ?? fallbackScheduler, isShowingSnapshot);
   const estimatedAvailablePct = scheduler.estimated_window_available_pct;
   const estimatedUsedPct = scheduler.estimated_window_used_pct;
   const countdownLabel = formatCountdown(scheduler.seconds_until_next_batch);
-  const showPauseBanner = scheduler.state === "rate_limit_cooldown" || (isError && !data);
+  const showPauseBanner = !isShowingSnapshot && scheduler.state === "rate_limit_cooldown";
   const errorDetail = getErrorDetail(error);
 
   if (isLoading && !data) {
