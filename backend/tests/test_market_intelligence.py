@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from datetime import date
+
 from analytics.sector import SectorRotationTracker
 from brokers.base import OptionChain, OptionChainEntry
+from data.upstox_research_sync import UpstoxResearchSync
 from market_data.option_chain import OptionChainService
 
 
@@ -71,3 +74,65 @@ def test_sector_rrg_uses_seeded_baseline_when_only_one_live_sample_exists() -> N
     assert len(series) == 2
     assert series[-1]["ratio"] > 100.0
     assert series[-1]["momentum"] > 100.0
+
+
+def test_contract_priority_focuses_on_near_atm_common_strikes() -> None:
+    sync = UpstoxResearchSync(
+        access_token="test-token",
+        from_date=date(2025, 3, 1),
+        to_date=date(2026, 3, 1),
+    )
+    contracts = []
+    for strike in (90, 95, 100, 105, 110, 115):
+        contracts.append({
+            "instrument_key": f"CE-{strike}",
+            "instrument_type": "CE",
+            "strike_price": strike,
+        })
+        contracts.append({
+            "instrument_key": f"PE-{strike}",
+            "instrument_type": "PE",
+            "strike_price": strike,
+        })
+
+    priority_keys = sync._prioritized_contract_keys(contracts, selection_spot_price=101.0)
+
+    assert "CE-100" in priority_keys
+    assert "PE-100" in priority_keys
+    assert "CE-105" in priority_keys
+    assert "PE-105" in priority_keys
+    assert "CE-95" in priority_keys
+    assert "PE-95" in priority_keys
+    assert "CE-110" in priority_keys
+    assert "PE-110" in priority_keys
+    assert "CE-90" not in priority_keys
+    assert "PE-115" not in priority_keys
+
+
+def test_contract_reprioritization_preserves_synced_priority_and_skips_noise() -> None:
+    sync = UpstoxResearchSync(
+        access_token="test-token",
+        from_date=date(2025, 3, 1),
+        to_date=date(2026, 3, 1),
+    )
+
+    assert sync._desired_contract_state(
+        current_status="complete",
+        current_last_error=None,
+        prioritized=True,
+    ) == ("complete", None)
+    assert sync._desired_contract_state(
+        current_status="empty",
+        current_last_error="No candles returned",
+        prioritized=True,
+    ) == ("empty", "No candles returned")
+    assert sync._desired_contract_state(
+        current_status="pending",
+        current_last_error="Old error",
+        prioritized=True,
+    ) == ("pending", None)
+    assert sync._desired_contract_state(
+        current_status="complete",
+        current_last_error=None,
+        prioritized=False,
+    ) == ("skipped", sync.PRIORITY_SKIP_REASON)

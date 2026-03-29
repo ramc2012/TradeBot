@@ -4,6 +4,7 @@ import {
   getPerformance, getEquityCurve, getCalendarHeatmap,
   getPortfolioGreeks, getTrades, getSectorRotation,
 } from "@/lib/api";
+import { ArrowDownRight, ArrowUpRight, Minus } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
   CartesianGrid, ScatterChart, Scatter, ReferenceLine, LabelList,
@@ -81,6 +82,29 @@ function quadrantTone(quadrant?: string) {
   }
 }
 
+function directionMeta(value?: number | null) {
+  if (value == null || Number.isNaN(value)) {
+    return { icon: <Minus size={12} />, tone: "text-text-muted", badge: "bg-bg-primary text-text-muted" };
+  }
+  if (value > 0) {
+    return { icon: <ArrowUpRight size={12} />, tone: "text-accent-green", badge: "bg-accent-green/10 text-accent-green" };
+  }
+  if (value < 0) {
+    return { icon: <ArrowDownRight size={12} />, tone: "text-accent-red", badge: "bg-accent-red/10 text-accent-red" };
+  }
+  return { icon: <Minus size={12} />, tone: "text-text-secondary", badge: "bg-bg-primary text-text-secondary" };
+}
+
+function SignedPill({ value }: { value?: number | null }) {
+  const direction = directionMeta(value);
+  return (
+    <span className={clsx("inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-semibold", direction.badge)}>
+      {direction.icon}
+      {formatSignedPct(value)}
+    </span>
+  );
+}
+
 export default function AnalyticsPage() {
   const { data: perf } = useQuery({
     queryKey: ["performance", "all"],
@@ -121,8 +145,24 @@ export default function AnalyticsPage() {
   const curveData = curve || [];
   const tradeList = trades || [];
   const rrgPoints = sectorRotation?.rrg?.points ?? [];
+  const watchlist = sectorRotation?.watchlist ?? [];
   const xValues = rrgPoints.map((point) => point.rrg_ratio);
   const yValues = rrgPoints.map((point) => point.rrg_momentum);
+  const topLeader = watchlist.find((sector) => sector.quadrant === "leading") ?? watchlist[0];
+  const topImproving = [...watchlist]
+    .filter((sector) => sector.quadrant === "improving")
+    .sort((left, right) => right.rrg_momentum - left.rrg_momentum)[0];
+  const quadrantPalette: Record<string, string> = {
+    leading: "#00d4a3",
+    improving: "#38bdf8",
+    weakening: "#f59e0b",
+    lagging: "#ef4444",
+  };
+  const quadrantSeries = Object.entries(quadrantPalette).map(([quadrant, color]) => ({
+    quadrant,
+    color,
+    data: rrgPoints.filter((point) => point.quadrant === quadrant),
+  }));
   const xDomain: [number, number] = [
     Math.min(95, ...(xValues.length ? xValues : [100])) - 1,
     Math.max(105, ...(xValues.length ? xValues : [100])) + 1,
@@ -263,6 +303,30 @@ export default function AnalyticsPage() {
             </div>
           </div>
 
+          <div className="grid gap-3 md:grid-cols-3">
+            <div className="rounded-xl border border-bg-border bg-bg-secondary/40 p-3">
+              <div className="text-[11px] uppercase tracking-[0.14em] text-text-muted">Benchmark</div>
+              <div className="mt-2 text-sm font-semibold text-text-primary">{sectorRotation?.benchmark?.name || "NIFTY 50"}</div>
+              <div className="mt-2">
+                <SignedPill value={sectorRotation?.benchmark?.tracked_change_pct} />
+              </div>
+            </div>
+            <div className="rounded-xl border border-bg-border bg-bg-secondary/40 p-3">
+              <div className="text-[11px] uppercase tracking-[0.14em] text-text-muted">Top Leader</div>
+              <div className="mt-2 text-sm font-semibold text-text-primary">{topLeader?.name || "--"}</div>
+              <div className="mt-2">
+                <SignedPill value={topLeader?.relative_strength_pct} />
+              </div>
+            </div>
+            <div className="rounded-xl border border-bg-border bg-bg-secondary/40 p-3">
+              <div className="text-[11px] uppercase tracking-[0.14em] text-text-muted">Top Improving</div>
+              <div className="mt-2 text-sm font-semibold text-text-primary">{topImproving?.name || "--"}</div>
+              <div className="mt-2">
+                <SignedPill value={topImproving?.rrg_momentum != null ? topImproving.rrg_momentum - 100 : null} />
+              </div>
+            </div>
+          </div>
+
           {sectorRotation?.watchlist?.length ? (
             <div className="overflow-x-auto">
               <table className="w-full text-xs font-mono">
@@ -282,17 +346,21 @@ export default function AnalyticsPage() {
                     <tr key={sector.code} className="border-b border-bg-border/40 hover:bg-bg-hover/30">
                       <td className="py-2">
                         <div className="font-semibold text-text-primary">{sector.name}</div>
-                        <div className="text-[11px] text-text-muted">{sector.trend}</div>
+                        <div className={clsx("mt-1 inline-flex rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wide", quadrantTone(sector.quadrant))}>
+                          {sector.trend}
+                        </div>
                       </td>
                       <td className="py-2 text-right">{sector.price.toFixed(2)}</td>
-                      <td className={clsx("py-2 text-right", sector.tracked_change_pct >= 0 ? "text-accent-green" : "text-accent-red")}>
-                        {formatSignedPct(sector.tracked_change_pct)}
+                      <td className="py-2 text-right">
+                        <SignedPill value={sector.tracked_change_pct} />
                       </td>
-                      <td className={clsx("py-2 text-right", sector.relative_strength_pct >= 0 ? "text-accent-green" : "text-accent-red")}>
-                        {formatSignedPct(sector.relative_strength_pct)}
+                      <td className="py-2 text-right">
+                        <SignedPill value={sector.relative_strength_pct} />
                       </td>
                       <td className="py-2 text-right text-accent-blue">{sector.rrg_ratio.toFixed(2)}</td>
-                      <td className="py-2 text-right text-accent-amber">{sector.rrg_momentum.toFixed(2)}</td>
+                      <td className={clsx("py-2 text-right font-semibold", sector.rrg_momentum >= 100 ? "text-accent-green" : "text-accent-red")}>
+                        {sector.rrg_momentum.toFixed(2)}
+                      </td>
                       <td className="py-2 text-right">
                         <span className={clsx("inline-flex rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wide", quadrantTone(sector.quadrant))}>
                           {sector.quadrant}
@@ -347,14 +415,19 @@ export default function AnalyticsPage() {
                 <Tooltip
                   cursor={{ strokeDasharray: "3 3" }}
                   contentStyle={{ background: "#0f1724", border: "1px solid #1e2d45", borderRadius: "4px" }}
-                  formatter={(value: number, _name: string, item: any) => [`${Number(value).toFixed(2)}`, item?.payload?.name]}
+                  formatter={(value: number, name: string, item: any) => [
+                    `${Number(value).toFixed(2)}`,
+                    name === "rrg_ratio" ? `${item?.payload?.name} ratio` : `${item?.payload?.name} momentum`,
+                  ]}
                   labelFormatter={() => "Sector"}
                 />
                 <ReferenceLine x={100} stroke="#334155" strokeDasharray="3 3" />
                 <ReferenceLine y={100} stroke="#334155" strokeDasharray="3 3" />
-                <Scatter data={rrgPoints} fill="#00d4a3">
-                  <LabelList dataKey="name" position="top" fontSize={10} fill="#94a3b8" />
-                </Scatter>
+                {quadrantSeries.map((series) => (
+                  <Scatter key={series.quadrant} data={series.data} fill={series.color}>
+                    <LabelList dataKey="name" position="top" fontSize={10} fill={series.color} />
+                  </Scatter>
+                ))}
               </ScatterChart>
             </ResponsiveContainer>
           ) : (
@@ -362,6 +435,15 @@ export default function AnalyticsPage() {
               {sectorRotation?.detail || "Waiting for enough sector history to position the RRG points."}
             </div>
           )}
+
+          <div className="flex flex-wrap gap-2 text-[11px] text-text-muted">
+            {Object.entries(quadrantPalette).map(([quadrant, color]) => (
+              <span key={quadrant} className="inline-flex items-center gap-1 rounded-full border border-bg-border px-2 py-1">
+                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: color }} />
+                {quadrant}
+              </span>
+            ))}
+          </div>
         </div>
       </div>
     </div>

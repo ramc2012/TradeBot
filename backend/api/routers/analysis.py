@@ -700,7 +700,7 @@ async def get_research_cache_status():
                 contract_stats AS (
                     SELECT
                         underlying,
-                        COUNT(*) AS total_contracts,
+                        COUNT(*) FILTER (WHERE sync_status <> 'skipped') AS total_contracts,
                         COUNT(*) FILTER (WHERE sync_status = 'complete') AS complete_contracts,
                         COUNT(*) FILTER (WHERE sync_status = 'pending') AS pending_contracts,
                         COUNT(*) FILTER (WHERE sync_status = 'empty') AS empty_contracts,
@@ -709,7 +709,7 @@ async def get_research_cache_status():
                                 COALESCE(last_synced_at, TIMESTAMPTZ 'epoch'),
                                 COALESCE(updated_at, TIMESTAMPTZ 'epoch')
                             )
-                        ) AS last_contract_activity
+                        ) FILTER (WHERE sync_status <> 'skipped') AS last_contract_activity
                     FROM fo_contract_catalog
                     GROUP BY underlying
                 ),
@@ -723,13 +723,16 @@ async def get_research_cache_status():
                 ),
                 option_stats AS (
                     SELECT
-                        underlying,
+                        o.underlying,
                         COUNT(*) AS option_candles,
-                        COUNT(DISTINCT instrument_key) AS option_contracts,
-                        MAX(synced_at) AS last_option_activity
-                    FROM option_premium_candles
-                    WHERE instrument_key IS NOT NULL
-                    GROUP BY underlying
+                        COUNT(DISTINCT o.instrument_key) AS option_contracts,
+                        MAX(o.synced_at) AS last_option_activity
+                    FROM option_premium_candles o
+                    JOIN fo_contract_catalog c
+                      ON c.instrument_key = o.instrument_key
+                    WHERE o.instrument_key IS NOT NULL
+                      AND c.sync_status <> 'skipped'
+                    GROUP BY o.underlying
                 )
                 SELECT
                     u.symbol,
@@ -774,8 +777,11 @@ async def get_research_cache_status():
                     COUNT(*) FILTER (
                         WHERE synced_at >= NOW() - INTERVAL '30 minutes'
                     ) AS option_candles_added_last_30m
-                FROM option_premium_candles
-                WHERE instrument_key IS NOT NULL
+                FROM option_premium_candles o
+                JOIN fo_contract_catalog c
+                  ON c.instrument_key = o.instrument_key
+                WHERE o.instrument_key IS NOT NULL
+                  AND c.sync_status <> 'skipped'
             """)
         )
         contract_touch_result = await session.execute(

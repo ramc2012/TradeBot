@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
-import { Activity, BarChart3, Radar, RefreshCw } from "lucide-react";
+import { Activity, ArrowDownRight, ArrowUpRight, BarChart3, Minus, Radar, RefreshCw } from "lucide-react";
 
 import { getMarketProfile, getOptionChain, getOptionExpiries } from "@/lib/api";
 import { MARKET_INDEX_SYMBOLS, type MarketIndexSymbol, getMarketIndexLabel } from "@/lib/marketSymbols";
@@ -109,6 +109,39 @@ function valueTone(value?: number | null) {
   return "text-text-secondary";
 }
 
+function directionMeta(value?: number | null) {
+  if (value == null || Number.isNaN(value)) {
+    return {
+      badge: "bg-bg-primary text-text-muted",
+      icon: <Minus size={12} />,
+      label: "Flat",
+      tone: "text-text-muted",
+    };
+  }
+  if (value > 0) {
+    return {
+      badge: "bg-accent-green/12 text-accent-green border-accent-green/20",
+      icon: <ArrowUpRight size={12} />,
+      label: "Up",
+      tone: "text-accent-green",
+    };
+  }
+  if (value < 0) {
+    return {
+      badge: "bg-accent-red/12 text-accent-red border-accent-red/20",
+      icon: <ArrowDownRight size={12} />,
+      label: "Down",
+      tone: "text-accent-red",
+    };
+  }
+  return {
+    badge: "bg-bg-primary text-text-secondary border-bg-border",
+    icon: <Minus size={12} />,
+    label: "Flat",
+    tone: "text-text-secondary",
+  };
+}
+
 function LiveIndexCard({ symbol, active, onSelect }: {
   symbol: MarketIndexSymbol;
   active: boolean;
@@ -173,6 +206,46 @@ function PulseRow({ label, value, delta, tone = "text-text-primary" }: {
       </div>
       {delta && (
         <div className="mt-1 text-right text-[11px] text-text-muted">{delta}</div>
+      )}
+    </div>
+  );
+}
+
+function PulseIndicatorCard({
+  label,
+  value,
+  detail,
+  tone = "text-text-primary",
+  directionValue,
+}: {
+  label: string;
+  value: string;
+  detail?: string;
+  tone?: string;
+  directionValue?: number | null;
+}) {
+  const direction = directionMeta(directionValue);
+  const hasDirection = directionValue != null && !Number.isNaN(directionValue);
+
+  return (
+    <div className="rounded-xl border border-bg-border bg-bg-secondary/45 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-[11px] uppercase tracking-[0.14em] text-text-muted">{label}</div>
+        {hasDirection && (
+          <div className={clsx("inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]", direction.badge)}>
+            {direction.icon}
+            {direction.label}
+          </div>
+        )}
+      </div>
+      <div className="mt-2 flex items-center gap-2">
+        {hasDirection && <span className={direction.tone}>{direction.icon}</span>}
+        <span className={clsx("font-mono text-lg font-semibold", tone)}>{value}</span>
+      </div>
+      {detail && (
+        <div className={clsx("mt-2 text-xs font-medium", hasDirection ? direction.tone : "text-text-muted")}>
+          {detail}
+        </div>
       )}
     </div>
   );
@@ -429,40 +502,57 @@ export default function MarketPage() {
               <Radar size={14} className="text-accent-blue" />
               Chain Pulse
             </div>
-            <div className="mt-3">
-              <PulseRow
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <PulseIndicatorCard
                 label="PCR OI"
                 value={chain?.pcr_oi?.toFixed(2) || "--"}
-                delta={chain?.pcr_oi_change != null ? `vs prev day ${formatSigned(chain.pcr_oi_change, 2)}` : undefined}
+                detail={chain?.pcr_oi_change != null ? `vs prev day ${formatSigned(chain.pcr_oi_change, 2)}` : undefined}
                 tone="text-accent-amber"
+                directionValue={chain?.pcr_oi_change}
               />
-              <PulseRow label="PCR Volume" value={chain?.pcr_volume?.toFixed(2) || "--"} tone="text-accent-blue" />
-              <PulseRow label="ATM Strike" value={chain?.atm_strike ? `${chain.atm_strike}` : "--"} />
-              <PulseRow label="ATM IV" value={formatIv(chain?.atm_iv)} tone="text-accent-green" />
-              <PulseRow label="Max Pain" value={chain?.max_pain ? `${chain.max_pain}` : "--"} />
-              <PulseRow
+              <PulseIndicatorCard label="PCR Volume" value={chain?.pcr_volume?.toFixed(2) || "--"} tone="text-accent-blue" />
+              <PulseIndicatorCard label="ATM Strike" value={chain?.atm_strike ? `${chain.atm_strike}` : "--"} />
+              <PulseIndicatorCard label="ATM IV" value={formatIv(chain?.atm_iv)} tone="text-accent-green" />
+              <PulseIndicatorCard label="Max Pain" value={chain?.max_pain ? `${chain.max_pain}` : "--"} />
+              <PulseIndicatorCard
                 label="CE OI"
                 value={formatCompact(chain?.total_ce_oi)}
-                delta={chain?.total_ce_oi_change != null ? `vs prev day ${formatCompact(chain.total_ce_oi_change)}` : undefined}
+                detail={chain?.total_ce_oi_change != null ? `vs prev day ${formatCompact(chain.total_ce_oi_change)}` : undefined}
+                directionValue={chain?.total_ce_oi_change}
               />
-              <PulseRow
+              <PulseIndicatorCard
                 label="PE OI"
                 value={formatCompact(chain?.total_pe_oi)}
-                delta={chain?.total_pe_oi_change != null ? `vs prev day ${formatCompact(chain.total_pe_oi_change)}` : undefined}
+                detail={chain?.total_pe_oi_change != null ? `vs prev day ${formatCompact(chain.total_pe_oi_change)}` : undefined}
+                directionValue={chain?.total_pe_oi_change}
               />
-              <PulseRow label="CE Volume" value={formatCompact(chain?.total_ce_volume)} />
-              <PulseRow label="PE Volume" value={formatCompact(chain?.total_pe_volume)} />
-              <PulseRow
+              <PulseIndicatorCard label="CE Volume" value={formatCompact(chain?.total_ce_volume)} />
+              <PulseIndicatorCard label="PE Volume" value={formatCompact(chain?.total_pe_volume)} />
+              <PulseIndicatorCard
                 label="ATM CE"
                 value={formatSigned(chain?.atm_call_ltp_change, 2)}
-                delta={chain?.atm_call_ltp_change_pct != null ? `${formatSigned(chain.atm_call_ltp_change_pct, 2, "%")} vs prev close` : undefined}
+                detail={chain?.atm_call_ltp_change_pct != null ? `${formatSigned(chain.atm_call_ltp_change_pct, 2, "%")} vs prev close` : undefined}
                 tone={valueTone(chain?.atm_call_ltp_change)}
+                directionValue={chain?.atm_call_ltp_change}
               />
-              <PulseRow
+              <PulseIndicatorCard
                 label="ATM PE"
                 value={formatSigned(chain?.atm_put_ltp_change, 2)}
-                delta={chain?.atm_put_ltp_change_pct != null ? `${formatSigned(chain.atm_put_ltp_change_pct, 2, "%")} vs prev close` : undefined}
+                detail={chain?.atm_put_ltp_change_pct != null ? `${formatSigned(chain.atm_put_ltp_change_pct, 2, "%")} vs prev close` : undefined}
                 tone={valueTone(chain?.atm_put_ltp_change)}
+                directionValue={chain?.atm_put_ltp_change}
+              />
+              <PulseIndicatorCard
+                label="ATM CE OI"
+                value={formatCompact(chain?.atm_call_oi_change)}
+                detail="vs previous day open interest"
+                directionValue={chain?.atm_call_oi_change}
+              />
+              <PulseIndicatorCard
+                label="ATM PE OI"
+                value={formatCompact(chain?.atm_put_oi_change)}
+                detail="vs previous day open interest"
+                directionValue={chain?.atm_put_oi_change}
               />
             </div>
           </section>
