@@ -101,10 +101,11 @@ def test_contract_priority_focuses_on_near_atm_common_strikes() -> None:
     assert "PE-100" in priority_keys
     assert "CE-105" in priority_keys
     assert "PE-105" in priority_keys
-    assert "CE-95" in priority_keys
-    assert "PE-95" in priority_keys
-    assert "CE-110" in priority_keys
-    assert "PE-110" in priority_keys
+    assert len(priority_keys) == 4
+    assert "CE-95" not in priority_keys
+    assert "PE-95" not in priority_keys
+    assert "CE-110" not in priority_keys
+    assert "PE-110" not in priority_keys
     assert "CE-90" not in priority_keys
     assert "PE-115" not in priority_keys
 

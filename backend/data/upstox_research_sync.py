@@ -145,8 +145,8 @@ class SyncSummary:
 
 
 class UpstoxResearchSync:
-    DISCOVERY_COMMON_STRIKES = 4
-    DISCOVERY_SIDE_FALLBACK = 2
+    DISCOVERY_COMMON_STRIKES = 2
+    DISCOVERY_SIDE_FALLBACK = 0
     PRIORITY_SKIP_REASON = "Skipped outside prioritized strike window"
 
     def __init__(

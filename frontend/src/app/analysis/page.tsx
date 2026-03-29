@@ -63,6 +63,9 @@ interface ResearchSymbol {
   kind: string;
   stage: "queued" | "metadata" | "spot" | "contracts" | "populating" | "populated";
   progress_pct: number;
+  research_ready: boolean;
+  research_contract_target: number;
+  research_contracts_processed: number;
   active_now: boolean;
   total_expiries: number;
   discovered_expiries: number;
@@ -91,6 +94,8 @@ interface ResearchCacheStatus {
     contracts_complete: number;
     contracts_pending: number;
     contracts_empty: number;
+    research_contract_target: number;
+    research_contracts_processed: number;
     option_contracts: number;
     option_candles: number;
     active_symbols: number;
@@ -119,6 +124,8 @@ interface ResearchCacheStatus {
     estimated_window_available_pct: number | null;
     estimated_window_used_pct: number | null;
     last_batch_activity_at: string | null;
+    last_run_started_at?: string | null;
+    last_run_completed_at?: string | null;
   };
   symbols: ResearchSymbol[];
 }
@@ -381,6 +388,8 @@ function buildFallbackResearchScheduler(nowMs: number, pauseStartedAt: number | 
     estimated_window_available_pct: estimatedWindowAvailablePct,
     estimated_window_used_pct: Number((100 - estimatedWindowAvailablePct).toFixed(1)),
     last_batch_activity_at: pauseStartedAt ? new Date(pauseStartedAt).toISOString() : null,
+    last_run_started_at: pauseStartedAt ? new Date(pauseStartedAt).toISOString() : null,
+    last_run_completed_at: null,
   };
 }
 
@@ -856,15 +865,27 @@ function PopulationMonitor() {
   }
 
   const { summary, symbols } = data;
-  const processedContracts = summary.contracts_complete + summary.contracts_empty;
+  const processedContracts = summary.research_contracts_processed;
   const expiryPct = summary.universe_total ? (summary.underlyings_with_expiries / summary.universe_total) * 100 : 0;
   const spotPct = summary.universe_total ? (summary.underlyings_with_spot / summary.universe_total) * 100 : 0;
   const selectionPct = summary.expiry_total ? (summary.selection_spots_ready / summary.expiry_total) * 100 : 0;
   const discoveryPct = summary.expiry_total ? (summary.expiries_discovered / summary.expiry_total) * 100 : 0;
-  const syncPct = summary.contracts_total ? (processedContracts / summary.contracts_total) * 100 : 0;
+  const syncPct = summary.research_contract_target ? (processedContracts / summary.research_contract_target) * 100 : 0;
+  const schedulerTone = scheduler.state === "running"
+    ? "border-accent-blue/30 bg-accent-blue/5 text-accent-blue"
+    : scheduler.state === "waiting"
+      ? "border-accent-amber/30 bg-accent-amber/5 text-accent-amber"
+      : scheduler.state === "rate_limit_cooldown"
+        ? "border-accent-amber/30 bg-accent-amber/5 text-accent-amber"
+        : "border-bg-border bg-bg-secondary text-text-secondary";
+  const schedulerMeta = scheduler.state === "running"
+    ? `started ${formatRelativeTime(scheduler.last_run_started_at)}`
+    : scheduler.next_batch_at
+      ? `next batch ${formatLocalTimestamp(scheduler.next_batch_at)}`
+      : `last completed ${formatRelativeTime(scheduler.last_run_completed_at)}`;
 
   const activeQueue = symbols
-    .filter(s => s.active_now || ["metadata", "spot", "contracts", "populating"].includes(s.stage))
+    .filter(s => !s.research_ready && (s.active_now || ["metadata", "spot", "contracts", "populating"].includes(s.stage)))
     .sort((a, b) => {
       const timeA = a.last_activity_at ? new Date(a.last_activity_at).getTime() : 0;
       const timeB = b.last_activity_at ? new Date(b.last_activity_at).getTime() : 0;
@@ -908,6 +929,21 @@ function PopulationMonitor() {
           <button onClick={() => refetch()} className="text-text-muted hover:text-text-primary">
             <RefreshCw size={12} />
           </button>
+        </div>
+      </div>
+
+      <div className={clsx("rounded border p-3", schedulerTone)}>
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <div className="text-sm font-semibold">{scheduler.label}</div>
+            <div className="mt-1 text-xs text-text-muted">{scheduler.detail}</div>
+          </div>
+          <div className="text-right text-xs">
+            <div className="font-medium">{schedulerMeta}</div>
+            {scheduler.state === "rate_limit_cooldown" && (
+              <div className="text-text-muted">resume in {countdownLabel}</div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -964,9 +1000,9 @@ function PopulationMonitor() {
         <StatCard label="Universe" value={summary.universe_total} sub={`${summary.underlyings_with_expiries} metadata ready`} color="text-text-primary" />
         <StatCard label="Spot Synced" value={summary.underlyings_with_spot} sub={`${summary.selection_spots_ready} selection bars`} color="text-accent-blue" />
         <StatCard
-          label="Contracts Synced"
-          value={summary.contracts_complete}
-          sub={`${summary.complete_contracts_touched_last_30m} complete vs ${summary.empty_contracts_touched_last_30m} empty in 30m`}
+          label="Research Ready"
+          value={summary.populated_symbols}
+          sub={`${summary.research_contracts_processed}/${summary.research_contract_target || 0} required contracts synced`}
           color="text-accent-green"
         />
         <StatCard
@@ -985,7 +1021,7 @@ function PopulationMonitor() {
         </div>
         <div className="space-y-2">
           <ProgressBar pct={discoveryPct} label={`Contract discovery · ${summary.expiries_discovered}/${summary.expiry_total || 0} expiry buckets`} />
-          <ProgressBar pct={syncPct} label={`Contract sync · ${processedContracts}/${summary.contracts_total || 0} processed`} />
+          <ProgressBar pct={syncPct} label={`Research sync target · ${processedContracts}/${summary.research_contract_target || 0} required contracts`} />
           <div className="flex flex-wrap gap-1.5 pt-1">
             {Object.entries(summary.stage_counts ?? {}).map(([stage, count]) => (
               <span key={stage} className={clsx("px-2 py-0.5 rounded border text-[11px] uppercase tracking-wide", stageTone(stage as ResearchSymbol["stage"]))}>
@@ -1022,7 +1058,7 @@ function PopulationMonitor() {
                       {symbol.active_now && <span className="text-[10px] text-accent-green">active now</span>}
                     </div>
                     <div className="text-xs text-text-muted">
-                      {symbol.complete_contracts}/{symbol.total_contracts || 0} complete contracts · {formatCompactNumber(symbol.option_candles)} candles · {symbol.pending_contracts} pending
+                      {symbol.research_contracts_processed}/{symbol.research_contract_target || 0} required · {formatCompactNumber(symbol.option_candles)} candles · {symbol.pending_contracts} backlog
                     </div>
                   </div>
                   <div className="text-right text-xs text-text-muted shrink-0">
@@ -1064,7 +1100,7 @@ function PopulationMonitor() {
                     </span>
                   </div>
                   <div className="text-xs text-text-muted">
-                    {symbol.option_contracts} local contracts · {symbol.complete_contracts} complete · {formatCompactNumber(symbol.option_candles)} candles
+                    {symbol.option_contracts} local contracts · {symbol.research_contracts_processed}/{symbol.research_contract_target || 0} required · {formatCompactNumber(symbol.option_candles)} candles
                   </div>
                 </div>
                 <div className="text-right text-xs text-text-muted shrink-0">

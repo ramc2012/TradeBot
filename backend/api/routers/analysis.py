@@ -110,13 +110,12 @@ def _stage_for_symbol(row: dict[str, Any]) -> str:
     discovered_expiries = int(row.get("discovered_expiries") or 0)
     spot_candles = int(row.get("spot_candles") or 0)
     total_contracts = int(row.get("total_contracts") or 0)
-    complete_contracts = int(row.get("complete_contracts") or 0)
     option_candles = int(row.get("option_candles") or 0)
-    pending_contracts = int(row.get("pending_contracts") or 0)
+    processed_contracts = _research_processed_contracts(row)
 
-    if option_candles > 0 and total_contracts > 0 and pending_contracts == 0:
+    if _is_research_ready(row):
         return "populated"
-    if option_candles > 0 or complete_contracts > 0:
+    if option_candles > 0 or processed_contracts > 0:
         return "populating"
     if total_contracts > 0 or discovered_expiries > 0:
         return "contracts"
@@ -132,9 +131,8 @@ def _symbol_progress_pct(row: dict[str, Any]) -> float:
     discovered_expiries = int(row.get("discovered_expiries") or 0)
     selection_spots_ready = int(row.get("selection_spots_ready") or 0)
     spot_candles = int(row.get("spot_candles") or 0)
-    total_contracts = int(row.get("total_contracts") or 0)
-    complete_contracts = int(row.get("complete_contracts") or 0)
-    empty_contracts = int(row.get("empty_contracts") or 0)
+    contract_target = _research_contract_target(row)
+    processed_contracts = _research_processed_contracts(row)
 
     expiry_component = 0.0
     selection_component = 0.0
@@ -145,11 +143,42 @@ def _symbol_progress_pct(row: dict[str, Any]) -> float:
     spot_component = 20.0 if spot_candles > 0 else 0.0
 
     contract_component = 0.0
-    if total_contracts > 0:
-        processed_contracts = complete_contracts + empty_contracts
-        contract_component = 40.0 * (processed_contracts / total_contracts)
+    if contract_target > 0:
+        contract_component = 40.0 * min(1.0, processed_contracts / contract_target)
 
     return round(min(100.0, expiry_component + selection_component + spot_component + contract_component), 1)
+
+
+def _research_expiry_coverage(row: dict[str, Any]) -> int:
+    discovered_expiries = int(row.get("discovered_expiries") or 0)
+    selection_spots_ready = int(row.get("selection_spots_ready") or 0)
+    if selection_spots_ready > 0:
+        return min(discovered_expiries, selection_spots_ready)
+    return discovered_expiries
+
+
+def _research_contract_target(row: dict[str, Any]) -> int:
+    total_contracts = int(row.get("total_contracts") or 0)
+    expiry_coverage = _research_expiry_coverage(row)
+    if total_contracts <= 0 or expiry_coverage <= 0:
+        return 0
+    # One liquid CE/PE pair per expiry bucket is enough to run the ATM monthly research.
+    return min(total_contracts, max(2, expiry_coverage * 2))
+
+
+def _research_processed_contracts(row: dict[str, Any]) -> int:
+    total_contracts = int(row.get("total_contracts") or 0)
+    complete_contracts = int(row.get("complete_contracts") or 0)
+    empty_contracts = int(row.get("empty_contracts") or 0)
+    return min(total_contracts, complete_contracts + empty_contracts)
+
+
+def _is_research_ready(row: dict[str, Any]) -> bool:
+    option_candles = int(row.get("option_candles") or 0)
+    contract_target = _research_contract_target(row)
+    if option_candles <= 0 or contract_target <= 0:
+        return False
+    return _research_processed_contracts(row) >= contract_target
 
 
 def _serialise_ts(value: Any) -> Optional[str]:
@@ -839,6 +868,9 @@ async def get_research_cache_status():
             "kind": row["kind"],
             "stage": stage,
             "progress_pct": _symbol_progress_pct(row),
+            "research_ready": _is_research_ready(row),
+            "research_contract_target": _research_contract_target(row),
+            "research_contracts_processed": _research_processed_contracts(row),
             "active_now": active_now,
             "total_expiries": int(row.get("total_expiries") or 0),
             "discovered_expiries": int(row.get("discovered_expiries") or 0),
@@ -867,6 +899,8 @@ async def get_research_cache_status():
     contracts_complete = sum(row["complete_contracts"] for row in symbols)
     contracts_pending = sum(row["pending_contracts"] for row in symbols)
     contracts_empty = sum(row["empty_contracts"] for row in symbols)
+    research_contract_target = sum(row["research_contract_target"] for row in symbols)
+    research_contracts_processed = sum(row["research_contracts_processed"] for row in symbols)
     option_contracts = sum(row["option_contracts"] for row in symbols)
     option_candles = sum(row["option_candles"] for row in symbols)
     recent_activity_at = _serialise_ts(recent_activity_at_dt)
@@ -900,11 +934,13 @@ async def get_research_cache_status():
             "contracts_complete": contracts_complete,
             "contracts_pending": contracts_pending,
             "contracts_empty": contracts_empty,
+            "research_contract_target": research_contract_target,
+            "research_contracts_processed": research_contracts_processed,
             "option_contracts": option_contracts,
             "option_candles": option_candles,
             "active_symbols": _count(lambda row: row["active_now"]),
             "active_recent_symbols": active_recent_symbols,
-            "populated_symbols": _count(lambda row: row["option_candles"] > 0),
+            "populated_symbols": _count(lambda row: row["research_ready"]),
             "symbols_in_progress": _count(
                 lambda row: row["stage"] in {"metadata", "spot", "contracts", "populating"}
             ),
