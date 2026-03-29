@@ -1,0 +1,57 @@
+# ─── Web framework ────────────────────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9
+
+# ─── Database ─────────────────────────────────────────────────────────────────
+sqlalchemy[asyncio]==2.0.30
+asyncpg==0.29.0
+alembic==1.13.1
+psycopg2-binary==2.9.9
+
+# ─── Redis ────────────────────────────────────────────────────────────────────
+redis[hiredis]==5.0.4
+aioredis==2.0.1
+
+# ─── Broker SDKs ─────────────────────────────────────────────────────────────
+fyers-apiv3==3.1.11
+upstox-python-sdk==2.21.0
+py5paisa==0.7.21.2
+breeze-connect==1.0.63
+
+# ─── HTTP & WebSocket ─────────────────────────────────────────────────────────
+# httpx 0.28.1 satisfies: py5paisa (>=0.28.1,<0.29.0) and fastapi (>=0.23.0)
+httpx==0.28.1
+websockets==12.0
+# aiohttp pinned by fyers-apiv3; let pip resolve
+
+# ─── Config & Security ────────────────────────────────────────────────────────
+pydantic==2.7.1
+pydantic-settings==2.2.1
+python-dotenv==1.0.1
+cryptography==42.0.7
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# ─── Analytics & Math ─────────────────────────────────────────────────────────
+numpy==1.26.4
+scipy==1.13.0
+pandas==2.2.2
+
+# ─── AI ───────────────────────────────────────────────────────────────────────
+anthropic==0.86.0
+
+# ─── Task scheduling ──────────────────────────────────────────────────────────
+apscheduler==3.10.4
+
+# ─── Utilities ────────────────────────────────────────────────────────────────
+pyotp==2.9.0
+arrow==1.3.0
+orjson==3.10.3
+loguru==0.7.2
+tenacity==8.3.0
+
+# ─── Testing ──────────────────────────────────────────────────────────────────
+pytest==8.2.1
+pytest-asyncio==0.23.7
+pytest-mock==3.14.0

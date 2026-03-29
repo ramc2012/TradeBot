@@ -1,0 +1,43 @@
+.DS_Store
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+backend/credentials.json
+
+# Python caches and virtualenvs
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Node / Next.js
+node_modules/
+.next/
+frontend/.next/
+
+# Logs and runtime state
+*.log
+backend/logs/
+backend/runtime/*.json
+
+# Local databases and temp files
+*.sqlite
+*.sqlite3
+*.db
+tmp/
+.tmp/
+
+# Generated research and validation outputs
+reports/
+backend/reports/
+
+# Coverage / build artifacts
+.coverage
+htmlcov/
+dist/
+build/
