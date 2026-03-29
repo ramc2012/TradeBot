@@ -22,6 +22,10 @@ from analysis.validation_live import (
     get_live_validation_report_artifact,
     get_live_validation_report_payload,
 )
+from analysis.validation_greeks_sync import (
+    get_live_greeks_sync_report_artifact,
+    get_live_greeks_sync_report_payload,
+)
 from db.database import AsyncSessionLocal
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
@@ -83,11 +87,18 @@ _VALIDATION_REPORT_FILES = {
     "coverage.csv",
     "chain_summary.csv",
 }
+_GREEKS_SYNC_REPORT_FILES = set(_VALIDATION_REPORT_FILES)
 _VALIDATION_REPORT_CANDIDATES = [
     Path(__file__).resolve().parents[2] / "reports" / "validation" / "nse-cache-current",
     Path(__file__).resolve().parents[3] / "reports" / "validation" / "nse-cache-current",
     Path(__file__).resolve().parents[2] / "reports" / "validation",
     Path(__file__).resolve().parents[3] / "reports" / "validation",
+]
+_GREEKS_SYNC_REPORT_CANDIDATES = [
+    Path(__file__).resolve().parents[2] / "reports" / "validation" / "greeks-sync-current",
+    Path(__file__).resolve().parents[3] / "reports" / "validation" / "greeks-sync-current",
+    Path(__file__).resolve().parents[2] / "reports" / "greeks-sync",
+    Path(__file__).resolve().parents[3] / "reports" / "greeks-sync",
 ]
 _RESEARCH_SYNC_STATE_FILE = (
     Path(__file__).resolve().parents[2] / "runtime" / "research_sync_status.json"
@@ -359,8 +370,8 @@ def _build_research_scheduler_summary(
     }
 
 
-def _resolve_validation_report_dir() -> Optional[Path]:
-    for base in _VALIDATION_REPORT_CANDIDATES:
+def _resolve_report_dir(candidates: list[Path]) -> Optional[Path]:
+    for base in candidates:
         if not base.exists():
             continue
         if base.is_dir() and (base / "summary.json").exists():
@@ -378,6 +389,14 @@ def _resolve_validation_report_dir() -> Optional[Path]:
         if candidates:
             return candidates[0]
     return None
+
+
+def _resolve_validation_report_dir() -> Optional[Path]:
+    return _resolve_report_dir(_VALIDATION_REPORT_CANDIDATES)
+
+
+def _resolve_greeks_sync_report_dir() -> Optional[Path]:
+    return _resolve_report_dir(_GREEKS_SYNC_REPORT_CANDIDATES)
 
 
 def _load_validation_report_payload() -> dict[str, Any]:
@@ -418,6 +437,60 @@ def _load_validation_report_payload() -> dict[str, Any]:
         "trades_csv_url": "/api/analysis/validation-report/latest/file/trades.csv",
         "coverage_csv_url": "/api/analysis/validation-report/latest/file/coverage.csv",
         "chain_summary_csv_url": "/api/analysis/validation-report/latest/file/chain_summary.csv",
+    }
+
+    return {
+        "available": True,
+        "report_key": report_dir.name,
+        "report_dir": str(report_dir),
+        "generated_at": summary.get("generated_at"),
+        "summary": summary,
+        "markdown_preview": markdown_preview,
+        "files": files,
+    }
+
+
+def _load_greeks_sync_report_payload() -> dict[str, Any]:
+    report_dir = _resolve_greeks_sync_report_dir()
+    if report_dir is None:
+        return {
+            "available": False,
+            "detail": (
+                "No Greeks Sync report is available yet. Generate one into "
+                "reports/greeks-sync or backend/reports/validation/greeks-sync-current."
+            ),
+        }
+
+    summary_path = report_dir / "summary.json"
+    report_path = report_dir / "report.md"
+
+    if not summary_path.exists():
+        return {
+            "available": False,
+            "detail": (
+                "Greeks Sync report directory found but summary.json is "
+                f"missing in {report_dir}"
+            ),
+        }
+
+    try:
+        summary = _json_safe(json.loads(summary_path.read_text()))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not parse Greeks Sync summary.json: {exc}",
+        ) from exc
+
+    markdown_preview = ""
+    if report_path.exists():
+        markdown_preview = report_path.read_text()
+
+    files = {
+        "report_markdown_url": "/api/analysis/greeks-sync-report/latest/file/report.md",
+        "summary_json_url": "/api/analysis/greeks-sync-report/latest/file/summary.json",
+        "trades_csv_url": "/api/analysis/greeks-sync-report/latest/file/trades.csv",
+        "coverage_csv_url": "/api/analysis/greeks-sync-report/latest/file/coverage.csv",
+        "chain_summary_csv_url": "/api/analysis/greeks-sync-report/latest/file/chain_summary.csv",
     }
 
     return {
@@ -892,6 +965,68 @@ async def download_latest_validation_report_file(file_name: str):
         raise HTTPException(
             status_code=404,
             detail="No validation report is available yet.",
+        )
+
+    file_path = report_dir / file_name
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Report file '{file_name}' not found in {report_dir.name}.",
+        )
+
+    media_type = "text/plain; charset=utf-8"
+    if file_name.endswith(".json"):
+        media_type = "application/json"
+    elif file_name.endswith(".csv"):
+        media_type = "text/csv; charset=utf-8"
+    elif file_name.endswith(".md"):
+        media_type = "text/markdown; charset=utf-8"
+
+    return FileResponse(
+        path=file_path,
+        media_type=media_type,
+        filename=file_name,
+    )
+
+
+@router.get("/greeks-sync-report/latest")
+async def get_latest_greeks_sync_report():
+    """
+    Return the latest live Greeks Sync research report summary.
+    """
+    try:
+        return await asyncio.to_thread(get_live_greeks_sync_report_payload)
+    except Exception as exc:
+        logger.exception(f"Live Greeks Sync report generation failed: {exc}")
+        return _load_greeks_sync_report_payload()
+
+
+@router.get("/greeks-sync-report/latest/file/{file_name}")
+async def download_latest_greeks_sync_report_file(file_name: str):
+    """
+    Download a whitelisted artifact from the latest Greeks Sync report.
+    """
+    if file_name not in _GREEKS_SYNC_REPORT_FILES:
+        raise HTTPException(status_code=404, detail=f"Unsupported report file '{file_name}'")
+
+    try:
+        content, media_type = await asyncio.to_thread(
+            get_live_greeks_sync_report_artifact,
+            file_name,
+        )
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
+        )
+    except Exception as exc:
+        logger.exception(f"Live Greeks Sync artifact failed for {file_name}: {exc}")
+
+    report_dir = _resolve_greeks_sync_report_dir()
+    if report_dir is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No Greeks Sync report is available yet.",
         )
 
     file_path = report_dir / file_name
