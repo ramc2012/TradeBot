@@ -892,12 +892,12 @@ function PopulationMonitor() {
       return timeB - timeA || b.progress_pct - a.progress_pct || a.symbol.localeCompare(b.symbol);
     });
 
-  const availableLocally = symbols
-    .filter(s => s.option_candles > 0)
+  const researchReadySymbols = symbols
+    .filter(s => s.research_ready)
     .sort((a, b) => b.option_candles - a.option_candles || b.complete_contracts - a.complete_contracts || a.symbol.localeCompare(b.symbol));
 
   const activeVisible = showAllActive ? activeQueue : activeQueue.slice(0, 12);
-  const availableVisible = showAllAvailable ? availableLocally : availableLocally.slice(0, 12);
+  const availableVisible = showAllAvailable ? researchReadySymbols : researchReadySymbols.slice(0, 12);
 
   return (
     <div className="card p-5 space-y-4">
@@ -1080,11 +1080,11 @@ function PopulationMonitor() {
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <div className="text-xs font-semibold text-text-secondary uppercase tracking-wide">
-              Available Locally ({availableLocally.length})
+              Research Ready ({researchReadySymbols.length})
             </div>
-            {availableLocally.length > 12 && (
+            {researchReadySymbols.length > 12 && (
               <button onClick={() => setShowAllAvailable(v => !v)} className="text-xs text-accent-blue hover:underline">
-                {showAllAvailable ? "Show Less" : `Show All (${availableLocally.length})`}
+                {showAllAvailable ? "Show Less" : `Show All (${researchReadySymbols.length})`}
               </button>
             )}
           </div>
@@ -1109,9 +1109,9 @@ function PopulationMonitor() {
                 </div>
               </div>
             ))}
-            {!availableLocally.length && (
+            {!researchReadySymbols.length && (
               <div className="text-xs text-text-muted border border-dashed border-bg-border rounded p-3">
-                No option contracts have been cached locally yet.
+                No symbols are research-ready yet. Partial cache coverage is still being built in the left column.
               </div>
             )}
           </div>
