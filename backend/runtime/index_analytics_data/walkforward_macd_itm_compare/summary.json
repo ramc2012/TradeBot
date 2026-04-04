@@ -1,0 +1,342 @@
+{
+  "generated_at": "2026-04-04T13:39:19.626031+05:30",
+  "atm": {
+    "overall": {
+      "opportunities": 425,
+      "win_rate": 0.64,
+      "avg_return_pct": -6.885,
+      "median_return_pct": 20.0,
+      "avg_win_return_pct": 28.8029,
+      "avg_loss_return_pct": -70.3303,
+      "avg_holding_minutes": 1166.3529
+    },
+    "by_option_type": {
+      "CE": {
+        "opportunities": 187,
+        "win_rate": 0.5615,
+        "avg_return_pct": -8.4763,
+        "median_return_pct": 10.0,
+        "avg_win_return_pct": 34.7482,
+        "avg_loss_return_pct": -63.8248,
+        "avg_holding_minutes": 1320.1872
+      },
+      "PE": {
+        "opportunities": 238,
+        "win_rate": 0.7017,
+        "avg_return_pct": -5.6347,
+        "median_return_pct": 20.0,
+        "avg_win_return_pct": 25.0649,
+        "avg_loss_return_pct": -77.8437,
+        "avg_holding_minutes": 1045.4832
+      }
+    },
+    "by_group_option_type": {
+      "monthly_series": {
+        "CE": {
+          "opportunities": 28,
+          "win_rate": 0.6786,
+          "avg_return_pct": -3.2628,
+          "median_return_pct": 30.0,
+          "avg_win_return_pct": 29.4556,
+          "avg_loss_return_pct": -72.335,
+          "avg_holding_minutes": 3385.5
+        },
+        "PE": {
+          "opportunities": 27,
+          "win_rate": 0.5926,
+          "avg_return_pct": -16.5646,
+          "median_return_pct": 30.0,
+          "avg_win_return_pct": 30.0,
+          "avg_loss_return_pct": -84.295,
+          "avg_holding_minutes": 4424.3333
+        }
+      },
+      "monthly_series_expiry_day": {
+        "CE": {
+          "opportunities": 8,
+          "win_rate": 0.5,
+          "avg_return_pct": 0.7456,
+          "median_return_pct": 0.0262,
+          "avg_win_return_pct": 12.6185,
+          "avg_loss_return_pct": -11.1273,
+          "avg_holding_minutes": 135.75
+        },
+        "PE": {
+          "opportunities": 9,
+          "win_rate": 0.7778,
+          "avg_return_pct": 1.122,
+          "median_return_pct": 20.0,
+          "avg_win_return_pct": 17.1429,
+          "avg_loss_return_pct": -54.951,
+          "avg_holding_minutes": 77.6667
+        }
+      },
+      "weekly_series": {
+        "CE": {
+          "opportunities": 95,
+          "win_rate": 0.5895,
+          "avg_return_pct": -2.5087,
+          "median_return_pct": 25.9151,
+          "avg_win_return_pct": 47.0934,
+          "avg_loss_return_pct": -73.7322,
+          "avg_holding_minutes": 1510.8421
+        },
+        "PE": {
+          "opportunities": 135,
+          "win_rate": 0.7185,
+          "avg_return_pct": -1.8326,
+          "median_return_pct": 30.0,
+          "avg_win_return_pct": 28.6194,
+          "avg_loss_return_pct": -79.5651,
+          "avg_holding_minutes": 907.1111
+        }
+      },
+      "weekly_series_expiry_day": {
+        "CE": {
+          "opportunities": 56,
+          "win_rate": 0.4643,
+          "avg_return_pct": -22.5241,
+          "median_return_pct": -0.8003,
+          "avg_win_return_pct": 15.4309,
+          "avg_loss_return_pct": -55.4184,
+          "avg_holding_minutes": 133.3036
+        },
+        "PE": {
+          "opportunities": 67,
+          "win_rate": 0.7015,
+          "avg_return_pct": -9.7988,
+          "median_return_pct": 20.0,
+          "avg_win_return_pct": 17.2289,
+          "avg_loss_return_pct": -73.3139,
+          "avg_holding_minutes": 92.6716
+        }
+      }
+    }
+  },
+  "itm_1": {
+    "overall": {
+      "opportunities": 338,
+      "win_rate": 0.6243,
+      "avg_return_pct": -6.2041,
+      "median_return_pct": 20.0,
+      "avg_win_return_pct": 29.8386,
+      "avg_loss_return_pct": -66.0862,
+      "avg_holding_minutes": 1033.0976
+    },
+    "by_option_type": {
+      "CE": {
+        "opportunities": 150,
+        "win_rate": 0.56,
+        "avg_return_pct": -6.7209,
+        "median_return_pct": 12.2883,
+        "avg_win_return_pct": 37.0939,
+        "avg_loss_return_pct": -62.4853,
+        "avg_holding_minutes": 1190.3733
+      },
+      "PE": {
+        "opportunities": 188,
+        "win_rate": 0.6755,
+        "avg_return_pct": -5.7918,
+        "median_return_pct": 20.0,
+        "avg_win_return_pct": 25.0398,
+        "avg_loss_return_pct": -69.9823,
+        "avg_holding_minutes": 907.6117
+      }
+    },
+    "by_group_option_type": {
+      "monthly_series": {
+        "CE": {
+          "opportunities": 17,
+          "win_rate": 0.4706,
+          "avg_return_pct": -21.8774,
+          "median_return_pct": -2.9297,
+          "avg_win_return_pct": 25.6437,
+          "avg_loss_return_pct": -64.1183,
+          "avg_holding_minutes": 2950.4118
+        },
+        "PE": {
+          "opportunities": 27,
+          "win_rate": 0.6296,
+          "avg_return_pct": -8.0342,
+          "median_return_pct": 30.0,
+          "avg_win_return_pct": 30.0,
+          "avg_loss_return_pct": -72.6923,
+          "avg_holding_minutes": 2110.7407
+        }
+      },
+      "monthly_series_expiry_day": {
+        "CE": {
+          "opportunities": 6,
+          "win_rate": 0.8333,
+          "avg_return_pct": 14.1442,
+          "median_return_pct": 20.0,
+          "avg_win_return_pct": 16.9731,
+          "avg_loss_return_pct": 0.0,
+          "avg_holding_minutes": 56.5
+        },
+        "PE": {
+          "opportunities": 7,
+          "win_rate": 0.8571,
+          "avg_return_pct": 1.8254,
+          "median_return_pct": 20.0,
+          "avg_win_return_pct": 18.3333,
+          "avg_loss_return_pct": -97.2222,
+          "avg_holding_minutes": 102.7143
+        }
+      },
+      "weekly_series": {
+        "CE": {
+          "opportunities": 90,
+          "win_rate": 0.6,
+          "avg_return_pct": -1.1648,
+          "median_return_pct": 28.0348,
+          "avg_win_return_pct": 47.1079,
+          "avg_loss_return_pct": -73.5738,
+          "avg_holding_minutes": 1370.9444
+        },
+        "PE": {
+          "opportunities": 111,
+          "win_rate": 0.6757,
+          "avg_return_pct": -5.0774,
+          "median_return_pct": 30.0,
+          "avg_win_return_pct": 27.9374,
+          "avg_loss_return_pct": -73.8582,
+          "avg_holding_minutes": 980.2252
+        }
+      },
+      "weekly_series_expiry_day": {
+        "CE": {
+          "opportunities": 37,
+          "win_rate": 0.4595,
+          "avg_return_pct": -16.6557,
+          "median_return_pct": -1.9141,
+          "avg_win_return_pct": 16.5911,
+          "avg_loss_return_pct": -44.9154,
+          "avg_holding_minutes": 126.3514
+        },
+        "PE": {
+          "opportunities": 43,
+          "win_rate": 0.6744,
+          "avg_return_pct": -7.4681,
+          "median_return_pct": 10.0,
+          "avg_win_return_pct": 16.026,
+          "avg_loss_return_pct": -56.1342,
+          "avg_holding_minutes": 95.7442
+        }
+      }
+    }
+  },
+  "itm_2": {
+    "overall": {
+      "opportunities": 433,
+      "win_rate": 0.642,
+      "avg_return_pct": -7.5793,
+      "median_return_pct": 20.0,
+      "avg_win_return_pct": 27.3824,
+      "avg_loss_return_pct": -70.2848,
+      "avg_holding_minutes": 896.6051
+    },
+    "by_option_type": {
+      "CE": {
+        "opportunities": 183,
+        "win_rate": 0.5628,
+        "avg_return_pct": -9.1887,
+        "median_return_pct": 10.0,
+        "avg_win_return_pct": 33.6534,
+        "avg_loss_return_pct": -64.3479,
+        "avg_holding_minutes": 1021.2732
+      },
+      "PE": {
+        "opportunities": 250,
+        "win_rate": 0.7,
+        "avg_return_pct": -6.4013,
+        "median_return_pct": 20.0,
+        "avg_win_return_pct": 23.6914,
+        "avg_loss_return_pct": -76.6174,
+        "avg_holding_minutes": 805.348
+      }
+    },
+    "by_group_option_type": {
+      "monthly_series": {
+        "CE": {
+          "opportunities": 17,
+          "win_rate": 0.6471,
+          "avg_return_pct": -8.9012,
+          "median_return_pct": 25.1062,
+          "avg_win_return_pct": 26.3359,
+          "avg_loss_return_pct": -73.5027,
+          "avg_holding_minutes": 3048.8235
+        },
+        "PE": {
+          "opportunities": 31,
+          "win_rate": 0.7097,
+          "avg_return_pct": -1.9267,
+          "median_return_pct": 30.0,
+          "avg_win_return_pct": 28.9497,
+          "avg_loss_return_pct": -77.4022,
+          "avg_holding_minutes": 2483.0645
+        }
+      },
+      "monthly_series_expiry_day": {
+        "CE": {
+          "opportunities": 10,
+          "win_rate": 0.8,
+          "avg_return_pct": -3.0093,
+          "median_return_pct": 13.7114,
+          "avg_win_return_pct": 14.4605,
+          "avg_loss_return_pct": -72.8888,
+          "avg_holding_minutes": 80.1
+        },
+        "PE": {
+          "opportunities": 11,
+          "win_rate": 0.6364,
+          "avg_return_pct": -21.9972,
+          "median_return_pct": 10.0,
+          "avg_win_return_pct": 15.7143,
+          "avg_loss_return_pct": -87.9922,
+          "avg_holding_minutes": 122.7273
+        }
+      },
+      "weekly_series": {
+        "CE": {
+          "opportunities": 93,
+          "win_rate": 0.6022,
+          "avg_return_pct": -0.5973,
+          "median_return_pct": 30.0,
+          "avg_win_return_pct": 46.0124,
+          "avg_loss_return_pct": -71.1417,
+          "avg_holding_minutes": 1336.9355
+        },
+        "PE": {
+          "opportunities": 114,
+          "win_rate": 0.7105,
+          "avg_return_pct": -2.1645,
+          "median_return_pct": 30.0,
+          "avg_win_return_pct": 28.0795,
+          "avg_loss_return_pct": -76.3996,
+          "avg_holding_minutes": 990.4386
+        }
+      },
+      "weekly_series_expiry_day": {
+        "CE": {
+          "opportunities": 63,
+          "win_rate": 0.4444,
+          "avg_return_pct": -22.9296,
+          "median_return_pct": -2.266,
+          "avg_win_return_pct": 17.294,
+          "avg_loss_return_pct": -55.1084,
+          "avg_holding_minutes": 157.5714
+        },
+        "PE": {
+          "opportunities": 94,
+          "win_rate": 0.6915,
+          "avg_return_pct": -11.1901,
+          "median_return_pct": 20.0,
+          "avg_win_return_pct": 17.3025,
+          "avg_loss_return_pct": -75.0528,
+          "avg_holding_minutes": 107.4681
+        }
+      }
+    }
+  }
+}

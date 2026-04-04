@@ -2,7 +2,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  getBrokerStatus, saveCredentials, getFyersAuthUrl, getUpstoxAuthUrl, connectUpstox,
+  getBrokerStatus, getCredentialsStatus, saveCredentials, getFyersAuthUrl, getUpstoxAuthUrl, connectUpstox,
   getIciciLoginUrl, connectIciciBreeze, connectFivepaisa,
   disconnectBroker, getRiskStatus, updateRiskConfig, getResearchCacheStatus,
   getTelegramSettings, saveTelegramSettings, discoverTelegramChats, sendTelegramTest,
@@ -505,29 +505,56 @@ function TelegramCard() {
 
 // ── Fyers Card ────────────────────────────────────────────────────────────────
 
-const FYERS_CALLBACK = "http://localhost:8000/api/auth/fyers/callback";
+const FYERS_DEFAULT_CALLBACK = "http://localhost:8000/api/auth/fyers/callback";
 
 function FyersCard({ status, onRefresh }: { status: any; onRefresh: () => void }) {
   const qc = useQueryClient();
   const { data: allCreds } = useAllCredsStatus();
   const savedFields: Record<string, boolean> = allCreds?.fyers?.fields ?? {};
   const hasCreds = allCreds?.fyers?.has_credentials;
+  const { data: fyersCreds } = useQuery({
+    queryKey: ["credentialsStatus", "fyers"],
+    queryFn: () => getCredentialsStatus("fyers").then((r) => r.data),
+    staleTime: 15000,
+  });
 
   const [expanded, setExpanded] = useState(false);
   const [appId, setAppId] = useState("");
   const [secret, setSecret] = useState("");
-  const [redirectUri, setRedirectUri] = useState(FYERS_CALLBACK);
+  const [redirectUri, setRedirectUri] = useState("");
   const [authCode, setAuthCode] = useState("");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
 
+  const effectiveRedirectUri = String(fyersCreds?.display?.redirect_uri || redirectUri || FYERS_DEFAULT_CALLBACK);
+
+  useEffect(() => {
+    if (fyersCreds?.display?.app_id && !appId) {
+      setAppId(String(fyersCreds.display.app_id));
+    }
+    if (fyersCreds?.display?.redirect_uri && !redirectUri) {
+      setRedirectUri(String(fyersCreds.display.redirect_uri));
+    }
+  }, [fyersCreds, appId, redirectUri]);
+
   const handleSaveCreds = async () => {
+    const redirectToSave = redirectUri.trim();
+    const savedRedirect = String(fyersCreds?.display?.redirect_uri || "").trim();
     if (!appId || !secret) { setMsg("Enter APP ID and Secret"); return; }
+    if (!redirectToSave && !savedRedirect) {
+      setMsg("Enter the Fyers redirect URI you actually registered in the app settings");
+      return;
+    }
     setSaving(true); setMsg("");
     try {
-      await saveCredentials("fyers", { app_id: appId, secret, redirect_uri: redirectUri });
+      await saveCredentials("fyers", {
+        app_id: appId,
+        secret,
+        ...(redirectToSave ? { redirect_uri: redirectToSave } : {}),
+      });
       setMsg("✓ Credentials saved");
       qc.invalidateQueries({ queryKey: ["allCredsStatus"] });
+      qc.invalidateQueries({ queryKey: ["credentialsStatus", "fyers"] });
     } catch (e: any) { setMsg(e?.response?.data?.detail || "Failed to save"); }
     finally { setSaving(false); }
   };
@@ -594,7 +621,7 @@ function FyersCard({ status, onRefresh }: { status: any; onRefresh: () => void }
             <div className="text-xs font-bold text-accent-amber flex items-center gap-1">
               <Info size={11} /> Register this Redirect URL in your Fyers app first
             </div>
-            <CopyableUrl url={FYERS_CALLBACK} label="Redirect URL (register at myapi.fyers.in → App Settings)" />
+            <CopyableUrl url={effectiveRedirectUri} label="Saved Redirect URL (register this in myapi.fyers.in → App Settings)" />
             <p className="text-xs text-text-muted">
               Go to{" "}
               <a href="https://myapi.fyers.in" target="_blank" rel="noopener noreferrer"
@@ -616,7 +643,7 @@ function FyersCard({ status, onRefresh }: { status: any; onRefresh: () => void }
             <TextInput value={appId} onChange={setAppId} label="APP ID (Client ID)" placeholder="XXXXXXXX-100" saved={savedFields["app_id"]} />
             <PasswordInput value={secret} onChange={setSecret} label="Secret Key" placeholder="secret" saved={savedFields["secret"]} />
             <TextInput value={redirectUri} onChange={setRedirectUri}
-              label="Redirect URI (must match app settings)" placeholder={FYERS_CALLBACK} saved={savedFields["redirect_uri"]} />
+              label="Redirect URI (must match app settings)" placeholder={FYERS_DEFAULT_CALLBACK} saved={savedFields["redirect_uri"]} />
             <button onClick={handleSaveCreds} disabled={saving}
               className="px-3 py-1.5 rounded text-xs bg-bg-hover border border-bg-border text-text-secondary hover:border-accent-amber/40 disabled:opacity-50 flex items-center gap-1">
               {saving ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />} Save Credentials

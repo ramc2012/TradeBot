@@ -1,0 +1,27 @@
+{
+  "task_id": "a02b8bc9-ffb9-4ce4-a2b7-ccbc8a454e9c",
+  "status": "running",
+  "current_stage": "downloading_candles",
+  "underlyings": [
+    "NIFTY",
+    "SENSEX"
+  ],
+  "interval": "1minute",
+  "total_expiries": 104,
+  "processed_expiries": 104,
+  "total_contracts": 31304,
+  "processed_contracts": 5,
+  "skipped_contracts": 1,
+  "stored_files": 0,
+  "stored_candles": 0,
+  "current_underlying": "NIFTY",
+  "current_expiry": "2025-04-03",
+  "current_symbol": "NIFTY 20550 CE 03 APR 25",
+  "data_root": "/app/runtime/index_analytics_data",
+  "latest_file": "/app/runtime/index_analytics_data/contracts/underlying=NIFTY/expiry_kind=weekly/expiry=2025-04-03/CE/NIFTY 20500 CE 03 APR 25.csv.gz",
+  "error": "",
+  "pct": 20.0,
+  "started_at": "2026-04-03T08:36:27.040290+00:00",
+  "finished_at": null,
+  "elapsed_secs": 330
+}

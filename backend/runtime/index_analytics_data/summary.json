@@ -1,0 +1,75 @@
+{
+  "rows": [
+    {
+      "underlying": "NIFTY",
+      "expiry_kind": "monthly",
+      "dataset_type": "options",
+      "contracts": 1017,
+      "expiries": 5,
+      "files": 1017,
+      "candles": 8013691,
+      "earliest": "2025-04-03T09:15:00+05:30",
+      "latest": "2025-08-28T15:29:00+05:30"
+    },
+    {
+      "underlying": "NIFTY",
+      "expiry_kind": "spot",
+      "dataset_type": "spot",
+      "contracts": 1,
+      "expiries": 0,
+      "files": 1,
+      "candles": 92318,
+      "earliest": "2025-04-03T09:15:00+05:30",
+      "latest": "2026-04-02T15:29:00+05:30"
+    },
+    {
+      "underlying": "NIFTY",
+      "expiry_kind": "weekly",
+      "dataset_type": "options",
+      "contracts": 3206,
+      "expiries": 17,
+      "files": 3206,
+      "candles": 9060268,
+      "earliest": "2025-04-03T09:15:00+05:30",
+      "latest": "2025-08-21T15:29:00+05:30"
+    },
+    {
+      "underlying": "SENSEX",
+      "expiry_kind": "monthly",
+      "dataset_type": "options",
+      "contracts": 3026,
+      "expiries": 11,
+      "files": 3026,
+      "candles": 12615421,
+      "earliest": "2025-04-03T09:15:00+05:30",
+      "latest": "2026-02-26T15:29:00+05:30"
+    },
+    {
+      "underlying": "SENSEX",
+      "expiry_kind": "spot",
+      "dataset_type": "spot",
+      "contracts": 1,
+      "expiries": 0,
+      "files": 1,
+      "candles": 92315,
+      "earliest": "2025-04-03T09:15:00+05:30",
+      "latest": "2026-04-02T15:29:00+05:30"
+    },
+    {
+      "underlying": "SENSEX",
+      "expiry_kind": "weekly",
+      "dataset_type": "options",
+      "contracts": 9313,
+      "expiries": 37,
+      "files": 9313,
+      "candles": 19744935,
+      "earliest": "2025-04-03T09:15:00+05:30",
+      "latest": "2026-03-04T15:29:00+05:30"
+    }
+  ],
+  "summary": {
+    "contracts": 16564,
+    "files": 16564,
+    "candles": 49618948
+  }
+}

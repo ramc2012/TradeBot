@@ -1,4 +1,8 @@
-"""Pure Python MACD computation (no external libraries)."""
+"""Pure Python MACD computation and signal helpers (no external libraries).
+
+Extended with spot MA context classification and IV filtering
+per STRATEGY_DOCUMENT.md.
+"""
 from __future__ import annotations
 
 from typing import Optional
@@ -414,3 +418,90 @@ def simulate_exit_strategies(candles: list[dict], entry_idx: int) -> dict[str, d
             float(trail_drawdown_pct),
         )
     return strategies
+
+
+# ── Spot MA Context ──────────────────────────────────────────────────────────
+
+def compute_spot_ma_context(
+    spot_closes: list[float],
+    fast: int = 20,
+    slow: int = 50,
+) -> dict:
+    """Classify the spot price setup relative to its own EMA(20) and EMA(50).
+
+    Returns
+    -------
+    dict with keys:
+        spot_price     : current spot close
+        ma20           : EMA(20) value (or None)
+        ma50           : EMA(50) value (or None)
+        ma20_gap_pct   : (spot - ma20) / ma20 * 100
+        ma50_gap_pct   : (spot - ma50) / ma50 * 100
+        above_ma20     : bool
+        above_ma50     : bool
+        setup          : "breakout" | "trend" | "reversal" | "unknown"
+    """
+    result: dict = {
+        "spot_price": spot_closes[-1] if spot_closes else None,
+        "ma20": None,
+        "ma50": None,
+        "ma20_gap_pct": None,
+        "ma50_gap_pct": None,
+        "above_ma20": False,
+        "above_ma50": False,
+        "setup": "unknown",
+    }
+
+    if not spot_closes:
+        return result
+
+    spot = spot_closes[-1]
+    result["spot_price"] = spot
+
+    ema20 = compute_ema(spot_closes, fast)
+    ema50 = compute_ema(spot_closes, slow)
+
+    ma20_val = ema20[-1]
+    ma50_val = ema50[-1]
+    result["ma20"] = ma20_val
+    result["ma50"] = ma50_val
+
+    if ma20_val is not None and ma20_val > 0:
+        result["ma20_gap_pct"] = (spot - ma20_val) / ma20_val * 100.0
+        result["above_ma20"] = spot >= ma20_val
+
+    if ma50_val is not None and ma50_val > 0:
+        result["ma50_gap_pct"] = (spot - ma50_val) / ma50_val * 100.0
+        result["above_ma50"] = spot >= ma50_val
+
+    # Setup classification (§8.3 of STRATEGY_DOCUMENT.md):
+    #   Breakout: above MA20, below MA50 → +202% option exit, 11% retrace
+    #   Trend:    above both             → +133%, 22% retrace
+    #   Reversal: below MA20             → +67%, 35% retrace
+    if result["above_ma20"] and not result["above_ma50"]:
+        result["setup"] = "breakout"
+    elif result["above_ma20"] and result["above_ma50"]:
+        result["setup"] = "trend"
+    elif not result["above_ma20"]:
+        result["setup"] = "reversal"
+
+    return result
+
+
+def check_iv_filter(iv_pct: Optional[float], max_iv: float = 30.0, hard_max: float = 45.0) -> str:
+    """Check implied volatility against strategy thresholds.
+
+    Returns
+    -------
+    "preferred"  : IV ≤ max_iv (best entry zone)
+    "acceptable" : IV between max_iv and hard_max
+    "reject"     : IV > hard_max (refuse entry)
+    "unknown"    : IV data unavailable
+    """
+    if iv_pct is None:
+        return "unknown"
+    if iv_pct <= max_iv:
+        return "preferred"
+    if iv_pct <= hard_max:
+        return "acceptable"
+    return "reject"

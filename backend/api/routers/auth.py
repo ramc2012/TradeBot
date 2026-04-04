@@ -1,11 +1,12 @@
 """Broker authentication routes."""
 from __future__ import annotations
 import asyncio
+import base64
 import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -45,6 +46,13 @@ _upstox_token_health_cache: dict = {
     "result": None,
 }
 IST = timezone(timedelta(hours=5, minutes=30))
+BROKER_STATUS_ORDER = ("fyers", "upstox", "icici_breeze", "fivepaisa")
+BROKER_STATUS_LABELS = {
+    "fyers": "FYERS",
+    "upstox": "UPSTOX",
+    "icici_breeze": "BREEZE",
+    "fivepaisa": "5PAISA",
+}
 
 
 # ── Credential persistence ────────────────────────────────────────────────────
@@ -93,6 +101,20 @@ def _persist_access_token(broker: str, access_token: Optional[str]) -> None:
     _save_credentials_to_disk(_broker_credentials)
     if broker == "upstox":
         _reset_upstox_token_health_cache()
+
+
+def _jwt_expired(token: str) -> bool:
+    """Decode JWT payload (without verification) and check exp claim."""
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return True
+        padded = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        payload = json.loads(base64.b64decode(padded))
+        exp = payload.get("exp", 0)
+        return datetime.utcnow().timestamp() >= exp
+    except Exception:
+        return True  # undecodable → treat as expired
 
 
 def _explicit_env(name: str) -> Optional[str]:
@@ -295,6 +317,42 @@ async def get_upstox_token_health(force: bool = False) -> dict:
     return result
 
 
+async def get_broker_connection_snapshot() -> dict[str, Any]:
+    """Return a compact broker connection snapshot for UI and Telegram usage."""
+    await ensure_upstox_session(force_validate=False)
+    await ensure_fyers_session()
+
+    connected = get_connected_brokers()
+    upstox_health = await get_upstox_token_health()
+
+    return {
+        "connected_brokers": connected,
+        "upstox_ready": bool(upstox_health.get("valid")),
+        "upstox_token_health": upstox_health,
+    }
+
+
+def format_broker_status_summary(snapshot: dict[str, Any]) -> str:
+    """Render broker connectivity as a short Telegram-safe summary line."""
+    connected = set(snapshot.get("connected_brokers") or [])
+    upstox_health = snapshot.get("upstox_token_health") or {}
+    upstox_ready = bool(snapshot.get("upstox_ready"))
+
+    parts: list[str] = []
+    for broker in BROKER_STATUS_ORDER:
+        label = BROKER_STATUS_LABELS.get(broker, broker.upper())
+        if broker == "upstox":
+            if broker in connected and upstox_ready:
+                state = "connected"
+            else:
+                state = str(upstox_health.get("status") or ("connected" if broker in connected else "disconnected"))
+        else:
+            state = "connected" if broker in connected else "disconnected"
+        parts.append(f"{label} {state.replace('_', ' ')}")
+
+    return "Broker Status: " + " | ".join(parts)
+
+
 async def ensure_upstox_session(force_validate: bool = False) -> bool:
     """
     Restore the Upstox adapter from the saved JWT when the in-memory session is gone.
@@ -304,10 +362,22 @@ async def ensure_upstox_session(force_validate: bool = False) -> bool:
     Upstox access token.
     """
     if "upstox" in _active_brokers:
-        return True
+        # Validate existing in-memory session — evict if token is expired
+        info = _active_brokers["upstox"]
+        token = info.get("token")
+        access_token = getattr(token, "access_token", None) if token else None
+        if access_token and not _jwt_expired(access_token):
+            return True
+        logger.info("[Upstox] In-memory session token expired — evicting")
+        del _active_brokers["upstox"]
 
     saved_token = str(_broker_credentials.get("upstox", {}).get("access_token", "")).strip()
     if not saved_token:
+        return False
+
+    # Don't try to restore an already-expired saved token
+    if _jwt_expired(saved_token):
+        logger.info("[Upstox] Saved token is expired — re-authentication required")
         return False
 
     if force_validate and not await _validate_upstox_access_token(saved_token):
@@ -356,10 +426,22 @@ async def ensure_fyers_session() -> bool:
     naturally expires.
     """
     if "fyers" in _active_brokers:
-        return True
+        # Validate existing in-memory session — evict if token is expired
+        info = _active_brokers["fyers"]
+        token = info.get("token")
+        access_token = getattr(token, "access_token", None) if token else None
+        if access_token and not _jwt_expired(access_token):
+            return True
+        logger.info("[Fyers] In-memory session token expired — evicting")
+        del _active_brokers["fyers"]
 
     saved_token = str(_broker_credentials.get("fyers", {}).get("access_token", "")).strip()
     if not saved_token:
+        return False
+
+    # Don't try to restore an already-expired saved token
+    if _jwt_expired(saved_token):
+        logger.info("[Fyers] Saved token is expired — re-authentication required")
         return False
 
     try:
@@ -462,10 +544,20 @@ async def get_credentials_status(broker: str):
         raise HTTPException(400, f"Unknown broker: {broker}")
     creds = _broker_credentials.get(broker, {})
     filled = {k: bool(v) for k, v in creds.items()}
+    display: dict[str, str] = {}
+    if broker == "fyers":
+        if creds.get("app_id"):
+            display["app_id"] = str(creds["app_id"])
+        display["redirect_uri"] = str(creds.get("redirect_uri") or settings.FYERS_REDIRECT_URI or "")
+    elif broker == "upstox":
+        if creds.get("api_key"):
+            display["api_key"] = str(creds["api_key"])
+        display["redirect_uri"] = str(creds.get("redirect_uri") or settings.UPSTOX_REDIRECT_URI or "")
     return {
         "broker": broker,
         "has_credentials": any(filled.values()),
         "fields": filled,   # {field_name: true/false}
+        "display": display,
     }
 
 
@@ -588,6 +680,8 @@ async def send_telegram_test(req: TelegramTestRequest):
         f"Time: {datetime.now(IST).strftime('%d %b %Y %I:%M:%S %p IST')}\n"
         f"Status: Telegram delivery is configured correctly."
     )
+    snapshot = await get_broker_connection_snapshot()
+    text = f"{text}\n{format_broker_status_summary(snapshot)}"
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:

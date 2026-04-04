@@ -33,10 +33,10 @@ export default function AgentPage() {
       <div>
         <h1 className="text-lg font-bold font-mono text-text-primary flex items-center gap-2">
           <Bot size={18} className="text-accent-purple" />
-          Autonomous Agent
+          Strategy Agent
         </h1>
         <div className="mt-1 text-xs text-text-muted">
-          This agent runs automatically during market hours. It scans the market intelligence watchlist, chooses trades from the active strategies, and sends trade logic to Telegram when configured.
+          This agent is now manual-run only. Use the market-specific scan controls to evaluate watchlists, while kill switches gate whether each market can open new entries.
         </div>
       </div>
 
@@ -53,7 +53,7 @@ export default function AgentPage() {
             <Activity size={14} /> Open Positions
           </div>
           <div className="mt-3 text-2xl font-mono font-semibold text-text-primary">{openPositions}</div>
-          <div className="mt-1 text-xs text-text-muted">Positions are managed automatically with RSI exits and trailing stops.</div>
+          <div className="mt-1 text-xs text-text-muted">Open positions are still managed by the strategy logic after each manual scan.</div>
         </div>
         <div className="card p-4">
           <div className="flex items-center gap-2 text-sm text-text-secondary">
@@ -75,7 +75,7 @@ export default function AgentPage() {
       <StrategyMonitorSection agentStatus={strategyStatus} />
 
       <div className="card p-4 text-xs text-text-muted">
-        Closed trades across both strategies: <span className="font-mono text-text-primary">{totalTrades}</span>. The Trading page still holds manual order entry and broker positions, while this page is now limited to autonomous agent supervision only.
+        Closed trades across both strategies: <span className="font-mono text-text-primary">{totalTrades}</span>. The Trading page holds manual order entry and the NSE kill switch, while the Commodity page holds the MCX kill switch and watchlists.
       </div>
     </div>
   );

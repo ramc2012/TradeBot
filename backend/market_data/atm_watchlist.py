@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
@@ -21,7 +22,7 @@ from market_data.option_history import option_history_service
 
 
 UTC = timezone.utc
-DEFAULT_WATCHLIST_TTL = 45
+DEFAULT_WATCHLIST_TTL = 120  # 2 min — covers full 211-symbol load time (~55s)
 DEFAULT_EXPIRY_TTL = 300
 
 INDEX_FYERS_SYMBOLS = {
@@ -30,6 +31,21 @@ INDEX_FYERS_SYMBOLS = {
     "FINNIFTY": "NSE:FINNIFTY-INDEX",
     "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
     "NIFTYNXT50": "NSE:NIFTYNXT50-INDEX",
+}
+
+_FYERS_MONTHS = {
+    "JAN": 1,
+    "FEB": 2,
+    "MAR": 3,
+    "APR": 4,
+    "MAY": 5,
+    "JUN": 6,
+    "JUL": 7,
+    "AUG": 8,
+    "SEP": 9,
+    "OCT": 10,
+    "NOV": 11,
+    "DEC": 12,
 }
 
 
@@ -46,7 +62,7 @@ class ATMWatchlistService:
 
     async def get_expiries(self) -> dict[str, Any]:
         redis = await get_redis()
-        cache_key = "atm_watchlist:expiries:v2"
+        cache_key = "atm_watchlist:expiries:v3"
         cached = await redis.get(cache_key)
         if cached:
             return json.loads(cached)
@@ -55,8 +71,7 @@ class ATMWatchlistService:
         if fyers_adapter is None and await ensure_fyers_session():
             fyers_adapter = get_active_adapter("fyers")
         upstox_adapter = await self._get_upstox_adapter()
-        adapter = fyers_adapter or upstox_adapter
-        if adapter is None:
+        if fyers_adapter is None and upstox_adapter is None:
             payload = {
                 "expiries": [],
                 "default_expiry": None,
@@ -74,14 +89,31 @@ class ATMWatchlistService:
         if not representative:
             representative = underlyings[:10]
 
+        fyers_failed = False
+        used_upstox_fallback = False
+
         async def fetch_expiries(meta: UnderlyingMeta) -> list[str]:
+            nonlocal fyers_failed, used_upstox_fallback
             try:
-                lookup_symbol = self._to_fyers_symbol(meta) if getattr(adapter, "broker_name", "") == "fyers" else meta.underlying_key
-                contracts = await adapter.get_option_contracts(lookup_symbol)
+                if fyers_adapter is not None:
+                    contracts = await fyers_adapter.get_option_contracts(self._to_fyers_symbol(meta))
+                    expiries = sorted({str(row.get("expiry")) for row in contracts if row.get("expiry")})
+                    if expiries:
+                        return expiries
             except Exception as exc:
+                fyers_failed = True
                 logger.debug(f"[ATM watchlist] Expiry discovery failed for {meta.symbol}: {exc}")
-                return []
-            return sorted({str(row.get("expiry")) for row in contracts if row.get("expiry")})
+
+            if upstox_adapter is not None:
+                try:
+                    contracts = await upstox_adapter.get_option_contracts(meta.underlying_key)
+                    expiries = sorted({str(row.get("expiry")) for row in contracts if row.get("expiry")})
+                    if expiries:
+                        used_upstox_fallback = True
+                    return expiries
+                except Exception as exc:
+                    logger.debug(f"[ATM watchlist] Upstox expiry discovery failed for {meta.symbol}: {exc}")
+            return []
 
         expiry_lists = await asyncio.gather(*(fetch_expiries(meta) for meta in representative))
         expiries = sorted({expiry for items in expiry_lists for expiry in items if expiry})
@@ -96,11 +128,24 @@ class ATMWatchlistService:
             if monthly_expiry_iso in expiries
             else next((expiry for expiry in expiries if expiry >= today), expiries[0] if expiries else None)
         )
+        detail: Optional[str] = None
+        source = "fyers"
+        if used_upstox_fallback:
+            source = "upstox"
+            detail = "Fyers is rate-limited for expiry discovery right now, so watchlist expiries are coming from Upstox."
+        elif fyers_adapter is None and upstox_adapter is not None:
+            source = "upstox"
+            detail = "Fyers is not connected, so expiries are resolved through Upstox."
+        elif fyers_failed and not expiries:
+            detail = "Expiry discovery is temporarily rate-limited on Fyers."
+        if not default_expiry and monthly_expiry_iso:
+            default_expiry = monthly_expiry_iso
+            detail = (detail + " " if detail else "") + f"Using inferred monthly expiry {monthly_expiry_iso} until live discovery recovers."
         payload = {
             "expiries": expiries,
             "default_expiry": default_expiry,
-            "source": "fyers" if getattr(adapter, "broker_name", "") == "fyers" else "upstox",
-            "detail": None if getattr(adapter, "broker_name", "") == "fyers" else "Fyers is not connected, so expiries are resolved through Upstox.",
+            "source": source,
+            "detail": detail,
         }
         await redis.set(cache_key, json.dumps(payload), ex=DEFAULT_EXPIRY_TTL)
         return payload
@@ -120,7 +165,7 @@ class ATMWatchlistService:
             }
 
         redis = await get_redis()
-        cache_key = f"atm_watchlist:v2:{selected_expiry}"
+        cache_key = f"atm_watchlist:v3:{selected_expiry}"
         cached = await redis.get(cache_key)
         if cached:
             return json.loads(cached)
@@ -142,9 +187,27 @@ class ATMWatchlistService:
             return payload
 
         underlyings = await self._load_underlyings()
-        semaphore = asyncio.Semaphore(8)
 
-        async def build(meta: UnderlyingMeta) -> Optional[dict[str, Any]]:
+        # Load any partially-built rows from a prior partial-cache key
+        partial_key = f"atm_watchlist:partial:{selected_expiry}"
+        partial_cache = await redis.get(partial_key)
+        prior_rows: dict[str, dict] = {}
+        if partial_cache:
+            for row in json.loads(partial_cache):
+                prior_rows[row["underlying"]] = row
+
+        # Only fetch symbols not already in cache
+        pending = [m for m in underlyings if m.symbol not in prior_rows]
+        logger.info(
+            f"[ATM watchlist] {len(prior_rows)} cached, {len(pending)} to fetch for {selected_expiry}"
+        )
+
+        # Fyers rate limit: ~10 req/s. Keep concurrency low to avoid 429.
+        semaphore = asyncio.Semaphore(3)
+
+        async def build(meta: UnderlyingMeta, delay: float = 0.0) -> Optional[dict[str, Any]]:
+            if delay:
+                await asyncio.sleep(delay)
             async with semaphore:
                 try:
                     return await self._build_row(
@@ -158,8 +221,28 @@ class ATMWatchlistService:
                     logger.warning(f"[ATM watchlist] Failed to build {meta.symbol}: {exc}")
                     return None
 
-        rows = [row for row in await asyncio.gather(*(build(meta) for meta in underlyings)) if row]
-        rows.sort(key=lambda row: (row["kind"] != "INDEX", row["underlying"]))
+        # Stagger requests: 1 req every 0.25s = 4 req/s, well under Fyers 10 req/s limit
+        tasks = [build(meta, delay=i * 0.25) for i, meta in enumerate(pending)]
+        new_rows = [row for row in await asyncio.gather(*tasks) if row]
+
+        # Merge new rows with prior cached rows
+        for row in new_rows:
+            prior_rows[row["underlying"]] = row
+
+        rows = sorted(prior_rows.values(), key=lambda r: (r["kind"] != "INDEX", r["underlying"]))
+
+        # Save partial results so next call can skip already-fetched symbols
+        # TTL: 5 min so partial results survive across rate-limit windows
+        await redis.set(partial_key, json.dumps(rows), ex=300)
+
+        logger.info(
+            f"[ATM watchlist] Built {len(rows)}/{len(underlyings)} rows "
+            f"({len(new_rows)} new, {len(prior_rows)-len(new_rows)} from partial cache)"
+        )
+
+        # If all symbols loaded, delete partial cache — no longer needed
+        if len(rows) >= len(underlyings):
+            await redis.delete(partial_key)
 
         await self._archive_expired_contracts()
         payload = {
@@ -230,6 +313,39 @@ class ATMWatchlistService:
         ce_contract = contract_map.get((atm_strike, "CE"))
         pe_contract = contract_map.get((atm_strike, "PE"))
 
+        if (
+            live_source == "fyers"
+            and not self._entries_match_expiry((ce_entry, pe_entry), expiry_date)
+            and upstox_adapter is not None
+        ):
+            logger.debug(
+                f"[ATM watchlist] Fyers returned mismatched expiry contracts for {meta.symbol} {expiry}; "
+                "falling back to Upstox for the selected expiry."
+            )
+            try:
+                chain = await upstox_adapter.get_option_chain(meta.underlying_key, expiry)
+                live_source = "upstox"
+                if not chain.entries:
+                    return None
+                spot_price = float(chain.spot_price or 0.0)
+                strikes = sorted({float(item.strike) for item in chain.entries})
+                if not strikes:
+                    return None
+                atm_strike = min(strikes, key=lambda item: abs(item - spot_price))
+                ce_entry = next(
+                    (item for item in chain.entries if item.option_type == "CE" and float(item.strike) == atm_strike),
+                    None,
+                )
+                pe_entry = next(
+                    (item for item in chain.entries if item.option_type == "PE" and float(item.strike) == atm_strike),
+                    None,
+                )
+                ce_contract = contract_map.get((atm_strike, "CE"))
+                pe_contract = contract_map.get((atm_strike, "PE"))
+            except Exception as exc:
+                logger.debug(f"[ATM watchlist] Upstox expiry fallback failed for {meta.symbol}: {exc}")
+                return None
+
         ce_payload = await self._build_option_payload(
             meta,
             expiry,
@@ -278,11 +394,7 @@ class ATMWatchlistService:
 
         catalog_instrument_key = str((contract or {}).get("instrument_key") or "").strip() or None
         live_instrument_key = str(entry.instrument_key or "").strip() or None
-        instrument_key = (
-            live_instrument_key
-            if source_broker == "fyers" and live_instrument_key
-            else catalog_instrument_key or live_instrument_key
-        )
+        instrument_key = catalog_instrument_key or live_instrument_key
         trading_symbol = str((contract or {}).get("trading_symbol") or "").strip() or None
         technicals = await self._load_technicals(
             underlying=meta.symbol,
@@ -607,6 +719,39 @@ class ATMWatchlistService:
             return date.fromisoformat(str(expiry))
         except ValueError:
             return None
+
+    @staticmethod
+    def _parse_fyers_contract_expiry(symbol: Optional[str], reference_year: int) -> Optional[date]:
+        raw = str(symbol or "").strip()
+        if not raw:
+            return None
+        raw = raw.split(":")[-1]
+        match = re.search(r"(\d{2})([A-Z]{3})\d+(?:\.\d+)?(?:CE|PE)$", raw)
+        if not match:
+            return None
+        day = int(match.group(1))
+        month = _FYERS_MONTHS.get(match.group(2))
+        if not month:
+            return None
+        try:
+            return date(reference_year, month, day)
+        except ValueError:
+            return None
+
+    def _entry_matches_expiry(self, entry: Optional[OptionChainEntry], expiry_date: date) -> bool:
+        if entry is None:
+            return True
+        parsed = self._parse_fyers_contract_expiry(entry.instrument_key, expiry_date.year)
+        if parsed is None:
+            return True
+        return parsed == expiry_date
+
+    def _entries_match_expiry(
+        self,
+        entries: tuple[Optional[OptionChainEntry], Optional[OptionChainEntry]],
+        expiry_date: date,
+    ) -> bool:
+        return all(self._entry_matches_expiry(entry, expiry_date) for entry in entries if entry is not None)
 
     async def _load_underlyings(self) -> list[UnderlyingMeta]:
         statement = text("""

@@ -1,0 +1,32 @@
+{
+  "task_id": "1062f4d7-6fc5-453f-9f1a-2f8410354680",
+  "status": "running",
+  "current_stage": "downloading_candles",
+  "underlyings": [
+    "NIFTY",
+    "SENSEX"
+  ],
+  "interval": "1minute",
+  "total_spot_series": 2,
+  "processed_spot_series": 2,
+  "total_expiries": 105,
+  "processed_expiries": 105,
+  "total_contracts": 31868,
+  "processed_contracts": 5438,
+  "skipped_contracts": 3884,
+  "stored_files": 1024,
+  "stored_spot_files": 2,
+  "stored_candles": 2699705,
+  "stored_spot_candles": 0,
+  "incomplete_contracts": 28,
+  "current_underlying": "SENSEX",
+  "current_expiry": "2025-07-01",
+  "current_symbol": "SENSEX 85000 PE 01 JUL 25",
+  "data_root": "/app/runtime/index_analytics_data",
+  "latest_file": "/app/runtime/index_analytics_data/contracts/underlying=SENSEX/expiry_kind=weekly/expiry=2025-07-01/PE/SENSEX 83800 PE 01 JUL 25.csv.gz",
+  "error": "",
+  "pct": 37.8,
+  "started_at": "2026-04-03T12:52:35.893882+00:00",
+  "finished_at": null,
+  "elapsed_secs": 3318
+}
