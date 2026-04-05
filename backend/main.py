@@ -9,12 +9,15 @@ from loguru import logger
 
 from core.config import settings
 from db.redis_client import get_redis, close_redis
-from api.routers import auth, trading, market, analytics, agent, backtester as backtester_router
+from api.routers import auth, trading, market, analytics, agent, commodity, backtester as backtester_router
 from api.routers import fo_data as fo_data_router
 from api.routers import analysis as analysis_router
+from api.routers import auction_intelligence as auction_intelligence_router
 from api.websockets.ticks import ws_ticks, ws_positions, ws_proposals
 from market_data import data_router as market_data_router
 from market_data.symbols import LIVE_INDEX_APP_SYMBOLS
+from paper_engine.commodity_strategy_agent import commodity_strategy_agent
+from paper_engine.strategy_agent import paper_strategy_agent
 
 
 @asynccontextmanager
@@ -34,7 +37,7 @@ async def lifespan(app: FastAPI):
     try:
         from api.routers.auth import auto_restore_sessions, get_active_adapter
         await auto_restore_sessions()
-        adapter = get_active_adapter()
+        adapter = get_active_adapter("fyers") or get_active_adapter("upstox") or get_active_adapter()
     except Exception as e:
         logger.warning(f"Session auto-restore failed: {e}")
         adapter = None
@@ -56,9 +59,14 @@ async def lifespan(app: FastAPI):
             )
         )
 
+    await paper_strategy_agent.start()
+    await commodity_strategy_agent.start()
+
     yield
 
     # Shutdown
+    await paper_strategy_agent.stop()
+    await commodity_strategy_agent.stop()
     await market_data_router.stop_mock_feed()
     await close_redis()
     await market_data_router.unsubscribe()
@@ -87,9 +95,11 @@ app.include_router(trading.router)
 app.include_router(market.router)
 app.include_router(analytics.router)
 app.include_router(agent.router)
+app.include_router(commodity.router)
 app.include_router(backtester_router.router)
 app.include_router(fo_data_router.router)
 app.include_router(analysis_router.router)
+app.include_router(auction_intelligence_router.router)
 
 
 # ── WebSocket Endpoints ───────────────────────────────────────────────────────

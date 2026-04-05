@@ -11,6 +11,13 @@ APP_TO_BROKER_SYMBOL: dict[str, str] = {
     "NSE:MIDCPNIFTY-INDEX": INDEX_INSTRUMENT_KEYS["MIDCPNIFTY"],
 }
 
+APP_TO_FYERS_SYMBOL: dict[str, str] = {
+    "NSE:NIFTY50-INDEX": "NSE:NIFTY50-INDEX",
+    "NSE:BANKNIFTY-INDEX": "NSE:NIFTYBANK-INDEX",
+    "NSE:FINNIFTY-INDEX": "NSE:FINNIFTY-INDEX",
+    "NSE:MIDCPNIFTY-INDEX": "NSE:MIDCPNIFTY-INDEX",
+}
+
 BROKER_TO_APP_SYMBOL: dict[str, str] = {
     broker_symbol: app_symbol for app_symbol, broker_symbol in APP_TO_BROKER_SYMBOL.items()
 }
@@ -30,7 +37,11 @@ def to_broker_symbol(symbol: str) -> str:
     return APP_TO_BROKER_SYMBOL.get(symbol, symbol)
 
 
+def to_fyers_symbol(symbol: str) -> str:
+    """Translate an app symbol to the equivalent Fyers market symbol when known."""
+    return APP_TO_FYERS_SYMBOL.get(symbol, symbol)
+
+
 def to_app_symbol(symbol: str) -> str:
     """Translate a broker instrument key back to the app symbol when known."""
     return BROKER_TO_APP_SYMBOL.get(symbol, symbol)
-

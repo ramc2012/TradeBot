@@ -65,6 +65,7 @@ The highest-value remaining work is no longer basic plumbing. It is:
 - no OptionsDX/DoltHub ingestion exists
 - no strategy validation report exists against the plan's success criteria
 - walk-forward validation exists in the generic backtester, but the Upstox expired-options research flow has not been carried through a complete validation program yet
+- Greeks Sync / multi-Greek confluence research should remain a separate validation track so it can be compared cleanly against the existing MACD-on-premium thesis
 
 #### Live NSE scanner
 
@@ -144,6 +145,7 @@ Only after the data and strategy path is stable:
 - [ ] complete local NSE research cache backfill
 - [ ] add SQL/report layer for IV, OI change, PCR, volume PCR, and exit-rule analysis
 - [ ] run walk-forward validation on cached NSE data
+- [ ] run Greeks Sync research on the same cached ATM monthly dataset and compare it directly against MACD zero-cross results
 - [ ] define go/no-go report against plan success criteria
 
 ### Next priority

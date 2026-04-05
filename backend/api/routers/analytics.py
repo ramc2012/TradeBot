@@ -98,8 +98,10 @@ async def get_portfolio_greeks():
 
 
 @router.get("/sector-rotation")
-async def get_sector_rotation():
-    return await sector_tracker.get_sector_rotation()
+async def get_sector_rotation(
+    timeframe: str = Query("daily", pattern="^(hourly|daily|weekly|monthly|hour|day|week|month)$"),
+):
+    return await sector_tracker.get_sector_rotation(timeframe)
 
 
 @router.get("/macro-dashboard")

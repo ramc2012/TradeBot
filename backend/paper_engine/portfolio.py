@@ -257,19 +257,24 @@ class PaperPortfolio:
         ]
 
     def get_summary(self) -> dict:
+        def safe_round(value: float, digits: int = 2) -> float | None:
+            if not math.isfinite(value):
+                return None
+            return round(value, digits)
+
         return {
             "session_id": str(self.session_id),
-            "initial_capital": self.initial_capital,
-            "available_capital": round(self.available_capital, 2),
-            "total_equity": round(self.total_equity, 2),
-            "unrealized_pnl": round(self.unrealized_pnl, 2),
-            "realized_pnl": round(self.realized_pnl, 2),
-            "day_pnl": round(self.day_pnl, 2),
+            "initial_capital": safe_round(self.initial_capital, 2),
+            "available_capital": safe_round(self.available_capital, 2),
+            "total_equity": safe_round(self.total_equity, 2),
+            "unrealized_pnl": safe_round(self.unrealized_pnl, 2),
+            "realized_pnl": safe_round(self.realized_pnl, 2),
+            "day_pnl": safe_round(self.day_pnl, 2),
             "total_trades": len(self._trade_history),
-            "win_rate": round(self.win_rate, 4),
-            "avg_win": round(self.avg_win, 2),
-            "avg_loss": round(self.avg_loss, 2),
-            "profit_factor": round(self.profit_factor, 2),
-            "max_drawdown": round(self.max_drawdown, 4),
-            "sharpe_ratio": round(self.sharpe_ratio(), 4),
+            "win_rate": safe_round(self.win_rate, 4),
+            "avg_win": safe_round(self.avg_win, 2),
+            "avg_loss": safe_round(self.avg_loss, 2),
+            "profit_factor": safe_round(self.profit_factor, 2),
+            "max_drawdown": safe_round(self.max_drawdown, 4),
+            "sharpe_ratio": safe_round(self.sharpe_ratio(), 4),
         }

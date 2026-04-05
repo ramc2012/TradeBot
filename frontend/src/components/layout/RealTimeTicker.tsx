@@ -22,20 +22,20 @@ function TickerItem({ symbol }: { symbol: string }) {
   const positive = tick && tick.close > 0 ? tick.ltp >= tick.close : undefined;
 
   return (
-    <div className="min-w-0 rounded-xl border border-bg-border bg-bg-secondary/80 px-3 py-2">
+    <div className="min-w-0 rounded-lg border border-bg-border bg-bg-secondary/80 px-2.5 py-1.5">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <div className="truncate text-[11px] uppercase tracking-[0.14em] text-text-muted">
+          <div className="truncate text-[10px] uppercase tracking-[0.16em] text-text-muted">
             {getMarketIndexLabel(symbol)}
           </div>
-          <div className="mt-1 font-mono text-sm font-semibold text-text-primary">
+          <div className="mt-1 font-mono text-[15px] font-semibold text-text-primary">
             {tick ? tick.ltp.toFixed(2) : "--"}
           </div>
         </div>
         <div className="text-right">
           <div
             className={clsx(
-              "font-mono text-xs font-semibold",
+              "font-mono text-[11px] font-semibold",
               positive === undefined
                 ? "text-text-muted"
                 : positive
@@ -45,7 +45,7 @@ function TickerItem({ symbol }: { symbol: string }) {
           >
             {tick ? formatChangePct(tick.ltp, tick.close) : "Waiting"}
           </div>
-          <div className="text-[11px] text-text-muted">
+          <div className="text-[10px] text-text-muted">
             {tick && tick.high > 0 && tick.low > 0
               ? `H ${tick.high.toFixed(0)} · L ${tick.low.toFixed(0)}`
               : "Live feed"}
@@ -100,7 +100,7 @@ export default function RealTimeTicker() {
   }, [ltpQuery.data, updateTick]);
 
   return (
-    <div className="shrink-0 border-b border-bg-border bg-bg-primary/95 px-3 py-2 backdrop-blur">
+    <div className="shrink-0 border-b border-bg-border bg-bg-primary/95 px-3 py-1.5 backdrop-blur">
       <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
         {MARKET_INDEX_SYMBOLS.map((symbol) => (
           <TickerItem key={symbol} symbol={symbol} />

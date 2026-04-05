@@ -119,6 +119,9 @@ class OptionChainEntry:
     gamma: Optional[float] = None
     theta: Optional[float] = None
     vega: Optional[float] = None
+    prev_oi: Optional[float] = None
+    prev_close: Optional[float] = None
+    instrument_key: Optional[str] = None
 
 
 @dataclass

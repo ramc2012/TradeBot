@@ -1,0 +1,79 @@
+{
+  "generated_at": "2026-04-04T13:47:29.172420+05:30",
+  "source_trades": "/Users/chinnadurairamachandran/Claude Projects/TradingBot/nomad-curie/backend/runtime/index_analytics_data/walkforward_macd_rsi/oos_trades.csv",
+  "starting_equity": 100.0,
+  "timeframes": {
+    "1m": {
+      "opportunities": 124,
+      "win_rate": 0.6048,
+      "avg_return_pct": -16.1076,
+      "median_return_pct": 10.0,
+      "avg_win_return_pct": 17.4392,
+      "avg_loss_return_pct": -67.4547,
+      "avg_holding_minutes": 360.2419,
+      "ending_equity": 0.0,
+      "net_return_pct": -100.0,
+      "max_drawdown_pct": -100.0
+    },
+    "3m": {
+      "opportunities": 14,
+      "win_rate": 0.6429,
+      "avg_return_pct": 6.6177,
+      "median_return_pct": 10.0,
+      "avg_win_return_pct": 16.6667,
+      "avg_loss_return_pct": -11.4705,
+      "avg_holding_minutes": 88.9286,
+      "ending_equity": 212.8896,
+      "net_return_pct": 112.8896,
+      "max_drawdown_pct": -22.0081
+    },
+    "5m": {
+      "opportunities": 270,
+      "win_rate": 0.6741,
+      "avg_return_pct": -4.5911,
+      "median_return_pct": 30.0,
+      "avg_win_return_pct": 28.7091,
+      "avg_loss_return_pct": -73.462,
+      "avg_holding_minutes": 1566.1852,
+      "ending_equity": 0.0,
+      "net_return_pct": -100.0,
+      "max_drawdown_pct": -100.0
+    },
+    "10m": {
+      "opportunities": 4,
+      "win_rate": 0.5,
+      "avg_return_pct": 189.372,
+      "median_return_pct": 48.1634,
+      "avg_win_return_pct": 478.7253,
+      "avg_loss_return_pct": -99.9813,
+      "avg_holding_minutes": 2277.5,
+      "ending_equity": 0.0001,
+      "net_return_pct": -99.9999,
+      "max_drawdown_pct": -100.0
+    },
+    "15m": {
+      "opportunities": 13,
+      "win_rate": 0.3077,
+      "avg_return_pct": -41.4873,
+      "median_return_pct": -75.2795,
+      "avg_win_return_pct": 48.4869,
+      "avg_loss_return_pct": -81.4759,
+      "avg_holding_minutes": 1369.6154,
+      "ending_equity": 0.0,
+      "net_return_pct": -100.0,
+      "max_drawdown_pct": -100.0
+    },
+    "30m": {
+      "opportunities": 0,
+      "win_rate": 0.0,
+      "avg_return_pct": 0.0,
+      "median_return_pct": 0.0,
+      "avg_win_return_pct": 0.0,
+      "avg_loss_return_pct": 0.0,
+      "avg_holding_minutes": 0.0,
+      "ending_equity": 100.0,
+      "net_return_pct": 0.0,
+      "max_drawdown_pct": 0.0
+    }
+  }
+}

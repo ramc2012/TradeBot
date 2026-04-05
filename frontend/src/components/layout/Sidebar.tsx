@@ -2,13 +2,14 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  LayoutDashboard, TrendingUp, BarChart3, Globe, Bot, Settings, FlaskConical, Database, Activity,
+  LayoutDashboard, TrendingUp, BarChart3, Globe, Bot, Settings, FlaskConical, Database, Activity, Boxes,
 } from "lucide-react";
 import { clsx } from "clsx";
 
 const NAV = [
   { href: "/", label: "Home", icon: LayoutDashboard },
   { href: "/trading", label: "Trading", icon: TrendingUp },
+  { href: "/commodity", label: "Commodity", icon: Boxes },
   { href: "/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/market", label: "Market", icon: Globe },
   { href: "/agent", label: "Agent", icon: Bot },

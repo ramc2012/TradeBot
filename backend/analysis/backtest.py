@@ -107,10 +107,21 @@ class MACDBacktester:
         self._spot_series_from: Optional[date] = None
         self._spot_series_to: Optional[date] = None
         self._db_available: Optional[bool] = None
+        self.rate_limit_hits: int = 0
+        self.rate_limit_backoff_seconds: float = 0.0
+        self.api_call_counts: dict[str, int] = defaultdict(int)
 
     def set_access_token(self, access_token: str) -> None:
         self.access_token = access_token
         self.headers["Authorization"] = f"Bearer {access_token}"
+
+    def reset_rate_limit_stats(self) -> None:
+        self.rate_limit_hits = 0
+        self.rate_limit_backoff_seconds = 0.0
+        self.api_call_counts = defaultdict(int)
+
+    def _record_api_call(self, endpoint: str) -> None:
+        self.api_call_counts[endpoint] += 1
 
     # ── Rate limiting ──────────────────────────────────────────────────────────
 
@@ -171,6 +182,7 @@ class MACDBacktester:
         async with self._semaphore:
             await self._throttle()
             async with httpx.AsyncClient(timeout=30.0) as client:
+                self._record_api_call("instrument_search")
                 resp = await client.get(url, params=params, headers=self.headers)
         if resp.status_code != 200:
             logger.debug(
@@ -200,6 +212,7 @@ class MACDBacktester:
         async with self._semaphore:
             await self._throttle()
             async with httpx.AsyncClient(timeout=30.0) as client:
+                self._record_api_call("expired_expiries")
                 resp = await client.get(url, headers=self.headers)
         if resp.status_code != 200:
             logger.debug(
@@ -340,10 +353,12 @@ class MACDBacktester:
             await self._throttle()
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
+                    self._record_api_call("historical_day")
                     resp = await client.get(url, headers=self.headers)
 
                 if resp.status_code in (400, 401, 403):
                     async with httpx.AsyncClient(timeout=30.0) as client:
+                        self._record_api_call("historical_day")
                         resp = await client.get(url, headers={"Accept": "application/json"})
 
                 if resp.status_code != 200:
@@ -532,6 +547,7 @@ class MACDBacktester:
             await self._throttle()
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
+                    self._record_api_call("expired_contracts")
                     resp = await client.get(url, headers=self.headers)
 
                 if resp.status_code == 200:
@@ -684,15 +700,18 @@ class MACDBacktester:
             await self._throttle()
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
+                    self._record_api_call("expired_historical_candle" if is_expired_key else "historical_candle")
                     resp = await client.get(url, headers=self.headers)
 
                 if resp.status_code == 429:
+                    self.rate_limit_hits += 1
                     if retry_count >= MAX_429_RETRIES:
                         logger.warning(
                             f"Skipping {instrument_key} after {retry_count} rate-limit retries"
                         )
                         return []
                     backoff = min(30, 5 * (retry_count + 1))
+                    self.rate_limit_backoff_seconds += backoff
                     logger.warning(
                         f"Rate limited for {instrument_key} — sleeping {backoff}s "
                         f"(retry {retry_count + 1}/{MAX_429_RETRIES})"
@@ -712,6 +731,7 @@ class MACDBacktester:
                         f"Auth error {resp.status_code} for {instrument_key} — retrying without auth"
                     )
                     async with httpx.AsyncClient(timeout=30.0) as client:
+                        self._record_api_call("historical_candle")
                         resp = await client.get(url, headers={"Accept": "application/json"})
 
                 if is_expired_key and resp.status_code in (401, 403):

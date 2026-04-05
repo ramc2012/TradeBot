@@ -31,6 +31,12 @@ export const connectFivepaisa = (totp: string) =>
   api.post("/api/auth/fivepaisa/connect", { totp });
 export const disconnectBroker = (broker: string) =>
   api.post("/api/auth/disconnect-broker", null, { params: { broker } });
+export const getTelegramSettings = () => api.get("/api/auth/telegram-settings");
+export const saveTelegramSettings = (payload: object) => api.post("/api/auth/telegram-settings", payload);
+export const discoverTelegramChats = (bot_token = "") =>
+  api.post("/api/auth/telegram-discover-chats", { bot_token });
+export const sendTelegramTest = (message = "") =>
+  api.post("/api/auth/telegram-test", { message });
 
 // ── Trading ───────────────────────────────────────────────────────────────
 export const placeOrder = (order: object) => api.post("/api/trading/orders", order);
@@ -41,13 +47,49 @@ export const getTrades = () => api.get("/api/trading/trades");
 export const setMode = (mode: string, broker?: string) =>
   api.post("/api/trading/mode", { mode, broker });
 export const killSwitch = () => api.post("/api/trading/kill-switch");
+export const getTradingKillSwitchStatus = () => api.get("/api/trading/kill-switch");
+export const updateTradingKillSwitch = (active: boolean) =>
+  api.put("/api/trading/kill-switch", { active });
 export const getPortfolioSummary = () => api.get("/api/trading/portfolio-summary");
+export const getStrategyAgentStatus = () => api.get("/api/trading/strategy-agent/status");
+export const runStrategyAgentOnce = (force = true) =>
+  api.post("/api/trading/strategy-agent/run-once", null, { params: { force } });
 export const getRiskStatus = () => api.get("/api/trading/risk-status");
 export const updateRiskConfig = (config: object) => api.put("/api/trading/risk-config", config);
+
+// ── Commodity ─────────────────────────────────────────────────────────────
+export const getCommodityStrategyStatus = () => api.get("/api/commodity/strategy-agent/status");
+export const startCommodityStrategyAgent = () => api.post("/api/commodity/strategy-agent/start");
+export const runCommodityStrategyOnce = (force = true) =>
+  api.post("/api/commodity/strategy-agent/run-once", null, { params: { force } });
+export const updateCommodityStrategyConfig = (symbols: string[]) =>
+  api.put("/api/commodity/strategy-agent/config", { symbols });
+export const getCommodityStrategyContracts = () =>
+  api.get("/api/commodity/strategy-agent/contracts");
+export const updateCommodityStrategyContracts = (selectedOptionExpiries: Record<string, string>) =>
+  api.put("/api/commodity/strategy-agent/contracts", { selected_option_expiries: selectedOptionExpiries });
+export const getCommodityKillSwitchStatus = () => api.get("/api/commodity/kill-switch");
+export const updateCommodityKillSwitch = (active: boolean) =>
+  api.put("/api/commodity/kill-switch", { active });
+export const getCommodityOrders = (limit?: number) =>
+  api.get("/api/commodity/orders", { params: { limit } });
+export const getCommodityPositions = () => api.get("/api/commodity/positions");
+export const getCommodityReports = (limit?: number) =>
+  api.get("/api/commodity/reports", { params: { limit } });
+export const getCommodityATMWatchlistExpiries = () =>
+  api.get("/api/commodity/atm-watchlist/expiries");
+export const getCommodityATMWatchlist = (expiry?: string) =>
+  api.get("/api/commodity/atm-watchlist", { params: { expiry } });
 
 // ── Market ────────────────────────────────────────────────────────────────
 export const getOptionChain = (symbol: string, expiry?: string) =>
   api.get(`/api/market/option-chain/${encodeURIComponent(symbol)}`, { params: { expiry } });
+export const getOptionExpiries = (symbol: string) =>
+  api.get(`/api/market/expiries/${encodeURIComponent(symbol)}`);
+export const getATMWatchlistExpiries = () =>
+  api.get("/api/market/atm-watchlist/expiries");
+export const getATMWatchlist = (expiry?: string) =>
+  api.get("/api/market/atm-watchlist", { params: { expiry } });
 export const getMarketProfile = (symbol: string, timeframe = "daily") =>
   api.get(`/api/market/market-profile/${encodeURIComponent(symbol)}`, { params: { timeframe } });
 export const getIVRank = (symbol: string) => api.get(`/api/market/iv-rank/${encodeURIComponent(symbol)}`);
@@ -65,7 +107,8 @@ export const getPerformance = (period = "today") =>
 export const getEquityCurve = () => api.get("/api/analytics/equity-curve");
 export const getCalendarHeatmap = () => api.get("/api/analytics/calendar-heatmap");
 export const getPortfolioGreeks = () => api.get("/api/analytics/portfolio-greeks");
-export const getSectorRotation = () => api.get("/api/analytics/sector-rotation");
+export const getSectorRotation = (timeframe = "daily") =>
+  api.get("/api/analytics/sector-rotation", { params: { timeframe } });
 export const getMacroDashboard = () => api.get("/api/analytics/macro-dashboard");
 
 // ── Agent ─────────────────────────────────────────────────────────────────
@@ -90,6 +133,7 @@ export const getAnalysisBrokerStatus = () => api.get("/api/analysis/broker-statu
 export const getFoUnderlyings = () => api.get("/api/analysis/fo-underlyings");
 export const getResearchCacheStatus = () => api.get("/api/analysis/research-cache-status");
 export const getLatestValidationReport = () => api.get("/api/analysis/validation-report/latest");
+export const getLatestGreeksSyncReport = () => api.get("/api/analysis/greeks-sync-report/latest");
 export const getAllCredsStatus = () => api.get("/api/auth/all-credentials-status");
 
 // ── Backtester ────────────────────────────────────────────────────────────

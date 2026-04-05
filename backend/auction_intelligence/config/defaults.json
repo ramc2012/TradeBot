@@ -1,0 +1,83 @@
+{
+  "mvp_scope": {
+    "primary_underlyings": ["NIFTY"],
+    "secondary_underlyings": ["BANKNIFTY"],
+    "instrument_type": "futures",
+    "session": {
+      "timezone": "Asia/Kolkata",
+      "open": "09:15",
+      "close": "15:30"
+    },
+    "latency_budget_ms": 500,
+    "slippage_bps": 1.5,
+    "commission_bps": 0.5
+  },
+  "market_profile": {
+    "period_minutes": 30,
+    "tick_size": 0.5,
+    "value_area_pct": 0.7,
+    "initial_balance_periods": 2,
+    "min_tail_tpos": 2,
+    "balance_overlap_min": 0.65,
+    "trend_day_extension_min": 0.3,
+    "trend_close_extreme_min": 0.8,
+    "breakout_acceptance_overlap_max": 0.45
+  },
+  "order_flow": {
+    "trade_lookback": 50,
+    "baseline_window": 120,
+    "spread_normalizer_ticks": 2.0,
+    "volatility_burst_threshold": 1.5
+  },
+  "regime": {
+    "balance_overlap_min": 0.7,
+    "developing_balance_overlap_min": 0.55,
+    "breakout_acceptance_overlap_max": 0.45,
+    "trend_day_extension_min": 0.3,
+    "trend_close_extreme_min": 0.8,
+    "no_trade_confidence_max": 0.55
+  },
+  "agents": {
+    "positional": {
+      "enabled": true,
+      "sleeve_fraction": 0.45,
+      "min_confidence": 0.7,
+      "risk_multiple": 2.5,
+      "lot_size": 25
+    },
+    "swing": {
+      "enabled": true,
+      "sleeve_fraction": 0.35,
+      "min_confidence": 0.62,
+      "risk_multiple": 2.0,
+      "lot_size": 25
+    },
+    "scalp": {
+      "enabled": true,
+      "sleeve_fraction": 0.2,
+      "min_confidence": 0.68,
+      "risk_multiple": 1.2,
+      "lot_size": 25
+    }
+  },
+  "meta_controller": {
+    "mode": "sleeve",
+    "hierarchy": ["positional", "swing", "scalp"],
+    "allow_countertrend_scalp_in_balance": true
+  },
+  "risk": {
+    "max_daily_loss": 75000.0,
+    "max_agent_drawdown": 0.08,
+    "max_symbol_exposure": 0.35,
+    "max_correlated_exposure": 0.55,
+    "max_concurrent_positions": 3,
+    "session_close_buffer_minutes": 15,
+    "stale_data_seconds": 10,
+    "min_model_confidence": 0.55
+  },
+  "paper_trading": {
+    "journal_root": "backend/runtime/auction_intelligence",
+    "slippage_bps": 1.0,
+    "fees_per_order": 20.0
+  }
+}

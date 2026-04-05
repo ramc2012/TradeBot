@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     # Telegram
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""
+    TELEGRAM_REPORTS_ENABLED: bool = False
+    TELEGRAM_REPORT_INTERVAL: str = "1h"
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod

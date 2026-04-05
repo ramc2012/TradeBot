@@ -10,8 +10,9 @@ import {
 import {
   startMacdBacktest, getMacdBacktestStatus, getMacdBacktestResults,
   listMacdBacktestTasks, getAnalysisBrokerStatus, getFoUnderlyings,
-  getResearchCacheStatus, getLatestValidationReport, API_URL,
+  getResearchCacheStatus, getLatestValidationReport, getLatestGreeksSyncReport, API_URL,
 } from "@/lib/api";
+import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -62,6 +63,9 @@ interface ResearchSymbol {
   kind: string;
   stage: "queued" | "metadata" | "spot" | "contracts" | "populating" | "populated";
   progress_pct: number;
+  research_ready: boolean;
+  research_contract_target: number;
+  research_contracts_processed: number;
   active_now: boolean;
   total_expiries: number;
   discovered_expiries: number;
@@ -90,6 +94,8 @@ interface ResearchCacheStatus {
     contracts_complete: number;
     contracts_pending: number;
     contracts_empty: number;
+    research_contract_target: number;
+    research_contracts_processed: number;
     option_contracts: number;
     option_candles: number;
     active_symbols: number;
@@ -106,7 +112,7 @@ interface ResearchCacheStatus {
     empty_contracts_touched_last_30m: number;
   };
   scheduler: {
-    state: "idle" | "running" | "waiting" | "rate_limit_cooldown";
+    state: "idle" | "running" | "waiting" | "rate_limit_cooldown" | "stalled";
     label: string;
     detail: string;
     pause_assumed: boolean;
@@ -118,6 +124,8 @@ interface ResearchCacheStatus {
     estimated_window_available_pct: number | null;
     estimated_window_used_pct: number | null;
     last_batch_activity_at: string | null;
+    last_run_started_at?: string | null;
+    last_run_completed_at?: string | null;
   };
   symbols: ResearchSymbol[];
 }
@@ -176,6 +184,64 @@ interface ValidationReportPayload {
   source_updated_at?: string | null;
   summary?: ValidationReportSummary;
   markdown_preview?: string;
+  files?: {
+    report_markdown_url?: string;
+    summary_json_url?: string;
+    trades_csv_url?: string;
+    coverage_csv_url?: string;
+    chain_summary_csv_url?: string;
+  };
+}
+
+interface GreeksSyncTrackRow {
+  track: string;
+  trades: number;
+  avg_oracle_best_exit_return_pct: number;
+  avg_max_return_pct: number;
+  avg_hold_to_expiry_return_pct: number;
+  positive_pct: number;
+}
+
+interface GreeksSyncStrategyRow {
+  strategy: string;
+  trades: number;
+  avg_return_pct: number;
+  median_return_pct: number;
+  positive_pct: number;
+}
+
+interface GreeksSyncReportPayload {
+  available: boolean;
+  live?: boolean;
+  detail?: string;
+  report_key?: string;
+  generated_at?: string | null;
+  source_updated_at?: string | null;
+  summary?: {
+    generated_at: string;
+    coverage: {
+      underlyings_with_option_data: number;
+      atm_monthly_pairs: number;
+      complete_cached_contracts: number;
+      cached_option_candles: number;
+    };
+    signals: {
+      total_signals: number;
+      strong_signals: number;
+      avg_score: number;
+      median_score: number;
+      avg_theta_overwhelm_ratio: number;
+      macd_confirmed_pct: number;
+    };
+    comparison: {
+      track_ranking: GreeksSyncTrackRow[];
+    };
+    exit_analysis: {
+      best_strategy: string;
+      best_strategy_avg_return_pct: number;
+      strategy_ranking: GreeksSyncStrategyRow[];
+    };
+  };
   files?: {
     report_markdown_url?: string;
     summary_json_url?: string;
@@ -260,6 +326,27 @@ function getErrorDetail(error: unknown) {
   return (error as any)?.response?.data?.detail || (error as Error)?.message || "Could not load cache status";
 }
 
+function SnapshotBanner({
+  message,
+  snapshotSavedAt,
+}: {
+  message: string;
+  snapshotSavedAt?: string | null;
+}) {
+  return (
+    <div className="rounded border border-accent-amber/30 bg-accent-amber/5 p-3 text-xs text-text-muted">
+      <div className="flex items-center gap-2 text-accent-amber">
+        <AlertCircle size={12} />
+        <span className="font-medium">Showing last successful snapshot</span>
+      </div>
+      <div className="mt-1">
+        {message}
+        {snapshotSavedAt && ` · saved ${formatRelativeTime(snapshotSavedAt)} (${formatLocalTimestamp(snapshotSavedAt)})`}
+      </div>
+    </div>
+  );
+}
+
 function stageTone(stage: ResearchSymbol["stage"]) {
   switch (stage) {
     case "populated":
@@ -279,46 +366,74 @@ function stageTone(stage: ResearchSymbol["stage"]) {
 
 function buildFallbackResearchScheduler(nowMs: number, pauseStartedAt: number | null) {
   const pollMinutes = 30;
-  const cooldownMinutes = 10;
-  const effectivePauseStart = pauseStartedAt ?? nowMs;
-  const nextBatchAtMs = effectivePauseStart + cooldownMinutes * 60_000;
+  const effectiveRefreshStart = pauseStartedAt ?? nowMs;
+  const nextBatchAtMs = effectiveRefreshStart + pollMinutes * 60_000;
   const secondsUntilNextBatch = Math.max(0, Math.ceil((nextBatchAtMs - nowMs) / 1000));
-  const estimatedWindowAvailablePct = Math.min(
-    100,
-    Math.max(0, Number((((cooldownMinutes * 60 - secondsUntilNextBatch) / (cooldownMinutes * 60)) * 100).toFixed(1))),
-  );
 
   return {
-    state: "rate_limit_cooldown" as const,
-    label: "Aggregation paused due to rate limit",
-    detail: `Status polling timed out. Assuming the Upstox ${pollMinutes}-minute request window is cooling down before the next batch resumes.`,
-    pause_assumed: true,
+    state: "waiting" as const,
+    label: "Live status refresh delayed",
+    detail: `Status polling timed out. The worker may still be running, but the latest scheduler state could not be confirmed.`,
+    pause_assumed: false,
     poll_minutes: pollMinutes,
     rate_limit_window_minutes: pollMinutes,
-    cooldown_minutes: cooldownMinutes,
+    cooldown_minutes: Math.max(1, Math.floor(pollMinutes / 3)),
     next_batch_at: new Date(nextBatchAtMs).toISOString(),
     seconds_until_next_batch: secondsUntilNextBatch,
-    estimated_window_available_pct: estimatedWindowAvailablePct,
-    estimated_window_used_pct: Number((100 - estimatedWindowAvailablePct).toFixed(1)),
+    estimated_window_available_pct: null,
+    estimated_window_used_pct: null,
     last_batch_activity_at: pauseStartedAt ? new Date(pauseStartedAt).toISOString() : null,
+    last_run_started_at: null,
+    last_run_completed_at: null,
+  };
+}
+
+function normaliseSnapshotScheduler(scheduler: ResearchCacheStatus["scheduler"], isSnapshot: boolean) {
+  if (!isSnapshot || scheduler.state !== "rate_limit_cooldown") {
+    return scheduler;
+  }
+
+  return {
+    ...scheduler,
+    state: "waiting" as const,
+    label: "Showing cached scheduler snapshot",
+    detail: "The last live refresh failed, so the previous cooldown state may be stale. Wait for the next successful poll to confirm current ingestion status.",
+    pause_assumed: false,
   };
 }
 
 // ── BrokerStatusCard ────────────────────────────────────────────────────────────
 
 function BrokerStatusCard() {
-  const { data, isLoading } = useQuery({
+  const {
+    data,
+    error,
+    isError,
+    isLoading,
+    isShowingSnapshot,
+    snapshotSavedAt,
+  } = usePersistentSnapshotQuery({
     queryKey: ["analysisBrokerStatus"],
     queryFn: () => getAnalysisBrokerStatus().then(r => r.data),
     refetchInterval: 10000,
     staleTime: 5000,
+    storageKey: "analysis:broker-status",
   });
 
-  if (isLoading) return (
+  if (isLoading && !data) return (
     <div className="card p-3 flex items-center gap-2 text-xs text-text-muted">
       <Loader2 size={12} className="animate-spin" /> Checking broker connections…
     </div>
   );
+
+  if (!data) {
+    return (
+      <div className="card p-3 flex items-center gap-2 text-xs text-accent-red">
+        <AlertCircle size={12} />
+        {getErrorDetail(error)}
+      </div>
+    );
+  }
 
   const upstoxOk = data?.upstox_connected;
   const upstoxReady = data?.upstox_ready ?? upstoxOk;
@@ -344,6 +459,12 @@ function BrokerStatusCard() {
 
   return (
     <div className="space-y-2">
+      {isShowingSnapshot && (
+        <SnapshotBanner
+          message={getErrorDetail(error)}
+          snapshotSavedAt={snapshotSavedAt}
+        />
+      )}
       {/* Upstox row */}
       <div className={clsx(
         "card p-3 flex items-start justify-between gap-3 text-xs",
@@ -417,10 +538,17 @@ function RunForm({ onStarted }: { onStarted: (taskId: string) => void }) {
   const [toDate] = useState(() => new Date().toISOString().split("T")[0]);
   const [error, setError] = useState("");
 
-  const { data: brokerStatus } = useQuery({
+  const {
+    data: brokerStatus,
+    error: brokerStatusError,
+    isError: brokerStatusUnavailable,
+    isShowingSnapshot: showingBrokerSnapshot,
+    snapshotSavedAt: brokerSnapshotSavedAt,
+  } = usePersistentSnapshotQuery({
     queryKey: ["analysisBrokerStatus"],
     queryFn: () => getAnalysisBrokerStatus().then(r => r.data),
     staleTime: 5000,
+    storageKey: "analysis:broker-status",
   });
 
   const { data: foData, isLoading: loadingFo } = useQuery({
@@ -458,7 +586,8 @@ function RunForm({ onStarted }: { onStarted: (taskId: string) => void }) {
     onError: (e: any) => setError(e?.response?.data?.detail || "Failed to start"),
   });
 
-  const isReady = brokerStatus?.upstox_ready ?? brokerStatus?.upstox_connected;
+  const lastKnownReady = brokerStatus?.upstox_ready ?? brokerStatus?.upstox_connected;
+  const isReady = !brokerStatusUnavailable && lastKnownReady;
   const tokenMessage = brokerStatus?.upstox_token_health?.message;
 
   return (
@@ -541,6 +670,19 @@ function RunForm({ onStarted }: { onStarted: (taskId: string) => void }) {
         </div>
       )}
 
+      {showingBrokerSnapshot && (
+        <div className="flex items-start gap-2 text-xs text-accent-amber bg-accent-amber/5 border border-accent-amber/20 rounded p-2">
+          <AlertCircle size={12} className="mt-0.5 shrink-0" />
+          <span>
+            Live broker verification is unavailable. Last known Upstox state was{" "}
+            <strong className="text-accent-amber">{lastKnownReady ? "ready" : "not ready"}</strong>.
+            {" "}
+            {getErrorDetail(brokerStatusError)}
+            {brokerSnapshotSavedAt && ` · saved ${formatRelativeTime(brokerSnapshotSavedAt)}`}
+          </span>
+        </div>
+      )}
+
       <button
         onClick={() => mut.mutate()}
         disabled={mut.isPending || !isReady || (mode === "custom" && customSelected.length === 0)}
@@ -551,7 +693,9 @@ function RunForm({ onStarted }: { onStarted: (taskId: string) => void }) {
 
       {!isReady && (
         <p className="text-xs text-accent-red text-center">
-          {tokenMessage || "Connect Upstox in Settings first to enable the backtest."}
+          {brokerStatusUnavailable
+            ? "Live Upstox status is unavailable, so starting a new backtest is disabled until the broker check recovers."
+            : (tokenMessage || "Connect Upstox in Settings first to enable the backtest.")}
         </p>
       )}
     </div>
@@ -651,11 +795,21 @@ function PopulationMonitor() {
   const [fallbackPauseStartedAt, setFallbackPauseStartedAt] = useState<number | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
-  const { data, isLoading, isError, error, refetch, isFetching } = useQuery<ResearchCacheStatus>({
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+    refetch,
+    isFetching,
+    isShowingSnapshot,
+    snapshotSavedAt,
+  } = usePersistentSnapshotQuery<ResearchCacheStatus>({
     queryKey: ["researchCacheStatus"],
     queryFn: () => getResearchCacheStatus().then(r => r.data),
     refetchInterval: 5000,
     staleTime: 2000,
+    storageKey: "analysis:research-cache-status",
   });
 
   useEffect(() => {
@@ -672,16 +826,16 @@ function PopulationMonitor() {
   }, [data, isError]);
 
   const fallbackScheduler = buildFallbackResearchScheduler(nowMs, fallbackPauseStartedAt);
-  const scheduler = isError
-    ? (data?.scheduler?.state === "rate_limit_cooldown" ? data.scheduler : fallbackScheduler)
-    : (data?.scheduler ?? fallbackScheduler);
+  const scheduler = !data
+    ? fallbackScheduler
+    : normaliseSnapshotScheduler(data.scheduler ?? fallbackScheduler, isShowingSnapshot);
   const estimatedAvailablePct = scheduler.estimated_window_available_pct;
   const estimatedUsedPct = scheduler.estimated_window_used_pct;
   const countdownLabel = formatCountdown(scheduler.seconds_until_next_batch);
-  const showPauseBanner = scheduler.state === "rate_limit_cooldown" || isError;
+  const showPauseBanner = !isShowingSnapshot && scheduler.state === "rate_limit_cooldown";
   const errorDetail = getErrorDetail(error);
 
-  if (isLoading) {
+  if (isLoading && !data) {
     return (
       <div className="card p-4 flex items-center gap-2 text-xs text-text-muted">
         <Loader2 size={12} className="animate-spin" /> Loading research cache status…
@@ -718,30 +872,54 @@ function PopulationMonitor() {
   }
 
   const { summary, symbols } = data;
-  const processedContracts = summary.contracts_complete + summary.contracts_empty;
+  const processedContracts = summary.research_contracts_processed;
   const expiryPct = summary.universe_total ? (summary.underlyings_with_expiries / summary.universe_total) * 100 : 0;
   const spotPct = summary.universe_total ? (summary.underlyings_with_spot / summary.universe_total) * 100 : 0;
   const selectionPct = summary.expiry_total ? (summary.selection_spots_ready / summary.expiry_total) * 100 : 0;
   const discoveryPct = summary.expiry_total ? (summary.expiries_discovered / summary.expiry_total) * 100 : 0;
-  const syncPct = summary.contracts_total ? (processedContracts / summary.contracts_total) * 100 : 0;
+  const syncPct = summary.research_contract_target ? (processedContracts / summary.research_contract_target) * 100 : 0;
+  const schedulerTone = scheduler.state === "running"
+    ? "border-accent-blue/30 bg-accent-blue/5 text-accent-blue"
+    : scheduler.state === "stalled"
+      ? "border-accent-red/30 bg-accent-red/5 text-accent-red"
+    : scheduler.state === "waiting"
+      ? "border-accent-amber/30 bg-accent-amber/5 text-accent-amber"
+      : scheduler.state === "rate_limit_cooldown"
+        ? "border-accent-amber/30 bg-accent-amber/5 text-accent-amber"
+        : "border-bg-border bg-bg-secondary text-text-secondary";
+  const schedulerMeta = scheduler.state === "running"
+    ? `started ${formatRelativeTime(scheduler.last_run_started_at)}`
+    : scheduler.state === "stalled"
+      ? scheduler.next_batch_at
+        ? `overdue since ${formatLocalTimestamp(scheduler.next_batch_at)}`
+        : `last completed ${formatRelativeTime(scheduler.last_run_completed_at)}`
+    : scheduler.next_batch_at
+      ? `next batch ${formatLocalTimestamp(scheduler.next_batch_at)}`
+      : `last completed ${formatRelativeTime(scheduler.last_run_completed_at)}`;
 
   const activeQueue = symbols
-    .filter(s => s.active_now || ["metadata", "spot", "contracts", "populating"].includes(s.stage))
+    .filter(s => !s.research_ready && (s.active_now || ["metadata", "spot", "contracts", "populating"].includes(s.stage)))
     .sort((a, b) => {
       const timeA = a.last_activity_at ? new Date(a.last_activity_at).getTime() : 0;
       const timeB = b.last_activity_at ? new Date(b.last_activity_at).getTime() : 0;
       return timeB - timeA || b.progress_pct - a.progress_pct || a.symbol.localeCompare(b.symbol);
     });
 
-  const availableLocally = symbols
-    .filter(s => s.option_candles > 0)
+  const researchReadySymbols = symbols
+    .filter(s => s.research_ready)
     .sort((a, b) => b.option_candles - a.option_candles || b.complete_contracts - a.complete_contracts || a.symbol.localeCompare(b.symbol));
 
   const activeVisible = showAllActive ? activeQueue : activeQueue.slice(0, 12);
-  const availableVisible = showAllAvailable ? availableLocally : availableLocally.slice(0, 12);
+  const availableVisible = showAllAvailable ? researchReadySymbols : researchReadySymbols.slice(0, 12);
 
   return (
     <div className="card p-5 space-y-4">
+      {isShowingSnapshot && (
+        <SnapshotBanner
+          message={`Research cache polling is unavailable. ${errorDetail}`}
+          snapshotSavedAt={snapshotSavedAt}
+        />
+      )}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-2">
           <Database size={15} className="text-accent-blue" />
@@ -764,6 +942,21 @@ function PopulationMonitor() {
           <button onClick={() => refetch()} className="text-text-muted hover:text-text-primary">
             <RefreshCw size={12} />
           </button>
+        </div>
+      </div>
+
+      <div className={clsx("rounded border p-3", schedulerTone)}>
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <div className="text-sm font-semibold">{scheduler.label}</div>
+            <div className="mt-1 text-xs text-text-muted">{scheduler.detail}</div>
+          </div>
+          <div className="text-right text-xs">
+            <div className="font-medium">{schedulerMeta}</div>
+            {scheduler.state === "rate_limit_cooldown" && (
+              <div className="text-text-muted">resume in {countdownLabel}</div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -820,9 +1013,9 @@ function PopulationMonitor() {
         <StatCard label="Universe" value={summary.universe_total} sub={`${summary.underlyings_with_expiries} metadata ready`} color="text-text-primary" />
         <StatCard label="Spot Synced" value={summary.underlyings_with_spot} sub={`${summary.selection_spots_ready} selection bars`} color="text-accent-blue" />
         <StatCard
-          label="Contracts Synced"
-          value={summary.contracts_complete}
-          sub={`${summary.complete_contracts_touched_last_30m} complete vs ${summary.empty_contracts_touched_last_30m} empty in 30m`}
+          label="Research Ready"
+          value={summary.populated_symbols}
+          sub={`${summary.research_contracts_processed}/${summary.research_contract_target || 0} required contracts synced`}
           color="text-accent-green"
         />
         <StatCard
@@ -841,7 +1034,7 @@ function PopulationMonitor() {
         </div>
         <div className="space-y-2">
           <ProgressBar pct={discoveryPct} label={`Contract discovery · ${summary.expiries_discovered}/${summary.expiry_total || 0} expiry buckets`} />
-          <ProgressBar pct={syncPct} label={`Contract sync · ${processedContracts}/${summary.contracts_total || 0} processed`} />
+          <ProgressBar pct={syncPct} label={`Research sync target · ${processedContracts}/${summary.research_contract_target || 0} required contracts`} />
           <div className="flex flex-wrap gap-1.5 pt-1">
             {Object.entries(summary.stage_counts ?? {}).map(([stage, count]) => (
               <span key={stage} className={clsx("px-2 py-0.5 rounded border text-[11px] uppercase tracking-wide", stageTone(stage as ResearchSymbol["stage"]))}>
@@ -878,7 +1071,7 @@ function PopulationMonitor() {
                       {symbol.active_now && <span className="text-[10px] text-accent-green">active now</span>}
                     </div>
                     <div className="text-xs text-text-muted">
-                      {symbol.complete_contracts}/{symbol.total_contracts || 0} complete contracts · {formatCompactNumber(symbol.option_candles)} candles · {symbol.pending_contracts} pending
+                      {symbol.research_contracts_processed}/{symbol.research_contract_target || 0} required · {formatCompactNumber(symbol.option_candles)} candles · {symbol.pending_contracts} backlog
                     </div>
                   </div>
                   <div className="text-right text-xs text-text-muted shrink-0">
@@ -900,11 +1093,11 @@ function PopulationMonitor() {
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <div className="text-xs font-semibold text-text-secondary uppercase tracking-wide">
-              Available Locally ({availableLocally.length})
+              Research Ready ({researchReadySymbols.length})
             </div>
-            {availableLocally.length > 12 && (
+            {researchReadySymbols.length > 12 && (
               <button onClick={() => setShowAllAvailable(v => !v)} className="text-xs text-accent-blue hover:underline">
-                {showAllAvailable ? "Show Less" : `Show All (${availableLocally.length})`}
+                {showAllAvailable ? "Show Less" : `Show All (${researchReadySymbols.length})`}
               </button>
             )}
           </div>
@@ -920,7 +1113,7 @@ function PopulationMonitor() {
                     </span>
                   </div>
                   <div className="text-xs text-text-muted">
-                    {symbol.option_contracts} local contracts · {symbol.complete_contracts} complete · {formatCompactNumber(symbol.option_candles)} candles
+                    {symbol.option_contracts} local contracts · {symbol.research_contracts_processed}/{symbol.research_contract_target || 0} required · {formatCompactNumber(symbol.option_candles)} candles
                   </div>
                 </div>
                 <div className="text-right text-xs text-text-muted shrink-0">
@@ -929,9 +1122,9 @@ function PopulationMonitor() {
                 </div>
               </div>
             ))}
-            {!availableLocally.length && (
+            {!researchReadySymbols.length && (
               <div className="text-xs text-text-muted border border-dashed border-bg-border rounded p-3">
-                No option contracts have been cached locally yet.
+                No symbols are research-ready yet. Partial cache coverage is still being built in the left column.
               </div>
             )}
           </div>
@@ -942,15 +1135,25 @@ function PopulationMonitor() {
 }
 
 function ValidationReportPanel() {
-  const { data, isLoading, isError, error, refetch, isFetching } = useQuery<ValidationReportPayload>({
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+    refetch,
+    isFetching,
+    isShowingSnapshot,
+    snapshotSavedAt,
+  } = usePersistentSnapshotQuery<ValidationReportPayload>({
     queryKey: ["latestValidationReport"],
     queryFn: () => getLatestValidationReport().then(r => r.data),
     staleTime: 5000,
     refetchInterval: 15000,
     refetchOnWindowFocus: false,
+    storageKey: "analysis:validation-report",
   });
 
-  if (isLoading) {
+  if (isLoading && !data) {
     return (
       <div className="card p-4 flex items-center gap-2 text-xs text-text-muted">
         <Loader2 size={12} className="animate-spin" /> Loading validation report…
@@ -958,7 +1161,7 @@ function ValidationReportPanel() {
     );
   }
 
-  if (isError) {
+  if (isError && !data) {
     return (
       <div className="card p-4 space-y-2">
         <div className="flex items-center gap-2 text-sm font-semibold text-accent-red">
@@ -974,6 +1177,12 @@ function ValidationReportPanel() {
   if (!data?.available || !data.summary) {
     return (
       <div className="card p-4 space-y-2">
+        {isShowingSnapshot && (
+          <SnapshotBanner
+            message={`Validation report refresh failed. ${getErrorDetail(error)}`}
+            snapshotSavedAt={snapshotSavedAt}
+          />
+        )}
         <div className="flex items-center gap-2 text-sm font-semibold text-text-secondary">
           <FileText size={14} className="text-accent-blue" /> Live Validation Report
         </div>
@@ -991,6 +1200,12 @@ function ValidationReportPanel() {
 
   return (
     <div className="card p-5 space-y-4">
+      {isShowingSnapshot && (
+        <SnapshotBanner
+          message={`Validation report refresh failed. ${getErrorDetail(error)}`}
+          snapshotSavedAt={snapshotSavedAt}
+        />
+      )}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-2">
           <FileText size={15} className="text-accent-amber" />
@@ -1111,6 +1326,186 @@ function ValidationReportPanel() {
                 <div className="text-right space-y-1">
                   <ReturnBadge pct={Number(row.avg_oracle_best_exit_return_pct ?? 0)} />
                   <div className="text-text-muted">{Number(row.oracle_positive_pct ?? 0).toFixed(2)}% positive</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GreeksSyncReportPanel() {
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+    refetch,
+    isFetching,
+    isShowingSnapshot,
+    snapshotSavedAt,
+  } = usePersistentSnapshotQuery<GreeksSyncReportPayload>({
+    queryKey: ["latestGreeksSyncReport"],
+    queryFn: () => getLatestGreeksSyncReport().then(r => r.data),
+    staleTime: 5000,
+    refetchInterval: 15000,
+    refetchOnWindowFocus: false,
+    storageKey: "analysis:greeks-sync-report",
+  });
+
+  if (isLoading && !data) {
+    return (
+      <div className="card p-4 flex items-center gap-2 text-xs text-text-muted">
+        <Loader2 size={12} className="animate-spin" /> Loading Greeks Sync research…
+      </div>
+    );
+  }
+
+  if (isError && !data) {
+    return (
+      <div className="card p-4 space-y-2">
+        <div className="flex items-center gap-2 text-sm font-semibold text-accent-red">
+          <AlertCircle size={14} /> Greeks Sync Report Unavailable
+        </div>
+        <div className="text-xs text-text-muted">
+          {(error as any)?.response?.data?.detail || (error as Error)?.message || "Could not load Greeks Sync report"}
+        </div>
+      </div>
+    );
+  }
+
+  if (!data?.available || !data.summary) {
+    return (
+      <div className="card p-4 space-y-2">
+        {isShowingSnapshot && (
+          <SnapshotBanner
+            message={`Greeks Sync research refresh failed. ${getErrorDetail(error)}`}
+            snapshotSavedAt={snapshotSavedAt}
+          />
+        )}
+        <div className="flex items-center gap-2 text-sm font-semibold text-text-secondary">
+          <FileText size={14} className="text-accent-purple" /> Greeks Sync Research
+        </div>
+        <div className="text-xs text-text-muted">
+          {data?.detail || "Greeks Sync research is waiting for complete cached CE/PE history."}
+        </div>
+      </div>
+    );
+  }
+
+  const summary = data.summary;
+  const trackRows = summary.comparison.track_ranking.slice(0, 4);
+  const strategyRows = summary.exit_analysis.strategy_ranking.slice(0, 3);
+  const linkHref = (path?: string) => (path ? `${API_URL}${path}` : "#");
+
+  return (
+    <div className="card p-5 space-y-4">
+      {isShowingSnapshot && (
+        <SnapshotBanner
+          message={`Greeks Sync research refresh failed. ${getErrorDetail(error)}`}
+          snapshotSavedAt={snapshotSavedAt}
+        />
+      )}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-2">
+          <FileText size={15} className="text-accent-purple" />
+          <div>
+            <div className="text-sm font-semibold text-text-secondary">Greeks Sync Research</div>
+            <div className="text-xs text-text-muted">
+              Located here in Analysis as a separate research track against the MACD baseline
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="text-[11px] text-text-muted mr-1">
+            Source updated {formatRelativeTime(data.source_updated_at || summary.generated_at)}
+          </div>
+          <a
+            href={linkHref(data.files?.report_markdown_url)}
+            target="_blank"
+            rel="noreferrer"
+            className="px-2.5 py-1.5 rounded border border-bg-border text-xs text-text-secondary hover:border-accent-purple/40 hover:text-accent-purple flex items-center gap-1"
+          >
+            <FileText size={11} /> Markdown
+          </a>
+          <a
+            href={linkHref(data.files?.summary_json_url)}
+            target="_blank"
+            rel="noreferrer"
+            className="px-2.5 py-1.5 rounded border border-bg-border text-xs text-text-secondary hover:border-accent-purple/40 hover:text-accent-purple flex items-center gap-1"
+          >
+            <Download size={11} /> Summary JSON
+          </a>
+          <button onClick={() => refetch()} className="text-text-muted hover:text-text-primary">
+            {isFetching ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <StatCard
+          label="Signals"
+          value={summary.signals.total_signals}
+          sub={`${summary.signals.strong_signals} strong`}
+          color="text-accent-purple"
+        />
+        <StatCard
+          label="Average Score"
+          value={summary.signals.avg_score.toFixed(1)}
+          sub={`Median ${summary.signals.median_score.toFixed(1)}`}
+          color="text-accent-green"
+        />
+        <StatCard
+          label="MACD Confirmed"
+          value={`${summary.signals.macd_confirmed_pct.toFixed(1)}%`}
+          sub={`${summary.coverage.atm_monthly_pairs} ATM monthly pairs`}
+          color="text-accent-amber"
+        />
+        <StatCard
+          label="Best Fixed Exit"
+          value={summary.exit_analysis.best_strategy}
+          sub={`${summary.exit_analysis.best_strategy_avg_return_pct.toFixed(2)}% avg`}
+          color="text-accent-blue"
+        />
+      </div>
+
+      <div className="grid xl:grid-cols-2 gap-4">
+        <div className="space-y-2">
+          <div className="text-xs font-semibold text-text-secondary uppercase tracking-wide">
+            Track Comparison
+          </div>
+          <div className="space-y-2">
+            {trackRows.map((row) => (
+              <div key={row.track} className="bg-bg-secondary border border-bg-border rounded p-3 flex items-center justify-between gap-3 text-xs">
+                <div className="space-y-1">
+                  <div className="font-semibold text-text-primary">{row.track}</div>
+                  <div className="text-text-muted">{row.trades} trades · hold {row.avg_hold_to_expiry_return_pct.toFixed(2)}%</div>
+                </div>
+                <div className="text-right space-y-1">
+                  <ReturnBadge pct={row.avg_oracle_best_exit_return_pct} />
+                  <div className="text-text-muted">{row.positive_pct.toFixed(2)}% positive</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <div className="text-xs font-semibold text-text-secondary uppercase tracking-wide">
+            Fixed Exit Ranking
+          </div>
+          <div className="space-y-2">
+            {strategyRows.map((row) => (
+              <div key={row.strategy} className="bg-bg-secondary border border-bg-border rounded p-3 flex items-center justify-between gap-3 text-xs">
+                <div className="space-y-1">
+                  <div className="font-semibold text-text-primary">{row.strategy}</div>
+                  <div className="text-text-muted">{row.trades} trades · median {row.median_return_pct.toFixed(2)}%</div>
+                </div>
+                <div className="text-right space-y-1">
+                  <ReturnBadge pct={row.avg_return_pct} />
+                  <div className="text-text-muted">{row.positive_pct.toFixed(2)}% positive</div>
                 </div>
               </div>
             ))}
@@ -1426,6 +1821,7 @@ export default function AnalysisPage() {
       <BrokerStatusCard />
       <PopulationMonitor />
       <ValidationReportPanel />
+      <GreeksSyncReportPanel />
       <PreviousTasks onResume={(id) => { setActiveTaskId(id); setResults(null); }} />
       <RunForm onStarted={handleStarted} />
       {activeTaskId && <TaskMonitor taskId={activeTaskId} onResults={setResults} />}
