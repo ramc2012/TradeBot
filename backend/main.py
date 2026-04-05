@@ -12,6 +12,7 @@ from db.redis_client import get_redis, close_redis
 from api.routers import auth, trading, market, analytics, agent, commodity, backtester as backtester_router
 from api.routers import fo_data as fo_data_router
 from api.routers import analysis as analysis_router
+from api.routers import auction_intelligence as auction_intelligence_router
 from api.websockets.ticks import ws_ticks, ws_positions, ws_proposals
 from market_data import data_router as market_data_router
 from market_data.symbols import LIVE_INDEX_APP_SYMBOLS
@@ -98,6 +99,7 @@ app.include_router(commodity.router)
 app.include_router(backtester_router.router)
 app.include_router(fo_data_router.router)
 app.include_router(analysis_router.router)
+app.include_router(auction_intelligence_router.router)
 
 
 # ── WebSocket Endpoints ───────────────────────────────────────────────────────
