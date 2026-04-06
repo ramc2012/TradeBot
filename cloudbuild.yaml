@@ -1,0 +1,88 @@
+steps:
+  # 1. Build Backend Image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'asia-south1-docker.pkg.dev/$PROJECT_ID/macd-agent/backend:$_SHORT_SHA'
+      - './backend'
+
+  # 2. Build Frontend Image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--build-arg'
+      - 'NEXT_PUBLIC_API_URL=https://macd-agent-api-637152640127.asia-south1.run.app'
+      - '--build-arg'
+      - 'NEXT_PUBLIC_WS_URL=wss://macd-agent-api-637152640127.asia-south1.run.app'
+      - '-t'
+      - 'asia-south1-docker.pkg.dev/$PROJECT_ID/macd-agent/frontend:$_SHORT_SHA'
+      - './frontend'
+
+  # 3. Push Both Images to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'asia-south1-docker.pkg.dev/$PROJECT_ID/macd-agent/backend:$_SHORT_SHA']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'asia-south1-docker.pkg.dev/$PROJECT_ID/macd-agent/frontend:$_SHORT_SHA']
+
+  # 4. Deploy Backend to Cloud Run (asia-south1 — Mumbai)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'macd-agent-api'
+      - '--image'
+      - 'asia-south1-docker.pkg.dev/$PROJECT_ID/macd-agent/backend:$_SHORT_SHA'
+      - '--region'
+      - 'asia-south1'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+      - '--memory'
+      - '1Gi'
+      - '--cpu'
+      - '1'
+      - '--min-instances'
+      - '0'
+      - '--max-instances'
+      - '2'
+      - '--vpc-connector'
+      - 'macd-vpc-connector'
+      - '--add-cloudsql-instances'
+      - 'project-25cf011d-07e5-4590-932:asia-south1:macd-agent-db'
+      - '--set-secrets'
+      - 'DATABASE_URL=DATABASE_URL:latest,REDIS_URL=REDIS_URL:latest,FYERS_APP_ID=FYERS_APP_ID:latest,FYERS_SECRET=FYERS_SECRET:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,TELEGRAM_CHAT_ID=TELEGRAM_CHAT_ID:latest'
+      - '--set-env-vars'
+      - 'BACKEND_CORS_ORIGINS=["http://localhost:3000","https://macd-agent-ui-nv6nlsutbq-el.a.run.app"]'
+
+  # 5. Deploy Frontend to Cloud Run (asia-south1 — Mumbai)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'macd-agent-ui'
+      - '--image'
+      - 'asia-south1-docker.pkg.dev/$PROJECT_ID/macd-agent/frontend:$_SHORT_SHA'
+      - '--region'
+      - 'asia-south1'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+      - '--memory'
+      - '512Mi'
+      - '--cpu'
+      - '1'
+      - '--min-instances'
+      - '0'
+      - '--max-instances'
+      - '2'
+
+images:
+  - 'asia-south1-docker.pkg.dev/$PROJECT_ID/macd-agent/backend:$_SHORT_SHA'
+  - 'asia-south1-docker.pkg.dev/$PROJECT_ID/macd-agent/frontend:$_SHORT_SHA'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

@@ -635,11 +635,15 @@ class SectorRotationTracker:
         """).bindparams(bindparam("symbols", expanding=True))
 
         async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                statement,
-                {"from_ts": from_ts, "symbols": symbols},
-            )
-            rows = result.fetchall()
+            try:
+                result = await session.execute(
+                    statement,
+                    {"from_ts": from_ts, "symbols": symbols},
+                )
+                rows = result.fetchall()
+            except Exception as exc:
+                logger.warning(f"[Sector] DB query failed (table may not exist yet): {exc}")
+                return {}
 
         grouped: dict[str, list[tuple[datetime, float]]] = defaultdict(list)
         for row in rows:

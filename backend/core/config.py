@@ -23,7 +23,10 @@ class Settings(BaseSettings):
     # App
     APP_ENV: str = "development"
     LOG_LEVEL: str = "INFO"
-    BACKEND_CORS_ORIGINS: List[str] = ["http://localhost:3000"]
+    BACKEND_CORS_ORIGINS: List[str] = [
+        "http://localhost:3000",
+        "https://macd-agent-ui-nv6nlsutbq-el.a.run.app",
+    ]
 
     # DB / Redis
     DATABASE_URL: str = "postgresql+asyncpg://nomadcurie:nomadcurie@localhost:5433/nomadcurie"
