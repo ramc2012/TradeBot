@@ -14,6 +14,9 @@ from loguru import logger
 
 from brokers import get_broker, BROKER_MAP
 from core.config import settings
+from db.database import AsyncSessionLocal
+from db.models import BrokerSession
+from sqlalchemy import select, update, insert
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -60,13 +63,72 @@ def _load_credentials() -> dict:
 
 
 def _save_credentials_to_disk(creds: dict) -> None:
-    """Persist broker credentials to disk."""
+    """Persist broker credentials to disk and sync with DB."""
     try:
         _CREDS_FILE.parent.mkdir(parents=True, exist_ok=True)
         _CREDS_FILE.write_text(json.dumps(creds, indent=2))
         logger.debug(f"Credentials saved to {_CREDS_FILE}")
+        # Trigger background task to sync to DB
+        asyncio.create_task(_sync_creds_to_db(creds))
     except Exception as e:
         logger.error(f"Could not write credentials to {_CREDS_FILE}: {e}")
+
+
+async def _sync_creds_to_db(creds: dict) -> None:
+    """Synchronize memory credentials to the persistent broker_sessions table."""
+    async with AsyncSessionLocal() as session:
+        for broker, data in creds.items():
+            try:
+                # We only sync brokers that have at least some credential data
+                if not data: continue
+                
+                # Check for existing session
+                stmt = select(BrokerSession).where(BrokerSession.broker == broker)
+                res = await session.execute(stmt)
+                db_session = res.scalar_one_or_none()
+
+                access_token = data.get("access_token") or ""
+                # We store generic credentials as JSON in access_token_enc if it's not a real token
+                # This matches the structure of credentials.json
+                data_json = json.dumps(data)
+                
+                if db_session:
+                    db_session.access_token_enc = data_json
+                    db_session.is_active = True
+                else:
+                    new_session = BrokerSession(
+                        broker=broker,
+                        access_token_enc=data_json,
+                        is_active=True
+                    )
+                    session.add(new_session)
+                
+                await session.commit()
+                logger.debug(f"Synced {broker} credentials to database.")
+            except Exception as e:
+                logger.error(f"Failed to sync {broker} credentials to DB: {e}")
+
+
+async def _load_broker_sessions_from_db() -> dict:
+    """Load all active broker sessions from the database."""
+    async with AsyncSessionLocal() as session:
+        try:
+            stmt = select(BrokerSession).where(BrokerSession.is_active == True)
+            res = await session.execute(stmt)
+            rows = res.scalars().all()
+            
+            db_creds = {}
+            for row in rows:
+                try:
+                    # access_token_enc contains the full JSON for the broker entry
+                    db_creds[row.broker] = json.loads(row.access_token_enc)
+                except Exception:
+                    # Fallback if it's just a raw token string (older data)
+                    db_creds[row.broker] = {"access_token": row.access_token_enc}
+            return db_creds
+        except Exception as e:
+            logger.error(f"Failed to load broker sessions from DB: {e}")
+            return {}
 
 
 def _reset_upstox_token_health_cache() -> None:
@@ -912,12 +974,20 @@ async def _sync_market_data_feed() -> None:
 async def auto_restore_sessions() -> None:
     """
     Called at server startup. Attempts to restore broker sessions from saved
-    credentials without requiring the user to re-authenticate.
-
-    Currently restores:
-      - Upstox: if a saved access_token exists in credentials.json and still validates,
-        uses it directly until the daily Upstox expiry.
+    credentials (database first, then local file fallback).
     """
+    global _broker_credentials
+    
+    # 1. Attempt to load from database (primary for Cloud Run)
+    db_creds = await _load_broker_sessions_from_db()
+    if db_creds:
+        logger.info(f"Loaded {len(db_creds)} broker credentials from database.")
+        _broker_credentials.update(db_creds)
+        # Apply them to live settings so adapters can use them
+        for broker, creds in db_creds.items():
+            _apply_credentials_to_settings(broker, creds)
+            
+    # ── Original File-based Auto-restore Logic ─────────────────────────────────
     if str(_broker_credentials.get("upstox", {}).get("access_token", "")).strip():
         logger.info("Auto-restoring Upstox session from saved access token…")
         if not await ensure_upstox_session(force_validate=True):
