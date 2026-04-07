@@ -36,11 +36,16 @@ def upgrade() -> None:
         );
     """)
     op.execute("""
-        SELECT create_hypertable(
-            'option_premium_candles', 'time',
-            if_not_exists => TRUE,
-            chunk_time_interval => INTERVAL '1 day'
-        );
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'create_hypertable') THEN
+                PERFORM create_hypertable(
+                    'option_premium_candles', 'time',
+                    if_not_exists => TRUE,
+                    chunk_time_interval => INTERVAL '1 day'
+                );
+            END IF;
+        END $$;
     """)
     op.execute("""
         CREATE INDEX IF NOT EXISTS idx_opc_underlying_time
@@ -68,11 +73,16 @@ def upgrade() -> None:
         );
     """)
     op.execute("""
-        SELECT create_hypertable(
-            'macd_signals', 'time',
-            if_not_exists => TRUE,
-            chunk_time_interval => INTERVAL '7 days'
-        );
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'create_hypertable') THEN
+                PERFORM create_hypertable(
+                    'macd_signals', 'time',
+                    if_not_exists => TRUE,
+                    chunk_time_interval => INTERVAL '7 days'
+                );
+            END IF;
+        END $$;
     """)
 
     # ── backtest_trades ───────────────────────────────────────────────────────

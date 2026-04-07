@@ -131,7 +131,14 @@ def upgrade() -> None:
             ask_qty     BIGINT
         );
     """)
-    op.execute("SELECT create_hypertable('market_ticks', 'time', if_not_exists => TRUE);")
+    op.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'create_hypertable') THEN
+                PERFORM create_hypertable('market_ticks', 'time', if_not_exists => TRUE);
+            END IF;
+        END $$;
+    """)
 
     op.execute("""
         CREATE TABLE IF NOT EXISTS market_profiles (
@@ -146,7 +153,14 @@ def upgrade() -> None:
             tpo_data    JSONB
         );
     """)
-    op.execute("SELECT create_hypertable('market_profiles', 'time', if_not_exists => TRUE);")
+    op.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'create_hypertable') THEN
+                PERFORM create_hypertable('market_profiles', 'time', if_not_exists => TRUE);
+            END IF;
+        END $$;
+    """)
 
     op.execute("""
         CREATE TABLE IF NOT EXISTS option_chain_snapshots (
@@ -165,7 +179,14 @@ def upgrade() -> None:
             vega        FLOAT
         );
     """)
-    op.execute("SELECT create_hypertable('option_chain_snapshots', 'time', if_not_exists => TRUE);")
+    op.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'create_hypertable') THEN
+                PERFORM create_hypertable('option_chain_snapshots', 'time', if_not_exists => TRUE);
+            END IF;
+        END $$;
+    """)
 
 
 def downgrade() -> None:

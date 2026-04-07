@@ -112,11 +112,16 @@ def upgrade() -> None:
         );
     """)
     op.execute("""
-        SELECT create_hypertable(
-            'underlying_spot_candles', 'time',
-            if_not_exists => TRUE,
-            chunk_time_interval => INTERVAL '1 day'
-        );
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'create_hypertable') THEN
+                PERFORM create_hypertable(
+                    'underlying_spot_candles', 'time',
+                    if_not_exists => TRUE,
+                    chunk_time_interval => INTERVAL '1 day'
+                );
+            END IF;
+        END $$;
     """)
     op.execute("""
         CREATE INDEX IF NOT EXISTS idx_underlying_spot_candles_symbol_time
@@ -143,11 +148,16 @@ def upgrade() -> None:
         );
     """)
     op.execute("""
-        SELECT create_hypertable(
-            'fo_option_chain_metrics', 'time',
-            if_not_exists => TRUE,
-            chunk_time_interval => INTERVAL '1 day'
-        );
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'create_hypertable') THEN
+                PERFORM create_hypertable(
+                    'fo_option_chain_metrics', 'time',
+                    if_not_exists => TRUE,
+                    chunk_time_interval => INTERVAL '1 day'
+                );
+            END IF;
+        END $$;
     """)
     op.execute("""
         CREATE INDEX IF NOT EXISTS idx_fo_option_chain_metrics_symbol_time
