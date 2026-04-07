@@ -54,8 +54,6 @@ steps:
       - 'project-25cf011d-07e5-4590-932:asia-south1:macd-agent-db'
       - '--set-secrets'
       - 'DATABASE_URL=DATABASE_URL:latest,REDIS_URL=REDIS_URL:latest,FYERS_APP_ID=FYERS_APP_ID:latest,FYERS_SECRET=FYERS_SECRET:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,TELEGRAM_CHAT_ID=TELEGRAM_CHAT_ID:latest'
-      - '--set-env-vars'
-      - 'BACKEND_CORS_ORIGINS=["http://localhost:3000","https://macd-agent-ui-nv6nlsutbq-el.a.run.app"]'
 
   # 5. Deploy Frontend to Cloud Run (asia-south1 — Mumbai)
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'

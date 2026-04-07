@@ -47,39 +47,12 @@ export const getTrades = () => api.get("/api/trading/trades");
 export const setMode = (mode: string, broker?: string) =>
   api.post("/api/trading/mode", { mode, broker });
 export const killSwitch = () => api.post("/api/trading/kill-switch");
-export const getTradingKillSwitchStatus = () => api.get("/api/trading/kill-switch");
-export const updateTradingKillSwitch = (active: boolean) =>
-  api.put("/api/trading/kill-switch", { active });
 export const getPortfolioSummary = () => api.get("/api/trading/portfolio-summary");
 export const getStrategyAgentStatus = () => api.get("/api/trading/strategy-agent/status");
 export const runStrategyAgentOnce = (force = true) =>
   api.post("/api/trading/strategy-agent/run-once", null, { params: { force } });
 export const getRiskStatus = () => api.get("/api/trading/risk-status");
 export const updateRiskConfig = (config: object) => api.put("/api/trading/risk-config", config);
-
-// ── Commodity ─────────────────────────────────────────────────────────────
-export const getCommodityStrategyStatus = () => api.get("/api/commodity/strategy-agent/status");
-export const startCommodityStrategyAgent = () => api.post("/api/commodity/strategy-agent/start");
-export const runCommodityStrategyOnce = (force = true) =>
-  api.post("/api/commodity/strategy-agent/run-once", null, { params: { force } });
-export const updateCommodityStrategyConfig = (symbols: string[]) =>
-  api.put("/api/commodity/strategy-agent/config", { symbols });
-export const getCommodityStrategyContracts = () =>
-  api.get("/api/commodity/strategy-agent/contracts");
-export const updateCommodityStrategyContracts = (selectedOptionExpiries: Record<string, string>) =>
-  api.put("/api/commodity/strategy-agent/contracts", { selected_option_expiries: selectedOptionExpiries });
-export const getCommodityKillSwitchStatus = () => api.get("/api/commodity/kill-switch");
-export const updateCommodityKillSwitch = (active: boolean) =>
-  api.put("/api/commodity/kill-switch", { active });
-export const getCommodityOrders = (limit?: number) =>
-  api.get("/api/commodity/orders", { params: { limit } });
-export const getCommodityPositions = () => api.get("/api/commodity/positions");
-export const getCommodityReports = (limit?: number) =>
-  api.get("/api/commodity/reports", { params: { limit } });
-export const getCommodityATMWatchlistExpiries = () =>
-  api.get("/api/commodity/atm-watchlist/expiries");
-export const getCommodityATMWatchlist = (expiry?: string) =>
-  api.get("/api/commodity/atm-watchlist", { params: { expiry } });
 
 // ── Market ────────────────────────────────────────────────────────────────
 export const getOptionChain = (symbol: string, expiry?: string) =>

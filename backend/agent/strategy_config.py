@@ -79,7 +79,11 @@ class ExitConfig:
     trail_drawdown_pct: float = 20.0      # exit on 20% drop from peak
     macd_death_min_profit_pct: float = 30.0  # MACD reversal exit only after +30%
 
-    # Layer 3: Hard stop
+    # Layer 3: Breakeven stop (dynamic)
+    breakeven_activation_pct: float = 20.0  # move stop to entry after +20%
+    breakeven_exit_pct: float = 1.0         # exit at +1% (covers brokerage)
+
+    # Layer 4: Hard stop (static fallback)
     hard_stop_pct: float = 25.0         # -25% from entry → exit 100%
 
     # Window end

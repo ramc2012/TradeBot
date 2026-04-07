@@ -130,25 +130,3 @@ def test_fetch_chunked_candles_splits_longer_windows() -> None:
     )
 
     assert len(calls) > 1
-
-
-def test_expiry_metadata_to_date_keeps_future_monthly_windows_available() -> None:
-    sync = UpstoxResearchSync(
-        access_token="token",
-        from_date=date(2025, 3, 28),
-        to_date=date(2026, 4, 1),
-        interval="30minute",
-    )
-
-    assert sync._expiry_metadata_to_date(today=date(2026, 4, 1)) == date(2026, 5, 31)
-
-
-def test_expired_contract_discovery_to_date_does_not_scan_future_expiries() -> None:
-    sync = UpstoxResearchSync(
-        access_token="token",
-        from_date=date(2025, 3, 28),
-        to_date=date(2026, 5, 31),
-        interval="30minute",
-    )
-
-    assert sync._expired_contract_discovery_to_date(today=date(2026, 4, 1)) == date(2026, 4, 1)

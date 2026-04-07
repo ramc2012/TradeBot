@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from paper_engine.portfolio import PaperPortfolio
-from paper_engine.strategy_agent import PaperStrategyAgent, detect_greeks_signal, detect_macd_zero_cross
+from paper_engine.strategy_agent import detect_greeks_signal, detect_macd_zero_cross
 
 
 UTC = timezone.utc
@@ -52,25 +52,3 @@ def test_paper_portfolio_summary_sanitizes_infinite_profit_factor() -> None:
     summary = portfolio.get_summary()
 
     assert summary["profit_factor"] is None
-
-
-def test_candidate_expiries_include_next_when_front_is_near() -> None:
-    agent = PaperStrategyAgent()
-
-    expiries = agent._select_candidate_expiries(
-        datetime(2026, 3, 24).date(),
-        ["2026-03-26", "2026-04-02", "2026-04-30"],
-    )
-
-    assert expiries == ["2026-03-26", "2026-04-02"]
-
-
-def test_candidate_expiries_only_front_when_not_near() -> None:
-    agent = PaperStrategyAgent()
-
-    expiries = agent._select_candidate_expiries(
-        datetime(2026, 3, 10).date(),
-        ["2026-03-26", "2026-04-02", "2026-04-30"],
-    )
-
-    assert expiries == ["2026-03-26"]

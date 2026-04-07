@@ -5,14 +5,11 @@ import { clsx } from "clsx";
 export type StrategyAgentStatus = {
   running: boolean;
   enabled?: boolean;
-  auto_run_enabled?: boolean;
-  kill_switch_active?: boolean;
   scan_interval_seconds?: number | null;
   last_run_at?: string | null;
   last_message?: string | null;
   last_error?: string | null;
   target_expiry?: string | null;
-  candidate_expiries?: string[];
   next_scan_at?: string | null;
   telegram?: {
     enabled: boolean;
@@ -96,8 +93,6 @@ function formatTimestamp(value?: string | null) {
 }
 
 export function StrategyStatusPanel({ agentStatus }: { agentStatus?: StrategyAgentStatus }) {
-  const autoRunEnabled = agentStatus?.auto_run_enabled ?? agentStatus?.enabled ?? false;
-
   return (
     <div className="card p-4">
       <div className="flex flex-wrap items-center gap-3 text-xs">
@@ -110,16 +105,10 @@ export function StrategyStatusPanel({ agentStatus }: { agentStatus?: StrategyAge
           {agentStatus?.running ? "Running" : "Idle"}
         </span>
         <span className="text-text-muted">
-          {autoRunEnabled ? "Automatic scan loop enabled" : "Manual scan only"}
-        </span>
-        <span className={clsx("rounded px-2 py-1 font-semibold", agentStatus?.kill_switch_active ? "bg-accent-red/15 text-accent-red" : "bg-accent-green/15 text-accent-green")}>
-          {agentStatus?.kill_switch_active ? "Kill Switch Active" : "Kill Switch Released"}
+          {agentStatus?.enabled === false ? "Autonomous loop disabled" : "Autonomous loop enabled"}
         </span>
         <span className="text-text-muted">Scan every {agentStatus?.scan_interval_seconds || 60}s</span>
         <span className="text-text-muted">Expiry {agentStatus?.target_expiry || "--"}</span>
-        <span className="text-text-muted">
-          Candidates {(agentStatus?.candidate_expiries?.length ? agentStatus.candidate_expiries.join(", ") : agentStatus?.target_expiry || "--")}
-        </span>
         <span className="text-text-muted">Last run {formatTimestamp(agentStatus?.last_run_at)}</span>
         <span className="text-text-muted">Next scan {formatTimestamp(agentStatus?.next_scan_at)}</span>
         <span className="text-text-muted">
@@ -141,7 +130,7 @@ export function AgentCommentaryFeed({ agentStatus }: { agentStatus?: StrategyAge
       <div className="flex items-center justify-between gap-3">
         <div>
           <h2 className="text-sm font-semibold text-text-primary">Agent Commentary</h2>
-          <div className="text-xs text-text-muted">Live English notes on what the agent is observing and why it is trading, exiting, or standing aside.</div>
+          <div className="text-xs text-text-muted">Live English notes on what the autonomous agent is observing and why it is trading or standing aside.</div>
         </div>
         <div className="text-xs text-text-muted">{items.length} recent notes</div>
       </div>

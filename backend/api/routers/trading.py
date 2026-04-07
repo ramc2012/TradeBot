@@ -63,10 +63,6 @@ class SetModeRequest(BaseModel):
     broker: Optional[str] = None
 
 
-class KillSwitchRequest(BaseModel):
-    active: bool
-
-
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.post("/mode")
@@ -88,9 +84,6 @@ async def set_mode(req: SetModeRequest):
 
 @router.post("/orders")
 async def place_order(req: PlaceOrderRequest):
-    if paper_strategy_agent.get_status().get("kill_switch_active"):
-        raise HTTPException(400, "NSE kill switch is active. Release it before placing new orders.")
-
     order_req = OrderRequest(
         symbol=req.symbol,
         exchange=req.exchange,
@@ -236,14 +229,9 @@ async def get_trades():
 
 @router.post("/kill-switch")
 async def kill_switch():
-    control = paper_strategy_agent.set_kill_switch(True)
     if _mode == "live" and _live_manager:
         cancelled = await _live_manager.kill_switch()
-        return {
-            "cancelled_orders": cancelled,
-            "trading_disabled": True,
-            **control,
-        }
+        return {"cancelled_orders": cancelled, "trading_disabled": True}
     # Paper mode: cancel all open orders
     if _mode == "paper":
         ob, _ = _get_or_create_paper_session()
@@ -251,18 +239,8 @@ async def kill_switch():
         for order in list(ob.get_open_orders()):
             if ob.cancel_order(order.order_id):
                 count += 1
-        return {"cancelled_orders": count, "mode": "paper", **control}
-    return {"cancelled_orders": 0, **control}
-
-
-@router.get("/kill-switch")
-async def get_kill_switch_state():
-    return paper_strategy_agent.get_control_state()
-
-
-@router.put("/kill-switch")
-async def update_kill_switch(body: KillSwitchRequest):
-    return paper_strategy_agent.set_kill_switch(body.active)
+        return {"cancelled_orders": count, "mode": "paper"}
+    return {"cancelled_orders": 0}
 
 
 @router.get("/portfolio-summary")

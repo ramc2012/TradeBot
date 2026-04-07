@@ -1379,9 +1379,6 @@ export default function MarketPage() {
               <div className="mt-1 text-sm text-text-secondary">
                 Instrument-wide monthly options board with live premium, OI, IV, and lightweight MACD / RSI context.
               </div>
-              {watchlistExpiryQuery.data?.detail && (
-                <div className="mt-2 text-xs text-accent-amber">{watchlistExpiryQuery.data.detail}</div>
-              )}
               {watchlistQuery.data?.detail && (
                 <div className="mt-2 text-xs text-accent-amber">{watchlistQuery.data.detail}</div>
               )}
@@ -1397,9 +1394,6 @@ export default function MarketPage() {
                     {item}
                   </option>
                 ))}
-                {!watchlistExpiryQuery.data?.expiries?.length && watchlistExpiry && (
-                  <option value={watchlistExpiry}>{watchlistExpiry}</option>
-                )}
                 {!watchlistExpiryQuery.data?.expiries?.length && <option value="">Expiry loading...</option>}
               </select>
               <button

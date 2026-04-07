@@ -8,9 +8,6 @@ import {
   getPositions,
   getTrades,
   getStrategyAgentStatus,
-  getTradingKillSwitchStatus,
-  runStrategyAgentOnce,
-  updateTradingKillSwitch,
 } from "@/lib/api";
 import {
   StrategyAgentStatus,
@@ -20,7 +17,7 @@ import {
 } from "@/components/trading/StrategyAgentMonitor";
 import { useStore } from "@/store";
 import { clsx } from "clsx";
-import { Play, Plus, ShieldAlert, ShieldCheck, X, Zap } from "lucide-react";
+import { Plus, X, Zap } from "lucide-react";
 
 type OrderType = "MARKET" | "LIMIT" | "SL" | "SL_M";
 type ActionType = "BUY" | "SELL";
@@ -48,13 +45,6 @@ type PortfolioTrade = {
   pnl?: number | null;
   entry_time?: string | null;
   exit_time?: string | null;
-};
-
-type KillSwitchState = {
-  market: string;
-  auto_run_enabled: boolean;
-  kill_switch_active: boolean;
-  cancelled_orders?: number;
 };
 
 // Quick strategy templates
@@ -149,13 +139,6 @@ export default function TradingPage() {
     staleTime: 10000,
   });
 
-  const { data: killSwitchState } = useQuery({
-    queryKey: ["nseKillSwitch"],
-    queryFn: () => getTradingKillSwitchStatus().then((r) => r.data as KillSwitchState),
-    refetchInterval: 15000,
-    staleTime: 10000,
-  });
-
   const placeMut = useMutation({
     mutationFn: placeOrder,
     onSuccess: () => {
@@ -171,25 +154,6 @@ export default function TradingPage() {
       qc.invalidateQueries({ queryKey: ["orders"] });
       qc.invalidateQueries({ queryKey: ["positions"] });
       qc.invalidateQueries({ queryKey: ["trades"] });
-    },
-  });
-
-  const runScanMutation = useMutation({
-    mutationFn: () => runStrategyAgentOnce(true),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["strategyAgentStatus"] });
-      qc.invalidateQueries({ queryKey: ["orders"] });
-      qc.invalidateQueries({ queryKey: ["positions"] });
-      qc.invalidateQueries({ queryKey: ["trades"] });
-    },
-  });
-
-  const killSwitchMutation = useMutation({
-    mutationFn: (active: boolean) => updateTradingKillSwitch(active),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["nseKillSwitch"] });
-      qc.invalidateQueries({ queryKey: ["strategyAgentStatus"] });
-      qc.invalidateQueries({ queryKey: ["orders"] });
     },
   });
 
@@ -223,38 +187,11 @@ export default function TradingPage() {
         <div>
           <h1 className="text-lg font-bold font-mono text-text-primary">Trading Desk</h1>
           <div className="mt-1 text-xs text-text-muted">
-            Manual execution sits alongside the NSE paper strategy. Strategy scans run only when you trigger them.
+            Manual execution sits alongside the autonomous paper agent. Strategy scanning runs automatically during market hours.
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => runScanMutation.mutate()}
-            disabled={runScanMutation.isPending}
-            className={clsx(
-              "inline-flex items-center gap-2 rounded border px-3 py-2 text-xs font-semibold transition-colors",
-              "border-accent-blue/40 bg-accent-blue/10 text-accent-blue hover:bg-accent-blue/20",
-              runScanMutation.isPending && "cursor-not-allowed opacity-60",
-            )}
-          >
-            <Play size={14} />
-            Run NSE Scan
-          </button>
-          <button
-            type="button"
-            onClick={() => killSwitchMutation.mutate(!(killSwitchState?.kill_switch_active))}
-            disabled={killSwitchMutation.isPending}
-            className={clsx(
-              "inline-flex items-center gap-2 rounded border px-3 py-2 text-xs font-semibold transition-colors",
-              killSwitchState?.kill_switch_active
-                ? "border-accent-green/40 bg-accent-green/10 text-accent-green hover:bg-accent-green/20"
-                : "border-accent-red/40 bg-accent-red/10 text-accent-red hover:bg-accent-red/20",
-              killSwitchMutation.isPending && "cursor-not-allowed opacity-60",
-            )}
-          >
-            {killSwitchState?.kill_switch_active ? <ShieldCheck size={14} /> : <ShieldAlert size={14} />}
-            {killSwitchState?.kill_switch_active ? "Release NSE Kill Switch" : "Activate NSE Kill Switch"}
-          </button>
+        <div className="rounded border border-accent-blue/20 bg-accent-blue/10 px-3 py-2 text-xs text-accent-blue">
+          Agent loop active. No manual strategy trigger is required.
         </div>
       </div>
 

@@ -104,8 +104,8 @@ async def get_all_active_windows(
             SELECT underlying, expiry, previous_monthly_expiry
             FROM fo_expiry_catalog
             WHERE previous_monthly_expiry IS NOT NULL
-              AND (previous_monthly_expiry - $1::int) <= $2::date
-              AND (expiry - $1::int) >= $2::date
+              AND (previous_monthly_expiry - $1) <= expiry
+              AND expiry >= $2
             ORDER BY underlying, expiry
             """,
             WINDOW_BUFFER_DAYS,

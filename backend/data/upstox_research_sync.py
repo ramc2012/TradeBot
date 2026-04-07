@@ -151,7 +151,6 @@ class UpstoxResearchSync:
     DISCOVERY_BACKLOG_MULTIPLIER = 2
     DISCOVERY_BACKLOG_FLOOR = 240
     SINGLE_CALL_30MINUTE_WINDOW_DAYS = 366
-    EXPIRY_LOOKAHEAD_DAYS = 60
 
     def __init__(
         self,
@@ -169,14 +168,6 @@ class UpstoxResearchSync:
         self.interval = interval
         self.risk_free_rate = risk_free_rate
         self._spot_cache: dict[str, dict[str, float]] = {}
-
-    def _expiry_metadata_to_date(self, today: Optional[date] = None) -> date:
-        reference_day = today or date.today()
-        return max(self.to_date, reference_day + timedelta(days=self.EXPIRY_LOOKAHEAD_DAYS))
-
-    def _expired_contract_discovery_to_date(self, today: Optional[date] = None) -> date:
-        reference_day = today or date.today()
-        return min(self.to_date, reference_day)
 
     async def _get_backlog_snapshot(self) -> dict[str, int]:
         async with AsyncSessionLocal() as session:
@@ -331,7 +322,6 @@ class UpstoxResearchSync:
         return len(rows)
 
     async def _discover_underlyings(self, limit: int) -> tuple[int, int]:
-        expiry_to_date = self._expiry_metadata_to_date()
         async with AsyncSessionLocal() as session:
             result = await session.execute(
                 text("""
@@ -357,7 +347,7 @@ class UpstoxResearchSync:
             monthly_expiries, prev_map = self.client._select_monthly_expiries(
                 expiry_dates,
                 self.from_date,
-                expiry_to_date,
+                self.to_date,
             )
             expiry_rows = []
             for expiry in monthly_expiries:
@@ -519,7 +509,6 @@ class UpstoxResearchSync:
         return "skipped", self.PRIORITY_SKIP_REASON
 
     async def _discover_contracts(self, limit: int) -> tuple[int, int]:
-        discovery_cutoff = self._expired_contract_discovery_to_date()
         async with AsyncSessionLocal() as session:
             result = await session.execute(
                 text("""
@@ -537,17 +526,13 @@ class UpstoxResearchSync:
                     LEFT JOIN underlying_progress p
                       ON p.underlying = e.underlying
                     WHERE contracts_discovered_at IS NULL
-                      AND e.expiry <= :discovery_cutoff
                     ORDER BY COALESCE(p.complete_contracts, 0),
                              CASE WHEN u.kind = 'STOCK' THEN 0 ELSE 1 END,
                              e.expiry DESC,
                              e.underlying
                     LIMIT :limit
                 """),
-                {
-                    "discovery_cutoff": discovery_cutoff,
-                    "limit": limit,
-                },
+                {"limit": limit},
             )
             rows = result.fetchall()
 
@@ -1400,7 +1385,7 @@ class UpstoxResearchSync:
     ) -> None:
         while True:
             try:
-                self.to_date = self._expiry_metadata_to_date()
+                self.to_date = max(self.to_date, date.today())
                 await self.run_once(
                     underlying_limit=underlying_limit,
                     expiry_limit=expiry_limit,

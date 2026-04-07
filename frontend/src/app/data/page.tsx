@@ -15,14 +15,9 @@ const foApi = {
   getStatus: (taskId: string) => api.get(`/api/fo-data/status/${taskId}`).then(r => r.data),
   getTasks: () => api.get("/api/fo-data/tasks").then(r => r.data),
   getStats: () => api.get("/api/fo-data/stats").then(r => r.data),
-  startIndexAnalytics: (body: object) => api.post("/api/fo-data/index-analytics/start", body).then(r => r.data),
-  getIndexAnalyticsStatus: (taskId: string) => api.get(`/api/fo-data/index-analytics/status/${taskId}`).then(r => r.data),
-  getIndexAnalyticsTasks: () => api.get("/api/fo-data/index-analytics/tasks").then(r => r.data),
-  getIndexAnalyticsStats: () => api.get("/api/fo-data/index-analytics/stats").then(r => r.data),
   getInstruments: (underlying: string) =>
     api.get("/api/fo-data/instruments", { params: { underlying } }).then(r => r.data),
   deleteTask: (taskId: string) => api.delete(`/api/fo-data/tasks/${taskId}`).then(r => r.data),
-  deleteIndexAnalyticsTask: (taskId: string) => api.delete(`/api/fo-data/index-analytics/tasks/${taskId}`).then(r => r.data),
 };
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -50,49 +45,6 @@ interface StatsRow {
   latest: string;
   expiries: number;
   strikes: number;
-}
-
-interface IndexAnalyticsTask {
-  task_id: string;
-  status: "pending" | "running" | "done" | "error";
-  current_stage: string;
-  underlyings: string[];
-  interval: string;
-  total_spot_series: number;
-  processed_spot_series: number;
-  total_expiries: number;
-  processed_expiries: number;
-  total_contracts: number;
-  processed_contracts: number;
-  total_request_units: number;
-  processed_request_units: number;
-  skipped_contracts: number;
-  stored_files: number;
-  stored_spot_files: number;
-  stored_candles: number;
-  stored_spot_candles: number;
-  pct: number;
-  current_underlying: string;
-  current_expiry: string;
-  current_symbol: string;
-  data_root: string;
-  latest_file: string;
-  error: string;
-  elapsed_secs: number;
-  started_at: string | null;
-  finished_at: string | null;
-}
-
-interface IndexAnalyticsStatsRow {
-  underlying: string;
-  expiry_kind: string;
-  dataset_type?: string;
-  contracts: number;
-  expiries: number;
-  files: number;
-  candles: number;
-  earliest: string | null;
-  latest: string | null;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -200,112 +152,6 @@ function TaskMonitor({ taskId, onDone }: { taskId: string; onDone: () => void })
   );
 }
 
-function IndexAnalyticsTaskMonitor({ taskId, onDone }: { taskId: string; onDone: () => void }) {
-  const [task, setTask] = useState<IndexAnalyticsTask | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval>>();
-
-  useEffect(() => {
-    const poll = async () => {
-      try {
-        const data = await foApi.getIndexAnalyticsStatus(taskId);
-        setTask(data);
-        if (data.status === "done" || data.status === "error") {
-          clearInterval(intervalRef.current);
-          onDone();
-        }
-      } catch {}
-    };
-    poll();
-    intervalRef.current = setInterval(poll, 2000);
-    return () => clearInterval(intervalRef.current);
-  }, [taskId, onDone]);
-
-  if (!task) return <div className="text-xs text-text-muted">Starting dataset build…</div>;
-
-  return (
-    <div className="card p-4 space-y-3 border-accent-green/30">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          {task.status === "running" && <Loader2 size={14} className="animate-spin text-accent-blue" />}
-          {task.status === "done" && <CheckCircle2 size={14} className="text-accent-green" />}
-          {task.status === "error" && <XCircle size={14} className="text-accent-red" />}
-          <span className="text-sm font-semibold">Index analytics dataset</span>
-          <StatusChip status={task.status} />
-        </div>
-        <span className="text-xs text-text-muted">{task.elapsed_secs}s elapsed</span>
-      </div>
-      <ProgressBar pct={task.pct} />
-      <div className="grid grid-cols-2 gap-3 text-center md:grid-cols-6">
-        <div>
-          <div className="text-lg font-mono font-bold text-accent-blue">{task.pct}%</div>
-          <div className="text-xs text-text-muted">Progress</div>
-        </div>
-        <div>
-          <div className="text-lg font-mono font-bold text-accent-green">
-            {fmtNum(task.processed_spot_series)}/{fmtNum(task.total_spot_series)}
-          </div>
-          <div className="text-xs text-text-muted">Spot series</div>
-        </div>
-        <div>
-          <div className="text-lg font-mono font-bold text-text-primary">
-            {fmtNum(task.processed_expiries)}/{fmtNum(task.total_expiries)}
-          </div>
-          <div className="text-xs text-text-muted">Expiries</div>
-        </div>
-        <div>
-          <div className="text-lg font-mono font-bold text-text-primary">
-            {fmtNum(task.processed_contracts)}/{fmtNum(task.total_contracts)}
-          </div>
-          <div className="text-xs text-text-muted">Contracts</div>
-        </div>
-        <div>
-          <div className="text-lg font-mono font-bold text-text-primary">
-            {fmtNum(task.processed_request_units)}/{fmtNum(task.total_request_units)}
-          </div>
-          <div className="text-xs text-text-muted">API windows</div>
-        </div>
-        <div>
-          <div className="text-lg font-mono font-bold text-accent-green">{fmtNum(task.stored_candles)}</div>
-          <div className="text-xs text-text-muted">Candles written</div>
-        </div>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        {task.underlyings.map((underlying) => (
-          <span
-            key={underlying}
-            className="rounded border border-accent-green/25 bg-accent-green/10 px-2 py-1 text-[11px] font-semibold text-accent-green"
-          >
-            {underlying}
-          </span>
-        ))}
-      </div>
-      <div className="grid grid-cols-1 gap-3 text-xs text-text-muted md:grid-cols-2">
-        <div className="rounded border border-bg-border bg-bg-secondary/30 p-3">
-          <div className="font-semibold text-text-secondary">Current stage</div>
-          <div className="mt-1 text-text-primary">{task.current_stage.replaceAll("_", " ")}</div>
-          <div className="mt-1">{task.current_underlying || "--"} {task.current_expiry ? `• ${task.current_expiry}` : ""}</div>
-          {task.current_symbol && <div className="mt-1 font-mono truncate">{task.current_symbol}</div>}
-        </div>
-        <div className="rounded border border-bg-border bg-bg-secondary/30 p-3">
-          <div className="font-semibold text-text-secondary">Dataset folder</div>
-          <div className="mt-1 break-all">{task.data_root || "--"}</div>
-          <div className="mt-2">
-            Files {fmtNum(task.stored_files)} · Spot files {fmtNum(task.stored_spot_files)} · Reused {fmtNum(task.skipped_contracts)}
-          </div>
-        </div>
-      </div>
-      {task.latest_file && (
-        <div className="rounded border border-bg-border bg-bg-secondary/20 p-3 text-xs text-text-muted">
-          Latest file: <span className="text-text-primary break-all">{task.latest_file}</span>
-        </div>
-      )}
-      {task.error && (
-        <p className="text-xs text-accent-red bg-accent-red/5 rounded p-2">{task.error}</p>
-      )}
-    </div>
-  );
-}
-
 // ── Stored stats table ────────────────────────────────────────────────────────
 
 function StatsTable({ rows }: { rows: StatsRow[] }) {
@@ -365,80 +211,6 @@ function StatsTable({ rows }: { rows: StatsRow[] }) {
   );
 }
 
-function IndexAnalyticsStatsTable({
-  rows,
-  dataRoot,
-}: {
-  rows: IndexAnalyticsStatsRow[];
-  dataRoot?: string;
-}) {
-  if (!rows.length) {
-    return (
-      <div className="text-center py-8 text-text-muted text-sm">
-        <Database size={32} className="mx-auto mb-2 opacity-30" />
-        No index analytics dataset stored yet. Start the collector to populate NIFTY and SENSEX option minute files plus spot history.
-      </div>
-    );
-  }
-
-  const byUnderlying: Record<string, IndexAnalyticsStatsRow[]> = {};
-  for (const row of rows) {
-    if (!byUnderlying[row.underlying]) byUnderlying[row.underlying] = [];
-    byUnderlying[row.underlying].push(row);
-  }
-
-  return (
-    <div className="space-y-3">
-      {dataRoot && (
-        <div className="rounded border border-bg-border bg-bg-secondary/30 p-3 text-xs text-text-muted">
-          Dataset root: <span className="text-text-primary break-all">{dataRoot}</span>
-        </div>
-      )}
-      {Object.entries(byUnderlying).map(([underlying, group]) => {
-        const totalCandles = group.reduce((sum, row) => sum + Number(row.candles), 0);
-        const orderedGroup = [...group].sort((a, b) => {
-          const order = { spot: 0, weekly: 1, monthly: 2 } as Record<string, number>;
-          return (order[a.expiry_kind] ?? 9) - (order[b.expiry_kind] ?? 9);
-        });
-        return (
-          <div key={underlying} className="card p-3 space-y-2">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <TrendingUp size={14} className="text-accent-green" />
-                <span className="font-semibold text-sm">{underlying}</span>
-              </div>
-              <span className="text-xs text-text-muted">{fmtNum(totalCandles)} minute candles</span>
-            </div>
-            <div className="grid gap-2 md:grid-cols-2">
-              {orderedGroup.map((row) => (
-                <div key={`${row.underlying}-${row.expiry_kind}`} className="rounded border border-bg-border bg-bg-secondary/30 p-3 space-y-1">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-xs font-bold uppercase tracking-wide text-text-secondary">
-                      {row.expiry_kind === "spot" ? "spot history" : row.expiry_kind}
-                    </span>
-                    <span className="text-xs text-text-muted">
-                      {row.expiry_kind === "spot" ? `${fmtNum(row.files)} file` : `${fmtNum(row.expiries)} expiries`}
-                    </span>
-                  </div>
-                  <div className="text-sm font-mono text-text-primary">
-                    {row.expiry_kind === "spot" ? `${fmtNum(row.contracts)} series` : `${fmtNum(row.contracts)} contracts`}
-                  </div>
-                  <div className="text-xs text-text-muted">
-                    {fmtNum(row.files)} files · {fmtNum(row.candles)} candles
-                  </div>
-                  <div className="text-xs text-text-muted">
-                    {fmtDate(row.earliest)} → {fmtDate(row.latest)}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 // ── Instrument preview ────────────────────────────────────────────────────────
 
 function InstrumentPreview({ underlying }: { underlying: string }) {
@@ -467,107 +239,6 @@ const INTERVALS = [
   { value: "1minute", label: "1-minute (very large)" },
   { value: "day", label: "Daily" },
 ];
-const INDEX_DATASET_UNDERLYINGS = ["NIFTY", "SENSEX"];
-
-function IndexAnalyticsForm({ onStarted }: { onStarted: (taskId: string) => void }) {
-  const [selectedULs, setSelectedULs] = useState<string[]>([...INDEX_DATASET_UNDERLYINGS]);
-  const [fromDate, setFromDate] = useState(() => {
-    const d = new Date();
-    d.setFullYear(d.getFullYear() - 1);
-    return d.toISOString().slice(0, 10);
-  });
-  const [toDate, setToDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-
-  const toggleUL = (ul: string) =>
-    setSelectedULs(prev => prev.includes(ul) ? prev.filter(x => x !== ul) : [...prev, ul]);
-
-  const handleStart = async () => {
-    if (!selectedULs.length) {
-      setError("Select at least one underlying.");
-      return;
-    }
-    setLoading(true);
-    setError("");
-    try {
-      const res = await foApi.startIndexAnalytics({
-        underlyings: selectedULs,
-        from_date: fromDate,
-        to_date: toDate,
-        interval: "1minute",
-      });
-      onStarted(res.task_id);
-    } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || "Failed to start index analytics dataset");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div className="card p-4 space-y-4">
-      <div className="flex items-center gap-2">
-        <Database size={16} className="text-accent-green" />
-        <h3 className="font-semibold text-sm">Index Minute Analytics Dataset</h3>
-      </div>
-
-      <div className="bg-bg-secondary rounded p-3 text-xs text-text-muted space-y-1">
-        <p className="flex items-center gap-1 text-accent-green font-semibold">
-          <Info size={11} /> What this collects
-        </p>
-        <p>Builds a separate file-based dataset for NIFTY and SENSEX option contracts using Upstox 1-minute OHLC, volume, and OI candles.</p>
-        <p>Includes weekly and monthly expiries across the selected 1-year window, and also writes 1-minute NIFTY and SENSEX spot history into the same analytics folder for future research use.</p>
-      </div>
-
-      <div>
-        <label className="text-xs text-text-muted block mb-2">Underlyings</label>
-        <div className="flex flex-wrap gap-2">
-          {INDEX_DATASET_UNDERLYINGS.map(ul => (
-            <button key={ul} type="button" onClick={() => toggleUL(ul)}
-              className={clsx(
-                "px-3 py-1 rounded text-xs border font-semibold transition-colors",
-                selectedULs.includes(ul)
-                  ? "bg-accent-green/20 border-accent-green/50 text-accent-green"
-                  : "bg-bg-hover border-bg-border text-text-muted hover:border-text-muted"
-              )}>
-              {ul}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="text-xs text-text-muted block mb-1">From Date</label>
-          <input type="date" value={fromDate} onChange={e => setFromDate(e.target.value)}
-            className="terminal-input w-full text-sm" />
-        </div>
-        <div>
-          <label className="text-xs text-text-muted block mb-1">To Date</label>
-          <input type="date" value={toDate} onChange={e => setToDate(e.target.value)}
-            className="terminal-input w-full text-sm" />
-        </div>
-      </div>
-
-      <div className="rounded border border-bg-border bg-bg-secondary/20 p-3 text-xs text-text-muted">
-        Interval is fixed to <span className="text-text-primary font-semibold">1 minute</span>. The collector uses the saved Upstox connection from Settings and writes a separate analytics dataset instead of the backtester database.
-      </div>
-
-      {error && (
-        <div className="bg-accent-red/5 border border-accent-red/20 rounded p-2 text-xs text-accent-red flex items-center gap-2">
-          <AlertCircle size={12} /> {error}
-        </div>
-      )}
-
-      <button type="button" onClick={handleStart} disabled={loading || !selectedULs.length}
-        className="w-full py-3 rounded text-sm bg-accent-green/20 border border-accent-green/30 text-accent-green hover:bg-accent-green/30 disabled:opacity-50 flex items-center justify-center gap-2 font-semibold">
-        {loading ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
-        {loading ? "Starting dataset build…" : "Start Index Dataset"}
-      </button>
-    </div>
-  );
-}
 
 function DownloadForm({ onStarted }: { onStarted: (taskId: string) => void }) {
   const [selectedULs, setSelectedULs] = useState<string[]>(["NIFTY", "BANKNIFTY"]);
@@ -753,7 +424,6 @@ function DownloadForm({ onStarted }: { onStarted: (taskId: string) => void }) {
 
 export default function DataPage() {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
-  const [activeIndexTaskId, setActiveIndexTaskId] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
   const { data: stats, refetch: refetchStats } = useQuery({
@@ -768,32 +438,8 @@ export default function DataPage() {
     staleTime: 10_000,
   });
 
-  const { data: indexStats, refetch: refetchIndexStats } = useQuery({
-    queryKey: ["indexAnalyticsStats", refreshKey],
-    queryFn: () => foApi.getIndexAnalyticsStats(),
-    staleTime: 30_000,
-  });
-
-  const { data: indexTasks, refetch: refetchIndexTasks } = useQuery({
-    queryKey: ["indexAnalyticsTasks"],
-    queryFn: () => foApi.getIndexAnalyticsTasks(),
-    staleTime: 10_000,
-  });
-
-  useEffect(() => {
-    if (activeIndexTaskId) return;
-    const runningTask = (indexTasks || []).find((task: IndexAnalyticsTask) => task.status === "running");
-    if (runningTask) {
-      setActiveIndexTaskId(runningTask.task_id);
-    }
-  }, [indexTasks, activeIndexTaskId]);
-
   const handleStarted = (taskId: string) => {
     setActiveTaskId(taskId);
-  };
-
-  const handleIndexStarted = (taskId: string) => {
-    setActiveIndexTaskId(taskId);
   };
 
   const handleDone = () => {
@@ -803,97 +449,42 @@ export default function DataPage() {
     refetchTasks();
   };
 
-  const handleIndexDone = () => {
-    setActiveIndexTaskId(null);
-    setRefreshKey(k => k + 1);
-    refetchIndexStats();
-    refetchIndexTasks();
-  };
-
   return (
-    <div className="max-w-6xl space-y-6">
+    <div className="max-w-3xl space-y-6">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Database size={18} className="text-accent-blue" />
-          <h1 className="text-lg font-bold font-mono text-text-primary">Data Collection</h1>
+          <h1 className="text-lg font-bold font-mono text-text-primary">F&O Historical Data</h1>
         </div>
-        <button onClick={() => { refetchStats(); refetchTasks(); refetchIndexStats(); refetchIndexTasks(); }}
+        <button onClick={() => { refetchStats(); refetchTasks(); }}
           className="text-text-muted hover:text-text-primary p-1 rounded" title="Refresh">
           <RefreshCw size={14} />
         </button>
       </div>
 
-      {activeIndexTaskId && (
-        <IndexAnalyticsTaskMonitor taskId={activeIndexTaskId} onDone={handleIndexDone} />
-      )}
-
+      {/* Active task monitor */}
       {activeTaskId && (
         <TaskMonitor taskId={activeTaskId} onDone={handleDone} />
       )}
 
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        {/* Download form */}
+        <DownloadForm onStarted={handleStarted} />
+
+        {/* Stored data stats */}
         <div className="space-y-4">
           <div className="flex items-center gap-2">
             <BarChart3 size={16} className="text-accent-green" />
-            <h3 className="font-semibold text-sm">Index Analytics Folder</h3>
-          </div>
-          <IndexAnalyticsForm onStarted={handleIndexStarted} />
-        </div>
-
-        <div className="space-y-4">
-          <div className="flex items-center gap-2">
-            <Database size={16} className="text-accent-green" />
-            <h3 className="font-semibold text-sm">Index Dataset Snapshot</h3>
-          </div>
-          <IndexAnalyticsStatsTable
-            rows={indexStats?.rows ?? []}
-            dataRoot={indexStats?.data_root}
-          />
-        </div>
-      </div>
-
-      {indexTasks && indexTasks.length > 0 && (
-        <section className="space-y-3">
-          <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">Index Dataset Tasks</h3>
-          <div className="space-y-2">
-            {indexTasks.map((task: IndexAnalyticsTask) => (
-              <div key={task.task_id} className="card p-3 flex items-center gap-3">
-                <StatusChip status={task.status} />
-                <div className="flex-1 min-w-0">
-                  <ProgressBar pct={task.pct} />
-                  <div className="flex items-center justify-between mt-1 gap-3">
-                    <span className="text-xs text-text-muted truncate">
-                      {task.underlyings.join(", ")} · reused {fmtNum(task.skipped_contracts)} · windows {fmtNum(task.processed_request_units)}/{fmtNum(task.total_request_units)} · contracts {fmtNum(task.processed_contracts)}/{fmtNum(task.total_contracts)} · {fmtNum(task.stored_candles)} candles · {task.current_stage.replaceAll("_", " ")}{task.current_underlying ? ` · ${task.current_underlying}` : ""}{task.current_expiry ? ` ${task.current_expiry}` : ""}
-                    </span>
-                    <span className="text-xs text-text-muted">{fmtDate(task.started_at)}</span>
-                  </div>
-                  {task.error && <p className="text-xs text-accent-red mt-1 truncate">{task.error}</p>}
-                </div>
-                <button onClick={() => foApi.deleteIndexAnalyticsTask(task.task_id).then(refetchIndexTasks)}
-                  className="text-text-muted hover:text-accent-red p-1" title="Remove">
-                  <Trash2 size={12} />
-                </button>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <DownloadForm onStarted={handleStarted} />
-
-        <div className="space-y-4">
-          <div className="flex items-center gap-2">
-            <BarChart3 size={16} className="text-accent-blue" />
-            <h3 className="font-semibold text-sm">Stored Backtester Data</h3>
+            <h3 className="font-semibold text-sm">Stored Data</h3>
           </div>
           <StatsTable rows={stats?.rows ?? []} />
         </div>
       </div>
 
+      {/* Past tasks */}
       {tasks && tasks.length > 0 && (
         <section className="space-y-3">
-          <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">F&amp;O Download History</h3>
+          <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">Download History</h3>
           <div className="space-y-2">
             {tasks.map((t: DownloadTask) => (
               <div key={t.task_id} className="card p-3 flex items-center gap-3">
