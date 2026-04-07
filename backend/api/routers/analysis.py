@@ -1477,16 +1477,16 @@ async def start_research_sync(
     from api.routers.auth import get_broker_token
     token = get_broker_token("upstox") or ""
     if not token:
-        raise HTTPException(
-            status_code=400,
-            detail="Upstox is not connected. Connect Upstox to sync the catalog.",
-        )
+        logger.info("[Research Sync] Upstox not connected. Proceeding with baseline index sync fallback.")
 
     background_tasks.add_task(_run_research_sync, token, underlying_limit)
 
     return {
         "status": "started",
-        "message": f"Background research sync for {underlying_limit} underlyings has been queued.",
+        "message": (
+            f"Background research sync for {underlying_limit} underlyings has been queued. "
+            "Using baseline indices if Upstox is disconnected."
+        ),
     }
 
 

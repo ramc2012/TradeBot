@@ -296,14 +296,24 @@ class UpstoxResearchSync:
         return [merged[key] for key in sorted(merged)]
 
     async def _upsert_universe(self) -> int:
-        universe = await self.client.fetch_fo_universe()
-        rows = [
-            {"symbol": symbol, "kind": "INDEX"}
-            for symbol in sorted(universe["indices"])
-        ] + [
-            {"symbol": symbol, "kind": "STOCK"}
-            for symbol in sorted(universe["stocks"])
-        ]
+        try:
+            universe = await self.client.fetch_fo_universe()
+            rows = [
+                {"symbol": symbol, "kind": "INDEX"}
+                for symbol in sorted(universe["indices"])
+            ] + [
+                {"symbol": symbol, "kind": "STOCK"}
+                for symbol in sorted(universe["stocks"])
+            ]
+        except Exception as exc:
+            logger.warning(f"[Research Sync] Could not fetch F&O universe from Upstox: {exc}. Seeding primary indices fallback.")
+            rows = [
+                {"symbol": "NIFTY", "kind": "INDEX"},
+                {"symbol": "BANKNIFTY", "kind": "INDEX"},
+                {"symbol": "FINNIFTY", "kind": "INDEX"},
+                {"symbol": "MIDCPNIFTY", "kind": "INDEX"},
+            ]
+
         if not rows:
             return 0
 

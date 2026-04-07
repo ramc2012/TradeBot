@@ -680,7 +680,7 @@ class ATMWatchlistService:
         async with AsyncSessionLocal() as session:
             try:
                 result = await session.execute(statement)
-                return [
+                underlyings = [
                     UnderlyingMeta(
                         symbol=str(row.symbol),
                         kind=str(row.kind),
@@ -692,6 +692,17 @@ class ATMWatchlistService:
             except Exception as exc:
                 logger.warning(f"[ATM Watchlist] fo_underlying_catalog not available: {exc}")
                 return []
+        
+        # Fallback to primary indices if the catalog is empty in the database
+        if not underlyings:
+            logger.info("[ATM Watchlist] Underlying catalog empty. Using default indices fallback.")
+            return [
+                UnderlyingMeta(symbol="NIFTY", kind="INDEX", spot_instrument_key="", underlying_key=""),
+                UnderlyingMeta(symbol="BANKNIFTY", kind="INDEX", spot_instrument_key="", underlying_key=""),
+                UnderlyingMeta(symbol="FINNIFTY", kind="INDEX", spot_instrument_key="", underlying_key=""),
+                UnderlyingMeta(symbol="MIDCPNIFTY", kind="INDEX", spot_instrument_key="", underlying_key=""),
+            ]
+        return underlyings
 
     async def _get_upstox_adapter(self) -> Optional[BrokerAdapter]:
         await ensure_upstox_session(force_validate=False)
