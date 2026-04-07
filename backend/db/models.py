@@ -1,10 +1,10 @@
 """SQLAlchemy ORM models for Nomad Curie."""
 from __future__ import annotations
 import uuid
-from datetime import datetime
-from typing import Optional
+from datetime import date, datetime
+from typing import Any, Optional
 from sqlalchemy import (
-    String, Integer, Float, Boolean, DateTime, Text, JSON,
+    String, Integer, Float, Boolean, Date, DateTime, Text, JSON,
     Enum as SAEnum, ForeignKey, UniqueConstraint
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -164,3 +164,103 @@ class AgentLog(Base):
     reasoning: Mapped[Optional[str]] = mapped_column(Text)
     output: Mapped[Optional[dict]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ValidationRun(Base):
+    __tablename__ = "validation_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    gate: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    label: Mapped[str] = mapped_column(String(150), nullable=False)
+    passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    symbol: Mapped[Optional[str]] = mapped_column(String(50))
+    mode: Mapped[Optional[str]] = mapped_column(String(30))
+    scenario: Mapped[Optional[str]] = mapped_column(String(50))
+    source: Mapped[Optional[str]] = mapped_column(String(50))
+    context: Mapped[Optional[Any]] = mapped_column(JSON)
+    report: Mapped[Optional[Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    metrics: Mapped[list["ValidationMetric"]] = relationship(
+        "ValidationMetric",
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )
+    artifacts: Mapped[list["ValidationArtifact"]] = relationship(
+        "ValidationArtifact",
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )
+
+
+class ValidationMetric(Base):
+    __tablename__ = "validation_metrics"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("validation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    metric_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    metric_value: Mapped[Optional[Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    run: Mapped["ValidationRun"] = relationship("ValidationRun", back_populates="metrics")
+
+
+class ValidationArtifact(Base):
+    __tablename__ = "validation_artifacts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("validation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    artifact_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    artifact_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    payload: Mapped[Optional[Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    run: Mapped["ValidationRun"] = relationship("ValidationRun", back_populates="artifacts")
+
+
+class ShadowObservation(Base):
+    __tablename__ = "shadow_observations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    signal_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    session_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    source: Mapped[Optional[str]] = mapped_column(String(50))
+    snapshot_mode: Mapped[Optional[str]] = mapped_column(String(30))
+    agent_name: Mapped[str] = mapped_column(String(50), nullable=False)
+    action: Mapped[str] = mapped_column(String(10), nullable=False)
+    regime_label: Mapped[Optional[str]] = mapped_column(String(50))
+    setup_name: Mapped[Optional[str]] = mapped_column(String(100))
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    entry_price: Mapped[Optional[float]] = mapped_column(Float)
+    stop_price: Mapped[Optional[float]] = mapped_column(Float)
+    target_price: Mapped[Optional[float]] = mapped_column(Float)
+    tick_size: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    risk_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    kill_switch_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    simulated_fill_price: Mapped[Optional[float]] = mapped_column(Float)
+    observed_touch_price: Mapped[Optional[float]] = mapped_column(Float)
+    observed_fill_price: Mapped[Optional[float]] = mapped_column(Float)
+    fill_drift_ticks: Mapped[Optional[float]] = mapped_column(Float)
+    stale_signal: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    reconciliation_status: Mapped[str] = mapped_column(String(30), nullable=False, default="matched")
+    mismatch_duration_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    kill_switch_tested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    kill_switch_passed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    dashboard_checked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    alerts_checked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    manual_override_tested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    details: Mapped[Optional[Any]] = mapped_column("metadata", JSON)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

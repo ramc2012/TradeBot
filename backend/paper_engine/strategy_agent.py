@@ -254,6 +254,8 @@ class StrategyPosition:
     entry_iv_pct: Optional[float] = None
     spot_setup: Optional[str] = None
     window_end: Optional[str] = None    # ISO date string for exit deadline
+    lot_size: Optional[int] = None      # NSE-mandated lot size for this underlying
+    price_updated_at: Optional[str] = None  # IST ISO when current_price was last refreshed
     macd_line: Optional[list] = field(default=None, repr=False)
 
     @property
@@ -317,7 +319,7 @@ class PaperStrategyAgent:
         self._task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
         self._enabled = True
-        self._auto_run_enabled = False
+        self._auto_run_enabled = True   # enabled by default; paper mode is safe
         self._kill_switch_active = False
         self._running = False
         self._last_run_at: Optional[str] = None
@@ -414,16 +416,47 @@ class PaperStrategyAgent:
                 })
                 self._last_expiry = self._last_candidate_expiries[0] if self._last_candidate_expiries else None
 
-                # 2. Get ATM watchlist rows for each active expiry
-                expiries = list({str(w["expiry"]) for w in self._active_windows})
+                # 2. Get ATM watchlist rows for each active expiry.
+                # Also include the broker's default (nearest weekly) expiry in
+                # case the monthly expiry isn't directly available in the live chain.
+                monthly_expiries = list({str(w["expiry"]) for w in self._active_windows})
+                # Always include the nearest available expiry (None = broker default)
+                expiries_to_fetch = monthly_expiries + [None]
                 watchlists = await asyncio.gather(
-                    *(atm_watchlist_service.get_watchlist(exp) for exp in expiries),
+                    *(atm_watchlist_service.get_watchlist(exp) for exp in expiries_to_fetch),
                     return_exceptions=True,
                 )
-                rows = []
+                # Merge rows: monthly-expiry rows first, broker-default rows as fallback.
+                # Deduplicate by underlying only — one row per underlying.
+                # Monthly expiry is preferred over broker-default nearest expiry
+                # to avoid dual entries when both weekly and monthly chains exist.
+                monthly_set = set(monthly_expiries)
+                rows_by_underlying: dict[str, dict] = {}
+
+                # First pass: add monthly-expiry rows (highest priority)
                 for wl in watchlists:
-                    if isinstance(wl, dict):
-                        rows.extend(wl.get("rows") or [])
+                    if not isinstance(wl, dict):
+                        continue
+                    for r in (wl.get("rows") or []):
+                        und = r.get("underlying", "")
+                        row_expiry = r.get("expiry", "")
+                        if row_expiry in monthly_set:
+                            # Only overwrite if this underlying doesn't have a monthly row yet
+                            if und not in rows_by_underlying or rows_by_underlying[und].get("expiry") not in monthly_set:
+                                rows_by_underlying[und] = r
+
+                # Second pass: broker-default rows fill gaps only (no monthly row found)
+                for wl in watchlists:
+                    if not isinstance(wl, dict):
+                        continue
+                    for r in (wl.get("rows") or []):
+                        und = r.get("underlying", "")
+                        row_expiry = r.get("expiry", "")
+                        if row_expiry not in monthly_set and und not in rows_by_underlying:
+                            rows_by_underlying[und] = r
+
+                rows = list(rows_by_underlying.values())
+                expiries = list({r.get("expiry", "") for r in rows if r.get("expiry")})
 
                 if not rows:
                     self._last_message = "ATM watchlist empty for active windows."
@@ -435,8 +468,12 @@ class PaperStrategyAgent:
 
                 # 4. Process: manage exits first, then scan for entries
                 runtime = self._strategy
-                await self._manage_exits(runtime)
+                await self._manage_exits(runtime, rows)
                 await self._scan_entries(runtime, rows, window_map)
+                # 5. Refresh open-position prices from live watchlist LTP so the
+                #    dashboard shows current tick prices, not just the last
+                #    closed 30-min candle (which can be up to 30 min stale).
+                self._refresh_prices_from_watchlist(runtime, rows)
                 await self._maybe_send_telegram_report()
 
                 self._last_run_at = _now_ist().isoformat()
@@ -450,6 +487,8 @@ class PaperStrategyAgent:
                     f"Scan complete. {len(rows)} rows, {n_pos} positions.",
                     tone="success",
                 )
+                # Capture equity snapshot for equity curve chart
+                runtime.portfolio.snapshot_equity()
                 return self.get_status()
 
             except Exception as exc:
@@ -488,10 +527,19 @@ class PaperStrategyAgent:
             if not window:
                 continue
 
-            # Check TTE
+            # Check TTE against the monthly trading window
             tte = days_remaining_in_window(window, as_of=_now_ist().date())
             if tte < MIN_TTE_DAYS:
                 continue
+
+            # Skip options expiring within 3 calendar days (avoid settlement risk)
+            if expiry_str:
+                try:
+                    opt_expiry = date.fromisoformat(expiry_str)
+                    if (opt_expiry - _now_ist().date()).days < 3:
+                        continue
+                except (ValueError, TypeError):
+                    pass
 
             # Skip if already holding this underlying
             if self._has_underlying_position(runtime, underlying):
@@ -544,15 +592,34 @@ class PaperStrategyAgent:
             if not should_enter or not reason:
                 continue
 
-            # Entry premium filter
-            latest_close = closes[-1]
+            # ── Entry price: always use live broker LTP from ATM watchlist ──
+            # The candle DB can be hours or days stale between sessions.
+            # Using a stale candle close as fill price produces impossible trades
+            # (e.g. NIFTY 22950 CE entered at 191 when it never traded there today).
+            live_ltp = float(side.get("ltp") or 0.0)
+            if live_ltp > 0:
+                candle_close = closes[-1]
+                if abs(candle_close - live_ltp) / max(live_ltp, 1.0) > 0.15:
+                    logger.warning(
+                        f"[Strategy] Stale candle detected for {underlying} {opt_type}: "
+                        f"candle_close={candle_close:.2f} vs live_ltp={live_ltp:.2f}. "
+                        "Using live LTP as entry basis."
+                    )
+                latest_close = live_ltp  # authoritative current price
+            elif closes:
+                latest_close = closes[-1]  # fallback when no live data
+            else:
+                continue  # no price at all — skip
+
+            # Entry premium filter (now checked against live LTP)
             if latest_close < MIN_PREMIUM or latest_close > MAX_PREMIUM:
                 continue
 
-            # IV filter
+            # IV filter — prefer live watchlist IV, fall back to last candle
             latest_candle = candles[-1] if candles else {}
             iv_pct = None
-            iv_raw = latest_candle.get("iv")
+            # Try live IV from watchlist first (most current)
+            iv_raw = side.get("iv") or latest_candle.get("iv")
             if iv_raw is not None:
                 iv_val = float(iv_raw)
                 iv_pct = iv_val * 100.0 if iv_val < 1.0 else iv_val  # handle decimal vs pct
@@ -622,7 +689,7 @@ class PaperStrategyAgent:
             self._append_commentary(
                 runtime.label,
                 f"Found {len(candidates)} signals. Best: {top['row']['underlying']} "
-                f"{top['opt_type']} (setup={top['spot_setup']}, IV={top.get('iv_pct', '?'):.0f}%, "
+                f"{top['opt_type']} (setup={top['spot_setup']}, IV={top.get('iv_pct') or 0:.0f}%, "
                 f"regime={top['quadrant'].regime}). Opened {opened}.",
                 tone="info",
             )
@@ -643,14 +710,32 @@ class PaperStrategyAgent:
         strike = float(side["strike"])
         symbol = _contract_symbol(row["underlying"], expiry, strike, opt_type)
 
-        lot_size = await option_history_service.resolve_lot_size(
-            underlying=row["underlying"],
-            expiry=date.fromisoformat(expiry),
-            strike=strike,
-            option_type=opt_type,
-            instrument_key=side.get("instrument_key"),
-        )
-        lot_size = lot_size or PaperPortfolio.DEFAULT_LOT_SIZE
+        # 1. Use lot_size embedded in the ATM watchlist row (from Upstox contract data)
+        # 2. Fall back to DB lookup (fo_underlying_catalog → fo_contract_catalog)
+        # 3. Emergency fallback: portfolio constant (should never be reached)
+        lot_size: Optional[int] = None
+        if row.get("lot_size"):
+            try:
+                lot_size = int(row["lot_size"])
+            except (TypeError, ValueError):
+                pass
+
+        if not lot_size:
+            lot_size = await option_history_service.resolve_lot_size(
+                underlying=row["underlying"],
+                expiry=date.fromisoformat(expiry),
+                strike=strike,
+                option_type=opt_type,
+                instrument_key=side.get("instrument_key"),
+            )
+
+        if not lot_size:
+            # Last resort — log a warning so we know this path was hit
+            logger.warning(
+                f"[Strategy] lot_size unknown for {row['underlying']} — using DEFAULT_LOT_SIZE. "
+                "Check Upstox contract sync or broker connectivity."
+            )
+            lot_size = PaperPortfolio.DEFAULT_LOT_SIZE
 
         # Kelly-based position sizing
         sizing_mode = self._get_sizing_mode(candidate)
@@ -696,6 +781,7 @@ class PaperStrategyAgent:
             spot_setup=candidate.get("spot_setup"),
             window_end=str(window["window_end"]),
             macd_line=candidate.get("macd_line"),
+            lot_size=lot_size,
         )
         runtime.entries += 1
         runtime.processed_signals[candidate["signal_key"]] = str(candidate["latest_bar_time"])
@@ -712,14 +798,14 @@ class PaperStrategyAgent:
             runtime.label,
             f"ENTRY {row['underlying']} {opt_type} {int(strike)} @{fill_price:.2f} | "
             f"Qty={qty} | Setup={candidate.get('spot_setup')} | "
-            f"IV={candidate.get('iv_pct', '?'):.0f}% | TTE={candidate['tte_days']}d | "
+            f"IV={candidate.get('iv_pct') or 0:.0f}% | TTE={candidate['tte_days']}d | "
             f"Regime={candidate['quadrant'].regime}",
             tone="trade",
         )
         await self._send_telegram_text(
             f"ENTRY | {row['underlying']} {opt_type} {int(strike)} @{fill_price:.2f}\n"
             f"Qty: {qty} | Setup: {candidate.get('spot_setup')} | "
-            f"IV: {candidate.get('iv_pct', '?'):.0f}% | Regime: {candidate['quadrant'].regime}"
+            f"IV: {candidate.get('iv_pct') or 0:.0f}% | Regime: {candidate['quadrant'].regime}"
         )
 
     def _get_sizing_mode(self, candidate: dict) -> str:
@@ -737,13 +823,22 @@ class PaperStrategyAgent:
 
     # ── Exit Management ──────────────────────────────────────────────────────
 
-    async def _manage_exits(self, runtime: StrategyRuntime) -> None:
+    async def _manage_exits(
+        self, runtime: StrategyRuntime, rows: Optional[list] = None
+    ) -> None:
         """Evaluate exit priority chain for all open positions."""
         if not runtime.positions:
             return
 
+        # Build a quick lookup from watchlist rows so we can use live LTP when
+        # the 30-min candle DB has no recent data for a position.
+        row_map: dict[str, dict] = {}
+        if rows:
+            for r in rows:
+                row_map[r.get("underlying", "")] = r
+
         for symbol, pos in list(runtime.positions.items()):
-            # Refresh current price
+            # Refresh current price from 30-min candles (MACD / exit signals)
             candles = await option_history_service.load_candles(
                 underlying=pos.underlying,
                 expiry=date.fromisoformat(pos.expiry),
@@ -753,14 +848,40 @@ class PaperStrategyAgent:
                 interval="30minute",
                 limit=80,
             )
-            if not candles:
+
+            closes = [float(c["close"]) for c in candles if c.get("close")] if candles else []
+
+            # Determine the best available exit price:
+            #   1. Last closed 30-min candle (most accurate for MACD-based exits)
+            #   2. Live watchlist LTP (fallback when candles are missing/stale)
+            live_ltp: Optional[float] = None
+            wl_row = row_map.get(pos.underlying)
+            if wl_row:
+                side_key = "ce" if pos.option_type == "CE" else "pe"
+                wl_side = wl_row.get(side_key) or {}
+                raw_ltp = wl_side.get("ltp")
+                if raw_ltp:
+                    try:
+                        live_ltp = float(raw_ltp)
+                    except (TypeError, ValueError):
+                        pass
+
+            if closes:
+                latest_close = closes[-1]
+                # If live LTP is significantly newer/different, prefer it for exit simulation
+                if live_ltp and live_ltp > 0 and abs(latest_close - live_ltp) / max(live_ltp, 1.0) > 0.10:
+                    latest_close = live_ltp
+            elif live_ltp and live_ltp > 0:
+                # No candle data at all — use live LTP so exits still fire
+                latest_close = live_ltp
+                logger.debug(
+                    f"[Strategy] No candles for {pos.underlying} {pos.option_type} — "
+                    f"using live LTP {live_ltp:.2f} for exit evaluation"
+                )
+            else:
+                # Truly no price — cannot evaluate exits, skip
                 continue
 
-            closes = [float(c["close"]) for c in candles if c.get("close")]
-            if not closes:
-                continue
-
-            latest_close = closes[-1]
             pos.current_price = latest_close
             pos.peak_price = max(pos.peak_price, latest_close)
 
@@ -828,6 +949,42 @@ class PaperStrategyAgent:
             sym: pos.current_price
             for sym, pos in runtime.positions.items()
         }
+        if latest_prices:
+            runtime.portfolio.update_prices(latest_prices)
+
+    # ── Watchlist LTP Price Refresh ──────────────────────────────────────────
+
+    def _refresh_prices_from_watchlist(
+        self, runtime: StrategyRuntime, rows: list[dict[str, Any]]
+    ) -> None:
+        """Update current_price for open positions using live watchlist LTP.
+
+        Exits have already run (using closed 30-min candle prices). This is a
+        display-only refresh so the dashboard shows the latest tick price
+        rather than the previous candle close (which can be 30 min stale).
+        """
+        if not runtime.positions:
+            return
+        row_map: dict[str, dict] = {r["underlying"]: r for r in rows}
+        now_str = _now_ist().isoformat()
+        for pos in runtime.positions.values():
+            row = row_map.get(pos.underlying)
+            if not row:
+                continue
+            side = "ce" if pos.option_type == "CE" else "pe"
+            opt = row.get(side) or {}
+            ltp = opt.get("ltp")
+            if ltp:
+                try:
+                    price = float(ltp)
+                    if price > 0:
+                        pos.current_price = price
+                        pos.price_updated_at = now_str
+                        if price > pos.peak_price:
+                            pos.peak_price = price
+                except (TypeError, ValueError):
+                    pass
+        latest_prices = {s: p.current_price for s, p in runtime.positions.items()}
         if latest_prices:
             runtime.portfolio.update_prices(latest_prices)
 
@@ -1019,6 +1176,28 @@ class PaperStrategyAgent:
             self._append_commentary("System", self._last_message, tone="success")
 
         return self.get_control_state(cancelled_orders=cancelled_orders)
+
+    async def set_auto_run(self, enabled: bool) -> dict[str, Any]:
+        """Enable or disable the recurring background scan loop."""
+        self._auto_run_enabled = bool(enabled)
+        if self._auto_run_enabled:
+            # Start background loop if not already running
+            if not self._task or self._task.done():
+                self._task = asyncio.create_task(self._loop(), name="paper-strategy-agent")
+            self._last_message = "Auto-run enabled. Agent will scan every 60 s during market hours."
+            self._append_commentary("System", self._last_message, tone="success")
+        else:
+            # Cancel background loop but keep agent enabled for manual runs
+            if self._task and not self._task.done():
+                self._task.cancel()
+                try:
+                    await self._task
+                except asyncio.CancelledError:
+                    pass
+                self._task = None
+            self._last_message = "Auto-run disabled. Use run-once for manual scans."
+            self._append_commentary("System", self._last_message, tone="warning")
+        return self.get_control_state()
 
     def get_control_state(self, *, cancelled_orders: int = 0) -> dict[str, Any]:
         return {

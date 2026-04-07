@@ -52,6 +52,7 @@ export const updateTradingKillSwitch = (active: boolean) =>
   api.put("/api/trading/kill-switch", { active });
 export const getPortfolioSummary = () => api.get("/api/trading/portfolio-summary");
 export const getStrategyAgentStatus = () => api.get("/api/trading/strategy-agent/status");
+export const getStrategyEquityHistory = () => api.get("/api/trading/strategy-agent/equity-history");
 export const runStrategyAgentOnce = (force = true) =>
   api.post("/api/trading/strategy-agent/run-once", null, { params: { force } });
 export const getRiskStatus = () => api.get("/api/trading/risk-status");
@@ -135,6 +136,87 @@ export const getResearchCacheStatus = () => api.get("/api/analysis/research-cach
 export const getLatestValidationReport = () => api.get("/api/analysis/validation-report/latest");
 export const getLatestGreeksSyncReport = () => api.get("/api/analysis/greeks-sync-report/latest");
 export const getAllCredsStatus = () => api.get("/api/auth/all-credentials-status");
+
+// ── Strategy Dashboard ───────────────────────────────────────────────────
+export const getStrategyDataStatus = () => api.get("/api/strategy/data-status");
+export const getStrategySignals = (underlying = "SENSEX", limit = 30) =>
+  api.get("/api/strategy/signals", { params: { underlying, limit } });
+export const getStrategyAgentComments = (limit = 20) =>
+  api.get("/api/strategy/agent-comments", { params: { limit } });
+export const getStrategyTrades = (underlying = "SENSEX", limit = 50) =>
+  api.get("/api/strategy/trades", { params: { underlying, limit } });
+export const getStrategyPortfolio = (underlying = "SENSEX") =>
+  api.get("/api/strategy/portfolio", { params: { underlying } });
+export const getStrategyOpenSignals = (underlying = "SENSEX") =>
+  api.get("/api/strategy/open-signals", { params: { underlying } });
+
+// ── Auction Intelligence ─────────────────────────────────────────────────
+export const getAuctionIntelligenceSummary = () =>
+  api.get("/api/auction-intelligence/summary");
+export const getAuctionIntelligenceDefaultConfig = () =>
+  api.get("/api/auction-intelligence/default-config");
+export const getAuctionIntelligenceDemoScenario = (
+  symbol = "NIFTY",
+  scenario = "acceptance_up",
+) =>
+  api.get("/api/auction-intelligence/demo-scenario", { params: { symbol, scenario } });
+export const getAuctionIntelligenceLiveSnapshot = (symbol = "NIFTY") =>
+  api.get("/api/auction-intelligence/live-snapshot", { params: { symbol } });
+export const runAuctionIntelligenceAnalysis = (payload: object) =>
+  api.post("/api/auction-intelligence/analyze", payload);
+export const runAuctionIntelligencePaperProposal = (payload: object) =>
+  api.post("/api/auction-intelligence/paper-proposal", payload);
+export const runAuctionIntelligenceGateAValidation = (payload: object) =>
+  api.post("/api/auction-intelligence/validate-gate-a", payload);
+export const getAuctionIntelligenceGateBValidation = (
+  symbol = "BANKNIFTY",
+  mode: "live" | "demo" = "live",
+  scenario = "acceptance_up",
+  session_limit = 8,
+  lookback_days = 45,
+) =>
+  api.get("/api/auction-intelligence/validate-gate-b", {
+    params: { symbol, mode, scenario, session_limit, lookback_days },
+  });
+export const runAuctionIntelligenceShadowBackfill = (
+  symbol = "BANKNIFTY",
+  session_limit = 20,
+  lookback_days = 45,
+  observation_bars = 4,
+  snapshot_cutoff = "11:15",
+  shadow_net_liquidation = 1_000_000,
+  payload: object = {},
+) =>
+  api.post("/api/auction-intelligence/shadow-backfill", payload, {
+    params: {
+      symbol,
+      session_limit,
+      lookback_days,
+      observation_bars,
+      snapshot_cutoff,
+      shadow_net_liquidation,
+    },
+  });
+export const getAuctionIntelligenceGateCValidation = (
+  symbol = "BANKNIFTY",
+  session_limit = 30,
+  record_limit = 500,
+) =>
+  api.get("/api/auction-intelligence/validate-gate-c", {
+    params: { symbol, session_limit, record_limit },
+  });
+export const getAuctionIntelligenceCanaryReadiness = (symbol = "BANKNIFTY") =>
+  api.get("/api/auction-intelligence/canary-readiness", { params: { symbol } });
+
+// ── Auction Intelligence — MP signal layer ────────────────────────────────
+export const getAuctionIntelligenceMPDataStatus = () =>
+  api.get("/api/auction-intelligence/mp-data-status");
+export const getAuctionIntelligenceMPSignals = (underlying = "NIFTY", limit = 20) =>
+  api.get("/api/auction-intelligence/mp-signals", { params: { underlying, limit } });
+export const getAuctionIntelligenceMPOpenSignal = (underlying = "NIFTY") =>
+  api.get("/api/auction-intelligence/mp-open-signal", { params: { underlying } });
+export const getAuctionIntelligenceMPAgentContext = (underlying = "NIFTY", limit = 10) =>
+  api.get("/api/auction-intelligence/mp-agent-context", { params: { underlying, limit } });
 
 // ── Backtester ────────────────────────────────────────────────────────────
 export const getBacktesterDefaultConfig = () => api.get("/api/backtester/default-config");

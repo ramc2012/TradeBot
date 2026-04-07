@@ -179,6 +179,7 @@ type ATMWatchlistPayload = {
     expiry: string;
     atm_strike: number;
     live_source: string;
+    lot_size?: number | null;
     fyers_symbol?: string | null;
     ce?: ATMWatchlistOptionSide | null;
     pe?: ATMWatchlistOptionSide | null;
@@ -198,6 +199,8 @@ type ATMWatchlistPayload = {
 type ATMWatchlistExpiryPayload = {
   expiries: string[];
   default_expiry?: string | null;
+  monthly_expiry?: string | null;
+  expiry_scope_note?: string | null;
   source?: string;
   detail?: string | null;
 };
@@ -1377,13 +1380,18 @@ export default function MarketPage() {
             <div>
               <div className="text-[11px] uppercase tracking-[0.14em] text-text-muted">ATM CE / PE Watchlist</div>
               <div className="mt-1 text-sm text-text-secondary">
-                Instrument-wide monthly options board with live premium, OI, IV, and lightweight MACD / RSI context.
+                All-instrument board · <span className="text-accent-blue/80">Indices use selected expiry (weekly/monthly)</span> · <span className="text-accent-amber/80">Stocks always use nearest monthly expiry</span>
               </div>
+              {watchlistExpiryQuery.data?.expiry_scope_note && (
+                <div className="mt-1.5 text-[11px] text-text-muted font-mono">
+                  {watchlistExpiryQuery.data.expiry_scope_note}
+                </div>
+              )}
               {watchlistExpiryQuery.data?.detail && (
-                <div className="mt-2 text-xs text-accent-amber">{watchlistExpiryQuery.data.detail}</div>
+                <div className="mt-1.5 text-xs text-accent-amber">{watchlistExpiryQuery.data.detail}</div>
               )}
               {watchlistQuery.data?.detail && (
-                <div className="mt-2 text-xs text-accent-amber">{watchlistQuery.data.detail}</div>
+                <div className="mt-1.5 text-xs text-accent-amber">{watchlistQuery.data.detail}</div>
               )}
             </div>
             <div className="flex items-center gap-2">
@@ -1443,36 +1451,54 @@ export default function MarketPage() {
           </div>
 
           <div className="mt-4 overflow-x-auto">
-            <table className="w-full min-w-[1800px] text-left text-xs">
+            <table className="w-full min-w-[1800px] text-left text-xs font-mono">
               <thead>
                 <tr className="border-b border-bg-border text-text-muted">
-                  <th className="pb-2 pr-3">Underlying</th>
-                  <th className="pb-2 pr-3">Spot</th>
-                  <th className="pb-2 pr-3">Expiry</th>
-                  <th className="pb-2 pr-3">ATM</th>
-                  <th className="pb-2 pr-3">CE Snapshot</th>
-                  <th className="pb-2">PE Snapshot</th>
+                  <th className="pb-2 pr-3 font-normal">Underlying</th>
+                  <th className="pb-2 pr-3 font-normal text-right">Spot</th>
+                  <th className="pb-2 pr-3 font-normal">Expiry</th>
+                  <th className="pb-2 pr-3 font-normal text-right">ATM Strike</th>
+                  <th className="pb-2 pr-3 font-normal text-right">Lot</th>
+                  <th className="pb-2 pr-6 font-normal" colSpan={1}>── CE (Call) ──</th>
+                  <th className="pb-2 font-normal" colSpan={1}>── PE (Put) ──</th>
                 </tr>
               </thead>
               <tbody>
                 {(watchlistQuery.data?.rows ?? []).map((row) => (
-                  <tr key={`${row.underlying}:${row.expiry}`} className="border-b border-bg-border/40 align-top">
-                    <td className="py-3 pr-3">
-                      <div className="font-medium text-text-primary">{row.underlying}</div>
-                      <div className="mt-1 text-[11px] uppercase tracking-[0.12em] text-text-muted">
-                        {row.kind} · {row.live_source}
+                  <tr key={`${row.underlying}:${row.expiry}`} className="border-b border-bg-border/40 align-top hover:bg-bg-secondary/20">
+                    <td className="py-2.5 pr-3">
+                      <div className="font-semibold text-text-primary not-italic">{row.underlying}</div>
+                      <div className="mt-0.5 flex items-center gap-1">
+                        <span className={clsx(
+                          "text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider not-italic",
+                          row.kind === "INDEX"
+                            ? "bg-accent-blue/15 text-accent-blue"
+                            : "bg-accent-amber/15 text-accent-amber"
+                        )}>
+                          {row.kind === "INDEX" ? "IDX" : "STK"}
+                        </span>
+                        <span className="text-[9px] text-text-muted not-italic">{row.live_source}</span>
                       </div>
                     </td>
-                    <td className="py-3 pr-3 font-mono text-text-primary">{row.spot_price.toFixed(2)}</td>
-                    <td className="py-3 pr-3 font-mono text-text-secondary">{row.expiry}</td>
-                    <td className="py-3 pr-3 font-mono text-accent-amber">{row.atm_strike}</td>
-                    <td className="py-3 pr-3"><ATMOptionCell option={row.ce} accent="ce" /></td>
-                    <td className="py-3"><ATMOptionCell option={row.pe} accent="pe" /></td>
+                    <td className="py-2.5 pr-3 text-right text-text-primary">{row.spot_price.toFixed(2)}</td>
+                    <td className="py-2.5 pr-3 text-text-secondary">{row.expiry}</td>
+                    <td className="py-2.5 pr-3 text-right text-accent-amber font-semibold">{row.atm_strike}</td>
+                    <td className="py-2.5 pr-3 text-right text-text-muted">{row.lot_size ?? "--"}</td>
+                    <td className="py-2.5 pr-6"><ATMOptionCell option={row.ce} accent="ce" /></td>
+                    <td className="py-2.5"><ATMOptionCell option={row.pe} accent="pe" /></td>
                   </tr>
                 ))}
+                {watchlistQuery.isLoading && (
+                  <tr>
+                    <td colSpan={7} className="py-8 text-center text-sm text-text-muted">
+                      <RefreshCw size={14} className="inline animate-spin mr-2" />
+                      Loading ATM watchlist…
+                    </td>
+                  </tr>
+                )}
                 {!watchlistQuery.isLoading && !(watchlistQuery.data?.rows?.length) && (
                   <tr>
-                    <td colSpan={6} className="py-8 text-center text-sm text-text-muted">
+                    <td colSpan={7} className="py-8 text-center text-sm text-text-muted">
                       {watchlistQuery.data?.detail || "No ATM watchlist rows are available for the selected expiry."}
                     </td>
                   </tr>

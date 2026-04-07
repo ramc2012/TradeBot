@@ -276,9 +276,34 @@ async def strategy_agent_status():
     return paper_strategy_agent.get_status()
 
 
+@router.get("/strategy-agent/equity-history")
+async def strategy_equity_history():
+    """Return equity curve for all strategy portfolios."""
+    status = paper_strategy_agent.get_status()
+    result = []
+    for strat in status.get("strategies", []):
+        key = strat.get("key", "")
+        # Access the runtime portfolio directly from the agent
+        runtime = paper_strategy_agent._strategy
+        if runtime and runtime.key == key:
+            result.append({
+                "key": key,
+                "label": strat.get("label", ""),
+                "equity_curve": runtime.portfolio.get_equity_curve(),
+                "initial_capital": strat["summary"].get("initial_capital", 1_000_000),
+            })
+    return result
+
+
 @router.post("/strategy-agent/run-once")
 async def run_strategy_agent_once(force: bool = True):
     return await paper_strategy_agent.run_once(force=force)
+
+
+@router.put("/strategy-agent/auto-run")
+async def set_strategy_agent_auto_run(enabled: bool):
+    """Enable or disable the recurring background scan loop."""
+    return await paper_strategy_agent.set_auto_run(enabled)
 
 
 @router.get("/risk-status")

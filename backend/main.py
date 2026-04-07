@@ -12,6 +12,7 @@ from db.redis_client import get_redis, close_redis
 from api.routers import auth, trading, market, analytics, agent, commodity, backtester as backtester_router
 from api.routers import fo_data as fo_data_router
 from api.routers import analysis as analysis_router
+from api.routers import strategy as strategy_router
 from api.routers import auction_intelligence as auction_intelligence_router
 from api.websockets.ticks import ws_ticks, ws_positions, ws_proposals
 from market_data import data_router as market_data_router
@@ -62,6 +63,14 @@ async def lifespan(app: FastAPI):
     await paper_strategy_agent.start()
     await commodity_strategy_agent.start()
 
+    # Load RL Q-table cache into memory (non-fatal if table doesn't exist yet)
+    try:
+        from auction_intelligence.rl.policy import rl_policy
+        await rl_policy.load_cache()
+        logger.info("✓ RL Q-table cache loaded")
+    except Exception as e:
+        logger.warning(f"RL Q-table cache load skipped: {e}")
+
     yield
 
     # Shutdown
@@ -99,6 +108,7 @@ app.include_router(commodity.router)
 app.include_router(backtester_router.router)
 app.include_router(fo_data_router.router)
 app.include_router(analysis_router.router)
+app.include_router(strategy_router.router)
 app.include_router(auction_intelligence_router.router)
 
 

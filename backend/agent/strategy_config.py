@@ -28,7 +28,7 @@ WINDOW_BUFFER_DAYS = 7  # days before expiry to exit (avoid delivery margins)
 
 MAX_ENTRY_IV_PCT = 30.0       # prefer IV ≤ 30% (vol-adjusted return 3.4× better)
 HARD_MAX_IV_PCT = 45.0        # refuse entry above 45%
-MIN_TTE_DAYS = 14             # need ≥14 days for move to develop
+MIN_TTE_DAYS = 7              # need ≥7 days for move to develop (lowered from 14 for weekly-expiry compatibility)
 MIN_PREMIUM = 2.0             # avoid illiquid sub-₹2 options
 MAX_PREMIUM = 500.0           # overpriced entries fail 4/17 times
 MIN_CANDLE_BARS = 20          # minimum 30-min bars in window before signal

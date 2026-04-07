@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  LayoutDashboard, TrendingUp, BarChart3, Globe, Bot, Settings, FlaskConical, Database, Activity, Boxes,
+  LayoutDashboard, TrendingUp, BarChart3, Globe, Bot, Settings, FlaskConical, Database, Activity, Boxes, Crosshair, Layers3,
 } from "lucide-react";
 import { clsx } from "clsx";
 
@@ -15,6 +15,8 @@ const NAV = [
   { href: "/agent", label: "Agent", icon: Bot },
   { href: "/backtester", label: "Backtester", icon: FlaskConical },
   { href: "/data", label: "F&O Data", icon: Database },
+  { href: "/strategy", label: "Strategy", icon: Crosshair },
+  { href: "/auction-intelligence", label: "Auction IQ", icon: Layers3 },
   { href: "/analysis", label: "MACD Analysis", icon: Activity },
   { href: "/settings", label: "Settings", icon: Settings },
 ];

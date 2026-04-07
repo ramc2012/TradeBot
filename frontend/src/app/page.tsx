@@ -7,6 +7,7 @@ import {
   Database,
   FlaskConical,
   Globe,
+  Layers3,
   Settings,
   TrendingUp,
   type LucideIcon,
@@ -26,6 +27,13 @@ const LIVE_SURFACES = [
     icon: TrendingUp,
     description: "Positions, proposals, broker mode, and manual execution controls.",
     cadence: "WebSocket-first",
+  },
+  {
+    href: "/auction-intelligence",
+    label: "Auction Intelligence",
+    icon: Layers3,
+    description: "Market Profile, order flow, sleeve decisions, and paper-validation flow for the new MP stack.",
+    cadence: "Demo + paper validation",
   },
   {
     href: "/market",

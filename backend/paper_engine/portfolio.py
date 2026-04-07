@@ -55,13 +55,15 @@ class PaperPortfolio:
     """Virtual portfolio that tracks positions, P&L, and performance metrics."""
 
     LOT_SIZES = {
-        "NIFTY": 50,
-        "BANKNIFTY": 15,
-        "FINNIFTY": 40,
-        "MIDCPNIFTY": 75,
-        "SENSEX": 10,
+        "NIFTY":       65,   # NSE-mandated (verified Apr 2026)
+        "BANKNIFTY":   30,
+        "FINNIFTY":    60,
+        "MIDCPNIFTY":  75,
+        "NIFTYNXT50":  25,
+        "SENSEX":      10,
+        "BANKEX":      15,
     }
-    DEFAULT_LOT_SIZE = 50
+    DEFAULT_LOT_SIZE = 1   # Emergency fallback only — all underlyings resolved from DB
 
     def __init__(self, initial_capital: float = 1_000_000.0, session_id: Optional[str] = None):
         self.initial_capital = initial_capital
@@ -278,3 +280,17 @@ class PaperPortfolio:
             "max_drawdown": safe_round(self.max_drawdown, 4),
             "sharpe_ratio": safe_round(self.sharpe_ratio(), 4),
         }
+
+    def snapshot_equity(self) -> None:
+        """Capture a timestamped equity snapshot (call after each strategy scan)."""
+        equity = self.total_equity
+        self._equity_curve.append((datetime.utcnow(), equity))
+        if equity > self._peak_equity:
+            self._peak_equity = equity
+
+    def get_equity_curve(self) -> list[dict]:
+        """Return equity curve as list of {time, equity} dicts for charting."""
+        return [
+            {"time": t.isoformat(), "equity": round(v, 2)}
+            for t, v in self._equity_curve
+        ]
