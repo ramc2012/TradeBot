@@ -27,6 +27,7 @@ from analysis.validation_greeks_sync import (
     get_live_greeks_sync_report_payload,
 )
 from db.database import AsyncSessionLocal
+from data.upstox_research_sync import UpstoxResearchSync
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
 
@@ -1436,6 +1437,56 @@ async def start_backtest(
         ),
         "status_url": f"/api/analysis/macd-backtest/status/{task_id}",
         "results_url": f"/api/analysis/macd-backtest/results/{task_id}",
+    }
+
+
+# ── Research Sync Background Task ─────────────────────────────────────────────
+
+async def _run_research_sync(token: str, underlying_limit: int = 50) -> None:
+    """Background task to sync the symbol/contract catalog from Upstox."""
+    logger.info(f"Starting background research catalog sync (limit={underlying_limit})")
+    try:
+        from datetime import date
+        sync = UpstoxResearchSync(
+            access_token=token,
+            from_date=date.today() - timedelta(days=365),
+            to_date=date.today(),
+        )
+        # We start with a conservative sync of underlyings and expiries
+        # to unblock the ATM watchlist and sector rotation.
+        result = await sync.run_once(
+            underlying_limit=underlying_limit,
+            expiry_limit=100,
+            spot_limit=25,
+            contract_limit=0, # Don't fetch candles yet, just populate the catalog
+        )
+        logger.info(f"Research catalog sync completed: {result.get('db_summary')}")
+    except Exception as exc:
+        logger.error(f"Background research sync failed: {exc}")
+
+
+@router.post("/research-sync/start")
+async def start_research_sync(
+    background_tasks: BackgroundTasks,
+    underlying_limit: int = 50,
+):
+    """
+    Trigger a background synchronization of the NSE F&O catalog.
+    This populates fo_underlying_catalog and fo_contract_catalog tables.
+    """
+    from api.routers.auth import get_broker_token
+    token = get_broker_token("upstox") or ""
+    if not token:
+        raise HTTPException(
+            status_code=400,
+            detail="Upstox is not connected. Connect Upstox to sync the catalog.",
+        )
+
+    background_tasks.add_task(_run_research_sync, token, underlying_limit)
+
+    return {
+        "status": "started",
+        "message": f"Background research sync for {underlying_limit} underlyings has been queued.",
     }
 
 
