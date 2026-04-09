@@ -5,18 +5,24 @@ import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import {
   Activity,
+  AlertTriangle,
   ArrowDownRight,
   ArrowUpRight,
   BarChart3,
+  CheckCircle2,
+  ExternalLink,
   Minus,
   Radar,
   RefreshCw,
   Sparkles,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
 
 import {
   getATMWatchlist,
   getATMWatchlistExpiries,
+  getBrokerStatus,
   getMarketProfile,
   getOptionChain,
   getOptionExpiries,
@@ -780,6 +786,103 @@ function ATMOptionCell({
   );
 }
 
+// ── Broker Health Banner ──────────────────────────────────────────────────────
+
+type BrokerStatusEntry = {
+  broker: string;
+  connected: boolean;
+  user_id?: string | null;
+  name?: string | null;
+  connected_at?: string | null;
+};
+
+const BROKER_LABEL: Record<string, string> = {
+  fyers: "Fyers",
+  upstox: "Upstox",
+  icici_breeze: "ICICI Breeze",
+  fivepaisa: "5paisa",
+};
+
+const TRADING_BROKERS = ["fyers", "upstox"];
+
+function BrokerHealthBanner() {
+  const statusQuery = useQuery<BrokerStatusEntry[]>({
+    queryKey: ["brokerHealthBanner"],
+    queryFn: () => getBrokerStatus().then((r) => r.data),
+    refetchInterval: 30_000,
+    staleTime: 20_000,
+  });
+
+  const entries = statusQuery.data ?? [];
+  const trading = entries.filter((e) => TRADING_BROKERS.includes(e.broker));
+  const disconnected = trading.filter((e) => !e.connected);
+  const connected = trading.filter((e) => e.connected);
+
+  // Show nothing while loading (avoid flash)
+  if (statusQuery.isLoading) return null;
+
+  // All connected — show a slim green confirmation strip
+  if (disconnected.length === 0 && connected.length > 0) {
+    return (
+      <div className="flex items-center gap-2 rounded-xl border border-accent-green/20 bg-accent-green/8 px-3 py-2 text-xs text-accent-green">
+        <CheckCircle2 size={13} className="shrink-0" />
+        <span className="font-medium">Brokers connected:</span>
+        <span className="text-accent-green/80">
+          {connected.map((e) => BROKER_LABEL[e.broker] ?? e.broker).join(" · ")}
+        </span>
+        <span className="ml-auto text-accent-green/50 text-[11px]">live data active</span>
+      </div>
+    );
+  }
+
+  // At least one disconnected — show amber / red warning banner
+  if (disconnected.length > 0) {
+    const allDisconnected = connected.length === 0;
+    return (
+      <div
+        className={clsx(
+          "flex flex-wrap items-center gap-2 rounded-xl border px-3 py-2.5 text-xs",
+          allDisconnected
+            ? "border-accent-red/25 bg-accent-red/8 text-accent-red"
+            : "border-accent-amber/25 bg-accent-amber/8 text-accent-amber",
+        )}
+      >
+        <WifiOff size={13} className="shrink-0" />
+        <span className="font-semibold">
+          {allDisconnected ? "No broker connected" : "Broker session expired"}
+        </span>
+        <span className="text-text-muted">—</span>
+        <span>
+          {disconnected.map((e) => BROKER_LABEL[e.broker] ?? e.broker).join(", ")} disconnected.
+          Live data and watchlist will not update.
+        </span>
+        {connected.length > 0 && (
+          <span className="text-accent-green/80">
+            Active: {connected.map((e) => BROKER_LABEL[e.broker] ?? e.broker).join(", ")}
+          </span>
+        )}
+        <a
+          href="/settings"
+          className={clsx(
+            "ml-auto flex items-center gap-1 rounded-lg border px-2.5 py-1 font-semibold transition-colors hover:opacity-80",
+            allDisconnected
+              ? "border-accent-red/40 text-accent-red"
+              : "border-accent-amber/40 text-accent-amber",
+          )}
+        >
+          <ExternalLink size={11} />
+          Reconnect in Settings
+        </a>
+      </div>
+    );
+  }
+
+  // No broker entries at all — something is wrong with the API
+  return null;
+}
+
+// ── Market Page ───────────────────────────────────────────────────────────────
+
 export default function MarketPage() {
   const [symbol, setSymbol] = useState<MarketIndexSymbol>("NSE:NIFTY50-INDEX");
   const [expiry, setExpiry] = useState("");
@@ -940,6 +1043,8 @@ export default function MarketPage() {
             />
           </div>
         </div>
+
+        <BrokerHealthBanner />
 
         <div className="grid gap-2 xl:grid-cols-4">
           {MARKET_INDEX_SYMBOLS.map((indexSymbol) => (

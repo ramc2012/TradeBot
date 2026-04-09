@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 from urllib.parse import quote
 
@@ -17,6 +17,18 @@ def _normalize_time(value: Any) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value)
+
+
+def _parse_time(value: Any) -> datetime:
+    """Parse an ISO timestamp string (with or without timezone) to datetime."""
+    if isinstance(value, datetime):
+        return value
+    s = str(value)
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        # Fallback: strip trailing 'Z' and treat as UTC
+        return datetime.fromisoformat(s.rstrip("Z")).replace(tzinfo=timezone.utc)
 
 
 class OptionHistoryService:
@@ -186,11 +198,27 @@ class OptionHistoryService:
                 )
 
         if len(merged) < 35 and instrument_key:
+            # Fetch back 90 days regardless of expiry month — ensures weekly
+            # contracts (listed only 1-2 weeks before expiry) still get enough
+            # history to warm up the MACD signal line (needs ≥34 bars).
+            fetch_from = date.today() - timedelta(days=90)
             broker_rows = await self._fetch_broker_candles(
                 instrument_key=instrument_key,
-                from_date=max(expiry.replace(day=1), date.today() - timedelta(days=90)),
+                from_date=fetch_from,
                 to_date=date.today(),
             )
+            if broker_rows:
+                # Persist new rows to DB so subsequent calls skip the API
+                await self._persist_broker_candles(
+                    rows=broker_rows,
+                    underlying=underlying,
+                    expiry=expiry,
+                    strike=strike,
+                    option_type=option_type,
+                    instrument_key=instrument_key,
+                    interval=interval,
+                    already_in_db=set(merged.keys()),
+                )
             for row in broker_rows:
                 time_key = _normalize_time(row.get("time"))
                 if time_key:
@@ -199,6 +227,70 @@ class OptionHistoryService:
         candles = list(merged.values())
         candles.sort(key=lambda row: row["time"])
         return candles[-limit:]
+
+    async def _persist_broker_candles(
+        self,
+        *,
+        rows: list[dict[str, Any]],
+        underlying: str,
+        expiry: date,
+        strike: float,
+        option_type: str,
+        instrument_key: str,
+        interval: str,
+        already_in_db: set[str],
+    ) -> None:
+        """Upsert broker-fetched candles into option_premium_candles."""
+        new_rows = [
+            r for r in rows
+            if _normalize_time(r.get("time")) not in already_in_db
+            and r.get("close") is not None
+        ]
+        if not new_rows:
+            return
+        async with AsyncSessionLocal() as session:
+            for r in new_rows:
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO option_premium_candles (
+                            time, underlying, market, expiry, strike, option_type,
+                            open, high, low, close, volume, oi, iv,
+                            delta, gamma, theta, vega, underlying_price,
+                            instrument_key, trading_symbol, interval, source, synced_at
+                        ) VALUES (
+                            :time, :underlying, 'NSE', :expiry, :strike, :option_type,
+                            :open, :high, :low, :close, :volume, :oi, :iv,
+                            :delta, :gamma, :theta, :vega, :underlying_price,
+                            :instrument_key, :trading_symbol, :interval, 'upstox', now()
+                        )
+                        ON CONFLICT (instrument_key, interval, time) DO NOTHING
+                        """
+                    ),
+                    {
+                        "time": _parse_time(r.get("time")),
+                        "underlying": underlying,
+                        "expiry": expiry,
+                        "strike": strike,
+                        "option_type": option_type,
+                        "open": r.get("open"),
+                        "high": r.get("high"),
+                        "low": r.get("low"),
+                        "close": r.get("close"),
+                        "volume": r.get("volume", 0),
+                        "oi": r.get("oi"),
+                        "iv": r.get("iv"),
+                        "delta": r.get("delta"),
+                        "gamma": r.get("gamma"),
+                        "theta": r.get("theta"),
+                        "vega": r.get("vega"),
+                        "underlying_price": r.get("underlying_price"),
+                        "instrument_key": instrument_key,
+                        "trading_symbol": None,
+                        "interval": interval,
+                    },
+                )
+            await session.commit()
 
     async def load_closes(self, **kwargs: Any) -> list[float]:
         candles = await self.load_candles(**kwargs)
@@ -213,7 +305,16 @@ class OptionHistoryService:
         option_type: str,
         instrument_key: Optional[str] = None,
     ) -> Optional[int]:
+        """Return NSE-mandated lot size for this contract.
+
+        Resolution order:
+        1. fo_contract_catalog by instrument_key (exact match, most specific)
+        2. fo_contract_catalog by underlying/expiry/strike/option_type
+        3. fo_underlying_catalog.lot_size (per-underlying default, populated from broker)
+        4. None  →  caller uses PaperPortfolio.DEFAULT_LOT_SIZE
+        """
         async with AsyncSessionLocal() as session:
+            # 1. Exact instrument_key lookup
             if instrument_key:
                 result = await session.execute(
                     text(
@@ -230,6 +331,7 @@ class OptionHistoryService:
                 if row and row.lot_size:
                     return int(row.lot_size)
 
+            # 2. Underlying / expiry / strike / option_type lookup
             result = await session.execute(
                 text(
                     """
@@ -249,6 +351,17 @@ class OptionHistoryService:
                     "strike": strike,
                     "option_type": option_type,
                 },
+            )
+            row = result.first()
+            if row and row.lot_size:
+                return int(row.lot_size)
+
+            # 3. Per-underlying default from fo_underlying_catalog (broker-sourced)
+            result = await session.execute(
+                text(
+                    "SELECT lot_size FROM fo_underlying_catalog WHERE symbol = :sym LIMIT 1"
+                ),
+                {"sym": underlying},
             )
             row = result.first()
             return int(row.lot_size) if row and row.lot_size else None

@@ -13,7 +13,11 @@ from loguru import logger
 from sqlalchemy import text
 
 from analytics.technicals import latest_macd_rsi
-from analysis.instruments import get_monthly_expiry
+from analysis.instruments import (
+    INDEX_EXPIRY_WEEKDAY,
+    get_monthly_expiry,
+    get_index_monthly_expiry,
+)
 from api.routers.auth import ensure_fyers_session, ensure_upstox_session, get_active_adapter
 from brokers.base import BrokerAdapter, OptionChain, OptionChainEntry
 from db.database import AsyncSessionLocal
@@ -34,21 +38,77 @@ DEFAULT_EXPIRY_TTL = 300
 #   We therefore override the expiry to the nearest monthly expiry for stocks.
 
 def _nearest_monthly_expiry() -> date:
-    """Return the nearest upcoming (or today's) NSE monthly expiry."""
+    """Return the nearest upcoming (or today's) NSE stock monthly expiry (last Thursday)."""
     today = date.today()
     monthly = get_monthly_expiry(today.year, today.month)
     if today > monthly:
-        # This month's expiry is past — advance to next month
         nm = today.replace(day=28) + timedelta(days=4)
         monthly = get_monthly_expiry(nm.year, nm.month)
     return monthly
 
+
+def _nearest_index_expiry(symbol: str) -> date:
+    """
+    Return the nearest upcoming (or today's) monthly expiry for a specific index.
+
+    Each index has a fixed expiry weekday (NIFTY=Thu, BANKNIFTY=Wed, FINNIFTY=Tue,
+    MIDCPNIFTY=Mon, SENSEX=Fri).  This function returns the last occurrence of that
+    weekday in the current (or next) month, adjusted backward past market holidays.
+    Used as a FALLBACK when broker data is unavailable.
+    """
+    today = date.today()
+    monthly = get_index_monthly_expiry(symbol, today.year, today.month)
+    if today > monthly:
+        nm = today.replace(day=28) + timedelta(days=4)
+        monthly = get_index_monthly_expiry(symbol, nm.year, nm.month)
+    return monthly
+
+
+def _nearest_monthly_from_expiry_list(expiries: list[str]) -> Optional[date]:
+    """
+    Given a list of ISO-format expiry dates from the broker, return the nearest
+    upcoming monthly expiry.
+
+    Monthly = the LAST expiry in each calendar month (weekly series + monthly series
+    always have the monthly contract as the final entry for that month).
+
+    Returns the first such date that is >= today, or None if the list is empty.
+    """
+    if not expiries:
+        return None
+    today = date.today()
+    # Parse all dates, keep future/today ones
+    parsed: list[date] = []
+    for e in expiries:
+        try:
+            d = date.fromisoformat(e)
+            if d >= today:
+                parsed.append(d)
+        except ValueError:
+            continue
+    if not parsed:
+        return None
+    # Group by (year, month) — monthly = max date per group
+    from itertools import groupby
+    from operator import attrgetter
+    grouped: dict[tuple[int, int], date] = {}
+    for d in sorted(parsed):
+        key = (d.year, d.month)
+        grouped[key] = d  # last one (max) because we iterate sorted
+    # Return the earliest monthly that is >= today
+    monthlies = sorted(grouped.values())
+    return monthlies[0] if monthlies else None
+
 INDEX_FYERS_SYMBOLS = {
-    "NIFTY": "NSE:NIFTY50-INDEX",
-    "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
-    "FINNIFTY": "NSE:FINNIFTY-INDEX",
+    # NSE indices
+    "NIFTY":      "NSE:NIFTY50-INDEX",
+    "BANKNIFTY":  "NSE:NIFTYBANK-INDEX",
+    "FINNIFTY":   "NSE:FINNIFTY-INDEX",
     "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
     "NIFTYNXT50": "NSE:NIFTYNXT50-INDEX",
+    # BSE indices
+    "SENSEX":     "BSE:SENSEX-INDEX",
+    "BANKEX":     "BSE:BANKEX-INDEX",
 }
 
 _FYERS_MONTHS = {
@@ -147,19 +207,35 @@ class ATMWatchlistService:
                     logger.debug(f"[ATM watchlist] Upstox expiry discovery failed for {meta.symbol}: {exc}")
             return []
 
-        expiry_lists = await asyncio.gather(*(fetch_expiries(meta) for meta in representative))
-        expiries = sorted({expiry for items in expiry_lists for expiry in items if expiry})
-        today = date.today().isoformat()
-        monthly_expiry = get_monthly_expiry(date.today().year, date.today().month)
-        if date.today() > monthly_expiry:
-            next_month = date.today().replace(day=28) + timedelta(days=4)
-            monthly_expiry = get_monthly_expiry(next_month.year, next_month.month)
-        monthly_expiry_iso = monthly_expiry.isoformat()
+        expiry_results = await asyncio.gather(*(fetch_expiries(meta) for meta in representative))
+        # Map symbol → broker expiry list (for per-index monthly derivation)
+        sym_to_expiries: dict[str, list[str]] = {
+            meta.symbol: exp_list
+            for meta, exp_list in zip(representative, expiry_results)
+        }
+        expiries = sorted({expiry for items in expiry_results for expiry in items if expiry})
+        _today = date.today()
+        today = _today.isoformat()
 
-        # Always ensure monthly expiry is in the list — this is the critical fallback
-        # that prevents the frontend dropdown from being empty when brokers are
-        # rate-limited. Without this, watchlistExpiry stays "" and the watchlist
-        # query never fires (enabled: Boolean(watchlistExpiry) === false).
+        # Per-index monthlies — derived from broker data (regulation-proof) with computed fallback
+        _index_monthlies: dict[str, str] = {}
+        for _sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"):
+            broker_exp_list = sym_to_expiries.get(_sym, [])
+            broker_m = _nearest_monthly_from_expiry_list(broker_exp_list)
+            if broker_m is not None:
+                _index_monthlies[_sym] = broker_m.isoformat()
+            else:
+                # Fallback: computed weekday rule (used when broker is unavailable)
+                _index_monthlies[_sym] = _nearest_index_expiry(_sym).isoformat()
+
+        # NIFTY monthly is the canonical default for the expiry dropdown.
+        # Each index auto-corrects to its own monthly inside _build_row().
+        monthly_expiry_iso = _index_monthlies.get("NIFTY") or get_monthly_expiry(
+            _today.year, _today.month
+        ).isoformat()
+
+        # Always ensure NIFTY monthly is in the list — prevents empty dropdown when
+        # brokers are rate-limited (watchlistExpiry stays "" → enabled:false otherwise).
         if monthly_expiry_iso not in expiries:
             expiries = sorted(set(expiries) | {monthly_expiry_iso})
 
@@ -187,11 +263,17 @@ class ATMWatchlistService:
             "monthly_expiry": monthly_expiry_iso,
             "source": source,
             "detail": detail,
-            # Expiry scope hint for the UI: indices use the selected (weekly/monthly)
-            # expiry; stocks always use monthly regardless of the selection above.
+            # Each index auto-corrects to its own native expiry weekday in _build_row().
+            # E.g. selecting NIFTY Apr-30 → FINNIFTY auto-uses Apr-28, BANKNIFTY Apr-29.
             "expiry_scope_note": (
-                f"Indices: selected expiry · Stocks: monthly ({monthly_expiry_iso})"
+                f"NIFTY {_index_monthlies.get('NIFTY', monthly_expiry_iso)} · "
+                f"BNKN {_index_monthlies.get('BANKNIFTY', '?')} · "
+                f"FINN {_index_monthlies.get('FINNIFTY', '?')} · "
+                f"MIDCP {_index_monthlies.get('MIDCPNIFTY', '?')} · "
+                f"SENSEX {_index_monthlies.get('SENSEX', '?')} · "
+                f"Stocks {monthly_expiry_iso}"
             ),
+            "index_monthlies": _index_monthlies,
         }
         await redis.set(cache_key, json.dumps(payload), ex=DEFAULT_EXPIRY_TTL)
         return payload
@@ -381,16 +463,51 @@ class ATMWatchlistService:
         fyers_adapter: Optional[BrokerAdapter],
     ) -> Optional[dict[str, Any]]:
         # ── Expiry resolution ──────────────────────────────────────────────────
-        # NSE rules:
-        #   INDEX underlyings (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY …): weekly
-        #     expiry series exist — use the caller-supplied expiry as-is.
-        #   STOCK underlyings: monthly expiry ONLY.  Passing a weekly expiry to
-        #     the broker chain API returns empty results, so override to the
-        #     nearest monthly expiry automatically.
+        # Priority: broker-reported expiry list → computed weekday fallback
+        #
+        # STOCK underlyings: monthly expiry ONLY (last Thursday of month).
+        #   Passing a weekly expiry returns empty results from the broker.
+        #   Override to the nearest stock monthly expiry unconditionally.
+        #
+        # INDEX underlyings: each index has its own expiry schedule that can
+        #   change due to regulatory updates.  We ALWAYS ask the broker for the
+        #   actual available expiry list and pick the nearest monthly from that.
+        #   "Monthly" = the last expiry in the calendar month (the furthest-out
+        #   contract for that month, which is the monthly contract in every
+        #   weekly+monthly series).
+        #   We only fall back to the hardcoded weekday computation when the
+        #   broker returns no data (disconnected / rate-limited).
         if meta.kind != "INDEX":
+            # Stock: always use last-Thursday monthly (no weekly series for stocks)
             monthly = _nearest_monthly_expiry()
             expiry = monthly.isoformat()
             expiry_date = monthly
+        else:
+            # Index: get actual available expiries from the broker
+            broker_expiries = await self._get_broker_expiries_for_symbol(
+                meta, upstox_adapter, fyers_adapter
+            )
+            broker_monthly = _nearest_monthly_from_expiry_list(broker_expiries)
+            if broker_monthly is not None:
+                if broker_monthly.isoformat() != expiry:
+                    logger.debug(
+                        f"[ATM watchlist] {meta.symbol} expiry broker-resolved: "
+                        f"{expiry} → {broker_monthly.isoformat()} "
+                        f"(from {len(broker_expiries)} broker expiries)"
+                    )
+                expiry = broker_monthly.isoformat()
+                expiry_date = broker_monthly
+            else:
+                # Broker unavailable — fall back to computed weekday rule
+                native_weekday = INDEX_EXPIRY_WEEKDAY.get(meta.symbol, 3)
+                if expiry_date.weekday() != native_weekday:
+                    idx_monthly = _nearest_index_expiry(meta.symbol)
+                    logger.debug(
+                        f"[ATM watchlist] {meta.symbol} expiry weekday-corrected (broker offline): "
+                        f"{expiry} → {idx_monthly.isoformat()} (native weekday {native_weekday})"
+                    )
+                    expiry = idx_monthly.isoformat()
+                    expiry_date = idx_monthly
 
         contracts = await self._get_contracts_for_expiry(meta, expiry, upstox_adapter) if upstox_adapter else []
 
@@ -608,6 +725,48 @@ class ATMWatchlistService:
                 await session.commit()
         except Exception as exc:
             logger.debug(f"[ATM watchlist] lot_size persist failed for {symbol}: {exc}")
+
+    async def _get_broker_expiries_for_symbol(
+        self,
+        meta: "UnderlyingMeta",
+        upstox_adapter: Optional[BrokerAdapter],
+        fyers_adapter: Optional[BrokerAdapter] = None,
+    ) -> list[str]:
+        """
+        Fetch all available expiry dates for a symbol directly from the broker.
+
+        Returns a sorted list of ISO date strings (e.g. ["2026-04-28", "2026-05-26", ...]).
+        Cached in Redis for 5 minutes per symbol.
+        Falls back to empty list if both brokers are unavailable.
+        """
+        redis = await get_redis()
+        cache_key = f"atm_watchlist:sym_expiries:v1:{meta.symbol}"
+        cached = await redis.get(cache_key)
+        if cached:
+            return json.loads(cached)
+
+        expiries: list[str] = []
+
+        # Try Fyers first (faster for index chains)
+        if fyers_adapter is not None and not expiries:
+            try:
+                fyers_sym = self._to_fyers_symbol(meta)
+                contracts = await fyers_adapter.get_option_contracts(fyers_sym)
+                expiries = sorted({str(row.get("expiry")) for row in contracts if row.get("expiry")})
+            except Exception as exc:
+                logger.debug(f"[ATM watchlist] Fyers expiry fetch failed for {meta.symbol}: {exc}")
+
+        # Fallback to Upstox
+        if upstox_adapter is not None and not expiries:
+            try:
+                contracts = await upstox_adapter.get_option_contracts(meta.underlying_key)
+                expiries = sorted({str(row.get("expiry")) for row in contracts if row.get("expiry")})
+            except Exception as exc:
+                logger.debug(f"[ATM watchlist] Upstox expiry fetch failed for {meta.symbol}: {exc}")
+
+        if expiries:
+            await redis.set(cache_key, json.dumps(expiries), ex=300)
+        return expiries
 
     async def _get_contracts_for_expiry(
         self,
@@ -950,6 +1109,8 @@ class ATMWatchlistService:
     @staticmethod
     def _to_fyers_symbol(meta: UnderlyingMeta) -> str:
         if meta.kind == "INDEX":
+            # BSE indices use BSE: prefix; NSE indices use NSE: prefix
+            # Explicit mapping takes precedence over the fallback
             return INDEX_FYERS_SYMBOLS.get(meta.symbol, f"NSE:{meta.symbol}-INDEX")
         return f"NSE:{meta.symbol}-EQ"
 

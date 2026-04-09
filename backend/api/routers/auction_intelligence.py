@@ -2,15 +2,31 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Body, HTTPException
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 
 from auction_intelligence import AuctionIntelligenceService
 from auction_intelligence.config import clone_default_config
+from auction_intelligence.demo import (
+    available_scenarios as get_available_demo_scenarios,
+    available_symbols as get_available_demo_symbols,
+    build_demo_analysis,
+    build_demo_validation_series,
+)
+from auction_intelligence.live import (
+    available_live_symbols as get_available_live_symbols,
+    build_live_analysis,
+    build_shadow_backfill_snapshots,
+    build_live_validation_series,
+)
+from auction_intelligence.shadow import ShadowPersistenceService
+from auction_intelligence.validation.gate_b import GateBValidator
+from auction_intelligence.validation.gate_c import GateCValidator
+from auction_intelligence.validation.persistence import ValidationPersistenceService
 from auction_intelligence.schemas import (
     DepthLevel,
     DepthSnapshot,
@@ -20,9 +36,12 @@ from auction_intelligence.schemas import (
     SessionContext,
     TradePrint,
 )
+from api.routers.auth import get_connected_brokers
 
 
 router = APIRouter(prefix="/api/auction-intelligence", tags=["auction-intelligence"])
+_validation_store = ValidationPersistenceService()
+_shadow_store = ShadowPersistenceService()
 
 
 class BarPayload(BaseModel):
@@ -88,6 +107,17 @@ class AnalysisRequest(BaseModel):
     portfolio: PortfolioPayload = Field(default_factory=PortfolioPayload)
 
 
+class ShadowCaptureOptions(BaseModel):
+    reconciliation_status: str = "matched"
+    mismatch_duration_seconds: float = 0.0
+    kill_switch_tested: bool = False
+    kill_switch_passed: bool = False
+    dashboard_checked: bool = False
+    alerts_checked: bool = False
+    manual_override_tested: bool = False
+    record_flat_decisions: bool = True
+
+
 def _service() -> AuctionIntelligenceService:
     return AuctionIntelligenceService()
 
@@ -114,6 +144,100 @@ def _serialize(value: object) -> dict:
     return jsonable_encoder(asdict(value))
 
 
+def _parse_time_value(raw: str | None) -> time | None:
+    if not raw:
+        return None
+    return time.fromisoformat(raw)
+
+
+def _shadow_records_from_snapshot(snapshot: dict, options: ShadowCaptureOptions) -> list[dict]:
+    request = snapshot.get("request", {})
+    analysis = snapshot.get("analysis", {})
+    session = request.get("session", {})
+    quote = request.get("quote", {})
+    metadata = request.get("metadata", {})
+    tick_size = float(analysis.get("market_profile", {}).get("tick_size") or 0.5)
+    risk = analysis.get("risk", {})
+    execution_by_agent = {
+        item.get("agent_name"): item for item in analysis.get("execution_plan", []) if item.get("agent_name")
+    }
+    snapshot_time = str(metadata.get("snapshot_time") or session.get("session_date") or "na")
+    snapshot_key = (
+        snapshot_time.replace(":", "")
+        .replace("-", "")
+        .replace("+", "")
+        .replace(".", "")
+        .replace("T", "_")
+    )
+    stale_signal = float(session.get("stale_data_seconds") or 0.0) > float(
+        clone_default_config()["risk"].get("stale_data_seconds", 10)
+    )
+
+    records: list[dict] = []
+    for index, decision in enumerate(analysis.get("agent_decisions", [])):
+        action = str(decision.get("action") or "FLAT")
+        if action == "FLAT" and not options.record_flat_decisions:
+            continue
+        execution = execution_by_agent.get(decision.get("agent_name"))
+        simulated_fill_price = (
+            execution.get("limit_price")
+            if execution and execution.get("limit_price") is not None
+            else decision.get("entry_price")
+        )
+        observed_touch_price = None
+        if action == "LONG":
+            observed_touch_price = quote.get("ask")
+        elif action == "SHORT":
+            observed_touch_price = quote.get("bid")
+        observed_fill_price = observed_touch_price
+        fill_drift_ticks = None
+        if simulated_fill_price is not None and observed_touch_price is not None and tick_size > 0:
+            fill_drift_ticks = round(abs(float(simulated_fill_price) - float(observed_touch_price)) / tick_size, 4)
+        records.append(
+            {
+                "signal_id": f"{session.get('session_date')}:{snapshot_key}:{session.get('symbol')}:{decision.get('agent_name')}:{index}",
+                "session_date": session.get("session_date"),
+                "symbol": session.get("symbol"),
+                "source": metadata.get("history_source", snapshot.get("mode", "shadow")),
+                "snapshot_mode": metadata.get("snapshot_mode"),
+                "agent_name": decision.get("agent_name"),
+                "action": action,
+                "regime_label": analysis.get("regime", {}).get("label"),
+                "setup_name": decision.get("metadata", {}).get("setup_name", decision.get("metadata", {}).get("flat_reason")),
+                "confidence": float(decision.get("confidence") or 0.0),
+                "quantity": int(decision.get("quantity") or 0),
+                "entry_price": decision.get("entry_price"),
+                "stop_price": decision.get("stop_price"),
+                "target_price": decision.get("target_price"),
+                "tick_size": tick_size,
+                "risk_allowed": bool(risk.get("allowed", False)),
+                "kill_switch_active": bool(risk.get("kill_switch", False)),
+                "simulated_fill_price": simulated_fill_price,
+                "observed_touch_price": observed_touch_price,
+                "observed_fill_price": observed_fill_price,
+                "fill_drift_ticks": fill_drift_ticks,
+                "stale_signal": stale_signal,
+                "reconciliation_status": options.reconciliation_status,
+                "mismatch_duration_seconds": options.mismatch_duration_seconds,
+                "kill_switch_tested": options.kill_switch_tested,
+                "kill_switch_passed": options.kill_switch_passed,
+                "dashboard_checked": options.dashboard_checked,
+                "alerts_checked": options.alerts_checked,
+                "manual_override_tested": options.manual_override_tested,
+                "metadata": {
+                    "symbol_code": snapshot.get("symbol_code"),
+                    "request_symbol": session.get("symbol"),
+                    "quote_source": metadata.get("quote_source"),
+                    "history_symbol": metadata.get("history_symbol"),
+                    "risk_reasons": risk.get("reasons", []),
+                    "rationale": decision.get("rationale", []),
+                    "decision_metadata": decision.get("metadata", {}),
+                },
+            }
+        )
+    return records
+
+
 @router.get("/summary")
 async def summary() -> dict:
     config = clone_default_config()
@@ -123,11 +247,38 @@ async def summary() -> dict:
         "auto_started": False,
         "mvp_scope": config["mvp_scope"],
         "deployable_first_sleeve": "swing",
+        "validation_gates": [
+            {"id": "gate_a", "label": "Data and feature engine", "status": "available"},
+            {"id": "gate_b", "label": "Rule engine and walk-forward", "status": "available"},
+            {"id": "gate_c", "label": "Shadow mode and paper trading", "status": "available"},
+            {"id": "gate_d", "label": "Live canary", "status": "planned"},
+        ],
+        "implementation_plan": [
+            "Automate Gate A against broker-backed snapshots and deterministic demo sessions.",
+            "Run Gate B walk-forward and setup-level expectancy validation on a deeper BANKNIFTY futures replay set.",
+            "Promote only after shadow-mode reconciliation and paper-trading stability are verified.",
+        ],
+        "demo_symbols": get_available_demo_symbols(),
+        "live_symbols": get_available_live_symbols(),
+        "demo_scenarios": get_available_demo_scenarios(),
+        "connected_brokers": get_connected_brokers(),
+        "live_ready": bool(get_connected_brokers()),
         "endpoints": [
             "/api/auction-intelligence/summary",
             "/api/auction-intelligence/default-config",
+            "/api/auction-intelligence/demo-scenario",
+            "/api/auction-intelligence/live-snapshot",
             "/api/auction-intelligence/analyze",
             "/api/auction-intelligence/paper-proposal",
+            "/api/auction-intelligence/validate-gate-a",
+            "/api/auction-intelligence/validate-gate-b",
+            "/api/auction-intelligence/shadow-record-live",
+            "/api/auction-intelligence/shadow-backfill",
+            "/api/auction-intelligence/shadow-records",
+            "/api/auction-intelligence/validate-gate-c",
+            "/api/auction-intelligence/canary-readiness",
+            "/api/auction-intelligence/validation-runs/latest",
+            "/api/auction-intelligence/validation-runs/{run_id}/artifacts",
         ],
     }
 
@@ -135,6 +286,102 @@ async def summary() -> dict:
 @router.get("/default-config")
 async def default_config() -> dict:
     return clone_default_config()
+
+
+@router.get("/demo-scenario")
+async def demo_scenario(symbol: str = "NIFTY", scenario: str = "acceptance_up") -> dict:
+    try:
+        return build_demo_analysis(symbol_code=symbol, scenario=scenario)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/live-snapshot")
+async def live_snapshot(symbol: str = "NIFTY") -> dict:
+    try:
+        return await build_live_analysis(symbol_code=symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/shadow-record-live")
+async def shadow_record_live(
+    symbol: str = "BANKNIFTY",
+    options: ShadowCaptureOptions = Body(default_factory=ShadowCaptureOptions),
+) -> dict:
+    try:
+        snapshot = await build_live_analysis(symbol_code=symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    records = _shadow_records_from_snapshot(snapshot, options)
+    storage = await _shadow_store.record_records(records)
+    return {
+        "symbol_code": snapshot.get("symbol_code"),
+        "session_date": snapshot.get("session_date"),
+        "snapshot_mode": snapshot.get("request", {}).get("metadata", {}).get("snapshot_mode"),
+        "record_count": len(records),
+        "storage": storage,
+        "records_preview": records[:6],
+    }
+
+
+@router.post("/shadow-backfill")
+async def shadow_backfill(
+    symbol: str = "BANKNIFTY",
+    session_limit: int = 20,
+    lookback_days: int = 45,
+    observation_bars: int = 4,
+    snapshot_cutoff: str = "11:15",
+    shadow_net_liquidation: float = 1_000_000.0,
+    options: ShadowCaptureOptions = Body(default_factory=ShadowCaptureOptions),
+) -> dict:
+    try:
+        backfill = await build_shadow_backfill_snapshots(
+            symbol_code=symbol,
+            max_sessions=session_limit,
+            lookback_days=lookback_days,
+            observation_bars=observation_bars,
+            snapshot_cutoff=_parse_time_value(snapshot_cutoff),
+            shadow_net_liquidation=shadow_net_liquidation,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    records: list[dict] = []
+    for snapshot in backfill["snapshots"]:
+        records.extend(_shadow_records_from_snapshot(snapshot, options))
+    storage = await _shadow_store.record_records(records)
+    return {
+        "symbol_code": backfill["symbol_code"],
+        "source": backfill["source"],
+        "history_symbol": backfill["history_symbol"],
+        "snapshot_count": backfill["snapshot_count"],
+        "skipped_sessions": backfill["skipped_sessions"],
+        "observation_bars": observation_bars,
+        "snapshot_cutoff": snapshot_cutoff,
+        "shadow_net_liquidation": shadow_net_liquidation,
+        "record_count": len(records),
+        "storage": storage,
+        "records_preview": records[:8],
+    }
+
+
+@router.get("/shadow-records")
+async def shadow_records(symbol: str = "BANKNIFTY", limit: int = 50) -> dict:
+    symbol_key = f"{symbol.upper()} FUT"
+    records = await _shadow_store.list_records(symbol=symbol_key, limit=limit)
+    return {
+        "symbol": symbol_key,
+        "count": len(records),
+        "records": records,
+    }
 
 
 @router.post("/analyze")
@@ -167,3 +414,610 @@ async def paper_proposal(request: AnalysisRequest) -> dict:
     payload = _serialize(bundle)
     payload["journal_paths"] = journal_paths
     return payload
+
+
+@router.post("/validate-gate-a")
+async def validate_gate_a(request: AnalysisRequest) -> dict:
+    service = _service()
+    report = service.validate_gate_a(
+        session=SessionContext(**request.session.model_dump()),
+        bars=_bars(request.bars),
+        prior_bars=_bars(request.prior_bars),
+    )
+    storage = await _validation_store.record_report(
+        report,
+        gate="gate_a",
+        symbol=request.session.symbol,
+        mode="request",
+        source="manual_payload",
+        context={"session_date": request.session.session_date.isoformat()},
+    )
+    payload = jsonable_encoder(asdict(report))
+    payload["storage"] = storage
+    return payload
+
+
+@router.get("/validate-gate-b")
+async def validate_gate_b(
+    symbol: str = "BANKNIFTY",
+    mode: str = "live",
+    scenario: str = "acceptance_up",
+    session_limit: int = 20,
+    lookback_days: int = 45,
+) -> dict:
+    if mode not in {"live", "demo"}:
+        raise HTTPException(status_code=400, detail="mode must be 'live' or 'demo'")
+
+    if mode == "live":
+        series = await build_live_validation_series(
+            symbol_code=symbol,
+            max_sessions=session_limit,
+            lookback_days=lookback_days,
+        )
+    else:
+        series = build_demo_validation_series(symbol_code=symbol, scenario=scenario, session_count=session_limit)
+
+    sessions = [
+        [
+            MarketBar(
+                timestamp=datetime.fromisoformat(str(item["timestamp"])),
+                open=item["open"],
+                high=item["high"],
+                low=item["low"],
+                close=item["close"],
+                volume=item.get("volume", 0.0),
+            )
+            for item in session["bars"]
+        ]
+        for session in series["sessions"]
+    ]
+    report = GateBValidator().validate(
+        symbol=f"{symbol.upper()} FUT",
+        sessions=sessions,
+        mode=mode,
+        source=str(series.get("source", mode)),
+    )
+    storage = await _validation_store.record_report(
+        report,
+        gate="gate_b",
+        symbol=symbol.upper(),
+        mode=mode,
+        scenario=scenario if mode == "demo" else None,
+        source=str(series.get("source", mode)),
+        context={"session_limit": session_limit, "session_count": len(series["sessions"])},
+    )
+    payload = jsonable_encoder(asdict(report))
+    payload["series_metadata"] = {
+        "symbol_code": series["symbol_code"],
+        "source": series.get("source"),
+        "session_count": len(series["sessions"]),
+        "session_dates": [session["session_date"] for session in series["sessions"]],
+    }
+    payload["storage"] = storage
+    payload["artifact_count"] = len(report.artifacts)
+    payload["artifacts_preview"] = jsonable_encoder([asdict(item) for item in report.artifacts[:8]])
+    return payload
+
+
+@router.get("/validate-gate-c")
+async def validate_gate_c(
+    symbol: str = "BANKNIFTY",
+    session_limit: int = 30,
+    record_limit: int = 500,
+) -> dict:
+    symbol_key = f"{symbol.upper()} FUT"
+    records = await _shadow_store.list_records(symbol=symbol_key, limit=record_limit)
+    report = GateCValidator().validate(
+        symbol=symbol_key,
+        records=records,
+        session_limit=session_limit,
+    )
+    storage = await _validation_store.record_report(
+        report,
+        gate="gate_c",
+        symbol=symbol.upper(),
+        mode="live_shadow",
+        source="shadow_observations",
+        context={
+            "session_limit": session_limit,
+            "record_limit": record_limit,
+            "record_count": len(records),
+        },
+    )
+    payload = jsonable_encoder(asdict(report))
+    payload["series_metadata"] = {
+        "symbol": symbol_key,
+        "record_count": len(records),
+        "session_limit": session_limit,
+    }
+    payload["storage"] = storage
+    payload["artifact_count"] = len(report.artifacts)
+    payload["artifacts_preview"] = jsonable_encoder([asdict(item) for item in report.artifacts[:8]])
+    return payload
+
+
+@router.get("/canary-readiness")
+async def canary_readiness(symbol: str = "BANKNIFTY") -> dict:
+    normalized_symbol = symbol.upper()
+    config = clone_default_config()
+    canary_config = config.get("live_canary", {})
+    gate_b = await _validation_store.latest_report(gate="gate_b", symbol=normalized_symbol)
+    gate_c = await _validation_store.latest_report(gate="gate_c", symbol=normalized_symbol)
+
+    blockers: list[str] = []
+    if normalized_symbol not in canary_config.get("allowed_symbols", []):
+        blockers.append(f"{normalized_symbol} is not in the approved canary symbol list.")
+    if not gate_b or not bool(gate_b.get("passed")):
+        blockers.append("Gate B is not passing for this symbol.")
+    if not gate_c or not bool(gate_c.get("passed")):
+        blockers.append("Gate C is not passing for this symbol.")
+
+    ready = not blockers
+    return {
+        "symbol": normalized_symbol,
+        "ready": ready,
+        "stage": "gate_d_canary",
+        "blockers": blockers,
+        "requirements": {
+            "manual_approval_required": bool(canary_config.get("manual_approval_required", True)),
+            "allowed_agents": list(canary_config.get("allowed_agents", ["swing"])),
+            "max_live_lots": int(canary_config.get("max_live_lots", 1)),
+            "daily_loss_limit": float(canary_config.get("daily_loss_limit", 25_000.0)),
+            "max_size_multiplier": float(canary_config.get("max_size_multiplier", 0.35)),
+        },
+        "gate_b": gate_b,
+        "gate_c": gate_c,
+        "next_step": (
+            "Prepare the smallest-size live canary with manual approval still enabled."
+            if ready
+            else "Clear the listed blockers before enabling any live canary route."
+        ),
+    }
+
+
+@router.get("/validation-runs/latest")
+async def latest_validation_run(gate: str | None = None, symbol: str | None = None) -> dict:
+    payload = await _validation_store.latest_report(gate=gate, symbol=symbol)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="No persisted validation run found.")
+    return payload
+
+
+@router.get("/validation-runs/{run_id}/artifacts")
+async def validation_run_artifacts(
+    run_id: str,
+    artifact_type: str | None = None,
+    limit: int = 50,
+) -> dict:
+    artifacts = await _validation_store.list_artifacts(
+        run_id,
+        artifact_type=artifact_type,
+        limit=limit,
+    )
+    return {
+        "run_id": run_id,
+        "artifact_type": artifact_type,
+        "count": len(artifacts),
+        "artifacts": artifacts,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  RL Q-learning policy endpoints
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@router.get("/rl-policy")
+async def rl_policy_summary() -> dict:
+    """Return the current RL Q-table summary: learned policy per MP state."""
+    from auction_intelligence.rl.policy import rl_policy as _rl
+
+    if not _rl._cache_loaded:
+        await _rl.load_cache()
+    return _rl.get_policy_summary()
+
+
+@router.post("/rl-train")
+async def rl_train(
+    max_trades: int = 500,
+    symbol: str | None = None,
+    use_proxy_reward: bool = True,
+) -> dict:
+    """Train the RL Q-table from shadow observations stored in the DB.
+
+    Args:
+        max_trades:       Max number of shadow observation records to train on.
+        symbol:           If set, restrict training to one symbol (e.g. "BANKNIFTY FUT").
+        use_proxy_reward: Use proxy reward based on R:R ratio (True) or actual outcomes (False).
+    """
+    from auction_intelligence.rl.trainer import train_from_journal
+
+    result = await train_from_journal(
+        max_trades=max_trades,
+        use_proxy_reward=use_proxy_reward,
+        symbol=symbol,
+    )
+    return result
+
+
+@router.delete("/rl-reset")
+async def rl_reset() -> dict:
+    """Wipe the Q-table from DB and in-memory cache. Resets all learning."""
+    from auction_intelligence.rl.policy import rl_policy as _rl
+
+    await _rl.reset()
+    return {"reset": True, "message": "Q-table wiped. Agent reverts to config defaults."}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MP-based signal layer — NIFTY / BANKNIFTY / SENSEX
+#  These endpoints serve the new MP+Order-Flow strategy dashboard panels.
+#  Data sourced from pre-computed enriched_mp_with_failures.csv per underlying.
+# ══════════════════════════════════════════════════════════════════════════════
+
+import csv
+import gzip
+import math
+from collections import defaultdict
+from pathlib import Path
+
+_DATA_ROOT = Path(__file__).resolve().parent.parent.parent / "runtime" / "index_analytics_data"
+
+_SUPPORTED_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "SENSEX")
+
+
+def _mp_enr_path(underlying: str) -> Path:
+    sub = _DATA_ROOT / "market_profile" / f"underlying={underlying}" / "enriched_mp_with_failures.csv"
+    if sub.exists():
+        return sub
+    # Legacy root-level file (SENSEX only)
+    return _DATA_ROOT / "market_profile" / "enriched_mp_with_failures.csv"
+
+
+def _mp_params_path(underlying: str) -> Path:
+    sub = _DATA_ROOT / "market_profile" / f"underlying={underlying}" / "daily_mp_params.csv"
+    if sub.exists():
+        return sub
+    return _DATA_ROOT / "market_profile" / "daily_mp_params.csv"
+
+
+def _spot_path(underlying: str) -> Path:
+    return _DATA_ROOT / "spot" / f"underlying={underlying}" / "1minute.csv.gz"
+
+
+def _safe_csv(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    with open(path) as f:
+        return list(csv.DictReader(f))
+
+
+def _flt(row: dict, key: str, default: float = 0.0) -> float:
+    try:
+        return float(row.get(key, default))
+    except (ValueError, TypeError):
+        return default
+
+
+def _classify_day_type(r: dict) -> str:
+    fa_up = str(r.get("fa_up", "")).lower() == "true"
+    fa_dn = str(r.get("fa_dn", "")).lower() == "true"
+    ib_up = str(r.get("ib_broken_up", "")).lower() == "true"
+    ib_dn = str(r.get("ib_broken_dn", "")).lower() == "true"
+    # Use pre-computed day_type if available
+    dt = r.get("day_type", "")
+    if dt and dt not in ("", "UNKNOWN"):
+        return dt
+    # Fall back to derivation
+    sh = _flt(r, "session_high")
+    sl = _flt(r, "session_low")
+    ibr = _flt(r, "ibr")
+    close = _flt(r, "close_price") or _flt(r, "close")
+    sr = sh - sl
+    if sr <= 0 or ibr <= 0:
+        return "UNKNOWN"
+    rr = sr / ibr
+    cp = (close - sl) / sr if sr > 0 else 0.5
+    if ib_up != ib_dn and rr >= 2.0:
+        if ib_up and cp >= 0.70:
+            return "TREND_UP"
+        if ib_dn and cp <= 0.30:
+            return "TREND_DN"
+    if ib_up and ib_dn and rr >= 1.5:
+        return "DOUBLE_DIST"
+    if ib_up != ib_dn and rr >= 1.2:
+        return "NORMAL_VAR_UP" if ib_up else "NORMAL_VAR_DN"
+    if fa_up or fa_dn:
+        return "FAILED_AUCTION"
+    return "NORMAL"
+
+
+@router.get("/mp-data-status")
+async def mp_data_status() -> list[dict]:
+    """Pipeline health for the MP+Order-Flow strategy — per supported underlying."""
+    sources: list[dict] = []
+
+    import pandas as pd
+
+    for ul in _SUPPORTED_UNDERLYINGS:
+        # Spot candles
+        sp = _spot_path(ul)
+        if sp.exists():
+            df = pd.read_csv(gzip.open(sp, "rt"), usecols=["time"])
+            last = str(df["time"].iloc[-1])[:10] if len(df) else "—"
+            sources.append({
+                "name": f"{ul} Spot 1-min",
+                "status": "ok",
+                "rows": len(df),
+                "last_date": last,
+                "detail": f"{len(df):,} candles",
+            })
+        else:
+            sources.append({
+                "name": f"{ul} Spot 1-min",
+                "status": "missing",
+                "rows": 0,
+                "last_date": "—",
+                "detail": "Fetch via broker API",
+            })
+
+        # Daily MP params
+        mp = _mp_params_path(ul)
+        mp_rows = _safe_csv(mp)
+        if mp_rows:
+            sources.append({
+                "name": f"{ul} Daily MP",
+                "status": "ok",
+                "rows": len(mp_rows),
+                "last_date": mp_rows[-1].get("date", "—"),
+                "detail": f"{len(mp_rows)} sessions",
+            })
+        else:
+            sources.append({
+                "name": f"{ul} Daily MP",
+                "status": "missing",
+                "rows": 0,
+                "last_date": "—",
+                "detail": "Run build_nifty_mp.py",
+            })
+
+        # Enriched failure scores
+        enr = _mp_enr_path(ul)
+        enr_rows = _safe_csv(enr)
+        if enr_rows:
+            sources.append({
+                "name": f"{ul} Failure Scores",
+                "status": "ok",
+                "rows": len(enr_rows),
+                "last_date": enr_rows[-1].get("date", "—"),
+                "detail": f"Buyer/seller scores — {len(enr_rows)} days",
+            })
+        else:
+            sources.append({
+                "name": f"{ul} Failure Scores",
+                "status": "warning",
+                "rows": 0,
+                "last_date": "—",
+                "detail": "Run build_nifty_mp.py",
+            })
+
+    return sources
+
+
+@router.get("/mp-signals")
+async def mp_signals(underlying: str = "NIFTY", limit: int = 20) -> dict:
+    """Recent MP day signals with failure scores and direction for the given underlying."""
+    enr_path = _mp_enr_path(underlying)
+    rows = _safe_csv(enr_path)
+    if not rows:
+        return {"underlying": underlying, "signals": [], "message": f"No MP data for {underlying}"}
+
+    signals = []
+    for r in rows[-limit:]:
+        bf = _flt(r, "buyer_fail_score")
+        sf = _flt(r, "seller_fail_score")
+        day_type = _classify_day_type(r)
+
+        direction = "NEUTRAL"
+        if bf >= 4 and sf < 2:
+            direction = "PE"
+        elif sf >= 4 and bf < 2:
+            direction = "CE"
+        elif day_type == "TREND_UP":
+            direction = "CE"
+        elif day_type == "TREND_DN":
+            direction = "PE"
+        elif bf >= 2 and sf >= 2:
+            direction = "CONFLICT"
+
+        signals.append({
+            "date": r.get("date", ""),
+            "day_type": day_type,
+            "poc": _flt(r, "poc"),
+            "vah": _flt(r, "vah"),
+            "val": _flt(r, "val"),
+            "ibh": _flt(r, "ibh"),
+            "ibl": _flt(r, "ibl"),
+            "ibr": _flt(r, "ibr"),
+            "buyer_fail": bf,
+            "seller_fail": sf,
+            "net_failure": sf - bf,
+            "direction": direction,
+            "close": _flt(r, "close_price"),
+            "daily_move": _flt(r, "daily_move"),
+        })
+
+    return {
+        "underlying": underlying,
+        "signals": signals,
+        "latest": signals[-1] if signals else None,
+    }
+
+
+@router.get("/mp-open-signal")
+async def mp_open_signal(underlying: str = "NIFTY") -> dict:
+    """
+    Next-session actionable signal for the MP+Order-Flow strategy.
+    Direction from: day_type + IB extension + failure scores.
+    Entry method: wait for price > VWAP after 09:30; VWAP stop with 60-min grace; hard SL -50%.
+    """
+    enr_path = _mp_enr_path(underlying)
+    rows = _safe_csv(enr_path)
+    if not rows:
+        return {"underlying": underlying, "signals": [], "skip_reason": f"No MP data for {underlying}"}
+
+    latest = rows[-1]
+    bf = _flt(latest, "buyer_fail_score")
+    sf = _flt(latest, "seller_fail_score")
+    day_type = _classify_day_type(latest)
+    d = latest.get("date", "")
+
+    direction = None
+    strength = "base"
+    reason = day_type
+    fa_up = str(latest.get("fa_up", "")).lower() == "true"
+    fa_dn = str(latest.get("fa_dn", "")).lower() == "true"
+
+    if day_type == "TREND_UP":
+        direction, strength = "CE", "strong"
+    elif day_type == "TREND_DN":
+        direction, strength = "PE", "strong"
+    elif day_type == "NORMAL_VAR_UP":
+        direction = "CE"
+    elif day_type == "NORMAL_VAR_DN":
+        direction = "PE"
+    elif day_type == "FAILED_AUCTION":
+        if fa_up and not fa_dn:
+            direction, reason = "PE", "FA_UP"
+        elif fa_dn and not fa_up:
+            direction, reason = "CE", "FA_DN"
+
+    # Failure score override
+    if bf >= 4 and sf < 2:
+        direction, strength, reason = "PE", "strong", reason + f"+BF{bf:.0f}"
+    elif sf >= 4 and bf < 2:
+        direction, strength, reason = "CE", "strong", reason + f"+SF{sf:.0f}"
+
+    # Conflict suppression
+    if bf >= 2 and sf >= 2 and day_type not in ("TREND_UP", "TREND_DN"):
+        direction = None
+        reason += "+CONFLICT"
+
+    alloc = 0.35 if strength == "strong" else 0.20
+    signals = []
+    if direction:
+        signals.append({
+            "signal_date": d,
+            "trade_date": "next session",
+            "underlying": underlying,
+            "direction": direction,
+            "reason": reason,
+            "strength": strength,
+            "alloc": alloc,
+            "buyer_fail": bf,
+            "seller_fail": sf,
+            "day_type": day_type,
+            "status": "pending_vwap_confirm",
+            "instruction": (
+                f"Enter {direction} ATM when premium > VWAP after 09:30 IST. "
+                f"60-min grace period before VWAP stop activates. "
+                f"Hard SL at -50%. Target +50%."
+            ),
+        })
+
+    return {
+        "as_of": d,
+        "underlying": underlying,
+        "signals": signals,
+        "skip_reason": reason if not direction else None,
+    }
+
+
+@router.get("/mp-agent-context")
+async def mp_agent_context(underlying: str = "NIFTY", limit: int = 10) -> list[dict]:
+    """
+    Contextual agent reasoning for the MP+Order-Flow strategy.
+    Returns structured comments explaining the latest MP structure.
+    """
+    comments: list[dict] = []
+    enr_path = _mp_enr_path(underlying)
+    rows = _safe_csv(enr_path)
+    if not rows:
+        return [{"time": "", "type": "system", "level": "warning",
+                 "message": f"No MP failure data found for {underlying}."}]
+
+    latest = rows[-1]
+    bf = _flt(latest, "buyer_fail_score")
+    sf = _flt(latest, "seller_fail_score")
+    d = latest.get("date", "")
+    move = _flt(latest, "daily_move")
+    day_type = _classify_day_type(latest)
+
+    comments.append({
+        "time": d, "type": "day_summary", "level": "info",
+        "message": (
+            f"{d}: {day_type} day on {underlying}. "
+            f"Move: {move:+.0f} pts. "
+            f"Buyer fail={bf:.0f}, Seller fail={sf:.0f}."
+        ),
+    })
+
+    # MP structure commentary
+    ib_up = str(latest.get("ib_broken_up", "")).lower() == "true"
+    ib_dn = str(latest.get("ib_broken_dn", "")).lower() == "true"
+    fa_up = str(latest.get("fa_up", "")).lower() == "true"
+    fa_dn = str(latest.get("fa_dn", "")).lower() == "true"
+    close = _flt(latest, "close_price")
+    ibh = _flt(latest, "ibh")
+    ibl = _flt(latest, "ibl")
+
+    if fa_up:
+        comments.append({
+            "time": d, "type": "auction", "level": "bearish",
+            "message": (
+                f"Failed Auction UP — {underlying} broke IB high (₹{ibh:.0f}) "
+                f"but closed at ₹{close:.0f}. Buyers exhausted. PE bias for next session."
+            ),
+        })
+    if fa_dn:
+        comments.append({
+            "time": d, "type": "auction", "level": "bullish",
+            "message": (
+                f"Failed Auction DOWN — {underlying} broke IB low (₹{ibl:.0f}) "
+                f"but closed at ₹{close:.0f}. Sellers rejected. CE bias for next session."
+            ),
+        })
+
+    if bf >= 4 and sf < 2:
+        comments.append({
+            "time": d, "type": "signal", "level": "bearish",
+            "message": f"Strong buyer failure (score {bf:.0f}). PE entry next session — wait for ATM premium > VWAP.",
+        })
+    elif sf >= 4 and bf < 2:
+        comments.append({
+            "time": d, "type": "signal", "level": "bullish",
+            "message": f"Strong seller failure (score {sf:.0f}). CE entry next session — wait for ATM premium > VWAP.",
+        })
+    elif bf >= 2 and sf >= 2:
+        comments.append({
+            "time": d, "type": "signal", "level": "warning",
+            "message": f"CONFLICT — BF={bf:.0f} and SF={sf:.0f} both elevated. Choppy auction. Skip or reduce size.",
+        })
+    else:
+        comments.append({
+            "time": d, "type": "signal", "level": "neutral",
+            "message": "Balanced auction. No strong failure signal. Await clearer MP structure before entry.",
+        })
+
+    if str(latest.get("poor_high", "")).lower() == "true":
+        comments.append({
+            "time": d, "type": "profile", "level": "bearish",
+            "message": f"Poor High on {underlying} — single-print at top. No buyer acceptance. Likely to revisit.",
+        })
+    if str(latest.get("poor_low", "")).lower() == "true":
+        comments.append({
+            "time": d, "type": "profile", "level": "bullish",
+            "message": f"Poor Low on {underlying} — single-print at bottom. No seller acceptance. Likely to revisit.",
+        })
+
+    return comments[-limit:]

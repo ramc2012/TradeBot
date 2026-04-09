@@ -2,6 +2,8 @@
 
 This package introduces a separate Market Profile + order-flow strategy module without changing the current strategy runtime. Nothing in this package is started from application lifespan hooks. The only integration point is an opt-in API router.
 
+Deployment and rollout planning for this module is documented in [DEPLOYMENT_BLUEPRINT.md](/Users/chinnadurairamachandran/Claude%20Projects/TradingBot/nomad-curie/backend/auction_intelligence/DEPLOYMENT_BLUEPRINT.md).
+
 ## MVP Scope
 
 - Primary deployment target: `NIFTY` futures
@@ -22,6 +24,8 @@ auction_intelligence/
 ├── risk/                Shared pre-trade governor
 ├── execution/           Execution-style planner
 ├── paper/               JSONL journaling for paper proposals
+├── shadow/              Persisted shadow-mode observations and divergence tracking
+├── validation/          Gate A/B/C validators and validation persistence
 └── service.py           End-to-end orchestration entry point
 ```
 
@@ -117,6 +121,8 @@ auction_intelligence/
 - Bar-based backtests should reuse `MarketBar` and `MarketProfileEngine`
 - Event-driven replay should reuse `TradePrint`, `QuoteSnapshot`, and `OrderFlowEngine`
 - Paper proposals should flow through `AuctionIntelligenceService.analyze_and_record_paper`
+- Shadow observations should be captured through the `/api/auction-intelligence/shadow-record-live` endpoint
+- Gate C should be monitored through `/api/auction-intelligence/validate-gate-c`
 - JSONL journals land under `backend/runtime/auction_intelligence/`
 
 ## Test Strategy

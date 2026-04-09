@@ -18,7 +18,7 @@ from analysis.backtest import MACDBacktester, UpstoxAuthError
 from analysis.instruments import INDEX_INSTRUMENT_KEYS
 
 
-SUPPORTED_INDEX_ANALYTICS_UNDERLYINGS = ("NIFTY", "SENSEX")
+SUPPORTED_INDEX_ANALYTICS_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "SENSEX")
 SUPPORTED_OPTION_TYPES = ("CE", "PE")
 DEFAULT_INTERVAL = "1minute"
 DEFAULT_WEEKLY_LOOKBACK_DAYS = 14
@@ -595,7 +595,7 @@ class IndexAnalyticsCollector:
     ) -> IndexAnalyticsProgress:
         normalized_underlyings = _normalize_underlyings(underlyings or list(SUPPORTED_INDEX_ANALYTICS_UNDERLYINGS))
         if not normalized_underlyings:
-            raise ValueError("At least one of NIFTY or SENSEX is required.")
+            raise ValueError(f"At least one supported underlying required: {', '.join(SUPPORTED_INDEX_ANALYTICS_UNDERLYINGS)}")
 
         if progress is None:
             progress = IndexAnalyticsProgress(

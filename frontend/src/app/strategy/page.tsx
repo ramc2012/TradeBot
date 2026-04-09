@@ -227,11 +227,12 @@ function OpenSignalsPanel() {
   const asOf = data?.as_of || "";
 
   return (
-    <div className="card p-4">
-      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3 flex items-center gap-1.5">
+    <div className="card p-4 flex flex-col" style={{ maxHeight: 380 }}>
+      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3 flex items-center gap-1.5 shrink-0">
         <Zap size={12} /> Next Session Signals
         <span className="ml-auto text-text-muted text-[10px] font-normal">{asOf}</span>
       </h3>
+      <div className="flex-1 min-h-0 overflow-y-auto">
       {signals.length === 0 ? (
         <div className="text-center py-4">
           <Shield size={20} className="mx-auto text-text-muted mb-1.5" />
@@ -270,6 +271,7 @@ function OpenSignalsPanel() {
           ))}
         </div>
       )}
+      </div>
     </div>
   );
 }
@@ -306,11 +308,12 @@ function AgentCommentsPanel() {
   };
 
   return (
-    <div className="card p-4">
-      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3 flex items-center gap-1.5">
+    <div className="card p-4 flex flex-col" style={{ maxHeight: 380 }}>
+      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3 flex items-center gap-1.5 shrink-0">
         <MessageSquare size={12} /> Agent Commentary
+        <span className="ml-auto text-[10px] font-normal text-text-muted">{comments.length} items</span>
       </h3>
-      <div className="space-y-1.5 max-h-[300px] overflow-y-auto pr-1">
+      <div className="flex-1 min-h-0 overflow-y-auto space-y-1.5 pr-1 scrollbar-thin">
         {comments.map((c: any, i: number) => (
           <div key={i} className={clsx(
             "text-xs border-l-2 pl-2.5 py-1",
@@ -363,11 +366,11 @@ function SignalHistoryPanel() {
   };
 
   return (
-    <div className="card p-4">
-      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3 flex items-center gap-1.5">
+    <div className="card p-4 flex flex-col" style={{ maxHeight: 400 }}>
+      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3 flex items-center gap-1.5 shrink-0">
         <BarChart2 size={12} /> MP Signal History
       </h3>
-      <div className="overflow-x-auto">
+      <div className="flex-1 min-h-0 overflow-auto">
         <table className="w-full text-[10px] font-mono">
           <thead>
             <tr className="text-text-muted border-b border-bg-border">
@@ -423,12 +426,12 @@ function TradeBookPanel() {
   const total = data?.total || 0;
 
   return (
-    <div className="card p-4">
-      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3 flex items-center gap-1.5">
+    <div className="card p-4 flex flex-col" style={{ maxHeight: 400 }}>
+      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3 flex items-center gap-1.5 shrink-0">
         <FileText size={12} /> Trade Book
         <span className="ml-auto text-text-muted text-[10px] font-normal">{total} total</span>
       </h3>
-      <div className="overflow-x-auto max-h-[350px] overflow-y-auto">
+      <div className="flex-1 min-h-0 overflow-auto">
         <table className="w-full text-[10px] font-mono">
           <thead className="sticky top-0 bg-bg-card">
             <tr className="text-text-muted border-b border-bg-border">

@@ -8,6 +8,7 @@ from auction_intelligence.schemas import AgentDecision, PortfolioSnapshot, RiskD
 class RiskGovernor:
     def __init__(self, config: dict[str, Any]):
         self.config = config
+        self.contract_specs = config.get("contract_specs", {})
         self.max_daily_loss = float(config.get("max_daily_loss", 75_000.0))
         self.max_agent_drawdown = float(config.get("max_agent_drawdown", 0.08))
         self.max_symbol_exposure = float(config.get("max_symbol_exposure", 0.35))
@@ -39,7 +40,11 @@ class RiskGovernor:
             decision.action != "FLAT" for decision in decisions
         ):
             reasons.append("Too close to session close for new entries.")
-        if portfolio.correlated_exposure >= self.max_correlated_exposure:
+        correlated_exposure = self._normalize_aggregate_exposure(
+            portfolio.correlated_exposure,
+            portfolio.net_liquidation,
+        )
+        if correlated_exposure >= self.max_correlated_exposure:
             reasons.append("Correlated exposure cap reached.")
 
         for decision in decisions:
@@ -49,9 +54,22 @@ class RiskGovernor:
                 reasons.append(f"{decision.agent_name} confidence below threshold.")
             if portfolio.agent_drawdowns.get(decision.agent_name, 0.0) >= self.max_agent_drawdown:
                 reasons.append(f"{decision.agent_name} drawdown cap reached.")
-            symbol_exposure = portfolio.symbol_exposure.get(session.symbol, 0.0)
+            symbol_exposure = self._normalize_symbol_exposure(
+                portfolio.symbol_exposure.get(session.symbol, 0.0),
+                session.symbol,
+                portfolio.net_liquidation,
+            )
+            proposed_exposure = self._decision_exposure_ratio(
+                decision,
+                session.symbol,
+                portfolio.net_liquidation,
+            )
             if symbol_exposure >= self.max_symbol_exposure:
                 reasons.append(f"{session.symbol} exposure cap reached.")
+            elif symbol_exposure + proposed_exposure > self.max_symbol_exposure:
+                reasons.append(f"{session.symbol} projected margin exposure would exceed cap.")
+            if correlated_exposure + proposed_exposure > self.max_correlated_exposure:
+                reasons.append("Projected correlated exposure would exceed cap.")
 
         if reasons:
             return RiskDecision(
@@ -69,3 +87,39 @@ class RiskGovernor:
             )
 
         return RiskDecision(allowed=True, kill_switch=False, max_size_multiplier=1.0, reasons=["Risk checks passed."])
+
+    def _decision_exposure_ratio(
+        self,
+        decision: AgentDecision,
+        session_symbol: str,
+        net_liquidation: float,
+    ) -> float:
+        if decision.entry_price is None or decision.quantity <= 0:
+            return 0.0
+        margin_fraction = self._margin_fraction(session_symbol)
+        notional = float(decision.entry_price) * float(decision.quantity)
+        return round((notional * margin_fraction) / max(net_liquidation, 1.0), 4)
+
+    def _normalize_symbol_exposure(
+        self,
+        value: float,
+        symbol: str,
+        net_liquidation: float,
+    ) -> float:
+        numeric = float(value or 0.0)
+        if numeric <= 1.5:
+            return numeric
+        margin_fraction = self._margin_fraction(symbol)
+        return round((numeric * margin_fraction) / max(net_liquidation, 1.0), 4)
+
+    def _normalize_aggregate_exposure(self, value: float, net_liquidation: float) -> float:
+        numeric = float(value or 0.0)
+        if numeric <= 1.5:
+            return numeric
+        return round(numeric / max(net_liquidation, 1.0), 4)
+
+    def _margin_fraction(self, symbol: str) -> float:
+        normalized_symbol = str(symbol or "").upper().replace(" INDEX", "").replace(" FUT", "").strip()
+        return float(
+            self.contract_specs.get(normalized_symbol, {}).get("margin_fraction_per_lot", 1.0)
+        )

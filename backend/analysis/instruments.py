@@ -6,9 +6,30 @@ from datetime import date, timedelta
 from typing import List
 
 
-# ── NSE F&O Indices ───────────────────────────────────────────────────────────
+# ── NSE/BSE F&O Indices ───────────────────────────────────────────────────────
 
 NSE_FO_INDICES: list[str] = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"]
+BSE_FO_INDICES: list[str] = ["SENSEX", "BANKEX"]
+ALL_FO_INDICES: list[str] = NSE_FO_INDICES + BSE_FO_INDICES
+
+# Per-index expiry weekday (Python weekday: Mon=0, Tue=1, Wed=2, Thu=3, Fri=4)
+# NSE F&O expiry schedule:
+#   NIFTY / NIFTYNXT50 : every Thursday  (weekly + last-Thursday monthly)
+#   BANKNIFTY           : every Wednesday (weekly + last-Wednesday monthly)
+#   FINNIFTY            : every Tuesday   (weekly + last-Tuesday monthly)
+#   MIDCPNIFTY          : every Monday    (weekly + last-Monday monthly)
+# BSE F&O expiry schedule:
+#   SENSEX              : every Friday    (weekly + last-Friday monthly)
+#   BANKEX              : every Monday    (weekly + last-Monday monthly)
+INDEX_EXPIRY_WEEKDAY: dict[str, int] = {
+    "NIFTY":      3,   # Thursday
+    "NIFTYNXT50": 3,   # Thursday
+    "BANKNIFTY":  2,   # Wednesday
+    "FINNIFTY":   1,   # Tuesday
+    "MIDCPNIFTY": 0,   # Monday
+    "SENSEX":     4,   # Friday  (BSE)
+    "BANKEX":     0,   # Monday  (BSE)
+}
 
 # ── Strike step sizes ─────────────────────────────────────────────────────────
 # Index options
@@ -158,13 +179,42 @@ def _last_thursday_of_month(year: int, month: int) -> date:
     return d
 
 
+def _last_weekday_of_month(year: int, month: int, weekday: int) -> date:
+    """Return the last occurrence of a given weekday (0=Mon … 6=Sun) in the month."""
+    last_day = monthrange(year, month)[1]
+    d = date(year, month, last_day)
+    while d.weekday() != weekday:
+        d -= timedelta(days=1)
+    return d
+
+
 def get_monthly_expiry(year: int, month: int) -> date:
     """
-    Return the actual monthly expiry date for a given month.
-
-    Monthly expiry is the last Thursday, adjusted backward for holidays.
+    Return the actual monthly expiry date for NIFTY (last Thursday), adjusted for holidays.
+    For other indices use get_index_monthly_expiry().
     """
     candidate = _last_thursday_of_month(year, month)
+    while not _is_trading_day(candidate):
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def get_index_monthly_expiry(symbol: str, year: int, month: int) -> date:
+    """
+    Return the actual monthly expiry for any F&O index, based on its native expiry weekday.
+
+    Each NSE/BSE index has a fixed expiry weekday:
+      NIFTY/NIFTYNXT50 → Thursday (3)
+      BANKNIFTY        → Wednesday (2)
+      FINNIFTY         → Tuesday (1)
+      MIDCPNIFTY       → Monday (0)
+      SENSEX           → Friday (4) [BSE]
+      BANKEX           → Monday (0) [BSE]
+
+    The result is adjusted backward past any known market holidays.
+    """
+    weekday = INDEX_EXPIRY_WEEKDAY.get(symbol, 3)   # default Thursday
+    candidate = _last_weekday_of_month(year, month, weekday)
     while not _is_trading_day(candidate):
         candidate -= timedelta(days=1)
     return candidate

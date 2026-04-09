@@ -12,6 +12,24 @@
     "slippage_bps": 1.5,
     "commission_bps": 0.5
   },
+  "contract_specs": {
+    "NIFTY": {
+      "lot_size": 65,
+      "margin_fraction_per_lot": 0.18
+    },
+    "BANKNIFTY": {
+      "lot_size": 30,
+      "margin_fraction_per_lot": 0.18
+    },
+    "FINNIFTY": {
+      "lot_size": 40,
+      "margin_fraction_per_lot": 0.18
+    },
+    "MIDCPNIFTY": {
+      "lot_size": 75,
+      "margin_fraction_per_lot": 0.18
+    }
+  },
   "market_profile": {
     "period_minutes": 30,
     "tick_size": 0.5,
@@ -50,7 +68,11 @@
       "sleeve_fraction": 0.35,
       "min_confidence": 0.62,
       "risk_multiple": 2.0,
-      "lot_size": 25
+      "lot_size": 25,
+      "margin_fraction_per_lot": 0.18,
+      "value_entry_tolerance_fraction": 0.25,
+      "value_entry_tolerance_min_points": 10.0,
+      "value_entry_tolerance_max_points": 50.0
     },
     "scalp": {
       "enabled": true,
@@ -76,8 +98,52 @@
     "min_model_confidence": 0.55
   },
   "paper_trading": {
-    "journal_root": "backend/runtime/auction_intelligence",
+    "journal_root": "runtime/auction_intelligence",
+    "shadow_net_liquidation": 1000000.0,
     "slippage_bps": 1.0,
     "fees_per_order": 20.0
+  },
+  "live_canary": {
+    "allowed_symbols": ["BANKNIFTY"],
+    "allowed_agents": ["swing"],
+    "manual_approval_required": true,
+    "max_live_lots": 1,
+    "daily_loss_limit": 25000.0,
+    "max_size_multiplier": 0.35
+  },
+  "validation": {
+    "gate_a": {
+      "min_current_bars": 4,
+      "min_prior_bars": 4,
+      "require_prior_session": true,
+      "max_duplicate_timestamps": 0,
+      "max_out_of_order_bars": 0,
+      "max_current_session_gaps": 0,
+      "max_prior_session_gaps": 0,
+      "max_misaligned_bars": 0
+    },
+    "gate_b": {
+      "observation_bars": 4,
+      "min_sessions": 5,
+      "min_trades": 2,
+      "walk_forward_windows": 3,
+      "min_profit_factor": 1.0,
+      "min_positive_window_ratio": 0.5,
+      "max_setup_concentration": 0.85,
+      "required_positive_regimes": 2,
+      "required_positive_setups": 2,
+      "slippage_bps": 1.5,
+      "commission_bps": 0.5
+    },
+    "gate_c": {
+      "min_sessions": 20,
+      "target_sessions": 30,
+      "max_stale_signal_ratio": 0.005,
+      "max_median_fill_drift_ticks": 2.0,
+      "max_p95_fill_drift_ticks": 8.0,
+      "max_non_critical_incidents_per_week": 1,
+      "min_kill_switch_drills": 2,
+      "position_mismatch_timeout_seconds": 300.0
+    }
   }
 }

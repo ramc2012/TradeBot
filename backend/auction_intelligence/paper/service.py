@@ -10,7 +10,10 @@ from auction_intelligence.schemas import AnalysisBundle, PaperTradeRecord
 
 class PaperTradingService:
     def __init__(self, journal_root: str):
-        self.writer = JournalWriter(Path(journal_root))
+        root = Path(journal_root)
+        if not root.is_absolute():
+            root = Path(__file__).resolve().parents[2] / root
+        self.writer = JournalWriter(root)
 
     def record_analysis(self, bundle: AnalysisBundle) -> list[str]:
         written: list[str] = []

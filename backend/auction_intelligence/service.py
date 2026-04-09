@@ -19,6 +19,8 @@ from auction_intelligence.schemas import (
     SessionContext,
     TradePrint,
 )
+from auction_intelligence.validation.engine import GateAValidator
+from auction_intelligence.validation.schemas import ValidationReport
 
 
 class AuctionIntelligenceService:
@@ -31,9 +33,10 @@ class AuctionIntelligenceService:
         self.positional_agent = PositionalAgent(self.config["agents"]["positional"])
         self.scalp_agent = ScalpAgent(self.config["agents"]["scalp"])
         self.meta_controller = MetaController(self.config["meta_controller"])
-        self.risk = RiskGovernor(self.config["risk"])
+        self.risk = RiskGovernor({**self.config["risk"], "contract_specs": self.config.get("contract_specs", {})})
         self.execution = ExecutionPlanner()
         self.paper = PaperTradingService(self.config["paper_trading"]["journal_root"])
+        self.validation = GateAValidator(self.config)
 
     def analyze(
         self,
@@ -120,3 +123,16 @@ class AuctionIntelligenceService:
         )
         paths = self.paper.record_analysis(bundle)
         return bundle, paths
+
+    def validate_gate_a(
+        self,
+        *,
+        session: SessionContext,
+        bars: list[MarketBar],
+        prior_bars: list[MarketBar] | None = None,
+    ) -> ValidationReport:
+        return self.validation.validate(
+            session=session,
+            bars=bars,
+            prior_bars=prior_bars,
+        )

@@ -778,7 +778,8 @@ export default function StrategyDashboard() {
       </div>
 
       {/* ── Tab Content ── */}
-      <div className="card p-4">
+      {/* Fixed max-height so any tab never extends the page — each tab manages its own inner scroll */}
+      <div className="card p-4 overflow-y-auto" style={{ maxHeight: 520 }}>
 
         {activeTab === "positions" && (
           <PositionsPanel positions={positions} summary={summary} />

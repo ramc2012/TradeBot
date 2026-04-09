@@ -15,16 +15,22 @@ class StrategyAgent(ABC):
     def evaluate(self, context: AgentContext) -> AgentDecision:
         raise NotImplementedError
 
-    def _flat(self, rationale: list[str]) -> AgentDecision:
+    def _flat(
+        self,
+        rationale: list[str],
+        *,
+        confidence: float = 0.0,
+        metadata: dict[str, Any] | None = None,
+    ) -> AgentDecision:
         return AgentDecision(
             agent_name=self.name,
             action="FLAT",
-            confidence=0.0,
+            confidence=confidence,
             entry_price=None,
             stop_price=None,
             target_price=None,
             quantity=0,
             sleeve_fraction=float(self.config.get("sleeve_fraction", 0.0)),
             rationale=rationale,
-            metadata={},
+            metadata=metadata or {},
         )
