@@ -1,14 +1,14 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { getStrategyAgentStatus } from "@/lib/api";
+import { getBrokerStatus, getStrategyAgentStatus } from "@/lib/api";
 import {
   AgentCommentaryFeed,
   StrategyAgentStatus,
   StrategyMonitorSection,
   StrategyStatusPanel,
 } from "@/components/trading/StrategyAgentMonitor";
-import { Activity, Bot, BrainCircuit, Send } from "lucide-react";
+import { Activity, Bot, Radio, Shield } from "lucide-react";
 
 export default function AgentPage() {
   const { data: strategyStatus } = useQuery({
@@ -17,16 +17,19 @@ export default function AgentPage() {
     refetchInterval: 15000,
     staleTime: 10000,
   });
+  const { data: brokers } = useQuery({
+    queryKey: ["brokerStatus"],
+    queryFn: () => getBrokerStatus().then((r) => r.data as any[]),
+    refetchInterval: 30000,
+    staleTime: 10000,
+  });
 
   const strategyCount = strategyStatus?.strategies?.length || 0;
   const openPositions = (strategyStatus?.strategies || []).reduce(
     (sum, strategy) => sum + (strategy.summary.open_positions || 0),
     0,
   );
-  const totalTrades = (strategyStatus?.strategies || []).reduce(
-    (sum, strategy) => sum + (strategy.summary.total_trades || 0),
-    0,
-  );
+  const connectedBrokers = (brokers || []).filter((broker: any) => broker.connected);
 
   return (
     <div className="max-w-screen-xl space-y-4">
@@ -36,46 +39,45 @@ export default function AgentPage() {
           Strategy Agent
         </h1>
         <div className="mt-1 text-xs text-text-muted">
-          This agent is now manual-run only. Use the market-specific scan controls to evaluate watchlists, while kill switches gate whether each market can open new entries.
+          Live monitor for both paper runtimes: Strategy 1 on 30-minute ATM options and Strategy 2 on 5-minute index options with Market Profile gating.
         </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="card p-4">
           <div className="flex items-center gap-2 text-sm text-text-secondary">
-            <BrainCircuit size={14} /> Strategy Books
+            <Shield size={14} /> Live Runtime
           </div>
           <div className="mt-3 text-2xl font-mono font-semibold text-text-primary">{strategyCount}</div>
-          <div className="mt-1 text-xs text-text-muted">MACD zero cross and Greeks Sync are evaluated independently.</div>
+          <div className="mt-1 text-xs text-text-muted">Both strategy runtimes report here, with positions, signal lanes, and recent activity.</div>
         </div>
         <div className="card p-4">
           <div className="flex items-center gap-2 text-sm text-text-secondary">
             <Activity size={14} /> Open Positions
           </div>
           <div className="mt-3 text-2xl font-mono font-semibold text-text-primary">{openPositions}</div>
-          <div className="mt-1 text-xs text-text-muted">Open positions are still managed by the strategy logic after each manual scan.</div>
+          <div className="mt-1 text-xs text-text-muted">Positions stay under strategy management after every automatic scan.</div>
         </div>
         <div className="card p-4">
           <div className="flex items-center gap-2 text-sm text-text-secondary">
-            <Send size={14} /> Telegram Trade Notes
+            <Radio size={14} /> Broker Links
           </div>
           <div className="mt-3 text-2xl font-mono font-semibold text-text-primary">
-            {strategyStatus?.telegram?.configured ? "Ready" : "Not Set"}
+            {connectedBrokers.length}
           </div>
           <div className="mt-1 text-xs text-text-muted">
-            {strategyStatus?.telegram?.configured
-              ? "Entries, exits, and periodic summaries can be pushed with strategy reasoning."
-              : "Configure bot token and chat ID in Settings to receive trade commentary."}
+            {connectedBrokers.length
+              ? connectedBrokers.map((broker: any) => broker.broker).join(" + ").toUpperCase()
+              : "No connected brokers"}
           </div>
         </div>
       </div>
 
-      <StrategyStatusPanel agentStatus={strategyStatus} />
-      <AgentCommentaryFeed agentStatus={strategyStatus} />
       <StrategyMonitorSection agentStatus={strategyStatus} />
 
-      <div className="card p-4 text-xs text-text-muted">
-        Closed trades across both strategies: <span className="font-mono text-text-primary">{totalTrades}</span>. The Trading page holds manual order entry and the NSE kill switch, while the Commodity page holds the MCX kill switch and watchlists.
+      <div className="grid grid-cols-1 xl:grid-cols-[0.85fr,1.15fr] gap-4">
+        <StrategyStatusPanel agentStatus={strategyStatus} />
+        <AgentCommentaryFeed agentStatus={strategyStatus} />
       </div>
     </div>
   );

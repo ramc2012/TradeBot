@@ -66,7 +66,7 @@ def test_normalize_commodity_symbols_filters_to_mcx() -> None:
 
 
 def test_extract_commodity_root_parses_mcx_future_symbol() -> None:
-    assert _extract_commodity_root("MCX:SILVERMIC26JUNFUT") == "SILVERMIC"
+    assert _extract_commodity_root("MCX:SILVERMIC26JUNFUT") == "SILVERM"
 
 
 def test_select_default_expiry_prefers_nearest_future() -> None:
@@ -96,6 +96,8 @@ def test_commodity_watchlist_uses_selected_mcx_expiry() -> None:
     assert payload["summary"]["total_rows"] == 1
     assert payload["rows"][0]["underlying"] == "GOLD"
     assert payload["rows"][0]["fyers_symbol"] == "MCX:GOLD26JUNFUT"
+    assert payload["rows"][0]["lot_size"] == 10
+    assert payload["rows"][0]["contract_unit_label"] == "100 gm contract"
 
 
 def test_contract_catalog_marks_selected_and_active_expiries() -> None:
@@ -139,6 +141,7 @@ def test_contract_catalog_resolves_silvermic_to_silverm_option_root() -> None:
     assert silver["lookup_symbol"] == "MCX:SILVERM26JUNFUT"
     assert silver["has_options"] is True
     assert silver["active_expiry"] == "2099-04-21"
+    assert silver["lot_size"] == 5
     assert "SILVERM26JUNFUT" in str(silver["detail"])
 
 
@@ -156,3 +159,82 @@ def test_watchlist_uses_alias_option_root_for_chain_build() -> None:
     assert payload["summary"]["total_rows"] == 1
     assert payload["rows"][0]["lookup_symbol"] == "MCX:SILVERM26JUNFUT"
     assert adapter.chain_requests == [("MCX:SILVERM26JUNFUT", "2099-04-21")]
+
+
+def test_watchlist_prefers_nearest_liquid_contract_when_atm_is_thin() -> None:
+    service = CommodityATMWatchlistService()
+
+    class _ThinAtmAdapter(_FakeCommodityAdapter):
+        async def get_option_chain(self, symbol: str, expiry: str) -> OptionChain:
+            self.chain_requests.append((symbol, expiry))
+            return OptionChain(
+                symbol=symbol,
+                expiry=expiry,
+                spot_price=145600.0,
+                entries=[
+                    OptionChainEntry(
+                        strike=145600.0,
+                        option_type="CE",
+                        ltp=118.0,
+                        oi=12,
+                        volume=4,
+                        bid=117.0,
+                        ask=121.0,
+                        prev_close=100.0,
+                        prev_oi=10,
+                        instrument_key="MCX:GOLDATMCE",
+                    ),
+                    OptionChainEntry(
+                        strike=145700.0,
+                        option_type="CE",
+                        ltp=126.0,
+                        oi=220,
+                        volume=180,
+                        bid=125.5,
+                        ask=126.5,
+                        prev_close=112.0,
+                        prev_oi=150,
+                        instrument_key="MCX:GOLDLIQCE",
+                    ),
+                    OptionChainEntry(
+                        strike=145600.0,
+                        option_type="PE",
+                        ltp=115.0,
+                        oi=8,
+                        volume=2,
+                        bid=113.0,
+                        ask=118.0,
+                        prev_close=98.0,
+                        prev_oi=7,
+                        instrument_key="MCX:GOLDATMPE",
+                    ),
+                    OptionChainEntry(
+                        strike=145500.0,
+                        option_type="PE",
+                        ltp=124.0,
+                        oi=250,
+                        volume=200,
+                        bid=123.5,
+                        ask=124.5,
+                        prev_close=108.0,
+                        prev_oi=180,
+                        instrument_key="MCX:GOLDLIQPE",
+                    ),
+                ],
+            )
+
+    adapter = _ThinAtmAdapter()
+
+    async def _get_adapter():
+        return adapter
+
+    service._get_fyers_adapter = _get_adapter  # type: ignore[method-assign]
+
+    payload = asyncio.run(service.get_watchlist(["MCX:GOLD26JUNFUT"]))
+
+    row = payload["rows"][0]
+    assert row["atm_strike"] == 145600.0
+    assert row["ce"]["instrument_key"] == "MCX:GOLDLIQCE"
+    assert row["ce"]["selection_mode"] == "nearest_liquid"
+    assert row["pe"]["instrument_key"] == "MCX:GOLDLIQPE"
+    assert row["pe"]["selection_mode"] == "nearest_liquid"

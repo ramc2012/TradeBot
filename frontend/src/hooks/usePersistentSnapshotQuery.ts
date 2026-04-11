@@ -40,6 +40,15 @@ function loadSnapshot<TData>(storageKey: string): SnapshotEnvelope<TData> | null
     if (!raw) return null;
     const parsed = JSON.parse(raw) as SnapshotEnvelope<TData>;
     if (!parsed?.savedAt) return null;
+
+    // Invalidate snapshots older than 4 hours to prevent showing stale data
+    const savedTime = new Date(parsed.savedAt).getTime();
+    const fourHoursMs = 4 * 60 * 60 * 1000;
+    if (Date.now() - savedTime > fourHoursMs) {
+      window.localStorage.removeItem(storageKey);
+      return null;
+    }
+
     return parsed;
   } catch {
     return null;

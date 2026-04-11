@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from brokers.base import Tick
@@ -62,7 +62,7 @@ class MarketProfileBuilder:
 
     def on_tick(self, tick: Tick):
         sym = tick.symbol
-        ts = tick.timestamp or datetime.utcnow()
+        ts = self._ensure_utc_timestamp(tick.timestamp)
         self._ticks.setdefault(sym, []).append(
             Tick(
                 symbol=sym,
@@ -132,7 +132,7 @@ class MarketProfileBuilder:
     def get_tick_rows(self, symbol: str) -> List[dict]:
         rows: List[dict] = []
         for tick in self._ticks.get(symbol, []):
-            ts = tick.timestamp or datetime.utcnow()
+            ts = self._ensure_utc_timestamp(tick.timestamp)
             rows.append(
                 {
                     "time": ts.isoformat(),
@@ -165,7 +165,9 @@ class MarketProfileBuilder:
             if not ts_val:
                 continue
             try:
-                ts = datetime.fromisoformat(str(ts_val).replace("Z", "+00:00"))
+                ts = self._ensure_utc_timestamp(
+                    datetime.fromisoformat(str(ts_val).replace("Z", "+00:00"))
+                )
             except ValueError:
                 continue
             candles.append(
@@ -190,7 +192,9 @@ class MarketProfileBuilder:
         bucket: Optional[dict] = None
 
         for row in sorted(rows, key=lambda item: str(item.get("time") or item.get("timestamp"))):
-            ts = datetime.fromisoformat(str(row.get("time") or row.get("timestamp")).replace("Z", "+00:00"))
+            ts = self._ensure_utc_timestamp(
+                datetime.fromisoformat(str(row.get("time") or row.get("timestamp")).replace("Z", "+00:00"))
+            )
             rounded_minute = (ts.minute // interval_minutes) * interval_minutes
             current_start = ts.replace(minute=rounded_minute, second=0, microsecond=0)
 
@@ -221,32 +225,53 @@ class MarketProfileBuilder:
         return aggregated
 
     async def store_profile(self, profile: MarketProfileResult):
+        # 1. Redis cache (fast read, 5-min TTL)
         redis = await get_redis()
         key = f"mp:{profile.symbol}:{profile.timeframe}"
-        await redis.set(
-            key,
-            json.dumps(
-                {
-                    "symbol": profile.symbol,
-                    "timeframe": profile.timeframe,
-                    "date": profile.date,
-                    "poc": profile.poc,
-                    "vah": profile.vah,
-                    "val": profile.val,
-                    "ib_high": profile.ib_high,
-                    "ib_low": profile.ib_low,
-                    "tpo_data": profile.tpo_data,
-                    "single_prints": profile.single_prints,
-                    "poor_high": profile.poor_high,
-                    "poor_low": profile.poor_low,
-                    "source_interval": profile.source_interval,
-                    "sample_count": profile.sample_count,
-                    "coverage_start": profile.coverage_start,
-                    "coverage_end": profile.coverage_end,
-                }
-            ),
-            ex=300,
-        )
+        profile_dict = {
+            "symbol": profile.symbol,
+            "timeframe": profile.timeframe,
+            "date": profile.date,
+            "poc": profile.poc,
+            "vah": profile.vah,
+            "val": profile.val,
+            "ib_high": profile.ib_high,
+            "ib_low": profile.ib_low,
+            "tpo_data": profile.tpo_data,
+            "single_prints": profile.single_prints,
+            "poor_high": profile.poor_high,
+            "poor_low": profile.poor_low,
+            "source_interval": profile.source_interval,
+            "sample_count": profile.sample_count,
+            "coverage_start": profile.coverage_start,
+            "coverage_end": profile.coverage_end,
+        }
+        await redis.set(key, json.dumps(profile_dict), ex=300)
+
+        # 2. DB persistence (long-term storage for analysis)
+        try:
+            from db.database import AsyncSessionLocal
+            from sqlalchemy import text
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    text("""
+                        INSERT INTO market_profiles (time, symbol, timeframe, poc, vah, val, ib_high, ib_low, tpo_data)
+                        VALUES (NOW(), :symbol, :timeframe, :poc, :vah, :val, :ib_high, :ib_low, :tpo_data::jsonb)
+                    """),
+                    {
+                        "symbol": profile.symbol,
+                        "timeframe": profile.timeframe,
+                        "poc": profile.poc,
+                        "vah": profile.vah,
+                        "val": profile.val,
+                        "ib_high": profile.ib_high,
+                        "ib_low": profile.ib_low,
+                        "tpo_data": json.dumps(profile_dict),
+                    },
+                )
+                await session.commit()
+        except Exception:
+            pass  # Non-fatal: Redis cache is primary, DB is for analysis
 
     async def get_cached_profile(self, symbol: str, timeframe: str) -> Optional[dict]:
         redis = await get_redis()
@@ -277,13 +302,13 @@ class MarketProfileBuilder:
         if len(ticks) > MAX_TICKS_PER_SYMBOL:
             self._ticks[sym] = ticks[-MAX_TICKS_PER_SYMBOL:]
             return
-        cutoff = datetime.utcnow() - timedelta(days=2)
-        self._ticks[sym] = [tick for tick in ticks if (tick.timestamp or datetime.utcnow()) >= cutoff]
+        cutoff = datetime.now(timezone.utc) - timedelta(days=2)
+        self._ticks[sym] = [tick for tick in ticks if self._ensure_utc_timestamp(tick.timestamp) >= cutoff]
 
     def _trim_candles(self, sym: str):
         candles = self._candles.get(sym, [])
-        cutoff = datetime.utcnow() - timedelta(days=40)
-        self._candles[sym] = [c for c in candles if c.timestamp >= cutoff][-2000:]
+        cutoff = datetime.now(timezone.utc) - timedelta(days=40)
+        self._candles[sym] = [c for c in candles if self._ensure_utc_timestamp(c.timestamp) >= cutoff][-2000:]
 
     def _build_profile(
         self,
@@ -359,6 +384,14 @@ class MarketProfileBuilder:
             coverage_start=coverage_start,
             coverage_end=coverage_end,
         )
+
+    @staticmethod
+    def _ensure_utc_timestamp(value: Optional[datetime]) -> datetime:
+        if value is None:
+            return datetime.now(timezone.utc)
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
 
 market_profile_builder = MarketProfileBuilder()

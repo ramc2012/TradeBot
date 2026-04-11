@@ -156,12 +156,12 @@ class FyersAdapter(BrokerAdapter):
                 grant_type="authorization_code",
             )
             session.set_token(auth_code)
-            response = session.generate_token()
+            response = await asyncio.to_thread(session.generate_token)
             self._access_token = response.get("access_token", "")
             logger.info("Fyers authenticated successfully")
             return AuthToken(
                 access_token=self._access_token,
-                expires_at=datetime.utcnow() + timedelta(hours=8),
+                expires_at=datetime.now(UTC) + timedelta(hours=8),
             )
         except Exception as e:
             logger.error(f"Fyers authentication failed: {e}")
@@ -370,7 +370,7 @@ class FyersAdapter(BrokerAdapter):
     def _handle_tick(self, msg: dict, callback: Callable[[Tick], None]):
         try:
             tick = Tick(
-                symbol=msg.get("symbol", ""),
+                symbol=msg.get("symbol") or msg.get("n", ""),
                 ltp=msg.get("ltp", 0),
                 open=msg.get("open_price", 0),
                 high=msg.get("high_price", 0),
@@ -380,7 +380,7 @@ class FyersAdapter(BrokerAdapter):
                 oi=msg.get("oi", 0),
                 bid=msg.get("bid", 0),
                 ask=msg.get("ask", 0),
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(UTC),
             )
             callback(tick)
         except Exception as e:

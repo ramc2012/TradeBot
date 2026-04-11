@@ -318,7 +318,7 @@ class UpstoxAdapter(BrokerAdapter):
                 prev_close = float(ltpc.get("cp", 0) or day_ohlc.get("close", 0) or ltp)
 
                 return Tick(
-                    symbol=feed.get("symbol", "") or feed_key,
+                    symbol=feed.get("symbol", "") or feed.get("instrument_key", "") or feed_key,
                     ltp=ltp,
                     open=float(day_ohlc.get("open", prev_close) or prev_close),
                     high=float(day_ohlc.get("high", ltp) or ltp),

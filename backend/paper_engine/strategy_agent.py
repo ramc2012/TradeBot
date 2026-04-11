@@ -12,13 +12,17 @@ premium candles with:
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
 import pandas as pd
 from loguru import logger
+from sqlalchemy import text
 
 from analysis.macd_engine import (
     compute_macd,
@@ -64,9 +68,15 @@ from agent.window_calculator import (
 )
 from analytics.technicals import latest_macd_rsi
 from core.config import settings
-from market_data import atm_watchlist_service, option_history_service
+from api.routers.auth import (
+    ensure_fyers_session,
+    get_active_adapter,
+    get_broker_connection_snapshot,
+)
+from db.database import AsyncSessionLocal
+from market_data import atm_watchlist_service, market_profile_builder, option_history_service
 from paper_engine.order_book import PaperOrderBook
-from paper_engine.portfolio import PaperPortfolio
+from paper_engine.portfolio import PaperPortfolio, TradeRecord, VirtualPosition
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -94,6 +104,60 @@ def _round_or_none(value: Optional[float], digits: int = 2) -> Optional[float]:
     return round(numeric, digits)
 
 
+def _parse_iso_timestamp(value: Any) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=IST)
+    return parsed.astimezone(IST)
+
+
+def _latest_session_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], Optional[date]]:
+    parsed_rows: list[tuple[datetime, dict[str, Any]]] = []
+    for row in rows:
+        parsed = _parse_iso_timestamp(row.get("time"))
+        if parsed is not None:
+            parsed_rows.append((parsed, row))
+
+    if not parsed_rows:
+        return [], None
+
+    parsed_rows.sort(key=lambda item: item[0])
+    session_date = max(parsed.date() for parsed, _ in parsed_rows)
+    session_rows = [row for parsed, row in parsed_rows if parsed.date() == session_date]
+    return session_rows, session_date
+
+
+def _latest_runtime_day(values: list[Any]) -> Optional[date]:
+    latest: Optional[date] = None
+    for value in values:
+        raw = str(value or "").strip()
+        if not raw:
+            continue
+        try:
+            candidate = date.fromisoformat(raw)
+        except ValueError:
+            parsed = _parse_iso_timestamp(raw)
+            candidate = parsed.date() if parsed is not None else None
+        if candidate is None:
+            continue
+        latest = max(latest, candidate) if latest else candidate
+    return latest
+
+
+def _ensure_ist_datetime(value: Any) -> Optional[datetime]:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=IST)
+    return value.astimezone(IST)
+
+
 def _contract_symbol(underlying: str, expiry: str, strike: float, option_type: str) -> str:
     return f"OPT:{underlying}:{expiry}:{int(round(strike))}:{option_type}"
 
@@ -101,6 +165,126 @@ def _contract_symbol(underlying: str, expiry: str, strike: float, option_type: s
 def _report_interval_seconds(value: str) -> int:
     mapping = {"30m": 1800, "1h": 3600, "4h": 14400, "daily": 86400}
     return mapping.get(str(value or "1h"), 3600)
+
+
+STRATEGY2_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
+STRATEGY2_ENTRY_CUTOFF = time(15, 0)
+STRATEGY2_FORCE_EXIT = time(15, 20)
+STRATEGY2_SPOT_CACHE_TTL_SECONDS = 90
+STRATEGY2_HARD_STOP_PCT = 18.0
+STRATEGY2_TARGET_PCT = 35.0
+STRATEGY2_KELLY_SCALE = 0.12
+STRATEGY2_MAX_POSITIONS = 4
+STRATEGY2_SIGNAL_HISTORY = 8
+STRATEGY2_FYERS_SYMBOLS = {
+    "NIFTY": "NSE:NIFTY50-INDEX",
+    "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+    "FINNIFTY": "NSE:FINNIFTY-INDEX",
+    "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
+}
+
+
+def _resolve_strategy_state_file() -> Path:
+    env_path = os.environ.get("NSE_STRATEGY_STATE_FILE", "").strip()
+    if env_path:
+        return Path(env_path)
+    docker_path = Path("/app/nse_strategy_state.json")
+    if docker_path.parent.is_dir():
+        return docker_path
+    return Path(__file__).resolve().parent.parent / "nse_strategy_state.json"
+
+
+_NSE_STRATEGY_STATE_FILE = _resolve_strategy_state_file()
+
+
+def _serialize_trade_history(portfolio: PaperPortfolio) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for trade in getattr(portfolio, "_trade_history", []):
+        rows.append(
+            {
+                "symbol": trade.symbol,
+                "action": trade.action,
+                "qty": int(trade.qty),
+                "entry_price": float(trade.entry_price),
+                "exit_price": float(trade.exit_price),
+                "pnl": float(trade.pnl),
+                "entry_time": trade.entry_time.isoformat(),
+                "exit_time": trade.exit_time.isoformat(),
+                "instrument_type": trade.instrument_type,
+                "expiry": trade.expiry,
+                "strike": trade.strike,
+                "option_type": trade.option_type,
+            }
+        )
+    return rows
+
+
+def _deserialize_trade_history(rows: list[dict[str, Any]]) -> list[TradeRecord]:
+    trades: list[TradeRecord] = []
+    for row in rows:
+        entry_time = _parse_iso_timestamp(row.get("entry_time"))
+        exit_time = _parse_iso_timestamp(row.get("exit_time"))
+        if entry_time is None or exit_time is None:
+            continue
+        try:
+            trades.append(
+                TradeRecord(
+                    symbol=str(row.get("symbol") or ""),
+                    action=str(row.get("action") or ""),
+                    qty=int(row.get("qty") or 0),
+                    entry_price=float(row.get("entry_price") or 0.0),
+                    exit_price=float(row.get("exit_price") or 0.0),
+                    pnl=float(row.get("pnl") or 0.0),
+                    entry_time=entry_time,
+                    exit_time=exit_time,
+                    instrument_type=str(row.get("instrument_type") or "CE"),
+                    expiry=row.get("expiry"),
+                    strike=float(row["strike"]) if row.get("strike") is not None else None,
+                    option_type=row.get("option_type"),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    return trades
+
+
+def _serialize_equity_curve(portfolio: PaperPortfolio) -> list[dict[str, Any]]:
+    return [
+        {"time": timestamp.isoformat(), "equity": float(equity)}
+        for timestamp, equity in getattr(portfolio, "_equity_curve", [])
+    ]
+
+
+def _deserialize_equity_curve(rows: list[dict[str, Any]]) -> list[tuple[datetime, float]]:
+    curve: list[tuple[datetime, float]] = []
+    for row in rows:
+        timestamp = _parse_iso_timestamp(row.get("time"))
+        if timestamp is None:
+            continue
+        try:
+            curve.append((timestamp, float(row.get("equity") or 0.0)))
+        except (TypeError, ValueError):
+            continue
+    return curve
+
+
+def _load_saved_strategy_state() -> dict[str, Any]:
+    if not _NSE_STRATEGY_STATE_FILE.exists():
+        return {}
+    try:
+        payload = json.loads(_NSE_STRATEGY_STATE_FILE.read_text())
+    except Exception as exc:
+        logger.warning(f"[Strategy] Failed to load {_NSE_STRATEGY_STATE_FILE}: {exc}")
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_strategy_state(payload: dict[str, Any]) -> None:
+    try:
+        _NSE_STRATEGY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _NSE_STRATEGY_STATE_FILE.write_text(json.dumps(payload, indent=2))
+    except Exception as exc:
+        logger.warning(f"[Strategy] Failed to persist {_NSE_STRATEGY_STATE_FILE}: {exc}")
 
 
 def detect_macd_zero_cross(closes: list[float], option_type: str = "CE") -> tuple[bool, Optional[float], Optional[str]]:
@@ -306,6 +490,207 @@ class StrategyRuntime:
     exits: int = 0
     last_scan_at: Optional[str] = None
     last_message: Optional[str] = None
+    signal_lane: list[dict[str, Any]] = field(default_factory=list)
+    meta: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class StrategyLaneDescriptor:
+    key: str
+    label: str
+    timeframe: str
+    instrument_scope: str
+    execution_mode: str
+    position_cap: int
+
+
+class _BaseNSEStrategyLaneAgent:
+    descriptor: StrategyLaneDescriptor
+
+    def __init__(self, owner: "PaperStrategyAgent", runtime: StrategyRuntime) -> None:
+        self.owner = owner
+        self.runtime = runtime
+
+    def mark_scan_started(self, started_at: datetime) -> None:
+        self.runtime.last_scan_at = started_at.isoformat()
+
+    def on_market_closed(self, started_at: datetime, last_live_scan: Optional[str]) -> None:
+        raise NotImplementedError
+
+    def on_broker_unavailable(self, started_at: datetime, broker_snapshot: dict[str, Any], message: str) -> None:
+        self.runtime.last_message = message
+        self.runtime.meta = {
+            **(self.runtime.meta or {}),
+            "mode": "broker_unavailable",
+            "updated_at": started_at.isoformat(),
+            "broker_snapshot": broker_snapshot,
+        }
+
+    def on_watchlist_unavailable(
+        self,
+        started_at: datetime,
+        *,
+        detail_messages: list[str],
+        history_warning: Optional[str],
+    ) -> None:
+        raise NotImplementedError
+
+    async def run_cycle(
+        self,
+        rows: list[dict[str, Any]],
+        started_at: datetime,
+        *,
+        window_map: dict[str, dict[str, Any]],
+        expiries: list[str],
+    ) -> None:
+        raise NotImplementedError
+
+    def build_status_payload(self) -> dict[str, Any]:
+        return {
+            "key": self.descriptor.key,
+            "label": self.descriptor.label,
+            "timeframe": self.descriptor.timeframe,
+            "instrument_scope": self.descriptor.instrument_scope,
+            "execution_mode": self.descriptor.execution_mode,
+            "position_cap": self.descriptor.position_cap,
+            "last_scan_at": self.runtime.last_scan_at,
+            "last_message": self.runtime.last_message,
+            "open_positions": len(self.runtime.positions),
+            "signals": len(self.runtime.signal_lane),
+            "mode": self.runtime.meta.get("mode") if self.runtime.meta else None,
+        }
+
+
+class _Strategy1LaneAgent(_BaseNSEStrategyLaneAgent):
+    descriptor = StrategyLaneDescriptor(
+        key="macd_strategy",
+        label="Strategy 1 · 30m ATM MACD",
+        timeframe="30minute",
+        instrument_scope="NSE F&O ATM options",
+        execution_mode="paper_execution",
+        position_cap=MAX_SIMULTANEOUS_POSITIONS,
+    )
+
+    def on_market_closed(self, started_at: datetime, last_live_scan: Optional[str]) -> None:
+        message = (
+            f"Market closed. Showing last live strategy state from {last_live_scan}."
+            if last_live_scan
+            else "Waiting for NSE market hours."
+        )
+        if not self.runtime.last_message or self.runtime.last_message.startswith("Waiting for NSE market hours."):
+            self.runtime.last_message = message
+        self.runtime.meta = {
+            **(self.runtime.meta or {}),
+            "mode": "market_closed",
+            "updated_at": started_at.isoformat(),
+            "market_state": "closed",
+        }
+
+    def on_watchlist_unavailable(
+        self,
+        started_at: datetime,
+        *,
+        detail_messages: list[str],
+        history_warning: Optional[str],
+    ) -> None:
+        message = "ATM watchlist empty for active windows."
+        if detail_messages:
+            message = f"{message} {' '.join(detail_messages[:2])}"
+        if history_warning:
+            message = f"{message} {history_warning}"
+        self.runtime.last_message = message
+        self.runtime.meta = {
+            **(self.runtime.meta or {}),
+            "mode": "no_watchlist",
+            "updated_at": started_at.isoformat(),
+        }
+
+    async def run_cycle(
+        self,
+        rows: list[dict[str, Any]],
+        started_at: datetime,
+        *,
+        window_map: dict[str, dict[str, Any]],
+        expiries: list[str],
+    ) -> None:
+        await self.owner._manage_exits(self.runtime, rows)
+        if window_map:
+            await self.owner._scan_entries(self.runtime, rows, window_map)
+            self.runtime.last_message = (
+                f"Scanned {len(rows)} instruments across {len(expiries)} expiries. "
+                f"{len(self.runtime.positions)} open positions."
+            )
+        else:
+            self.runtime.last_message = "No active Strategy 1 monthly trading windows."
+            self.owner._append_commentary(
+                "System",
+                "No active prev_expiry−7 to current_expiry−7 windows found for Strategy 1.",
+                tone="warning",
+            )
+        self.owner._refresh_prices_from_watchlist(self.runtime, rows)
+        self.runtime.meta = {
+            **(self.runtime.meta or {}),
+            "mode": "live_scan" if window_map else "idle_no_window",
+            "scan_interval": "30minute",
+            "watchlist_rows": len(rows),
+            "updated_at": started_at.isoformat(),
+        }
+
+
+class _Strategy2LaneAgent(_BaseNSEStrategyLaneAgent):
+    descriptor = StrategyLaneDescriptor(
+        key="index_mp_strategy",
+        label="Strategy 2 · 5m Index MACD + MP",
+        timeframe="5minute",
+        instrument_scope="NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY ATM options",
+        execution_mode="paper_execution",
+        position_cap=STRATEGY2_MAX_POSITIONS,
+    )
+
+    def on_market_closed(self, started_at: datetime, last_live_scan: Optional[str]) -> None:
+        self.runtime.last_message = self.runtime.last_message or "Market closed. Showing last Strategy 2 scan state."
+        self.runtime.meta = {
+            **(self.runtime.meta or {}),
+            "mode": "market_closed",
+            "scan_interval": self.runtime.meta.get("scan_interval", "5minute") if self.runtime.meta else "5minute",
+            "watchlist_rows": self.runtime.meta.get("watchlist_rows", len(self.runtime.signal_lane)) if self.runtime.meta else len(self.runtime.signal_lane),
+            "updated_at": started_at.isoformat(),
+            "market_state": "closed",
+        }
+
+    def on_broker_unavailable(self, started_at: datetime, broker_snapshot: dict[str, Any], message: str) -> None:
+        super().on_broker_unavailable(started_at, broker_snapshot, message)
+        self.runtime.meta = {
+            **(self.runtime.meta or {}),
+            "scan_interval": self.runtime.meta.get("scan_interval", "5minute") if self.runtime.meta else "5minute",
+            "watchlist_rows": 0,
+        }
+
+    def on_watchlist_unavailable(
+        self,
+        started_at: datetime,
+        *,
+        detail_messages: list[str],
+        history_warning: Optional[str],
+    ) -> None:
+        self.runtime.last_message = "ATM watchlist empty for index scan."
+        self.runtime.meta = {
+            **(self.runtime.meta or {}),
+            "mode": "no_watchlist",
+            "scan_interval": self.runtime.meta.get("scan_interval", "5minute") if self.runtime.meta else "5minute",
+            "watchlist_rows": 0,
+            "updated_at": started_at.isoformat(),
+        }
+
+    async def run_cycle(
+        self,
+        rows: list[dict[str, Any]],
+        started_at: datetime,
+        *,
+        window_map: dict[str, dict[str, Any]],
+        expiries: list[str],
+    ) -> None:
+        await self.owner._run_strategy2(self.runtime, rows, started_at)
 
 
 class PaperStrategyAgent:
@@ -315,7 +700,13 @@ class PaperStrategyAgent:
     max_positions = MAX_SIMULTANEOUS_POSITIONS
 
     def __init__(self) -> None:
-        self._strategy = self._build_runtime("macd_strategy", "MACD Zero-Cross Strategy")
+        self._strategy1 = self._build_runtime("macd_strategy", "Strategy 1 · 30m ATM MACD")
+        self._strategy2 = self._build_runtime("index_mp_strategy", "Strategy 2 · 5m Index MACD + MP")
+        self._strategy_agents: list[_BaseNSEStrategyLaneAgent] = [
+            _Strategy1LaneAgent(self, self._strategy1),
+            _Strategy2LaneAgent(self, self._strategy2),
+        ]
+        self._strategy = self._strategy1
         self._task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
         self._enabled = True
@@ -331,12 +722,211 @@ class PaperStrategyAgent:
         self._commentary: list[CommentaryEntry] = []
         self._active_windows: list[dict] = []
         self._regime_cache: dict[str, QuadrantResult] = {}
+        self._scan_count: int = 0
+        self._last_spot_sync: Optional[datetime] = None
+        self._strategy2_spot_cache: dict[str, tuple[datetime, list[dict[str, Any]], str]] = {}
+        self._last_data_health: dict[str, Any] = {}
+        self._historical_recovery_attempted = False
+        self._restore_saved_state(_load_saved_strategy_state())
+
+    def _runtimes(self) -> list[StrategyRuntime]:
+        return [self._strategy1, self._strategy2]
+
+    def _lane_agents(self) -> list[_BaseNSEStrategyLaneAgent]:
+        return list(self._strategy_agents)
+
+    def get_runtime(self, key: str) -> Optional[StrategyRuntime]:
+        for runtime in self._runtimes():
+            if runtime.key == key:
+                return runtime
+        return None
 
     def _build_runtime(self, key: str, label: str) -> StrategyRuntime:
         session_id = f"{key}-paper"
         portfolio = PaperPortfolio(initial_capital=1_000_000.0, session_id=session_id)
         order_book = PaperOrderBook(on_fill=portfolio.on_fill)
         return StrategyRuntime(key=key, label=label, portfolio=portfolio, order_book=order_book)
+
+    def _restore_saved_state(self, payload: dict[str, Any]) -> None:
+        if not payload:
+            return
+
+        self._last_run_at = payload.get("last_run_at") or self._last_run_at
+        self._last_error = payload.get("last_error") or self._last_error
+        self._last_message = payload.get("last_message") or self._last_message
+        self._last_expiry = payload.get("last_expiry") or self._last_expiry
+        self._last_candidate_expiries = [
+            str(item)
+            for item in list(payload.get("last_candidate_expiries") or [])
+            if str(item or "").strip()
+        ]
+
+        commentary: list[CommentaryEntry] = []
+        for row in list(payload.get("commentary") or []):
+            if not isinstance(row, dict):
+                continue
+            commentary.append(
+                CommentaryEntry(
+                    time=str(row.get("time") or ""),
+                    scope=str(row.get("scope") or "System"),
+                    tone=str(row.get("tone") or "info"),
+                    message=str(row.get("message") or ""),
+                )
+            )
+        self._commentary = commentary[:COMMENTARY_MAX]
+
+        strategies = payload.get("strategies") or {}
+        if isinstance(strategies, dict):
+            for runtime in self._runtimes():
+                runtime_payload = strategies.get(runtime.key)
+                if isinstance(runtime_payload, dict):
+                    self._restore_runtime_state(runtime, runtime_payload)
+
+    def _restore_runtime_state(self, runtime: StrategyRuntime, payload: dict[str, Any]) -> None:
+        runtime.entries = int(payload.get("entries") or 0)
+        runtime.exits = int(payload.get("exits") or 0)
+        runtime.last_scan_at = payload.get("last_scan_at")
+        runtime.last_message = payload.get("last_message")
+        runtime.processed_signals = {
+            str(key): str(value)
+            for key, value in dict(payload.get("processed_signals") or {}).items()
+            if str(key or "").strip() and str(value or "").strip()
+        }
+        runtime.signal_lane = [
+            row for row in list(payload.get("signal_lane") or []) if isinstance(row, dict)
+        ]
+        runtime.meta = dict(payload.get("meta") or {})
+
+        runtime.recent_events = []
+        for row in list(payload.get("recent_events") or []):
+            if not isinstance(row, dict):
+                continue
+            try:
+                runtime.recent_events.append(
+                    StrategyEvent(
+                        time=str(row.get("time") or ""),
+                        event=str(row.get("event") or ""),
+                        symbol=str(row.get("symbol") or ""),
+                        underlying=str(row.get("underlying") or ""),
+                        option_type=str(row.get("option_type") or ""),
+                        strike=float(row.get("strike") or 0.0),
+                        price=float(row.get("price") or 0.0),
+                        qty=int(row.get("qty") or 0),
+                        reason=str(row.get("reason") or ""),
+                        signal_strength=_round_or_none(row.get("signal_strength"), 2),
+                        pnl=_round_or_none(row.get("pnl"), 2),
+                        phase=row.get("phase"),
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+        runtime.recent_events = runtime.recent_events[:20]
+
+        portfolio_payload = dict(payload.get("portfolio") or {})
+        runtime.portfolio.initial_capital = float(portfolio_payload.get("initial_capital") or runtime.portfolio.initial_capital)
+        runtime.portfolio.available_capital = float(portfolio_payload.get("available_capital") or runtime.portfolio.initial_capital)
+        runtime.portfolio._peak_equity = float(portfolio_payload.get("peak_equity") or runtime.portfolio.initial_capital)
+        runtime.portfolio._trade_history = _deserialize_trade_history(
+            [row for row in list(portfolio_payload.get("trade_history") or []) if isinstance(row, dict)]
+        )
+        runtime.portfolio._daily_pnl.clear()
+        for raw_day, pnl in dict(portfolio_payload.get("daily_pnl") or {}).items():
+            try:
+                runtime.portfolio._daily_pnl[date.fromisoformat(str(raw_day))] = float(pnl or 0.0)
+            except (TypeError, ValueError):
+                continue
+        runtime.portfolio._equity_curve = _deserialize_equity_curve(
+            [row for row in list(portfolio_payload.get("equity_curve") or []) if isinstance(row, dict)]
+        )
+
+        runtime.positions.clear()
+        runtime.portfolio._positions.clear()
+        for row in list(payload.get("positions") or []):
+            if not isinstance(row, dict):
+                continue
+            try:
+                position = StrategyPosition(
+                    symbol=str(row.get("symbol") or ""),
+                    underlying=str(row.get("underlying") or ""),
+                    expiry=str(row.get("expiry") or ""),
+                    strike=float(row.get("strike") or 0.0),
+                    option_type=str(row.get("option_type") or ""),
+                    instrument_key=row.get("instrument_key"),
+                    trading_symbol=row.get("trading_symbol"),
+                    qty=int(row.get("qty") or 0),
+                    initial_qty=int(row.get("initial_qty") or row.get("qty") or 0),
+                    entry_price=float(row.get("entry_price") or 0.0),
+                    current_price=float(row.get("current_price") or 0.0),
+                    peak_price=float(row.get("peak_price") or row.get("current_price") or 0.0),
+                    entry_bar_time=str(row.get("entry_bar_time") or ""),
+                    entered_at=str(row.get("entered_at") or ""),
+                    signal_reason=str(row.get("signal_reason") or ""),
+                    signal_strength=_round_or_none(row.get("signal_strength"), 2),
+                    latest_rsi=_round_or_none(row.get("latest_rsi"), 2),
+                    phase=str(row.get("phase") or PHASE_1),
+                    trailing_stop=_round_or_none(row.get("trailing_stop"), 2),
+                    entry_iv_pct=_round_or_none(row.get("entry_iv_pct"), 1),
+                    spot_setup=row.get("spot_setup"),
+                    window_end=row.get("window_end"),
+                    lot_size=int(row.get("lot_size")) if row.get("lot_size") is not None else None,
+                    price_updated_at=row.get("price_updated_at"),
+                    macd_line=row.get("macd_line"),
+                )
+            except (TypeError, ValueError):
+                continue
+            runtime.positions[position.symbol] = position
+            opened_at = _parse_iso_timestamp(position.entered_at) or datetime.utcnow().replace(tzinfo=IST)
+            runtime.portfolio._positions[position.symbol] = VirtualPosition(
+                symbol=position.symbol,
+                action="BUY",
+                qty=position.qty,
+                avg_price=position.entry_price,
+                current_price=position.current_price,
+                instrument_type=position.option_type,
+                expiry=position.expiry,
+                strike=position.strike,
+                option_type=position.option_type,
+                opened_at=opened_at,
+            )
+
+        if runtime.positions:
+            runtime.portfolio.update_prices({symbol: pos.current_price for symbol, pos in runtime.positions.items()})
+
+    def _serialize_runtime_state(self, runtime: StrategyRuntime) -> dict[str, Any]:
+        return {
+            "entries": runtime.entries,
+            "exits": runtime.exits,
+            "last_scan_at": runtime.last_scan_at,
+            "last_message": runtime.last_message,
+            "processed_signals": runtime.processed_signals,
+            "signal_lane": runtime.signal_lane,
+            "meta": runtime.meta,
+            "recent_events": [asdict(event) for event in runtime.recent_events],
+            "positions": [asdict(position) for position in runtime.positions.values()],
+            "portfolio": {
+                "initial_capital": runtime.portfolio.initial_capital,
+                "available_capital": runtime.portfolio.available_capital,
+                "peak_equity": getattr(runtime.portfolio, "_peak_equity", runtime.portfolio.initial_capital),
+                "trade_history": _serialize_trade_history(runtime.portfolio),
+                "daily_pnl": {str(day): pnl for day, pnl in getattr(runtime.portfolio, "_daily_pnl", {}).items()},
+                "equity_curve": _serialize_equity_curve(runtime.portfolio),
+            },
+        }
+
+    def _persist_state(self) -> None:
+        payload = {
+            "last_run_at": self._last_run_at,
+            "last_error": self._last_error,
+            "last_message": self._last_message,
+            "last_expiry": self._last_expiry,
+            "last_candidate_expiries": self._last_candidate_expiries,
+            "commentary": [asdict(entry) for entry in self._commentary],
+            "strategies": {
+                runtime.key: self._serialize_runtime_state(runtime)
+                for runtime in self._runtimes()
+            },
+        }
+        _save_strategy_state(payload)
 
     def _select_candidate_expiries(self, as_of: date, expiries: list[str]) -> list[str]:
         """Legacy expiry chooser retained for compatibility with older tests."""
@@ -362,6 +952,16 @@ class PaperStrategyAgent:
 
     async def start(self) -> None:
         self._enabled = True
+        # Restore equity curve from Redis (survives backend restart)
+        for runtime in self._runtimes():
+            if getattr(runtime.portfolio, "_equity_curve", None):
+                continue
+            try:
+                await runtime.portfolio.restore_from_redis()
+            except Exception as exc:
+                logger.debug(f"[Strategy] Equity curve restore skipped for {runtime.key}: {exc}")
+        await self.ensure_recovered_state()
+        self._persist_state()
         if not self._auto_run_enabled or (self._task and not self._task.done()):
             return
         self._task = asyncio.create_task(self._loop(), name="paper-strategy-agent")
@@ -388,6 +988,582 @@ class PaperStrategyAgent:
                 logger.exception("[Strategy] loop failure")
             await asyncio.sleep(self.scan_interval_seconds)
 
+    async def ensure_recovered_state(self) -> None:
+        if self._historical_recovery_attempted:
+            return
+        self._historical_recovery_attempted = True
+        try:
+            async with AsyncSessionLocal() as session:
+                latest_snapshot_day = await session.scalar(
+                    text(
+                        """
+                        SELECT MAX(time::date)
+                        FROM atm_option_watchlist_snapshots
+                        """
+                    )
+                )
+                latest_position_day = await session.scalar(
+                    text(
+                        """
+                        SELECT MAX(created_at::date)
+                        FROM positions
+                        WHERE qty > 0
+                          AND symbol LIKE 'OPT:%'
+                        """
+                    )
+                )
+
+            current_strategy1_day = _latest_runtime_day(
+                [position.entered_at for position in self._strategy1.positions.values()]
+            )
+            current_strategy2_day = _latest_runtime_day(
+                [
+                    signal.get("spot_session_date") or signal.get("signal_date") or signal.get("as_of")
+                    for signal in self._strategy2.signal_lane
+                    if isinstance(signal, dict)
+                ]
+            )
+            needs_strategy1 = latest_position_day is not None and (
+                not self._strategy1.positions
+                or current_strategy1_day is None
+                or current_strategy1_day < latest_position_day
+            )
+            needs_strategy2 = latest_snapshot_day is not None and (
+                len(self._strategy2.signal_lane) < len(STRATEGY2_UNDERLYINGS)
+                or current_strategy2_day is None
+                or current_strategy2_day < latest_snapshot_day
+            )
+            needs_recovery = (not self._last_run_at) or needs_strategy1 or needs_strategy2
+            if not needs_recovery:
+                return
+            await self._restore_from_historical_state(
+                latest_snapshot_day=latest_snapshot_day,
+                latest_position_day=latest_position_day,
+            )
+        except Exception as exc:
+            logger.warning(f"[Strategy] Historical recovery skipped: {exc}")
+
+    async def _restore_from_historical_state(
+        self,
+        *,
+        latest_snapshot_day: Optional[date] = None,
+        latest_position_day: Optional[date] = None,
+    ) -> None:
+        strategy1_day = latest_position_day or latest_snapshot_day
+        strategy2_day = latest_snapshot_day or latest_position_day
+        if strategy1_day is None and strategy2_day is None:
+            return
+
+        recovered_positions = 0
+        strategy1_signal_count = 0
+        strategy1_last_seen: Optional[datetime] = None
+        if strategy1_day is not None:
+            recovered_positions, strategy1_signal_count, strategy1_last_seen = await self._restore_strategy1_positions_from_db(
+                strategy1_day
+            )
+
+        strategy2_summary: dict[str, Any] = {}
+        if strategy2_day is not None:
+            strategy2_summary = await self._replay_strategy2_session(strategy2_day)
+
+        timestamps = [
+            ts
+            for ts in (
+                strategy1_last_seen,
+                strategy2_summary.get("last_seen_at"),
+            )
+            if ts is not None
+        ]
+        reference_day = max(day for day in (strategy1_day, strategy2_day) if day is not None)
+        latest_seen = max(timestamps) if timestamps else datetime.combine(reference_day, time(15, 20), tzinfo=IST)
+        latest_seen_iso = latest_seen.astimezone(IST).isoformat()
+
+        self._last_run_at = latest_seen_iso
+        self._last_message = f"Recovered last session state from {reference_day.isoformat()}."
+
+        commentary: list[str] = []
+        if recovered_positions:
+            commentary.append(
+                f"Recovered {recovered_positions} open Strategy 1 position{'s' if recovered_positions != 1 else ''} from {strategy1_day.isoformat()}"
+            )
+            commentary.append(f"{strategy1_signal_count} Strategy 1 raw signals")
+        entry_ready = int(strategy2_summary.get("entry_ready_count") or 0)
+        trend_aligned = int(strategy2_summary.get("trend_aligned_count") or 0)
+        if entry_ready or trend_aligned or self._strategy2.signal_lane:
+            commentary.append(
+                f"Strategy 2 replay found {entry_ready} entry-ready and {trend_aligned} trend-aligned lanes from {strategy2_day.isoformat()}"
+            )
+        if commentary:
+            self._append_commentary(
+                "System",
+                f"{'; '.join(commentary)}.",
+                tone="info",
+            )
+
+    @staticmethod
+    def _broker_failure_message(snapshot: dict[str, Any]) -> str:
+        upstox_status = str((snapshot.get("upstox_token_health") or {}).get("status") or "disconnected")
+        fyers_status = str((snapshot.get("fyers_token_health") or {}).get("status") or "disconnected")
+        return (
+            "No valid NSE broker session is available for the paper scan. "
+            f"Upstox={upstox_status.replace('_', ' ')}, "
+            f"Fyers={fyers_status.replace('_', ' ')}."
+        )
+
+    @staticmethod
+    def _option_history_warning(health: dict[str, Any]) -> Optional[str]:
+        if int(health.get("failure_count", 0)) <= 0:
+            return None
+        broker_parts: list[str] = []
+        for broker, state in dict(health.get("brokers") or {}).items():
+            failures = int(state.get("failure", 0) or 0)
+            if failures <= 0:
+                continue
+            detail = str(state.get("last_detail") or "fetch failed")
+            broker_parts.append(f"{broker}: {failures} failure(s), latest '{detail}'")
+        if not broker_parts:
+            return None
+        return "Option history warnings detected: " + "; ".join(broker_parts) + "."
+
+    async def _restore_strategy1_positions_from_db(self, trading_day: date) -> tuple[int, int, Optional[datetime]]:
+        runtime = self._strategy1
+        runtime.positions.clear()
+        runtime.recent_events.clear()
+        runtime.portfolio._positions.clear()
+        runtime.portfolio._trade_history.clear()
+
+        async with AsyncSessionLocal() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT DISTINCT ON (symbol)
+                               created_at,
+                               symbol,
+                               qty,
+                               avg_price
+                        FROM positions
+                        WHERE qty > 0
+                          AND symbol LIKE 'OPT:%'
+                          AND created_at::date = :day
+                        ORDER BY symbol, created_at ASC
+                        """
+                    ),
+                    {"day": trading_day},
+                )
+            ).mappings().all()
+
+        latest_seen: Optional[datetime] = None
+        recovered = 0
+        for row in rows:
+            symbol = str(row.get("symbol") or "")
+            parts = symbol.split(":")
+            if len(parts) != 5 or parts[0] != "OPT":
+                continue
+            _, underlying, expiry, strike_raw, option_type = parts
+            try:
+                expiry_date = date.fromisoformat(expiry)
+            except ValueError:
+                continue
+            created_at = row.get("created_at")
+            if isinstance(created_at, datetime):
+                created_at = created_at.astimezone(IST)
+                latest_seen = max(latest_seen, created_at) if latest_seen else created_at
+            try:
+                strike = float(strike_raw)
+                qty = int(row.get("qty") or 0)
+                entry_price = float(row.get("avg_price") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if qty <= 0 or entry_price <= 0:
+                continue
+
+            current_price = entry_price
+            async with AsyncSessionLocal() as session:
+                latest_ltp = await session.scalar(
+                    text(
+                        """
+                        SELECT ltp::float8
+                        FROM atm_option_watchlist_snapshots
+                        WHERE time::date = :day
+                          AND underlying = :underlying
+                          AND expiry = :expiry
+                          AND strike = :strike
+                          AND option_type = :option_type
+                        ORDER BY time DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "day": trading_day,
+                        "underlying": underlying,
+                        "expiry": expiry_date,
+                        "strike": strike,
+                        "option_type": option_type,
+                    },
+                )
+            if latest_ltp is not None:
+                current_price = float(latest_ltp)
+
+            entered_at = created_at.isoformat() if isinstance(created_at, datetime) else datetime.combine(
+                trading_day, time(15, 20), tzinfo=IST
+            ).isoformat()
+            position = StrategyPosition(
+                symbol=symbol,
+                underlying=underlying,
+                expiry=expiry,
+                strike=strike,
+                option_type=option_type,
+                instrument_key=None,
+                trading_symbol=None,
+                qty=qty,
+                initial_qty=qty,
+                entry_price=entry_price,
+                current_price=current_price,
+                peak_price=max(entry_price, current_price),
+                entry_bar_time=entered_at,
+                entered_at=entered_at,
+                signal_reason="macd_zero_cross",
+                phase=PHASE_1,
+            )
+            runtime.positions[symbol] = position
+            runtime.portfolio._positions[symbol] = VirtualPosition(
+                symbol=symbol,
+                action="BUY",
+                qty=qty,
+                avg_price=entry_price,
+                current_price=current_price,
+                instrument_type=option_type,
+                expiry=expiry,
+                strike=strike,
+                option_type=option_type,
+                opened_at=_parse_iso_timestamp(entered_at) or datetime.combine(trading_day, time(15, 20), tzinfo=IST),
+            )
+            runtime.recent_events.append(
+                StrategyEvent(
+                    time=entered_at,
+                    event="entry",
+                    symbol=symbol,
+                    underlying=underlying,
+                    option_type=option_type,
+                    strike=strike,
+                    price=entry_price,
+                    qty=qty,
+                    reason="recovered_position",
+                    phase=PHASE_1,
+                )
+            )
+            recovered += 1
+
+        if runtime.positions:
+            runtime.portfolio.update_prices({symbol: pos.current_price for symbol, pos in runtime.positions.items()})
+            runtime.entries = len(runtime.positions)
+            runtime.last_scan_at = latest_seen.isoformat() if latest_seen else datetime.combine(
+                trading_day, time(15, 20), tzinfo=IST
+            ).isoformat()
+            runtime.last_message = f"Recovered {len(runtime.positions)} open Strategy 1 positions from {trading_day.isoformat()}."
+
+        signal_count = await self._count_strategy1_historical_signals(trading_day)
+        runtime.meta = {
+            **(runtime.meta or {}),
+            "mode": "historical_recovery",
+            "recovered_trading_day": trading_day.isoformat(),
+            "historical_signal_count": signal_count,
+        }
+        return recovered, signal_count, latest_seen
+
+    async def _count_strategy1_historical_signals(self, trading_day: date) -> int:
+        windows = {w["underlying"]: w for w in await get_all_active_windows(as_of=trading_day)}
+        async with AsyncSessionLocal() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT timezone('Asia/Kolkata', time) AS local_time,
+                               underlying,
+                               expiry::text AS expiry,
+                               strike::float8 AS strike,
+                               option_type,
+                               ltp::float8 AS ltp,
+                               iv::float8 AS iv,
+                               macd::float8 AS macd
+                        FROM atm_option_watchlist_snapshots
+                        WHERE time::date = :day
+                        ORDER BY time ASC
+                        """
+                    ),
+                    {"day": trading_day},
+                )
+            ).mappings().all()
+
+        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        previous_macd: dict[tuple[str, str], float] = {}
+        signal_keys: set[tuple[str, str, str]] = set()
+
+        for row in rows:
+            underlying = str(row.get("underlying") or "")
+            if underlying in EXCLUDED_UNDERLYINGS:
+                continue
+            local_time = _ensure_ist_datetime(row.get("local_time"))
+            if local_time is None:
+                continue
+            bucket = local_time.replace(second=0, microsecond=0)
+            bucket_key = (underlying, bucket.isoformat())
+            paired = grouped.setdefault(bucket_key, {"bucket": bucket, "underlying": underlying, "expiry": row.get("expiry")})
+            paired[str(row.get("option_type") or "").lower()] = row
+
+        for paired in sorted(grouped.values(), key=lambda item: (item["bucket"], item["underlying"])):
+            underlying = paired["underlying"]
+            window = windows.get(underlying)
+            ce = paired.get("ce")
+            pe = paired.get("pe")
+            if not window or not ce or not pe:
+                continue
+            try:
+                expiry = date.fromisoformat(str(paired.get("expiry") or ""))
+            except ValueError:
+                continue
+            if days_remaining_in_window(window, as_of=trading_day) < MIN_TTE_DAYS:
+                continue
+            if (expiry - trading_day).days < 3:
+                continue
+            ce_macd = ce.get("macd")
+            pe_macd = pe.get("macd")
+            if ce_macd is None or pe_macd is None:
+                continue
+            regime_name = REGIME_DEAD if ce_macd is None or pe_macd is None else (
+                REGIME_BULLISH if ce_macd >= 0 > pe_macd else REGIME_BEARISH if ce_macd < 0 <= pe_macd else REGIME_DEAD
+            )
+            prev_ce = previous_macd.get((underlying, "CE"))
+            prev_pe = previous_macd.get((underlying, "PE"))
+            ce_cross = prev_ce is not None and prev_ce <= 0 < ce_macd
+            pe_cross = prev_pe is not None and prev_pe >= 0 > pe_macd
+            previous_macd[(underlying, "CE")] = float(ce_macd)
+            previous_macd[(underlying, "PE")] = float(pe_macd)
+
+            side = None
+            option_type = None
+            if regime_name == REGIME_BULLISH and ce_cross:
+                side = ce
+                option_type = "CE"
+            elif regime_name == REGIME_BEARISH and pe_cross:
+                side = pe
+                option_type = "PE"
+            if side is None or option_type is None:
+                continue
+            ltp = float(side.get("ltp") or 0.0)
+            if not (MIN_PREMIUM <= ltp <= MAX_PREMIUM):
+                continue
+            iv_raw = side.get("iv")
+            iv_pct = None
+            if iv_raw is not None:
+                iv_val = float(iv_raw)
+                iv_pct = iv_val * 100.0 if iv_val < 1.0 else iv_val
+            if check_iv_filter(iv_pct, MAX_ENTRY_IV_PCT, HARD_MAX_IV_PCT) == "reject":
+                continue
+            signal_keys.add((underlying, option_type, paired["bucket"].isoformat()))
+
+        return len(signal_keys)
+
+    async def _replay_strategy2_session(self, trading_day: date) -> dict[str, Any]:
+        runtime = self._strategy2
+        async with AsyncSessionLocal() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT time,
+                               timezone('Asia/Kolkata', time) AS local_time,
+                               underlying,
+                               expiry::text AS expiry,
+                               strike::float8 AS strike,
+                               option_type,
+                               instrument_key,
+                               trading_symbol,
+                               underlying_price::float8 AS underlying_price,
+                               ltp::float8 AS ltp,
+                               iv::float8 AS iv
+                        FROM atm_option_watchlist_snapshots
+                        WHERE time::date = :day
+                          AND underlying = ANY(:underlyings)
+                        ORDER BY time ASC
+                        """
+                    ),
+                    {"day": trading_day, "underlyings": list(STRATEGY2_UNDERLYINGS)},
+                )
+            ).mappings().all()
+
+        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in rows:
+            local_time = _ensure_ist_datetime(row.get("local_time"))
+            if local_time is None:
+                continue
+            bucket = local_time.replace(
+                minute=(local_time.minute // 5) * 5,
+                second=0,
+                microsecond=0,
+            )
+            key = (str(row.get("underlying") or ""), bucket.isoformat())
+            paired = grouped.setdefault(key, {"bucket": bucket, "underlying": row.get("underlying"), "expiry": row.get("expiry")})
+            option_key = str(row.get("option_type") or "").lower()
+            current = paired.get(option_key)
+            if current is None or row.get("time") > current.get("time"):
+                paired[option_key] = dict(row)
+
+        option_cache: dict[str, list[dict[str, Any]]] = {}
+        spot_cache: dict[str, list[dict[str, Any]]] = {}
+        latest_signals: dict[str, dict[str, Any]] = {}
+        latest_pipeline: dict[str, dict[str, Any]] = {}
+        entry_ready_count = 0
+        trend_aligned_count = 0
+        last_seen_at: Optional[datetime] = None
+
+        async def option_minutes(instrument_key: str) -> list[dict[str, Any]]:
+            if instrument_key not in option_cache:
+                option_cache[instrument_key] = await option_history_service._fetch_broker_candles(
+                    instrument_key=instrument_key,
+                    from_date=trading_day,
+                    to_date=trading_day,
+                    interval="1minute",
+                )
+            return option_cache[instrument_key]
+
+        async def spot_minutes(underlying: str, started_at: datetime) -> list[dict[str, Any]]:
+            if underlying not in spot_cache:
+                rows, _source = await self._load_strategy2_spot_rows(underlying, started_at)
+                spot_cache[underlying] = rows
+            return spot_cache[underlying]
+
+        for paired in sorted(grouped.values(), key=lambda item: (item["bucket"], item["underlying"])):
+            underlying = str(paired.get("underlying") or "")
+            ce = paired.get("ce")
+            pe = paired.get("pe")
+            if not ce or not pe:
+                continue
+            started_at = _ensure_ist_datetime(paired["bucket"]) or paired["bucket"]
+            spot_rows_all = await spot_minutes(underlying, started_at)
+            spot_rows = [
+                row
+                for row in spot_rows_all
+                if (_parse_iso_timestamp(row.get("time")) or datetime.min.replace(tzinfo=IST)) <= started_at
+            ]
+            session_rows, session_date = _latest_session_rows(spot_rows)
+            if len(session_rows) < 30:
+                continue
+            profile = market_profile_builder.build_profile_from_rows(underlying, session_rows, "day", "1minute")
+            if not profile:
+                continue
+            current_spot = float(session_rows[-1].get("close") or ce.get("underlying_price") or 0.0)
+            direction, day_type, gate_reason = self._classify_strategy2_market_profile(
+                profile=profile,
+                current_spot=current_spot,
+                today_rows=session_rows,
+            )
+            if direction not in {"CE", "PE"}:
+                continue
+
+            ce_minute_rows = await option_minutes(str(ce.get("instrument_key") or ""))
+            pe_minute_rows = await option_minutes(str(pe.get("instrument_key") or ""))
+            ce_slice = [
+                row
+                for row in ce_minute_rows
+                if (_parse_iso_timestamp(row.get("time")) or datetime.min.replace(tzinfo=IST)) <= started_at
+            ]
+            pe_slice = [
+                row
+                for row in pe_minute_rows
+                if (_parse_iso_timestamp(row.get("time")) or datetime.min.replace(tzinfo=IST)) <= started_at
+            ]
+            ce_candles = option_history_service._aggregate_rows(ce_slice, 5)
+            pe_candles = option_history_service._aggregate_rows(pe_slice, 5)
+            ce_closes = [float(item["close"]) for item in ce_candles if item.get("close") is not None]
+            pe_closes = [float(item["close"]) for item in pe_candles if item.get("close") is not None]
+            if direction == "CE":
+                fresh_cross, _, _ = detect_macd_zero_cross(ce_closes, "CE")
+                macd_line, _, _ = compute_macd(ce_closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL) if len(ce_closes) >= MACD_MIN_BARS else ([], [], [])
+                macd_value = macd_line[-1] if macd_line else None
+                aligned = macd_value is not None and macd_value > 0
+                option_last_bar_time = ce_candles[-1].get("time") if ce_candles else None
+            else:
+                fresh_cross, _, _ = detect_macd_zero_cross(pe_closes, "PE")
+                macd_line, _, _ = compute_macd(pe_closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL) if len(pe_closes) >= MACD_MIN_BARS else ([], [], [])
+                macd_value = macd_line[-1] if macd_line else None
+                aligned = macd_value is not None and macd_value < 0
+                option_last_bar_time = pe_candles[-1].get("time") if pe_candles else None
+            if not option_last_bar_time:
+                continue
+
+            status = "waiting-cross"
+            instruction = f"{underlying}: MP gate is {day_type}, waiting for the next MACD trigger."
+            if fresh_cross:
+                status = "entry-ready"
+                entry_ready_count += 1
+                instruction = f"{underlying}: {direction} zero-cross confirmed with MP {day_type} gate."
+            elif aligned:
+                status = "trend-aligned"
+                trend_aligned_count += 1
+                instruction = f"{underlying}: MP {day_type} gate is aligned; waiting for the next fresh trigger."
+
+            signal = {
+                "strategy": "Strategy 2",
+                "source": "historical_replay",
+                "underlying": underlying,
+                "signal_date": trading_day.isoformat(),
+                "trade_date": "historical replay",
+                "as_of": started_at.isoformat(),
+                "direction": direction,
+                "reason": gate_reason,
+                "strength": "strong" if status == "entry-ready" else "monitoring",
+                "status": status,
+                "freshness": "session-close",
+                "instruction": instruction,
+                "mp_day_type": day_type,
+                "spot_price": _round_or_none(current_spot, 2),
+                "poc": _round_or_none(profile.poc, 2),
+                "vah": _round_or_none(profile.vah, 2),
+                "val": _round_or_none(profile.val, 2),
+                "option_last_bar_time": option_last_bar_time,
+                "spot_last_time": session_rows[-1].get("time"),
+                "spot_source": "historical",
+                "spot_session_date": session_date.isoformat() if session_date else trading_day.isoformat(),
+            }
+            latest_signals[underlying] = signal
+            latest_pipeline[underlying] = {
+                "name": f"Strategy 2 {underlying}",
+                "status": "ok",
+                "rows": len(session_rows),
+                "last_date": str(option_last_bar_time),
+                "detail": f"Historical replay · MP {day_type} · {status}",
+                "freshness": "session-close",
+            }
+            last_seen = _parse_iso_timestamp(option_last_bar_time) or started_at
+            last_seen_at = max(last_seen_at, last_seen) if last_seen_at else last_seen
+
+        if latest_signals:
+            runtime.signal_lane = [latest_signals[underlying] for underlying in STRATEGY2_UNDERLYINGS if underlying in latest_signals]
+            runtime.meta = {
+                "mode": "historical_recovery",
+                "scan_interval": "5minute",
+                "watchlist_rows": len(runtime.signal_lane),
+                "updated_at": (last_seen_at or datetime.combine(trading_day, time(15, 20), tzinfo=IST)).isoformat(),
+                "pipeline": [latest_pipeline[underlying] for underlying in STRATEGY2_UNDERLYINGS if underlying in latest_pipeline],
+                "recovered_trading_day": trading_day.isoformat(),
+                "entry_ready_count": entry_ready_count,
+                "trend_aligned_count": trend_aligned_count,
+                "market_state": "closed",
+            }
+            runtime.last_scan_at = (last_seen_at or datetime.combine(trading_day, time(15, 20), tzinfo=IST)).isoformat()
+            runtime.last_message = (
+                f"Recovered Strategy 2 from {trading_day.isoformat()}: "
+                f"{entry_ready_count} entry-ready, {trend_aligned_count} trend-aligned."
+            )
+
+        return {
+            "entry_ready_count": entry_ready_count,
+            "trend_aligned_count": trend_aligned_count,
+            "last_seen_at": last_seen_at,
+        }
+
     # ── Main Scan ────────────────────────────────────────────────────────────
 
     async def run_once(self, *, force: bool = False) -> dict[str, Any]:
@@ -398,19 +1574,39 @@ class PaperStrategyAgent:
             self._running = True
             started_at = _now_ist()
             self._last_error = None
+            option_history_service.reset_health()
             try:
                 if not force and not _in_market_hours(started_at):
-                    self._last_message = "Waiting for NSE market hours."
+                    last_live_scan = self._last_run_at or self._strategy2.last_scan_at or self._strategy1.last_scan_at
+                    self._last_message = (
+                        f"Market closed. Showing last live strategy state from {last_live_scan}."
+                        if last_live_scan
+                        else "Waiting for NSE market hours."
+                    )
+                    for lane in self._lane_agents():
+                        lane.on_market_closed(started_at, last_live_scan)
                     self._append_commentary("System", "Market closed. Agent idle.", tone="idle")
                     return self.get_status()
 
-                # 1. Get active trading windows
-                self._active_windows = await get_all_active_windows(as_of=started_at.date())
-                if not self._active_windows:
-                    self._last_message = "No active trading windows."
-                    self._append_commentary("System", "No active prev_expiry−7 to current_expiry−7 windows found.", tone="warning")
+                broker_snapshot = await get_broker_connection_snapshot(force_validate=True)
+                self._last_data_health = {
+                    "broker_snapshot": broker_snapshot,
+                    "option_history": option_history_service.get_health_snapshot(),
+                }
+                if not broker_snapshot.get("broker_ready"):
+                    message = self._broker_failure_message(broker_snapshot)
+                    self._last_error = message
+                    self._last_message = message
+                    for lane in self._lane_agents():
+                        lane.on_broker_unavailable(started_at, broker_snapshot, message)
+                    self._append_commentary("System", message, tone="error")
                     return self.get_status()
 
+                for lane in self._lane_agents():
+                    lane.mark_scan_started(started_at)
+
+                # 1. Get active trading windows
+                self._active_windows = await get_all_active_windows(as_of=started_at.date())
                 self._last_candidate_expiries = list({
                     str(w["expiry"]) for w in self._active_windows
                 })
@@ -459,45 +1655,82 @@ class PaperStrategyAgent:
                 expiries = list({r.get("expiry", "") for r in rows if r.get("expiry")})
 
                 if not rows:
+                    detail_messages = [
+                        str(wl.get("detail") or "").strip()
+                        for wl in watchlists
+                        if isinstance(wl, dict) and str(wl.get("detail") or "").strip()
+                    ]
+                    health_warning = self._option_history_warning(option_history_service.get_health_snapshot())
                     self._last_message = "ATM watchlist empty for active windows."
+                    if detail_messages:
+                        self._last_message = f"{self._last_message} {' '.join(detail_messages[:2])}"
+                    if health_warning:
+                        self._last_message = f"{self._last_message} {health_warning}"
+                    for lane in self._lane_agents():
+                        lane.on_watchlist_unavailable(
+                            started_at,
+                            detail_messages=detail_messages,
+                            history_warning=health_warning,
+                        )
                     self._append_commentary("System", "No ATM watchlist data available.", tone="warning")
                     return self.get_status()
 
                 # 3. Build window lookup
                 window_map = {w["underlying"]: w for w in self._active_windows}
 
-                # 4. Process: manage exits first, then scan for entries
-                runtime = self._strategy
-                await self._manage_exits(runtime, rows)
-                await self._scan_entries(runtime, rows, window_map)
-                # 5. Refresh open-position prices from live watchlist LTP so the
-                #    dashboard shows current tick prices, not just the last
-                #    closed 30-min candle (which can be up to 30 min stale).
-                self._refresh_prices_from_watchlist(runtime, rows)
+                for lane in self._lane_agents():
+                    await lane.run_cycle(
+                        rows,
+                        started_at,
+                        window_map=window_map,
+                        expiries=expiries,
+                    )
                 await self._maybe_send_telegram_report()
 
                 self._last_run_at = _now_ist().isoformat()
-                n_pos = len(runtime.positions)
+                n_pos = len(self._strategy1.positions)
+                s2_pos = len(self._strategy2.positions)
+                option_history_health = option_history_service.get_health_snapshot()
+                self._last_data_health = {
+                    "broker_snapshot": broker_snapshot,
+                    "option_history": option_history_health,
+                }
                 self._last_message = (
                     f"Scanned {len(rows)} instruments across {len(expiries)} expiries. "
-                    f"{n_pos} open positions."
+                    f"S1={n_pos} open, S2={s2_pos} open."
                 )
+                history_warning = self._option_history_warning(option_history_health)
+                if history_warning:
+                    self._last_message = f"{self._last_message} {history_warning}"
+                if history_warning:
+                    self._strategy1.last_message = f"{self._strategy1.last_message or 'Strategy 1 scan complete.'} {history_warning}"
+                    self._strategy2.last_message = f"{self._strategy2.last_message or 'Strategy 2 scan complete.'} {history_warning}"
                 self._append_commentary(
                     "System",
-                    f"Scan complete. {len(rows)} rows, {n_pos} positions.",
-                    tone="success",
+                    f"Scan complete. {len(rows)} rows, S1={n_pos}, S2={s2_pos}.",
+                    tone="warning" if history_warning else "success",
                 )
-                # Capture equity snapshot for equity curve chart
-                runtime.portfolio.snapshot_equity()
+                if history_warning:
+                    self._append_commentary("System", history_warning, tone="warning")
+                # Capture equity snapshot for equity curve chart + persist to Redis
+                for item in self._runtimes():
+                    item.portfolio.snapshot_equity()
+                    await item.portfolio.persist_equity_to_redis()
+
+                # Periodically sync spot candles to keep MA context fresh
+                await self._maybe_sync_spot_candles()
+
                 return self.get_status()
 
             except Exception as exc:
                 self._last_error = str(exc)
                 self._last_message = f"Agent error: {exc}"
+                runtime.last_message = self._last_message
                 self._append_commentary("System", f"Error: {exc}", tone="error")
                 raise
             finally:
                 self._running = False
+                self._persist_state()
 
     # ── Entry Scanning ───────────────────────────────────────────────────────
 
@@ -701,7 +1934,7 @@ class PaperStrategyAgent:
         side = candidate["side"]
         latest_close = float(candidate["latest_close"])
         opt_type = candidate["opt_type"]
-        window = candidate["window"]
+        window = candidate.get("window") or {}
 
         if latest_close <= 0:
             return
@@ -738,13 +1971,17 @@ class PaperStrategyAgent:
             lot_size = PaperPortfolio.DEFAULT_LOT_SIZE
 
         # Kelly-based position sizing
-        sizing_mode = self._get_sizing_mode(candidate)
-        if sizing_mode == "premium":
-            fraction = KELLY_PREMIUM_FRACTION
-        elif sizing_mode == "cautious":
-            fraction = KELLY_CAUTIOUS_FRACTION
+        fraction_override = candidate.get("fraction_override")
+        if fraction_override is not None:
+            fraction = float(fraction_override)
         else:
-            fraction = KELLY_FRACTION
+            sizing_mode = self._get_sizing_mode(candidate)
+            if sizing_mode == "premium":
+                fraction = KELLY_PREMIUM_FRACTION
+            elif sizing_mode == "cautious":
+                fraction = KELLY_CAUTIOUS_FRACTION
+            else:
+                fraction = KELLY_FRACTION
 
         allocation = max(runtime.portfolio.total_equity * fraction, latest_close * lot_size)
         lots = max(1, int(allocation // max(latest_close * lot_size, 1.0)))
@@ -758,6 +1995,7 @@ class PaperStrategyAgent:
         )
 
         fill_price = float(order.fill_price or latest_close)
+        regime_label = getattr(candidate.get("quadrant"), "regime", None) or candidate.get("mp_day_type") or "n/a"
         runtime.positions[symbol] = StrategyPosition(
             symbol=symbol,
             underlying=row["underlying"],
@@ -779,7 +2017,7 @@ class PaperStrategyAgent:
             phase=PHASE_1,
             entry_iv_pct=_round_or_none(candidate.get("iv_pct"), 1),
             spot_setup=candidate.get("spot_setup"),
-            window_end=str(window["window_end"]),
+            window_end=str(window.get("window_end") or expiry),
             macd_line=candidate.get("macd_line"),
             lot_size=lot_size,
         )
@@ -799,14 +2037,33 @@ class PaperStrategyAgent:
             f"ENTRY {row['underlying']} {opt_type} {int(strike)} @{fill_price:.2f} | "
             f"Qty={qty} | Setup={candidate.get('spot_setup')} | "
             f"IV={candidate.get('iv_pct') or 0:.0f}% | TTE={candidate['tte_days']}d | "
-            f"Regime={candidate['quadrant'].regime}",
+            f"Regime={regime_label}",
             tone="trade",
         )
         await self._send_telegram_text(
             f"ENTRY | {row['underlying']} {opt_type} {int(strike)} @{fill_price:.2f}\n"
             f"Qty: {qty} | Setup: {candidate.get('spot_setup')} | "
-            f"IV: {candidate.get('iv_pct') or 0:.0f}% | Regime: {candidate['quadrant'].regime}"
+            f"IV: {candidate.get('iv_pct') or 0:.0f}% | Regime: {regime_label}"
         )
+
+        # ── Persist to DB ──
+        indicators = latest_macd_rsi(candidate["closes"])
+        await self._persist_macd_signal(
+            underlying=row["underlying"],
+            expiry=expiry,
+            strike=strike,
+            option_type=opt_type,
+            macd_value=float(candidate["strength"] or 0),
+            signal_value=indicators.get("macd_signal"),
+            histogram=indicators.get("macd_histogram"),
+            signal_type="zero_cross_entry",
+            premium_at_signal=fill_price,
+        )
+        await self._persist_order(
+            runtime, symbol, "BUY", qty, fill_price,
+            expiry, strike, opt_type, str(candidate["reason"]),
+        )
+        await self._persist_position(runtime, runtime.positions[symbol])
 
     def _get_sizing_mode(self, candidate: dict) -> str:
         """Determine sizing mode based on setup quality and IV."""
@@ -1037,18 +2294,715 @@ class PaperStrategyAgent:
             f"@{exit_price:.2f}\nQty: {close_qty} | PnL: ₹{pnl:.0f} | Reason: {reason}"
         )
 
+        # ── Persist exit to DB ──
+        await self._persist_order(
+            runtime, position.symbol, "SELL", close_qty, exit_price,
+            position.expiry, position.strike, position.option_type, reason,
+        )
+        await self._persist_macd_signal(
+            underlying=position.underlying,
+            expiry=position.expiry,
+            strike=position.strike,
+            option_type=position.option_type,
+            macd_value=float(position.macd_line[-1] or 0) if position.macd_line else 0,
+            signal_value=None,
+            histogram=None,
+            signal_type=f"exit_{reason}",
+            premium_at_signal=exit_price,
+        )
+        if not partial:
+            # Position fully closed — persist with qty=0 to mark closed
+            closed_pos = StrategyPosition(
+                symbol=position.symbol, underlying=position.underlying,
+                expiry=position.expiry, strike=position.strike,
+                option_type=position.option_type, instrument_key=None,
+                trading_symbol=None, qty=0, initial_qty=position.initial_qty,
+                entry_price=position.entry_price, current_price=exit_price,
+                peak_price=position.peak_price, entry_bar_time=position.entry_bar_time,
+                entered_at=position.entered_at, signal_reason=position.signal_reason,
+            )
+            await self._persist_position(runtime, closed_pos, realized_pnl=pnl)
+        else:
+            await self._persist_position(runtime, position)
+
     # ── Helper Methods ───────────────────────────────────────────────────────
 
-    async def _load_candles(self, row: dict, side: dict) -> list[dict]:
+    async def _load_candles(
+        self,
+        row: dict,
+        side: dict,
+        *,
+        interval: str = "30minute",
+        limit: int = 80,
+    ) -> list[dict]:
         return await option_history_service.load_candles(
             underlying=row["underlying"],
             expiry=date.fromisoformat(row["expiry"]),
             strike=float(side["strike"]),
             option_type=str(side["option_type"]),
             instrument_key=side.get("instrument_key"),
-            interval="30minute",
-            limit=80,
+            interval=interval,
+            limit=limit,
         )
+
+    async def _run_strategy2(
+        self,
+        runtime: StrategyRuntime,
+        rows: list[dict[str, Any]],
+        started_at: datetime,
+    ) -> None:
+        index_rows = [row for row in rows if row.get("underlying") in STRATEGY2_UNDERLYINGS]
+        if not index_rows:
+            runtime.meta = {
+                **(runtime.meta or {}),
+                "mode": "no_index_rows",
+                "scan_interval": runtime.meta.get("scan_interval", "5minute") if runtime.meta else "5minute",
+                "watchlist_rows": 0,
+                "updated_at": started_at.isoformat(),
+                "pipeline": runtime.meta.get("pipeline", []) if runtime.meta else [],
+            }
+            runtime.last_message = "No index ATM rows available for Strategy 2."
+            return
+
+        contexts: dict[str, dict[str, Any]] = {}
+        for row in index_rows:
+            contexts[row["underlying"]] = await self._build_strategy2_signal_context(row, started_at)
+
+        runtime.signal_lane = [contexts[row["underlying"]]["signal"] for row in index_rows]
+        runtime.meta = {
+            "mode": "live_scan",
+            "scan_interval": "5minute",
+            "watchlist_rows": len(index_rows),
+            "updated_at": started_at.isoformat(),
+            "pipeline": [contexts[row["underlying"]]["pipeline"] for row in index_rows],
+        }
+
+        await self._manage_strategy2_exits(runtime, index_rows, contexts, started_at)
+        await self._scan_strategy2_entries(runtime, index_rows, contexts, started_at)
+        self._refresh_prices_from_watchlist(runtime, index_rows)
+
+        actionable = sum(
+            1
+            for item in runtime.signal_lane
+            if item.get("status") in {"entry-ready", "trend-aligned", "active"}
+        )
+        runtime.last_message = (
+            f"Scanned {len(index_rows)} indices. "
+            f"{actionable} aligned lanes, {len(runtime.positions)} open positions."
+        )
+
+    async def _scan_strategy2_entries(
+        self,
+        runtime: StrategyRuntime,
+        rows: list[dict[str, Any]],
+        contexts: dict[str, dict[str, Any]],
+        started_at: datetime,
+    ) -> None:
+        capacity = STRATEGY2_MAX_POSITIONS - len(runtime.positions)
+        if capacity <= 0:
+            return
+        if self._kill_switch_active:
+            return
+
+        opened = 0
+        for row in rows:
+            if opened >= capacity:
+                break
+            context = contexts.get(row["underlying"]) or {}
+            if not context.get("can_enter"):
+                continue
+            if self._has_underlying_position(runtime, row["underlying"]):
+                continue
+            if started_at.time() > STRATEGY2_ENTRY_CUTOFF:
+                continue
+
+            direction = context.get("direction")
+            side = row.get("ce") if direction == "CE" else row.get("pe")
+            closes = context.get("ce_closes") if direction == "CE" else context.get("pe_closes")
+            macd_line = context.get("ce_macd_line") if direction == "CE" else context.get("pe_macd_line")
+            if not side or not closes:
+                continue
+
+            try:
+                opt_expiry = date.fromisoformat(str(row.get("expiry")))
+                tte_days = max((opt_expiry - started_at.date()).days, 0)
+            except Exception:
+                tte_days = 0
+
+            latest_price = float(side.get("ltp") or (closes[-1] if closes else 0.0) or 0.0)
+            if latest_price <= 0:
+                continue
+
+            candidate = {
+                "row": row,
+                "side": side,
+                "closes": closes,
+                "candles": context.get("ce_candles") if direction == "CE" else context.get("pe_candles"),
+                "latest_close": latest_price,
+                "latest_bar_time": context.get("option_last_bar_time") or started_at.isoformat(),
+                "signal_key": f"strategy2:{row['underlying']}:{direction}",
+                "strength": abs(float(context.get("ce_macd_value") or 0.0))
+                if direction == "CE"
+                else abs(float(context.get("pe_macd_value") or 0.0)),
+                "reason": f"strategy2_{context.get('gate_reason')}_macd_zero_cross",
+                "rsi": latest_macd_rsi(closes).get("rsi"),
+                "opt_type": direction,
+                "iv_pct": _round_or_none(float(side.get("iv") or 0.0) * 100.0, 1) if side.get("iv") is not None else None,
+                "iv_status": "preferred" if side.get("iv") is not None else "unknown",
+                "spot_setup": f"mp_{context.get('day_type')}",
+                "quadrant": None,
+                "window": None,
+                "tte_days": tte_days,
+                "macd_line": macd_line,
+                "mp_day_type": context.get("day_type"),
+                "fraction_override": max(KELLY_FRACTION * STRATEGY2_KELLY_SCALE, 0.01),
+            }
+            if runtime.processed_signals.get(candidate["signal_key"]) == candidate["latest_bar_time"]:
+                continue
+            await self._open_position(runtime, candidate)
+            opened += 1
+
+        if opened:
+            self._append_commentary(
+                runtime.label,
+                f"Opened {opened} Strategy 2 position{'s' if opened != 1 else ''} from live 5-minute index signals.",
+                tone="info",
+            )
+
+    async def _manage_strategy2_exits(
+        self,
+        runtime: StrategyRuntime,
+        rows: list[dict[str, Any]],
+        contexts: dict[str, dict[str, Any]],
+        started_at: datetime,
+    ) -> None:
+        if not runtime.positions:
+            return
+
+        row_map = {row["underlying"]: row for row in rows}
+        for symbol, pos in list(runtime.positions.items()):
+            row = row_map.get(pos.underlying)
+            if not row:
+                continue
+
+            side = row.get("ce") if pos.option_type == "CE" else row.get("pe")
+            candles = await self._load_candles(row, side or {}, interval="5minute", limit=96) if side else []
+            closes = [float(c["close"]) for c in candles if c.get("close")] if candles else []
+            live_ltp = float((side or {}).get("ltp") or 0.0)
+            latest_close = live_ltp or (closes[-1] if closes else 0.0)
+            if latest_close <= 0:
+                continue
+
+            pos.current_price = latest_close
+            pos.peak_price = max(pos.peak_price, latest_close)
+            if len(closes) >= MACD_MIN_BARS:
+                macd_line, _, _ = compute_macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+                pos.macd_line = macd_line
+                pos.latest_rsi = _round_or_none(latest_macd_rsi(closes).get("rsi"), 2)
+
+            context = contexts.get(pos.underlying) or {}
+            aligned_direction = context.get("direction")
+            entered_at = _parse_iso_timestamp(pos.entered_at)
+            return_pct = pos.return_pct
+
+            if started_at.time() >= STRATEGY2_FORCE_EXIT or (entered_at and entered_at.date() < started_at.date()):
+                await self._close_position(runtime, pos, latest_close, "intraday_close", qty=pos.qty)
+                continue
+
+            if return_pct <= -STRATEGY2_HARD_STOP_PCT:
+                await self._close_position(runtime, pos, latest_close, "strategy2_hard_stop", qty=pos.qty)
+                continue
+
+            if return_pct >= STRATEGY2_TARGET_PCT:
+                await self._close_position(runtime, pos, latest_close, "strategy2_target", qty=pos.qty)
+                continue
+
+            if aligned_direction and aligned_direction != pos.option_type:
+                await self._close_position(runtime, pos, latest_close, "mp_gate_flip", qty=pos.qty)
+                continue
+
+            if pos.macd_line and len(pos.macd_line) >= 2:
+                previous = pos.macd_line[-2]
+                current = pos.macd_line[-1]
+                if pos.option_type == "CE" and previous is not None and current is not None and previous >= 0 > current:
+                    await self._close_position(runtime, pos, latest_close, "macd_reversal", qty=pos.qty)
+                    continue
+                if pos.option_type == "PE" and previous is not None and current is not None and previous <= 0 < current:
+                    await self._close_position(runtime, pos, latest_close, "macd_reversal", qty=pos.qty)
+                    continue
+
+        latest_prices = {sym: pos.current_price for sym, pos in runtime.positions.items()}
+        if latest_prices:
+            runtime.portfolio.update_prices(latest_prices)
+
+    async def _build_strategy2_signal_context(
+        self,
+        row: dict[str, Any],
+        started_at: datetime,
+    ) -> dict[str, Any]:
+        underlying = row["underlying"]
+        ce_side = row.get("ce")
+        pe_side = row.get("pe")
+        empty_signal = {
+            "strategy": "Strategy 2",
+            "source": "live_scan",
+            "underlying": underlying,
+            "signal_date": started_at.date().isoformat(),
+            "trade_date": "live scan",
+            "as_of": started_at.isoformat(),
+            "direction": None,
+            "reason": "data_pending",
+            "strength": "standby",
+            "status": "waiting",
+            "freshness": "missing",
+            "instruction": f"{underlying}: waiting for live 1-minute spot rows and 5-minute option candles.",
+        }
+        empty_pipeline = {
+            "name": f"Strategy 2 {underlying}",
+            "status": "missing",
+            "rows": 0,
+            "last_date": "—",
+            "detail": "No live data yet",
+            "freshness": "missing",
+        }
+        if not ce_side or not pe_side:
+            return {
+                "direction": None,
+                "signal": empty_signal,
+                "pipeline": empty_pipeline,
+                "can_enter": False,
+            }
+
+        spot_rows, spot_source = await self._load_strategy2_spot_rows(underlying, started_at)
+        session_rows, session_date = _latest_session_rows(spot_rows)
+        spot_last_time = session_rows[-1].get("time") if session_rows else None
+        using_latest_session = session_date is not None and session_date != started_at.date()
+        session_label = session_date.isoformat() if session_date else "latest available session"
+
+        if len(session_rows) < 30:
+            signal = {
+                **empty_signal,
+                "reason": "spot_warmup",
+                "freshness": "stale" if session_rows else "missing",
+                "instruction": (
+                    f"{underlying}: {len(session_rows)} spot bars loaded for {session_label}. "
+                    "Waiting for intraday Market Profile warm-up."
+                ),
+            }
+            pipeline = {
+                "name": f"Strategy 2 {underlying}",
+                "status": "warning" if session_rows else "missing",
+                "rows": len(session_rows),
+                "last_date": str(spot_last_time or "—"),
+                "detail": f"{spot_source} spot rows warming up ({session_label})",
+                "freshness": "stale" if session_rows else "missing",
+            }
+            return {
+                "direction": None,
+                "signal": signal,
+                "pipeline": pipeline,
+                "can_enter": False,
+            }
+
+        profile = market_profile_builder.build_profile_from_rows(
+            underlying,
+            session_rows,
+            "day",
+            "1minute",
+        )
+        if not profile:
+            return {
+                "direction": None,
+                "signal": empty_signal,
+                "pipeline": empty_pipeline,
+                "can_enter": False,
+            }
+
+        current_spot = float(session_rows[-1].get("close") or row.get("spot_price") or 0.0)
+        direction, day_type, gate_reason = self._classify_strategy2_market_profile(
+            profile=profile,
+            current_spot=current_spot,
+            today_rows=session_rows,
+        )
+
+        ce_candles = await self._load_candles(row, ce_side, interval="5minute", limit=96)
+        pe_candles = await self._load_candles(row, pe_side, interval="5minute", limit=96)
+        ce_closes = [float(item["close"]) for item in ce_candles if item.get("close")] if ce_candles else []
+        pe_closes = [float(item["close"]) for item in pe_candles if item.get("close")] if pe_candles else []
+        option_last_bar_time = (
+            (ce_candles[-1].get("time") if ce_candles else None)
+            or (pe_candles[-1].get("time") if pe_candles else None)
+        )
+
+        ce_macd_line, _, _ = compute_macd(ce_closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL) if len(ce_closes) >= MACD_MIN_BARS else ([], [], [])
+        pe_macd_line, _, _ = compute_macd(pe_closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL) if len(pe_closes) >= MACD_MIN_BARS else ([], [], [])
+        ce_macd_value = ce_macd_line[-1] if ce_macd_line else None
+        pe_macd_value = pe_macd_line[-1] if pe_macd_line else None
+        fresh_ce, _, _ = detect_macd_zero_cross(ce_closes, "CE")
+        fresh_pe, _, _ = detect_macd_zero_cross(pe_closes, "PE")
+        ce_aligned = ce_macd_value is not None and ce_macd_value > 0
+        pe_aligned = pe_macd_value is not None and pe_macd_value < 0
+
+        if direction == "CE":
+            if fresh_ce:
+                status = "entry-ready"
+                instruction = f"{underlying}: CE zero-cross confirmed with MP {day_type} gate above POC {profile.poc:.0f}."
+                can_enter = True
+            elif ce_aligned:
+                status = "trend-aligned"
+                instruction = f"{underlying}: MP gate stays bullish ({day_type}). CE MACD is above zero; waiting for the next fresh trigger."
+                can_enter = False
+            else:
+                status = "waiting-cross"
+                instruction = f"{underlying}: MP gate is bullish ({day_type}) but CE MACD has not crossed yet."
+                can_enter = False
+        elif direction == "PE":
+            if fresh_pe:
+                status = "entry-ready"
+                instruction = f"{underlying}: PE zero-cross confirmed with MP {day_type} gate below POC {profile.poc:.0f}."
+                can_enter = True
+            elif pe_aligned:
+                status = "trend-aligned"
+                instruction = f"{underlying}: MP gate stays bearish ({day_type}). PE MACD is aligned; waiting for the next fresh trigger."
+                can_enter = False
+            else:
+                status = "waiting-cross"
+                instruction = f"{underlying}: MP gate is bearish ({day_type}) but PE MACD has not crossed yet."
+                can_enter = False
+        else:
+            status = "standby"
+            instruction = f"{underlying}: Market Profile is balanced around POC {profile.poc:.0f}. No directional gate yet."
+            can_enter = False
+
+        spot_fresh = _parse_iso_timestamp(spot_last_time)
+        option_fresh = _parse_iso_timestamp(option_last_bar_time)
+        freshness = "live"
+        if not spot_fresh or not option_fresh:
+            freshness = "missing"
+        elif using_latest_session or started_at - spot_fresh > timedelta(minutes=10) or started_at - option_fresh > timedelta(minutes=20):
+            freshness = "stale"
+        can_enter = can_enter and freshness == "live"
+
+        signal = {
+            "strategy": "Strategy 2",
+            "source": "live_scan",
+            "underlying": underlying,
+            "signal_date": started_at.date().isoformat(),
+            "trade_date": "live scan",
+            "as_of": started_at.isoformat(),
+            "direction": direction,
+            "reason": gate_reason,
+            "strength": "strong" if status == "entry-ready" else "monitoring",
+            "status": status,
+            "freshness": freshness,
+            "instruction": instruction,
+            "mp_day_type": day_type,
+            "spot_price": _round_or_none(current_spot, 2),
+            "poc": _round_or_none(profile.poc, 2),
+            "vah": _round_or_none(profile.vah, 2),
+            "val": _round_or_none(profile.val, 2),
+            "ce_macd": _round_or_none(ce_macd_value, 4),
+            "pe_macd": _round_or_none(pe_macd_value, 4),
+            "option_last_bar_time": option_last_bar_time,
+            "spot_last_time": spot_last_time,
+            "spot_source": spot_source,
+            "spot_session_date": session_date.isoformat() if session_date else None,
+        }
+        pipeline = {
+            "name": f"Strategy 2 {underlying}",
+            "status": "ok" if freshness == "live" else ("warning" if freshness == "stale" else "missing"),
+            "rows": len(session_rows),
+            "last_date": str(option_last_bar_time or spot_last_time or "—"),
+            "detail": (
+                f"{spot_source} spot · session {session_label} · MP {day_type} · {status}"
+            ),
+            "freshness": freshness,
+        }
+        return {
+            "direction": direction,
+            "day_type": day_type,
+            "gate_reason": gate_reason,
+            "signal": signal,
+            "pipeline": pipeline,
+            "can_enter": can_enter,
+            "option_last_bar_time": option_last_bar_time,
+            "spot_last_time": spot_last_time,
+            "ce_closes": ce_closes,
+            "pe_closes": pe_closes,
+            "ce_candles": ce_candles,
+            "pe_candles": pe_candles,
+            "ce_macd_line": ce_macd_line,
+            "pe_macd_line": pe_macd_line,
+            "ce_macd_value": ce_macd_value,
+            "pe_macd_value": pe_macd_value,
+        }
+
+    async def _load_strategy2_spot_rows(
+        self,
+        underlying: str,
+        started_at: datetime,
+    ) -> tuple[list[dict[str, Any]], str]:
+        cached = self._strategy2_spot_cache.get(underlying)
+        if cached and (started_at - cached[0]).total_seconds() <= STRATEGY2_SPOT_CACHE_TTL_SECONDS:
+            return cached[1], cached[2]
+
+        from_date = started_at.date() - timedelta(days=5)
+        to_date = started_at.date()
+
+        rows: list[dict[str, Any]] = []
+        source = "none"
+        spot_key = self._INDEX_SPOT_KEYS.get(underlying)
+        if spot_key:
+            rows = await option_history_service._fetch_broker_candles(
+                instrument_key=spot_key,
+                from_date=from_date,
+                to_date=to_date,
+                interval="1minute",
+            )
+            if rows:
+                source = "upstox"
+
+        if not rows:
+            fyers_adapter = get_active_adapter("fyers")
+            if fyers_adapter is None and await ensure_fyers_session(force_validate=True):
+                fyers_adapter = get_active_adapter("fyers")
+            get_history = getattr(fyers_adapter, "get_historical_candles", None) if fyers_adapter else None
+            fyers_symbol = STRATEGY2_FYERS_SYMBOLS.get(underlying)
+            if fyers_symbol and callable(get_history):
+                try:
+                    rows = await get_history(
+                        fyers_symbol,
+                        "1",
+                        from_date.isoformat(),
+                        to_date.isoformat(),
+                    )
+                    if rows:
+                        source = "fyers"
+                except Exception as exc:
+                    logger.debug(f"[Strategy2] Fyers spot history failed for {underlying}: {exc}")
+
+        if rows:
+            self._strategy2_spot_cache[underlying] = (started_at, rows, source)
+        return rows, source
+
+    def _classify_strategy2_market_profile(
+        self,
+        *,
+        profile: Any,
+        current_spot: float,
+        today_rows: list[dict[str, Any]],
+    ) -> tuple[Optional[str], str, str]:
+        recent_move = 0.0
+        if len(today_rows) >= 15:
+            try:
+                recent_move = current_spot - float(today_rows[-15].get("close") or current_spot)
+            except Exception:
+                recent_move = 0.0
+
+        if current_spot >= profile.vah and current_spot >= profile.ib_high and recent_move >= 0:
+            return "CE", "trend_up", "mp_trend_up"
+        if current_spot <= profile.val and current_spot <= profile.ib_low and recent_move <= 0:
+            return "PE", "trend_down", "mp_trend_down"
+        if profile.poor_low and current_spot >= profile.poc:
+            return "CE", "failed_auction_low", "poor_low_recovery"
+        if profile.poor_high and current_spot <= profile.poc:
+            return "PE", "failed_auction_high", "poor_high_reversal"
+        if current_spot > profile.poc and recent_move >= 0:
+            return "CE", "balance_above_poc", "holding_above_poc"
+        if current_spot < profile.poc and recent_move <= 0:
+            return "PE", "balance_below_poc", "holding_below_poc"
+        return None, "balance", "mp_balanced"
+
+    # ── Spot Candle Sync ───────────────────────────────────────────────────
+
+    SPOT_SYNC_INTERVAL_SCANS = 30   # every ~30 min at 60s scan interval
+    SPOT_SYNC_LOOKBACK_DAYS = 10    # fetch 10 days to cover weekends + gaps
+
+    # Upstox instrument keys for index spot prices
+    _INDEX_SPOT_KEYS: dict[str, str] = {
+        "NIFTY": "NSE_INDEX|Nifty 50",
+        "BANKNIFTY": "NSE_INDEX|Nifty Bank",
+        "FINNIFTY": "NSE_INDEX|Nifty Fin Service",
+        "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT",
+        "NIFTYNXT50": "NSE_INDEX|Nifty Next 50",
+        "SENSEX": "BSE_INDEX|SENSEX",
+        "BANKEX": "BSE_INDEX|BSE-BANKEX",
+    }
+
+    async def _maybe_sync_spot_candles(self) -> None:
+        """Periodically sync spot candles from broker to DB during market hours."""
+        self._scan_count += 1
+        if self._scan_count % self.SPOT_SYNC_INTERVAL_SCANS != 1:
+            return  # first scan + every 30th scan
+        try:
+            await self._sync_spot_candles()
+            self._last_spot_sync = _now_ist()
+            logger.info("[Strategy] Spot candle sync completed")
+        except Exception as exc:
+            logger.warning(f"[Strategy] Spot candle sync failed: {exc}")
+
+    async def _sync_spot_candles(self) -> int:
+        """Fetch recent 30-min spot candles from Upstox and upsert into DB."""
+        from api.routers.auth import get_broker_token, ensure_upstox_session
+        from urllib.parse import quote
+
+        token = get_broker_token("upstox")
+        if not token:
+            await ensure_upstox_session()
+            token = get_broker_token("upstox")
+        if not token:
+            logger.debug("[Strategy] No Upstox token for spot sync — skipped")
+            return 0
+
+        today = date.today()
+        from_date = today - timedelta(days=self.SPOT_SYNC_LOOKBACK_DAYS)
+
+        # Collect underlyings: all indices + any stocks with open positions
+        targets: dict[str, str] = dict(self._INDEX_SPOT_KEYS)
+
+        # Also sync spot for stocks with open strategy positions
+        for runtime in self._runtimes():
+            for pos in runtime.positions.values():
+                if pos.underlying not in targets:
+                    key = await self._resolve_spot_instrument_key(pos.underlying)
+                    if key:
+                        targets[pos.underlying] = key
+
+        total_stored = 0
+        for underlying, instrument_key in targets.items():
+            try:
+                candles = await self._fetch_spot_candles_upstox(
+                    instrument_key, from_date, today, token
+                )
+                if not candles:
+                    continue
+                stored = await self._upsert_spot_candles(underlying, instrument_key, candles)
+                total_stored += stored
+            except Exception as exc:
+                logger.debug(f"[Strategy] Spot sync failed for {underlying}: {exc}")
+            # Small delay to respect rate limits
+            await asyncio.sleep(0.5)
+
+        return total_stored
+
+    async def _fetch_spot_candles_upstox(
+        self,
+        instrument_key: str,
+        from_date: date,
+        to_date: date,
+        token: str,
+    ) -> list[dict]:
+        """Fetch 30-min candles from Upstox historical API."""
+        from urllib.parse import quote
+        encoded_key = quote(instrument_key, safe="")
+        url = (
+            f"https://api.upstox.com/v2/historical-candle/"
+            f"{encoded_key}/30minute/{to_date.isoformat()}/{from_date.isoformat()}"
+        )
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                },
+            )
+        if resp.status_code != 200:
+            logger.debug(f"[Strategy] Upstox spot API {resp.status_code} for {instrument_key}")
+            return []
+
+        rows: list[dict] = []
+        for candle in reversed(resp.json().get("data", {}).get("candles", [])):
+            if not candle or len(candle) < 6:
+                continue
+            rows.append({
+                "time": str(candle[0]),
+                "open": float(candle[1]),
+                "high": float(candle[2]),
+                "low": float(candle[3]),
+                "close": float(candle[4]),
+                "volume": int(candle[5] or 0),
+                "oi": 0,
+            })
+        return rows
+
+    async def _upsert_spot_candles(
+        self,
+        underlying: str,
+        instrument_key: str,
+        candles: list[dict],
+    ) -> int:
+        """Upsert spot candles into underlying_spot_candles hypertable."""
+        from db.database import AsyncSessionLocal
+
+        def _parse_ts(value: str) -> datetime:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+        payload = [
+            {
+                "time": _parse_ts(c["time"]),
+                "instrument_key": instrument_key,
+                "underlying": underlying,
+                "interval": "30minute",
+                "open": float(c["open"]),
+                "high": float(c["high"]),
+                "low": float(c["low"]),
+                "close": float(c["close"]),
+                "volume": int(c.get("volume", 0)),
+                "oi": int(c.get("oi", 0)),
+                "source": "strategy_agent",
+            }
+            for c in candles
+        ]
+        if not payload:
+            return 0
+
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                text("""
+                    INSERT INTO underlying_spot_candles (
+                        time, instrument_key, underlying, interval, open, high,
+                        low, close, volume, oi, source, synced_at
+                    )
+                    VALUES (
+                        :time, :instrument_key, :underlying, :interval, :open, :high,
+                        :low, :close, :volume, :oi, :source, NOW()
+                    )
+                    ON CONFLICT (instrument_key, interval, time) DO UPDATE
+                    SET open = EXCLUDED.open,
+                        high = EXCLUDED.high,
+                        low = EXCLUDED.low,
+                        close = EXCLUDED.close,
+                        volume = EXCLUDED.volume,
+                        oi = EXCLUDED.oi,
+                        source = EXCLUDED.source,
+                        synced_at = NOW()
+                """),
+                payload,
+            )
+            await session.commit()
+
+        logger.debug(f"[Strategy] Upserted {len(payload)} spot candles for {underlying}")
+        return len(payload)
+
+    async def _resolve_spot_instrument_key(self, underlying: str) -> Optional[str]:
+        """Look up spot_instrument_key from fo_underlying_catalog for a stock."""
+        try:
+            from db.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    text("""
+                        SELECT spot_instrument_key
+                        FROM fo_underlying_catalog
+                        WHERE symbol = :symbol AND spot_instrument_key IS NOT NULL
+                        LIMIT 1
+                    """),
+                    {"symbol": underlying},
+                )
+                row = result.fetchone()
+                return row.spot_instrument_key if row else None
+        except Exception:
+            return None
 
     async def _compute_spot_context(self, underlying: str, window: dict) -> dict:
         """Load spot candles and classify the MA setup."""
@@ -1084,6 +3038,169 @@ class PaperStrategyAgent:
 
     def _has_underlying_position(self, runtime: StrategyRuntime, underlying: str) -> bool:
         return any(p.underlying == underlying for p in runtime.positions.values())
+
+    @staticmethod
+    def _paper_session_uuid(runtime: StrategyRuntime) -> str:
+        import uuid
+
+        return str(uuid.uuid5(uuid.NAMESPACE_DNS, runtime.portfolio.session_id or runtime.key))
+
+    async def _ensure_paper_session_record(self, session: Any, runtime: StrategyRuntime) -> str:
+        session_id = self._paper_session_uuid(runtime)
+        await session.execute(
+            text(
+                """
+                INSERT INTO paper_sessions (
+                    id, name, broker, initial_capital, current_capital, is_active
+                ) VALUES (
+                    :id, :name, 'paper', :initial_capital, :current_capital, true
+                )
+                ON CONFLICT (id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    broker = EXCLUDED.broker,
+                    current_capital = EXCLUDED.current_capital,
+                    is_active = true
+                """
+            ),
+            {
+                "id": session_id,
+                "name": runtime.label,
+                "initial_capital": runtime.portfolio.initial_capital,
+                "current_capital": runtime.portfolio.total_equity,
+            },
+        )
+        return session_id
+
+    # ── DB Persistence ────────────────────────────────────────────────────
+
+    async def _persist_macd_signal(
+        self,
+        underlying: str,
+        expiry: str,
+        strike: float,
+        option_type: str,
+        macd_value: float,
+        signal_value: Optional[float],
+        histogram: Optional[float],
+        signal_type: str,
+        premium_at_signal: float,
+    ) -> None:
+        """Write a MACD signal to the macd_signals hypertable for historical analysis."""
+        try:
+            from db.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    text("""
+                        INSERT INTO macd_signals
+                            (time, underlying, market, expiry, strike, option_type,
+                             macd_value, signal_value, histogram, signal_type, premium_at_signal)
+                        VALUES
+                            (now(), :underlying, 'NSE', :expiry::date, :strike, :option_type,
+                             :macd_value, :signal_value, :histogram, :signal_type, :premium_at_signal)
+                    """),
+                    {
+                        "underlying": underlying,
+                        "expiry": expiry,
+                        "strike": strike,
+                        "option_type": option_type,
+                        "macd_value": macd_value,
+                        "signal_value": signal_value,
+                        "histogram": histogram,
+                        "signal_type": signal_type,
+                        "premium_at_signal": premium_at_signal,
+                    },
+                )
+                await session.commit()
+            logger.debug(f"[Strategy] Persisted MACD signal: {underlying} {option_type} {signal_type}")
+        except Exception as exc:
+            logger.warning(f"[Strategy] Failed to persist MACD signal: {exc}")
+
+    async def _persist_order(
+        self,
+        runtime: StrategyRuntime,
+        symbol: str,
+        action: str,
+        qty: int,
+        price: float,
+        expiry: str,
+        strike: float,
+        option_type: str,
+        reason: str,
+    ) -> None:
+        """Write an order record to the orders table for audit trail."""
+        try:
+            from db.database import AsyncSessionLocal
+            import uuid
+            async with AsyncSessionLocal() as session:
+                session_id = await self._ensure_paper_session_record(session, runtime)
+                await session.execute(
+                    text("""
+                        INSERT INTO orders
+                            (id, session_id, mode, broker, symbol, exchange,
+                             instrument_type, strike, expiry, option_type,
+                             action, order_type, qty, price, status,
+                             fill_price, fill_time, created_at)
+                        VALUES
+                            (:id, :session_id, 'paper', 'paper', :symbol, 'NSE',
+                             :instrument_type, :strike, :expiry, :option_type,
+                             :action, 'MARKET', :qty, :price, 'filled',
+                             :price, now(), now())
+                    """),
+                    {
+                        "id": str(uuid.uuid4()),
+                        "session_id": session_id,
+                        "symbol": symbol,
+                        "instrument_type": "OPTION",
+                        "option_type": option_type,
+                        "strike": strike,
+                        "expiry": expiry,
+                        "action": action,
+                        "qty": qty,
+                        "price": price,
+                    },
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.warning(f"[Strategy] Failed to persist order: {exc}")
+
+    async def _persist_position(
+        self,
+        runtime: StrategyRuntime,
+        pos: StrategyPosition,
+        realized_pnl: float = 0.0,
+    ) -> None:
+        """Upsert a position record to the positions table."""
+        try:
+            from db.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as session:
+                session_id = await self._ensure_paper_session_record(session, runtime)
+                await session.execute(
+                    text("""
+                        INSERT INTO positions
+                            (id, session_id, mode, broker, symbol, strike,
+                             expiry, option_type, qty, avg_price, realized_pnl, created_at)
+                        VALUES
+                            (:id, :session_id, 'paper', 'paper', :symbol, :strike,
+                             :expiry, :option_type, :qty, :avg_price, :realized_pnl, now())
+                        ON CONFLICT (id) DO UPDATE SET
+                            qty = EXCLUDED.qty,
+                            realized_pnl = EXCLUDED.realized_pnl
+                    """),
+                    {
+                        "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{runtime.key}:{pos.symbol}")),
+                        "session_id": session_id,
+                        "symbol": pos.symbol,
+                        "strike": pos.strike,
+                        "expiry": pos.expiry,
+                        "option_type": pos.option_type,
+                        "qty": pos.qty,
+                        "avg_price": pos.entry_price,
+                        "realized_pnl": realized_pnl,
+                    },
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.warning(f"[Strategy] Failed to persist position: {exc}")
 
     def _append_event(self, runtime: StrategyRuntime, event: StrategyEvent) -> None:
         runtime.recent_events.insert(0, event)
@@ -1139,21 +3256,35 @@ class PaperStrategyAgent:
         if self._telegram_last_sent_at and (now - self._telegram_last_sent_at).total_seconds() < interval:
             return
 
-        runtime = self._strategy
-        summary = runtime.portfolio.get_summary()
         lines = [
             f"Nomad Curie | {now.strftime('%d %b %Y %I:%M %p IST')}",
             f"Windows: {len(self._active_windows)} active",
-            f"Equity: ₹{summary.get('total_equity', 0):,.0f}",
-            f"Realized PnL: ₹{summary.get('realized_pnl', 0):,.0f}",
-            f"Open: {len(runtime.positions)} | Entries: {runtime.entries} | Exits: {runtime.exits}",
         ]
-        for pos in runtime.positions.values():
+        total_equity = 0.0
+        total_realized = 0.0
+        total_open = 0
+        for runtime in self._runtimes():
+            summary = runtime.portfolio.get_summary()
+            total_equity += float(summary.get("total_equity") or 0.0)
+            total_realized += float(summary.get("realized_pnl") or 0.0)
+            total_open += len(runtime.positions)
+        lines.extend(
+            [
+                f"Equity: ₹{total_equity:,.0f}",
+                f"Realized PnL: ₹{total_realized:,.0f}",
+                f"Open Positions: {total_open}",
+            ]
+        )
+        for runtime in self._runtimes():
             lines.append(
-                f"  {pos.underlying} {pos.option_type} {int(pos.strike)} "
-                f"@{pos.entry_price:.2f} → {pos.current_price:.2f} "
-                f"({pos.return_pct:.1f}%) [{pos.phase}]"
+                f"{runtime.label}: {len(runtime.positions)} open | Entries {runtime.entries} | Exits {runtime.exits}"
             )
+            for pos in runtime.positions.values():
+                lines.append(
+                    f"  {pos.underlying} {pos.option_type} {int(pos.strike)} "
+                    f"@{pos.entry_price:.2f} → {pos.current_price:.2f} "
+                    f"({pos.return_pct:.1f}%) [{pos.phase}]"
+                )
         try:
             await self._send_telegram_text("\n".join(lines))
             self._telegram_last_sent_at = now
@@ -1161,12 +3292,12 @@ class PaperStrategyAgent:
             pass
 
     def set_kill_switch(self, active: bool) -> dict[str, Any]:
-        runtime = self._strategy
         self._kill_switch_active = bool(active)
         cancelled_orders = 0
-        for order in list(runtime.order_book.get_open_orders(runtime.portfolio.session_id)):
-            if runtime.order_book.cancel_order(order.order_id):
-                cancelled_orders += 1
+        for runtime in self._runtimes():
+            for order in list(runtime.order_book.get_open_orders(runtime.portfolio.session_id)):
+                if runtime.order_book.cancel_order(order.order_id):
+                    cancelled_orders += 1
 
         if self._kill_switch_active:
             self._last_message = "NSE kill switch active. New entries are blocked until it is released."
@@ -1175,6 +3306,7 @@ class PaperStrategyAgent:
             self._last_message = "NSE kill switch released. Manual scans can open new entries again."
             self._append_commentary("System", self._last_message, tone="success")
 
+        self._persist_state()
         return self.get_control_state(cancelled_orders=cancelled_orders)
 
     async def set_auto_run(self, enabled: bool) -> dict[str, Any]:
@@ -1197,6 +3329,7 @@ class PaperStrategyAgent:
                 self._task = None
             self._last_message = "Auto-run disabled. Use run-once for manual scans."
             self._append_commentary("System", self._last_message, tone="warning")
+        self._persist_state()
         return self.get_control_state()
 
     def get_control_state(self, *, cancelled_orders: int = 0) -> dict[str, Any]:
@@ -1204,24 +3337,34 @@ class PaperStrategyAgent:
             "market": "nse",
             "auto_run_enabled": self._auto_run_enabled,
             "kill_switch_active": self._kill_switch_active,
+            "loop_active": bool(self._task and not self._task.done()),
             "cancelled_orders": cancelled_orders,
         }
 
     # ── Status API ───────────────────────────────────────────────────────────
 
     def get_status(self) -> dict[str, Any]:
-        runtime = self._strategy
-        summary = runtime.portfolio.get_summary()
+        next_scan_at = None
+        if self._last_run_at and self._auto_run_enabled:
+            try:
+                next_scan_at = (
+                    datetime.fromisoformat(self._last_run_at) + timedelta(seconds=self.scan_interval_seconds)
+                ).isoformat()
+            except ValueError:
+                next_scan_at = None
 
         return {
             "enabled": self._enabled,
             "auto_run_enabled": self._auto_run_enabled,
             "kill_switch_active": self._kill_switch_active,
+            "loop_active": bool(self._task and not self._task.done()),
             "running": self._running,
             "scan_interval_seconds": self.scan_interval_seconds,
             "last_run_at": self._last_run_at,
+            "next_scan_at": next_scan_at,
             "last_error": self._last_error,
             "last_message": self._last_message,
+            "data_health": self._last_data_health,
             "target_expiry": self._last_expiry,
             "candidate_expiries": self._last_candidate_expiries,
             "active_windows": len(self._active_windows),
@@ -1234,13 +3377,24 @@ class PaperStrategyAgent:
                 "configured": bool(settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID),
                 "last_sent_at": self._telegram_last_sent_at.isoformat() if self._telegram_last_sent_at else None,
             },
+            "strategy_agents": [lane.build_status_payload() for lane in self._lane_agents()],
             "commentary": [asdict(entry) for entry in self._commentary],
             "strategies": [
                 {
+                    **(
+                        next(
+                            (lane.build_status_payload() for lane in self._lane_agents() if lane.runtime is runtime),
+                            {},
+                        )
+                    ),
                     "key": runtime.key,
                     "label": runtime.label,
+                    "agent": next(
+                        (lane.build_status_payload() for lane in self._lane_agents() if lane.runtime is runtime),
+                        None,
+                    ),
                     "summary": {
-                        **summary,
+                        **runtime.portfolio.get_summary(),
                         "open_positions": len(runtime.positions),
                         "entries": runtime.entries,
                         "exits": runtime.exits,
@@ -1273,7 +3427,10 @@ class PaperStrategyAgent:
                     ],
                     "last_scan_at": runtime.last_scan_at,
                     "last_message": runtime.last_message,
+                    "signals": runtime.signal_lane,
+                    "meta": runtime.meta,
                 }
+                for runtime in self._runtimes()
             ],
         }
 

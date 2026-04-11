@@ -1,0 +1,326 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from api.routers import system
+
+
+class _FakeResult:
+    def scalar_one_or_none(self) -> int:
+        return 1
+
+
+class _FakeSession:
+    async def __aenter__(self) -> "_FakeSession":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    async def execute(self, _query):
+        return _FakeResult()
+
+
+class _FakeRedis:
+    async def ping(self) -> bool:
+        return True
+
+
+class _FakeStrategySupervisor:
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def get_status(self) -> dict:
+        return self._payload
+
+
+@pytest.mark.asyncio
+async def test_system_health_reports_healthy_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(timezone.utc)
+
+    monkeypatch.setattr(system, "AsyncSessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(system, "get_redis", lambda: _async_value(_FakeRedis()))
+    monkeypatch.setattr(
+        system,
+        "_load_research_sync_runtime_state",
+        lambda: {
+            "state": "waiting",
+            "run_completed_at": (now - timedelta(minutes=15)).isoformat(),
+            "next_run_at": (now + timedelta(minutes=15)).isoformat(),
+        },
+    )
+    monkeypatch.setattr(
+        system,
+        "get_broker_connection_snapshot",
+        lambda force_validate=False: _async_result(
+            {
+                "connected_brokers": ["fyers"],
+                "broker_ready": True,
+                "upstox_ready": False,
+                "fyers_ready": True,
+                "upstox_token_health": {"status": "missing", "valid": False},
+                "fyers_token_health": {"status": "valid_session", "valid": True},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        system.data_router,
+        "get_status",
+        lambda: {
+            "mode": "broker",
+            "broker": "fyers",
+            "subscribed_symbols": ["NIFTY", "BANKNIFTY"],
+            "subscribed_symbol_count": 2,
+            "tick_buffer_size": 2,
+            "callback_count": 4,
+            "ws_connected": True,
+            "mock_running": False,
+            "last_tick_at": now.isoformat(),
+        },
+    )
+    monkeypatch.setattr(
+        system,
+        "paper_strategy_agent",
+        _FakeStrategySupervisor(
+            {
+                "enabled": True,
+                "running": True,
+                "auto_run_enabled": True,
+                "kill_switch_active": False,
+                "scan_interval_seconds": 60,
+                "last_run_at": now.isoformat(),
+                "next_scan_at": (now + timedelta(minutes=1)).isoformat(),
+                "last_message": "Scan loop healthy.",
+                "strategy_agents": [
+                    {"key": "macd_strategy", "label": "ATM MACD", "timeframe": "30minute", "scope": "ATM options"}
+                ],
+                "strategies": [
+                    {
+                        "key": "macd_strategy",
+                        "label": "ATM MACD",
+                        "summary": {"open_positions": 1},
+                        "last_scan_at": now.isoformat(),
+                    }
+                ],
+                "data_health": {"broker_snapshot": {"broker_ready": True}},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        system,
+        "commodity_strategy_agent",
+        _FakeStrategySupervisor(
+            {
+                "enabled": True,
+                "running": True,
+                "auto_run_enabled": True,
+                "kill_switch_active": False,
+                "scan_interval_seconds": 30,
+                "last_run_at": now.isoformat(),
+                "last_message": "Commodity loop healthy.",
+                "strategy_agents": [
+                    {"key": "commodity_futures", "label": "Commodity Futures", "timeframe": "15minute", "scope": "MCX futures"}
+                ],
+                "strategies": [
+                    {
+                        "key": "commodity_futures",
+                        "label": "Commodity Futures",
+                        "summary": {"open_positions": 0},
+                        "last_scan_at": now.isoformat(),
+                    }
+                ],
+                "data_health": {"fyers_token_health": {"valid": True}},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        system,
+        "auction_intelligence_summary",
+        lambda: _async_result(
+            {
+                "connected_brokers": ["fyers"],
+                "live_ready": True,
+                "deployable_first_sleeve": "swing",
+                "validation_gates": [{"id": "gate_a", "status": "available"}],
+            }
+        ),
+    )
+
+    payload = await system.system_health()
+
+    assert payload["summary"]["status"] == "healthy"
+    assert payload["summary"]["critical_services"] == 0
+    assert len(payload["services"]) == 9
+    assert any(service["key"] == "brokers" and service["status"] == "healthy" for service in payload["services"])
+    assert any(lane["key"] == "nse_strategy:macd_strategy" for lane in payload["strategy_lanes"])
+
+
+@pytest.mark.asyncio
+async def test_system_health_marks_missing_brokers_critical(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(system, "AsyncSessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(system, "get_redis", lambda: _async_value(_FakeRedis()))
+    monkeypatch.setattr(system, "_load_research_sync_runtime_state", lambda: {})
+    monkeypatch.setattr(
+        system,
+        "get_broker_connection_snapshot",
+        lambda force_validate=False: _async_result(
+            {
+                "connected_brokers": [],
+                "broker_ready": False,
+                "upstox_ready": False,
+                "fyers_ready": False,
+                "upstox_token_health": {"status": "missing", "valid": False},
+                "fyers_token_health": {"status": "missing", "valid": False},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        system.data_router,
+        "get_status",
+        lambda: {
+            "mode": "idle",
+            "broker": None,
+            "subscribed_symbols": [],
+            "subscribed_symbol_count": 0,
+            "tick_buffer_size": 0,
+            "callback_count": 0,
+            "ws_connected": False,
+            "mock_running": False,
+            "last_tick_at": None,
+        },
+    )
+    monkeypatch.setattr(system, "paper_strategy_agent", _FakeStrategySupervisor({"enabled": False, "running": False, "strategies": [], "strategy_agents": []}))
+    monkeypatch.setattr(system, "commodity_strategy_agent", _FakeStrategySupervisor({"enabled": False, "running": False, "strategies": [], "strategy_agents": []}))
+    monkeypatch.setattr(
+        system,
+        "auction_intelligence_summary",
+        lambda: _async_result(
+            {
+                "connected_brokers": [],
+                "live_ready": False,
+                "deployable_first_sleeve": "swing",
+                "validation_gates": [{"id": "gate_a", "status": "available"}],
+            }
+        ),
+    )
+
+    payload = await system.system_health()
+
+    assert payload["summary"]["status"] == "critical"
+    assert any(service["key"] == "brokers" and service["status"] == "critical" for service in payload["services"])
+
+
+@pytest.mark.asyncio
+async def test_system_overview_excludes_idle_services_from_blockers(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(timezone.utc)
+
+    monkeypatch.setattr(system, "AsyncSessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(system, "get_redis", lambda: _async_value(_FakeRedis()))
+    monkeypatch.setattr(
+        system,
+        "_load_research_sync_runtime_state",
+        lambda: {
+            "state": "waiting",
+            "run_completed_at": (now - timedelta(minutes=15)).isoformat(),
+            "next_run_at": (now + timedelta(minutes=15)).isoformat(),
+        },
+    )
+    monkeypatch.setattr(
+        system,
+        "get_broker_connection_snapshot",
+        lambda force_validate=False: _async_result(
+            {
+                "connected_brokers": ["fyers"],
+                "broker_ready": True,
+                "upstox_ready": False,
+                "fyers_ready": True,
+                "upstox_token_health": {"status": "missing", "valid": False},
+                "fyers_token_health": {"status": "valid_session", "valid": True},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        system.data_router,
+        "get_status",
+        lambda: {
+            "mode": "broker",
+            "broker": "fyers",
+            "subscribed_symbols": ["NIFTY"],
+            "subscribed_symbol_count": 1,
+            "tick_buffer_size": 1,
+            "callback_count": 1,
+            "ws_connected": True,
+            "mock_running": False,
+            "last_tick_at": now.isoformat(),
+        },
+    )
+    monkeypatch.setattr(system, "_in_market_hours", lambda _dt: False)
+    monkeypatch.setattr(system, "_in_commodity_hours", lambda _dt: False)
+    monkeypatch.setattr(
+        system,
+        "paper_strategy_agent",
+        _FakeStrategySupervisor(
+            {
+                "enabled": True,
+                "running": False,
+                "loop_active": False,
+                "auto_run_enabled": True,
+                "kill_switch_active": False,
+                "scan_interval_seconds": 60,
+                "last_run_at": now.isoformat(),
+                "strategies": [],
+                "strategy_agents": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        system,
+        "commodity_strategy_agent",
+        _FakeStrategySupervisor(
+            {
+                "enabled": True,
+                "running": False,
+                "loop_active": False,
+                "auto_run_enabled": True,
+                "kill_switch_active": False,
+                "scan_interval_seconds": 30,
+                "last_run_at": now.isoformat(),
+                "strategies": [],
+                "strategy_agents": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        system,
+        "auction_intelligence_summary",
+        lambda: _async_result(
+            {
+                "connected_brokers": ["fyers"],
+                "live_ready": True,
+                "deployable_first_sleeve": "swing",
+                "validation_gates": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(system, "_manual_book_summary", lambda: {"total_pnl": 0.0, "total_trades": 0, "open_positions": 0, "open_pnl": 0.0})
+
+    class _FakeRiskManager:
+        def get_status(self) -> dict:
+            return {"trading_allowed": True, "open_positions": 0, "max_positions": 6}
+
+    monkeypatch.setattr(system, "_risk_manager", _FakeRiskManager())
+
+    payload = await system.system_overview()
+
+    assert payload["health"]["summary"]["service_counts"]["idle"] >= 2
+    assert payload["blockers"] == []
+
+
+async def _async_result(payload: dict) -> dict:
+    return payload
+
+
+async def _async_value(payload):
+    return payload

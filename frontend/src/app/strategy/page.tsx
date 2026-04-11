@@ -1,621 +1,1090 @@
 "use client";
+
+import type { ReactNode } from "react";
+import { startTransition, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import {
-  Activity, AlertCircle, ArrowDown, ArrowUp, BarChart2, CheckCircle2,
-  Clock, Database, FileText, Loader2, MessageSquare, Minus, Shield,
-  Target, TrendingDown, TrendingUp, XCircle, Zap,
+  Activity,
+  BarChart3,
+  Bot,
+  CandlestickChart,
+  Database,
+  FileText,
+  Radio,
+  Shield,
+  Waves,
 } from "lucide-react";
 import {
-  getStrategyDataStatus,
-  getStrategySignals,
-  getStrategyAgentComments,
-  getStrategyTrades,
-  getStrategyPortfolio,
-  getStrategyOpenSignals,
-  getStrategyAgentStatus,
-} from "@/lib/api";
-import {
-  LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
-  BarChart, Bar, Cell, CartesianGrid, ReferenceLine,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Line,
+  LineChart,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
 } from "recharts";
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
+import type { StrategyAgentStatus } from "@/components/trading/StrategyAgentMonitor";
+import {
+  getBrokerStatus,
+  getStrategyAgentComments,
+  getStrategyAgentStatus,
+  getStrategyDataStatus,
+  getStrategyOpenSignals,
+  getStrategyPortfolio,
+} from "@/lib/api";
 
-function fmt(v: number | null | undefined, d = 2): string {
-  if (v == null || !isFinite(v)) return "--";
-  return v.toFixed(d);
-}
-function fmtSigned(v: number | null | undefined, d = 2): string {
-  if (v == null || !isFinite(v)) return "--";
-  return (v >= 0 ? "+" : "") + v.toFixed(d);
-}
-function fmtCrore(v: number | null | undefined): string {
-  if (v == null) return "--";
-  if (Math.abs(v) >= 10_00_000) return "₹" + (v / 10_00_000).toFixed(2) + "L";
-  if (Math.abs(v) >= 1_000) return "₹" + (v / 1_000).toFixed(1) + "K";
-  return "₹" + v.toFixed(0);
-}
-function pnlColor(v: number | null | undefined): string {
-  if (v == null) return "text-text-muted";
-  return v >= 0 ? "text-accent-green" : "text-accent-red";
+type StrategyTab = "portfolio" | "signals" | "operations";
+
+type StrategyComment = {
+  time: string;
+  type: string;
+  level: string;
+  message: string;
+};
+
+type StrategySignalRow = {
+  strategy: string;
+  source: string;
+  underlying: string;
+  signal_date?: string;
+  trade_date?: string;
+  as_of?: string;
+  direction?: string | null;
+  reason?: string | null;
+  strength?: string | null;
+  status?: string | null;
+  freshness?: string | null;
+  instruction?: string | null;
+  mp_day_type?: string | null;
+  spot_price?: number | null;
+  poc?: number | null;
+  vah?: number | null;
+  val?: number | null;
+  spot_source?: string | null;
+  spot_session_date?: string | null;
+  spot_last_time?: string | null;
+  option_last_bar_time?: string | null;
+};
+
+type StrategyPortfolioRow = {
+  id: string;
+  strategyKey: string;
+  strategyLabel: string;
+  underlying: string;
+  contract: string;
+  qty: number;
+  entryTime?: string | null;
+  entryPrice?: number | null;
+  lastTime?: string | null;
+  lastPrice?: number | null;
+  pnl?: number | null;
+  returnPct?: number | null;
+  status: "open" | "closed";
+  statusLabel: string;
+  signalReason?: string | null;
+};
+
+function formatNumber(value?: number | null, digits = 2) {
+  if (value == null || Number.isNaN(value)) return "--";
+  return value.toFixed(digits);
 }
 
-// ── Live Positions Widget ─────────────────────────────────────────────────────
+function formatSigned(value?: number | null, digits = 2, suffix = "") {
+  if (value == null || Number.isNaN(value)) return "--";
+  const prefix = value > 0 ? "+" : "";
+  return `${prefix}${value.toFixed(digits)}${suffix}`;
+}
 
-function LivePositionsWidget() {
-  const { data: agentStatus, isLoading } = useQuery({
-    queryKey: ["strategyAgentStatus"],
-    queryFn: () => getStrategyAgentStatus().then((r) => r.data as any),
-    refetchInterval: 15_000,
+function formatCompact(value?: number | null) {
+  if (value == null || Number.isNaN(value)) return "--";
+  if (Math.abs(value) >= 10_00_000) return `₹${(value / 10_00_000).toFixed(2)}L`;
+  if (Math.abs(value) >= 1_000) return `₹${(value / 1_000).toFixed(1)}K`;
+  return `₹${value.toFixed(0)}`;
+}
+
+function formatTimestamp(value?: string | null) {
+  if (!value) return "--";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
   });
-
-  if (isLoading) {
-    return (
-      <div className="card p-4">
-        <div className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2 flex items-center gap-1.5">
-          <Activity size={12} /> Live Paper Trading
-        </div>
-        <div className="py-4 text-center text-xs text-text-muted">
-          <Loader2 size={14} className="inline animate-spin mr-1" /> Loading…
-        </div>
-      </div>
-    );
-  }
-
-  const strat = agentStatus?.strategies?.[0];
-  const positions: any[] = strat?.positions ?? [];
-  const summary = strat?.summary;
-  const totalPnl = positions.reduce((s: number, p: any) => s + (p.unrealized_pnl ?? 0), 0);
-
-  return (
-    <div className={clsx(
-      "card p-4 border",
-      positions.length > 0
-        ? totalPnl >= 0 ? "border-accent-green/20" : "border-accent-red/20"
-        : "border-bg-border"
-    )}>
-      <div className="flex items-center justify-between gap-2 mb-3">
-        <div className="text-xs font-semibold text-text-secondary uppercase tracking-wider flex items-center gap-1.5">
-          <Activity size={12} className={agentStatus?.running ? "text-accent-blue animate-pulse" : "text-text-muted"} />
-          Live Paper Trading
-        </div>
-        {positions.length > 0 && (
-          <div className={clsx("font-mono font-bold text-sm", pnlColor(totalPnl))}>
-            {fmtSigned(totalPnl, 0)} open P&L
-          </div>
-        )}
-      </div>
-
-      {positions.length === 0 ? (
-        <div className="text-xs text-text-muted py-2">
-          {agentStatus?.last_message ?? "No open positions"}
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {positions.map((pos: any) => (
-            <div key={pos.symbol} className={clsx(
-              "rounded border px-3 py-2 flex items-center justify-between gap-4",
-              (pos.unrealized_pnl ?? 0) >= 0 ? "border-accent-green/20 bg-accent-green/5" : "border-accent-red/20 bg-accent-red/5"
-            )}>
-              <div>
-                <div className="flex items-center gap-1.5">
-                  <span className="font-semibold text-text-primary text-xs">{pos.underlying}</span>
-                  <span className={clsx("text-[10px] font-bold px-1.5 py-0.5 rounded",
-                    pos.option_type === "CE" ? "bg-accent-green/20 text-accent-green" : "bg-accent-red/20 text-accent-red"
-                  )}>
-                    {pos.option_type} {pos.strike}
-                  </span>
-                  <span className="text-[10px] text-text-muted">{pos.expiry?.slice(5)}</span>
-                </div>
-                <div className="text-[10px] text-text-muted mt-0.5 font-mono">
-                  Entry {fmt(pos.entry_price)} → LTP {fmt(pos.current_price)}
-                </div>
-              </div>
-              <div className="text-right">
-                <div className={clsx("font-mono font-semibold text-sm", pnlColor(pos.unrealized_pnl))}>
-                  {fmtSigned(pos.unrealized_pnl, 0)}
-                </div>
-                <div className={clsx("text-[10px] font-mono", pnlColor(pos.return_pct))}>
-                  {fmtSigned(pos.return_pct, 1)}%
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {summary && (
-        <div className="mt-3 pt-3 border-t border-bg-border grid grid-cols-4 gap-2 text-[10px] text-text-muted">
-          <div>
-            <div>Equity</div>
-            <div className={clsx("font-mono font-semibold text-xs", pnlColor(summary.total_equity - summary.initial_capital))}>
-              {fmtCrore(summary.total_equity)}
-            </div>
-          </div>
-          <div>
-            <div>Realized</div>
-            <div className={clsx("font-mono font-semibold text-xs", pnlColor(summary.realized_pnl))}>
-              {fmtSigned(summary.realized_pnl, 0)}
-            </div>
-          </div>
-          <div>
-            <div>Win Rate</div>
-            <div className={clsx("font-mono font-semibold text-xs",
-              (summary.win_rate ?? 0) >= 0.5 ? "text-accent-green" : "text-text-primary"
-            )}>
-              {summary.win_rate != null ? (summary.win_rate * 100).toFixed(0) + "%" : "--"}
-            </div>
-          </div>
-          <div>
-            <div>Trades</div>
-            <div className="font-mono font-semibold text-xs text-text-primary">
-              {summary.total_trades}
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
 }
 
-// ── Stat Card ──────────────────────────────────────────────────────────────────
+function pnlTone(value?: number | null) {
+  if (value == null || Number.isNaN(value)) return "text-text-muted";
+  if (value > 0) return "text-accent-green";
+  if (value < 0) return "text-accent-red";
+  return "text-text-secondary";
+}
 
-function Stat({ label, value, sub, color }: {
-  label: string; value: string; sub?: string; color?: string;
+function freshnessTone(value?: string | null) {
+  if (value === "live") return "ready";
+  if (value === "stale") return "warning";
+  if (value === "missing") return "error";
+  return "idle";
+}
+
+function badgeTone(value?: string | null) {
+  if (value === "ready" || value === "active" || value === "entry-ready" || value === "open") {
+    return "border-accent-green/30 bg-accent-green/10 text-accent-green";
+  }
+  if (
+    value === "trend-aligned"
+    || value === "watching"
+    || value === "monitoring"
+    || value === "warning"
+    || value === "stale"
+  ) {
+    return "border-accent-amber/30 bg-accent-amber/10 text-accent-amber";
+  }
+  if (
+    value === "not-ready"
+    || value === "pipeline_missing"
+    || value === "error"
+    || value === "missing"
+  ) {
+    return "border-accent-red/30 bg-accent-red/10 text-accent-red";
+  }
+  if (value === "CE" || value === "bullish") {
+    return "border-accent-green/30 bg-accent-green/10 text-accent-green";
+  }
+  if (value === "PE" || value === "bearish") {
+    return "border-accent-red/30 bg-accent-red/10 text-accent-red";
+  }
+  return "border-bg-active bg-bg-secondary/60 text-text-secondary";
+}
+
+function prettify(value?: string | null) {
+  if (!value) return "--";
+  return value.replaceAll("_", " ");
+}
+
+function tokenStatusTone(value?: string | null, valid?: boolean) {
+  if (valid) return "ready";
+  if (value === "missing" || value === "expired_reconnect_required") return "error";
+  return "warning";
+}
+
+function summarizeOptionHistoryHealth(agentStatus?: StrategyAgentStatus) {
+  const health = agentStatus?.data_health?.option_history;
+  const failures = Number(health?.failure_count || 0);
+  const successes = Number(health?.success_count || 0);
+  const latestFailure = Object.entries(health?.brokers || {})
+    .map(([broker, brokerState]) => {
+      const brokerFailures = Number(brokerState.failure || 0);
+      if (!brokerFailures) return null;
+      return `${broker.toUpperCase()}: ${brokerState.last_detail || "fetch failed"}`;
+    })
+    .filter(Boolean)
+    .join(" | ");
+
+  return {
+    failures,
+    successes,
+    latestFailure,
+  };
+}
+
+function StatusBadge({
+  label,
+  tone,
+}: {
+  label: string;
+  tone?: string | null;
 }) {
   return (
-    <div className="bg-bg-card border border-bg-border rounded-lg p-3">
-      <div className="text-text-muted text-[10px] uppercase tracking-wider">{label}</div>
-      <div className={clsx("font-mono text-base font-semibold mt-0.5", color)}>{value}</div>
-      {sub && <div className="text-text-muted text-[10px] mt-0.5">{sub}</div>}
-    </div>
-  );
-}
-
-// ── Data Status Panel ──────────────────────────────────────────────────────────
-
-function DataStatusPanel() {
-  const { data, isLoading } = useQuery({
-    queryKey: ["strategy-data-status"],
-    queryFn: () => getStrategyDataStatus().then(r => r.data),
-    refetchInterval: 60_000,
-  });
-
-  if (isLoading) return <PanelSkeleton title="Data Status" />;
-
-  const sources: any[] = data || [];
-  return (
-    <div className="card p-4">
-      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3 flex items-center gap-1.5">
-        <Database size={12} /> Data Pipeline
-      </h3>
-      <div className="space-y-1.5">
-        {sources.map((s: any, i: number) => (
-          <div key={i} className="flex items-center gap-2 text-xs font-mono">
-            {s.status === "ok" ? (
-              <CheckCircle2 size={11} className="text-accent-green shrink-0" />
-            ) : s.status === "warning" ? (
-              <AlertCircle size={11} className="text-accent-amber shrink-0" />
-            ) : (
-              <XCircle size={11} className="text-accent-red shrink-0" />
-            )}
-            <span className="text-text-secondary truncate flex-1">{s.name}</span>
-            <span className="text-text-muted text-[10px]">{s.rows > 0 ? `${s.rows.toLocaleString()}` : "—"}</span>
-            <span className="text-text-muted text-[10px]">{s.last_date}</span>
-          </div>
-        ))}
-        {!sources.length && <div className="text-xs text-text-muted py-3 text-center">No data status</div>}
-      </div>
-    </div>
-  );
-}
-
-// ── Open Signals Panel ─────────────────────────────────────────────────────────
-
-function OpenSignalsPanel() {
-  const { data, isLoading } = useQuery({
-    queryKey: ["strategy-open-signals"],
-    queryFn: () => getStrategyOpenSignals().then(r => r.data),
-    refetchInterval: 30_000,
-  });
-
-  if (isLoading) return <PanelSkeleton title="Next Signals" />;
-
-  const signals: any[] = data?.signals || [];
-  const skipReason = data?.skip_reason;
-  const asOf = data?.as_of || "";
-
-  return (
-    <div className="card p-4 flex flex-col" style={{ maxHeight: 380 }}>
-      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3 flex items-center gap-1.5 shrink-0">
-        <Zap size={12} /> Next Session Signals
-        <span className="ml-auto text-text-muted text-[10px] font-normal">{asOf}</span>
-      </h3>
-      <div className="flex-1 min-h-0 overflow-y-auto">
-      {signals.length === 0 ? (
-        <div className="text-center py-4">
-          <Shield size={20} className="mx-auto text-text-muted mb-1.5" />
-          <div className="text-xs text-text-muted">
-            {skipReason ? `No trade — ${skipReason}` : "No actionable signals"}
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {signals.map((s: any, i: number) => (
-            <div key={i} className={clsx(
-              "rounded-lg p-2.5 border",
-              s.direction === "CE" ? "border-accent-green/30 bg-accent-green/5" :
-              s.direction === "PE" ? "border-accent-red/30 bg-accent-red/5" :
-              "border-bg-border"
-            )}>
-              <div className="flex items-center gap-2 mb-1.5">
-                <span className={clsx(
-                  "text-[10px] font-bold px-2 py-0.5 rounded",
-                  s.direction === "CE" ? "bg-accent-green/20 text-accent-green" :
-                  "bg-accent-red/20 text-accent-red"
-                )}>
-                  {s.direction === "CE" ? "BUY CE" : "BUY PE"}
-                </span>
-                <span className={clsx(
-                  "text-[10px] px-1.5 py-0.5 rounded",
-                  s.strength === "strong" ? "bg-accent-amber/20 text-accent-amber" :
-                  "bg-bg-secondary text-text-muted"
-                )}>
-                  {s.strength}
-                </span>
-                <span className="text-[10px] text-text-muted ml-auto">{s.reason}</span>
-              </div>
-              <div className="text-[10px] text-text-muted italic">{s.instruction}</div>
-            </div>
-          ))}
-        </div>
+    <span
+      className={clsx(
+        "inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em]",
+        badgeTone(tone || label),
       )}
-      </div>
+    >
+      {label}
+    </span>
+  );
+}
+
+function MetricTile({
+  label,
+  value,
+  detail,
+  tone,
+}: {
+  label: string;
+  value: string;
+  detail?: string;
+  tone?: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-bg-border bg-bg-secondary/35 px-4 py-3">
+      <div className="text-[11px] uppercase tracking-[0.16em] text-text-muted">{label}</div>
+      <div className={clsx("mt-2 font-mono text-lg font-semibold text-text-primary", tone)}>{value}</div>
+      {detail ? <div className="mt-1 text-[11px] text-text-muted">{detail}</div> : null}
     </div>
   );
 }
 
-// ── Agent Comments Panel ───────────────────────────────────────────────────────
-
-function AgentCommentsPanel() {
-  const { data, isLoading } = useQuery({
-    queryKey: ["strategy-agent-comments"],
-    queryFn: () => getStrategyAgentComments().then(r => r.data),
-    refetchInterval: 60_000,
-  });
-
-  if (isLoading) return <PanelSkeleton title="Commentary" />;
-
-  const comments: any[] = data || [];
-
-  const levelIcon = (level: string) => {
-    switch (level) {
-      case "bullish": return <TrendingUp size={11} className="text-accent-green" />;
-      case "bearish": return <TrendingDown size={11} className="text-accent-red" />;
-      case "warning": return <AlertCircle size={11} className="text-accent-amber" />;
-      default: return <Activity size={11} className="text-accent-blue" />;
-    }
-  };
-
-  const levelBorder = (level: string) => {
-    switch (level) {
-      case "bullish": return "border-l-accent-green";
-      case "bearish": return "border-l-accent-red";
-      case "warning": return "border-l-accent-amber";
-      default: return "border-l-accent-blue";
-    }
-  };
-
+function PanelHeader({
+  icon,
+  title,
+  detail,
+  meta,
+}: {
+  icon: ReactNode;
+  title: string;
+  detail: string;
+  meta?: string;
+}) {
   return (
-    <div className="card p-4 flex flex-col" style={{ maxHeight: 380 }}>
-      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3 flex items-center gap-1.5 shrink-0">
-        <MessageSquare size={12} /> Agent Commentary
-        <span className="ml-auto text-[10px] font-normal text-text-muted">{comments.length} items</span>
-      </h3>
-      <div className="flex-1 min-h-0 overflow-y-auto space-y-1.5 pr-1 scrollbar-thin">
-        {comments.map((c: any, i: number) => (
-          <div key={i} className={clsx(
-            "text-xs border-l-2 pl-2.5 py-1",
-            levelBorder(c.level)
-          )}>
-            <div className="flex items-center gap-1.5 mb-0.5">
-              {levelIcon(c.level)}
-              <span className="text-text-muted text-[10px]">{c.type}</span>
-              <span className="text-text-muted text-[10px] ml-auto">{c.time}</span>
-            </div>
-            <div className="text-text-secondary leading-relaxed">{c.message}</div>
-          </div>
-        ))}
-        {comments.length === 0 && (
-          <div className="text-xs text-text-muted text-center py-4">No commentary available</div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── Signal History ─────────────────────────────────────────────────────────────
-
-function SignalHistoryPanel() {
-  const { data, isLoading } = useQuery({
-    queryKey: ["strategy-signals"],
-    queryFn: () => getStrategySignals().then(r => r.data),
-    refetchInterval: 60_000,
-  });
-
-  if (isLoading) return <PanelSkeleton title="Signal History" />;
-
-  const mpSignals: any[] = (data?.mp_signals || []).slice(-20).reverse();
-
-  const dirColor = (dir: string) => {
-    switch (dir) {
-      case "CE": return "text-accent-green";
-      case "PE": return "text-accent-red";
-      case "CONFLICT": return "text-accent-amber";
-      default: return "text-text-muted";
-    }
-  };
-
-  const dayTypeColor = (dt: string) => {
-    if (dt.includes("TREND_UP")) return "text-accent-green";
-    if (dt.includes("TREND_DN")) return "text-accent-red";
-    if (dt.includes("DOUBLE_DIST")) return "text-accent-amber";
-    if (dt.includes("FAILED")) return "text-accent-purple";
-    return "text-text-secondary";
-  };
-
-  return (
-    <div className="card p-4 flex flex-col" style={{ maxHeight: 400 }}>
-      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3 flex items-center gap-1.5 shrink-0">
-        <BarChart2 size={12} /> MP Signal History
-      </h3>
-      <div className="flex-1 min-h-0 overflow-auto">
-        <table className="w-full text-[10px] font-mono">
-          <thead>
-            <tr className="text-text-muted border-b border-bg-border">
-              <th className="text-left py-1 pr-2">Date</th>
-              <th className="text-left py-1 pr-2">Day Type</th>
-              <th className="text-right py-1 pr-2">Move</th>
-              <th className="text-center py-1 pr-2">BF</th>
-              <th className="text-center py-1 pr-2">SF</th>
-              <th className="text-center py-1">Dir</th>
-            </tr>
-          </thead>
-          <tbody>
-            {mpSignals.map((s: any, i: number) => (
-              <tr key={i} className="border-b border-bg-border/30 hover:bg-bg-secondary/30">
-                <td className="py-1 pr-2 text-text-secondary">{s.date}</td>
-                <td className={clsx("py-1 pr-2", dayTypeColor(s.day_type))}>{s.day_type}</td>
-                <td className={clsx("py-1 pr-2 text-right",
-                  s.daily_move > 0 ? "text-accent-green" : s.daily_move < 0 ? "text-accent-red" : "text-text-muted"
-                )}>
-                  {s.daily_move > 0 ? "+" : ""}{Math.round(s.daily_move)}
-                </td>
-                <td className="py-1 pr-2 text-center">{s.buyer_fail}</td>
-                <td className="py-1 pr-2 text-center">{s.seller_fail}</td>
-                <td className={clsx("py-1 text-center font-semibold", dirColor(s.mp_direction))}>
-                  {s.mp_direction}
-                </td>
-              </tr>
-            ))}
-            {!mpSignals.length && (
-              <tr>
-                <td colSpan={6} className="py-6 text-center text-text-muted">No signal history</td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-// ── Trade Book Panel ───────────────────────────────────────────────────────────
-
-function TradeBookPanel() {
-  const { data, isLoading } = useQuery({
-    queryKey: ["strategy-trades"],
-    queryFn: () => getStrategyTrades().then(r => r.data),
-    refetchInterval: 60_000,
-  });
-
-  if (isLoading) return <PanelSkeleton title="Trade Book" />;
-
-  const trades: any[] = data?.trades || [];
-  const total = data?.total || 0;
-
-  return (
-    <div className="card p-4 flex flex-col" style={{ maxHeight: 400 }}>
-      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3 flex items-center gap-1.5 shrink-0">
-        <FileText size={12} /> Trade Book
-        <span className="ml-auto text-text-muted text-[10px] font-normal">{total} total</span>
-      </h3>
-      <div className="flex-1 min-h-0 overflow-auto">
-        <table className="w-full text-[10px] font-mono">
-          <thead className="sticky top-0 bg-bg-card">
-            <tr className="text-text-muted border-b border-bg-border">
-              <th className="text-left py-1 pr-2">Type</th>
-              <th className="text-left py-1 pr-2">Entry</th>
-              <th className="text-right py-1 pr-2">EP</th>
-              <th className="text-right py-1 pr-2">XP</th>
-              <th className="text-left py-1 pr-2">Reason</th>
-              <th className="text-right py-1">Ret%</th>
-            </tr>
-          </thead>
-          <tbody>
-            {trades.map((t: any, i: number) => (
-              <tr key={i} className="border-b border-bg-border/30 hover:bg-bg-secondary/30">
-                <td className={clsx("py-1 pr-2 font-semibold",
-                  t.option_type === "CE" ? "text-accent-green" : "text-accent-red"
-                )}>
-                  {t.option_type}
-                </td>
-                <td className="py-1 pr-2 text-text-secondary">{t.entry_time?.slice(0, 10)}</td>
-                <td className="py-1 pr-2 text-right text-text-secondary">{t.entry_price?.toFixed(0)}</td>
-                <td className="py-1 pr-2 text-right text-text-secondary">{t.exit_price?.toFixed(0)}</td>
-                <td className="py-1 pr-2 text-text-muted">{t.exit_reason?.replace(/_/g, " ")}</td>
-                <td className={clsx("py-1 text-right font-semibold",
-                  t.blended_return > 0 ? "text-accent-green" : t.blended_return < 0 ? "text-accent-red" : "text-text-muted"
-                )}>
-                  {t.blended_return > 0 ? "+" : ""}{t.blended_return?.toFixed(1)}%
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-// ── Portfolio Stats Panel ──────────────────────────────────────────────────────
-
-function PortfolioPanel() {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["strategy-portfolio"],
-    queryFn: () => getStrategyPortfolio().then(r => r.data),
-    refetchInterval: 120_000,
-  });
-
-  if (isLoading) return <PanelSkeleton title="Portfolio" />;
-  if (error || !data) return (
-    <div className="card p-4">
-      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">Backtest Portfolio</h3>
-      <div className="text-xs text-text-muted text-center py-6">No portfolio data available</div>
-    </div>
-  );
-
-  const p = data;
-  const equityCurve = p.equity_curve || [];
-  const monthly = p.monthly || [];
-
-  return (
-    <div className="card p-4 space-y-4">
-      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider flex items-center gap-1.5">
-        <Target size={12} /> Backtest Portfolio — {p.strategy}
-      </h3>
-
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        <Stat
-          label="Final Equity"
-          value={`${p.final_equity_lakhs}L`}
-          sub={`from 1L (${p.total_return_pct > 0 ? "+" : ""}${p.total_return_pct}%)`}
-          color="text-accent-green"
-        />
-        <Stat
-          label="Win Rate"
-          value={`${p.win_rate}%`}
-          sub={`${p.wins}W / ${p.losses}L of ${p.total_trades}`}
-          color={p.win_rate >= 60 ? "text-accent-green" : p.win_rate >= 50 ? "text-accent-amber" : "text-accent-red"}
-        />
-        <Stat
-          label="Avg Return"
-          value={`${p.avg_return > 0 ? "+" : ""}${p.avg_return}%`}
-          sub={`Median: ${p.median_return > 0 ? "+" : ""}${p.median_return}%`}
-          color={p.avg_return > 0 ? "text-accent-green" : "text-accent-red"}
-        />
-        <Stat
-          label="Max Drawdown"
-          value={`${p.max_drawdown_pct}%`}
-          sub={`${p.catastrophic_trades} catastrophic`}
-          color={p.max_drawdown_pct > 30 ? "text-accent-red" : "text-accent-amber"}
-        />
-      </div>
-
-      {equityCurve.length > 1 && (
-        <div>
-          <div className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Backtest Equity Curve</div>
-          <ResponsiveContainer width="100%" height={160}>
-            <LineChart data={equityCurve}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1e2d45" />
-              <XAxis dataKey="trade" tick={{ fontSize: 9, fill: "#4a5568" }} />
-              <YAxis tick={{ fontSize: 9, fill: "#4a5568" }} tickFormatter={(v: number) => `${(v / 1e5).toFixed(0)}L`} />
-              <Tooltip
-                contentStyle={{ background: "#0f1724", border: "1px solid #1e2d45", fontSize: 11 }}
-                formatter={(v: number) => [`${(v / 1e5).toFixed(2)}L`, "Equity"]}
-                labelFormatter={(v: number) => `Trade #${v}`}
-              />
-              <ReferenceLine y={100000} stroke="#4a5568" strokeDasharray="3 3" />
-              <Line type="monotone" dataKey="equity" stroke="#00d4a3" dot={false} strokeWidth={2} />
-            </LineChart>
-          </ResponsiveContainer>
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <div className="flex items-center gap-2 text-sm font-semibold text-text-primary">
+          {icon}
+          {title}
         </div>
-      )}
-
-      {monthly.length > 0 && (
-        <div>
-          <div className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Monthly P&L</div>
-          <ResponsiveContainer width="100%" height={120}>
-            <BarChart data={monthly}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1e2d45" />
-              <XAxis dataKey="month" tick={{ fontSize: 8, fill: "#4a5568" }} />
-              <YAxis tick={{ fontSize: 8, fill: "#4a5568" }} tickFormatter={(v: number) => `${v > 0 ? "+" : ""}${v.toFixed(0)}%`} />
-              <Tooltip
-                contentStyle={{ background: "#0f1724", border: "1px solid #1e2d45", fontSize: 11 }}
-                formatter={(v: number) => [`${v > 0 ? "+" : ""}${v.toFixed(1)}%`, "Equity Δ"]}
-              />
-              <ReferenceLine y={0} stroke="#4a5568" />
-              <Bar dataKey="eq_change_pct">
-                {monthly.map((m: any, i: number) => (
-                  <Cell key={i} fill={m.eq_change_pct >= 0 ? "#22c55e" : "#ef4444"} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Panel Skeleton ─────────────────────────────────────────────────────────────
-
-function PanelSkeleton({ title }: { title: string }) {
-  return (
-    <div className="card p-4">
-      <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3">{title}</h3>
-      <div className="flex items-center justify-center py-6">
-        <Loader2 size={14} className="animate-spin text-text-muted" />
-        <span className="text-xs text-text-muted ml-2">Loading...</span>
+        <div className="mt-1 text-xs text-text-muted">{detail}</div>
       </div>
+      {meta ? <div className="text-xs text-text-muted">{meta}</div> : null}
     </div>
   );
 }
 
-// ── Main Page ──────────────────────────────────────────────────────────────────
+function TabButton({
+  active,
+  label,
+  detail,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  detail: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={clsx(
+        "rounded-2xl border px-4 py-3 text-left transition-colors",
+        active
+          ? "border-accent-blue/40 bg-accent-blue/10 text-text-primary"
+          : "border-bg-border bg-bg-secondary/25 text-text-secondary hover:border-bg-active hover:text-text-primary",
+      )}
+    >
+      <div className="text-xs font-semibold uppercase tracking-[0.16em]">{label}</div>
+      <div className="mt-1 text-[11px] leading-5 text-text-muted">{detail}</div>
+    </button>
+  );
+}
+
+function normalizeSignalRows(rows: StrategySignalRow[] | undefined) {
+  return (rows || []).map((row, index) => ({ ...row, _id: `${row.underlying}-${row.reason || row.status || index}` }));
+}
+
+function toEpoch(value?: string | null) {
+  if (!value) return 0;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? 0 : parsed.getTime();
+}
+
+function strategyContractLabel(optionType?: string | null, strike?: number | null, expiry?: string | null) {
+  return `${optionType || "--"} ${strike != null ? String(strike) : "--"} · ${expiry || "--"}`;
+}
+
+function strategyUnderlyingFromSymbol(symbol?: string | null) {
+  const parts = String(symbol || "").split(":");
+  return parts.length > 1 ? parts[1] : String(symbol || "--");
+}
+
+function buildStrategyPortfolioRows(
+  strategies: StrategyAgentStatus["strategies"],
+  lastRunAt?: string | null,
+): StrategyPortfolioRow[] {
+  const rows: StrategyPortfolioRow[] = [];
+
+  for (const strategy of strategies || []) {
+    for (const position of strategy.positions || []) {
+      rows.push({
+        id: `${strategy.key}:open:${position.symbol}:${position.entered_at || position.price_updated_at || "na"}`,
+        strategyKey: strategy.key,
+        strategyLabel: strategy.label,
+        underlying: position.underlying,
+        contract: strategyContractLabel(position.option_type, position.strike, position.expiry),
+        qty: position.qty,
+        entryTime: position.entered_at,
+        entryPrice: position.entry_price,
+        lastTime: position.price_updated_at || lastRunAt || position.entered_at,
+        lastPrice: position.current_price,
+        pnl: position.unrealized_pnl,
+        returnPct: position.return_pct,
+        status: "open",
+        statusLabel: position.phase ? `open · ${prettify(position.phase)}` : "open",
+        signalReason: position.signal_reason,
+      });
+    }
+
+    for (const trade of strategy.trade_history || []) {
+      const grossCost = (trade.entry_price || 0) * Math.max(trade.qty || 0, 1);
+      rows.push({
+        id: `${strategy.key}:closed:${trade.symbol}:${trade.exit_time || trade.entry_time || "na"}`,
+        strategyKey: strategy.key,
+        strategyLabel: strategy.label,
+        underlying: strategyUnderlyingFromSymbol(trade.symbol),
+        contract: strategyContractLabel(trade.option_type, trade.strike, trade.expiry),
+        qty: trade.qty,
+        entryTime: trade.entry_time,
+        entryPrice: trade.entry_price,
+        lastTime: trade.exit_time,
+        lastPrice: trade.exit_price,
+        pnl: trade.pnl,
+        returnPct: grossCost > 0 ? (trade.pnl / grossCost) * 100 : null,
+        status: "closed",
+        statusLabel: "closed",
+        signalReason: trade.option_type ? `${trade.option_type} exit` : trade.action,
+      });
+    }
+  }
+
+  rows.sort((left, right) => {
+    const rightTime = Math.max(toEpoch(right.lastTime), toEpoch(right.entryTime));
+    const leftTime = Math.max(toEpoch(left.lastTime), toEpoch(left.entryTime));
+    return rightTime - leftTime;
+  });
+  return rows;
+}
 
 export default function StrategyPage() {
+  const [activeTab, setActiveTab] = useState<StrategyTab>("portfolio");
+
+  const { data: agentStatus } = useQuery({
+    queryKey: ["strategyAgentStatus"],
+    queryFn: () => getStrategyAgentStatus().then((response) => response.data as StrategyAgentStatus),
+    refetchInterval: 15_000,
+    staleTime: 10_000,
+  });
+
+  const { data: openSignals } = useQuery({
+    queryKey: ["strategyOpenSignals"],
+    queryFn: () => getStrategyOpenSignals().then((response) => response.data as any),
+    refetchInterval: 15_000,
+    staleTime: 10_000,
+  });
+
+  const { data: comments } = useQuery({
+    queryKey: ["strategyAgentComments"],
+    queryFn: () => getStrategyAgentComments().then((response) => response.data as StrategyComment[]),
+    refetchInterval: 30_000,
+    staleTime: 10_000,
+  });
+
+  const { data: brokers } = useQuery({
+    queryKey: ["brokerStatus"],
+    queryFn: () => getBrokerStatus().then((response) => response.data as any[]),
+    refetchInterval: 30_000,
+    staleTime: 10_000,
+  });
+
+  const { data: pipeline } = useQuery({
+    queryKey: ["strategyDataStatus"],
+    queryFn: () => getStrategyDataStatus().then((response) => response.data as any),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+
+  const { data: livePortfolio } = useQuery({
+    queryKey: ["strategyPortfolio"],
+    queryFn: () => getStrategyPortfolio().then((response) => response.data as any),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+
+  const strategies = agentStatus?.strategies || [];
+  const allPositions = strategies.flatMap((strategy) =>
+    (strategy.positions || []).map((position) => ({
+      ...position,
+      strategyKey: strategy.key,
+      strategyLabel: strategy.label,
+    })),
+  );
+  const totalOpenPnl = strategies.reduce((sum, strategy) => sum + (strategy.summary.unrealized_pnl || 0), 0);
+  const totalRealized = strategies.reduce((sum, strategy) => sum + (strategy.summary.realized_pnl || 0), 0);
+  const totalTrades = strategies.reduce((sum, strategy) => sum + (strategy.summary.total_trades || 0), 0);
+  const weightedWins = strategies.reduce(
+    (sum, strategy) => sum + Math.round((strategy.summary.win_rate || 0) * (strategy.summary.total_trades || 0)),
+    0,
+  );
+  const combinedWinRate = totalTrades ? (weightedWins / totalTrades) * 100 : 0;
+
+  const strategy1Rows = normalizeSignalRows([
+    ...(openSignals?.live_positions || []),
+    ...(openSignals?.strategy1_watchlist || []),
+  ]);
+  const strategy2Rows = normalizeSignalRows(openSignals?.strategy2_signals || []);
+  const brokerRows = brokers || [];
+  const commentRows = comments || [];
+  const brokerSnapshot = agentStatus?.data_health?.broker_snapshot;
+  const upstoxHealth = brokerSnapshot?.upstox_token_health;
+  const fyersHealth = brokerSnapshot?.fyers_token_health;
+  const optionHistoryHealth = summarizeOptionHistoryHealth(agentStatus);
+  const portfolioRows = buildStrategyPortfolioRows(strategies, agentStatus?.last_run_at);
+  const equityCurve = livePortfolio?.equity_curve || [];
+  const monthly = livePortfolio?.monthly || [];
+
   return (
-    <div className="space-y-4 max-w-[1600px] mx-auto">
+    <div className="mx-auto max-w-[1680px] space-y-6 pb-10">
+      <section className="rounded-[28px] border border-bg-active/60 bg-bg-secondary/30 px-5 py-5">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="max-w-4xl">
+            <div className="flex items-center gap-2 text-lg font-bold font-mono text-text-primary">
+              <Bot size={18} className="text-accent-blue" />
+              NSE Options Strategy Desk
+            </div>
+            <p className="mt-2 text-sm leading-6 text-text-secondary">
+              Strategy 1 trades 30-minute ATM option MACD zero-cross setups, while Strategy 2 trades 5-minute index options only when MACD and Market Profile confirmation align. This desk is organized around live option exposure first, then signals, then runtime operations.
+            </p>
+          </div>
+          <div className="rounded-[22px] border border-bg-border bg-bg-secondary/35 px-4 py-4">
+            <div className="text-sm font-semibold text-text-primary">Runtime Rail</div>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <StatusBadge label={agentStatus?.running ? "Loop Active" : "Idle"} tone={agentStatus?.running ? "ready" : "idle"} />
+              <StatusBadge
+                label={agentStatus?.kill_switch_active ? "Kill Switch On" : "Kill Switch Off"}
+                tone={agentStatus?.kill_switch_active ? "warning" : "ready"}
+              />
+              <StatusBadge
+                label={agentStatus?.auto_run_enabled ? "Automatic" : "Manual"}
+                tone={agentStatus?.auto_run_enabled ? "ready" : "warning"}
+              />
+              {brokerSnapshot ? (
+                <StatusBadge
+                  label={brokerSnapshot.broker_ready ? "Broker Ready" : "Broker Blocked"}
+                  tone={brokerSnapshot.broker_ready ? "ready" : "error"}
+                />
+              ) : null}
+            </div>
+            <div className="mt-4 space-y-2 text-xs text-text-secondary">
+              <div>Last scan: <span className="font-mono text-text-primary">{formatTimestamp(agentStatus?.last_run_at)}</span></div>
+              <div>Next scan: <span className="font-mono text-text-primary">{formatTimestamp(agentStatus?.next_scan_at)}</span></div>
+              <div>Expiry: <span className="font-mono text-text-primary">{agentStatus?.target_expiry || "--"}</span></div>
+              <div>Cadence: <span className="font-mono text-text-primary">{agentStatus?.scan_interval_seconds || 60}s</span></div>
+            </div>
+          </div>
+        </div>
 
-      {/* Header */}
-      <div>
-        <h1 className="text-base font-bold text-text-primary">Strategy Dashboard</h1>
-        <p className="text-xs text-text-muted mt-0.5">
-          MACD Zero-Cross · Market Profile · NSE F&O
-        </p>
-      </div>
+        <div className="mt-5 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+          <MetricTile label="Open Positions" value={String(allPositions.length)} />
+          <MetricTile label="Strategy 1 Open" value={String(strategies.find((strategy) => strategy.key === "macd_strategy")?.summary.open_positions || 0)} />
+          <MetricTile label="Strategy 2 Open" value={String(strategies.find((strategy) => strategy.key === "index_mp_strategy")?.summary.open_positions || 0)} />
+          <MetricTile label="Open P&L" value={formatSigned(totalOpenPnl, 0)} tone={pnlTone(totalOpenPnl)} />
+          <MetricTile label="Realized" value={formatSigned(totalRealized, 0)} tone={pnlTone(totalRealized)} />
+          <MetricTile label="Win Rate" value={totalTrades ? `${combinedWinRate.toFixed(1)}%` : "--"} detail={`${totalTrades} closed trades`} />
+        </div>
+      </section>
 
-      {/* Live positions — full width, prominent at top */}
-      <LivePositionsWidget />
+      <section className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <div className="text-sm font-semibold text-text-primary">Workspace Tabs</div>
+            <div className="mt-1 text-xs text-text-muted">
+              Portfolio stays first. Signal lanes stay separate from operations, and performance lives under operations so the live options book is not buried under research panels.
+            </div>
+          </div>
+          <div className="text-xs text-text-muted">
+            {activeTab === "portfolio"
+              ? `${allPositions.length} live positions`
+              : activeTab === "signals"
+                ? `${strategy1Rows.length + strategy2Rows.length} signal rows`
+                : `${portfolioRows.length} portfolio rows`}
+          </div>
+        </div>
 
-      {/* Signal + Commentary + Data Status */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <OpenSignalsPanel />
-        <AgentCommentsPanel />
-        <DataStatusPanel />
-      </div>
+        <div className="mt-4 grid gap-3 md:grid-cols-3">
+          <TabButton
+            active={activeTab === "portfolio"}
+            label="Portfolio"
+            detail="Combined live positions, strategy summary, and commentary."
+            onClick={() => startTransition(() => setActiveTab("portfolio"))}
+          />
+          <TabButton
+            active={activeTab === "signals"}
+            label="Signals"
+            detail="Strategy 1 monitoring lane and Strategy 2 MP-confirmed option lane."
+            onClick={() => startTransition(() => setActiveTab("signals"))}
+          />
+          <TabButton
+            active={activeTab === "operations"}
+            label="Operations"
+            detail="Performance, trade book, broker links, and live data pipeline."
+            onClick={() => startTransition(() => setActiveTab("operations"))}
+          />
+        </div>
+      </section>
 
-      {/* Backtest portfolio stats (full width) */}
-      <PortfolioPanel />
+      <section className={clsx("space-y-4", activeTab !== "portfolio" && "hidden")}>
+        <div className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
+          <PanelHeader
+            icon={<CandlestickChart size={16} className="text-accent-green" />}
+            title="Live Option Positions"
+            detail="Strategy 1 and Strategy 2 option positions are shown in one table so live exposure is visible before commentary or research status."
+            meta={`${allPositions.length} positions`}
+          />
 
-      {/* Signal history + Trade book */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <SignalHistoryPanel />
-        <TradeBookPanel />
-      </div>
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full min-w-[1540px] text-left text-xs">
+              <thead>
+                <tr className="border-b border-bg-border text-text-muted">
+                  <th className="pb-2 pr-3">Strategy</th>
+                  <th className="pb-2 pr-3">Underlying</th>
+                  <th className="pb-2 pr-3">Contract</th>
+                  <th className="pb-2 pr-3">Phase</th>
+                  <th className="pb-2 pr-3">Qty</th>
+                  <th className="pb-2 pr-3">Entry</th>
+                  <th className="pb-2 pr-3">Last</th>
+                  <th className="pb-2 pr-3">Trail / RSI</th>
+                  <th className="pb-2 pr-3">Signal</th>
+                  <th className="pb-2">Open P&amp;L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {allPositions.length ? (
+                  allPositions.map((position) => (
+                    <tr key={`${position.symbol}-${position.entered_at}`} className="border-b border-bg-border/40 align-top">
+                      <td className="py-3 pr-3">
+                        <StatusBadge
+                          label={position.strategyKey === "macd_strategy" ? "Strategy 1" : "Strategy 2"}
+                          tone={position.strategyKey === "macd_strategy" ? "ready" : "warning"}
+                        />
+                      </td>
+                      <td className="py-3 pr-3">
+                        <div className="font-medium text-text-primary">{position.underlying}</div>
+                        <div className="mt-1 text-[11px] text-text-muted">{position.strategyLabel}</div>
+                      </td>
+                      <td className="py-3 pr-3">
+                        <div className="font-mono text-text-primary">
+                          {position.option_type} {position.strike}
+                        </div>
+                        <div className="mt-1 text-[11px] text-text-muted">{position.expiry || "--"}</div>
+                      </td>
+                      <td className="py-3 pr-3">
+                        <StatusBadge label={prettify(position.phase)} tone={position.phase || "idle"} />
+                      </td>
+                      <td className="py-3 pr-3 font-mono text-text-primary">{position.qty}</td>
+                      <td className="py-3 pr-3 font-mono text-text-primary">{formatNumber(position.entry_price)}</td>
+                      <td className="py-3 pr-3 font-mono text-text-primary">{formatNumber(position.current_price)}</td>
+                      <td className="py-3 pr-3 font-mono text-text-secondary">
+                        <div>trail {position.trailing_stop != null ? formatNumber(position.trailing_stop) : "--"}</div>
+                        <div className="mt-1 text-[11px] text-text-muted">RSI {position.latest_rsi != null ? formatNumber(position.latest_rsi, 1) : "--"}</div>
+                      </td>
+                      <td className="py-3 pr-3 text-text-muted">
+                        {prettify(position.signal_reason)}
+                        <div className="mt-1 text-[11px] text-text-muted">{formatTimestamp(position.price_updated_at || position.entered_at)}</div>
+                      </td>
+                      <td className={clsx("py-3 font-mono font-semibold", pnlTone(position.unrealized_pnl))}>
+                        {formatSigned(position.unrealized_pnl, 0)}
+                        <div className="mt-1 text-[11px] text-text-muted">{formatSigned(position.return_pct, 1, "%")}</div>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={10} className="py-10 text-center text-sm text-text-muted">
+                      No live option positions are open right now.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
 
+        <div className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
+          <PanelHeader
+            icon={<FileText size={16} className="text-accent-blue" />}
+            title="Portfolio Ledger"
+            detail="Each row shows the contract, entry fill, latest exit or mark, timestamps, and the exact P&L so trade outcomes are visible without reading the commentary feed."
+            meta={`${portfolioRows.length} rows`}
+          />
+
+          <div className="mt-4 max-h-[360px] overflow-auto">
+            <table className="w-full min-w-[1280px] text-left text-xs">
+              <thead className="sticky top-0 bg-bg-card">
+                <tr className="border-b border-bg-border text-text-muted">
+                  <th className="py-2 pr-3">Strategy</th>
+                  <th className="py-2 pr-3">Underlying</th>
+                  <th className="py-2 pr-3">Contract</th>
+                  <th className="py-2 pr-3">Status</th>
+                  <th className="py-2 pr-3">Qty</th>
+                  <th className="py-2 pr-3">Entry</th>
+                  <th className="py-2 pr-3">Exit / Mark</th>
+                  <th className="py-2 pr-3">Signal</th>
+                  <th className="py-2">P&amp;L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {portfolioRows.length ? (
+                  portfolioRows.map((row) => (
+                    <tr key={row.id} className="border-b border-bg-border/40 align-top">
+                      <td className="py-3 pr-3">
+                        <StatusBadge
+                          label={row.strategyKey === "macd_strategy" ? "Strategy 1" : "Strategy 2"}
+                          tone={row.strategyKey === "macd_strategy" ? "ready" : "warning"}
+                        />
+                      </td>
+                      <td className="py-3 pr-3 font-medium text-text-primary">{row.underlying}</td>
+                      <td className="py-3 pr-3 font-mono text-text-secondary">{row.contract}</td>
+                      <td className="py-3 pr-3">
+                        <StatusBadge label={row.statusLabel} tone={row.status === "open" ? "ready" : "idle"} />
+                      </td>
+                      <td className="py-3 pr-3 font-mono text-text-primary">{row.qty}</td>
+                      <td className="py-3 pr-3 font-mono text-text-secondary">
+                        <div>{row.entryPrice != null ? formatNumber(row.entryPrice) : "--"}</div>
+                        <div className="mt-1 text-[11px] text-text-muted">{formatTimestamp(row.entryTime)}</div>
+                      </td>
+                      <td className="py-3 pr-3 font-mono text-text-secondary">
+                        <div>{row.lastPrice != null ? formatNumber(row.lastPrice) : "--"}</div>
+                        <div className="mt-1 text-[11px] text-text-muted">{formatTimestamp(row.lastTime)}</div>
+                      </td>
+                      <td className="py-3 pr-3 text-text-muted">{prettify(row.signalReason)}</td>
+                      <td className={clsx("py-3 font-mono font-semibold", pnlTone(row.pnl))}>
+                        {formatSigned(row.pnl, 0)}
+                        <div className="mt-1 text-[11px] text-text-muted">{formatSigned(row.returnPct, 1, "%")}</div>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={9} className="py-10 text-center text-sm text-text-muted">
+                      No portfolio rows are available yet.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="grid gap-4 xl:grid-cols-[0.95fr,1.05fr]">
+          <div className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
+            <PanelHeader
+              icon={<Shield size={16} className="text-accent-blue" />}
+              title="Strategy Summary"
+              detail="Both runtimes report into one summary block under the portfolio so the page does not lead with infrastructure."
+            />
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              {strategies.map((strategy) => (
+                <div key={strategy.key} className="rounded-2xl border border-bg-border bg-bg-secondary/20 px-4 py-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-text-primary">{strategy.label}</div>
+                      <div className="mt-1 text-[11px] text-text-muted">
+                        {strategy.summary.open_positions || 0} open · {strategy.summary.total_trades || 0} closed
+                      </div>
+                    </div>
+                    <div className={clsx("font-mono text-sm font-semibold", pnlTone(strategy.summary.unrealized_pnl))}>
+                      {formatSigned(strategy.summary.unrealized_pnl, 0)}
+                    </div>
+                  </div>
+                  <div className="mt-4 grid gap-2 text-xs sm:grid-cols-2">
+                    <div className="rounded-xl border border-bg-border bg-bg-primary/30 px-3 py-2">
+                      <div className="text-text-muted">Equity</div>
+                      <div className="mt-1 font-mono text-text-primary">{formatCompact(strategy.summary.total_equity)}</div>
+                    </div>
+                    <div className="rounded-xl border border-bg-border bg-bg-primary/30 px-3 py-2">
+                      <div className="text-text-muted">Win Rate</div>
+                      <div className="mt-1 font-mono text-text-primary">
+                        {strategy.summary.win_rate != null ? `${((strategy.summary.win_rate || 0) * 100).toFixed(1)}%` : "--"}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-bg-border bg-bg-primary/30 px-3 py-2">
+                      <div className="text-text-muted">Entries / Exits</div>
+                      <div className="mt-1 font-mono text-text-primary">
+                        {strategy.summary.entries || 0} / {strategy.summary.exits || 0}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-bg-border bg-bg-primary/30 px-3 py-2">
+                      <div className="text-text-muted">Last Scan</div>
+                      <div className="mt-1 font-mono text-text-primary">{formatTimestamp(strategy.last_scan_at)}</div>
+                    </div>
+                  </div>
+                  <div className="mt-4 rounded-2xl border border-bg-border bg-bg-primary/35 px-3 py-3 text-xs text-text-secondary">
+                    {strategy.last_message || "Waiting for the next scan."}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
+            <PanelHeader
+              icon={<Activity size={16} className="text-accent-blue" />}
+              title="Agent Commentary"
+              detail="Scrollable runtime commentary sits below positions so it stays operational instead of becoming the first thing on the page."
+              meta={`${commentRows.length} notes`}
+            />
+
+            <div className="mt-4 max-h-[520px] space-y-3 overflow-y-auto pr-1">
+              {commentRows.length ? (
+                commentRows.map((comment, index) => (
+                  <div key={`${comment.time}-${index}`} className="rounded-2xl border border-bg-border bg-bg-primary/35 px-3 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <StatusBadge label={comment.type} tone={comment.level} />
+                      <div className="text-[11px] text-text-muted">{comment.time}</div>
+                    </div>
+                    <div className="mt-2 text-sm leading-6 text-text-secondary">{comment.message}</div>
+                  </div>
+                ))
+              ) : (
+                <div className="rounded-2xl border border-dashed border-bg-border px-3 py-12 text-center text-xs text-text-muted">
+                  No agent commentary yet.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className={clsx("space-y-4", activeTab !== "signals" && "hidden")}>
+        <div className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
+          <PanelHeader
+            icon={<Waves size={16} className="text-accent-amber" />}
+            title="Strategy 1 · 30m ATM MACD"
+            detail="This lane watches the 30-minute option regime and the live option positions opened from that regime. It stays separate from Strategy 2 so the MP-confirmed index workflow does not obscure the simpler monthly-window book."
+            meta={`${strategy1Rows.length} rows`}
+          />
+
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full min-w-[1320px] text-left text-xs">
+              <thead>
+                <tr className="border-b border-bg-border text-text-muted">
+                  <th className="pb-2 pr-3">Underlying</th>
+                  <th className="pb-2 pr-3">Direction</th>
+                  <th className="pb-2 pr-3">Status</th>
+                  <th className="pb-2 pr-3">Source</th>
+                  <th className="pb-2 pr-3">Reason</th>
+                  <th className="pb-2">Instruction</th>
+                </tr>
+              </thead>
+              <tbody>
+                {strategy1Rows.length ? (
+                  strategy1Rows.map((row) => (
+                    <tr key={row._id} className="border-b border-bg-border/40 align-top">
+                      <td className="py-3 pr-3 font-medium text-text-primary">{row.underlying}</td>
+                      <td className="py-3 pr-3">
+                        {row.direction ? <StatusBadge label={row.direction} tone={row.direction} /> : <span className="text-text-muted">--</span>}
+                      </td>
+                      <td className="py-3 pr-3">
+                        <StatusBadge label={prettify(row.status)} tone={row.status || row.freshness} />
+                      </td>
+                      <td className="py-3 pr-3">
+                        <div className="text-text-secondary">{prettify(row.source)}</div>
+                        <div className="mt-1 text-[11px] text-text-muted">{row.as_of || "--"}</div>
+                      </td>
+                      <td className="py-3 pr-3 text-text-secondary">{prettify(row.reason)}</td>
+                      <td className="py-3 text-text-muted">{row.instruction || "--"}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={6} className="py-10 text-center text-sm text-text-muted">
+                      No Strategy 1 live rows are available.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
+          <PanelHeader
+            icon={<CandlestickChart size={16} className="text-accent-green" />}
+            title="Strategy 2 · 5m Index MACD + MP"
+            detail="This lane is the live MP-confirmed options workflow. Market Profile context is surfaced with the option trigger so each index row reads like an actionable trading lane rather than a CSV monitor."
+            meta={`${strategy2Rows.length} rows`}
+          />
+
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full min-w-[1600px] text-left text-xs">
+              <thead>
+                <tr className="border-b border-bg-border text-text-muted">
+                  <th className="pb-2 pr-3">Index</th>
+                  <th className="pb-2 pr-3">Direction</th>
+                  <th className="pb-2 pr-3">Status</th>
+                  <th className="pb-2 pr-3">MP Context</th>
+                  <th className="pb-2 pr-3">Spot / Value Area</th>
+                  <th className="pb-2 pr-3">Freshness</th>
+                  <th className="pb-2">Instruction</th>
+                </tr>
+              </thead>
+              <tbody>
+                {strategy2Rows.length ? (
+                  strategy2Rows.map((row) => (
+                    <tr key={row._id} className="border-b border-bg-border/40 align-top">
+                      <td className="py-3 pr-3">
+                        <div className="font-medium text-text-primary">{row.underlying}</div>
+                        <div className="mt-1 text-[11px] text-text-muted">{row.as_of || "--"}</div>
+                      </td>
+                      <td className="py-3 pr-3">
+                        {row.direction ? <StatusBadge label={row.direction} tone={row.direction} /> : <span className="text-text-muted">--</span>}
+                      </td>
+                      <td className="py-3 pr-3">
+                        <StatusBadge label={prettify(row.status)} tone={row.status || row.freshness} />
+                      </td>
+                      <td className="py-3 pr-3 text-text-secondary">
+                        <div>{prettify(row.reason)}</div>
+                        {row.mp_day_type ? <div className="mt-1 text-[11px] text-text-muted">{prettify(row.mp_day_type)}</div> : null}
+                      </td>
+                      <td className="py-3 pr-3 font-mono text-text-secondary">
+                        <div>spot {row.spot_price != null ? formatNumber(row.spot_price) : "--"}</div>
+                        <div className="mt-1">POC {row.poc != null ? formatNumber(row.poc) : "--"} · VA {row.val != null ? formatNumber(row.val) : "--"} / {row.vah != null ? formatNumber(row.vah) : "--"}</div>
+                      </td>
+                      <td className="py-3 pr-3 text-text-secondary">
+                        <StatusBadge label={row.freshness || "unknown"} tone={freshnessTone(row.freshness)} />
+                        <div className="mt-2 text-[11px] text-text-muted">
+                          {row.spot_source ? `${row.spot_source} spot` : "--"} · option {row.option_last_bar_time || "--"}
+                        </div>
+                      </td>
+                      <td className="py-3 text-text-muted">{row.instruction || "--"}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={7} className="py-10 text-center text-sm text-text-muted">
+                      No Strategy 2 signal rows are available.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section className={clsx("space-y-4", activeTab !== "operations" && "hidden")}>
+        <div className="grid gap-4 xl:grid-cols-[1.1fr,0.9fr]">
+          <div className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
+            <PanelHeader
+              icon={<BarChart3 size={16} className="text-accent-blue" />}
+              title="Live Strategy Performance"
+              detail="These metrics come from the live paper runtimes, not the archive research files."
+              meta={livePortfolio?.source || "live runtime"}
+            />
+
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
+              {strategies.map((strategy) => (
+                <div key={strategy.key} className="rounded-2xl border border-bg-border bg-bg-secondary/20 px-4 py-4">
+                  <div className="text-sm font-semibold text-text-primary">{strategy.label}</div>
+                  <div className="mt-3 grid gap-2 text-xs">
+                    <div className="flex justify-between gap-3"><span className="text-text-muted">Equity</span><span className="font-mono text-text-primary">{formatCompact(strategy.summary.total_equity)}</span></div>
+                    <div className="flex justify-between gap-3"><span className="text-text-muted">Realized</span><span className={clsx("font-mono", pnlTone(strategy.summary.realized_pnl))}>{formatSigned(strategy.summary.realized_pnl, 0)}</span></div>
+                    <div className="flex justify-between gap-3"><span className="text-text-muted">Open P&amp;L</span><span className={clsx("font-mono", pnlTone(strategy.summary.unrealized_pnl))}>{formatSigned(strategy.summary.unrealized_pnl, 0)}</span></div>
+                    <div className="flex justify-between gap-3"><span className="text-text-muted">Trades</span><span className="font-mono text-text-primary">{strategy.summary.total_trades || 0}</span></div>
+                    <div className="flex justify-between gap-3"><span className="text-text-muted">Win Rate</span><span className="font-mono text-text-primary">{strategy.summary.win_rate != null ? `${((strategy.summary.win_rate || 0) * 100).toFixed(1)}%` : "--"}</span></div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {equityCurve.length > 1 ? (
+              <div className="mt-5">
+                <div className="mb-2 text-[11px] uppercase tracking-[0.16em] text-text-muted">Combined Equity Curve</div>
+                <ResponsiveContainer width="100%" height={190}>
+                  <LineChart data={equityCurve}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1e2d45" />
+                    <XAxis dataKey="trade" tick={{ fontSize: 9, fill: "#4a5568" }} />
+                    <YAxis tick={{ fontSize: 9, fill: "#4a5568" }} tickFormatter={(value: number) => `${(value / 1e5).toFixed(0)}L`} />
+                    <Tooltip
+                      contentStyle={{ background: "#0f1724", border: "1px solid #1e2d45", fontSize: 11 }}
+                      formatter={(value: number) => [`${(value / 1e5).toFixed(2)}L`, "Equity"]}
+                    />
+                    <ReferenceLine y={livePortfolio?.start_capital || 100000} stroke="#4a5568" strokeDasharray="3 3" />
+                    <Line type="monotone" dataKey="equity" stroke="#00d4a3" strokeWidth={2} dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            ) : null}
+
+            {monthly.length ? (
+              <div className="mt-5">
+                <div className="mb-2 text-[11px] uppercase tracking-[0.16em] text-text-muted">Monthly Equity Change</div>
+                <ResponsiveContainer width="100%" height={160}>
+                  <BarChart data={monthly}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1e2d45" />
+                    <XAxis dataKey="month" tick={{ fontSize: 8, fill: "#4a5568" }} />
+                    <YAxis tick={{ fontSize: 8, fill: "#4a5568" }} tickFormatter={(value: number) => `${value > 0 ? "+" : ""}${value.toFixed(0)}%`} />
+                    <Tooltip
+                      contentStyle={{ background: "#0f1724", border: "1px solid #1e2d45", fontSize: 11 }}
+                      formatter={(value: number) => [`${value > 0 ? "+" : ""}${value.toFixed(1)}%`, "Equity Δ"]}
+                    />
+                    <ReferenceLine y={0} stroke="#4a5568" />
+                    <Bar dataKey="eq_change_pct">
+                      {monthly.map((row: any, index: number) => (
+                        <Cell key={`${row.month}-${index}`} fill={row.eq_change_pct >= 0 ? "#22c55e" : "#ef4444"} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="space-y-4">
+            <div className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
+              <PanelHeader
+                icon={<Radio size={16} className="text-accent-green" />}
+                title="Broker Links"
+                detail="Connection health for the adapters used by the live option desks."
+                meta={`${brokerRows.filter((broker) => broker.connected).length} connected`}
+              />
+              <div className="mt-4 flex flex-wrap gap-2">
+                {upstoxHealth ? (
+                  <StatusBadge
+                    label={`Upstox ${prettify(upstoxHealth.status)}`}
+                    tone={tokenStatusTone(upstoxHealth.status, upstoxHealth.valid)}
+                  />
+                ) : null}
+                {fyersHealth ? (
+                  <StatusBadge
+                    label={`Fyers ${prettify(fyersHealth.status)}`}
+                    tone={tokenStatusTone(fyersHealth.status, fyersHealth.valid)}
+                  />
+                ) : null}
+                <StatusBadge
+                  label={
+                    optionHistoryHealth.failures > 0
+                      ? `History warnings ${optionHistoryHealth.failures}`
+                      : optionHistoryHealth.successes > 0
+                        ? `History healthy ${optionHistoryHealth.successes}`
+                        : "History idle"
+                  }
+                  tone={
+                    optionHistoryHealth.failures > 0
+                      ? "warning"
+                      : optionHistoryHealth.successes > 0
+                        ? "ready"
+                        : "idle"
+                  }
+                />
+              </div>
+              {(upstoxHealth?.message || fyersHealth?.message || optionHistoryHealth.latestFailure) ? (
+                <div className="mt-4 rounded-2xl border border-bg-border bg-bg-primary/40 px-3 py-3 text-xs text-text-secondary">
+                  {upstoxHealth?.message ? <div>{upstoxHealth.message}</div> : null}
+                  {fyersHealth?.message ? <div className={clsx(upstoxHealth?.message && "mt-2")}>{fyersHealth.message}</div> : null}
+                  {optionHistoryHealth.latestFailure ? (
+                    <div className={clsx((upstoxHealth?.message || fyersHealth?.message) && "mt-2", "text-accent-amber")}>
+                      Latest history failure: {optionHistoryHealth.latestFailure}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              <div className="mt-4 space-y-2">
+                {brokerRows.map((broker) => (
+                  <div key={broker.broker} className="flex items-center gap-2 rounded-2xl border border-bg-border bg-bg-secondary/20 px-3 py-3 text-xs">
+                    <StatusBadge label={broker.connected ? "connected" : "offline"} tone={broker.connected ? "ready" : "error"} />
+                    <span className="font-semibold uppercase text-text-primary">{broker.broker}</span>
+                    <span className="text-text-muted">{broker.connected ? broker.name || broker.user_id || "connected" : "disconnected"}</span>
+                    <span className="ml-auto text-[11px] text-text-muted">{broker.connected_at ? formatTimestamp(broker.connected_at) : "--"}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
+              <PanelHeader
+                icon={<Database size={16} className="text-accent-amber" />}
+                title="Live Data Pipeline"
+                detail="Live execution inputs and archive references are separated so stale research cannot read like live broker data."
+                meta={pipeline?.as_of || "--"}
+              />
+              <div className="mt-4 space-y-3">
+                {[...(pipeline?.live_pipeline || []), ...(pipeline?.strategy2_pipeline || [])].map((item: any) => (
+                  <div key={item.name} className="rounded-2xl border border-bg-border bg-bg-secondary/20 px-3 py-3 text-xs">
+                    <div className="flex items-center gap-2">
+                      <StatusBadge label={item.freshness || item.status} tone={item.status || item.freshness} />
+                      <span className="font-semibold text-text-primary">{item.name}</span>
+                    </div>
+                    <div className="mt-2 text-text-secondary">{item.detail}</div>
+                    <div className="mt-1 text-[11px] text-text-muted">{item.rows?.toLocaleString() || 0} rows · {item.last_date}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
+          <PanelHeader
+            icon={<FileText size={16} className="text-accent-blue" />}
+            title="Portfolio Ledger"
+            detail="The same contract-level ledger is kept alongside performance so fills, marks, and P&L can be reconciled against the curve."
+            meta={`${portfolioRows.length} rows`}
+          />
+
+          <div className="mt-4 max-h-[420px] overflow-auto">
+            <table className="w-full min-w-[1240px] text-left text-xs">
+              <thead className="sticky top-0 bg-bg-card">
+                <tr className="border-b border-bg-border text-text-muted">
+                  <th className="py-2 pr-3">Strategy</th>
+                  <th className="py-2 pr-3">Underlying</th>
+                  <th className="py-2 pr-3">Contract</th>
+                  <th className="py-2 pr-3">Status</th>
+                  <th className="py-2 pr-3">Qty</th>
+                  <th className="py-2 pr-3">Entry</th>
+                  <th className="py-2 pr-3">Exit / Mark</th>
+                  <th className="py-2 pr-3">Signal</th>
+                  <th className="py-2">P&amp;L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {portfolioRows.length ? (
+                  portfolioRows.map((row) => (
+                    <tr key={row.id} className="border-b border-bg-border/40">
+                      <td className="py-2 pr-3 text-text-muted">{row.strategyLabel}</td>
+                      <td className="py-2 pr-3 text-text-primary">{row.underlying}</td>
+                      <td className="py-2 pr-3 text-text-secondary">{row.contract}</td>
+                      <td className="py-2 pr-3">
+                        <StatusBadge label={row.statusLabel} tone={row.status === "open" ? "ready" : "idle"} />
+                      </td>
+                      <td className="py-2 pr-3 font-mono text-text-primary">{row.qty}</td>
+                      <td className="py-2 pr-3 font-mono text-text-secondary">
+                        <div>{row.entryPrice != null ? formatNumber(row.entryPrice) : "--"}</div>
+                        <div className="mt-1 text-[11px] text-text-muted">{formatTimestamp(row.entryTime)}</div>
+                      </td>
+                      <td className="py-2 pr-3 font-mono text-text-secondary">
+                        <div>{row.lastPrice != null ? formatNumber(row.lastPrice) : "--"}</div>
+                        <div className="mt-1 text-[11px] text-text-muted">{formatTimestamp(row.lastTime)}</div>
+                      </td>
+                      <td className="py-2 pr-3 text-text-muted">{prettify(row.signalReason)}</td>
+                      <td className={clsx("py-2 font-semibold", pnlTone(row.pnl))}>
+                        {formatSigned(row.pnl, 0)}
+                        <div className="mt-1 text-[11px] text-text-muted">{formatSigned(row.returnPct, 1, "%")}</div>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={9} className="py-10 text-center text-sm text-text-muted">
+                      No portfolio rows are available yet.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }

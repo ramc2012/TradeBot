@@ -1,0 +1,2501 @@
+{
+  "last_run_at": "2026-04-09T14:59:07.612330+05:30",
+  "last_error": null,
+  "last_message": "Market closed. Showing last live strategy state from 2026-04-09T14:59:07.612330+05:30.",
+  "last_expiry": "2026-04-23",
+  "last_candidate_expiries": [
+    "2026-04-23",
+    "2026-04-22"
+  ],
+  "commentary": [
+    {
+      "time": "2026-04-11T17:14:30.699662+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T17:14:30.691720+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T16:58:27.342478+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T16:58:27.330910+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T16:37:54.575497+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T16:37:54.568060+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T16:13:43.022068+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T16:13:42.991162+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T16:13:05.434563+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-04-11T16:12:35.987746+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T16:12:35.979091+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T16:11:55.399901+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-04-11T15:17:35.871860+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T15:17:35.863086+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T15:16:38.678653+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T15:16:38.670644+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T15:15:25.611089+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T15:15:25.603557+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T15:13:36.741566+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T15:13:36.732779+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T15:07:09.963162+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T15:07:09.955453+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T14:53:56.736932+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T14:53:56.720559+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T14:52:15.647928+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T14:52:15.624467+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T14:47:23.027869+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T14:47:23.018051+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T14:33:28.455961+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T14:33:28.447589+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 2 entry-ready and 61 trend-aligned lanes from 2026-04-10."
+    },
+    {
+      "time": "2026-04-11T14:16:57.465169+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-04-11T14:16:57.456978+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T14:16:12.517149+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-04-11T14:16:12.509464+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T14:16:00.644332+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-04-11T14:16:00.633197+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T14:15:46.092432+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-04-10T22:42:24.386872+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-10T22:42:24.368963+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 2 entry-ready and 61 trend-aligned lanes from 2026-04-10."
+    },
+    {
+      "time": "2026-04-10T22:40:11.259469+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    }
+  ],
+  "strategies": {
+    "macd_strategy": {
+      "entries": 2,
+      "exits": 0,
+      "last_scan_at": "2026-04-09T14:59:07.612330+05:30",
+      "last_message": "Recovered 2 open Strategy 1 positions from 2026-04-09.",
+      "processed_signals": {},
+      "signal_lane": [],
+      "meta": {
+        "mode": "market_closed",
+        "recovered_trading_day": "2026-04-09",
+        "historical_signal_count": 36,
+        "updated_at": "2026-04-11T17:17:30.745053+05:30",
+        "broker_snapshot": {
+          "connected_brokers": [],
+          "upstox_ready": false,
+          "fyers_ready": false,
+          "broker_ready": false,
+          "upstox_token_health": {
+            "status": "expired_reconnect_required"
+          },
+          "fyers_token_health": {
+            "status": "expired_reconnect_required"
+          }
+        },
+        "market_state": "closed"
+      },
+      "recent_events": [
+        {
+          "time": "2026-04-09T14:18:28.200836+05:30",
+          "event": "entry",
+          "symbol": "OPT:AUROPHARMA:2026-04-30:1340:CE",
+          "underlying": "AUROPHARMA",
+          "option_type": "CE",
+          "strike": 1340.0,
+          "price": 39.069525,
+          "qty": 2500,
+          "reason": "recovered_position",
+          "signal_strength": null,
+          "pnl": null,
+          "phase": "phase1"
+        },
+        {
+          "time": "2026-04-09T14:59:07.612330+05:30",
+          "event": "entry",
+          "symbol": "OPT:LUPIN:2026-04-30:2300:CE",
+          "underlying": "LUPIN",
+          "option_type": "CE",
+          "strike": 2300.0,
+          "price": 55.377675,
+          "qty": 2500,
+          "reason": "recovered_position",
+          "signal_strength": null,
+          "pnl": null,
+          "phase": "phase1"
+        }
+      ],
+      "positions": [
+        {
+          "symbol": "OPT:AUROPHARMA:2026-04-30:1340:CE",
+          "underlying": "AUROPHARMA",
+          "expiry": "2026-04-30",
+          "strike": 1340.0,
+          "option_type": "CE",
+          "instrument_key": null,
+          "trading_symbol": null,
+          "qty": 2500,
+          "initial_qty": 2500,
+          "entry_price": 39.069525,
+          "current_price": 41.0,
+          "peak_price": 41.0,
+          "entry_bar_time": "2026-04-09T14:18:28.200836+05:30",
+          "entered_at": "2026-04-09T14:18:28.200836+05:30",
+          "signal_reason": "macd_zero_cross",
+          "signal_strength": null,
+          "latest_rsi": null,
+          "phase": "phase1",
+          "trailing_stop": null,
+          "entry_iv_pct": null,
+          "spot_setup": null,
+          "window_end": null,
+          "lot_size": null,
+          "price_updated_at": null,
+          "macd_line": null
+        },
+        {
+          "symbol": "OPT:LUPIN:2026-04-30:2300:CE",
+          "underlying": "LUPIN",
+          "expiry": "2026-04-30",
+          "strike": 2300.0,
+          "option_type": "CE",
+          "instrument_key": null,
+          "trading_symbol": null,
+          "qty": 2500,
+          "initial_qty": 2500,
+          "entry_price": 55.377675,
+          "current_price": 57.55,
+          "peak_price": 57.55,
+          "entry_bar_time": "2026-04-09T14:59:07.612330+05:30",
+          "entered_at": "2026-04-09T14:59:07.612330+05:30",
+          "signal_reason": "macd_zero_cross",
+          "signal_strength": null,
+          "latest_rsi": null,
+          "phase": "phase1",
+          "trailing_stop": null,
+          "entry_iv_pct": null,
+          "spot_setup": null,
+          "window_end": null,
+          "lot_size": null,
+          "price_updated_at": null,
+          "macd_line": null
+        }
+      ],
+      "portfolio": {
+        "initial_capital": 1000000.0,
+        "available_capital": 1000000.0,
+        "peak_equity": 1019257.0,
+        "trade_history": [],
+        "daily_pnl": {},
+        "equity_curve": [
+          {
+            "time": "2026-04-09T08:48:29.204817+05:30",
+            "equity": 985300.12
+          },
+          {
+            "time": "2026-04-09T08:49:43.435915+05:30",
+            "equity": 985300.12
+          },
+          {
+            "time": "2026-04-09T08:51:06.645096+05:30",
+            "equity": 985300.12
+          },
+          {
+            "time": "2026-04-09T08:54:08.317829+05:30",
+            "equity": 985300.12
+          },
+          {
+            "time": "2026-04-09T08:57:06.062055+05:30",
+            "equity": 985175.12
+          },
+          {
+            "time": "2026-04-09T08:58:16.257117+05:30",
+            "equity": 985175.12
+          },
+          {
+            "time": "2026-04-09T09:01:14.916279+05:30",
+            "equity": 985175.12
+          },
+          {
+            "time": "2026-04-09T09:02:23.564127+05:30",
+            "equity": 984050.12
+          },
+          {
+            "time": "2026-04-09T09:03:33.683739+05:30",
+            "equity": 984050.12
+          },
+          {
+            "time": "2026-04-09T09:06:49.374856+05:30",
+            "equity": 984050.12
+          },
+          {
+            "time": "2026-04-09T09:07:57.963110+05:30",
+            "equity": 984050.12
+          },
+          {
+            "time": "2026-04-09T09:09:08.486595+05:30",
+            "equity": 984050.12
+          },
+          {
+            "time": "2026-04-09T09:12:16.134618+05:30",
+            "equity": 986425.12
+          },
+          {
+            "time": "2026-04-09T09:13:23.757320+05:30",
+            "equity": 986425.12
+          },
+          {
+            "time": "2026-04-09T09:14:32.586168+05:30",
+            "equity": 986425.12
+          },
+          {
+            "time": "2026-04-09T09:15:40.640369+05:30",
+            "equity": 986425.12
+          },
+          {
+            "time": "2026-04-09T09:16:48.310434+05:30",
+            "equity": 986425.12
+          },
+          {
+            "time": "2026-04-09T09:20:45.689584+05:30",
+            "equity": 986425.12
+          },
+          {
+            "time": "2026-04-09T09:23:46.727312+05:30",
+            "equity": 985175.12
+          },
+          {
+            "time": "2026-04-09T09:24:54.225746+05:30",
+            "equity": 985175.12
+          },
+          {
+            "time": "2026-04-09T09:26:02.980966+05:30",
+            "equity": 985175.12
+          },
+          {
+            "time": "2026-04-09T09:29:07.615730+05:30",
+            "equity": 965089.3
+          },
+          {
+            "time": "2026-04-09T09:30:15.751958+05:30",
+            "equity": 965089.3
+          },
+          {
+            "time": "2026-04-09T09:31:22.908281+05:30",
+            "equity": 965089.3
+          },
+          {
+            "time": "2026-04-09T09:34:23.000163+05:30",
+            "equity": 974214.3
+          },
+          {
+            "time": "2026-04-09T09:35:29.259103+05:30",
+            "equity": 974214.3
+          },
+          {
+            "time": "2026-04-09T09:36:37.836840+05:30",
+            "equity": 974214.3
+          },
+          {
+            "time": "2026-04-09T09:37:47.627482+05:30",
+            "equity": 975339.3
+          },
+          {
+            "time": "2026-04-09T09:38:55.896712+05:30",
+            "equity": 975339.3
+          },
+          {
+            "time": "2026-04-09T09:42:54.347180+05:30",
+            "equity": 975339.3
+          },
+          {
+            "time": "2026-04-09T09:45:54.207057+05:30",
+            "equity": 974339.3
+          },
+          {
+            "time": "2026-04-09T09:47:01.526732+05:30",
+            "equity": 974339.3
+          },
+          {
+            "time": "2026-04-09T09:48:09.219475+05:30",
+            "equity": 974339.3
+          },
+          {
+            "time": "2026-04-09T09:49:23.334884+05:30",
+            "equity": 974339.3
+          },
+          {
+            "time": "2026-04-09T09:50:31.779937+05:30",
+            "equity": 974339.3
+          },
+          {
+            "time": "2026-04-09T09:51:39.816236+05:30",
+            "equity": 974339.3
+          },
+          {
+            "time": "2026-04-09T09:54:47.868230+05:30",
+            "equity": 974339.3
+          },
+          {
+            "time": "2026-04-09T09:55:48.641654+05:30",
+            "equity": 962977.37
+          },
+          {
+            "time": "2026-04-09T09:58:51.570520+05:30",
+            "equity": 962977.37
+          },
+          {
+            "time": "2026-04-09T10:01:48.028222+05:30",
+            "equity": 963477.37
+          },
+          {
+            "time": "2026-04-09T10:23:03.378991+05:30",
+            "equity": 962902.08
+          },
+          {
+            "time": "2026-04-09T10:23:13.950433+05:30",
+            "equity": 962902.08
+          },
+          {
+            "time": "2026-04-09T10:35:30.949224+05:30",
+            "equity": 962902.08
+          },
+          {
+            "time": "2026-04-09T10:42:27.883949+05:30",
+            "equity": 984566.06
+          },
+          {
+            "time": "2026-04-09T17:47:40.750290+05:30",
+            "equity": 897397.5
+          },
+          {
+            "time": "2026-04-10T03:47:48.438156+05:30",
+            "equity": 1018757.0
+          },
+          {
+            "time": "2026-04-10T03:48:53.409617+05:30",
+            "equity": 1018757.0
+          },
+          {
+            "time": "2026-04-10T03:49:53.555361+05:30",
+            "equity": 1018757.0
+          },
+          {
+            "time": "2026-04-10T03:50:54.689848+05:30",
+            "equity": 1018757.0
+          },
+          {
+            "time": "2026-04-10T03:51:54.809530+05:30",
+            "equity": 1018757.0
+          },
+          {
+            "time": "2026-04-10T03:52:55.464559+05:30",
+            "equity": 1018757.0
+          },
+          {
+            "time": "2026-04-10T03:53:55.605524+05:30",
+            "equity": 1018757.0
+          },
+          {
+            "time": "2026-04-10T03:54:56.270127+05:30",
+            "equity": 1018757.0
+          },
+          {
+            "time": "2026-04-10T03:57:48.485124+05:30",
+            "equity": 1019257.0
+          },
+          {
+            "time": "2026-04-10T03:58:49.136933+05:30",
+            "equity": 1019257.0
+          },
+          {
+            "time": "2026-04-10T03:59:49.272967+05:30",
+            "equity": 1019257.0
+          },
+          {
+            "time": "2026-04-10T04:00:49.878258+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:01:50.999502+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:02:51.655911+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:03:51.837949+05:30",
+            "equity": 1000882.0
+          },
+          {
+            "time": "2026-04-10T04:04:52.578267+05:30",
+            "equity": 1000882.0
+          },
+          {
+            "time": "2026-04-10T04:05:52.751798+05:30",
+            "equity": 1000882.0
+          },
+          {
+            "time": "2026-04-10T04:06:54.025384+05:30",
+            "equity": 1000882.0
+          },
+          {
+            "time": "2026-04-10T04:07:54.174028+05:30",
+            "equity": 1000882.0
+          },
+          {
+            "time": "2026-04-10T04:10:46.953457+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:11:47.588496+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:12:48.168976+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:13:48.801410+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:14:48.915316+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:15:49.540645+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:16:49.687405+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:17:51.820769+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:18:51.939609+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:19:52.649765+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:20:52.799537+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:21:53.519629+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:24:50.802202+05:30",
+            "equity": 1007132.0
+          },
+          {
+            "time": "2026-04-10T04:25:51.414333+05:30",
+            "equity": 1007132.0
+          },
+          {
+            "time": "2026-04-10T04:26:51.541377+05:30",
+            "equity": 1007132.0
+          },
+          {
+            "time": "2026-04-10T04:27:52.126050+05:30",
+            "equity": 1007132.0
+          },
+          {
+            "time": "2026-04-10T04:28:52.916985+05:30",
+            "equity": 1007132.0
+          },
+          {
+            "time": "2026-04-10T04:29:53.643382+05:30",
+            "equity": 1007132.0
+          },
+          {
+            "time": "2026-04-10T04:30:53.855163+05:30",
+            "equity": 997882.0
+          },
+          {
+            "time": "2026-04-10T04:31:54.591635+05:30",
+            "equity": 997882.0
+          },
+          {
+            "time": "2026-04-10T04:34:44.693103+05:30",
+            "equity": 1000632.0
+          },
+          {
+            "time": "2026-04-10T04:37:35.633255+05:30",
+            "equity": 988257.0
+          },
+          {
+            "time": "2026-04-10T04:38:36.248797+05:30",
+            "equity": 988257.0
+          },
+          {
+            "time": "2026-04-10T04:39:36.388055+05:30",
+            "equity": 990257.0
+          },
+          {
+            "time": "2026-04-10T04:40:36.998261+05:30",
+            "equity": 990257.0
+          },
+          {
+            "time": "2026-04-10T04:43:27.682200+05:30",
+            "equity": 990257.0
+          },
+          {
+            "time": "2026-04-10T04:44:28.269490+05:30",
+            "equity": 990257.0
+          },
+          {
+            "time": "2026-04-10T04:45:28.411606+05:30",
+            "equity": 990257.0
+          },
+          {
+            "time": "2026-04-10T04:46:29.010980+05:30",
+            "equity": 990257.0
+          },
+          {
+            "time": "2026-04-10T04:49:21.593339+05:30",
+            "equity": 991257.0
+          },
+          {
+            "time": "2026-04-10T04:50:22.288987+05:30",
+            "equity": 991257.0
+          },
+          {
+            "time": "2026-04-10T04:51:22.472696+05:30",
+            "equity": 991257.0
+          },
+          {
+            "time": "2026-04-10T04:52:23.045807+05:30",
+            "equity": 991257.0
+          },
+          {
+            "time": "2026-04-10T04:55:14.149843+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T04:56:14.693596+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T04:57:14.823581+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T04:58:15.362637+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T04:59:16.104346+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T05:00:16.679716+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T05:01:16.846005+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T05:02:17.402673+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T05:05:07.435926+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T05:08:02.511855+05:30",
+            "equity": 995882.0
+          },
+          {
+            "time": "2026-04-10T05:09:03.122811+05:30",
+            "equity": 995882.0
+          },
+          {
+            "time": "2026-04-10T05:10:03.250258+05:30",
+            "equity": 995882.0
+          },
+          {
+            "time": "2026-04-10T05:11:03.813410+05:30",
+            "equity": 995882.0
+          },
+          {
+            "time": "2026-04-10T05:13:54.396184+05:30",
+            "equity": 993882.0
+          },
+          {
+            "time": "2026-04-10T05:14:55.017508+05:30",
+            "equity": 993882.0
+          },
+          {
+            "time": "2026-04-10T05:15:55.171758+05:30",
+            "equity": 993882.0
+          },
+          {
+            "time": "2026-04-10T05:16:55.728777+05:30",
+            "equity": 993882.0
+          },
+          {
+            "time": "2026-04-10T05:19:47.315703+05:30",
+            "equity": 993882.0
+          },
+          {
+            "time": "2026-04-10T05:22:37.786726+05:30",
+            "equity": 988757.0
+          },
+          {
+            "time": "2026-04-10T05:23:38.872639+05:30",
+            "equity": 988757.0
+          },
+          {
+            "time": "2026-04-10T05:24:39.009554+05:30",
+            "equity": 988757.0
+          },
+          {
+            "time": "2026-04-10T05:25:39.520913+05:30",
+            "equity": 990257.0
+          },
+          {
+            "time": "2026-04-10T05:26:39.647597+05:30",
+            "equity": 990257.0
+          },
+          {
+            "time": "2026-04-10T05:29:30.586254+05:30",
+            "equity": 998632.0
+          },
+          {
+            "time": "2026-04-10T05:32:21.607048+05:30",
+            "equity": 999632.0
+          },
+          {
+            "time": "2026-04-10T05:33:22.205342+05:30",
+            "equity": 999632.0
+          },
+          {
+            "time": "2026-04-10T05:34:22.373398+05:30",
+            "equity": 997132.0
+          },
+          {
+            "time": "2026-04-10T05:35:22.943600+05:30",
+            "equity": 997132.0
+          },
+          {
+            "time": "2026-04-10T05:38:13.600443+05:30",
+            "equity": 999007.0
+          },
+          {
+            "time": "2026-04-10T05:39:14.101018+05:30",
+            "equity": 999007.0
+          },
+          {
+            "time": "2026-04-10T05:40:14.258045+05:30",
+            "equity": 999007.0
+          },
+          {
+            "time": "2026-04-10T05:41:14.774351+05:30",
+            "equity": 999007.0
+          },
+          {
+            "time": "2026-04-10T05:42:15.495305+05:30",
+            "equity": 999007.0
+          },
+          {
+            "time": "2026-04-10T05:43:15.977088+05:30",
+            "equity": 999007.0
+          },
+          {
+            "time": "2026-04-10T05:44:16.093534+05:30",
+            "equity": 999007.0
+          },
+          {
+            "time": "2026-04-10T05:45:16.715473+05:30",
+            "equity": 999007.0
+          },
+          {
+            "time": "2026-04-10T05:48:07.175752+05:30",
+            "equity": 1000757.0
+          },
+          {
+            "time": "2026-04-10T05:49:08.420256+05:30",
+            "equity": 1000757.0
+          },
+          {
+            "time": "2026-04-10T05:50:09.340376+05:30",
+            "equity": 1000757.0
+          },
+          {
+            "time": "2026-04-10T05:51:13.645498+05:30",
+            "equity": 1009507.0
+          },
+          {
+            "time": "2026-04-10T05:52:13.775092+05:30",
+            "equity": 1009507.0
+          },
+          {
+            "time": "2026-04-10T05:53:14.415546+05:30",
+            "equity": 1009507.0
+          },
+          {
+            "time": "2026-04-10T05:54:15.049421+05:30",
+            "equity": 1009507.0
+          },
+          {
+            "time": "2026-04-10T05:55:15.551055+05:30",
+            "equity": 1009507.0
+          },
+          {
+            "time": "2026-04-10T05:56:15.690222+05:30",
+            "equity": 1009507.0
+          },
+          {
+            "time": "2026-04-10T05:57:16.113765+05:30",
+            "equity": 1009507.0
+          },
+          {
+            "time": "2026-04-10T05:58:16.233427+05:30",
+            "equity": 1009507.0
+          },
+          {
+            "time": "2026-04-10T06:01:07.248800+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:02:07.731034+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:03:07.858481+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:04:08.344626+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:05:09.031366+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:06:09.510912+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:07:09.641922+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:08:10.124723+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:09:10.242957+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:12:01.098025+05:30",
+            "equity": 997007.0
+          },
+          {
+            "time": "2026-04-10T06:13:01.573175+05:30",
+            "equity": 997007.0
+          },
+          {
+            "time": "2026-04-10T06:14:01.763713+05:30",
+            "equity": 997007.0
+          },
+          {
+            "time": "2026-04-10T06:15:02.257456+05:30",
+            "equity": 991007.0
+          },
+          {
+            "time": "2026-04-10T06:17:52.759492+05:30",
+            "equity": 991007.0
+          },
+          {
+            "time": "2026-04-10T06:20:43.773011+05:30",
+            "equity": 986507.0
+          },
+          {
+            "time": "2026-04-10T06:21:44.880867+05:30",
+            "equity": 986507.0
+          },
+          {
+            "time": "2026-04-10T06:22:45.018876+05:30",
+            "equity": 986507.0
+          },
+          {
+            "time": "2026-04-10T06:23:45.492705+05:30",
+            "equity": 986507.0
+          },
+          {
+            "time": "2026-04-10T06:24:45.634203+05:30",
+            "equity": 986507.0
+          },
+          {
+            "time": "2026-04-10T06:27:35.998731+05:30",
+            "equity": 989507.0
+          },
+          {
+            "time": "2026-04-10T06:30:26.765238+05:30",
+            "equity": 989507.0
+          },
+          {
+            "time": "2026-04-10T06:33:17.188810+05:30",
+            "equity": 989507.0
+          },
+          {
+            "time": "2026-04-10T06:34:22.118667+05:30",
+            "equity": 989507.0
+          },
+          {
+            "time": "2026-04-10T06:37:12.339729+05:30",
+            "equity": 989507.0
+          },
+          {
+            "time": "2026-04-10T06:38:12.881036+05:30",
+            "equity": 989507.0
+          },
+          {
+            "time": "2026-04-10T06:41:02.777123+05:30",
+            "equity": 991132.0
+          },
+          {
+            "time": "2026-04-10T06:42:04.032190+05:30",
+            "equity": 991132.0
+          },
+          {
+            "time": "2026-04-10T06:44:53.993540+05:30",
+            "equity": 991757.0
+          },
+          {
+            "time": "2026-04-10T06:45:54.497105+05:30",
+            "equity": 991757.0
+          },
+          {
+            "time": "2026-04-10T06:48:44.475881+05:30",
+            "equity": 997382.0
+          },
+          {
+            "time": "2026-04-10T06:51:36.265574+05:30",
+            "equity": 997382.0
+          },
+          {
+            "time": "2026-04-10T06:54:26.646429+05:30",
+            "equity": 998507.0
+          },
+          {
+            "time": "2026-04-10T06:55:27.655012+05:30",
+            "equity": 998507.0
+          },
+          {
+            "time": "2026-04-10T06:58:17.659932+05:30",
+            "equity": 999257.0
+          },
+          {
+            "time": "2026-04-10T06:59:18.118861+05:30",
+            "equity": 999257.0
+          },
+          {
+            "time": "2026-04-10T07:00:18.292817+05:30",
+            "equity": 999257.0
+          },
+          {
+            "time": "2026-04-10T07:01:19.244682+05:30",
+            "equity": 999257.0
+          },
+          {
+            "time": "2026-04-10T07:04:09.305858+05:30",
+            "equity": 999257.0
+          },
+          {
+            "time": "2026-04-10T07:06:59.559265+05:30",
+            "equity": 999882.0
+          },
+          {
+            "time": "2026-04-10T07:08:00.515361+05:30",
+            "equity": 999882.0
+          },
+          {
+            "time": "2026-04-10T07:10:50.897359+05:30",
+            "equity": 1005382.0
+          },
+          {
+            "time": "2026-04-10T07:11:51.426820+05:30",
+            "equity": 1005382.0
+          },
+          {
+            "time": "2026-04-10T07:14:41.326741+05:30",
+            "equity": 1004757.0
+          },
+          {
+            "time": "2026-04-10T07:17:32.266377+05:30",
+            "equity": 1004757.0
+          },
+          {
+            "time": "2026-04-10T07:20:22.525909+05:30",
+            "equity": 1014132.0
+          },
+          {
+            "time": "2026-04-10T07:21:23.628827+05:30",
+            "equity": 1014132.0
+          },
+          {
+            "time": "2026-04-10T07:24:14.575710+05:30",
+            "equity": 1008882.0
+          },
+          {
+            "time": "2026-04-10T07:25:15.087696+05:30",
+            "equity": 1008882.0
+          },
+          {
+            "time": "2026-04-10T07:28:05.047381+05:30",
+            "equity": 1007007.0
+          },
+          {
+            "time": "2026-04-10T07:30:56.213507+05:30",
+            "equity": 1007007.0
+          },
+          {
+            "time": "2026-04-10T07:33:46.575510+05:30",
+            "equity": 987882.0
+          },
+          {
+            "time": "2026-04-10T07:34:47.511645+05:30",
+            "equity": 987882.0
+          },
+          {
+            "time": "2026-04-10T07:37:41.465664+05:30",
+            "equity": 987007.0
+          },
+          {
+            "time": "2026-04-10T07:38:41.946263+05:30",
+            "equity": 987007.0
+          },
+          {
+            "time": "2026-04-10T07:41:32.224071+05:30",
+            "equity": 991382.0
+          },
+          {
+            "time": "2026-04-10T07:44:23.031018+05:30",
+            "equity": 991382.0
+          },
+          {
+            "time": "2026-04-10T07:47:13.239766+05:30",
+            "equity": 980632.0
+          },
+          {
+            "time": "2026-04-10T07:48:14.270982+05:30",
+            "equity": 980632.0
+          },
+          {
+            "time": "2026-04-10T07:51:04.316807+05:30",
+            "equity": 1007507.0
+          },
+          {
+            "time": "2026-04-10T07:52:04.961431+05:30",
+            "equity": 1007507.0
+          },
+          {
+            "time": "2026-04-10T07:53:05.128706+05:30",
+            "equity": 1007507.0
+          },
+          {
+            "time": "2026-04-10T07:54:06.313831+05:30",
+            "equity": 1007507.0
+          },
+          {
+            "time": "2026-04-10T07:56:57.401453+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T07:57:57.922478+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T07:58:58.049170+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T07:59:59.647331+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T08:00:59.794138+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T08:02:00.338460+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T08:03:00.475670+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T08:04:00.953300+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T08:05:01.797910+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T08:07:52.181399+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:08:52.940547+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:09:53.085273+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:10:54.315268+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:11:54.445034+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:12:55.005116+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:13:55.182848+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:14:55.763497+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:15:56.555349+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:16:57.033001+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:17:57.151323+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:20:51.720888+05:30",
+            "equity": 1006007.0
+          },
+          {
+            "time": "2026-04-10T08:21:52.860718+05:30",
+            "equity": 1006007.0
+          },
+          {
+            "time": "2026-04-10T08:22:53.009395+05:30",
+            "equity": 1006007.0
+          },
+          {
+            "time": "2026-04-10T08:23:53.484859+05:30",
+            "equity": 982507.0
+          },
+          {
+            "time": "2026-04-10T08:24:53.593448+05:30",
+            "equity": 982507.0
+          },
+          {
+            "time": "2026-04-10T08:25:54.087020+05:30",
+            "equity": 982507.0
+          },
+          {
+            "time": "2026-04-10T08:26:54.729473+05:30",
+            "equity": 982507.0
+          },
+          {
+            "time": "2026-04-10T08:27:55.977144+05:30",
+            "equity": 982507.0
+          },
+          {
+            "time": "2026-04-10T08:30:47.238011+05:30",
+            "equity": 980757.0
+          },
+          {
+            "time": "2026-04-10T08:31:47.793480+05:30",
+            "equity": 980757.0
+          },
+          {
+            "time": "2026-04-10T08:32:48.522079+05:30",
+            "equity": 980757.0
+          },
+          {
+            "time": "2026-04-10T08:33:49.063535+05:30",
+            "equity": 980757.0
+          },
+          {
+            "time": "2026-04-10T08:34:49.181438+05:30",
+            "equity": 980757.0
+          },
+          {
+            "time": "2026-04-10T08:35:49.764404+05:30",
+            "equity": 980757.0
+          },
+          {
+            "time": "2026-04-10T08:36:49.904507+05:30",
+            "equity": 979257.0
+          },
+          {
+            "time": "2026-04-10T08:37:51.047531+05:30",
+            "equity": 979257.0
+          },
+          {
+            "time": "2026-04-10T08:38:51.195279+05:30",
+            "equity": 979257.0
+          },
+          {
+            "time": "2026-04-10T08:39:51.770589+05:30",
+            "equity": 979257.0
+          },
+          {
+            "time": "2026-04-10T08:42:41.778131+05:30",
+            "equity": 1003007.0
+          },
+          {
+            "time": "2026-04-10T08:45:32.757635+05:30",
+            "equity": 1003007.0
+          },
+          {
+            "time": "2026-04-10T08:48:23.212611+05:30",
+            "equity": 989007.0
+          },
+          {
+            "time": "2026-04-10T08:49:24.699763+05:30",
+            "equity": 989007.0
+          },
+          {
+            "time": "2026-04-10T08:52:14.652122+05:30",
+            "equity": 987757.0
+          },
+          {
+            "time": "2026-04-10T08:53:15.256867+05:30",
+            "equity": 987757.0
+          },
+          {
+            "time": "2026-04-10T08:56:05.598285+05:30",
+            "equity": 1003632.0
+          },
+          {
+            "time": "2026-04-10T08:58:57.304432+05:30",
+            "equity": 1003632.0
+          },
+          {
+            "time": "2026-04-10T09:01:47.840783+05:30",
+            "equity": 994382.0
+          },
+          {
+            "time": "2026-04-10T09:02:49.108944+05:30",
+            "equity": 994382.0
+          },
+          {
+            "time": "2026-04-10T09:05:39.179829+05:30",
+            "equity": 995132.0
+          },
+          {
+            "time": "2026-04-10T09:06:39.739942+05:30",
+            "equity": 995132.0
+          },
+          {
+            "time": "2026-04-10T09:09:33.995273+05:30",
+            "equity": 994507.0
+          },
+          {
+            "time": "2026-04-10T09:12:25.641674+05:30",
+            "equity": 994507.0
+          },
+          {
+            "time": "2026-04-10T09:15:16.188230+05:30",
+            "equity": 991507.0
+          },
+          {
+            "time": "2026-04-10T09:16:17.284067+05:30",
+            "equity": 991507.0
+          },
+          {
+            "time": "2026-04-10T09:19:07.190737+05:30",
+            "equity": 993257.0
+          },
+          {
+            "time": "2026-04-10T09:20:07.771807+05:30",
+            "equity": 993257.0
+          },
+          {
+            "time": "2026-04-10T09:22:57.805571+05:30",
+            "equity": 981257.0
+          },
+          {
+            "time": "2026-04-10T09:25:48.879923+05:30",
+            "equity": 981257.0
+          },
+          {
+            "time": "2026-04-10T09:28:39.348296+05:30",
+            "equity": 980132.0
+          },
+          {
+            "time": "2026-04-10T09:29:41.352373+05:30",
+            "equity": 980132.0
+          },
+          {
+            "time": "2026-04-10T09:32:31.352120+05:30",
+            "equity": 979382.0
+          },
+          {
+            "time": "2026-04-10T09:33:31.882622+05:30",
+            "equity": 979382.0
+          },
+          {
+            "time": "2026-04-10T09:36:21.894276+05:30",
+            "equity": 981882.0
+          },
+          {
+            "time": "2026-04-10T09:39:12.944589+05:30",
+            "equity": 981882.0
+          },
+          {
+            "time": "2026-04-10T09:42:04.106932+05:30",
+            "equity": 975382.0
+          },
+          {
+            "time": "2026-04-10T09:43:05.248494+05:30",
+            "equity": 975382.0
+          },
+          {
+            "time": "2026-04-10T09:45:55.361364+05:30",
+            "equity": 977882.0
+          },
+          {
+            "time": "2026-04-10T09:46:55.897338+05:30",
+            "equity": 977882.0
+          },
+          {
+            "time": "2026-04-10T09:49:45.894861+05:30",
+            "equity": 976257.0
+          },
+          {
+            "time": "2026-04-10T09:52:36.838137+05:30",
+            "equity": 976257.0
+          },
+          {
+            "time": "2026-04-10T09:55:27.266201+05:30",
+            "equity": 973007.0
+          },
+          {
+            "time": "2026-04-10T09:56:28.527019+05:30",
+            "equity": 973007.0
+          },
+          {
+            "time": "2026-04-10T09:59:18.553003+05:30",
+            "equity": 974757.0
+          }
+        ]
+      }
+    },
+    "index_mp_strategy": {
+      "entries": 0,
+      "exits": 0,
+      "last_scan_at": "2026-04-09T15:20:00+05:30",
+      "last_message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required.",
+      "processed_signals": {},
+      "signal_lane": [
+        {
+          "underlying": "NIFTY",
+          "status": "trend-aligned",
+          "freshness": "live",
+          "instruction": "NIFTY aligned"
+        }
+      ],
+      "meta": {
+        "mode": "market_closed",
+        "scan_interval": "5minute",
+        "watchlist_rows": 0,
+        "pipeline": [
+          {
+            "name": "Strategy 2 NIFTY",
+            "status": "ok",
+            "rows": 45,
+            "last_date": "2026-04-09 15:20"
+          }
+        ],
+        "updated_at": "2026-04-11T17:17:30.745053+05:30",
+        "market_state": "closed",
+        "broker_snapshot": {
+          "connected_brokers": [],
+          "upstox_ready": false,
+          "fyers_ready": false,
+          "broker_ready": false,
+          "upstox_token_health": {
+            "status": "expired_reconnect_required"
+          },
+          "fyers_token_health": {
+            "status": "expired_reconnect_required"
+          }
+        }
+      },
+      "recent_events": [],
+      "positions": [],
+      "portfolio": {
+        "initial_capital": 1000000.0,
+        "available_capital": 1000000.0,
+        "peak_equity": 1000000.0,
+        "trade_history": [],
+        "daily_pnl": {},
+        "equity_curve": [
+          {
+            "time": "2026-04-09T10:23:03.379987+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-09T10:23:13.951493+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-09T10:35:30.951353+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-09T10:42:27.885642+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-09T17:47:40.755619+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:47:48.439209+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:48:53.410285+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:49:53.555634+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:50:54.690328+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:51:54.809840+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:52:55.464881+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:53:55.605891+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:54:56.270786+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:57:48.485562+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:58:49.137388+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:59:49.273238+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:00:49.878781+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:01:50.999898+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:02:51.656197+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:03:51.838389+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:04:52.578921+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:05:52.752076+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:06:54.025743+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:07:54.174431+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:10:46.954094+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:11:47.588973+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:12:48.169529+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:13:48.801879+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:14:48.916038+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:15:49.543498+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:16:49.687861+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:17:51.821913+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:18:51.939989+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:19:52.650253+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:20:52.800104+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:21:53.520558+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:24:50.802557+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:25:51.415138+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:26:51.541794+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:27:52.126742+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:28:52.917391+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:29:53.644187+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:30:53.856448+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:31:54.592754+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:34:44.693562+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:37:35.633997+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:38:36.249350+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:39:36.388494+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:40:36.999064+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:43:27.682698+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:44:28.274119+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:45:28.412037+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:46:29.011478+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:49:21.594660+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:50:22.315194+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:51:22.473129+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:52:23.046700+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:55:14.150250+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:56:14.694376+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:57:14.824103+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:58:15.363228+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:59:16.104844+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:00:16.680273+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:01:16.846574+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:02:17.403763+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:05:07.436539+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:08:02.512724+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:09:03.123345+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:10:03.250832+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:11:03.814201+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:13:54.396721+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:14:55.019409+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:15:55.172269+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:16:55.729683+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:19:47.318047+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:22:37.787630+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:23:38.873131+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:24:39.010130+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:25:39.521791+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:26:39.648133+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:29:30.588781+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:32:21.607677+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:33:22.206527+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:34:22.374515+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:35:22.944419+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:38:13.601019+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:39:14.103432+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:40:14.258639+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:41:14.775082+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:42:15.495892+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:43:15.977635+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:44:16.094351+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:45:16.716088+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:48:07.176365+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:49:08.420963+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:50:09.340974+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:51:13.646315+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:52:13.775841+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:53:14.415954+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:54:15.049934+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:55:15.551994+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:56:15.690844+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:57:16.114522+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:58:16.234070+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:01:07.249606+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:02:07.732067+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:03:07.859353+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:04:08.345373+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:05:09.031979+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:06:09.511648+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:07:09.642523+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:08:10.125452+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:09:10.243680+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:12:01.098696+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:13:01.574034+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:14:01.773151+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:15:02.258166+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:17:52.760151+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:20:43.775392+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:21:44.881566+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:22:45.019477+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:23:45.493469+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:24:45.634895+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:27:35.999341+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:30:26.766079+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:33:17.189511+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:34:22.119257+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:37:12.340387+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:38:12.881669+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:41:02.777842+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:42:04.032738+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:44:53.994243+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:45:54.497746+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:48:44.476633+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:51:36.267740+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:54:26.647560+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:55:27.655805+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:58:17.660534+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:59:18.119573+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:00:18.293400+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:01:19.245523+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:04:09.306557+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:06:59.560333+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:08:00.516199+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:10:50.898172+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:11:51.427556+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:14:41.327868+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:17:32.267470+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:20:22.526705+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:21:23.629417+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:24:14.576611+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:25:15.088283+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:28:05.048150+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:30:56.214394+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:33:46.576653+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:34:47.512429+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:37:41.466176+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:38:41.946941+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:41:32.224848+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:44:23.031921+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:47:13.240676+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:48:14.271645+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:51:04.317478+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:52:04.962259+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:53:05.129543+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:54:06.314487+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:56:57.403926+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:57:57.923818+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:58:58.049972+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:59:59.647857+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:00:59.795149+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:02:00.339659+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:03:00.476307+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:04:00.954503+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:05:01.798599+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:07:52.182286+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:08:52.941722+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:09:53.086166+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:10:54.316059+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:11:54.445805+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:12:55.006287+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:13:55.183646+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:14:55.766380+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:15:56.555851+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:16:57.033625+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:17:57.152012+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:20:51.721848+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:21:52.861503+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:22:53.010132+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:23:53.485922+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:24:53.594445+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:25:54.087739+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:26:54.730221+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:27:55.979264+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:30:47.243308+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:31:47.794808+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:32:48.522967+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:33:49.064720+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:34:49.182281+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:35:49.765173+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:36:49.905476+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:37:51.048555+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:38:51.196047+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:39:51.771528+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:42:41.778949+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:45:32.758514+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:48:23.213804+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:49:24.700538+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:52:14.653068+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:53:15.257656+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:56:05.599206+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:58:57.306764+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:01:47.841682+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:02:49.109822+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:05:39.180705+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:06:39.740929+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:09:33.996138+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:12:25.643248+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:15:16.189451+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:16:17.284970+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:19:07.191465+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:20:07.772546+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:22:57.806409+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:25:48.881176+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:28:39.349351+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:29:41.353587+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:32:31.353042+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:33:31.883599+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:36:21.895069+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:39:12.945668+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:42:04.107819+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:43:05.249464+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:45:55.361980+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:46:55.898305+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:49:45.895768+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:52:36.839049+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:55:27.267406+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:56:28.528018+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:59:18.556527+05:30",
+            "equity": 1000000.0
+          }
+        ]
+      }
+    }
+  }
+}

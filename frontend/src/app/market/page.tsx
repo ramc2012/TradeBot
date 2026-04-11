@@ -178,6 +178,7 @@ type ATMWatchlistOptionSide = {
 
 type ATMWatchlistPayload = {
   expiry: string | null;
+  build_status?: "building" | "ready" | string;
   rows: Array<{
     underlying: string;
     kind: string;
@@ -786,8 +787,6 @@ function ATMOptionCell({
   );
 }
 
-// ── Broker Health Banner ──────────────────────────────────────────────────────
-
 type BrokerStatusEntry = {
   broker: string;
   connected: boolean;
@@ -818,10 +817,8 @@ function BrokerHealthBanner() {
   const disconnected = trading.filter((e) => !e.connected);
   const connected = trading.filter((e) => e.connected);
 
-  // Show nothing while loading (avoid flash)
   if (statusQuery.isLoading) return null;
 
-  // All connected — show a slim green confirmation strip
   if (disconnected.length === 0 && connected.length > 0) {
     return (
       <div className="flex items-center gap-2 rounded-xl border border-accent-green/20 bg-accent-green/8 px-3 py-2 text-xs text-accent-green">
@@ -835,9 +832,13 @@ function BrokerHealthBanner() {
     );
   }
 
-  // At least one disconnected — show amber / red warning banner
   if (disconnected.length > 0) {
     const allDisconnected = connected.length === 0;
+    const disconnectedNames = disconnected.map((e) => BROKER_LABEL[e.broker] ?? e.broker).join(", ");
+    const connectedNames = connected.map((e) => BROKER_LABEL[e.broker] ?? e.broker).join(", ");
+    const statusCopy = allDisconnected
+      ? `${disconnectedNames} disconnected. Live chain refresh is unavailable until a trading broker reconnects.`
+      : `${disconnectedNames} disconnected. Live market data continues via ${connectedNames}; saved expiry metadata remains available.`;
     return (
       <div
         className={clsx(
@@ -852,13 +853,10 @@ function BrokerHealthBanner() {
           {allDisconnected ? "No broker connected" : "Broker session expired"}
         </span>
         <span className="text-text-muted">—</span>
-        <span>
-          {disconnected.map((e) => BROKER_LABEL[e.broker] ?? e.broker).join(", ")} disconnected.
-          Live data and watchlist will not update.
-        </span>
+        <span>{statusCopy}</span>
         {connected.length > 0 && (
           <span className="text-accent-green/80">
-            Active: {connected.map((e) => BROKER_LABEL[e.broker] ?? e.broker).join(", ")}
+            Active: {connectedNames}
           </span>
         )}
         <a
@@ -877,11 +875,8 @@ function BrokerHealthBanner() {
     );
   }
 
-  // No broker entries at all — something is wrong with the API
   return null;
 }
-
-// ── Market Page ───────────────────────────────────────────────────────────────
 
 export default function MarketPage() {
   const [symbol, setSymbol] = useState<MarketIndexSymbol>("NSE:NIFTY50-INDEX");
@@ -897,6 +892,7 @@ export default function MarketPage() {
   const expiriesQuery = useQuery<ExpiryPayload>({
     queryKey: ["optionExpiries", symbol],
     queryFn: () => getOptionExpiries(symbol).then((response) => response.data),
+    enabled: workspace === "options",
     staleTime: 60000,
     refetchInterval: 60000,
   });
@@ -913,6 +909,7 @@ export default function MarketPage() {
   const chainQuery = useQuery<OptionChainPayload>({
     queryKey: ["optionChain", symbol, expiry],
     queryFn: () => getOptionChain(symbol, expiry || undefined).then((response) => response.data),
+    enabled: workspace === "options" && Boolean(expiry),
     refetchInterval: 15000,
     staleTime: 5000,
   });
@@ -920,6 +917,7 @@ export default function MarketPage() {
   const profileQuery = useQuery<MarketProfilePayload>({
     queryKey: ["marketProfile", symbol, profileTimeframe],
     queryFn: () => getMarketProfile(symbol, profileTimeframe).then((response) => response.data),
+    enabled: workspace === "options",
     refetchInterval: 30000,
     staleTime: 5000,
   });
@@ -927,6 +925,7 @@ export default function MarketPage() {
   const sectorQuery = useQuery<SectorRotationPayload>({
     queryKey: ["marketSectorRotation", sectorTimeframe],
     queryFn: () => getSectorRotation(sectorTimeframe).then((response) => response.data),
+    enabled: workspace === "sectors",
     refetchInterval: 60000,
     staleTime: 5000,
   });
@@ -934,6 +933,7 @@ export default function MarketPage() {
   const watchlistExpiryQuery = useQuery<ATMWatchlistExpiryPayload>({
     queryKey: ["atmWatchlistExpiries"],
     queryFn: () => getATMWatchlistExpiries().then((response) => response.data),
+    enabled: workspace === "watchlist",
     refetchInterval: 300000,
     staleTime: 60000,
   });
@@ -950,10 +950,26 @@ export default function MarketPage() {
   const watchlistQuery = useQuery<ATMWatchlistPayload>({
     queryKey: ["atmWatchlist", watchlistExpiry],
     queryFn: () => getATMWatchlist(watchlistExpiry || undefined).then((response) => response.data),
-    enabled: Boolean(watchlistExpiry),
-    refetchInterval: 60000,
+    enabled: workspace === "watchlist" && Boolean(watchlistExpiry),
+    refetchInterval: (query) => {
+      const data = query.state.data as ATMWatchlistPayload | undefined;
+      if (workspace !== "watchlist" || !watchlistExpiry) return false;
+      if (data?.build_status === "building") return 5000;
+      if (!data?.rows?.length) return 15000;
+      return 60000;
+    },
+    refetchIntervalInBackground: true,
+    refetchOnMount: "always",
+    retry: 2,
+    retryDelay: 1500,
     staleTime: 5000,
   });
+
+  useEffect(() => {
+    if (workspace === "watchlist" && watchlistExpiry) {
+      void watchlistQuery.refetch();
+    }
+  }, [workspace, watchlistExpiry]);
 
   useEffect(() => {
     const available = sectorQuery.data?.watchlist ?? [];
@@ -1011,6 +1027,8 @@ export default function MarketPage() {
   const stockImproving = selectedSectorStockRows.filter((stock) => stock.quadrant === "improving");
   const stockWeakening = selectedSectorStockRows.filter((stock) => stock.quadrant === "weakening");
   const stockLagging = selectedSectorStockRows.filter((stock) => stock.quadrant === "lagging");
+  const isWatchlistBuilding = watchlistQuery.data?.build_status === "building";
+  const showWatchlistLoading = watchlistQuery.isLoading || (isWatchlistBuilding && !(watchlistQuery.data?.rows?.length));
 
   return (
     <div className="mx-auto max-w-[1800px] space-y-4 pb-8">
@@ -1593,15 +1611,15 @@ export default function MarketPage() {
                     <td className="py-2.5"><ATMOptionCell option={row.pe} accent="pe" /></td>
                   </tr>
                 ))}
-                {watchlistQuery.isLoading && (
+                {showWatchlistLoading && (
                   <tr>
                     <td colSpan={7} className="py-8 text-center text-sm text-text-muted">
                       <RefreshCw size={14} className="inline animate-spin mr-2" />
-                      Loading ATM watchlist…
+                      {isWatchlistBuilding ? "Building ATM watchlist…" : "Loading ATM watchlist…"}
                     </td>
                   </tr>
                 )}
-                {!watchlistQuery.isLoading && !(watchlistQuery.data?.rows?.length) && (
+                {!showWatchlistLoading && !(watchlistQuery.data?.rows?.length) && (
                   <tr>
                     <td colSpan={7} className="py-8 text-center text-sm text-text-muted">
                       {watchlistQuery.data?.detail || "No ATM watchlist rows are available for the selected expiry."}

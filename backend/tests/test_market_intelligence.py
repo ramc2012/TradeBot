@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date
+
+import httpx
 
 from analytics.technicals import latest_macd_rsi
 from analytics.sector import SectorRotationTracker
 from brokers.base import OptionChain, OptionChainEntry
 from brokers.fyers import FyersAdapter
+import market_data.option_history as option_history_module
 from data.upstox_research_sync import UpstoxResearchSync
+from market_data.option_history import OptionHistoryService
 from market_data.option_chain import OptionChainService
 
 
@@ -173,3 +178,159 @@ def test_latest_macd_rsi_returns_values_once_series_is_long_enough() -> None:
     assert indicators["macd_signal"] is not None
     assert indicators["macd_histogram"] is not None
     assert indicators["rsi"] is not None
+
+
+def test_option_history_interval_mappings_cover_five_minute_backfill() -> None:
+    service = OptionHistoryService()
+
+    assert service._upstox_interval("5minute") == "5minute"
+    assert service._fyers_resolution("5minute") == "5"
+    assert service._upstox_interval("30minute") == "30minute"
+    assert service._needs_upstox_minute_fallback("NSE_FO|12345", "5minute") is True
+    assert service._needs_upstox_minute_fallback("NSE_FO|12345", "15minute") is True
+    assert service._needs_upstox_minute_fallback("NSE_FO|12345", "30minute") is False
+    assert service._broker_lookback_days("1minute", limit=500) == 5
+    assert service._broker_lookback_days("5minute", limit=96) == 5
+
+
+def test_option_history_can_aggregate_one_minute_rows_to_five_minute() -> None:
+    service = OptionHistoryService()
+    rows = [
+        {
+            "time": f"2026-04-09T09:{15 + idx:02d}:00+05:30",
+            "open": 100 + idx,
+            "high": 101 + idx,
+            "low": 99 + idx,
+            "close": 100.5 + idx,
+            "volume": 10,
+        }
+        for idx in range(5)
+    ]
+
+    aggregated = service._aggregate_rows(rows, 5)
+
+    assert len(aggregated) == 1
+    assert aggregated[0]["time"].startswith("2026-04-09T09:15:00")
+    assert aggregated[0]["open"] == 100
+    assert aggregated[0]["close"] == 104.5
+    assert aggregated[0]["volume"] == 50
+
+
+def test_option_history_upstox_ssl_errors_degrade_to_empty_rows(monkeypatch) -> None:
+    service = OptionHistoryService()
+    service.reset_health()
+
+    class BrokenClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        async def get(self, *args, **kwargs):
+            raise httpx.ConnectError("ssl failure")
+
+    monkeypatch.setattr(option_history_module, "get_broker_token", lambda broker: "token")
+    monkeypatch.setattr(option_history_module.httpx, "AsyncClient", BrokenClient)
+
+    rows = asyncio.run(
+        service._fetch_broker_candles(
+            instrument_key="NSE_FO|12345",
+            from_date=date(2026, 4, 1),
+            to_date=date(2026, 4, 9),
+            interval="30minute",
+        )
+    )
+
+    assert rows == []
+    health = service.get_health_snapshot()
+    assert health["failure_count"] >= 1
+    assert health["brokers"]["upstox"]["last_status"] == "failure"
+    assert "ssl failure" in health["brokers"]["upstox"]["last_detail"]
+
+
+def test_fyers_tick_parser_uses_name_field_when_symbol_missing() -> None:
+    adapter = FyersAdapter()
+    captured = []
+
+    adapter._handle_tick(
+        {
+            "n": "NSE:NIFTY50-INDEX",
+            "ltp": 22510.0,
+            "open_price": 22400.0,
+            "high_price": 22540.0,
+            "low_price": 22380.0,
+            "prev_close_price": 22395.0,
+        },
+        captured.append,
+    )
+
+    assert len(captured) == 1
+    assert captured[0].symbol == "NSE:NIFTY50-INDEX"
+    assert captured[0].ltp == 22510.0
+
+
+def test_option_history_uses_upstox_intraday_for_current_day_requests(monkeypatch) -> None:
+    service = OptionHistoryService()
+    requested_urls: list[str] = []
+    today = date(2026, 4, 10)
+
+    class FakeResponse:
+        def __init__(self, url: str) -> None:
+            self.status_code = 200
+            self._url = url
+
+        def json(self) -> dict:
+            if "/intraday/" in self._url:
+                candles = [["2026-04-10T09:15:00+05:30", 110, 112, 109, 111, 25, 7]]
+            else:
+                candles = [["2026-04-09T15:25:00+05:30", 100, 101, 99, 100.5, 20, 5]]
+            return {"data": {"candles": candles}}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        async def get(self, url: str, *args, **kwargs):
+            requested_urls.append(url)
+            return FakeResponse(url)
+
+    monkeypatch.setattr(OptionHistoryService, "_today_ist_date", staticmethod(lambda: today))
+    monkeypatch.setattr(option_history_module, "get_broker_token", lambda broker: "token")
+    monkeypatch.setattr(option_history_module.httpx, "AsyncClient", FakeClient)
+
+    rows = asyncio.run(
+        service._fetch_broker_candles(
+            instrument_key="NSE_INDEX|Nifty 50",
+            from_date=date(2026, 4, 9),
+            to_date=today,
+            interval="1minute",
+        )
+    )
+
+    assert len(rows) == 2
+    assert rows[0]["time"].startswith("2026-04-09")
+    assert rows[-1]["time"].startswith("2026-04-10")
+    assert any("/historical-candle/intraday/" in url for url in requested_urls)
+    assert any("/historical-candle/" in url and "/intraday/" not in url for url in requested_urls)
+
+
+def test_option_history_marks_previous_session_intraday_rows_as_stale(monkeypatch) -> None:
+    service = OptionHistoryService()
+    monkeypatch.setattr(OptionHistoryService, "_today_ist_date", staticmethod(lambda: date(2026, 4, 10)))
+
+    stale_rows = [{"time": "2026-04-09T15:29:00+05:30", "close": 101.0}]
+    fresh_rows = [{"time": "2026-04-10T09:20:00+05:30", "close": 103.0}]
+
+    assert service._latest_row_is_stale_for_today(stale_rows, "5minute") is True
+    assert service._latest_row_is_stale_for_today(fresh_rows, "5minute") is False
+    assert service._latest_row_is_stale_for_today(stale_rows, "1day") is False

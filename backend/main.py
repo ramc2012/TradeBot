@@ -14,6 +14,7 @@ from api.routers import fo_data as fo_data_router
 from api.routers import analysis as analysis_router
 from api.routers import strategy as strategy_router
 from api.routers import auction_intelligence as auction_intelligence_router
+from api.routers import system as system_router
 from api.websockets.ticks import ws_ticks, ws_positions, ws_proposals
 from market_data import data_router as market_data_router
 from market_data.symbols import LIVE_INDEX_APP_SYMBOLS
@@ -110,6 +111,7 @@ app.include_router(fo_data_router.router)
 app.include_router(analysis_router.router)
 app.include_router(strategy_router.router)
 app.include_router(auction_intelligence_router.router)
+app.include_router(system_router.router)
 
 
 # ── WebSocket Endpoints ───────────────────────────────────────────────────────

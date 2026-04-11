@@ -10,11 +10,17 @@ from loguru import logger
 
 from api.routers.auth import ensure_fyers_session, get_active_adapter
 from brokers.base import BrokerAdapter, OptionChainEntry
+from market_data.commodity_contract_specs import (
+    canonicalize_commodity_root,
+    extract_commodity_root,
+    get_commodity_contract_spec,
+)
 
 
 UTC = timezone.utc
-_MCX_FUTURE_SYMBOL_RE = re.compile(r"^(?P<exchange>MCX):(?P<root>[A-Z0-9]+)\d{2}[A-Z]{3}FUT$")
-_MCX_FUTURE_PARTS_RE = re.compile(r"^(?P<exchange>MCX):(?P<root>[A-Z0-9]+)(?P<year>\d{2})(?P<month>[A-Z]{3})FUT$")
+_MCX_FUTURE_PARTS_RE = re.compile(
+    r"^(?P<exchange>MCX):(?P<root>[A-Z0-9]+?)(?P<year>\d{2})(?P<month>[A-Z]{3})FUT$"
+)
 _MCX_OPTION_ROOT_ALIASES: dict[str, tuple[str, ...]] = {
     "SILVERMIC": ("SILVERM",),
 }
@@ -35,11 +41,7 @@ def _normalize_commodity_symbols(symbols: list[str]) -> list[str]:
 
 
 def _extract_commodity_root(symbol: str) -> str:
-    match = _MCX_FUTURE_SYMBOL_RE.match(str(symbol or "").strip().upper())
-    if match:
-        return str(match.group("root"))
-    token = str(symbol or "").strip().upper().split(":")[-1]
-    return token or str(symbol or "").strip().upper()
+    return extract_commodity_root(symbol)
 
 
 def _expand_option_lookup_candidates(symbol: str) -> list[str]:
@@ -52,7 +54,10 @@ def _expand_option_lookup_candidates(symbol: str) -> list[str]:
     year = str(match.group("year"))
     month = str(match.group("month"))
     candidates = [raw_symbol]
-    for alias_root in _MCX_OPTION_ROOT_ALIASES.get(root, ()):
+    alias_candidates = _MCX_OPTION_ROOT_ALIASES.get(root, ())
+    if not alias_candidates:
+        alias_candidates = _MCX_OPTION_ROOT_ALIASES.get(canonicalize_commodity_root(root), ())
+    for alias_root in alias_candidates:
         alias_symbol = f"MCX:{alias_root}{year}{month}FUT"
         if alias_symbol not in candidates:
             candidates.append(alias_symbol)
@@ -116,6 +121,92 @@ def _serialize_option(entry: Optional[OptionChainEntry]) -> Optional[dict[str, A
         "macd_signal": None,
         "macd_histogram": None,
         "rsi": None,
+    }
+
+
+def _spread_ratio(entry: OptionChainEntry) -> float:
+    bid = float(entry.bid or 0.0)
+    ask = float(entry.ask or 0.0)
+    ltp = float(entry.ltp or 0.0)
+    anchor = ltp or max(bid, ask, 1.0)
+    if anchor <= 0:
+        return 1.0
+    spread = max(ask - bid, 0.0)
+    return spread / anchor
+
+
+def _liquidity_score(entry: OptionChainEntry) -> float:
+    volume = float(entry.volume or 0.0)
+    oi = float(entry.oi or 0.0)
+    bid = float(entry.bid or 0.0)
+    ask = float(entry.ask or 0.0)
+    score = (volume * 1.0) + (oi * 0.35)
+    if bid > 0 and ask > 0:
+        score += 50.0
+    score -= _spread_ratio(entry) * 200.0
+    return score
+
+
+def _is_liquid_entry(entry: OptionChainEntry) -> bool:
+    volume = int(entry.volume or 0)
+    oi = int(entry.oi or 0)
+    bid = float(entry.bid or 0.0)
+    ask = float(entry.ask or 0.0)
+    spread_ok = bid > 0 and ask > 0 and _spread_ratio(entry) <= 0.08
+    depth_ok = volume >= 20 or oi >= 100
+    return (
+        spread_ok
+        and depth_ok
+    )
+
+
+def _strike_step(strikes: list[float]) -> float:
+    positive_steps = sorted(
+        {
+            round(abs(right - left), 6)
+            for left, right in zip(strikes, strikes[1:])
+            if abs(right - left) > 0
+        }
+    )
+    return positive_steps[0] if positive_steps else 1.0
+
+
+def _select_nearest_liquid_entry(
+    entries: list[OptionChainEntry],
+    *,
+    spot_price: float,
+    reference_strike: float,
+    strike_step: float,
+) -> tuple[Optional[OptionChainEntry], dict[str, Any]]:
+    if not entries:
+        return None, {
+            "selection_mode": "missing",
+            "liquidity_score": None,
+            "distance_steps": None,
+            "distance_from_atm": None,
+            "is_liquid": False,
+        }
+
+    ranked = sorted(
+        entries,
+        key=lambda entry: (
+            abs(float(entry.strike) - spot_price),
+            -_liquidity_score(entry),
+        ),
+    )
+    liquid_ranked = [entry for entry in ranked if _is_liquid_entry(entry)]
+    chosen = liquid_ranked[0] if liquid_ranked else ranked[0]
+    distance_from_atm = abs(float(chosen.strike) - reference_strike)
+    distance_steps = distance_from_atm / max(strike_step, 1e-9)
+    mode = "nearest_liquid" if chosen.strike != reference_strike else "atm"
+    if not liquid_ranked:
+        mode = "atm_fallback" if chosen.strike == reference_strike else "nearest_available"
+    return chosen, {
+        "selection_mode": mode,
+        "liquidity_score": round(_liquidity_score(chosen), 2),
+        "distance_steps": round(distance_steps, 2),
+        "distance_from_atm": round(distance_from_atm, 2),
+        "is_liquid": _is_liquid_entry(chosen),
     }
 
 
@@ -190,6 +281,7 @@ class CommodityATMWatchlistService:
 
         for symbol, contract_result in zip(normalized, symbol_contracts):
             underlying = _extract_commodity_root(symbol)
+            spec = get_commodity_contract_spec(symbol)
             lookup_symbol = symbol
             alias_note: Optional[str] = None
             if isinstance(contract_result, Exception):
@@ -219,6 +311,10 @@ class CommodityATMWatchlistService:
                     "suggested_expiry": suggested_expiry,
                     "active_expiry": active_expiry,
                     "has_options": bool(row_expiries),
+                    "lot_size": spec.futures_lot_size,
+                    "contract_unit_label": spec.contract_unit_label,
+                    "quote_unit_label": spec.quote_unit_label,
+                    "strategy_title": spec.options_label,
                     "detail": alias_note or (None if row_expiries else "No option expiries returned by Fyers for this contract."),
                 }
             )
@@ -402,7 +498,7 @@ class CommodityATMWatchlistService:
         adapter = get_active_adapter("fyers")
         if adapter:
             return adapter
-        if await ensure_fyers_session():
+        if await ensure_fyers_session(force_validate=True):
             return get_active_adapter("fyers")
         return None
 
@@ -444,13 +540,14 @@ class CommodityATMWatchlistService:
         expiry: str,
     ) -> Optional[dict[str, Any]]:
         chain = await adapter.get_option_chain(lookup_symbol, expiry)
-        strikes = sorted(
-            {
-                float(entry.strike)
-                for entry in chain.entries
-                if str(entry.option_type).upper() in {"CE", "PE"}
-            }
-        )
+        spec = get_commodity_contract_spec(symbol)
+        ce_entries = [
+            entry for entry in chain.entries if str(entry.option_type).upper() == "CE"
+        ]
+        pe_entries = [
+            entry for entry in chain.entries if str(entry.option_type).upper() == "PE"
+        ]
+        strikes = sorted({float(entry.strike) for entry in [*ce_entries, *pe_entries]})
         if not strikes:
             return None
 
@@ -459,22 +556,28 @@ class CommodityATMWatchlistService:
             return None
 
         atm_strike = min(strikes, key=lambda strike: abs(strike - spot_price))
-        ce_entry = next(
-            (
-                entry for entry in chain.entries
-                if str(entry.option_type).upper() == "CE" and float(entry.strike) == atm_strike
-            ),
-            None,
+        strike_step = _strike_step(strikes)
+        ce_entry, ce_selection = _select_nearest_liquid_entry(
+            ce_entries,
+            spot_price=spot_price,
+            reference_strike=atm_strike,
+            strike_step=strike_step,
         )
-        pe_entry = next(
-            (
-                entry for entry in chain.entries
-                if str(entry.option_type).upper() == "PE" and float(entry.strike) == atm_strike
-            ),
-            None,
+        pe_entry, pe_selection = _select_nearest_liquid_entry(
+            pe_entries,
+            spot_price=spot_price,
+            reference_strike=atm_strike,
+            strike_step=strike_step,
         )
         if ce_entry is None and pe_entry is None:
             return None
+
+        ce_payload = _serialize_option(ce_entry)
+        pe_payload = _serialize_option(pe_entry)
+        if ce_payload is not None:
+            ce_payload.update(ce_selection)
+        if pe_payload is not None:
+            pe_payload.update(pe_selection)
 
         return {
             "underlying": underlying,
@@ -485,8 +588,14 @@ class CommodityATMWatchlistService:
             "atm_strike": atm_strike,
             "live_source": "fyers",
             "fyers_symbol": lookup_symbol,
-            "ce": _serialize_option(ce_entry),
-            "pe": _serialize_option(pe_entry),
+            "lot_size": spec.futures_lot_size,
+            "contract_unit_label": spec.contract_unit_label,
+            "quote_unit_label": spec.quote_unit_label,
+            "strategy_title": spec.options_label,
+            "contract_notes": spec.notes,
+            "selection_policy": "nearest_liquid_contract",
+            "ce": ce_payload,
+            "pe": pe_payload,
         }
 
 

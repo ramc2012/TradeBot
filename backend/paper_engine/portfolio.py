@@ -80,7 +80,13 @@ class PaperPortfolio:
     def on_fill(self, order: PaperOrder):
         """Called by PaperOrderBook when an order fills."""
         fill_price = order.fill_price or 0
-        margin_used = self._estimate_margin(order.symbol, order.qty, fill_price)
+        margin_used = self._estimate_margin(
+            order.symbol,
+            order.qty,
+            fill_price,
+            instrument_type=order.instrument_type,
+            option_type=order.option_type,
+        )
 
         # Check if we have an existing position for this symbol in same direction
         existing_key = self._find_position_key(order.symbol, order.action)
@@ -140,7 +146,13 @@ class PaperPortfolio:
         today = date.today()
         self._daily_pnl[today] = self._daily_pnl[today] + pnl
 
-        margin_released = self._estimate_margin(pos.symbol, close_order.qty, fill_price)
+        margin_released = self._estimate_margin(
+            pos.symbol,
+            close_order.qty,
+            fill_price,
+            instrument_type=pos.instrument_type,
+            option_type=pos.option_type,
+        )
         self.available_capital += margin_released + pnl
 
         if close_order.qty >= pos.qty:
@@ -168,8 +180,19 @@ class PaperPortfolio:
                 return key
         return None
 
-    def _estimate_margin(self, symbol: str, qty: int, price: float) -> float:
+    def _estimate_margin(
+        self,
+        symbol: str,
+        qty: int,
+        price: float,
+        *,
+        instrument_type: Optional[str] = None,
+        option_type: Optional[str] = None,
+    ) -> float:
         """Approximate SPAN margin = lot_size × price × margin_pct."""
+        token = str(option_type or instrument_type or "").upper()
+        if token in {"CE", "PE", "OPT"}:
+            return max(price, 0.0) * max(qty, 0)
         base = symbol.split(":")[1] if ":" in symbol else symbol[:10].rstrip("0123456789CEPEF")
         lot_size = self.LOT_SIZES.get(base, self.DEFAULT_LOT_SIZE)
         margin_pct = 0.15  # 15% approximate
@@ -287,6 +310,60 @@ class PaperPortfolio:
         self._equity_curve.append((datetime.utcnow(), equity))
         if equity > self._peak_equity:
             self._peak_equity = equity
+
+    async def persist_equity_to_redis(self) -> None:
+        """Persist the equity curve + key portfolio state to Redis for restart survival."""
+        try:
+            from db.redis_client import get_redis
+            import json
+            redis = await get_redis()
+            key = f"paper_portfolio:equity:{self.session_id}"
+            # Store last 2000 snapshots (covers ~33 hours at 60s interval)
+            data = {
+                "initial_capital": self.initial_capital,
+                "available_capital": self.available_capital,
+                "peak_equity": self._peak_equity,
+                "daily_pnl": {str(k): v for k, v in self._daily_pnl.items()},
+                "trade_count": len(self._trade_history),
+                "equity_curve": [
+                    {"time": t.isoformat(), "equity": round(v, 2)}
+                    for t, v in self._equity_curve[-2000:]
+                ],
+            }
+            await redis.set(key, json.dumps(data), ex=86400 * 7)  # 7 day TTL
+        except Exception as exc:
+            logger.debug(f"[Portfolio] Redis equity persist failed: {exc}")
+
+    async def restore_from_redis(self) -> bool:
+        """Restore equity curve from Redis after a restart. Returns True if restored."""
+        try:
+            from db.redis_client import get_redis
+            import json
+            redis = await get_redis()
+            key = f"paper_portfolio:equity:{self.session_id}"
+            cached = await redis.get(key)
+            if not cached:
+                return False
+            data = json.loads(cached)
+            self._peak_equity = float(data.get("peak_equity", self.initial_capital))
+            for item in data.get("equity_curve", []):
+                t = datetime.fromisoformat(item["time"])
+                v = float(item["equity"])
+                self._equity_curve.append((t, v))
+            # Restore daily P&L
+            for d_str, pnl in data.get("daily_pnl", {}).items():
+                try:
+                    d = date.fromisoformat(d_str)
+                    self._daily_pnl[d] = float(pnl)
+                except ValueError:
+                    pass
+            logger.info(
+                f"[Portfolio] Restored {len(self._equity_curve)} equity points from Redis"
+            )
+            return True
+        except Exception as exc:
+            logger.debug(f"[Portfolio] Redis equity restore failed: {exc}")
+            return False
 
     def get_equity_curve(self) -> list[dict]:
         """Return equity curve as list of {time, equity} dicts for charting."""

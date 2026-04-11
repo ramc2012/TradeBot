@@ -19,6 +19,8 @@ export const getCredentialsStatus = (broker: string) =>
   api.get(`/api/auth/credentials/${broker}`);
 
 export const getBrokerStatus = () => api.get("/api/auth/broker-status");
+export const getSystemHealth = () => api.get("/api/system/health");
+export const getSystemOverview = () => api.get("/api/system/overview");
 
 export const getFyersAuthUrl = () => api.get("/api/auth/fyers/auth-url");
 export const getUpstoxAuthUrl = () => api.get("/api/auth/upstox/auth-url");

@@ -10,62 +10,1286 @@
       "MCX:GOLD26JUNFUT": "2026-04-30",
       "MCX:SILVERM26JUNFUT": "2026-04-21",
       "MCX:NATURALGAS26MAYFUT": "2026-04-23"
-    }
+    },
+    "lots_per_trade": 1
   },
   "control": {
     "kill_switch_active": false,
     "start_required": false,
-    "last_run_at": "2026-04-09T12:43:49.724066+05:30",
+    "last_run_at": "2026-04-10T23:19:25.998133+05:30",
     "last_error": null,
-    "last_message": "Scanned 0 commodity symbols. 3 open positions."
+    "last_message": "Waiting for MCX market hours."
   },
   "runtime": {
-    "watchlist": [],
-    "positions": [
+    "watchlist": [
       {
         "symbol": "MCX:GOLD26JUNFUT",
-        "action": "SELL",
-        "qty": 1,
-        "entry_price": 151786.069,
-        "current_price": 151533.0,
-        "stop_price": 152604.71,
-        "target_price": 150376.58,
+        "underlying": "GOLD",
+        "display_name": "Gold",
+        "price": 152598.0,
+        "previous_close": 152560.0,
+        "change_pct": 0.02,
+        "signal": null,
+        "raw_signal": null,
+        "reason": "no_cross",
+        "signal_validation_detail": "Waiting for a fresh 15-minute MACD cross.",
         "regime": "bearish",
-        "signal_reason": "bearish_breakdown",
-        "atr": 618.9267,
-        "entered_at": "2026-04-08T20:23:39.737785+05:30",
-        "entry_bar_time": "2026-04-08T14:30:00Z"
+        "macd": -19.5768,
+        "macd_signal": 9.4086,
+        "macd_histogram": -28.9854,
+        "atr": 236.7523,
+        "bar_time": "2026-04-10T17:45:00Z",
+        "mp_status": "ready",
+        "mp_direction": "SELL",
+        "mp_day_type": "balance_below_poc",
+        "mp_reason": "holding_below_poc",
+        "mp_poc": 152707.0,
+        "mp_vah": 152945.0,
+        "mp_val": 152350.0,
+        "mp_ib_high": 152985.0,
+        "mp_ib_low": 152561.0,
+        "mp_periods": 58,
+        "mp_session_date": "2026-04-10",
+        "lot_size": 10,
+        "lots_per_trade": 1,
+        "default_qty": 10,
+        "contract_unit_label": "100 gm contract",
+        "quote_unit_label": "Rs / 10 gm",
+        "strategy_title": "Strategy 2 \u00b7 Futures",
+        "signal_validation": "waiting_cross",
+        "execution_lane": "paper_futures",
+        "required_margin": 228897.0,
+        "bias_side": null
       },
       {
         "symbol": "MCX:SILVERM26JUNFUT",
-        "action": "SELL",
-        "qty": 1,
-        "entry_price": 244764.5565,
-        "current_price": 245718.0,
-        "stop_price": 246813.32,
-        "target_price": 241034.36,
-        "regime": "bearish",
-        "signal_reason": "bearish_breakdown",
-        "atr": 1605.2664,
-        "entered_at": "2026-04-09T09:00:13.899760+05:30",
-        "entry_bar_time": "2026-04-09T03:30:00Z"
+        "underlying": "SILVERM",
+        "display_name": "Silver Mini",
+        "price": 251155.0,
+        "previous_close": 251169.0,
+        "change_pct": -0.01,
+        "signal": null,
+        "raw_signal": null,
+        "reason": "no_cross",
+        "signal_validation_detail": "Waiting for a fresh 15-minute MACD cross.",
+        "regime": "bullish",
+        "macd": 149.7348,
+        "macd_signal": 217.9567,
+        "macd_histogram": -68.2219,
+        "atr": 542.7496,
+        "bar_time": "2026-04-10T17:45:00Z",
+        "mp_status": "ready",
+        "mp_direction": null,
+        "mp_day_type": "balance",
+        "mp_reason": "mp_balanced",
+        "mp_poc": 251156.0,
+        "mp_vah": 251697.0,
+        "mp_val": 249714.0,
+        "mp_ib_high": 251589.0,
+        "mp_ib_low": 250275.0,
+        "mp_periods": 58,
+        "mp_session_date": "2026-04-10",
+        "lot_size": 5,
+        "lots_per_trade": 1,
+        "default_qty": 5,
+        "contract_unit_label": "5 kg contract",
+        "quote_unit_label": "Rs / kg",
+        "strategy_title": "Strategy 2 \u00b7 Futures",
+        "signal_validation": "waiting_cross",
+        "execution_lane": "paper_futures",
+        "required_margin": 188366.25,
+        "bias_side": null
       },
       {
         "symbol": "MCX:CRUDEOIL26MAYFUT",
-        "action": "BUY",
-        "qty": 1,
-        "entry_price": 8403.1995,
-        "current_price": 8482.0,
-        "stop_price": 8269.99,
-        "target_price": 8657.03,
+        "underlying": "CRUDEOIL",
+        "display_name": "Crude Oil",
+        "price": 8501.0,
+        "previous_close": 8511.0,
+        "change_pct": -0.12,
+        "signal": null,
+        "raw_signal": null,
+        "reason": "no_cross",
+        "signal_validation_detail": "Waiting for a fresh 15-minute MACD cross.",
         "regime": "bullish",
-        "signal_reason": "bullish_breakout",
-        "atr": 107.5107,
-        "entered_at": "2026-04-09T09:00:13.899923+05:30",
-        "entry_bar_time": "2026-04-09T03:30:00Z"
+        "macd": 10.9052,
+        "macd_signal": 10.4325,
+        "macd_histogram": 0.4728,
+        "atr": 42.0668,
+        "bar_time": "2026-04-10T17:45:00Z",
+        "mp_status": "ready",
+        "mp_direction": null,
+        "mp_day_type": "balance",
+        "mp_reason": "mp_balanced",
+        "mp_poc": 8485.0,
+        "mp_vah": 8533.0,
+        "mp_val": 8413.0,
+        "mp_ib_high": 8522.0,
+        "mp_ib_low": 8413.0,
+        "mp_periods": 58,
+        "mp_session_date": "2026-04-10",
+        "lot_size": 100,
+        "lots_per_trade": 1,
+        "default_qty": 100,
+        "contract_unit_label": "100 barrel contract",
+        "quote_unit_label": "Rs / barrel",
+        "strategy_title": "Strategy 2 \u00b7 Futures",
+        "signal_validation": "waiting_cross",
+        "execution_lane": "paper_futures",
+        "required_margin": 127515.0,
+        "bias_side": null
+      },
+      {
+        "symbol": "MCX:NATURALGAS26MAYFUT",
+        "underlying": "NATURALGAS",
+        "display_name": "Natural Gas",
+        "price": 265.0,
+        "previous_close": 265.1,
+        "change_pct": -0.04,
+        "signal": null,
+        "raw_signal": null,
+        "reason": "no_cross",
+        "signal_validation_detail": "A futures position is already open for this underlying.",
+        "regime": "bearish",
+        "macd": -0.0414,
+        "macd_signal": -0.0375,
+        "macd_histogram": -0.0039,
+        "atr": 0.761,
+        "bar_time": "2026-04-10T17:45:00Z",
+        "mp_status": "ready",
+        "mp_direction": "SELL",
+        "mp_day_type": "balance_below_poc",
+        "mp_reason": "holding_below_poc",
+        "mp_poc": 265.8,
+        "mp_vah": 266.5,
+        "mp_val": 264.8,
+        "mp_ib_high": 267.0,
+        "mp_ib_low": 265.2,
+        "mp_periods": 58,
+        "mp_session_date": "2026-04-10",
+        "lot_size": 1250,
+        "lots_per_trade": 1,
+        "default_qty": 1250,
+        "contract_unit_label": "1250 MMBtu contract",
+        "quote_unit_label": "Rs / MMBtu",
+        "strategy_title": "Strategy 2 \u00b7 Futures",
+        "signal_validation": "position_open",
+        "execution_lane": "paper_futures",
+        "required_margin": 49687.5,
+        "bias_side": null
+      }
+    ],
+    "futures_watchlist": [
+      {
+        "symbol": "MCX:GOLD26JUNFUT",
+        "underlying": "GOLD",
+        "display_name": "Gold",
+        "price": 152598.0,
+        "previous_close": 152560.0,
+        "change_pct": 0.02,
+        "signal": null,
+        "raw_signal": null,
+        "reason": "no_cross",
+        "signal_validation_detail": "Waiting for a fresh 15-minute MACD cross.",
+        "regime": "bearish",
+        "macd": -19.5768,
+        "macd_signal": 9.4086,
+        "macd_histogram": -28.9854,
+        "atr": 236.7523,
+        "bar_time": "2026-04-10T17:45:00Z",
+        "mp_status": "ready",
+        "mp_direction": "SELL",
+        "mp_day_type": "balance_below_poc",
+        "mp_reason": "holding_below_poc",
+        "mp_poc": 152707.0,
+        "mp_vah": 152945.0,
+        "mp_val": 152350.0,
+        "mp_ib_high": 152985.0,
+        "mp_ib_low": 152561.0,
+        "mp_periods": 58,
+        "mp_session_date": "2026-04-10",
+        "lot_size": 10,
+        "lots_per_trade": 1,
+        "default_qty": 10,
+        "contract_unit_label": "100 gm contract",
+        "quote_unit_label": "Rs / 10 gm",
+        "strategy_title": "Strategy 2 \u00b7 Futures",
+        "signal_validation": "waiting_cross",
+        "execution_lane": "paper_futures",
+        "required_margin": 228897.0,
+        "bias_side": null
+      },
+      {
+        "symbol": "MCX:SILVERM26JUNFUT",
+        "underlying": "SILVERM",
+        "display_name": "Silver Mini",
+        "price": 251155.0,
+        "previous_close": 251169.0,
+        "change_pct": -0.01,
+        "signal": null,
+        "raw_signal": null,
+        "reason": "no_cross",
+        "signal_validation_detail": "Waiting for a fresh 15-minute MACD cross.",
+        "regime": "bullish",
+        "macd": 149.7348,
+        "macd_signal": 217.9567,
+        "macd_histogram": -68.2219,
+        "atr": 542.7496,
+        "bar_time": "2026-04-10T17:45:00Z",
+        "mp_status": "ready",
+        "mp_direction": null,
+        "mp_day_type": "balance",
+        "mp_reason": "mp_balanced",
+        "mp_poc": 251156.0,
+        "mp_vah": 251697.0,
+        "mp_val": 249714.0,
+        "mp_ib_high": 251589.0,
+        "mp_ib_low": 250275.0,
+        "mp_periods": 58,
+        "mp_session_date": "2026-04-10",
+        "lot_size": 5,
+        "lots_per_trade": 1,
+        "default_qty": 5,
+        "contract_unit_label": "5 kg contract",
+        "quote_unit_label": "Rs / kg",
+        "strategy_title": "Strategy 2 \u00b7 Futures",
+        "signal_validation": "waiting_cross",
+        "execution_lane": "paper_futures",
+        "required_margin": 188366.25,
+        "bias_side": null
+      },
+      {
+        "symbol": "MCX:CRUDEOIL26MAYFUT",
+        "underlying": "CRUDEOIL",
+        "display_name": "Crude Oil",
+        "price": 8501.0,
+        "previous_close": 8511.0,
+        "change_pct": -0.12,
+        "signal": null,
+        "raw_signal": null,
+        "reason": "no_cross",
+        "signal_validation_detail": "Waiting for a fresh 15-minute MACD cross.",
+        "regime": "bullish",
+        "macd": 10.9052,
+        "macd_signal": 10.4325,
+        "macd_histogram": 0.4728,
+        "atr": 42.0668,
+        "bar_time": "2026-04-10T17:45:00Z",
+        "mp_status": "ready",
+        "mp_direction": null,
+        "mp_day_type": "balance",
+        "mp_reason": "mp_balanced",
+        "mp_poc": 8485.0,
+        "mp_vah": 8533.0,
+        "mp_val": 8413.0,
+        "mp_ib_high": 8522.0,
+        "mp_ib_low": 8413.0,
+        "mp_periods": 58,
+        "mp_session_date": "2026-04-10",
+        "lot_size": 100,
+        "lots_per_trade": 1,
+        "default_qty": 100,
+        "contract_unit_label": "100 barrel contract",
+        "quote_unit_label": "Rs / barrel",
+        "strategy_title": "Strategy 2 \u00b7 Futures",
+        "signal_validation": "waiting_cross",
+        "execution_lane": "paper_futures",
+        "required_margin": 127515.0,
+        "bias_side": null
+      },
+      {
+        "symbol": "MCX:NATURALGAS26MAYFUT",
+        "underlying": "NATURALGAS",
+        "display_name": "Natural Gas",
+        "price": 265.0,
+        "previous_close": 265.1,
+        "change_pct": -0.04,
+        "signal": null,
+        "raw_signal": null,
+        "reason": "no_cross",
+        "signal_validation_detail": "A futures position is already open for this underlying.",
+        "regime": "bearish",
+        "macd": -0.0414,
+        "macd_signal": -0.0375,
+        "macd_histogram": -0.0039,
+        "atr": 0.761,
+        "bar_time": "2026-04-10T17:45:00Z",
+        "mp_status": "ready",
+        "mp_direction": "SELL",
+        "mp_day_type": "balance_below_poc",
+        "mp_reason": "holding_below_poc",
+        "mp_poc": 265.8,
+        "mp_vah": 266.5,
+        "mp_val": 264.8,
+        "mp_ib_high": 267.0,
+        "mp_ib_low": 265.2,
+        "mp_periods": 58,
+        "mp_session_date": "2026-04-10",
+        "lot_size": 1250,
+        "lots_per_trade": 1,
+        "default_qty": 1250,
+        "contract_unit_label": "1250 MMBtu contract",
+        "quote_unit_label": "Rs / MMBtu",
+        "strategy_title": "Strategy 2 \u00b7 Futures",
+        "signal_validation": "position_open",
+        "execution_lane": "paper_futures",
+        "required_margin": 49687.5,
+        "bias_side": null
+      }
+    ],
+    "option_watchlist": [
+      {
+        "underlying": "CRUDEOIL",
+        "symbol": "MCX:CRUDEOIL26MAYFUT",
+        "kind": "MCX",
+        "spot_price": 9161.0,
+        "expiry": "2026-04-16",
+        "atm_strike": 9150.0,
+        "live_source": "fyers",
+        "fyers_symbol": "MCX:CRUDEOIL26MAYFUT",
+        "lot_size": 100,
+        "contract_unit_label": "100 barrel contract",
+        "quote_unit_label": "Rs / barrel",
+        "strategy_title": "Strategy 1 \u00b7 Options",
+        "contract_notes": "Crude Oil options align with the saved expiry ladder; one futures lot is 100 barrels.",
+        "selection_policy": "nearest_liquid_contract",
+        "ce": {
+          "strike": 9150.0,
+          "option_type": "CE",
+          "instrument_key": "MCX:CRUDEOIL26APR9150CE",
+          "trading_symbol": "MCX:CRUDEOIL26APR9150CE",
+          "ltp": 477.7,
+          "prev_close": 418.7,
+          "change": 59.0,
+          "change_pct": 14.09,
+          "oi": 697,
+          "prev_oi": 440.0,
+          "oi_change": 257.0,
+          "oi_change_pct": 58.41,
+          "volume": 27951,
+          "iv": 0.999,
+          "delta": 0.532582,
+          "gamma": 0.000339,
+          "theta": -39.6612,
+          "vega": 4.6701,
+          "macd": -21.6614,
+          "macd_signal": 0.0925,
+          "macd_histogram": -21.7539,
+          "rsi": 45.49,
+          "selection_mode": "atm",
+          "liquidity_score": 28244.32,
+          "distance_steps": 0.0,
+          "distance_from_atm": 0.0,
+          "is_liquid": true,
+          "bar_time": "2026-04-10T03:30:00+00:00",
+          "zero_cross": "below_zero"
+        },
+        "pe": {
+          "strike": 9150.0,
+          "option_type": "PE",
+          "instrument_key": "MCX:CRUDEOIL26APR9150PE",
+          "trading_symbol": "MCX:CRUDEOIL26APR9150PE",
+          "ltp": 462.1,
+          "prev_close": 635.8,
+          "change": -173.7,
+          "change_pct": -27.32,
+          "oi": 855,
+          "prev_oi": 205.0,
+          "oi_change": 650.0,
+          "oi_change_pct": 317.07,
+          "volume": 25165,
+          "iv": 1.01,
+          "delta": -0.467213,
+          "gamma": 0.000335,
+          "theta": -38.4622,
+          "vega": 4.6699,
+          "macd": -7.8811,
+          "macd_signal": -20.8404,
+          "macd_histogram": 12.9592,
+          "rsi": 42.32,
+          "selection_mode": "atm",
+          "liquidity_score": 25513.51,
+          "distance_steps": 0.0,
+          "distance_from_atm": 0.0,
+          "is_liquid": true,
+          "bar_time": "2026-04-10T03:30:00+00:00",
+          "zero_cross": "below_zero"
+        },
+        "selected_expiry": null,
+        "suggested_expiry": "2026-04-16",
+        "active_expiry": "2026-04-16",
+        "available_expiries": [
+          "2026-04-16",
+          "2026-05-14",
+          "2026-06-16"
+        ],
+        "lookup_symbol": "MCX:CRUDEOIL26MAYFUT",
+        "display_name": "Crude Oil",
+        "regime": "dead_zone",
+        "signal_side": null,
+        "signal_reason": "waiting_cross",
+        "trade_symbol": "",
+        "trade_strike": null,
+        "trade_price": 0.0,
+        "trade_bar_time": null,
+        "ce_symbol": "MCX:CRUDEOIL26APR9150CE",
+        "pe_symbol": "MCX:CRUDEOIL26APR9150PE",
+        "ce_trade_price": 477.7,
+        "pe_trade_price": 462.1,
+        "capital_per_trade": 179109.75,
+        "lots_affordable": 0,
+        "is_trade_contract_liquid": false,
+        "signal_validation": "dead_zone",
+        "signal_validation_detail": "Both CE and PE MACD are below zero. Strategy 1 skips the dead zone."
+      },
+      {
+        "underlying": "GOLD",
+        "symbol": "MCX:GOLD26JUNFUT",
+        "kind": "MCX",
+        "spot_price": 152598.0,
+        "expiry": "2026-04-30",
+        "atm_strike": 152600.0,
+        "live_source": "fyers",
+        "fyers_symbol": "MCX:GOLD26JUNFUT",
+        "lot_size": 10,
+        "contract_unit_label": "100 gm contract",
+        "quote_unit_label": "Rs / 10 gm",
+        "strategy_title": "Strategy 1 \u00b7 Options",
+        "contract_notes": "Gold options are monitored off the saved expiry ladder; futures execution uses one 100 gm lot with prices quoted per 10 gm.",
+        "selection_policy": "nearest_liquid_contract",
+        "ce": {
+          "strike": 152600.0,
+          "option_type": "CE",
+          "instrument_key": "MCX:GOLD26APR152600CE",
+          "trading_symbol": "MCX:GOLD26APR152600CE",
+          "ltp": 5247.5,
+          "prev_close": 5840.0,
+          "change": -592.5,
+          "change_pct": -10.15,
+          "oi": 0,
+          "prev_oi": 0.0,
+          "oi_change": 0.0,
+          "oi_change_pct": null,
+          "volume": 0,
+          "iv": 0.3497,
+          "delta": 0.533583,
+          "gamma": 3.2e-05,
+          "theta": -137.6933,
+          "vega": 141.9989,
+          "macd": null,
+          "macd_signal": null,
+          "macd_histogram": null,
+          "rsi": null,
+          "selection_mode": "atm_fallback",
+          "liquidity_score": 0.0,
+          "distance_steps": 0.0,
+          "distance_from_atm": 0.0,
+          "is_liquid": false,
+          "bar_time": null,
+          "zero_cross": "below_zero"
+        },
+        "pe": {
+          "strike": 152600.0,
+          "option_type": "PE",
+          "instrument_key": "MCX:GOLD26APR152600PE",
+          "trading_symbol": "MCX:GOLD26APR152600PE",
+          "ltp": 6068.5,
+          "prev_close": 5008.5,
+          "change": 1060.0,
+          "change_pct": 21.16,
+          "oi": 0,
+          "prev_oi": 0.0,
+          "oi_change": 0.0,
+          "oi_change_pct": null,
+          "volume": 0,
+          "iv": 0.4455,
+          "delta": -0.465665,
+          "gamma": 2.5e-05,
+          "theta": -144.4074,
+          "vega": 141.976,
+          "macd": null,
+          "macd_signal": null,
+          "macd_histogram": null,
+          "rsi": null,
+          "selection_mode": "atm_fallback",
+          "liquidity_score": 0.0,
+          "distance_steps": 0.0,
+          "distance_from_atm": 0.0,
+          "is_liquid": false,
+          "bar_time": null,
+          "zero_cross": "above_zero"
+        },
+        "selected_expiry": "2026-04-30",
+        "suggested_expiry": "2026-04-30",
+        "active_expiry": "2026-04-30",
+        "available_expiries": [
+          "2026-04-30",
+          "2026-05-27",
+          "2026-06-30",
+          "2026-07-29",
+          "2026-08-31",
+          "2026-09-25",
+          "2026-10-30",
+          "2026-11-27",
+          "2026-12-31",
+          "2027-01-29"
+        ],
+        "lookup_symbol": "MCX:GOLD26JUNFUT",
+        "display_name": "Gold",
+        "regime": "warmup",
+        "signal_side": null,
+        "signal_reason": "waiting_cross",
+        "trade_symbol": "",
+        "trade_strike": null,
+        "trade_price": 0.0,
+        "trade_bar_time": null,
+        "ce_symbol": "MCX:GOLD26APR152600CE",
+        "pe_symbol": "MCX:GOLD26APR152600PE",
+        "ce_trade_price": 5247.5,
+        "pe_trade_price": 6068.5,
+        "capital_per_trade": 179109.75,
+        "lots_affordable": 0,
+        "is_trade_contract_liquid": false,
+        "signal_validation": "warming_up",
+        "signal_validation_detail": "CE and PE candles need more history before the MACD quadrant is tradable."
+      },
+      {
+        "underlying": "NATURALGAS",
+        "symbol": "MCX:NATURALGAS26MAYFUT",
+        "kind": "MCX",
+        "spot_price": 248.6,
+        "expiry": "2026-04-23",
+        "atm_strike": 250.0,
+        "live_source": "fyers",
+        "fyers_symbol": "MCX:NATURALGAS26MAYFUT",
+        "lot_size": 1250,
+        "contract_unit_label": "1250 MMBtu contract",
+        "quote_unit_label": "Rs / MMBtu",
+        "strategy_title": "Strategy 1 \u00b7 Options",
+        "contract_notes": "Natural Gas options and futures use the same root; one futures lot is 1250 MMBtu.",
+        "selection_policy": "nearest_liquid_contract",
+        "ce": {
+          "strike": 250.0,
+          "option_type": "CE",
+          "instrument_key": "MCX:NATURALGAS26APR250CE",
+          "trading_symbol": "MCX:NATURALGAS26APR250CE",
+          "ltp": 9.55,
+          "prev_close": 10.85,
+          "change": -1.3,
+          "change_pct": -11.98,
+          "oi": 16586,
+          "prev_oi": 11151.0,
+          "oi_change": 5435.0,
+          "oi_change_pct": 48.74,
+          "volume": 121801,
+          "iv": 0.5312,
+          "delta": 0.506864,
+          "gamma": 0.016004,
+          "theta": -0.4031,
+          "vega": 0.1871,
+          "macd": -0.5261,
+          "macd_signal": -0.5801,
+          "macd_histogram": 0.0541,
+          "rsi": 41.76,
+          "selection_mode": "atm",
+          "liquidity_score": 127655.05,
+          "distance_steps": 0.0,
+          "distance_from_atm": 0.0,
+          "is_liquid": true,
+          "bar_time": "2026-04-10T17:00:00+00:00",
+          "zero_cross": "below_zero"
+        },
+        "pe": {
+          "strike": 250.0,
+          "option_type": "PE",
+          "instrument_key": "MCX:NATURALGAS26APR250PE",
+          "trading_symbol": "MCX:NATURALGAS26APR250PE",
+          "ltp": 10.95,
+          "prev_close": 10.3,
+          "change": 0.65,
+          "change_pct": 6.31,
+          "oi": 9230,
+          "prev_oi": 6770.0,
+          "oi_change": 2460.0,
+          "oi_change_pct": 36.34,
+          "volume": 112694,
+          "iv": 0.5621,
+          "delta": -0.491251,
+          "gamma": 0.015123,
+          "theta": -0.3809,
+          "vega": 0.1871,
+          "macd": 0.0915,
+          "macd_signal": 0.1768,
+          "macd_histogram": -0.0853,
+          "rsi": 51.43,
+          "selection_mode": "atm",
+          "liquidity_score": 115973.59,
+          "distance_steps": 0.0,
+          "distance_from_atm": 0.0,
+          "is_liquid": true,
+          "bar_time": "2026-04-10T17:00:00+00:00",
+          "zero_cross": "above_zero"
+        },
+        "selected_expiry": "2026-04-23",
+        "suggested_expiry": "2026-04-23",
+        "active_expiry": "2026-04-23",
+        "available_expiries": [
+          "2026-04-23",
+          "2026-05-22",
+          "2026-06-23"
+        ],
+        "lookup_symbol": "MCX:NATURALGAS26MAYFUT",
+        "display_name": "Natural Gas",
+        "regime": "bearish",
+        "signal_side": null,
+        "signal_reason": "waiting_cross",
+        "trade_symbol": "",
+        "trade_strike": null,
+        "trade_price": 0.0,
+        "trade_bar_time": null,
+        "ce_symbol": "MCX:NATURALGAS26APR250CE",
+        "pe_symbol": "MCX:NATURALGAS26APR250PE",
+        "ce_trade_price": 9.55,
+        "pe_trade_price": 10.95,
+        "capital_per_trade": 179109.75,
+        "lots_affordable": 0,
+        "is_trade_contract_liquid": false,
+        "signal_validation": "trend_aligned",
+        "signal_validation_detail": "The MACD quadrant is aligned, but a fresh zero-cross has not fired yet."
+      },
+      {
+        "underlying": "SILVERM",
+        "symbol": "MCX:SILVERM26JUNFUT",
+        "kind": "MCX",
+        "spot_price": 245150.0,
+        "expiry": "2026-04-21",
+        "atm_strike": 245250.0,
+        "live_source": "fyers",
+        "fyers_symbol": "MCX:SILVERM26JUNFUT",
+        "lot_size": 5,
+        "contract_unit_label": "5 kg contract",
+        "quote_unit_label": "Rs / kg",
+        "strategy_title": "Strategy 1 \u00b7 Options",
+        "contract_notes": "Silver Mini options and futures share the same saved root; one futures lot is 5 kg.",
+        "selection_policy": "nearest_liquid_contract",
+        "ce": {
+          "strike": 245000.0,
+          "option_type": "CE",
+          "instrument_key": "MCX:SILVERM26APR245000CE",
+          "trading_symbol": "MCX:SILVERM26APR245000CE",
+          "ltp": 9650.5,
+          "prev_close": 10496.0,
+          "change": -845.5,
+          "change_pct": -8.06,
+          "oi": 902,
+          "prev_oi": 636.0,
+          "oi_change": 266.0,
+          "oi_change_pct": 41.82,
+          "volume": 7240,
+          "iv": 0.5506,
+          "delta": 0.529769,
+          "gamma": 1.7e-05,
+          "theta": -445.1326,
+          "vega": 169.3092,
+          "macd": -33.9221,
+          "macd_signal": 43.7937,
+          "macd_histogram": -77.7159,
+          "rsi": 45.16,
+          "selection_mode": "nearest_liquid",
+          "liquidity_score": 7605.09,
+          "distance_steps": 1.0,
+          "distance_from_atm": 250.0,
+          "is_liquid": true,
+          "bar_time": "2026-04-10T17:00:00+00:00",
+          "zero_cross": "below_zero"
+        },
+        "pe": {
+          "strike": 245000.0,
+          "option_type": "PE",
+          "instrument_key": "MCX:SILVERM26APR245000PE",
+          "trading_symbol": "MCX:SILVERM26APR245000PE",
+          "ltp": 9400.0,
+          "prev_close": 9498.5,
+          "change": -98.5,
+          "change_pct": -1.04,
+          "oi": 528,
+          "prev_oi": 376.0,
+          "oi_change": 152.0,
+          "oi_change_pct": 40.43,
+          "volume": 4506,
+          "iv": 0.573,
+          "delta": -0.469876,
+          "gamma": 1.6e-05,
+          "theta": -418.7328,
+          "vega": 169.2978,
+          "macd": -463.8978,
+          "macd_signal": -470.94,
+          "macd_histogram": 7.0422,
+          "rsi": 43.0,
+          "selection_mode": "nearest_liquid",
+          "liquidity_score": 4740.23,
+          "distance_steps": 1.0,
+          "distance_from_atm": 250.0,
+          "is_liquid": true,
+          "bar_time": "2026-04-10T17:00:00+00:00",
+          "zero_cross": "below_zero"
+        },
+        "selected_expiry": "2026-04-21",
+        "suggested_expiry": "2026-04-21",
+        "active_expiry": "2026-04-21",
+        "available_expiries": [
+          "2026-04-21",
+          "2026-05-26",
+          "2026-06-19",
+          "2026-07-28",
+          "2026-08-24",
+          "2026-09-24",
+          "2026-10-27",
+          "2026-11-23",
+          "2026-12-28",
+          "2027-01-25",
+          "2027-02-19"
+        ],
+        "lookup_symbol": "MCX:SILVERM26JUNFUT",
+        "display_name": "Silver Mini",
+        "regime": "dead_zone",
+        "signal_side": null,
+        "signal_reason": "waiting_cross",
+        "trade_symbol": "",
+        "trade_strike": null,
+        "trade_price": 0.0,
+        "trade_bar_time": null,
+        "ce_symbol": "MCX:SILVERM26APR245000CE",
+        "pe_symbol": "MCX:SILVERM26APR245000PE",
+        "ce_trade_price": 9650.5,
+        "pe_trade_price": 9400.0,
+        "capital_per_trade": 179109.75,
+        "lots_affordable": 0,
+        "is_trade_contract_liquid": false,
+        "signal_validation": "dead_zone",
+        "signal_validation_detail": "Both CE and PE MACD are below zero. Strategy 1 skips the dead zone."
+      }
+    ],
+    "positions": [
+      {
+        "position_key": "commodity_futures:MCX:NATURALGAS26MAYFUT",
+        "symbol": "MCX:NATURALGAS26MAYFUT",
+        "live_symbol": "MCX:NATURALGAS26MAYFUT",
+        "underlying": "NATURALGAS",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures",
+        "instrument_type": "FUT",
+        "action": "SELL",
+        "qty": 1250,
+        "lots": 1,
+        "lot_size": 1250,
+        "entry_price": 264.76754999999997,
+        "current_price": 265.0,
+        "stop_price": 265.69,
+        "target_price": 263.33,
+        "regime": "balance_below_poc",
+        "signal_reason": "macd_zero_cross_down_holding_below_poc",
+        "atr": 0.7857,
+        "macd_value": -0.0414,
+        "mp_poc": 265.8,
+        "mp_vah": 266.5,
+        "mp_val": 264.8,
+        "entered_at": "2026-04-10T23:03:48.002404+05:30",
+        "entry_bar_time": "2026-04-10T17:30:00Z",
+        "contract_unit_label": "1250 MMBtu contract",
+        "quote_unit_label": "Rs / MMBtu",
+        "display_name": "Natural Gas",
+        "initial_qty": 1250,
+        "peak_price": 264.76754999999997,
+        "target_reached": false,
+        "expiry": null,
+        "strike": null,
+        "option_type": null
       }
     ],
     "orders": [
+      {
+        "time": "2026-04-10T17:33:48.001187",
+        "order_id": "7ca68e16-1af1-4579-856f-d869d949a576",
+        "symbol": "MCX:NATURALGAS26MAYFUT",
+        "action": "SELL",
+        "qty": 1250,
+        "lots": 1,
+        "lot_size": 1250,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 264.77,
+        "reason": "macd_zero_cross_down_holding_below_poc",
+        "flow": "entry",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-10T17:30:35.445999",
+        "order_id": "c480fd24-2ad0-4d24-a02d-e0eb2b1c65c6",
+        "symbol": "MCX:GOLD26JUNFUT",
+        "action": "SELL",
+        "qty": 10,
+        "lots": 1,
+        "lot_size": 10,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 152498.71,
+        "reason": "mp_gate_flip",
+        "flow": "exit",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-10T17:26:55.360855",
+        "order_id": "c2f80e2e-c362-457b-95f0-ad987cf3a382",
+        "symbol": "MCX:GOLD26JUNFUT",
+        "action": "BUY",
+        "qty": 10,
+        "lots": 1,
+        "lot_size": 10,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 152804.36,
+        "reason": "macd_zero_cross_up_holding_above_poc",
+        "flow": "entry",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-10T17:22:00.467134",
+        "order_id": "8db43876-5d9c-4bbf-92b6-93e0ef94de08",
+        "symbol": "MCX:GOLD26JUNFUT",
+        "action": "BUY",
+        "qty": 10,
+        "lots": 1,
+        "lot_size": 10,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 152801.36,
+        "reason": "macd_reversal",
+        "flow": "exit",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-10T17:01:14.163818",
+        "order_id": "a87d30e8-b955-4458-acb6-929b8c6ea63d",
+        "symbol": "MCX:NATURALGAS26MAYFUT",
+        "action": "SELL",
+        "qty": 1250,
+        "lots": 1,
+        "lot_size": 1250,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 265.47,
+        "reason": "mp_gate_flip",
+        "flow": "exit",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-10T16:48:09.795075",
+        "order_id": "4904169c-1a9f-4570-989c-8e2882971e88",
+        "symbol": "MCX:GOLD26JUNFUT",
+        "action": "SELL",
+        "qty": 10,
+        "lots": 1,
+        "lot_size": 10,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 152430.75,
+        "reason": "macd_zero_cross_down_holding_below_poc",
+        "flow": "entry",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-10T16:30:38.837720",
+        "order_id": "beddcb94-7096-4e8a-9700-ae46e1a3ccd0",
+        "symbol": "MCX:NATURALGAS26MAYFUT",
+        "action": "BUY",
+        "qty": 1250,
+        "lots": 1,
+        "lot_size": 1250,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 266.23,
+        "reason": "macd_zero_cross_up_holding_above_poc",
+        "flow": "entry",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-10T12:19:49.512280",
+        "order_id": "9b93c683-870d-40d3-a42f-524ba8b5d021",
+        "symbol": "MCX:GOLD26JUNFUT",
+        "action": "SELL",
+        "qty": 10,
+        "lots": 1,
+        "lot_size": 10,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 152480.72,
+        "reason": "stop_loss",
+        "flow": "exit",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-10T12:19:49.511559",
+        "order_id": "00aab7ff-da4e-4418-ba8e-a2848823ecee",
+        "symbol": "MCX:CRUDEOIL26APR9350CE",
+        "action": "SELL",
+        "qty": 300,
+        "lots": 3,
+        "lot_size": 100,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 395.6,
+        "reason": "hard_stop",
+        "flow": "exit",
+        "strategy_key": "commodity_options",
+        "strategy_title": "Strategy 1 \u00b7 Options"
+      },
+      {
+        "time": "2026-04-10T11:58:18.095828",
+        "order_id": "48a9447c-4352-4a97-8d0a-3040c1a01712",
+        "symbol": "MCX:GOLD26JUNFUT",
+        "action": "BUY",
+        "qty": 10,
+        "lots": 1,
+        "lot_size": 10,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 152826.38,
+        "reason": "macd_zero_cross_up_holding_above_poc",
+        "flow": "entry",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-10T08:52:20.331209",
+        "order_id": "015416a4-e2f8-469b-8cf8-a584c322552c",
+        "symbol": "MCX:CRUDEOIL26APR9350CE",
+        "action": "BUY",
+        "qty": 300,
+        "lots": 3,
+        "lot_size": 100,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 533.17,
+        "reason": "ce_macd_zero_cross",
+        "flow": "entry",
+        "strategy_key": "commodity_options",
+        "strategy_title": "Strategy 1 \u00b7 Options"
+      },
+      {
+        "time": "2026-04-10T08:46:06.480272",
+        "order_id": "6b800912-ff2c-4442-8e4a-91499bcf99c2",
+        "symbol": "MCX:SILVERM26JUNFUT",
+        "action": "BUY",
+        "qty": 5,
+        "lots": 1,
+        "lot_size": 5,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 248904.39,
+        "reason": "target_hit",
+        "flow": "exit",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-10T08:15:10.938720",
+        "order_id": "0135dbfe-f6af-41be-8b6f-e72fc7a050da",
+        "symbol": "MCX:SILVERM26JUNFUT",
+        "action": "SELL",
+        "qty": 5,
+        "lots": 1,
+        "lot_size": 5,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 249558.16,
+        "reason": "macd_zero_cross_down_holding_below_poc",
+        "flow": "entry",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-10T08:09:35.002221",
+        "order_id": "54be33fb-501b-4772-b028-6c8c4f305d00",
+        "symbol": "MCX:NATURALGAS26MAYFUT",
+        "action": "SELL",
+        "qty": 1250,
+        "lots": 1,
+        "lot_size": 1250,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 266.37,
+        "reason": "stop_loss",
+        "flow": "exit",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-10T07:45:26.318259",
+        "order_id": "8a84188d-b5aa-40fa-a889-a64be2a40a2f",
+        "symbol": "MCX:NATURALGAS26MAYFUT",
+        "action": "BUY",
+        "qty": 1250,
+        "lots": 1,
+        "lot_size": 1250,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 267.33,
+        "reason": "macd_zero_cross_up_poor_low_recovery",
+        "flow": "entry",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-10T07:09:22.934410",
+        "order_id": "29826c3d-c503-4b89-9bc1-a7fe20f3da32",
+        "symbol": "MCX:CRUDEOIL26MAYFUT",
+        "action": "SELL",
+        "qty": 100,
+        "lots": 1,
+        "lot_size": 100,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 8557.72,
+        "reason": "target_hit",
+        "flow": "exit",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-10T06:50:11.914486",
+        "order_id": "909a5aab-0222-4dbc-8be5-d86243a78a81",
+        "symbol": "MCX:GOLD26JUNFUT",
+        "action": "BUY",
+        "qty": 10,
+        "lots": 1,
+        "lot_size": 10,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 152313.12,
+        "reason": "target_hit",
+        "flow": "exit",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-10T06:38:15.581539",
+        "order_id": "b98b0327-6a3c-49ff-95d6-0551ed8687d7",
+        "symbol": "MCX:CRUDEOIL26MAYFUT",
+        "action": "BUY",
+        "qty": 100,
+        "lots": 1,
+        "lot_size": 100,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 8501.25,
+        "reason": "macd_zero_cross_up_holding_above_poc",
+        "flow": "entry",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-10T05:57:13.762116",
+        "order_id": "e8d6638d-561e-4f7a-bc24-19ea8f610e4f",
+        "symbol": "MCX:GOLD26JUNFUT",
+        "action": "SELL",
+        "qty": 10,
+        "lots": 1,
+        "lot_size": 10,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 152623.65,
+        "reason": "macd_zero_cross_down_holding_below_poc",
+        "flow": "entry",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-10T03:30:08.253823",
+        "order_id": "07c45291-106f-4f55-b2c4-39ac2758dcee",
+        "symbol": "MCX:CRUDEOIL26MAYFUT",
+        "action": "BUY",
+        "qty": 100,
+        "lots": 1,
+        "lot_size": 100,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 8516.26,
+        "reason": "stop_loss",
+        "flow": "exit",
+        "strategy_key": "commodity_futures",
+        "strategy_title": "Strategy 2 \u00b7 Futures"
+      },
+      {
+        "time": "2026-04-09T17:19:51.410702",
+        "order_id": "3f06c119-3e01-4807-bba5-664b59a8eb8c",
+        "symbol": "MCX:CRUDEOIL26MAYFUT",
+        "action": "SELL",
+        "qty": 100,
+        "lots": 1,
+        "lot_size": 100,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 8308.84,
+        "reason": "bearish_breakdown",
+        "flow": "entry"
+      },
+      {
+        "time": "2026-04-09T16:27:47.861860",
+        "order_id": "1d53c044-a218-4376-a47a-0d3e52c6cb18",
+        "symbol": "MCX:CRUDEOIL26MAYFUT",
+        "action": "SELL",
+        "qty": 100,
+        "lots": 1,
+        "lot_size": 100,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 8350.82,
+        "reason": "stop_loss",
+        "flow": "exit"
+      },
+      {
+        "time": "2026-04-09T16:01:31.094128",
+        "order_id": "a0accb8e-9d21-4c5c-b9e0-a8baf4cabef9",
+        "symbol": "MCX:SILVERM26JUNFUT",
+        "action": "BUY",
+        "qty": 5,
+        "lots": 1,
+        "lot_size": 5,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 250405.14,
+        "reason": "bullish_breakout",
+        "flow": "entry"
+      },
+      {
+        "time": "2026-04-09T16:01:31.093531",
+        "order_id": "4e63ff7e-c0bb-4203-a9f4-f131860de5e1",
+        "symbol": "MCX:NATURALGAS26MAYFUT",
+        "action": "BUY",
+        "qty": 1250,
+        "lots": 1,
+        "lot_size": 1250,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 265.73,
+        "reason": "target_hit",
+        "flow": "exit"
+      },
+      {
+        "time": "2026-04-09T15:31:11.619937",
+        "order_id": "c1d36b0a-d7d2-43dc-b32e-618e0381f128",
+        "symbol": "MCX:GOLD26JUNFUT",
+        "action": "BUY",
+        "qty": 10,
+        "lots": 1,
+        "lot_size": 10,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 153258.59,
+        "reason": "bullish_breakout",
+        "flow": "entry"
+      },
+      {
+        "time": "2026-04-09T15:04:54.767515",
+        "order_id": "648c392a-d91b-42a4-a8d1-8c23ac273ca2",
+        "symbol": "MCX:GOLD26JUNFUT",
+        "action": "SELL",
+        "qty": 10,
+        "lots": 1,
+        "lot_size": 10,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 153118.4,
+        "reason": "target_hit",
+        "flow": "exit"
+      },
+      {
+        "time": "2026-04-09T14:05:58.262341",
+        "order_id": "930c6c3a-9d3c-4288-80dc-0c4173338cbe",
+        "symbol": "MCX:CRUDEOIL26MAYFUT",
+        "action": "BUY",
+        "qty": 100,
+        "lots": 1,
+        "lot_size": 100,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 8685.34,
+        "reason": "bullish_breakout",
+        "flow": "entry"
+      },
+      {
+        "time": "2026-04-09T14:05:58.260075",
+        "order_id": "afc6160c-b1cb-4d7e-9f7f-fda9beff5906",
+        "symbol": "MCX:CRUDEOIL26MAYFUT",
+        "action": "SELL",
+        "qty": 100,
+        "lots": 1,
+        "lot_size": 100,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 8676.66,
+        "reason": "target_hit",
+        "flow": "exit"
+      },
+      {
+        "time": "2026-04-09T14:03:16.739848",
+        "order_id": "eb96a530-0eb4-4309-858a-c6b4ec021dd7",
+        "symbol": "MCX:NATURALGAS26MAYFUT",
+        "action": "SELL",
+        "qty": 1250,
+        "lots": 1,
+        "lot_size": 1250,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 268.67,
+        "reason": "bearish_breakdown",
+        "flow": "entry"
+      },
+      {
+        "time": "2026-04-09T11:47:26.136006",
+        "order_id": "6f2b7622-8ce0-433e-9aca-a2e6339560fc",
+        "symbol": "MCX:SILVERM26JUNFUT",
+        "action": "BUY",
+        "qty": 5,
+        "lots": 1,
+        "lot_size": 5,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 246965.42,
+        "reason": "stop_loss",
+        "flow": "exit"
+      },
+      {
+        "time": "2026-04-09T10:31:14.685713",
+        "order_id": "4bdb6a25-440d-4694-b9e3-8ddf67460abe",
+        "symbol": "MCX:GOLD26JUNFUT",
+        "action": "BUY",
+        "qty": 1,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 152277.1,
+        "reason": "bullish_breakout"
+      },
+      {
+        "time": "2026-04-09T10:31:14.683761",
+        "order_id": "00d418b1-a455-43d4-8821-2a5c90668d75",
+        "symbol": "MCX:GOLD26JUNFUT",
+        "action": "BUY",
+        "qty": 1,
+        "order_type": "MARKET",
+        "status": "FILLED",
+        "fill_price": 152277.1,
+        "reason": "trend_reversal"
+      },
       {
         "time": "2026-04-09T03:30:13.899822",
         "order_id": "bb537e7c-f151-4ec9-982f-7eb756bb3af0",
@@ -593,814 +1817,786 @@
         "status": "FILLED",
         "fill_price": 150034.98,
         "reason": "bullish_breakout"
-      },
-      {
-        "time": "2026-04-06T05:00:14.088099",
-        "order_id": "fef30ac3-cb09-4e16-a922-e27adb8048c9",
-        "symbol": "MCX:GOLD26JUNFUT",
-        "action": "SELL",
-        "qty": 1,
-        "order_type": "MARKET",
-        "status": "FILLED",
-        "fill_price": 149822.05,
-        "reason": "target_hit"
-      },
-      {
-        "time": "2026-04-06T03:30:19.547641",
-        "order_id": "8c918c84-351c-4366-8330-47e611fb5374",
-        "symbol": "MCX:GOLD26JUNFUT",
-        "action": "BUY",
-        "qty": 1,
-        "order_type": "MARKET",
-        "status": "FILLED",
-        "fill_price": 148825.38,
-        "reason": "bullish_breakout"
-      },
-      {
-        "time": "2026-04-02T17:52:16.792872",
-        "order_id": "769a7c9a-c05b-460e-af1d-d30cd5ff35e5",
-        "symbol": "MCX:CRUDEOIL26MAYFUT",
-        "action": "BUY",
-        "qty": 1,
-        "order_type": "MARKET",
-        "status": "FILLED",
-        "fill_price": 9214.6,
-        "reason": "bullish_breakout"
       }
     ],
     "reports": [
       {
-        "time": "2026-04-09T12:43:50.981153+05:30",
-        "total_equity": 929688.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -621.57,
-        "open_positions": 3,
+        "time": "2026-04-10T23:19:32.134395+05:30",
+        "total_equity": 895258.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -290.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 0 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:43:19.701162+05:30",
-        "total_equity": 929688.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -621.57,
-        "open_positions": 3,
+        "time": "2026-04-10T23:18:55.981930+05:30",
+        "total_equity": 895258.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -290.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:42:48.872873+05:30",
-        "total_equity": 929689.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -620.57,
-        "open_positions": 3,
+        "time": "2026-04-10T23:18:18.191248+05:30",
+        "total_equity": 895383.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -165.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 0 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:42:18.147282+05:30",
-        "total_equity": 929689.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -620.57,
-        "open_positions": 3,
+        "time": "2026-04-10T23:17:42.010813+05:30",
+        "total_equity": 895133.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -415.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 3 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:41:54.609248+05:30",
-        "total_equity": 929544.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -765.57,
-        "open_positions": 3,
+        "time": "2026-04-10T23:17:03.626961+05:30",
+        "total_equity": 895133.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -415.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:41:23.706372+05:30",
-        "total_equity": 929494.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -815.57,
-        "open_positions": 3,
+        "time": "2026-04-10T23:16:26.404529+05:30",
+        "total_equity": 895133.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -415.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:37:44.528605+05:30",
-        "total_equity": 929820.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -489.57,
-        "open_positions": 3,
+        "time": "2026-04-10T23:15:40.838430+05:30",
+        "total_equity": 894883.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -665.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:37:13.621287+05:30",
-        "total_equity": 929835.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -474.57,
-        "open_positions": 3,
+        "time": "2026-04-10T23:15:03.497502+05:30",
+        "total_equity": 895133.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -415.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:36:42.733218+05:30",
-        "total_equity": 930077.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -232.57,
-        "open_positions": 3,
+        "time": "2026-04-10T23:14:25.220981+05:30",
+        "total_equity": 895133.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -415.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:36:11.875896+05:30",
-        "total_equity": 930067.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -242.57,
-        "open_positions": 3,
+        "time": "2026-04-10T23:13:45.435966+05:30",
+        "total_equity": 895133.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -415.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 3 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:35:40.997239+05:30",
-        "total_equity": 930110.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -199.57,
-        "open_positions": 3,
+        "time": "2026-04-10T23:13:09.785368+05:30",
+        "total_equity": 895008.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -540.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 3 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:35:10.240903+05:30",
-        "total_equity": 930069.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -240.57,
-        "open_positions": 3,
+        "time": "2026-04-10T23:12:33.286723+05:30",
+        "total_equity": 895133.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -415.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:34:38.962913+05:30",
-        "total_equity": 930063.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -246.57,
-        "open_positions": 3,
+        "time": "2026-04-10T23:11:57.532106+05:30",
+        "total_equity": 895133.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -415.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:34:08.151784+05:30",
-        "total_equity": 930127.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -182.57,
-        "open_positions": 3,
+        "time": "2026-04-10T23:11:21.875800+05:30",
+        "total_equity": 895133.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -415.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:33:37.105202+05:30",
-        "total_equity": 930103.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -206.57,
-        "open_positions": 3,
+        "time": "2026-04-10T23:10:44.070088+05:30",
+        "total_equity": 895133.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -415.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:33:06.155812+05:30",
-        "total_equity": 930167.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -142.57,
-        "open_positions": 3,
+        "time": "2026-04-10T23:10:05.578326+05:30",
+        "total_equity": 895258.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -290.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:32:35.297346+05:30",
-        "total_equity": 930273.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -36.57,
-        "open_positions": 3,
+        "time": "2026-04-10T23:09:27.857296+05:30",
+        "total_equity": 895258.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -290.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 3 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:32:04.187609+05:30",
-        "total_equity": 930497.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 187.43,
-        "open_positions": 3,
+        "time": "2026-04-10T23:08:52.099907+05:30",
+        "total_equity": 895383.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -165.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 0 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:31:33.360972+05:30",
-        "total_equity": 930497.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 187.43,
-        "open_positions": 3,
+        "time": "2026-04-10T23:08:14.974024+05:30",
+        "total_equity": 895383.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -165.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 2 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:31:02.610448+05:30",
-        "total_equity": 930419.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 109.43,
-        "open_positions": 3,
+        "time": "2026-04-10T23:07:35.814022+05:30",
+        "total_equity": 895383.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -165.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 0 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:30:31.796354+05:30",
-        "total_equity": 930419.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 109.43,
-        "open_positions": 3,
+        "time": "2026-04-10T23:06:59.470634+05:30",
+        "total_equity": 895383.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -165.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 3 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:25:32.518463+05:30",
-        "total_equity": 930960.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 650.43,
-        "open_positions": 3,
+        "time": "2026-04-10T23:06:21.797212+05:30",
+        "total_equity": 895383.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -165.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 0 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:25:02.330865+05:30",
-        "total_equity": 930960.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 650.43,
-        "open_positions": 3,
+        "time": "2026-04-10T23:05:43.118779+05:30",
+        "total_equity": 895383.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -165.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 0 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:24:31.590168+05:30",
-        "total_equity": 930960.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 650.43,
-        "open_positions": 3,
+        "time": "2026-04-10T23:05:07.146684+05:30",
+        "total_equity": 895258.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -290.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:24:14.851522+05:30",
-        "total_equity": 931014.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 704.43,
-        "open_positions": 3,
+        "time": "2026-04-10T23:04:27.176325+05:30",
+        "total_equity": 895133.2,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": -415.56,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:23:44.043141+05:30",
-        "total_equity": 930541.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 231.43,
-        "open_positions": 3,
+        "time": "2026-04-10T23:03:48.002842+05:30",
+        "total_equity": 895548.77,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": 0.0,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:23:12.375349+05:30",
-        "total_equity": 930756.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 446.43,
-        "open_positions": 3,
+        "time": "2026-04-10T23:03:07.471265+05:30",
+        "total_equity": 945192.68,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": 0.0,
+        "open_positions": 0,
         "tracked_symbols": 4,
-        "last_message": "Scanned 0 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-09T12:22:41.550084+05:30",
-        "total_equity": 930756.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 446.43,
-        "open_positions": 3,
+        "time": "2026-04-10T23:02:29.983978+05:30",
+        "total_equity": 945192.68,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": 0.0,
+        "open_positions": 0,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-09T12:22:10.698642+05:30",
-        "total_equity": 930640.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 330.43,
-        "open_positions": 3,
+        "time": "2026-04-10T23:01:48.598850+05:30",
+        "total_equity": 945192.68,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": 0.0,
+        "open_positions": 0,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-09T12:21:39.776308+05:30",
-        "total_equity": 930668.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 358.43,
-        "open_positions": 3,
+        "time": "2026-04-10T23:01:12.547039+05:30",
+        "total_equity": 945192.68,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": 0.0,
+        "open_positions": 0,
         "tracked_symbols": 4,
-        "last_message": "Scanned 3 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-09T12:21:08.903450+05:30",
-        "total_equity": 930534.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 224.43,
-        "open_positions": 3,
+        "time": "2026-04-10T23:00:35.446845+05:30",
+        "total_equity": 945192.68,
+        "realized_pnl": -77667.57,
+        "unrealized_pnl": 0.0,
+        "open_positions": 0,
         "tracked_symbols": 4,
-        "last_message": "Scanned 0 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-09T12:20:38.180191+05:30",
-        "total_equity": 930534.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 224.43,
-        "open_positions": 3,
+        "time": "2026-04-10T22:59:59.181332+05:30",
+        "total_equity": 717147.49,
+        "realized_pnl": -74611.05,
+        "unrealized_pnl": -2353.64,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 3 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:20:07.159457+05:30",
-        "total_equity": 930545.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 235.43,
-        "open_positions": 3,
+        "time": "2026-04-10T22:59:24.034332+05:30",
+        "total_equity": 717147.49,
+        "realized_pnl": -74611.05,
+        "unrealized_pnl": -2353.64,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 0 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:19:36.397907+05:30",
-        "total_equity": 930545.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 235.43,
-        "open_positions": 3,
+        "time": "2026-04-10T22:58:47.167418+05:30",
+        "total_equity": 718317.49,
+        "realized_pnl": -74611.05,
+        "unrealized_pnl": -1183.64,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:19:05.222711+05:30",
-        "total_equity": 930413.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 103.43,
-        "open_positions": 3,
+        "time": "2026-04-10T22:58:09.988913+05:30",
+        "total_equity": 718717.49,
+        "realized_pnl": -74611.05,
+        "unrealized_pnl": -783.64,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 0 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:18:34.412569+05:30",
-        "total_equity": 930413.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": 103.43,
-        "open_positions": 3,
+        "time": "2026-04-10T22:57:32.728905+05:30",
+        "total_equity": 718737.49,
+        "realized_pnl": -74611.05,
+        "unrealized_pnl": -763.64,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:18:03.038340+05:30",
-        "total_equity": 930193.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -116.57,
-        "open_positions": 3,
+        "time": "2026-04-10T22:56:55.362792+05:30",
+        "total_equity": 719501.13,
+        "realized_pnl": -74611.05,
+        "unrealized_pnl": 0.0,
+        "open_positions": 1,
         "tracked_symbols": 4,
-        "last_message": "Scanned 0 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:17:32.196948+05:30",
-        "total_equity": 930193.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -116.57,
-        "open_positions": 3,
+        "time": "2026-04-10T22:56:18.786414+05:30",
+        "total_equity": 948707.67,
+        "realized_pnl": -74611.05,
+        "unrealized_pnl": 0.0,
+        "open_positions": 0,
         "tracked_symbols": 4,
-        "last_message": "Scanned 2 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-09T11:27:21.652621+05:30",
-        "total_equity": 930126.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -183.57,
-        "open_positions": 3,
+        "time": "2026-04-10T22:55:39.785192+05:30",
+        "total_equity": 948707.67,
+        "realized_pnl": -74611.05,
+        "unrealized_pnl": 0.0,
+        "open_positions": 0,
         "tracked_symbols": 4,
-        "last_message": "Scanned 0 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-09T11:24:17.766134+05:30",
-        "total_equity": 930126.62,
-        "realized_pnl": -9771.0,
-        "unrealized_pnl": -183.57,
-        "open_positions": 3,
+        "time": "2026-04-10T22:55:02.558113+05:30",
+        "total_equity": 948707.67,
+        "realized_pnl": -74611.05,
+        "unrealized_pnl": 0.0,
+        "open_positions": 0,
         "tracked_symbols": 4,
-        "last_message": "Scanned 0 commodity symbols. 3 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       }
     ],
     "commentary": [
       {
-        "time": "2026-04-09T12:43:50.980002+05:30",
+        "time": "2026-04-10T23:37:10.194399+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Agent idle."
+      },
+      {
+        "time": "2026-04-10T23:03:48.002531+05:30",
         "tone": "success",
-        "message": "Scanned 0 commodity symbols. 3 open positions."
+        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:43:50.979887+05:30",
+        "time": "2026-04-10T23:03:48.002486+05:30",
+        "tone": "trade",
+        "message": "ENTRY Natural Gas SELL @264.77 | 1 lot | MP balance_below_poc | stop 265.69"
+      },
+      {
+        "time": "2026-04-10T23:00:35.446530+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
+      },
+      {
+        "time": "2026-04-10T23:00:35.446448+05:30",
+        "tone": "trade",
+        "message": "EXIT Gold SELL @152575.00 (mp_gate_flip) | 1 lot"
+      },
+      {
+        "time": "2026-04-10T22:56:55.362237+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
+      },
+      {
+        "time": "2026-04-10T22:56:55.362185+05:30",
+        "tone": "trade",
+        "message": "ENTRY Gold BUY @152804.36 | 1 lot | MP balance_above_poc | stop 152561.00"
+      },
+      {
+        "time": "2026-04-10T22:52:00.475721+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
+      },
+      {
+        "time": "2026-04-10T22:52:00.475371+05:30",
+        "tone": "trade",
+        "message": "EXIT Gold BUY @152725.00 (macd_reversal) | 1 lot"
+      },
+      {
+        "time": "2026-04-10T22:31:14.164400+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
+      },
+      {
+        "time": "2026-04-10T22:31:14.164264+05:30",
+        "tone": "trade",
+        "message": "EXIT Natural Gas SELL @265.60 (mp_gate_flip) | 1 lot"
+      },
+      {
+        "time": "2026-04-10T22:28:00.013261+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 2 open positions."
+      },
+      {
+        "time": "2026-04-10T22:27:53.962321+05:30",
         "tone": "warning",
-        "message": "MCX:NATURALGAS26MAYFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
+        "message": "Live LTP fetch failed. Using candle closes where available. ()"
       },
       {
-        "time": "2026-04-09T12:43:50.362192+05:30",
-        "tone": "warning",
-        "message": "MCX:CRUDEOIL26MAYFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
+        "time": "2026-04-10T22:18:09.796539+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 2 open positions."
       },
       {
-        "time": "2026-04-09T12:43:50.242583+05:30",
-        "tone": "warning",
-        "message": "MCX:SILVERM26JUNFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
+        "time": "2026-04-10T22:18:09.796403+05:30",
+        "tone": "trade",
+        "message": "ENTRY Gold SELL @152430.75 | 1 lot | MP balance_below_poc | stop 152781.61"
       },
       {
-        "time": "2026-04-09T12:43:50.116554+05:30",
-        "tone": "warning",
-        "message": "MCX:GOLD26JUNFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
+        "time": "2026-04-10T22:00:38.838277+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:43:49.891568+05:30",
+        "time": "2026-04-10T22:00:38.838229+05:30",
+        "tone": "trade",
+        "message": "ENTRY Natural Gas BUY @266.23 | 1 lot | MP balance_above_poc | stop 265.20"
+      },
+      {
+        "time": "2026-04-10T21:40:52.803104+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
+      },
+      {
+        "time": "2026-04-10T21:11:49.600879+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 3 option rows. 0 open positions."
+      },
+      {
+        "time": "2026-04-10T17:49:49.512676+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
+      },
+      {
+        "time": "2026-04-10T17:49:49.512454+05:30",
+        "tone": "trade",
+        "message": "EXIT Gold SELL @152557.00 (stop_loss) | 1 lot"
+      },
+      {
+        "time": "2026-04-10T17:49:49.512204+05:30",
+        "tone": "trade",
+        "message": "EXIT Crude Oil CE @395.80 (hard_stop) | 3 lot"
+      },
+      {
+        "time": "2026-04-10T17:28:18.096933+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 2 open positions."
+      },
+      {
+        "time": "2026-04-10T17:28:18.096718+05:30",
+        "tone": "trade",
+        "message": "ENTRY Gold BUY @152826.38 | 1 lot | MP balance_above_poc | stop 152561.00"
+      },
+      {
+        "time": "2026-04-10T15:22:17.647292+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
+      },
+      {
+        "time": "2026-04-10T15:21:43.526113+05:30",
+        "tone": "success",
+        "message": "Scanned 0 futures rows and 0 option rows. 1 open positions."
+      },
+      {
+        "time": "2026-04-10T15:21:43.525359+05:30",
         "tone": "warning",
         "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
       },
       {
-        "time": "2026-04-09T12:43:19.700637+05:30",
-        "tone": "success",
-        "message": "Scanned 4 commodity symbols. 3 open positions."
-      },
-      {
-        "time": "2026-04-09T12:42:48.871879+05:30",
-        "tone": "success",
-        "message": "Scanned 0 commodity symbols. 3 open positions."
-      },
-      {
-        "time": "2026-04-09T12:42:48.871635+05:30",
+        "time": "2026-04-10T15:21:42.478817+05:30",
         "tone": "warning",
-        "message": "MCX:NATURALGAS26MAYFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
+        "message": "MCX:NATURALGAS26MAYFUT: no futures candles returned by broker."
       },
       {
-        "time": "2026-04-09T12:42:48.718651+05:30",
+        "time": "2026-04-10T15:21:42.200973+05:30",
         "tone": "warning",
-        "message": "MCX:CRUDEOIL26MAYFUT: unable to load Fyers history ([SSL] record layer failure (_ssl.c:1016))"
+        "message": "MCX:CRUDEOIL26MAYFUT: no futures candles returned by broker."
       },
       {
-        "time": "2026-04-09T12:42:48.597150+05:30",
+        "time": "2026-04-10T15:21:41.998665+05:30",
         "tone": "warning",
-        "message": "MCX:SILVERM26JUNFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
+        "message": "MCX:SILVERM26JUNFUT: no futures candles returned by broker."
       },
       {
-        "time": "2026-04-09T12:42:48.447936+05:30",
+        "time": "2026-04-10T15:21:41.748452+05:30",
         "tone": "warning",
-        "message": "MCX:GOLD26JUNFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
+        "message": "MCX:GOLD26JUNFUT: no futures candles returned by broker."
       },
       {
-        "time": "2026-04-09T12:42:48.279392+05:30",
+        "time": "2026-04-10T15:21:41.399926+05:30",
         "tone": "warning",
         "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
       },
       {
-        "time": "2026-04-09T12:42:18.146362+05:30",
+        "time": "2026-04-10T15:14:21.441385+05:30",
         "tone": "success",
-        "message": "Scanned 3 commodity symbols. 3 open positions."
+        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:42:17.955875+05:30",
-        "tone": "warning",
-        "message": "MCX:CRUDEOIL26MAYFUT: unable to load Fyers history ([SSL] record layer failure (_ssl.c:1016))"
-      },
-      {
-        "time": "2026-04-09T12:36:42.732261+05:30",
+        "time": "2026-04-10T15:13:47.666041+05:30",
         "tone": "success",
-        "message": "Scanned 4 commodity symbols. 3 open positions."
+        "message": "Scanned 0 futures rows and 0 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:36:11.875446+05:30",
-        "tone": "success",
-        "message": "Scanned 3 commodity symbols. 3 open positions."
-      },
-      {
-        "time": "2026-04-09T12:36:11.875100+05:30",
-        "tone": "warning",
-        "message": "MCX:NATURALGAS26MAYFUT: unable to load Fyers history ([SSL] record layer failure (_ssl.c:1016))"
-      },
-      {
-        "time": "2026-04-09T12:35:40.997026+05:30",
-        "tone": "success",
-        "message": "Scanned 3 commodity symbols. 3 open positions."
-      },
-      {
-        "time": "2026-04-09T12:35:40.996938+05:30",
-        "tone": "warning",
-        "message": "MCX:NATURALGAS26MAYFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
-      },
-      {
-        "time": "2026-04-09T12:33:06.154887+05:30",
-        "tone": "success",
-        "message": "Scanned 4 commodity symbols. 3 open positions."
-      },
-      {
-        "time": "2026-04-09T12:32:35.296265+05:30",
-        "tone": "success",
-        "message": "Scanned 3 commodity symbols. 3 open positions."
-      },
-      {
-        "time": "2026-04-09T12:32:34.792260+05:30",
-        "tone": "warning",
-        "message": "MCX:GOLD26JUNFUT: unable to load Fyers history ([SSL] record layer failure (_ssl.c:1016))"
-      },
-      {
-        "time": "2026-04-09T12:32:34.672033+05:30",
-        "tone": "warning",
-        "message": "Live LTP fetch failed. Using candle closes where available. ([SSL] record layer failure (_ssl.c:1016))"
-      },
-      {
-        "time": "2026-04-09T12:32:04.186382+05:30",
-        "tone": "success",
-        "message": "Scanned 0 commodity symbols. 3 open positions."
-      },
-      {
-        "time": "2026-04-09T12:32:04.186251+05:30",
-        "tone": "warning",
-        "message": "MCX:NATURALGAS26MAYFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
-      },
-      {
-        "time": "2026-04-09T12:32:04.045992+05:30",
-        "tone": "warning",
-        "message": "MCX:CRUDEOIL26MAYFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
-      },
-      {
-        "time": "2026-04-09T12:32:03.900188+05:30",
-        "tone": "warning",
-        "message": "MCX:SILVERM26JUNFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
-      },
-      {
-        "time": "2026-04-09T12:32:03.727473+05:30",
-        "tone": "warning",
-        "message": "MCX:GOLD26JUNFUT: unable to load Fyers history ([SSL] record layer failure (_ssl.c:1016))"
-      },
-      {
-        "time": "2026-04-09T12:32:03.514818+05:30",
+        "time": "2026-04-10T15:13:47.665699+05:30",
         "tone": "warning",
         "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
       },
       {
-        "time": "2026-04-09T12:31:33.360083+05:30",
-        "tone": "success",
-        "message": "Scanned 2 commodity symbols. 3 open positions."
-      },
-      {
-        "time": "2026-04-09T12:31:33.165323+05:30",
+        "time": "2026-04-10T15:13:46.704097+05:30",
         "tone": "warning",
-        "message": "MCX:CRUDEOIL26MAYFUT: unable to load Fyers history ([SSL] record layer failure (_ssl.c:1016))"
+        "message": "MCX:NATURALGAS26MAYFUT: no futures candles returned by broker."
       },
       {
-        "time": "2026-04-09T12:31:32.879799+05:30",
+        "time": "2026-04-10T15:13:46.493842+05:30",
         "tone": "warning",
-        "message": "MCX:GOLD26JUNFUT: unable to load Fyers history ([SSL] record layer failure (_ssl.c:1016))"
+        "message": "MCX:CRUDEOIL26MAYFUT: no futures candles returned by broker."
       },
       {
-        "time": "2026-04-09T12:31:02.609283+05:30",
-        "tone": "success",
-        "message": "Scanned 0 commodity symbols. 3 open positions."
-      },
-      {
-        "time": "2026-04-09T12:31:02.609095+05:30",
+        "time": "2026-04-10T15:13:46.236426+05:30",
         "tone": "warning",
-        "message": "MCX:NATURALGAS26MAYFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
+        "message": "MCX:SILVERM26JUNFUT: no futures candles returned by broker."
       },
       {
-        "time": "2026-04-09T12:31:02.462301+05:30",
+        "time": "2026-04-10T15:13:46.067280+05:30",
         "tone": "warning",
-        "message": "MCX:CRUDEOIL26MAYFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
+        "message": "MCX:GOLD26JUNFUT: no futures candles returned by broker."
       },
       {
-        "time": "2026-04-09T12:31:02.280423+05:30",
-        "tone": "warning",
-        "message": "MCX:SILVERM26JUNFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
-      },
-      {
-        "time": "2026-04-09T12:31:02.084909+05:30",
-        "tone": "warning",
-        "message": "MCX:GOLD26JUNFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
-      },
-      {
-        "time": "2026-04-09T12:31:01.949003+05:30",
+        "time": "2026-04-10T15:13:45.845672+05:30",
         "tone": "warning",
         "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
       },
       {
-        "time": "2026-04-09T12:30:31.795935+05:30",
+        "time": "2026-04-10T15:13:15.731718+05:30",
         "tone": "success",
-        "message": "Scanned 3 commodity symbols. 3 open positions."
+        "message": "Scanned 4 futures rows and 3 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:30:31.795569+05:30",
-        "tone": "warning",
-        "message": "MCX:NATURALGAS26MAYFUT: unable to load Fyers history ([SSL] record layer failure (_ssl.c:1016))"
-      },
-      {
-        "time": "2026-04-09T12:25:32.516217+05:30",
+        "time": "2026-04-10T15:09:49.648174+05:30",
         "tone": "success",
-        "message": "Scanned 0 commodity symbols. 3 open positions."
+        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:25:32.515496+05:30",
-        "tone": "warning",
-        "message": "MCX:NATURALGAS26MAYFUT: unable to load Fyers history ([Errno -2] Name or service not known)"
-      },
-      {
-        "time": "2026-04-09T12:25:32.479769+05:30",
-        "tone": "warning",
-        "message": "MCX:CRUDEOIL26MAYFUT: unable to load Fyers history ([Errno -2] Name or service not known)"
-      },
-      {
-        "time": "2026-04-09T12:25:32.448714+05:30",
-        "tone": "warning",
-        "message": "MCX:SILVERM26JUNFUT: unable to load Fyers history ([Errno -2] Name or service not known)"
-      },
-      {
-        "time": "2026-04-09T12:25:32.398806+05:30",
-        "tone": "warning",
-        "message": "MCX:GOLD26JUNFUT: unable to load Fyers history ([Errno -2] Name or service not known)"
-      },
-      {
-        "time": "2026-04-09T12:25:32.384348+05:30",
-        "tone": "warning",
-        "message": "Live LTP fetch failed. Using candle closes where available. ([Errno -2] Name or service not known)"
-      },
-      {
-        "time": "2026-04-09T12:25:02.327138+05:30",
+        "time": "2026-04-10T15:09:15.306189+05:30",
         "tone": "success",
-        "message": "Scanned 0 commodity symbols. 3 open positions."
+        "message": "Scanned 0 futures rows and 0 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:25:02.326664+05:30",
-        "tone": "warning",
-        "message": "MCX:NATURALGAS26MAYFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
-      },
-      {
-        "time": "2026-04-09T12:25:02.182514+05:30",
-        "tone": "warning",
-        "message": "MCX:CRUDEOIL26MAYFUT: unable to load Fyers history ([SSL] record layer failure (_ssl.c:1016))"
-      },
-      {
-        "time": "2026-04-09T12:25:02.079725+05:30",
-        "tone": "warning",
-        "message": "MCX:SILVERM26JUNFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
-      },
-      {
-        "time": "2026-04-09T12:25:01.930761+05:30",
-        "tone": "warning",
-        "message": "MCX:GOLD26JUNFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
-      },
-      {
-        "time": "2026-04-09T12:25:01.784112+05:30",
+        "time": "2026-04-10T15:09:15.305853+05:30",
         "tone": "warning",
         "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
       },
       {
-        "time": "2026-04-09T12:23:44.040271+05:30",
-        "tone": "success",
-        "message": "Scanned 4 commodity symbols. 3 open positions."
-      },
-      {
-        "time": "2026-04-09T12:23:42.581868+05:30",
+        "time": "2026-04-10T15:09:14.288564+05:30",
         "tone": "warning",
-        "message": "Live LTP fetch failed. Using candle closes where available. ([SSL] record layer failure (_ssl.c:1016))"
+        "message": "MCX:NATURALGAS26MAYFUT: no futures candles returned by broker."
       },
       {
-        "time": "2026-04-09T12:23:12.372595+05:30",
-        "tone": "success",
-        "message": "Scanned 0 commodity symbols. 3 open positions."
-      },
-      {
-        "time": "2026-04-09T12:23:12.372160+05:30",
+        "time": "2026-04-10T15:09:13.966169+05:30",
         "tone": "warning",
-        "message": "MCX:NATURALGAS26MAYFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
+        "message": "MCX:CRUDEOIL26MAYFUT: no futures candles returned by broker."
       },
       {
-        "time": "2026-04-09T12:23:12.195171+05:30",
+        "time": "2026-04-10T15:09:13.718458+05:30",
         "tone": "warning",
-        "message": "MCX:CRUDEOIL26MAYFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
+        "message": "MCX:SILVERM26JUNFUT: no futures candles returned by broker."
       },
       {
-        "time": "2026-04-09T12:23:12.026520+05:30",
+        "time": "2026-04-10T15:09:13.493284+05:30",
         "tone": "warning",
-        "message": "MCX:SILVERM26JUNFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
+        "message": "MCX:GOLD26JUNFUT: no futures candles returned by broker."
       },
       {
-        "time": "2026-04-09T12:23:11.886252+05:30",
-        "tone": "warning",
-        "message": "MCX:GOLD26JUNFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
-      },
-      {
-        "time": "2026-04-09T12:23:11.695636+05:30",
+        "time": "2026-04-10T15:09:13.340046+05:30",
         "tone": "warning",
         "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
       },
       {
-        "time": "2026-04-09T12:22:10.694114+05:30",
+        "time": "2026-04-10T15:08:43.186737+05:30",
         "tone": "success",
-        "message": "Scanned 4 commodity symbols. 3 open positions."
+        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:21:39.775219+05:30",
+        "time": "2026-04-10T15:08:09.179715+05:30",
         "tone": "success",
-        "message": "Scanned 3 commodity symbols. 3 open positions."
+        "message": "Scanned 0 futures rows and 0 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:21:39.774486+05:30",
-        "tone": "warning",
-        "message": "MCX:NATURALGAS26MAYFUT: unable to load Fyers history ([SSL] record layer failure (_ssl.c:1016))"
-      },
-      {
-        "time": "2026-04-09T12:21:08.901062+05:30",
-        "tone": "success",
-        "message": "Scanned 0 commodity symbols. 3 open positions."
-      },
-      {
-        "time": "2026-04-09T12:21:08.900716+05:30",
-        "tone": "warning",
-        "message": "MCX:NATURALGAS26MAYFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
-      },
-      {
-        "time": "2026-04-09T12:21:08.738328+05:30",
-        "tone": "warning",
-        "message": "MCX:CRUDEOIL26MAYFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
-      },
-      {
-        "time": "2026-04-09T12:21:08.601868+05:30",
-        "tone": "warning",
-        "message": "MCX:SILVERM26JUNFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
-      },
-      {
-        "time": "2026-04-09T12:21:08.495449+05:30",
-        "tone": "warning",
-        "message": "MCX:GOLD26JUNFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
-      },
-      {
-        "time": "2026-04-09T12:21:08.357190+05:30",
+        "time": "2026-04-10T15:08:09.179140+05:30",
         "tone": "warning",
         "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
       },
       {
-        "time": "2026-04-09T12:20:38.179724+05:30",
+        "time": "2026-04-10T15:08:08.137331+05:30",
+        "tone": "warning",
+        "message": "MCX:NATURALGAS26MAYFUT: no futures candles returned by broker."
+      },
+      {
+        "time": "2026-04-10T15:08:07.916827+05:30",
+        "tone": "warning",
+        "message": "MCX:CRUDEOIL26MAYFUT: no futures candles returned by broker."
+      },
+      {
+        "time": "2026-04-10T15:08:07.769954+05:30",
+        "tone": "warning",
+        "message": "MCX:SILVERM26JUNFUT: no futures candles returned by broker."
+      },
+      {
+        "time": "2026-04-10T15:08:07.526219+05:30",
+        "tone": "warning",
+        "message": "MCX:GOLD26JUNFUT: no futures candles returned by broker."
+      },
+      {
+        "time": "2026-04-10T15:08:07.279227+05:30",
+        "tone": "warning",
+        "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
+      },
+      {
+        "time": "2026-04-10T15:00:47.995051+05:30",
         "tone": "success",
-        "message": "Scanned 3 commodity symbols. 3 open positions."
+        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:20:37.645812+05:30",
-        "tone": "warning",
-        "message": "MCX:GOLD26JUNFUT: unable to load Fyers history ([SSL] record layer failure (_ssl.c:1016))"
-      },
-      {
-        "time": "2026-04-09T12:20:37.515730+05:30",
-        "tone": "warning",
-        "message": "Live LTP fetch failed. Using candle closes where available. ([SSL] record layer failure (_ssl.c:1016))"
-      },
-      {
-        "time": "2026-04-09T12:20:07.158878+05:30",
+        "time": "2026-04-10T15:00:13.679577+05:30",
         "tone": "success",
-        "message": "Scanned 0 commodity symbols. 3 open positions."
+        "message": "Scanned 4 futures rows and 2 option rows. 1 open positions."
       },
       {
-        "time": "2026-04-09T12:20:07.158733+05:30",
+        "time": "2026-04-10T15:00:13.679390+05:30",
         "tone": "warning",
-        "message": "MCX:NATURALGAS26MAYFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
+        "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
       },
       {
-        "time": "2026-04-09T12:20:07.018822+05:30",
-        "tone": "warning",
-        "message": "MCX:CRUDEOIL26MAYFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
-      },
-      {
-        "time": "2026-04-09T12:20:06.862902+05:30",
-        "tone": "warning",
-        "message": "MCX:SILVERM26JUNFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
-      },
-      {
-        "time": "2026-04-09T12:20:06.704928+05:30",
-        "tone": "warning",
-        "message": "MCX:GOLD26JUNFUT: unable to load Fyers history (Fyers data API error 429: request limit reached)"
-      },
-      {
-        "time": "2026-04-09T12:20:06.530734+05:30",
-        "tone": "warning",
-        "message": "Live LTP fetch failed. Using candle closes where available. ([SSL] record layer failure (_ssl.c:1016))"
-      },
-      {
-        "time": "2026-04-09T12:19:36.397486+05:30",
+        "time": "2026-04-10T14:56:15.580142+05:30",
         "tone": "success",
-        "message": "Scanned 4 commodity symbols. 3 open positions."
+        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
+      },
+      {
+        "time": "2026-04-10T14:55:41.281117+05:30",
+        "tone": "success",
+        "message": "Scanned 0 futures rows and 0 option rows. 1 open positions."
+      },
+      {
+        "time": "2026-04-10T14:55:41.280695+05:30",
+        "tone": "warning",
+        "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
+      },
+      {
+        "time": "2026-04-10T14:55:40.358528+05:30",
+        "tone": "warning",
+        "message": "MCX:NATURALGAS26MAYFUT: no futures candles returned by broker."
+      },
+      {
+        "time": "2026-04-10T14:55:40.104324+05:30",
+        "tone": "warning",
+        "message": "MCX:CRUDEOIL26MAYFUT: no futures candles returned by broker."
+      },
+      {
+        "time": "2026-04-10T14:55:39.827783+05:30",
+        "tone": "warning",
+        "message": "MCX:SILVERM26JUNFUT: no futures candles returned by broker."
+      },
+      {
+        "time": "2026-04-10T14:55:39.679646+05:30",
+        "tone": "warning",
+        "message": "MCX:GOLD26JUNFUT: no futures candles returned by broker."
+      },
+      {
+        "time": "2026-04-10T14:55:39.459660+05:30",
+        "tone": "warning",
+        "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
+      },
+      {
+        "time": "2026-04-10T14:55:09.300348+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 3 option rows. 1 open positions."
+      },
+      {
+        "time": "2026-04-10T14:54:35.087301+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 0 option rows. 1 open positions."
+      },
+      {
+        "time": "2026-04-10T14:54:35.086582+05:30",
+        "tone": "warning",
+        "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
+      },
+      {
+        "time": "2026-04-10T14:54:01.874862+05:30",
+        "tone": "success",
+        "message": "Scanned 1 futures rows and 2 option rows. 1 open positions."
+      },
+      {
+        "time": "2026-04-10T14:53:58.814513+05:30",
+        "tone": "warning",
+        "message": "MCX:CRUDEOIL26MAYFUT: no futures candles returned by broker."
+      },
+      {
+        "time": "2026-04-10T14:53:58.623945+05:30",
+        "tone": "warning",
+        "message": "MCX:SILVERM26JUNFUT: no futures candles returned by broker."
+      },
+      {
+        "time": "2026-04-10T14:53:58.300318+05:30",
+        "tone": "warning",
+        "message": "MCX:GOLD26JUNFUT: no futures candles returned by broker."
+      },
+      {
+        "time": "2026-04-10T14:51:45.631405+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
+      },
+      {
+        "time": "2026-04-10T14:51:11.701252+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 3 option rows. 1 open positions."
+      },
+      {
+        "time": "2026-04-10T14:42:39.793707+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
+      },
+      {
+        "time": "2026-04-10T14:42:05.563747+05:30",
+        "tone": "success",
+        "message": "Scanned 0 futures rows and 0 option rows. 1 open positions."
+      },
+      {
+        "time": "2026-04-10T14:42:05.562813+05:30",
+        "tone": "warning",
+        "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
       }
     ],
     "processed_signals": {
-      "MCX:CRUDEOIL26MAYFUT": "2026-04-09T03:30:00Z",
-      "MCX:GOLD26JUNFUT": "2026-04-08T14:30:00Z",
-      "MCX:NATURALGAS26MAYFUT": "2026-04-08T16:30:00Z",
-      "MCX:SILVERM26JUNFUT": "2026-04-09T03:30:00Z"
+      "MCX:CRUDEOIL26MAYFUT": "2026-04-09T17:00:00Z",
+      "MCX:GOLD26JUNFUT": "2026-04-09T15:30:00Z",
+      "MCX:NATURALGAS26MAYFUT": "2026-04-09T14:00:00Z",
+      "MCX:SILVERM26JUNFUT": "2026-04-09T15:30:00Z",
+      "commodity_futures:MCX:GOLD26JUNFUT": "2026-04-10T17:15:00Z",
+      "commodity_futures:MCX:CRUDEOIL26MAYFUT": "2026-04-10T06:30:00Z",
+      "commodity_futures:MCX:NATURALGAS26MAYFUT": "2026-04-10T17:30:00Z",
+      "commodity_futures:MCX:SILVERM26JUNFUT": "2026-04-10T08:15:00Z",
+      "commodity_options:MCX:CRUDEOIL26APR9350CE": "2026-04-10T08:30:00Z"
     },
     "portfolio": {
       "initial_capital": 1000000.0,
-      "available_capital": 930310.1956824997,
+      "available_capital": 895548.7656824996,
       "trade_history": [
         {
           "symbol": "MCX:GOLD26JUNFUT",
@@ -1409,8 +2605,8 @@
           "entry_price": 148825.3755,
           "exit_price": 149822.0515,
           "pnl": 996.6760000000068,
-          "entry_time": "2026-04-06T03:30:19.547641",
-          "exit_time": "2026-04-06T05:00:14.088099",
+          "entry_time": "2026-04-06T03:30:19.547641+05:30",
+          "exit_time": "2026-04-06T05:00:14.088099+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1423,8 +2619,8 @@
           "entry_price": 150034.98,
           "exit_price": 149322.3015,
           "pnl": -712.6785000000091,
-          "entry_time": "2026-04-06T05:00:44.859060",
-          "exit_time": "2026-04-06T06:03:42.010669",
+          "entry_time": "2026-04-06T05:00:44.859060+05:30",
+          "exit_time": "2026-04-06T06:03:42.010669+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1437,8 +2633,8 @@
           "entry_price": 276.36175,
           "exit_price": 278.43915,
           "pnl": -2.0774000000000115,
-          "entry_time": "2026-04-06T06:50:46.139834",
-          "exit_time": "2026-04-06T07:27:38.144700",
+          "entry_time": "2026-04-06T06:50:46.139834+05:30",
+          "exit_time": "2026-04-06T07:27:38.144700+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1451,8 +2647,8 @@
           "entry_price": 275.862,
           "exit_price": 278.03895,
           "pnl": -2.1769499999999766,
-          "entry_time": "2026-04-06T07:53:34.324642",
-          "exit_time": "2026-04-06T08:30:54.031684",
+          "entry_time": "2026-04-06T07:53:34.324642+05:30",
+          "exit_time": "2026-04-06T08:30:54.031684+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1466,7 +2662,7 @@
           "exit_price": 9086.4545,
           "pnl": -128.15049999999974,
           "entry_time": "2026-04-02T23:22:16.793591+05:30",
-          "exit_time": "2026-04-06T09:05:05.973060",
+          "exit_time": "2026-04-06T09:05:05.973060+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1479,8 +2675,8 @@
           "entry_price": 9086.4545,
           "exit_price": 9211.6035,
           "pnl": -125.14899999999943,
-          "entry_time": "2026-04-06T09:05:05.974386",
-          "exit_time": "2026-04-06T09:57:45.538367",
+          "entry_time": "2026-04-06T09:05:05.974386+05:30",
+          "exit_time": "2026-04-06T09:57:45.538367+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1493,8 +2689,8 @@
           "entry_price": 281.84085,
           "exit_price": 279.46020000000004,
           "pnl": -2.380649999999946,
-          "entry_time": "2026-04-06T09:57:45.539048",
-          "exit_time": "2026-04-06T11:55:32.774186",
+          "entry_time": "2026-04-06T09:57:45.539048+05:30",
+          "exit_time": "2026-04-06T11:55:32.774186+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1508,7 +2704,7 @@
           "exit_price": 240729.575,
           "pnl": -1891.6749999999884,
           "entry_time": "2026-04-06T14:02:58.470789+05:30",
-          "exit_time": "2026-04-06T17:03:36.635089",
+          "exit_time": "2026-04-06T17:03:36.635089+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1522,7 +2718,7 @@
           "exit_price": 149536.1945,
           "pnl": -930.0009999999893,
           "entry_time": "2026-04-06T13:20:27.957838+05:30",
-          "exit_time": "2026-04-06T17:14:22.213605",
+          "exit_time": "2026-04-06T17:14:22.213605+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1535,8 +2731,8 @@
           "entry_price": 240729.575,
           "exit_price": 242330.1045,
           "pnl": -1600.529499999975,
-          "entry_time": "2026-04-06T17:03:36.636881",
-          "exit_time": "2026-04-06T17:35:54.767929",
+          "entry_time": "2026-04-06T17:03:36.636881+05:30",
+          "exit_time": "2026-04-06T17:35:54.767929+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1550,7 +2746,7 @@
           "exit_price": 9437.279,
           "pnl": 202.66400000000067,
           "entry_time": "2026-04-06T18:55:52.423590+05:30",
-          "exit_time": "2026-04-07T05:32:13.228950",
+          "exit_time": "2026-04-07T05:32:13.228950+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1564,7 +2760,7 @@
           "exit_price": 150138.0315,
           "pnl": -740.7675000000163,
           "entry_time": "2026-04-07T11:05:18.700236+05:30",
-          "exit_time": "2026-04-07T06:58:17.464756",
+          "exit_time": "2026-04-07T06:58:17.464756+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1578,7 +2774,7 @@
           "exit_price": 242360.1195,
           "pnl": -1766.4764999999898,
           "entry_time": "2026-04-07T11:11:28.712654+05:30",
-          "exit_time": "2026-04-07T08:22:18.934128",
+          "exit_time": "2026-04-07T08:22:18.934128+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1592,7 +2788,7 @@
           "exit_price": 275.03745,
           "pnl": 2.7235999999999763,
           "entry_time": "2026-04-07T13:31:14.230227+05:30",
-          "exit_time": "2026-04-07T08:58:04.627408",
+          "exit_time": "2026-04-07T08:58:04.627408+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1606,7 +2802,7 @@
           "exit_price": 149260.3325,
           "pnl": -1565.0425000000105,
           "entry_time": "2026-04-07T13:53:51.942640+05:30",
-          "exit_time": "2026-04-07T13:42:35.359038",
+          "exit_time": "2026-04-07T13:42:35.359038+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1619,8 +2815,8 @@
           "entry_price": 9198.3985,
           "exit_price": 9450.723,
           "pnl": -252.32450000000063,
-          "entry_time": "2026-04-07T09:31:25.517265",
-          "exit_time": "2026-04-07T13:42:35.361190",
+          "entry_time": "2026-04-07T09:31:25.517265+05:30",
+          "exit_time": "2026-04-07T13:42:35.361190+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1634,7 +2830,7 @@
           "exit_price": 283.04145,
           "pnl": -8.278900000000021,
           "entry_time": "2026-04-07T14:28:04.628233+05:30",
-          "exit_time": "2026-04-07T13:42:35.361509",
+          "exit_time": "2026-04-07T13:42:35.361509+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1647,8 +2843,8 @@
           "entry_price": 9514.755,
           "exit_price": 9405.295,
           "pnl": -109.45999999999913,
-          "entry_time": "2026-04-07T15:02:58.554443",
-          "exit_time": "2026-04-07T15:55:07.729987",
+          "entry_time": "2026-04-07T15:02:58.554443+05:30",
+          "exit_time": "2026-04-07T15:55:07.729987+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1662,7 +2858,7 @@
           "exit_price": 150250.0875,
           "pnl": -989.7550000000047,
           "entry_time": "2026-04-07T19:12:35.362055+05:30",
-          "exit_time": "2026-04-07T17:07:37.154194",
+          "exit_time": "2026-04-07T17:07:37.154194+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1676,7 +2872,7 @@
           "exit_price": 240019.95,
           "pnl": -1994.022500000021,
           "entry_time": "2026-04-07T19:12:35.362299+05:30",
-          "exit_time": "2026-04-07T17:36:01.098353",
+          "exit_time": "2026-04-07T17:36:01.098353+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1689,8 +2885,8 @@
           "entry_price": 150566.2455,
           "exit_price": 154018.952,
           "pnl": 3452.7065000000002,
-          "entry_time": "2026-04-07T17:38:04.520832",
-          "exit_time": "2026-04-08T07:55:14.193108",
+          "entry_time": "2026-04-07T17:38:04.520832+05:30",
+          "exit_time": "2026-04-08T07:55:14.193108+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1703,8 +2899,8 @@
           "entry_price": 254311.092,
           "exit_price": 252860.5065,
           "pnl": -1450.5855000000156,
-          "entry_time": "2026-04-08T11:35:05.757985",
-          "exit_time": "2026-04-08T13:33:26.095664",
+          "entry_time": "2026-04-08T11:35:05.757985+05:30",
+          "exit_time": "2026-04-08T13:33:26.095664+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1717,8 +2913,8 @@
           "entry_price": 7996.0,
           "exit_price": 8148.072,
           "pnl": -152.07200000000012,
-          "entry_time": "2026-04-08T11:43:04.297321",
-          "exit_time": "2026-04-08T14:31:54.738306",
+          "entry_time": "2026-04-08T11:43:04.297321+05:30",
+          "exit_time": "2026-04-08T14:31:54.738306+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1731,8 +2927,232 @@
           "entry_price": 268.4657,
           "exit_price": 270.63525,
           "pnl": -2.1695499999999583,
-          "entry_time": "2026-04-08T16:49:43.441039",
-          "exit_time": "2026-04-09T03:30:13.898251",
+          "entry_time": "2026-04-08T16:49:43.441039+05:30",
+          "exit_time": "2026-04-09T03:30:13.898251+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null
+        },
+        {
+          "symbol": "MCX:GOLD26JUNFUT",
+          "action": "SELL",
+          "qty": 1,
+          "entry_price": 151786.069,
+          "exit_price": 152277.1005,
+          "pnl": -491.0315000000119,
+          "entry_time": "2026-04-08T20:23:39.737785+05:30",
+          "exit_time": "2026-04-09T10:31:14.683761+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null
+        },
+        {
+          "symbol": "MCX:SILVERM26JUNFUT",
+          "action": "SELL",
+          "qty": 5,
+          "entry_price": 244764.5565,
+          "exit_price": 246965.421,
+          "pnl": -11004.32249999998,
+          "entry_time": "2026-04-09T09:00:13.899760+05:30",
+          "exit_time": "2026-04-09T11:47:26.136006+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null
+        },
+        {
+          "symbol": "MCX:CRUDEOIL26MAYFUT",
+          "action": "BUY",
+          "qty": 100,
+          "entry_price": 8403.1995,
+          "exit_price": 8676.6595,
+          "pnl": 27345.999999999913,
+          "entry_time": "2026-04-09T09:00:13.899923+05:30",
+          "exit_time": "2026-04-09T14:05:58.260075+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null
+        },
+        {
+          "symbol": "MCX:GOLD26JUNFUT",
+          "action": "BUY",
+          "qty": 10,
+          "entry_price": 152277.1005,
+          "exit_price": 153118.4025,
+          "pnl": 8413.01999999996,
+          "entry_time": "2026-04-09T16:01:14.686231+05:30",
+          "exit_time": "2026-04-09T15:04:54.767515+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null
+        },
+        {
+          "symbol": "MCX:NATURALGAS26MAYFUT",
+          "action": "SELL",
+          "qty": 1250,
+          "entry_price": 268.6656,
+          "exit_price": 265.7328,
+          "pnl": 3665.9999999999827,
+          "entry_time": "2026-04-09T14:03:16.739848+05:30",
+          "exit_time": "2026-04-09T16:01:31.093531+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null
+        },
+        {
+          "symbol": "MCX:CRUDEOIL26MAYFUT",
+          "action": "BUY",
+          "qty": 100,
+          "entry_price": 8685.3405,
+          "exit_price": 8350.8225,
+          "pnl": -33451.8,
+          "entry_time": "2026-04-09T14:05:58.262341+05:30",
+          "exit_time": "2026-04-09T16:27:47.861860+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null
+        },
+        {
+          "symbol": "MCX:CRUDEOIL26MAYFUT",
+          "action": "SELL",
+          "qty": 100,
+          "entry_price": 8308.8435,
+          "exit_price": 8516.256,
+          "pnl": -20741.249999999854,
+          "entry_time": "2026-04-09T22:49:51.412157+05:30",
+          "exit_time": "2026-04-10T03:30:08.253823+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null
+        },
+        {
+          "symbol": "MCX:GOLD26JUNFUT",
+          "action": "SELL",
+          "qty": 10,
+          "entry_price": 152623.65,
+          "exit_price": 152313.1185,
+          "pnl": 3105.3149999998277,
+          "entry_time": "2026-04-10T05:57:13.762116+05:30",
+          "exit_time": "2026-04-10T06:50:11.914486+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null
+        },
+        {
+          "symbol": "MCX:CRUDEOIL26MAYFUT",
+          "action": "BUY",
+          "qty": 100,
+          "entry_price": 8501.2485,
+          "exit_price": 8557.719,
+          "pnl": 5647.049999999945,
+          "entry_time": "2026-04-10T06:38:15.581539+05:30",
+          "exit_time": "2026-04-10T07:09:22.934410+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null
+        },
+        {
+          "symbol": "MCX:NATURALGAS26MAYFUT",
+          "action": "BUY",
+          "qty": 1250,
+          "entry_price": 267.3336,
+          "exit_price": 266.36675,
+          "pnl": -1208.5624999999568,
+          "entry_time": "2026-04-10T07:45:26.318259+05:30",
+          "exit_time": "2026-04-10T08:09:35.002221+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null
+        },
+        {
+          "symbol": "MCX:SILVERM26JUNFUT",
+          "action": "SELL",
+          "qty": 5,
+          "entry_price": 249558.1585,
+          "exit_price": 248904.39,
+          "pnl": 3268.8424999998824,
+          "entry_time": "2026-04-10T08:15:10.938720+05:30",
+          "exit_time": "2026-04-10T08:46:06.480272+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null
+        },
+        {
+          "symbol": "MCX:CRUDEOIL26APR9350CE",
+          "action": "BUY",
+          "qty": 300,
+          "entry_price": 533.1664499999999,
+          "exit_price": 395.6021,
+          "pnl": -41269.30499999998,
+          "entry_time": "2026-04-10T08:52:20.331209+05:30",
+          "exit_time": "2026-04-10T12:19:49.511559+05:30",
+          "instrument_type": "OPT",
+          "expiry": "2026-04-16",
+          "strike": 9350.0,
+          "option_type": "CE"
+        },
+        {
+          "symbol": "MCX:GOLD26JUNFUT",
+          "action": "BUY",
+          "qty": 10,
+          "entry_price": 152826.375,
+          "exit_price": 152480.7215,
+          "pnl": -3456.534999999858,
+          "entry_time": "2026-04-10T11:58:18.095828+05:30",
+          "exit_time": "2026-04-10T12:19:49.512280+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null
+        },
+        {
+          "symbol": "MCX:NATURALGAS26MAYFUT",
+          "action": "BUY",
+          "qty": 1250,
+          "entry_price": 266.23305000000005,
+          "exit_price": 265.46720000000005,
+          "pnl": -957.3125000000005,
+          "entry_time": "2026-04-10T16:30:38.837720+05:30",
+          "exit_time": "2026-04-10T17:01:14.163818+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null
+        },
+        {
+          "symbol": "MCX:GOLD26JUNFUT",
+          "action": "SELL",
+          "qty": 10,
+          "entry_price": 152430.7465,
+          "exit_price": 152801.3625,
+          "pnl": -3706.1599999997998,
+          "entry_time": "2026-04-10T22:18:09.796335+05:30",
+          "exit_time": "2026-04-10T17:22:00.467134+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null
+        },
+        {
+          "symbol": "MCX:GOLD26JUNFUT",
+          "action": "BUY",
+          "qty": 10,
+          "entry_price": 152804.364,
+          "exit_price": 152498.7125,
+          "pnl": -3056.515000000072,
+          "entry_time": "2026-04-10T17:26:55.360855+05:30",
+          "exit_time": "2026-04-10T17:30:35.445999+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -1743,107 +3163,172 @@
         "2026-04-06": -4398.142499999954,
         "2026-04-07": -7220.739800000042,
         "2026-04-08": 1850.0489999999845,
-        "2026-04-09": -2.1695499999999583
+        "2026-04-09": -5524.303550000139,
+        "2026-04-10": -62374.432499999864
       },
       "equity_curve": [
         {
-          "time": "2026-04-06T05:00:14.089025",
+          "time": "2026-04-06T05:00:14.089025+05:30",
           "equity": 999829.3816500001
         },
         {
-          "time": "2026-04-06T06:03:42.011091",
+          "time": "2026-04-06T06:03:42.011091+05:30",
           "equity": 999047.8013750002
         },
         {
-          "time": "2026-04-06T07:27:38.145102",
+          "time": "2026-04-06T07:27:38.145102+05:30",
           "equity": 999021.0355850001
         },
         {
-          "time": "2026-04-06T08:30:54.032107",
+          "time": "2026-04-06T08:30:54.032107+05:30",
           "equity": 976916.0603525
         },
         {
-          "time": "2026-04-06T09:05:05.974196",
+          "time": "2026-04-06T09:05:05.974196+05:30",
           "equity": 943493.0455275
         },
         {
-          "time": "2026-04-06T09:57:45.538865",
+          "time": "2026-04-06T09:57:45.538865+05:30",
           "equity": 941791.6688775
         },
         {
-          "time": "2026-04-06T11:55:32.775649",
+          "time": "2026-04-06T11:55:32.775649+05:30",
           "equity": 942827.93113
         },
         {
-          "time": "2026-04-06T17:03:36.636589",
+          "time": "2026-04-06T17:03:36.636589+05:30",
           "equity": 973455.1351300001
         },
         {
-          "time": "2026-04-06T17:14:22.215124",
+          "time": "2026-04-06T17:14:22.215124+05:30",
           "equity": 959650.897555
         },
         {
-          "time": "2026-04-06T17:35:54.769488",
+          "time": "2026-04-06T17:35:54.769488+05:30",
           "equity": 994131.30873
         },
         {
-          "time": "2026-04-07T05:32:13.229716",
+          "time": "2026-04-07T05:32:13.229716+05:30",
           "equity": 995694.17958
         },
         {
-          "time": "2026-04-07T06:58:17.465181",
+          "time": "2026-04-07T06:58:17.465181+05:30",
           "equity": 958196.1237550001
         },
         {
-          "time": "2026-04-07T08:22:18.934683",
+          "time": "2026-04-07T08:22:18.934683+05:30",
           "equity": 993522.4190725001
         },
         {
-          "time": "2026-04-07T08:58:04.627891",
+          "time": "2026-04-07T08:58:04.627891+05:30",
           "equity": 970657.15599
         },
         {
-          "time": "2026-04-07T13:42:35.360791",
+          "time": "2026-04-07T13:42:35.360791+05:30",
           "equity": 990088.8252574998
         },
         {
-          "time": "2026-04-07T13:42:35.361317",
+          "time": "2026-04-07T13:42:35.361317+05:30",
           "equity": 991501.7107074998
         },
         {
-          "time": "2026-04-07T13:42:35.361629",
+          "time": "2026-04-07T13:42:35.361629+05:30",
           "equity": 991544.0254749998
         },
         {
-          "time": "2026-04-07T15:55:07.742762",
+          "time": "2026-04-07T15:55:07.742762+05:30",
           "equity": 934109.4674749997
         },
         {
-          "time": "2026-04-07T17:07:37.154805",
+          "time": "2026-04-07T17:07:37.154805+05:30",
           "equity": 953898.8930999998
         },
         {
-          "time": "2026-04-07T17:36:01.105589",
+          "time": "2026-04-07T17:36:01.105589+05:30",
           "equity": 988881.9355999997
         },
         {
-          "time": "2026-04-08T07:55:14.194337",
+          "time": "2026-04-08T07:55:14.194337+05:30",
           "equity": 992852.5480749997
         },
         {
-          "time": "2026-04-08T13:33:26.096730",
+          "time": "2026-04-08T13:33:26.096730+05:30",
           "equity": 990010.9747499997
         },
         {
-          "time": "2026-04-08T14:31:54.739269",
+          "time": "2026-04-08T14:31:54.739269+05:30",
           "equity": 991055.1135499997
         },
         {
-          "time": "2026-04-09T03:30:13.898959",
+          "time": "2026-04-09T03:30:13.898959+05:30",
           "equity": 969191.4280824997
+        },
+        {
+          "time": "2026-04-09T10:31:14.685263+05:30",
+          "equity": 951531.0862574996
+        },
+        {
+          "time": "2026-04-09T11:47:26.137671+05:30",
+          "equity": 1122927.9524324995
+        },
+        {
+          "time": "2026-04-09T14:05:58.261998+05:30",
+          "equity": 1215245.9949324992
+        },
+        {
+          "time": "2026-04-09T15:04:54.768067+05:30",
+          "equity": 1316643.4661824994
+        },
+        {
+          "time": "2026-04-09T16:01:31.093951+05:30",
+          "equity": 1138763.5696824994
+        },
+        {
+          "time": "2026-04-09T16:27:47.863221+05:30",
+          "equity": 1053148.6021824994
+        },
+        {
+          "time": "2026-04-10T03:30:08.254021+05:30",
+          "equity": 1028950.1496824995
+        },
+        {
+          "time": "2026-04-10T06:50:11.914651+05:30",
+          "equity": 904246.0899324993
+        },
+        {
+          "time": "2026-04-10T07:09:22.934703+05:30",
+          "equity": 1038083.7749324993
+        },
+        {
+          "time": "2026-04-10T08:09:35.003014+05:30",
+          "equity": 1036693.9280574992
+        },
+        {
+          "time": "2026-04-10T08:46:06.481585+05:30",
+          "equity": 1039472.4441824992
+        },
+        {
+          "time": "2026-04-10T12:19:49.512033+05:30",
+          "equity": 725000.5216824993
+        },
+        {
+          "time": "2026-04-10T12:19:49.512383+05:30",
+          "equity": 952958.8189324995
+        },
+        {
+          "time": "2026-04-10T17:01:14.164092+05:30",
+          "equity": 721599.2548074996
+        },
+        {
+          "time": "2026-04-10T17:22:00.475098+05:30",
+          "equity": 948707.6735574997
+        },
+        {
+          "time": "2026-04-10T17:30:35.446305+05:30",
+          "equity": 945192.6813074996
         }
       ],
-      "peak_equity": 1000000.0
+      "peak_equity": 1316643.4661824994
     }
   }
 }

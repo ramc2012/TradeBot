@@ -273,6 +273,7 @@ async def portfolio_summary():
 
 @router.get("/strategy-agent/status")
 async def strategy_agent_status():
+    await paper_strategy_agent.ensure_recovered_state()
     return paper_strategy_agent.get_status()
 
 
@@ -283,9 +284,8 @@ async def strategy_equity_history():
     result = []
     for strat in status.get("strategies", []):
         key = strat.get("key", "")
-        # Access the runtime portfolio directly from the agent
-        runtime = paper_strategy_agent._strategy
-        if runtime and runtime.key == key:
+        runtime = paper_strategy_agent.get_runtime(key)
+        if runtime:
             result.append({
                 "key": key,
                 "label": strat.get("label", ""),
