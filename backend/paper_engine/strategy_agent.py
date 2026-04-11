@@ -239,6 +239,7 @@ class StrategyPosition:
     option_type: str
     instrument_key: Optional[str]
     trading_symbol: Optional[str]
+    fyers_symbol: Optional[str]
     qty: int                    # current qty (may decrease on partial exit)
     initial_qty: int            # qty at entry
     entry_price: float
@@ -309,7 +310,7 @@ class StrategyRuntime:
 class PaperStrategyAgent:
     """Autonomous paper-trading agent implementing STRATEGY_DOCUMENT.md."""
 
-    scan_interval_seconds = 60
+    scan_interval_seconds = 300
     max_positions = MAX_SIMULTANEOUS_POSITIONS
 
     def __init__(self) -> None:
@@ -355,6 +356,27 @@ class PaperStrategyAgent:
         if len(parsed) > 1 and (parsed[0] - as_of).days <= 3:
             selected.append(parsed[1])
         return [item.isoformat() for item in selected]
+
+    async def _get_broker_snapshot(self, *, force_validate: bool) -> dict[str, Any]:
+        try:
+            from api.routers.auth import get_broker_connection_snapshot
+
+            return await get_broker_connection_snapshot(force_validate=force_validate)
+        except Exception as exc:
+            logger.debug(f"[Strategy] broker snapshot failed: {exc}")
+            return {}
+
+    @staticmethod
+    def _format_history_issue_detail(snapshot: dict[str, Any]) -> Optional[str]:
+        issues = list(snapshot.get("issues") or [])
+        if not issues:
+            return None
+        sample = issues[0]
+        broker = str(sample.get("broker") or "broker").upper()
+        message = str(sample.get("message") or "historical data failed")
+        count = int(snapshot.get("issue_count") or len(issues))
+        suffix = f" (+{count - 1} more)" if count > 1 else ""
+        return f"{broker} history degraded: {message}{suffix}"
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -402,6 +424,14 @@ class PaperStrategyAgent:
                     self._append_commentary("System", "Market closed. Agent idle.", tone="idle")
                     return self.get_status()
 
+                broker_snapshot = await self._get_broker_snapshot(force_validate=True)
+                if broker_snapshot and not (
+                    broker_snapshot.get("fyers_ready") or broker_snapshot.get("upstox_ready")
+                ):
+                    self._last_message = "Broker sessions are unavailable. Reconnect Fyers or Upstox before scanning."
+                    self._append_commentary("System", self._last_message, tone="error")
+                    return self.get_status()
+
                 # 1. Get active trading windows
                 self._active_windows = await get_all_active_windows(as_of=started_at.date())
                 if not self._active_windows:
@@ -421,13 +451,20 @@ class PaperStrategyAgent:
                     return_exceptions=True,
                 )
                 rows = []
+                watchlist_details: list[str] = []
                 for wl in watchlists:
                     if isinstance(wl, dict):
                         rows.extend(wl.get("rows") or [])
+                        detail = str(wl.get("detail") or "").strip()
+                        if detail:
+                            watchlist_details.append(detail)
+                    elif isinstance(wl, Exception):
+                        watchlist_details.append(f"ATM watchlist request failed: {wl}")
 
                 if not rows:
-                    self._last_message = "ATM watchlist empty for active windows."
-                    self._append_commentary("System", "No ATM watchlist data available.", tone="warning")
+                    detail = f" {watchlist_details[0]}" if watchlist_details else ""
+                    self._last_message = f"ATM watchlist empty for active windows.{detail}".strip()
+                    self._append_commentary("System", self._last_message, tone="warning")
                     return self.get_status()
 
                 # 3. Build window lookup
@@ -435,20 +472,34 @@ class PaperStrategyAgent:
 
                 # 4. Process: manage exits first, then scan for entries
                 runtime = self._strategy
+                option_history_service.reset_health()
                 await self._manage_exits(runtime)
                 await self._scan_entries(runtime, rows, window_map)
                 await self._maybe_send_telegram_report()
 
                 self._last_run_at = _now_ist().isoformat()
                 n_pos = len(runtime.positions)
+                history_health = option_history_service.get_health_snapshot()
+                degraded_messages = list(watchlist_details)
+                history_detail = self._format_history_issue_detail(history_health)
+                if history_detail:
+                    degraded_messages.append(history_detail)
+
                 self._last_message = (
                     f"Scanned {len(rows)} instruments across {len(expiries)} expiries. "
                     f"{n_pos} open positions."
                 )
+                if degraded_messages:
+                    self._last_message += " Broker data degraded."
+                    self._append_commentary("System", degraded_messages[0], tone="warning")
                 self._append_commentary(
                     "System",
-                    f"Scan complete. {len(rows)} rows, {n_pos} positions.",
-                    tone="success",
+                    (
+                        f"Scan complete with degraded broker data. {len(rows)} rows, {n_pos} positions."
+                        if degraded_messages
+                        else f"Scan complete. {len(rows)} rows, {n_pos} positions."
+                    ),
+                    tone="warning" if degraded_messages else "success",
                 )
                 return self.get_status()
 
@@ -681,6 +732,7 @@ class PaperStrategyAgent:
             option_type=opt_type,
             instrument_key=side.get("instrument_key"),
             trading_symbol=side.get("trading_symbol"),
+            fyers_symbol=side.get("fyers_instrument_key") or side.get("trading_symbol"),
             qty=qty,
             initial_qty=qty,
             entry_price=fill_price,
@@ -750,6 +802,7 @@ class PaperStrategyAgent:
                 strike=pos.strike,
                 option_type=pos.option_type,
                 instrument_key=pos.instrument_key,
+                fyers_symbol=pos.fyers_symbol,
                 interval="30minute",
                 limit=80,
             )
@@ -889,6 +942,7 @@ class PaperStrategyAgent:
             strike=float(side["strike"]),
             option_type=str(side["option_type"]),
             instrument_key=side.get("instrument_key"),
+            fyers_symbol=side.get("fyers_instrument_key") or side.get("trading_symbol"),
             interval="30minute",
             limit=80,
         )

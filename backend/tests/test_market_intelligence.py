@@ -5,6 +5,7 @@ from datetime import date
 from analytics.technicals import latest_macd_rsi
 from analytics.sector import SectorRotationTracker
 from brokers.base import OptionChain, OptionChainEntry
+from brokers.upstox import UpstoxAdapter
 from brokers.fyers import FyersAdapter
 from data.upstox_research_sync import UpstoxResearchSync
 from market_data.option_chain import OptionChainService
@@ -100,6 +101,31 @@ def test_fyers_expiry_helpers_convert_dates() -> None:
 
     assert FyersAdapter._expiry_date_to_epoch("2026-03-30", expiry_rows) == "1774864800"
     assert FyersAdapter._epoch_to_iso_date("1774864800") == "2026-03-30"
+
+
+def test_fyers_ticks_prefer_name_field_for_symbol() -> None:
+    adapter = FyersAdapter()
+    ticks = []
+
+    adapter._handle_tick(  # type: ignore[attr-defined]
+        {
+            "n": "NSE:NIFTY50-INDEX",
+            "ltp": 22800.0,
+            "open_price": 22750.0,
+            "high_price": 22850.0,
+            "low_price": 22700.0,
+            "prev_close_price": 22710.0,
+            "vol_traded_today": 1000,
+        },
+        ticks.append,
+    )
+
+    assert ticks
+    assert ticks[0].symbol == "NSE:NIFTY50-INDEX"
+
+
+def test_upstox_tick_symbol_prefers_feed_key_when_symbol_missing() -> None:
+    assert UpstoxAdapter._tick_symbol("NSE_INDEX|Nifty 50", {}) == "NSE_INDEX|Nifty 50"
 
 
 def test_contract_priority_focuses_on_near_atm_common_strikes() -> None:

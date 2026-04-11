@@ -60,6 +60,15 @@ class UnderlyingMeta:
 class ATMWatchlistService:
     """Build an all-F&O ATM call/put watchlist using live chain data."""
 
+    @staticmethod
+    def _format_failure_detail(failures: list[str]) -> Optional[str]:
+        if not failures:
+            return None
+        sample = ", ".join(failures[:5])
+        if len(failures) > 5:
+            sample += f", +{len(failures) - 5} more"
+        return f"Live watchlist data failed for {len(failures)} symbols: {sample}."
+
     async def get_expiries(self) -> dict[str, Any]:
         redis = await get_redis()
         cache_key = "atm_watchlist:expiries:v3"
@@ -219,11 +228,17 @@ class ATMWatchlistService:
                     )
                 except Exception as exc:
                     logger.warning(f"[ATM watchlist] Failed to build {meta.symbol}: {exc}")
-                    return None
+                    return {"underlying": meta.symbol, "_error": str(exc)}
 
         # Stagger requests: 1 req every 0.25s = 4 req/s, well under Fyers 10 req/s limit
         tasks = [build(meta, delay=i * 0.25) for i, meta in enumerate(pending)]
-        new_rows = [row for row in await asyncio.gather(*tasks) if row]
+        raw_results = [row for row in await asyncio.gather(*tasks) if row]
+        failures = [
+            f"{result.get('underlying')}: {result.get('_error')}"
+            for result in raw_results
+            if result.get("_error")
+        ]
+        new_rows = [row for row in raw_results if not row.get("_error")]
 
         # Merge new rows with prior cached rows
         for row in new_rows:
@@ -254,9 +269,13 @@ class ATMWatchlistService:
                 "pe_ready": sum(1 for row in rows if row.get("pe")),
                 "fyers_rows": sum(1 for row in rows if row.get("live_source") == "fyers"),
                 "upstox_rows": sum(1 for row in rows if row.get("live_source") == "upstox"),
+                "failed_rows": len(failures),
             },
             "source": "fyers" if fyers_adapter else "upstox",
-            "detail": None if fyers_adapter else "Fyers is not connected, so the watchlist is using Upstox live chain data.",
+            "detail": (
+                self._format_failure_detail(failures)
+                or (None if fyers_adapter else "Fyers is not connected, so the watchlist is using Upstox live chain data.")
+            ),
             "timestamp": datetime.now(UTC).isoformat(),
         }
         await redis.set(cache_key, json.dumps(payload), ex=DEFAULT_WATCHLIST_TTL)
@@ -275,36 +294,43 @@ class ATMWatchlistService:
         chain: Optional[OptionChain] = None
         live_source = "upstox"
         fyers_symbol = self._to_fyers_symbol(meta)
+        failures: list[str] = []
         if fyers_adapter:
             try:
                 chain = await fyers_adapter.get_option_chain(fyers_symbol, expiry)
                 if chain.entries:
                     live_source = "fyers"
+                else:
+                    failures.append("Fyers returned no option-chain entries")
             except Exception as exc:
                 logger.debug(f"[ATM watchlist] Fyers chain failed for {meta.symbol}: {exc}")
+                failures.append(f"Fyers error: {exc}")
 
         if chain is None or not chain.entries:
             if upstox_adapter is None:
-                return None
+                return {"underlying": meta.symbol, "_error": "; ".join(failures) or "No broker chain is available."}
             try:
                 chain = await upstox_adapter.get_option_chain(meta.underlying_key, expiry)
                 live_source = "upstox"
+                if not chain.entries:
+                    failures.append("Upstox returned no option-chain entries")
             except Exception as exc:
                 logger.debug(f"[ATM watchlist] Upstox chain failed for {meta.symbol}: {exc}")
-                return None
+                failures.append(f"Upstox error: {exc}")
+                return {"underlying": meta.symbol, "_error": "; ".join(failures)}
 
         if not chain.entries:
-            return None
+            return {"underlying": meta.symbol, "_error": "; ".join(failures) or "No option-chain entries were returned."}
 
         spot_price = float(chain.spot_price or 0.0)
         strikes = sorted({float(entry.strike) for entry in chain.entries})
         if not strikes:
-            return None
+            return {"underlying": meta.symbol, "_error": "Broker chain returned no strikes."}
         atm_strike = min(strikes, key=lambda strike: abs(strike - spot_price))
         ce_entry = next((entry for entry in chain.entries if entry.option_type == "CE" and float(entry.strike) == atm_strike), None)
         pe_entry = next((entry for entry in chain.entries if entry.option_type == "PE" and float(entry.strike) == atm_strike), None)
         if not ce_entry and not pe_entry:
-            return None
+            return {"underlying": meta.symbol, "_error": "ATM strike did not include CE or PE entries."}
 
         contract_map = {
             (float(contract["strike_price"]), str(contract["instrument_type"])): contract
@@ -326,11 +352,11 @@ class ATMWatchlistService:
                 chain = await upstox_adapter.get_option_chain(meta.underlying_key, expiry)
                 live_source = "upstox"
                 if not chain.entries:
-                    return None
+                    return {"underlying": meta.symbol, "_error": "Upstox expiry fallback returned no option-chain entries."}
                 spot_price = float(chain.spot_price or 0.0)
                 strikes = sorted({float(item.strike) for item in chain.entries})
                 if not strikes:
-                    return None
+                    return {"underlying": meta.symbol, "_error": "Upstox expiry fallback returned no strikes."}
                 atm_strike = min(strikes, key=lambda item: abs(item - spot_price))
                 ce_entry = next(
                     (item for item in chain.entries if item.option_type == "CE" and float(item.strike) == atm_strike),
@@ -344,7 +370,7 @@ class ATMWatchlistService:
                 pe_contract = contract_map.get((atm_strike, "PE"))
             except Exception as exc:
                 logger.debug(f"[ATM watchlist] Upstox expiry fallback failed for {meta.symbol}: {exc}")
-                return None
+                return {"underlying": meta.symbol, "_error": f"Upstox expiry fallback failed: {exc}"}
 
         ce_payload = await self._build_option_payload(
             meta,
@@ -396,6 +422,11 @@ class ATMWatchlistService:
         live_instrument_key = str(entry.instrument_key or "").strip() or None
         instrument_key = catalog_instrument_key or live_instrument_key
         trading_symbol = str((contract or {}).get("trading_symbol") or "").strip() or None
+        fyers_instrument_key = (
+            live_instrument_key
+            if live_instrument_key and not live_instrument_key.startswith(("NSE_FO|", "NSE_INDEX|", "BSE_FO|", "BSE_INDEX|"))
+            else None
+        )
         technicals = await self._load_technicals(
             underlying=meta.symbol,
             expiry=expiry_date,
@@ -409,6 +440,7 @@ class ATMWatchlistService:
             "option_type": entry.option_type,
             "instrument_key": instrument_key,
             "trading_symbol": trading_symbol,
+            "fyers_instrument_key": fyers_instrument_key,
             "ltp": round(float(entry.ltp or 0.0), 2),
             "prev_close": round(float(entry.prev_close or 0.0), 2) if entry.prev_close is not None else None,
             "change": round(float(entry.ltp or 0.0) - float(entry.prev_close or 0.0), 2)

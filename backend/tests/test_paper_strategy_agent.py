@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
+import paper_engine.strategy_agent as strategy_module
 from paper_engine.portfolio import PaperPortfolio
 from paper_engine.strategy_agent import PaperStrategyAgent, detect_greeks_signal, detect_macd_zero_cross
 
@@ -74,3 +76,52 @@ def test_candidate_expiries_only_front_when_not_near() -> None:
     )
 
     assert expiries == ["2026-03-26"]
+
+
+def test_run_once_surfaces_degraded_broker_data(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+
+    async def fake_snapshot(*, force_validate: bool) -> dict:
+        return {"fyers_ready": True, "upstox_ready": True}
+
+    async def fake_windows(*, as_of):
+        return [{"underlying": "RELIANCE", "expiry": "2026-03-26", "window_end": "2026-03-25"}]
+
+    async def fake_watchlist(expiry: str) -> dict:
+        return {
+            "rows": [{"underlying": "RELIANCE", "expiry": expiry, "ce": {}, "pe": {}}],
+            "detail": "Live watchlist data failed for 2 symbols: SBIN, TCS.",
+        }
+
+    async def noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(agent, "_get_broker_snapshot", fake_snapshot)
+    monkeypatch.setattr(strategy_module, "get_all_active_windows", fake_windows)
+    monkeypatch.setattr(strategy_module.atm_watchlist_service, "get_watchlist", fake_watchlist)
+    monkeypatch.setattr(strategy_module.option_history_service, "reset_health", lambda: None)
+    monkeypatch.setattr(
+        strategy_module.option_history_service,
+        "get_health_snapshot",
+        lambda: {
+            "issue_count": 1,
+            "issues": [
+                {
+                    "broker": "upstox",
+                    "instrument_key": "NSE_FO|TEST",
+                    "message": "Upstox returned no historical candles.",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(agent, "_manage_exits", noop)
+    monkeypatch.setattr(agent, "_scan_entries", noop)
+    monkeypatch.setattr(agent, "_maybe_send_telegram_report", noop)
+
+    status = asyncio.run(agent.run_once(force=True))
+
+    assert "Broker data degraded." in str(status["last_message"])
+    assert any(
+        "Live watchlist data failed for 2 symbols" in entry["message"]
+        for entry in status["commentary"]
+    )

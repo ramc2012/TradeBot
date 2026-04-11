@@ -20,10 +20,38 @@ def _normalize_time(value: Any) -> str:
 
 
 class OptionHistoryService:
+    def __init__(self) -> None:
+        self._recent_issues: list[dict[str, str]] = []
+
+    def reset_health(self) -> None:
+        self._recent_issues.clear()
+
+    def get_health_snapshot(self) -> dict[str, Any]:
+        return {
+            "issue_count": len(self._recent_issues),
+            "issues": list(self._recent_issues),
+        }
+
+    def _record_issue(
+        self,
+        *,
+        broker: str,
+        instrument_key: str,
+        message: str,
+    ) -> None:
+        issue = {
+            "broker": broker,
+            "instrument_key": instrument_key,
+            "message": str(message),
+        }
+        self._recent_issues.insert(0, issue)
+        del self._recent_issues[20:]
+
     async def _fetch_broker_candles(
         self,
         *,
         instrument_key: str,
+        fyers_symbol: Optional[str],
         from_date: date,
         to_date: date,
     ) -> list[dict[str, Any]]:
@@ -33,51 +61,100 @@ class OptionHistoryService:
         if instrument_key.startswith(("NSE_FO|", "NSE_INDEX|", "BSE_FO|", "BSE_INDEX|")):
             token = get_broker_token("upstox")
             if not token and not await ensure_upstox_session():
-                return []
+                self._record_issue(
+                    broker="upstox",
+                    instrument_key=instrument_key,
+                    message="No active Upstox session is available for candle history.",
+                )
+                token = None
             token = token or get_broker_token("upstox")
-            if not token:
-                return []
-            encoded_key = quote(instrument_key, safe="")
-            url = (
-                "https://api.upstox.com/v2/historical-candle/"
-                f"{encoded_key}/30minute/{to_date.isoformat()}/{from_date.isoformat()}"
-            )
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(
-                    url,
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Accept": "application/json",
-                    },
+            if token:
+                encoded_key = quote(instrument_key, safe="")
+                url = (
+                    "https://api.upstox.com/v2/historical-candle/"
+                    f"{encoded_key}/30minute/{to_date.isoformat()}/{from_date.isoformat()}"
                 )
-            if response.status_code != 200:
-                return []
-            rows = []
-            for candle in reversed(response.json().get("data", {}).get("candles", [])):
-                rows.append(
-                    {
-                        "time": str(candle[0]),
-                        "open": float(candle[1]),
-                        "high": float(candle[2]),
-                        "low": float(candle[3]),
-                        "close": float(candle[4]),
-                        "volume": int(candle[5] or 0),
-                        "oi": int(candle[6] or 0) if len(candle) > 6 and candle[6] is not None else None,
-                        "iv": None,
-                        "delta": None,
-                        "gamma": None,
-                        "theta": None,
-                        "vega": None,
-                        "underlying_price": None,
-                    }
-                )
-            return rows
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        response = await client.get(
+                            url,
+                            headers={
+                                "Authorization": f"Bearer {token}",
+                                "Accept": "application/json",
+                            },
+                        )
+                except Exception as exc:
+                    self._record_issue(
+                        broker="upstox",
+                        instrument_key=instrument_key,
+                        message=f"Upstox historical candle request failed: {exc}",
+                    )
+                else:
+                    if response.status_code == 200:
+                        rows = []
+                        for candle in reversed(response.json().get("data", {}).get("candles", [])):
+                            rows.append(
+                                {
+                                    "time": str(candle[0]),
+                                    "open": float(candle[1]),
+                                    "high": float(candle[2]),
+                                    "low": float(candle[3]),
+                                    "close": float(candle[4]),
+                                    "volume": int(candle[5] or 0),
+                                    "oi": int(candle[6] or 0) if len(candle) > 6 and candle[6] is not None else None,
+                                    "iv": None,
+                                    "delta": None,
+                                    "gamma": None,
+                                    "theta": None,
+                                    "vega": None,
+                                    "underlying_price": None,
+                                }
+                            )
+                        if rows:
+                            return rows
+                        self._record_issue(
+                            broker="upstox",
+                            instrument_key=instrument_key,
+                            message="Upstox returned no historical candles.",
+                        )
+                    else:
+                        self._record_issue(
+                            broker="upstox",
+                            instrument_key=instrument_key,
+                            message=f"Upstox historical candle API returned HTTP {response.status_code}.",
+                        )
 
+            if fyers_symbol:
+                return await self._fetch_fyers_candles(
+                    instrument_key=fyers_symbol,
+                    from_date=from_date,
+                    to_date=to_date,
+                )
+            return []
+
+        return await self._fetch_fyers_candles(
+            instrument_key=instrument_key,
+            from_date=from_date,
+            to_date=to_date,
+        )
+
+    async def _fetch_fyers_candles(
+        self,
+        *,
+        instrument_key: str,
+        from_date: date,
+        to_date: date,
+    ) -> list[dict[str, Any]]:
         adapter = get_active_adapter("fyers")
         if adapter is None and await ensure_fyers_session():
             adapter = get_active_adapter("fyers")
         get_history = getattr(adapter, "get_historical_candles", None) if adapter else None
         if not callable(get_history):
+            self._record_issue(
+                broker="fyers",
+                instrument_key=instrument_key,
+                message="No active Fyers session is available for candle history.",
+            )
             return []
         try:
             rows = await get_history(
@@ -86,8 +163,19 @@ class OptionHistoryService:
                 from_date.isoformat(),
                 to_date.isoformat(),
             )
-        except Exception:
+        except Exception as exc:
+            self._record_issue(
+                broker="fyers",
+                instrument_key=instrument_key,
+                message=f"Fyers historical candle request failed: {exc}",
+            )
             return []
+        if not rows:
+            self._record_issue(
+                broker="fyers",
+                instrument_key=instrument_key,
+                message="Fyers returned no historical candles.",
+            )
         return [
             {
                 "time": str(row.get("time")),
@@ -115,6 +203,7 @@ class OptionHistoryService:
         strike: float,
         option_type: str,
         instrument_key: Optional[str] = None,
+        fyers_symbol: Optional[str] = None,
         interval: str = "30minute",
         limit: int = 80,
     ) -> list[dict[str, Any]]:
@@ -188,6 +277,7 @@ class OptionHistoryService:
         if len(merged) < 35 and instrument_key:
             broker_rows = await self._fetch_broker_candles(
                 instrument_key=instrument_key,
+                fyers_symbol=fyers_symbol,
                 from_date=max(expiry.replace(day=1), date.today() - timedelta(days=90)),
                 to_date=date.today(),
             )

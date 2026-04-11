@@ -31,6 +31,14 @@ class UpstoxAdapter(BrokerAdapter):
             "Accept-Encoding": "identity",
         }
 
+    @staticmethod
+    def _tick_symbol(feed_key: str, feed: dict) -> str:
+        return (
+            str(feed.get("symbol", "") or "").strip()
+            or str(feed.get("instrument_key", "") or "").strip()
+            or str(feed_key or "").strip()
+        )
+
     def get_auth_url(self) -> str:
         """Generate Upstox OAuth2 PKCE authorization URL."""
         import urllib.parse
@@ -318,7 +326,7 @@ class UpstoxAdapter(BrokerAdapter):
                 prev_close = float(ltpc.get("cp", 0) or day_ohlc.get("close", 0) or ltp)
 
                 return Tick(
-                    symbol=feed.get("symbol", "") or feed_key,
+                    symbol=self._tick_symbol(feed_key, feed),
                     ltp=ltp,
                     open=float(day_ohlc.get("open", prev_close) or prev_close),
                     high=float(day_ohlc.get("high", ltp) or ltp),

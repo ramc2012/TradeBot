@@ -45,6 +45,11 @@ _upstox_token_health_cache: dict = {
     "checked_at": None,
     "result": None,
 }
+_fyers_token_health_cache: dict = {
+    "token": None,
+    "checked_at": None,
+    "result": None,
+}
 IST = timezone(timedelta(hours=5, minutes=30))
 BROKER_STATUS_ORDER = ("fyers", "upstox", "icici_breeze", "fivepaisa")
 BROKER_STATUS_LABELS = {
@@ -87,6 +92,16 @@ def _reset_upstox_token_health_cache() -> None:
     )
 
 
+def _reset_fyers_token_health_cache() -> None:
+    _fyers_token_health_cache.update(
+        {
+            "token": None,
+            "checked_at": None,
+            "result": None,
+        }
+    )
+
+
 def _persist_access_token(broker: str, access_token: Optional[str]) -> None:
     """Persist a broker session token when the broker supports restore."""
     token_value = str(access_token or "").strip()
@@ -101,6 +116,8 @@ def _persist_access_token(broker: str, access_token: Optional[str]) -> None:
     _save_credentials_to_disk(_broker_credentials)
     if broker == "upstox":
         _reset_upstox_token_health_cache()
+    if broker == "fyers":
+        _reset_fyers_token_health_cache()
 
 
 def _jwt_expired(token: str) -> bool:
@@ -239,6 +256,19 @@ async def _validate_upstox_access_token(access_token: str) -> bool:
         return False
 
 
+async def _validate_fyers_access_token(access_token: str) -> bool:
+    if not access_token or not settings.FYERS_APP_ID:
+        return False
+    headers = {"Authorization": f"{settings.FYERS_APP_ID}:{access_token}"}
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            resp = await client.get("https://api-t1.fyers.in/api/v3/profile", headers=headers)
+        return resp.status_code == 200
+    except Exception as exc:
+        logger.debug(f"Fyers token validation failed: {exc}")
+        return False
+
+
 def _next_upstox_expiry_ist(now_utc: datetime) -> datetime:
     now_ist = now_utc.astimezone(IST)
     cutoff = now_ist.replace(hour=3, minute=30, second=0, microsecond=0)
@@ -317,16 +347,87 @@ async def get_upstox_token_health(force: bool = False) -> dict:
     return result
 
 
-async def get_broker_connection_snapshot() -> dict[str, Any]:
+async def get_fyers_token_health(force: bool = False) -> dict:
+    fyers_creds = _broker_credentials.get("fyers", {})
+    active_token = get_broker_token("fyers")
+    saved_token = str(fyers_creds.get("access_token", "")).strip()
+    token_to_check = active_token or saved_token
+    connected = "fyers" in _active_brokers
+    now = datetime.now(timezone.utc)
+
+    if not token_to_check:
+        return {
+            "connected": connected,
+            "source": "none",
+            "valid": False,
+            "status": "missing",
+            "checked_at": None,
+            "has_saved_token": bool(saved_token),
+            "needs_reconnect": True,
+            "message": "No saved Fyers token is available. Connect Fyers in Settings.",
+            "expires_at_ist": None,
+        }
+
+    checked_at = _fyers_token_health_cache.get("checked_at")
+    cached_token = _fyers_token_health_cache.get("token")
+    if (
+        not force
+        and cached_token == token_to_check
+        and isinstance(checked_at, datetime)
+        and now - checked_at < timedelta(seconds=45)
+        and _fyers_token_health_cache.get("result") is not None
+    ):
+        cached = dict(_fyers_token_health_cache["result"])
+        cached["connected"] = connected
+        cached["source"] = "active_session" if active_token else "saved_credentials"
+        return cached
+
+    is_valid = await _validate_fyers_access_token(token_to_check)
+    source = "active_session" if active_token else "saved_credentials"
+
+    if is_valid:
+        status = "valid_session_token"
+        message = (
+            "Fyers token is valid for the current trading session. "
+            "Fyers access tokens require fresh authentication each day."
+        )
+    else:
+        status = "expired_reconnect_required"
+        message = (
+            "Saved Fyers access token is invalid. Fyers requires manual re-authentication "
+            "for a new session."
+        )
+
+    result = {
+        "connected": connected,
+        "source": source,
+        "valid": is_valid,
+        "status": status,
+        "checked_at": now.isoformat(),
+        "has_saved_token": bool(saved_token),
+        "needs_reconnect": not is_valid,
+        "message": message,
+        "expires_at_ist": None,
+    }
+    _fyers_token_health_cache.update(
+        {"token": token_to_check, "checked_at": now, "result": result}
+    )
+    return result
+
+
+async def get_broker_connection_snapshot(force_validate: bool = False) -> dict[str, Any]:
     """Return a compact broker connection snapshot for UI and Telegram usage."""
-    await ensure_upstox_session(force_validate=False)
-    await ensure_fyers_session()
+    await ensure_upstox_session(force_validate=force_validate)
+    await ensure_fyers_session(force_validate=force_validate)
 
     connected = get_connected_brokers()
     upstox_health = await get_upstox_token_health()
+    fyers_health = await get_fyers_token_health(force=force_validate)
 
     return {
         "connected_brokers": connected,
+        "fyers_ready": bool(fyers_health.get("valid")),
+        "fyers_token_health": fyers_health,
         "upstox_ready": bool(upstox_health.get("valid")),
         "upstox_token_health": upstox_health,
     }
@@ -335,13 +436,20 @@ async def get_broker_connection_snapshot() -> dict[str, Any]:
 def format_broker_status_summary(snapshot: dict[str, Any]) -> str:
     """Render broker connectivity as a short Telegram-safe summary line."""
     connected = set(snapshot.get("connected_brokers") or [])
+    fyers_health = snapshot.get("fyers_token_health") or {}
+    fyers_ready = bool(snapshot.get("fyers_ready"))
     upstox_health = snapshot.get("upstox_token_health") or {}
     upstox_ready = bool(snapshot.get("upstox_ready"))
 
     parts: list[str] = []
     for broker in BROKER_STATUS_ORDER:
         label = BROKER_STATUS_LABELS.get(broker, broker.upper())
-        if broker == "upstox":
+        if broker == "fyers":
+            if broker in connected and fyers_ready:
+                state = "connected"
+            else:
+                state = str(fyers_health.get("status") or ("connected" if broker in connected else "disconnected"))
+        elif broker == "upstox":
             if broker in connected and upstox_ready:
                 state = "connected"
             else:
@@ -367,8 +475,11 @@ async def ensure_upstox_session(force_validate: bool = False) -> bool:
         token = info.get("token")
         access_token = getattr(token, "access_token", None) if token else None
         if access_token and not _jwt_expired(access_token):
-            return True
-        logger.info("[Upstox] In-memory session token expired — evicting")
+            if not force_validate or await _validate_upstox_access_token(access_token):
+                return True
+            logger.info("[Upstox] In-memory session token failed validation — evicting")
+        else:
+            logger.info("[Upstox] In-memory session token expired — evicting")
         del _active_brokers["upstox"]
 
     saved_token = str(_broker_credentials.get("upstox", {}).get("access_token", "")).strip()
@@ -417,7 +528,7 @@ async def ensure_upstox_session(force_validate: bool = False) -> bool:
         return False
 
 
-async def ensure_fyers_session() -> bool:
+async def ensure_fyers_session(force_validate: bool = False) -> bool:
     """
     Restore the Fyers adapter from a saved access token when available.
 
@@ -431,8 +542,11 @@ async def ensure_fyers_session() -> bool:
         token = info.get("token")
         access_token = getattr(token, "access_token", None) if token else None
         if access_token and not _jwt_expired(access_token):
-            return True
-        logger.info("[Fyers] In-memory session token expired — evicting")
+            if not force_validate or await _validate_fyers_access_token(access_token):
+                return True
+            logger.info("[Fyers] In-memory session token failed validation — evicting")
+        else:
+            logger.info("[Fyers] In-memory session token expired — evicting")
         del _active_brokers["fyers"]
 
     saved_token = str(_broker_credentials.get("fyers", {}).get("access_token", "")).strip()
@@ -446,6 +560,10 @@ async def ensure_fyers_session() -> bool:
 
     try:
         from brokers.fyers import FyersAdapter
+
+        if force_validate and not await _validate_fyers_access_token(saved_token):
+            logger.warning("Saved Fyers token is invalid during on-demand restore")
+            return False
 
         adapter = FyersAdapter()
         token = await adapter.authenticate({"access_token": saved_token})
@@ -747,7 +865,7 @@ async def disconnect_broker(broker: str):
 @router.get("/broker-status")
 async def broker_status():
     await ensure_upstox_session(force_validate=False)
-    await ensure_fyers_session()
+    await ensure_fyers_session(force_validate=False)
     _persist_active_session_tokens()
     statuses = []
     for broker, info in _active_brokers.items():
@@ -1018,5 +1136,5 @@ async def auto_restore_sessions() -> None:
             logger.warning("Upstox auto-restore failed — manual connect required")
     if str(_broker_credentials.get("fyers", {}).get("access_token", "")).strip():
         logger.info("Auto-restoring Fyers session from saved access token…")
-        if not await ensure_fyers_session():
+        if not await ensure_fyers_session(force_validate=True):
             logger.warning("Fyers auto-restore failed — manual connect required")

@@ -22,9 +22,25 @@ def test_format_broker_status_summary_marks_upstox_connected_when_ready() -> Non
     summary = format_broker_status_summary(
         {
             "connected_brokers": ["fyers", "upstox"],
+            "fyers_ready": True,
+            "fyers_token_health": {"status": "valid_session_token"},
             "upstox_ready": True,
             "upstox_token_health": {"status": "valid_no_refresh"},
         }
     )
 
     assert "UPSTOX connected" in summary
+
+
+def test_format_broker_status_summary_humanizes_fyers_status() -> None:
+    summary = format_broker_status_summary(
+        {
+            "connected_brokers": ["fyers"],
+            "fyers_ready": False,
+            "fyers_token_health": {"status": "expired_reconnect_required"},
+            "upstox_ready": False,
+            "upstox_token_health": {"status": "missing"},
+        }
+    )
+
+    assert "FYERS expired reconnect required" in summary

@@ -156,7 +156,7 @@ class FyersAdapter(BrokerAdapter):
                 grant_type="authorization_code",
             )
             session.set_token(auth_code)
-            response = session.generate_token()
+            response = await asyncio.to_thread(session.generate_token)
             self._access_token = response.get("access_token", "")
             logger.info("Fyers authenticated successfully")
             return AuthToken(
@@ -370,7 +370,7 @@ class FyersAdapter(BrokerAdapter):
     def _handle_tick(self, msg: dict, callback: Callable[[Tick], None]):
         try:
             tick = Tick(
-                symbol=msg.get("symbol", ""),
+                symbol=msg.get("n", msg.get("symbol", "")),
                 ltp=msg.get("ltp", 0),
                 open=msg.get("open_price", 0),
                 high=msg.get("high_price", 0),

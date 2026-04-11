@@ -784,9 +784,9 @@ class CommodityStrategyAgent:
 
     async def _get_fyers_adapter(self) -> Optional[BrokerAdapter]:
         adapter = get_active_adapter("fyers")
-        if adapter:
+        if adapter and await ensure_fyers_session(force_validate=True):
             return adapter
-        if await ensure_fyers_session():
+        if await ensure_fyers_session(force_validate=True):
             return get_active_adapter("fyers")
         return None
 
