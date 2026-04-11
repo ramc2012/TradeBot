@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime, timedelta
+from threading import RLock
 from typing import Dict, List, Optional
 
 from loguru import logger
@@ -56,6 +57,7 @@ class LiveOrderManager:
         self._dup_guard = DuplicateGuard()
         self._reconcile_task: Optional[asyncio.Task] = None
         self._kill_switch_active = False
+        self._orders_lock = RLock()
 
     async def start_reconciliation(self):
         """Start background position reconciliation loop."""
@@ -98,7 +100,8 @@ class LiveOrderManager:
                 order=order_req,
             )
             live_order.status = response.status
-            self._orders[local_id] = live_order
+            with self._orders_lock:
+                self._orders[local_id] = live_order
             self.risk.on_position_opened(order_req.symbol, price * order_req.qty)
             logger.info(f"[LiveOM] Placed {order_req.action} {order_req.qty} {order_req.symbol} → broker_id={response.order_id}")
             return live_order
@@ -107,7 +110,8 @@ class LiveOrderManager:
             raise
 
     async def cancel_order(self, local_id: str) -> bool:
-        order = self._orders.get(local_id)
+        with self._orders_lock:
+            order = self._orders.get(local_id)
         if not order:
             return False
         success = await self.broker.cancel_order(order.broker_id or "")
@@ -119,7 +123,8 @@ class LiveOrderManager:
         """Cancel all open orders. Returns count cancelled."""
         self._kill_switch_active = True
         cancelled = 0
-        open_orders = [o for o in self._orders.values() if o.status in ("PENDING", "OPEN")]
+        with self._orders_lock:
+            open_orders = [o for o in self._orders.values() if o.status in ("PENDING", "OPEN")]
         tasks = [self.broker.cancel_order(o.broker_id or "") for o in open_orders if o.broker_id]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for o, result in zip(open_orders, results):
@@ -134,7 +139,8 @@ class LiveOrderManager:
         logger.info("[LiveOM] Kill switch reset")
 
     def get_open_orders(self) -> List[LiveOrder]:
-        return [o for o in self._orders.values() if o.status in ("PENDING", "OPEN")]
+        with self._orders_lock:
+            return [o for o in self._orders.values() if o.status in ("PENDING", "OPEN")]
 
     # ── Reconciliation ────────────────────────────────────────────────────
 
@@ -153,7 +159,9 @@ class LiveOrderManager:
         try:
             broker_orders = await self.broker.get_order_book()
             broker_map = {o.order_id: o for o in broker_orders}
-            for live_order in self._orders.values():
+            with self._orders_lock:
+                live_orders = list(self._orders.values())
+            for live_order in live_orders:
                 if not live_order.broker_id:
                     continue
                 broker_order = broker_map.get(live_order.broker_id)

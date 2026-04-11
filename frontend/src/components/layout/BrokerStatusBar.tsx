@@ -1,29 +1,50 @@
 "use client";
 import { useEffect } from "react";
 import { getBrokerStatus, getPortfolioSummary } from "@/lib/api";
-import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
-import { useStore } from "@/store";
+import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
+import { createLayoutSocket } from "@/lib/websocket";
+import { type BrokerName, useStore } from "@/store";
 import { clsx } from "clsx";
+
+type LayoutSnapshot = {
+  broker_status: Array<{
+    broker: BrokerName;
+    connected: boolean;
+    user_id?: string;
+    name?: string;
+    connected_at?: string;
+  }>;
+  portfolio_summary: {
+    total_equity: number;
+    available_capital: number;
+    unrealized_pnl: number;
+    realized_pnl: number;
+    day_pnl: number;
+    win_rate: number;
+    sharpe_ratio: number;
+    max_drawdown: number;
+  };
+};
 
 export default function BrokerStatusBar() {
   const { mode, activeBroker, portfolio, setPortfolio, setBrokerStatuses } = useStore();
 
-  const statusQuery = usePersistentSnapshotQuery({
-    queryKey: ["brokerStatus"],
-    queryFn: () => getBrokerStatus().then((r) => r.data),
-    refetchInterval: 30000,
-    storageKey: "layout:broker-status",
+  const layoutQuery = useLiveSnapshotQuery<LayoutSnapshot>({
+    queryKey: ["layoutSnapshot"],
+    queryFn: async () => {
+      const [broker_status, portfolio_summary] = await Promise.all([
+        getBrokerStatus().then((response) => response.data),
+        getPortfolioSummary().then((response) => response.data),
+      ]);
+      return { broker_status, portfolio_summary };
+    },
+    streamFactory: (onData, onStatusChange) =>
+      createLayoutSocket((data) => onData(data as LayoutSnapshot), onStatusChange),
+    storageKey: "layout:snapshot",
   });
 
-  const portfolioQuery = usePersistentSnapshotQuery({
-    queryKey: ["portfolioSummary"],
-    queryFn: () => getPortfolioSummary().then((r) => r.data),
-    refetchInterval: 5000,
-    storageKey: "layout:portfolio-summary",
-  });
-
-  const statusData = statusQuery.data;
-  const portfolioData = portfolioQuery.data;
+  const statusData = layoutQuery.data?.broker_status;
+  const portfolioData = layoutQuery.data?.portfolio_summary;
 
   useEffect(() => {
     if (statusData) setBrokerStatuses(statusData);
@@ -35,12 +56,8 @@ export default function BrokerStatusBar() {
 
   const connectedBroker = statusData?.find((s: { broker: string; connected: boolean }) => s.connected);
   const dayPnl = portfolio?.day_pnl ?? 0;
-  const showingSnapshot = statusQuery.isShowingSnapshot || portfolioQuery.isShowingSnapshot;
-  const statusMessage = statusQuery.isShowingSnapshot
-    ? "last broker state"
-    : portfolioQuery.isShowingSnapshot
-      ? "last portfolio state"
-      : null;
+  const showingSnapshot = layoutQuery.isShowingSnapshot;
+  const statusMessage = showingSnapshot ? "last layout state" : null;
 
   return (
     <div className="h-8 bg-bg-secondary border-b border-bg-border flex items-center px-4 gap-6 text-xs font-mono shrink-0">

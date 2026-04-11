@@ -1,19 +1,21 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
 import { Activity, MonitorSmartphone, Shield } from "lucide-react";
 
 import {
   SystemHealthBoard,
   type SystemHealthResponse,
 } from "@/components/system/SystemHealthBoard";
+import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import { getSystemHealth } from "@/lib/api";
+import { createSystemHealthSocket } from "@/lib/websocket";
 
 export default function HealthPage() {
-  const healthQuery = useQuery({
+  const healthQuery = useLiveSnapshotQuery<SystemHealthResponse>({
     queryKey: ["systemHealth"],
     queryFn: () => getSystemHealth().then((response) => response.data as SystemHealthResponse),
-    refetchInterval: 15_000,
+    streamFactory: (onData, onStatusChange) =>
+      createSystemHealthSocket((data) => onData(data as SystemHealthResponse), onStatusChange),
     staleTime: 10_000,
   });
 

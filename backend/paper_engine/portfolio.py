@@ -23,6 +23,10 @@ class VirtualPosition:
     expiry: Optional[str] = None
     strike: Optional[float] = None
     option_type: Optional[str] = None
+    signal_id: Optional[str] = None
+    setup_type: Optional[str] = None
+    entry_iv_pct: Optional[float] = None
+    regime: Optional[str] = None
     opened_at: datetime = field(default_factory=datetime.utcnow)
 
     @property
@@ -49,6 +53,10 @@ class TradeRecord:
     expiry: Optional[str] = None
     strike: Optional[float] = None
     option_type: Optional[str] = None
+    signal_id: Optional[str] = None
+    setup_type: Optional[str] = None
+    entry_iv_pct: Optional[float] = None
+    regime: Optional[str] = None
 
 
 class PaperPortfolio:
@@ -116,6 +124,10 @@ class PaperPortfolio:
                 expiry=order.expiry,
                 strike=order.strike,
                 option_type=order.option_type,
+                signal_id=order.signal_id,
+                setup_type=order.setup_type,
+                entry_iv_pct=order.entry_iv_pct,
+                regime=order.regime,
                 opened_at=order.fill_time or datetime.utcnow(),
             )
             self.available_capital -= margin_used
@@ -140,6 +152,10 @@ class PaperPortfolio:
             expiry=pos.expiry,
             strike=pos.strike,
             option_type=pos.option_type,
+            signal_id=pos.signal_id,
+            setup_type=pos.setup_type,
+            entry_iv_pct=pos.entry_iv_pct,
+            regime=pos.regime,
         )
         self._trade_history.append(trade)
 

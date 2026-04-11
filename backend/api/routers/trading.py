@@ -1,12 +1,13 @@
 """Trading routes — orders, positions, mode management."""
 from __future__ import annotations
+import asyncio
 import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.routers.auth import get_active_adapter, _active_brokers
+from api.routers.auth import get_active_adapter
 from brokers.base import OrderRequest
 from live_engine import LiveOrderManager, RiskManager
 from paper_engine import PaperOrderBook, PaperPortfolio
@@ -21,18 +22,26 @@ _risk_manager = RiskManager()
 _paper_sessions: dict[str, tuple[PaperOrderBook, PaperPortfolio]] = {}
 _current_session_id: Optional[str] = None
 _live_manager: Optional[LiveOrderManager] = None
+_trading_state_lock = asyncio.Lock()
 
 
-def _get_or_create_paper_session() -> tuple[PaperOrderBook, PaperPortfolio]:
+async def _get_or_create_paper_session() -> tuple[str, PaperOrderBook, PaperPortfolio]:
     global _current_session_id
-    if _current_session_id and _current_session_id in _paper_sessions:
-        return _paper_sessions[_current_session_id]
-    session_id = str(uuid.uuid4())
-    _current_session_id = session_id
-    portfolio = PaperPortfolio(initial_capital=1_000_000.0, session_id=session_id)
-    order_book = PaperOrderBook(on_fill=portfolio.on_fill)
-    _paper_sessions[session_id] = (order_book, portfolio)
-    return order_book, portfolio
+    async with _trading_state_lock:
+        if _current_session_id and _current_session_id in _paper_sessions:
+            order_book, portfolio = _paper_sessions[_current_session_id]
+            return _current_session_id, order_book, portfolio
+        session_id = str(uuid.uuid4())
+        _current_session_id = session_id
+        portfolio = PaperPortfolio(initial_capital=1_000_000.0, session_id=session_id)
+        order_book = PaperOrderBook(on_fill=portfolio.on_fill)
+        _paper_sessions[session_id] = (order_book, portfolio)
+        return session_id, order_book, portfolio
+
+
+async def _get_trading_state_snapshot() -> tuple[str, str, Optional[LiveOrderManager]]:
+    async with _trading_state_lock:
+        return _mode, _active_broker, _live_manager
 
 
 # ── Pydantic Models ──────────────────────────────────────────────────────────
@@ -74,22 +83,34 @@ async def set_mode(req: SetModeRequest):
     global _mode, _active_broker, _live_manager
     if req.mode not in ("paper", "live"):
         raise HTTPException(400, "mode must be paper or live")
-    _mode = req.mode
-    if req.broker:
-        _active_broker = req.broker
-    if _mode == "live":
-        adapter = get_active_adapter(_active_broker)
+    next_broker = req.broker or _active_broker
+    new_live_manager: Optional[LiveOrderManager] = None
+    if req.mode == "live":
+        adapter = get_active_adapter(next_broker)
         if not adapter:
             raise HTTPException(400, "No active broker for live trading")
-        _live_manager = LiveOrderManager(adapter, _risk_manager)
-        await _live_manager.start_reconciliation()
-    return {"mode": _mode, "broker": _active_broker}
+        new_live_manager = LiveOrderManager(adapter, _risk_manager)
+
+    async with _trading_state_lock:
+        previous_live_manager = _live_manager
+        _mode = req.mode
+        _active_broker = next_broker
+        _live_manager = new_live_manager
+
+    if previous_live_manager:
+        await previous_live_manager.stop_reconciliation()
+    if new_live_manager:
+        await new_live_manager.start_reconciliation()
+
+    return {"mode": req.mode, "broker": next_broker}
 
 
 @router.post("/orders")
 async def place_order(req: PlaceOrderRequest):
     if paper_strategy_agent.get_status().get("kill_switch_active"):
         raise HTTPException(400, "NSE kill switch is active. Release it before placing new orders.")
+
+    mode, _, live_manager = await _get_trading_state_snapshot()
 
     order_req = OrderRequest(
         symbol=req.symbol,
@@ -107,8 +128,8 @@ async def place_order(req: PlaceOrderRequest):
         option_type=req.option_type,
     )
 
-    if _mode == "paper":
-        ob, portfolio = _get_or_create_paper_session()
+    if mode == "paper":
+        session_id, ob, portfolio = await _get_or_create_paper_session()
 
         # Risk check
         allowed, reason = _risk_manager.check_order(
@@ -134,7 +155,7 @@ async def place_order(req: PlaceOrderRequest):
             expiry=req.expiry,
             strike=req.strike,
             option_type=req.option_type,
-            session_id=_current_session_id,
+            session_id=session_id,
             ltp=req.ltp,
         )
         return {
@@ -144,10 +165,10 @@ async def place_order(req: PlaceOrderRequest):
             "mode": "paper",
         }
 
-    elif _mode == "live":
-        if not _live_manager:
+    elif mode == "live":
+        if not live_manager:
             raise HTTPException(400, "Live trading not initialized")
-        live_order = await _live_manager.place_order(order_req)
+        live_order = await live_manager.place_order(order_req)
         return {
             "order_id": live_order.local_id,
             "broker_order_id": live_order.broker_id,
@@ -160,8 +181,9 @@ async def place_order(req: PlaceOrderRequest):
 
 @router.get("/orders")
 async def get_orders():
-    if _mode == "paper":
-        ob, _ = _get_or_create_paper_session()
+    mode, active_broker, live_manager = await _get_trading_state_snapshot()
+    if mode == "paper":
+        _, ob, _ = await _get_or_create_paper_session()
         orders = ob.get_open_orders()
         return [
             {
@@ -174,50 +196,60 @@ async def get_orders():
             }
             for o in orders
         ]
-    elif _mode == "live" and _active_broker in _active_brokers:
-        adapter = _active_brokers[_active_broker]["adapter"]
+    elif mode == "live":
+        adapter = get_active_adapter(active_broker)
+        if not adapter:
+            return []
         return await adapter.get_order_book()
     return []
 
 
 @router.put("/orders/{order_id}")
 async def modify_order(order_id: str, req: ModifyOrderRequest):
-    if _mode == "live" and _live_manager:
-        resp = await _live_manager.broker.modify_order(order_id, req.dict(exclude_none=True))
+    mode, _, live_manager = await _get_trading_state_snapshot()
+    if mode == "live" and live_manager:
+        resp = await live_manager.broker.modify_order(order_id, req.dict(exclude_none=True))
         return resp
     raise HTTPException(400, "Modify only supported in live mode")
 
 
 @router.delete("/orders/{order_id}")
 async def cancel_order(order_id: str):
-    if _mode == "paper":
-        ob, _ = _get_or_create_paper_session()
+    mode, _, live_manager = await _get_trading_state_snapshot()
+    if mode == "paper":
+        _, ob, _ = await _get_or_create_paper_session()
         success = ob.cancel_order(order_id)
         return {"cancelled": success}
-    elif _mode == "live" and _live_manager:
-        success = await _live_manager.cancel_order(order_id)
+    elif mode == "live" and live_manager:
+        success = await live_manager.cancel_order(order_id)
         return {"cancelled": success}
     return {"cancelled": False}
 
 
 @router.get("/positions")
 async def get_positions():
-    if _mode == "paper":
-        _, portfolio = _get_or_create_paper_session()
+    mode, active_broker, _ = await _get_trading_state_snapshot()
+    if mode == "paper":
+        _, _, portfolio = await _get_or_create_paper_session()
         return portfolio.get_positions_list()
-    elif _mode == "live" and _active_broker in _active_brokers:
-        adapter = _active_brokers[_active_broker]["adapter"]
+    elif mode == "live":
+        adapter = get_active_adapter(active_broker)
+        if not adapter:
+            return []
         return await adapter.get_positions()
     return []
 
 
 @router.get("/trades")
 async def get_trades():
-    if _mode == "live" and _active_broker in _active_brokers:
-        adapter = _active_brokers[_active_broker]["adapter"]
+    mode, active_broker, _ = await _get_trading_state_snapshot()
+    if mode == "live":
+        adapter = get_active_adapter(active_broker)
+        if not adapter:
+            return []
         return await adapter.get_trade_book()
-    if _mode == "paper":
-        _, portfolio = _get_or_create_paper_session()
+    if mode == "paper":
+        _, _, portfolio = await _get_or_create_paper_session()
         return [
             {
                 "symbol": t.symbol,
@@ -237,16 +269,17 @@ async def get_trades():
 @router.post("/kill-switch")
 async def kill_switch():
     control = paper_strategy_agent.set_kill_switch(True)
-    if _mode == "live" and _live_manager:
-        cancelled = await _live_manager.kill_switch()
+    mode, _, live_manager = await _get_trading_state_snapshot()
+    if mode == "live" and live_manager:
+        cancelled = await live_manager.kill_switch()
         return {
             "cancelled_orders": cancelled,
             "trading_disabled": True,
             **control,
         }
     # Paper mode: cancel all open orders
-    if _mode == "paper":
-        ob, _ = _get_or_create_paper_session()
+    if mode == "paper":
+        _, ob, _ = await _get_or_create_paper_session()
         count = 0
         for order in list(ob.get_open_orders()):
             if ob.cancel_order(order.order_id):
@@ -267,7 +300,7 @@ async def update_kill_switch(body: KillSwitchRequest):
 
 @router.get("/portfolio-summary")
 async def portfolio_summary():
-    _, portfolio = _get_or_create_paper_session()
+    _, _, portfolio = await _get_or_create_paper_session()
     return portfolio.get_summary()
 
 

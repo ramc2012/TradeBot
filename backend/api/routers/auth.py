@@ -6,20 +6,23 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import RLock
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketException, status
 from pydantic import BaseModel
 import httpx
 from loguru import logger
 
 from brokers import get_broker, BROKER_MAP
 from core.config import settings
+from core.security import decrypt_token, encrypt_token, issue_ephemeral_token, verify_ephemeral_token
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 # In-memory broker registry (active connections this session)
 _active_brokers: dict = {}
+_active_brokers_lock = RLock()
 
 # Persistent credential store — survives restarts via credentials.json
 # Use /app/credentials.json in Docker; fall back to backend dir in local dev
@@ -58,25 +61,104 @@ BROKER_STATUS_LABELS = {
     "icici_breeze": "BREEZE",
     "fivepaisa": "5PAISA",
 }
+AUTO_RESTORE_TIMEOUT_SECONDS = 10
+WS_TOKEN_TTL_SECONDS = 300
+_ENCRYPTED_VALUE_PREFIX = "fernet::"
+_ENCRYPTED_CREDENTIALS_VERSION = "fernet-v1"
+_credentials_require_migration = False
+_SENSITIVE_CREDENTIAL_FIELDS = {
+    "fyers": {"app_id", "secret", "redirect_uri", "access_token"},
+    "upstox": {"api_key", "secret", "redirect_uri", "access_token"},
+    "fivepaisa": {"app_name", "app_source", "user_id", "email", "password", "user_key", "encryption_key"},
+    "icici_breeze": {"api_key", "secret"},
+    "telegram": {"bot_token", "chat_id"},
+}
 
 
 # ── Credential persistence ────────────────────────────────────────────────────
 
+def _is_sensitive_credential(broker: str, field: str) -> bool:
+    return field in _SENSITIVE_CREDENTIAL_FIELDS.get(broker, set())
+
+
+def _encrypt_credential_value(value: Any) -> Any:
+    text_value = str(value or "").strip()
+    if not text_value:
+        return value
+    if text_value.startswith(_ENCRYPTED_VALUE_PREFIX):
+        return text_value
+    return f"{_ENCRYPTED_VALUE_PREFIX}{encrypt_token(text_value)}"
+
+
+def _decrypt_credential_value(value: Any) -> Any:
+    text_value = str(value or "").strip()
+    if not text_value.startswith(_ENCRYPTED_VALUE_PREFIX):
+        return value
+    return decrypt_token(text_value[len(_ENCRYPTED_VALUE_PREFIX):])
+
+
+def _decode_credentials_payload(payload: Any) -> dict:
+    global _credentials_require_migration
+
+    raw = payload
+    if isinstance(raw, dict) and raw.get("_format") == _ENCRYPTED_CREDENTIALS_VERSION:
+        raw = raw.get("data", {})
+
+    decoded: dict[str, dict[str, Any]] = {}
+    for broker, values in dict(raw or {}).items():
+        if not isinstance(values, dict):
+            continue
+        broker_values: dict[str, Any] = {}
+        for key, value in values.items():
+            if _is_sensitive_credential(broker, key):
+                try:
+                    broker_values[key] = _decrypt_credential_value(value)
+                    if not str(value or "").startswith(_ENCRYPTED_VALUE_PREFIX):
+                        _credentials_require_migration = True
+                except Exception as exc:
+                    logger.warning(f"Could not decrypt credentials.json field {broker}.{key}: {exc}")
+                    broker_values[key] = value
+            else:
+                broker_values[key] = value
+        decoded[broker] = broker_values
+    return decoded
+
+
+def _encode_credentials_payload(creds: dict) -> dict:
+    data: dict[str, dict[str, Any]] = {}
+    for broker, values in dict(creds or {}).items():
+        if not isinstance(values, dict):
+            continue
+        broker_values: dict[str, Any] = {}
+        for key, value in values.items():
+            broker_values[key] = (
+                _encrypt_credential_value(value)
+                if _is_sensitive_credential(broker, key)
+                else value
+            )
+        data[broker] = broker_values
+    return {"_format": _ENCRYPTED_CREDENTIALS_VERSION, "data": data}
+
 def _load_credentials() -> dict:
     """Load saved broker credentials from disk."""
+    global _credentials_require_migration
     if _CREDS_FILE.exists():
         try:
-            return json.loads(_CREDS_FILE.read_text())
+            payload = json.loads(_CREDS_FILE.read_text())
+            return _decode_credentials_payload(payload)
         except Exception as e:
             logger.warning(f"Could not load credentials.json: {e}")
+            _credentials_require_migration = False
     return {}
 
 
 def _save_credentials_to_disk(creds: dict) -> None:
     """Persist broker credentials to disk."""
+    global _credentials_require_migration
     try:
         _CREDS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _CREDS_FILE.write_text(json.dumps(creds, indent=2))
+        _CREDS_FILE.write_text(json.dumps(_encode_credentials_payload(creds), indent=2))
+        _credentials_require_migration = False
         logger.debug(f"Credentials saved to {_CREDS_FILE}")
     except Exception as e:
         logger.error(f"Could not write credentials to {_CREDS_FILE}: {e}")
@@ -225,6 +307,9 @@ def _bootstrap_credentials() -> None:
     for broker, creds in _broker_credentials.items():
         _apply_credentials_to_settings(broker, creds)
 
+    if _broker_credentials and _credentials_require_migration:
+        _save_credentials_to_disk(_broker_credentials)
+
     saved = [b for b, c in _broker_credentials.items() if c]
     if saved:
         logger.info(f"Credentials loaded for: {', '.join(saved)}")
@@ -232,7 +317,8 @@ def _bootstrap_credentials() -> None:
 
 def _persist_active_session_tokens() -> None:
     for broker in ("upstox", "fyers"):
-        info = _active_brokers.get(broker)
+        with _active_brokers_lock:
+            info = _active_brokers.get(broker)
         if not info:
             continue
         token = info.get("token")
@@ -285,7 +371,8 @@ async def get_upstox_token_health(force: bool = False) -> dict:
     active_token = get_broker_token("upstox")
     saved_token = str(upstox_creds.get("access_token", "")).strip()
     token_to_check = active_token or saved_token
-    connected = "upstox" in _active_brokers
+    with _active_brokers_lock:
+        connected = "upstox" in _active_brokers
     now = datetime.now(timezone.utc)
 
     if not token_to_check:
@@ -355,7 +442,8 @@ async def get_fyers_token_health(force: bool = False) -> dict:
     active_token = get_broker_token("fyers")
     saved_token = str(fyers_creds.get("access_token", "")).strip()
     token_to_check = active_token or saved_token
-    connected = "fyers" in _active_brokers
+    with _active_brokers_lock:
+        connected = "fyers" in _active_brokers
     now = datetime.now(timezone.utc)
 
     if not token_to_check:
@@ -461,9 +549,10 @@ async def ensure_upstox_session(force_validate: bool = False) -> bool:
     clears `_active_brokers` even though credentials.json still contains a valid
     Upstox access token.
     """
-    if "upstox" in _active_brokers:
+    with _active_brokers_lock:
+        info = _active_brokers.get("upstox")
+    if info:
         # Validate existing in-memory session — evict if token is expired
-        info = _active_brokers["upstox"]
         token = info.get("token")
         access_token = getattr(token, "access_token", None) if token else None
         if access_token and not _jwt_expired(access_token):
@@ -472,7 +561,8 @@ async def ensure_upstox_session(force_validate: bool = False) -> bool:
             logger.info("[Upstox] In-memory session token failed validation — evicting")
         else:
             logger.info("[Upstox] In-memory session token expired — evicting")
-        del _active_brokers["upstox"]
+        with _active_brokers_lock:
+            _active_brokers.pop("upstox", None)
 
     saved_token = str(_broker_credentials.get("upstox", {}).get("access_token", "")).strip()
     if not saved_token:
@@ -505,13 +595,14 @@ async def ensure_upstox_session(force_validate: bool = False) -> bool:
                 broker="upstox",
             )
 
-        _active_brokers["upstox"] = {
-            "adapter": adapter,
-            "token": token,
-            "profile": profile,
-            "connected_at": datetime.utcnow().isoformat(),
-            "auto_restored": True,
-        }
+        with _active_brokers_lock:
+            _active_brokers["upstox"] = {
+                "adapter": adapter,
+                "token": token,
+                "profile": profile,
+                "connected_at": datetime.utcnow().isoformat(),
+                "auto_restored": True,
+            }
         await _sync_market_data_feed()
         logger.info(f"✓ Upstox restored from saved credentials (token ends …{saved_token[-8:]})")
         return True
@@ -528,9 +619,10 @@ async def ensure_fyers_session(force_validate: bool = False) -> bool:
     during the same trading day we can usually reuse the saved token until it
     naturally expires.
     """
-    if "fyers" in _active_brokers:
+    with _active_brokers_lock:
+        info = _active_brokers.get("fyers")
+    if info:
         # Validate existing in-memory session — evict if token is expired
-        info = _active_brokers["fyers"]
         token = info.get("token")
         access_token = getattr(token, "access_token", None) if token else None
         if access_token and not _jwt_expired(access_token):
@@ -539,7 +631,8 @@ async def ensure_fyers_session(force_validate: bool = False) -> bool:
             logger.info("[Fyers] In-memory session token failed validation — evicting")
         else:
             logger.info("[Fyers] In-memory session token expired — evicting")
-        del _active_brokers["fyers"]
+        with _active_brokers_lock:
+            _active_brokers.pop("fyers", None)
 
     saved_token = str(_broker_credentials.get("fyers", {}).get("access_token", "")).strip()
     if not saved_token:
@@ -560,13 +653,14 @@ async def ensure_fyers_session(force_validate: bool = False) -> bool:
         adapter = FyersAdapter()
         token = await adapter.authenticate({"access_token": saved_token})
         profile = await adapter.get_profile()
-        _active_brokers["fyers"] = {
-            "adapter": adapter,
-            "token": token,
-            "profile": profile,
-            "connected_at": datetime.utcnow().isoformat(),
-            "auto_restored": True,
-        }
+        with _active_brokers_lock:
+            _active_brokers["fyers"] = {
+                "adapter": adapter,
+                "token": token,
+                "profile": profile,
+                "connected_at": datetime.utcnow().isoformat(),
+                "auto_restored": True,
+            }
         logger.info("✓ Fyers restored from saved credentials")
         return True
     except Exception as exc:
@@ -611,6 +705,36 @@ class TelegramChatLookupRequest(BaseModel):
 
 class TelegramTestRequest(BaseModel):
     message: str = ""
+
+
+def _websocket_subject(websocket: WebSocket) -> str:
+    client = websocket.client
+    return f"{client.host}:{client.port}" if client else "unknown"
+
+
+def _mint_websocket_token(subject: str) -> tuple[str, str]:
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=WS_TOKEN_TTL_SECONDS)
+    token = issue_ephemeral_token(
+        scope="websocket",
+        subject=subject,
+        ttl_seconds=WS_TOKEN_TTL_SECONDS,
+    )
+    return token, expires_at.isoformat()
+
+
+def authenticate_websocket_client(websocket: WebSocket) -> dict[str, Any]:
+    token = str(
+        websocket.query_params.get("auth")
+        or websocket.query_params.get("token")
+        or ""
+    ).strip()
+    if not token:
+        raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION, reason="missing websocket token")
+    try:
+        claims = verify_ephemeral_token(token, expected_scope="websocket")
+    except Exception as exc:
+        raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION, reason=f"invalid websocket token: {exc}")
+    return claims
 
 
 # ── Credential Management ──────────────────────────────────────────────────────
@@ -687,6 +811,15 @@ async def all_credentials_status():
         "fields": {k: bool(v) for k, v in telegram.items() if k in {"bot_token", "chat_id", "enabled", "report_interval"}},
     }
     return result
+
+
+@router.get("/ws-token")
+async def websocket_token():
+    token, expires_at = _mint_websocket_token("browser-client")
+    return {
+        "token": token,
+        "expires_at": expires_at,
+    }
 
 
 @router.get("/telegram-settings")
@@ -825,12 +958,13 @@ async def connect_broker(req: ConnectBrokerRequest):
     try:
         token = await adapter.authenticate(req.credentials)
         profile = await adapter.get_profile()
-        _active_brokers[req.broker] = {
-            "adapter": adapter,
-            "token": token,
-            "profile": profile,
-            "connected_at": datetime.utcnow().isoformat(),
-        }
+        with _active_brokers_lock:
+            _active_brokers[req.broker] = {
+                "adapter": adapter,
+                "token": token,
+                "profile": profile,
+                "connected_at": datetime.utcnow().isoformat(),
+            }
         if req.broker == "upstox":
             _persist_access_token("upstox", getattr(token, "access_token", None))
         if req.broker == "fyers":
@@ -848,8 +982,8 @@ async def connect_broker(req: ConnectBrokerRequest):
 
 @router.post("/disconnect-broker")
 async def disconnect_broker(broker: str):
-    if broker in _active_brokers:
-        _active_brokers.pop(broker)
+    with _active_brokers_lock:
+        _active_brokers.pop(broker, None)
     await _sync_market_data_feed()
     return {"status": "disconnected", "broker": broker}
 
@@ -860,7 +994,10 @@ async def broker_status():
     await ensure_fyers_session()
     _persist_active_session_tokens()
     statuses = []
-    for broker, info in _active_brokers.items():
+    with _active_brokers_lock:
+        active_snapshot = list(_active_brokers.items())
+        active_names = set(_active_brokers.keys())
+    for broker, info in active_snapshot:
         profile = info.get("profile")
         statuses.append(BrokerStatusResponse(
             broker=broker,
@@ -870,7 +1007,7 @@ async def broker_status():
             connected_at=info.get("connected_at"),
         ))
     for broker in BROKER_MAP:
-        if broker not in _active_brokers:
+        if broker not in active_names:
             statuses.append(BrokerStatusResponse(broker=broker, connected=False))
     return statuses
 
@@ -900,10 +1037,11 @@ async def fyers_callback(auth_code: str = None, code: str = None):
     adapter = FyersAdapter()
     token = await adapter.authenticate({"auth_code": actual_code})
     profile = await adapter.get_profile()
-    _active_brokers["fyers"] = {
-        "adapter": adapter, "token": token, "profile": profile,
-        "connected_at": datetime.utcnow().isoformat(),
-    }
+    with _active_brokers_lock:
+        _active_brokers["fyers"] = {
+            "adapter": adapter, "token": token, "profile": profile,
+            "connected_at": datetime.utcnow().isoformat(),
+        }
     _persist_access_token("fyers", token.access_token)
     await _sync_market_data_feed()
     return HTMLResponse(content="""
@@ -955,10 +1093,11 @@ async def upstox_connect_manual(body: dict):
             user_id="upstox_user", name="Upstox", email="", mobile="", broker="upstox"
         )
 
-    _active_brokers["upstox"] = {
-        "adapter": adapter, "token": token, "profile": profile,
-        "connected_at": datetime.utcnow().isoformat(),
-    }
+    with _active_brokers_lock:
+        _active_brokers["upstox"] = {
+            "adapter": adapter, "token": token, "profile": profile,
+            "connected_at": datetime.utcnow().isoformat(),
+        }
 
     # Persist the access token so it auto-restores until the daily Upstox expiry.
     _persist_access_token("upstox", token.access_token)
@@ -981,10 +1120,11 @@ async def upstox_callback(code: str):
     except Exception as e:
         logger.warning(f"Upstox callback profile fetch failed: {e}")
         profile = UserProfile(user_id="upstox_user", name="Upstox", email="", mobile="", broker="upstox")
-    _active_brokers["upstox"] = {
-        "adapter": adapter, "token": token, "profile": profile,
-        "connected_at": datetime.utcnow().isoformat(),
-    }
+    with _active_brokers_lock:
+        _active_brokers["upstox"] = {
+            "adapter": adapter, "token": token, "profile": profile,
+            "connected_at": datetime.utcnow().isoformat(),
+        }
     _persist_access_token("upstox", token.access_token)
     await _sync_market_data_feed()
     return HTMLResponse(content="""
@@ -1032,10 +1172,11 @@ async def icici_breeze_connect(body: dict):
     try:
         token = await adapter.authenticate(credentials)
         profile = await adapter.get_profile()
-        _active_brokers["icici_breeze"] = {
-            "adapter": adapter, "token": token, "profile": profile,
-            "connected_at": datetime.utcnow().isoformat(),
-        }
+        with _active_brokers_lock:
+            _active_brokers["icici_breeze"] = {
+                "adapter": adapter, "token": token, "profile": profile,
+                "connected_at": datetime.utcnow().isoformat(),
+            }
         await _sync_market_data_feed()
         return {"status": "connected", "broker": "icici_breeze",
                 "user_id": profile.user_id, "name": profile.name}
@@ -1055,10 +1196,11 @@ async def fivepaisa_connect(body: dict):
     try:
         token = await adapter.authenticate({"totp": totp})
         profile = await adapter.get_profile()
-        _active_brokers["fivepaisa"] = {
-            "adapter": adapter, "token": token, "profile": profile,
-            "connected_at": datetime.utcnow().isoformat(),
-        }
+        with _active_brokers_lock:
+            _active_brokers["fivepaisa"] = {
+                "adapter": adapter, "token": token, "profile": profile,
+                "connected_at": datetime.utcnow().isoformat(),
+            }
         await _sync_market_data_feed()
         return {"status": "connected", "broker": "fivepaisa",
                 "user_id": profile.user_id, "name": profile.name}
@@ -1069,17 +1211,19 @@ async def fivepaisa_connect(body: dict):
 # ── Dependency ────────────────────────────────────────────────────────────────
 
 def get_active_adapter(broker: Optional[str] = None):
-    if broker:
-        info = _active_brokers.get(broker)
-        return info["adapter"] if info else None
-    for info in _active_brokers.values():
-        return info["adapter"]
+    with _active_brokers_lock:
+        if broker:
+            info = _active_brokers.get(broker)
+            return info["adapter"] if info else None
+        for info in _active_brokers.values():
+            return info["adapter"]
     return None
 
 
 def get_broker_token(broker: str) -> Optional[str]:
     """Return the access token string for an active broker session or saved token."""
-    info = _active_brokers.get(broker)
+    with _active_brokers_lock:
+        info = _active_brokers.get(broker)
     if not info:
         saved = str(_broker_credentials.get(broker, {}).get("access_token", "")).strip()
         return saved or None
@@ -1094,7 +1238,8 @@ def get_broker_token(broker: str) -> Optional[str]:
 
 def get_connected_brokers() -> list[str]:
     """Return list of currently connected broker names."""
-    return list(_active_brokers.keys())
+    with _active_brokers_lock:
+        return list(_active_brokers.keys())
 
 
 async def _sync_market_data_feed() -> None:
@@ -1124,9 +1269,25 @@ async def auto_restore_sessions() -> None:
     """
     if str(_broker_credentials.get("upstox", {}).get("access_token", "")).strip():
         logger.info("Auto-restoring Upstox session from saved access token…")
-        if not await ensure_upstox_session(force_validate=True):
+        try:
+            restored = await asyncio.wait_for(
+                ensure_upstox_session(force_validate=True),
+                timeout=AUTO_RESTORE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            restored = False
+            logger.warning("Upstox auto-restore timed out after 10 seconds")
+        if not restored:
             logger.warning("Upstox auto-restore failed — manual connect required")
     if str(_broker_credentials.get("fyers", {}).get("access_token", "")).strip():
         logger.info("Auto-restoring Fyers session from saved access token…")
-        if not await ensure_fyers_session(force_validate=True):
+        try:
+            restored = await asyncio.wait_for(
+                ensure_fyers_session(force_validate=True),
+                timeout=AUTO_RESTORE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            restored = False
+            logger.warning("Fyers auto-restore timed out after 10 seconds")
+        if not restored:
             logger.warning("Fyers auto-restore failed — manual connect required")

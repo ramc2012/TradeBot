@@ -261,7 +261,7 @@
         "mode": "market_closed",
         "recovered_trading_day": "2026-04-09",
         "historical_signal_count": 36,
-        "updated_at": "2026-04-11T17:43:07.271910+05:30",
+        "updated_at": "2026-04-11T21:13:32.723767+05:30",
         "broker_snapshot": {
           "connected_brokers": [],
           "upstox_ready": false,
@@ -1514,7 +1514,7 @@
             "last_date": "2026-04-09 15:20"
           }
         ],
-        "updated_at": "2026-04-11T17:43:07.271910+05:30",
+        "updated_at": "2026-04-11T21:13:32.723767+05:30",
         "market_state": "closed",
         "broker_snapshot": {
           "connected_brokers": [],

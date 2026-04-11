@@ -1,7 +1,6 @@
 "use client";
 
-import { startTransition, useDeferredValue, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { memo, startTransition, useDeferredValue, useMemo, useState } from "react";
 import { clsx } from "clsx";
 import {
   Activity,
@@ -12,11 +11,13 @@ import {
 } from "lucide-react";
 
 import type { StrategyAgentStatus } from "@/components/trading/StrategyAgentMonitor";
+import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import {
   getCommodityStrategyStatus,
   getPositions,
   getStrategyAgentStatus,
 } from "@/lib/api";
+import { createPositionsOverviewSocket } from "@/lib/websocket";
 
 type PositionScope = "all" | "options" | "futures";
 
@@ -167,12 +168,88 @@ function ScopeButton({
   );
 }
 
+const PositionsLedgerTable = memo(function PositionsLedgerTable({ rows }: { rows: GlobalPositionRow[] }) {
+  return (
+    <div className="mt-4 overflow-x-auto">
+      <table className="w-full min-w-[1520px] text-left text-xs">
+        <thead>
+          <tr className="border-b border-bg-border text-text-muted">
+            <th className="pb-2 pr-3">Desk</th>
+            <th className="pb-2 pr-3">Strategy</th>
+            <th className="pb-2 pr-3">Venue</th>
+            <th className="pb-2 pr-3">Underlying</th>
+            <th className="pb-2 pr-3">Contract</th>
+            <th className="pb-2 pr-3">Side</th>
+            <th className="pb-2 pr-3">Qty / Lots</th>
+            <th className="pb-2 pr-3">Entry</th>
+            <th className="pb-2 pr-3">Last</th>
+            <th className="pb-2 pr-3">Open P&amp;L</th>
+            <th className="pb-2">Updated</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length ? (
+            rows.map((row) => (
+              <tr key={row.id} className="border-b border-bg-border/40 align-top">
+                <td className="py-3 pr-3">
+                  <div className="font-medium text-text-primary">{row.desk}</div>
+                  <div className="mt-1 text-[11px] text-text-muted">{row.source}</div>
+                </td>
+                <td className="py-3 pr-3 text-text-secondary">{row.strategy}</td>
+                <td className="py-3 pr-3">
+                  <span className={clsx(
+                    "inline-flex rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em]",
+                    row.venue === "MCX"
+                      ? "border-accent-amber/30 bg-accent-amber/10 text-accent-amber"
+                      : "border-accent-blue/30 bg-accent-blue/10 text-accent-blue",
+                  )}>
+                    {row.venue}
+                  </span>
+                </td>
+                <td className="py-3 pr-3 font-medium text-text-primary">{row.underlying}</td>
+                <td className="py-3 pr-3">
+                  <div className="font-mono text-text-primary">{row.contract}</div>
+                  <div className="mt-1 text-[11px] text-text-muted">{row.symbol}</div>
+                </td>
+                <td className={clsx("py-3 pr-3 font-semibold", row.action === "BUY" ? "text-accent-green" : "text-accent-red")}>
+                  {row.action}
+                </td>
+                <td className="py-3 pr-3 font-mono text-text-secondary">
+                  <div>{row.qty}</div>
+                  {row.lots ? <div className="mt-1 text-[11px] text-text-muted">{row.lots} lot · {row.lotSize || "--"} size</div> : null}
+                </td>
+                <td className="py-3 pr-3 font-mono text-text-primary">{formatNumber(row.entryPrice)}</td>
+                <td className="py-3 pr-3 font-mono text-text-primary">{formatNumber(row.currentPrice)}</td>
+                <td className={clsx("py-3 pr-3 font-mono font-semibold", pnlTone(row.unrealizedPnl))}>
+                  {formatSigned(row.unrealizedPnl, 0)}
+                  {row.returnPct != null ? <div className="mt-1 text-[11px] text-text-muted">{formatSigned(row.returnPct, 1, "%")}</div> : null}
+                </td>
+                <td className="py-3 text-text-muted">{formatTimestamp(row.updatedAt)}</td>
+              </tr>
+            ))
+          ) : (
+            <tr>
+              <td colSpan={11} className="py-10 text-center text-sm text-text-muted">
+                No positions match the current filters.
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+});
+
 export default function PositionsPage() {
   const [scope, setScope] = useState<PositionScope>("all");
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search.trim().toLowerCase());
 
-  const { data, isLoading } = useQuery({
+  const positionsQuery = useLiveSnapshotQuery<{
+    manual: ManualPosition[];
+    strategy: StrategyAgentStatus;
+    commodity: CommodityStatus;
+  }>({
     queryKey: ["globalPositionsSnapshot"],
     queryFn: async () => {
       const [manual, strategy, commodity] = await Promise.all([
@@ -182,9 +259,20 @@ export default function PositionsPage() {
       ]);
       return { manual, strategy, commodity };
     },
-    refetchInterval: 10_000,
+    streamFactory: (onData, onStatusChange) =>
+      createPositionsOverviewSocket(
+        (data) =>
+          onData(data as {
+            manual: ManualPosition[];
+            strategy: StrategyAgentStatus;
+            commodity: CommodityStatus;
+          }),
+        onStatusChange,
+      ),
     staleTime: 5_000,
   });
+  const data = positionsQuery.data;
+  const isLoading = positionsQuery.isLoading;
 
   const rows = useMemo<GlobalPositionRow[]>(() => {
     const manualRows: GlobalPositionRow[] = (data?.manual || []).map((position) => {
@@ -271,22 +359,41 @@ export default function PositionsPage() {
     );
   }, [data]);
 
-  const filteredRows = rows.filter((row) => {
-    if (scope !== "all" && row.instrumentGroup !== scope) {
-      return false;
-    }
-    if (!deferredSearch) {
-      return true;
-    }
-    const haystack = `${row.desk} ${row.strategy} ${row.underlying} ${row.symbol} ${row.contract}`.toLowerCase();
-    return haystack.includes(deferredSearch);
-  });
+  const { filteredRows, totalOpenPnl, optionsCount, futuresCount, desksActive, grossNotional } = useMemo(() => {
+    const nextFilteredRows = rows.filter((row) => {
+      if (scope !== "all" && row.instrumentGroup !== scope) {
+        return false;
+      }
+      if (!deferredSearch) {
+        return true;
+      }
+      const haystack = `${row.desk} ${row.strategy} ${row.underlying} ${row.symbol} ${row.contract}`.toLowerCase();
+      return haystack.includes(deferredSearch);
+    });
 
-  const totalOpenPnl = filteredRows.reduce((sum, row) => sum + (row.unrealizedPnl || 0), 0);
-  const optionsCount = filteredRows.filter((row) => row.instrumentGroup === "options").length;
-  const futuresCount = filteredRows.filter((row) => row.instrumentGroup === "futures").length;
-  const desksActive = new Set(filteredRows.map((row) => row.desk)).size;
-  const grossNotional = filteredRows.reduce((sum, row) => sum + (row.currentPrice || 0) * (row.qty || 0), 0);
+    let nextOpenPnl = 0;
+    let nextOptionsCount = 0;
+    let nextFuturesCount = 0;
+    let nextGrossNotional = 0;
+    const activeDesks = new Set<string>();
+
+    for (const row of nextFilteredRows) {
+      nextOpenPnl += row.unrealizedPnl || 0;
+      nextGrossNotional += (row.currentPrice || 0) * (row.qty || 0);
+      if (row.instrumentGroup === "options") nextOptionsCount += 1;
+      if (row.instrumentGroup === "futures") nextFuturesCount += 1;
+      activeDesks.add(row.desk);
+    }
+
+    return {
+      filteredRows: nextFilteredRows,
+      totalOpenPnl: nextOpenPnl,
+      optionsCount: nextOptionsCount,
+      futuresCount: nextFuturesCount,
+      desksActive: activeDesks.size,
+      grossNotional: nextGrossNotional,
+    };
+  }, [deferredSearch, rows, scope]);
 
   return (
     <div className="mx-auto max-w-[1760px] space-y-6 pb-10">
@@ -355,73 +462,7 @@ export default function PositionsPage() {
           <div className="text-xs text-text-muted">{filteredRows.length} rows</div>
         </div>
 
-        <div className="mt-4 overflow-x-auto">
-          <table className="w-full min-w-[1520px] text-left text-xs">
-            <thead>
-              <tr className="border-b border-bg-border text-text-muted">
-                <th className="pb-2 pr-3">Desk</th>
-                <th className="pb-2 pr-3">Strategy</th>
-                <th className="pb-2 pr-3">Venue</th>
-                <th className="pb-2 pr-3">Underlying</th>
-                <th className="pb-2 pr-3">Contract</th>
-                <th className="pb-2 pr-3">Side</th>
-                <th className="pb-2 pr-3">Qty / Lots</th>
-                <th className="pb-2 pr-3">Entry</th>
-                <th className="pb-2 pr-3">Last</th>
-                <th className="pb-2 pr-3">Open P&amp;L</th>
-                <th className="pb-2">Updated</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredRows.length ? (
-                filteredRows.map((row) => (
-                  <tr key={row.id} className="border-b border-bg-border/40 align-top">
-                    <td className="py-3 pr-3">
-                      <div className="font-medium text-text-primary">{row.desk}</div>
-                      <div className="mt-1 text-[11px] text-text-muted">{row.source}</div>
-                    </td>
-                    <td className="py-3 pr-3 text-text-secondary">{row.strategy}</td>
-                    <td className="py-3 pr-3">
-                      <span className={clsx(
-                        "inline-flex rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em]",
-                        row.venue === "MCX"
-                          ? "border-accent-amber/30 bg-accent-amber/10 text-accent-amber"
-                          : "border-accent-blue/30 bg-accent-blue/10 text-accent-blue",
-                      )}>
-                        {row.venue}
-                      </span>
-                    </td>
-                    <td className="py-3 pr-3 font-medium text-text-primary">{row.underlying}</td>
-                    <td className="py-3 pr-3">
-                      <div className="font-mono text-text-primary">{row.contract}</div>
-                      <div className="mt-1 text-[11px] text-text-muted">{row.symbol}</div>
-                    </td>
-                    <td className={clsx("py-3 pr-3 font-semibold", row.action === "BUY" ? "text-accent-green" : "text-accent-red")}>
-                      {row.action}
-                    </td>
-                    <td className="py-3 pr-3 font-mono text-text-secondary">
-                      <div>{row.qty}</div>
-                      {row.lots ? <div className="mt-1 text-[11px] text-text-muted">{row.lots} lot · {row.lotSize || "--"} size</div> : null}
-                    </td>
-                    <td className="py-3 pr-3 font-mono text-text-primary">{formatNumber(row.entryPrice)}</td>
-                    <td className="py-3 pr-3 font-mono text-text-primary">{formatNumber(row.currentPrice)}</td>
-                    <td className={clsx("py-3 pr-3 font-mono font-semibold", pnlTone(row.unrealizedPnl))}>
-                      {formatSigned(row.unrealizedPnl, 0)}
-                      {row.returnPct != null ? <div className="mt-1 text-[11px] text-text-muted">{formatSigned(row.returnPct, 1, "%")}</div> : null}
-                    </td>
-                    <td className="py-3 text-text-muted">{formatTimestamp(row.updatedAt)}</td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={11} className="py-10 text-center text-sm text-text-muted">
-                    No positions match the current filters.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+        <PositionsLedgerTable rows={filteredRows} />
 
         <div className="mt-5 grid gap-4 xl:grid-cols-3">
           <div className="rounded-[22px] border border-bg-border bg-bg-secondary/20 p-4">

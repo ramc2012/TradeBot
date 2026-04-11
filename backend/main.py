@@ -15,7 +15,18 @@ from api.routers import analysis as analysis_router
 from api.routers import strategy as strategy_router
 from api.routers import auction_intelligence as auction_intelligence_router
 from api.routers import system as system_router
-from api.websockets.ticks import ws_ticks, ws_positions, ws_proposals
+from api.websockets.ticks import (
+    ws_commodity_overview,
+    ws_layout,
+    ws_positions,
+    ws_positions_overview,
+    ws_proposals,
+    ws_strategy_dashboard,
+    ws_strategy_overview,
+    ws_system_health,
+    ws_system_overview,
+    ws_ticks,
+)
 from market_data import data_router as market_data_router
 from market_data.symbols import LIVE_INDEX_APP_SYMBOLS
 from paper_engine.commodity_strategy_agent import commodity_strategy_agent
@@ -123,6 +134,41 @@ async def websocket_ticks(websocket: WebSocket, symbol: str):
 @app.websocket("/ws/positions")
 async def websocket_positions(websocket: WebSocket):
     await ws_positions(websocket)
+
+
+@app.websocket("/ws/layout")
+async def websocket_layout(websocket: WebSocket):
+    await ws_layout(websocket)
+
+
+@app.websocket("/ws/system-overview")
+async def websocket_system_overview(websocket: WebSocket):
+    await ws_system_overview(websocket)
+
+
+@app.websocket("/ws/system-health")
+async def websocket_system_health(websocket: WebSocket):
+    await ws_system_health(websocket)
+
+
+@app.websocket("/ws/strategy-overview")
+async def websocket_strategy_overview(websocket: WebSocket):
+    await ws_strategy_overview(websocket)
+
+
+@app.websocket("/ws/strategy-dashboard")
+async def websocket_strategy_dashboard(websocket: WebSocket):
+    await ws_strategy_dashboard(websocket)
+
+
+@app.websocket("/ws/positions-overview")
+async def websocket_positions_overview(websocket: WebSocket):
+    await ws_positions_overview(websocket)
+
+
+@app.websocket("/ws/commodity-overview")
+async def websocket_commodity_overview(websocket: WebSocket):
+    await ws_commodity_overview(websocket)
 
 
 @app.websocket("/ws/proposals")

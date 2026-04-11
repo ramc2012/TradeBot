@@ -13,10 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
-from pathlib import Path
+import uuid
+from dataclasses import asdict, dataclass
+from datetime import date, datetime, time, timedelta
 from typing import Any, Optional
 
 import httpx
@@ -25,6 +24,7 @@ from loguru import logger
 from sqlalchemy import text
 
 from analysis.macd_engine import (
+    compute_ema,
     compute_macd,
     compute_spot_ma_context,
     check_iv_filter,
@@ -59,6 +59,10 @@ from agent.strategy_config import (
     SETUP_PREMIUM,
     SPOT_MA_FAST,
     SPOT_MA_SLOW,
+    OPTION_ENTRY_MA_FAST,
+    OPTION_ENTRY_MA_SLOW,
+    OPTION_ENTRY_REQUIRE_ABOVE_MA20,
+    FIRST_PULLBACK_IGNORE_BARS,
     EXCLUDED_UNDERLYINGS,
     COMMENTARY_MAX,
 )
@@ -75,14 +79,34 @@ from api.routers.auth import (
 )
 from db.database import AsyncSessionLocal
 from market_data import atm_watchlist_service, market_profile_builder, option_history_service
+from paper_engine import strategy_agent_state as strategy_state_module
+from paper_engine.base_strategy_agent import (
+    BaseStrategyAgent,
+    IST,
+    _ensure_ist_datetime,
+    _latest_runtime_day,
+    _latest_session_rows,
+    _now_ist,
+    _parse_iso_timestamp,
+    _round_or_none,
+    _serialize_equity_curve,
+    _serialize_trade_history,
+    _deserialize_equity_curve,
+    _deserialize_trade_history,
+)
 from paper_engine.order_book import PaperOrderBook
-from paper_engine.portfolio import PaperPortfolio, TradeRecord, VirtualPosition
-
-IST = timezone(timedelta(hours=5, minutes=30))
-
-
-def _now_ist() -> datetime:
-    return datetime.now(IST)
+from paper_engine.portfolio import PaperPortfolio, VirtualPosition
+from paper_engine.strategy_agent_entries import StrategyEntryMixin
+from paper_engine.strategy_agent_exits import StrategyExitMixin
+from paper_engine.strategy_agent_state import (
+    CommentaryEntry,
+    StrategyEvent,
+    StrategyPosition,
+    StrategyRuntime,
+    _NSE_STRATEGY_STATE_FILE,
+    _load_saved_strategy_state,
+    _save_strategy_state,
+)
 
 
 def _in_market_hours(now: Optional[datetime] = None) -> bool:
@@ -91,75 +115,21 @@ def _in_market_hours(now: Optional[datetime] = None) -> bool:
         return False
     return time(9, 15) <= current.time() <= time(15, 30)
 
-
-def _round_or_none(value: Optional[float], digits: int = 2) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    if numeric != numeric or numeric in (float("inf"), float("-inf")):
-        return None
-    return round(numeric, digits)
-
-
-def _parse_iso_timestamp(value: Any) -> Optional[datetime]:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=IST)
-    return parsed.astimezone(IST)
-
-
-def _latest_session_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], Optional[date]]:
-    parsed_rows: list[tuple[datetime, dict[str, Any]]] = []
-    for row in rows:
-        parsed = _parse_iso_timestamp(row.get("time"))
-        if parsed is not None:
-            parsed_rows.append((parsed, row))
-
-    if not parsed_rows:
-        return [], None
-
-    parsed_rows.sort(key=lambda item: item[0])
-    session_date = max(parsed.date() for parsed, _ in parsed_rows)
-    session_rows = [row for parsed, row in parsed_rows if parsed.date() == session_date]
-    return session_rows, session_date
-
-
-def _latest_runtime_day(values: list[Any]) -> Optional[date]:
-    latest: Optional[date] = None
-    for value in values:
-        raw = str(value or "").strip()
-        if not raw:
-            continue
-        try:
-            candidate = date.fromisoformat(raw)
-        except ValueError:
-            parsed = _parse_iso_timestamp(raw)
-            candidate = parsed.date() if parsed is not None else None
-        if candidate is None:
-            continue
-        latest = max(latest, candidate) if latest else candidate
-    return latest
-
-
-def _ensure_ist_datetime(value: Any) -> Optional[datetime]:
-    if not isinstance(value, datetime):
-        return None
-    if value.tzinfo is None:
-        return value.replace(tzinfo=IST)
-    return value.astimezone(IST)
-
-
 def _contract_symbol(underlying: str, expiry: str, strike: float, option_type: str) -> str:
     return f"OPT:{underlying}:{expiry}:{int(round(strike))}:{option_type}"
+
+
+def _bars_since_entry(candles: list[dict[str, Any]], entered_at: Optional[str]) -> Optional[int]:
+    entry_time = _parse_iso_timestamp(entered_at)
+    if entry_time is None or not candles:
+        return None
+
+    bars = 0
+    for candle in candles:
+        candle_time = _parse_iso_timestamp(candle.get("time"))
+        if candle_time is not None and candle_time >= entry_time:
+            bars += 1
+    return bars or None
 
 
 def _report_interval_seconds(value: str) -> int:
@@ -182,109 +152,6 @@ STRATEGY2_FYERS_SYMBOLS = {
     "FINNIFTY": "NSE:FINNIFTY-INDEX",
     "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
 }
-
-
-def _resolve_strategy_state_file() -> Path:
-    env_path = os.environ.get("NSE_STRATEGY_STATE_FILE", "").strip()
-    if env_path:
-        return Path(env_path)
-    docker_path = Path("/app/nse_strategy_state.json")
-    if docker_path.parent.is_dir():
-        return docker_path
-    return Path(__file__).resolve().parent.parent / "nse_strategy_state.json"
-
-
-_NSE_STRATEGY_STATE_FILE = _resolve_strategy_state_file()
-
-
-def _serialize_trade_history(portfolio: PaperPortfolio) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for trade in getattr(portfolio, "_trade_history", []):
-        rows.append(
-            {
-                "symbol": trade.symbol,
-                "action": trade.action,
-                "qty": int(trade.qty),
-                "entry_price": float(trade.entry_price),
-                "exit_price": float(trade.exit_price),
-                "pnl": float(trade.pnl),
-                "entry_time": trade.entry_time.isoformat(),
-                "exit_time": trade.exit_time.isoformat(),
-                "instrument_type": trade.instrument_type,
-                "expiry": trade.expiry,
-                "strike": trade.strike,
-                "option_type": trade.option_type,
-            }
-        )
-    return rows
-
-
-def _deserialize_trade_history(rows: list[dict[str, Any]]) -> list[TradeRecord]:
-    trades: list[TradeRecord] = []
-    for row in rows:
-        entry_time = _parse_iso_timestamp(row.get("entry_time"))
-        exit_time = _parse_iso_timestamp(row.get("exit_time"))
-        if entry_time is None or exit_time is None:
-            continue
-        try:
-            trades.append(
-                TradeRecord(
-                    symbol=str(row.get("symbol") or ""),
-                    action=str(row.get("action") or ""),
-                    qty=int(row.get("qty") or 0),
-                    entry_price=float(row.get("entry_price") or 0.0),
-                    exit_price=float(row.get("exit_price") or 0.0),
-                    pnl=float(row.get("pnl") or 0.0),
-                    entry_time=entry_time,
-                    exit_time=exit_time,
-                    instrument_type=str(row.get("instrument_type") or "CE"),
-                    expiry=row.get("expiry"),
-                    strike=float(row["strike"]) if row.get("strike") is not None else None,
-                    option_type=row.get("option_type"),
-                )
-            )
-        except (TypeError, ValueError):
-            continue
-    return trades
-
-
-def _serialize_equity_curve(portfolio: PaperPortfolio) -> list[dict[str, Any]]:
-    return [
-        {"time": timestamp.isoformat(), "equity": float(equity)}
-        for timestamp, equity in getattr(portfolio, "_equity_curve", [])
-    ]
-
-
-def _deserialize_equity_curve(rows: list[dict[str, Any]]) -> list[tuple[datetime, float]]:
-    curve: list[tuple[datetime, float]] = []
-    for row in rows:
-        timestamp = _parse_iso_timestamp(row.get("time"))
-        if timestamp is None:
-            continue
-        try:
-            curve.append((timestamp, float(row.get("equity") or 0.0)))
-        except (TypeError, ValueError):
-            continue
-    return curve
-
-
-def _load_saved_strategy_state() -> dict[str, Any]:
-    if not _NSE_STRATEGY_STATE_FILE.exists():
-        return {}
-    try:
-        payload = json.loads(_NSE_STRATEGY_STATE_FILE.read_text())
-    except Exception as exc:
-        logger.warning(f"[Strategy] Failed to load {_NSE_STRATEGY_STATE_FILE}: {exc}")
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _save_strategy_state(payload: dict[str, Any]) -> None:
-    try:
-        _NSE_STRATEGY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _NSE_STRATEGY_STATE_FILE.write_text(json.dumps(payload, indent=2))
-    except Exception as exc:
-        logger.warning(f"[Strategy] Failed to persist {_NSE_STRATEGY_STATE_FILE}: {exc}")
 
 
 def detect_macd_zero_cross(closes: list[float], option_type: str = "CE") -> tuple[bool, Optional[float], Optional[str]]:
@@ -412,86 +279,6 @@ PHASE_1 = "phase1"           # full position, awaiting target +50%
 PHASE_2 = "phase2"           # half exited at target, runner held
 PHASE_TRAILING = "trailing"  # runner with active trail after +100%
 PHASE_EXITED = "exited"
-
-
-@dataclass
-class StrategyPosition:
-    symbol: str
-    underlying: str
-    expiry: str
-    strike: float
-    option_type: str
-    instrument_key: Optional[str]
-    trading_symbol: Optional[str]
-    qty: int                    # current qty (may decrease on partial exit)
-    initial_qty: int            # qty at entry
-    entry_price: float
-    current_price: float
-    peak_price: float
-    entry_bar_time: str
-    entered_at: str
-    signal_reason: str
-    signal_strength: Optional[float] = None
-    latest_rsi: Optional[float] = None
-    phase: str = PHASE_1
-    trailing_stop: Optional[float] = None
-    entry_iv_pct: Optional[float] = None
-    spot_setup: Optional[str] = None
-    window_end: Optional[str] = None    # ISO date string for exit deadline
-    lot_size: Optional[int] = None      # NSE-mandated lot size for this underlying
-    price_updated_at: Optional[str] = None  # IST ISO when current_price was last refreshed
-    macd_line: Optional[list] = field(default=None, repr=False)
-
-    @property
-    def unrealized_pnl(self) -> float:
-        return (self.current_price - self.entry_price) * self.qty
-
-    @property
-    def return_pct(self) -> float:
-        if self.entry_price <= 0:
-            return 0.0
-        return ((self.current_price - self.entry_price) / self.entry_price) * 100.0
-
-
-@dataclass
-class StrategyEvent:
-    time: str
-    event: str
-    symbol: str
-    underlying: str
-    option_type: str
-    strike: float
-    price: float
-    qty: int
-    reason: str
-    signal_strength: Optional[float] = None
-    pnl: Optional[float] = None
-    phase: Optional[str] = None
-
-
-@dataclass
-class CommentaryEntry:
-    time: str
-    scope: str
-    tone: str
-    message: str
-
-
-@dataclass
-class StrategyRuntime:
-    key: str
-    label: str
-    portfolio: PaperPortfolio
-    order_book: PaperOrderBook
-    positions: dict[str, StrategyPosition] = field(default_factory=dict)
-    processed_signals: dict[str, str] = field(default_factory=dict)
-    recent_events: list[StrategyEvent] = field(default_factory=list)
-    entries: int = 0
-    exits: int = 0
-    last_scan_at: Optional[str] = None
-    last_message: Optional[str] = None
-    signal_lane: list[dict[str, Any]] = field(default_factory=list)
-    meta: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -693,13 +480,24 @@ class _Strategy2LaneAgent(_BaseNSEStrategyLaneAgent):
         await self.owner._run_strategy2(self.runtime, rows, started_at)
 
 
-class PaperStrategyAgent:
+class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgent):
     """Autonomous paper-trading agent implementing STRATEGY_DOCUMENT.md."""
 
     scan_interval_seconds = 60
     max_positions = MAX_SIMULTANEOUS_POSITIONS
+    PHASE_1 = PHASE_1
+    PHASE_2 = PHASE_2
+    PHASE_TRAILING = PHASE_TRAILING
+    PHASE_EXITED = PHASE_EXITED
+    _contract_symbol = staticmethod(_contract_symbol)
+    _bars_since_entry = staticmethod(_bars_since_entry)
+
+    @staticmethod
+    def _sync_state_file_override() -> None:
+        strategy_state_module._NSE_STRATEGY_STATE_FILE = _NSE_STRATEGY_STATE_FILE
 
     def __init__(self) -> None:
+        self._sync_state_file_override()
         self._strategy1 = self._build_runtime("macd_strategy", "Strategy 1 · 30m ATM MACD")
         self._strategy2 = self._build_runtime("index_mp_strategy", "Strategy 2 · 5m Index MACD + MP")
         self._strategy_agents: list[_BaseNSEStrategyLaneAgent] = [
@@ -846,6 +644,7 @@ class PaperStrategyAgent:
                 continue
             try:
                 position = StrategyPosition(
+                    signal_id=row.get("signal_id"),
                     symbol=str(row.get("symbol") or ""),
                     underlying=str(row.get("underlying") or ""),
                     expiry=str(row.get("expiry") or ""),
@@ -867,6 +666,12 @@ class PaperStrategyAgent:
                     trailing_stop=_round_or_none(row.get("trailing_stop"), 2),
                     entry_iv_pct=_round_or_none(row.get("entry_iv_pct"), 1),
                     spot_setup=row.get("spot_setup"),
+                    regime=row.get("regime"),
+                    option_ma20=_round_or_none(row.get("option_ma20"), 2),
+                    option_ma50=_round_or_none(row.get("option_ma50"), 2),
+                    above_option_ma20=bool(row.get("above_option_ma20")),
+                    above_option_ma50=bool(row.get("above_option_ma50")),
+                    first_pullback_ignored_at=row.get("first_pullback_ignored_at"),
                     window_end=row.get("window_end"),
                     lot_size=int(row.get("lot_size")) if row.get("lot_size") is not None else None,
                     price_updated_at=row.get("price_updated_at"),
@@ -886,6 +691,10 @@ class PaperStrategyAgent:
                 expiry=position.expiry,
                 strike=position.strike,
                 option_type=position.option_type,
+                signal_id=position.signal_id,
+                setup_type=position.spot_setup,
+                entry_iv_pct=position.entry_iv_pct,
+                regime=position.regime,
                 opened_at=opened_at,
             )
 
@@ -914,6 +723,7 @@ class PaperStrategyAgent:
         }
 
     def _persist_state(self) -> None:
+        self._sync_state_file_override()
         payload = {
             "last_run_at": self._last_run_at,
             "last_error": self._last_error,
@@ -1209,6 +1019,7 @@ class PaperStrategyAgent:
                 trading_day, time(15, 20), tzinfo=IST
             ).isoformat()
             position = StrategyPosition(
+                signal_id=str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{runtime.key}:{symbol}:{entered_at}")),
                 symbol=symbol,
                 underlying=underlying,
                 expiry=expiry,
@@ -1586,7 +1397,7 @@ class PaperStrategyAgent:
                     for lane in self._lane_agents():
                         lane.on_market_closed(started_at, last_live_scan)
                     self._append_commentary("System", "Market closed. Agent idle.", tone="idle")
-                    return self.get_status()
+                    return await self._status_with_risk_snapshot()
 
                 broker_snapshot = await get_broker_connection_snapshot(force_validate=True)
                 self._last_data_health = {
@@ -1600,7 +1411,7 @@ class PaperStrategyAgent:
                     for lane in self._lane_agents():
                         lane.on_broker_unavailable(started_at, broker_snapshot, message)
                     self._append_commentary("System", message, tone="error")
-                    return self.get_status()
+                    return await self._status_with_risk_snapshot()
 
                 for lane in self._lane_agents():
                     lane.mark_scan_started(started_at)
@@ -1673,7 +1484,7 @@ class PaperStrategyAgent:
                             history_warning=health_warning,
                         )
                     self._append_commentary("System", "No ATM watchlist data available.", tone="warning")
-                    return self.get_status()
+                    return await self._status_with_risk_snapshot()
 
                 # 3. Build window lookup
                 window_map = {w["underlying"]: w for w in self._active_windows}
@@ -1720,12 +1531,13 @@ class PaperStrategyAgent:
                 # Periodically sync spot candles to keep MA context fresh
                 await self._maybe_sync_spot_candles()
 
-                return self.get_status()
+                return await self._status_with_risk_snapshot()
 
             except Exception as exc:
                 self._last_error = str(exc)
                 self._last_message = f"Agent error: {exc}"
-                runtime.last_message = self._last_message
+                for lane in self._lane_agents():
+                    lane.last_message = self._last_message
                 self._append_commentary("System", f"Error: {exc}", tone="error")
                 raise
             finally:
@@ -1740,510 +1552,29 @@ class PaperStrategyAgent:
         rows: list[dict[str, Any]],
         window_map: dict[str, dict],
     ) -> None:
-        capacity = self.max_positions - len(runtime.positions)
-        if capacity <= 0:
-            self._append_commentary(runtime.label, "Position cap reached. Managing exits only.", tone="warning")
-            return
-
-        candidates: list[dict[str, Any]] = []
-
-        for row in rows:
-            underlying = row.get("underlying", "")
-            expiry_str = row.get("expiry", "")
-
-            # Skip excluded underlyings
-            if underlying in EXCLUDED_UNDERLYINGS:
-                continue
-
-            # Must have an active window
-            window = window_map.get(underlying)
-            if not window:
-                continue
-
-            # Check TTE against the monthly trading window
-            tte = days_remaining_in_window(window, as_of=_now_ist().date())
-            if tte < MIN_TTE_DAYS:
-                continue
-
-            # Skip options expiring within 3 calendar days (avoid settlement risk)
-            if expiry_str:
-                try:
-                    opt_expiry = date.fromisoformat(expiry_str)
-                    if (opt_expiry - _now_ist().date()).days < 3:
-                        continue
-                except (ValueError, TypeError):
-                    pass
-
-            # Skip if already holding this underlying
-            if self._has_underlying_position(runtime, underlying):
-                continue
-
-            # Load CE and PE candles for quadrant check
-            ce_side = row.get("ce")
-            pe_side = row.get("pe")
-            if not ce_side or not pe_side:
-                continue
-
-            ce_candles = await self._load_candles(row, ce_side)
-            pe_candles = await self._load_candles(row, pe_side)
-
-            ce_closes = [float(c["close"]) for c in ce_candles if c.get("close")] if ce_candles else []
-            pe_closes = [float(c["close"]) for c in pe_candles if c.get("close")] if pe_candles else []
-
-            # Quadrant regime check
-            quadrant = compute_quadrant(
-                ce_closes, pe_closes,
-                underlying=underlying,
-                expiry=expiry_str,
-            )
-            self._regime_cache[underlying] = quadrant
-
-            # Dead zone = no trade
-            if quadrant.regime == REGIME_DEAD:
-                continue
-
-            # Determine which side to check based on regime
-            if quadrant.regime == REGIME_BULLISH and quadrant.ce_has_zero_cross:
-                side = ce_side
-                candles = ce_candles
-                closes = ce_closes
-                opt_type = "CE"
-            elif quadrant.regime == REGIME_BEARISH and quadrant.pe_has_zero_cross:
-                side = pe_side
-                candles = pe_candles
-                closes = pe_closes
-                opt_type = "PE"
-            else:
-                # No fresh zero-cross in the correct regime
-                continue
-
-            if len(closes) < MACD_MIN_BARS:
-                continue
-
-            # Verify the zero-cross on this specific side
-            should_enter, strength, reason = detect_macd_zero_cross(closes, opt_type)
-            if not should_enter or not reason:
-                continue
-
-            # ── Entry price: always use live broker LTP from ATM watchlist ──
-            # The candle DB can be hours or days stale between sessions.
-            # Using a stale candle close as fill price produces impossible trades
-            # (e.g. NIFTY 22950 CE entered at 191 when it never traded there today).
-            live_ltp = float(side.get("ltp") or 0.0)
-            if live_ltp > 0:
-                candle_close = closes[-1]
-                if abs(candle_close - live_ltp) / max(live_ltp, 1.0) > 0.15:
-                    logger.warning(
-                        f"[Strategy] Stale candle detected for {underlying} {opt_type}: "
-                        f"candle_close={candle_close:.2f} vs live_ltp={live_ltp:.2f}. "
-                        "Using live LTP as entry basis."
-                    )
-                latest_close = live_ltp  # authoritative current price
-            elif closes:
-                latest_close = closes[-1]  # fallback when no live data
-            else:
-                continue  # no price at all — skip
-
-            # Entry premium filter (now checked against live LTP)
-            if latest_close < MIN_PREMIUM or latest_close > MAX_PREMIUM:
-                continue
-
-            # IV filter — prefer live watchlist IV, fall back to last candle
-            latest_candle = candles[-1] if candles else {}
-            iv_pct = None
-            # Try live IV from watchlist first (most current)
-            iv_raw = side.get("iv") or latest_candle.get("iv")
-            if iv_raw is not None:
-                iv_val = float(iv_raw)
-                iv_pct = iv_val * 100.0 if iv_val < 1.0 else iv_val  # handle decimal vs pct
-            iv_status = check_iv_filter(iv_pct, MAX_ENTRY_IV_PCT, HARD_MAX_IV_PCT)
-            if iv_status == "reject":
-                continue
-
-            # Deduplicate signal
-            latest_bar_time = str(candles[-1]["time"]) if candles else ""
-            signal_key = f"{underlying}:{opt_type}"
-            if runtime.processed_signals.get(signal_key) == latest_bar_time:
-                continue
-
-            # Spot MA context
-            spot_context = await self._compute_spot_context(underlying, window)
-            setup = spot_context.get("setup", "unknown")
-
-            # Compute MACD line for exit monitoring
-            macd_line, _, _ = compute_macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-
-            indicators = latest_macd_rsi(closes)
-            candidates.append({
-                "row": row,
-                "side": side,
-                "candles": candles,
-                "closes": closes,
-                "latest_close": latest_close,
-                "latest_bar_time": latest_bar_time,
-                "signal_key": signal_key,
-                "strength": strength or 0.0,
-                "reason": reason,
-                "rsi": indicators.get("rsi"),
-                "opt_type": opt_type,
-                "iv_pct": iv_pct,
-                "iv_status": iv_status,
-                "spot_setup": setup,
-                "quadrant": quadrant,
-                "window": window,
-                "tte_days": tte,
-                "macd_line": macd_line,
-            })
-
-        # Rank by: premium setup > breakout > trend > reversal, then by IV (lower better)
-        setup_rank = {SETUP_PREMIUM: 0, SETUP_BREAKOUT: 1, "trend": 2, "reversal": 3, "unknown": 4}
-        candidates.sort(key=lambda c: (
-            setup_rank.get(c["spot_setup"], 4),
-            c.get("iv_pct") or 999,
-            -(c["strength"] or 0),
-        ))
-
-        if self._kill_switch_active:
-            if candidates:
-                self._append_commentary(
-                    runtime.label,
-                    f"NSE kill switch active. {len(candidates)} candidate signals observed, but new entries are blocked.",
-                    tone="warning",
-                )
-            return
-
-        opened = 0
-        for candidate in candidates[:capacity]:
-            await self._open_position(runtime, candidate)
-            opened += 1
-
-        if candidates:
-            top = candidates[0]
-            self._append_commentary(
-                runtime.label,
-                f"Found {len(candidates)} signals. Best: {top['row']['underlying']} "
-                f"{top['opt_type']} (setup={top['spot_setup']}, IV={top.get('iv_pct') or 0:.0f}%, "
-                f"regime={top['quadrant'].regime}). Opened {opened}.",
-                tone="info",
-            )
+        return await StrategyEntryMixin._scan_entries(self, runtime, rows, window_map)
 
     # ── Position Entry ───────────────────────────────────────────────────────
 
     async def _open_position(self, runtime: StrategyRuntime, candidate: dict[str, Any]) -> None:
-        row = candidate["row"]
-        side = candidate["side"]
-        latest_close = float(candidate["latest_close"])
-        opt_type = candidate["opt_type"]
-        window = candidate.get("window") or {}
-
-        if latest_close <= 0:
-            return
-
-        expiry = row["expiry"]
-        strike = float(side["strike"])
-        symbol = _contract_symbol(row["underlying"], expiry, strike, opt_type)
-
-        # 1. Use lot_size embedded in the ATM watchlist row (from Upstox contract data)
-        # 2. Fall back to DB lookup (fo_underlying_catalog → fo_contract_catalog)
-        # 3. Emergency fallback: portfolio constant (should never be reached)
-        lot_size: Optional[int] = None
-        if row.get("lot_size"):
-            try:
-                lot_size = int(row["lot_size"])
-            except (TypeError, ValueError):
-                pass
-
-        if not lot_size:
-            lot_size = await option_history_service.resolve_lot_size(
-                underlying=row["underlying"],
-                expiry=date.fromisoformat(expiry),
-                strike=strike,
-                option_type=opt_type,
-                instrument_key=side.get("instrument_key"),
-            )
-
-        if not lot_size:
-            # Last resort — log a warning so we know this path was hit
-            logger.warning(
-                f"[Strategy] lot_size unknown for {row['underlying']} — using DEFAULT_LOT_SIZE. "
-                "Check Upstox contract sync or broker connectivity."
-            )
-            lot_size = PaperPortfolio.DEFAULT_LOT_SIZE
-
-        # Kelly-based position sizing
-        fraction_override = candidate.get("fraction_override")
-        if fraction_override is not None:
-            fraction = float(fraction_override)
-        else:
-            sizing_mode = self._get_sizing_mode(candidate)
-            if sizing_mode == "premium":
-                fraction = KELLY_PREMIUM_FRACTION
-            elif sizing_mode == "cautious":
-                fraction = KELLY_CAUTIOUS_FRACTION
-            else:
-                fraction = KELLY_FRACTION
-
-        allocation = max(runtime.portfolio.total_equity * fraction, latest_close * lot_size)
-        lots = max(1, int(allocation // max(latest_close * lot_size, 1.0)))
-        lots = min(lots, 5)
-        qty = lot_size * lots
-
-        order = runtime.order_book.place_order(
-            symbol=symbol, action="BUY", order_type="MARKET", qty=qty,
-            instrument_type=opt_type, expiry=expiry, strike=strike,
-            option_type=opt_type, ltp=latest_close,
-        )
-
-        fill_price = float(order.fill_price or latest_close)
-        regime_label = getattr(candidate.get("quadrant"), "regime", None) or candidate.get("mp_day_type") or "n/a"
-        runtime.positions[symbol] = StrategyPosition(
-            symbol=symbol,
-            underlying=row["underlying"],
-            expiry=expiry,
-            strike=strike,
-            option_type=opt_type,
-            instrument_key=side.get("instrument_key"),
-            trading_symbol=side.get("trading_symbol"),
-            qty=qty,
-            initial_qty=qty,
-            entry_price=fill_price,
-            current_price=fill_price,
-            peak_price=fill_price,
-            entry_bar_time=str(candidate["latest_bar_time"]),
-            entered_at=_now_ist().isoformat(),
-            signal_reason=str(candidate["reason"]),
-            signal_strength=_round_or_none(float(candidate["strength"]), 2),
-            latest_rsi=_round_or_none(candidate.get("rsi"), 2),
-            phase=PHASE_1,
-            entry_iv_pct=_round_or_none(candidate.get("iv_pct"), 1),
-            spot_setup=candidate.get("spot_setup"),
-            window_end=str(window.get("window_end") or expiry),
-            macd_line=candidate.get("macd_line"),
-            lot_size=lot_size,
-        )
-        runtime.entries += 1
-        runtime.processed_signals[candidate["signal_key"]] = str(candidate["latest_bar_time"])
-
-        self._append_event(runtime, StrategyEvent(
-            time=_now_ist().isoformat(), event="entry", symbol=symbol,
-            underlying=row["underlying"], option_type=opt_type, strike=strike,
-            price=fill_price, qty=qty, reason=str(candidate["reason"]),
-            signal_strength=_round_or_none(float(candidate["strength"]), 2),
-            phase=PHASE_1,
-        ))
-
-        self._append_commentary(
-            runtime.label,
-            f"ENTRY {row['underlying']} {opt_type} {int(strike)} @{fill_price:.2f} | "
-            f"Qty={qty} | Setup={candidate.get('spot_setup')} | "
-            f"IV={candidate.get('iv_pct') or 0:.0f}% | TTE={candidate['tte_days']}d | "
-            f"Regime={regime_label}",
-            tone="trade",
-        )
-        await self._send_telegram_text(
-            f"ENTRY | {row['underlying']} {opt_type} {int(strike)} @{fill_price:.2f}\n"
-            f"Qty: {qty} | Setup: {candidate.get('spot_setup')} | "
-            f"IV: {candidate.get('iv_pct') or 0:.0f}% | Regime: {regime_label}"
-        )
-
-        # ── Persist to DB ──
-        indicators = latest_macd_rsi(candidate["closes"])
-        await self._persist_macd_signal(
-            underlying=row["underlying"],
-            expiry=expiry,
-            strike=strike,
-            option_type=opt_type,
-            macd_value=float(candidate["strength"] or 0),
-            signal_value=indicators.get("macd_signal"),
-            histogram=indicators.get("macd_histogram"),
-            signal_type="zero_cross_entry",
-            premium_at_signal=fill_price,
-        )
-        await self._persist_order(
-            runtime, symbol, "BUY", qty, fill_price,
-            expiry, strike, opt_type, str(candidate["reason"]),
-        )
-        await self._persist_position(runtime, runtime.positions[symbol])
+        return await StrategyEntryMixin._open_position(self, runtime, candidate)
 
     def _get_sizing_mode(self, candidate: dict) -> str:
-        """Determine sizing mode based on setup quality and IV."""
-        setup = candidate.get("spot_setup")
-        iv_status = candidate.get("iv_status", "unknown")
-
-        # Premium setup (option below MA50) or breakout with low IV → aggressive
-        if setup in (SETUP_PREMIUM, SETUP_BREAKOUT) and iv_status == "preferred":
-            return "premium"
-        # High IV or reversal → cautious
-        if iv_status == "acceptable" or setup == "reversal":
-            return "cautious"
-        return "normal"
+        return StrategyEntryMixin._get_sizing_mode(self, candidate)
 
     # ── Exit Management ──────────────────────────────────────────────────────
 
     async def _manage_exits(
         self, runtime: StrategyRuntime, rows: Optional[list] = None
     ) -> None:
-        """Evaluate exit priority chain for all open positions."""
-        if not runtime.positions:
-            return
-
-        # Build a quick lookup from watchlist rows so we can use live LTP when
-        # the 30-min candle DB has no recent data for a position.
-        row_map: dict[str, dict] = {}
-        if rows:
-            for r in rows:
-                row_map[r.get("underlying", "")] = r
-
-        for symbol, pos in list(runtime.positions.items()):
-            # Refresh current price from 30-min candles (MACD / exit signals)
-            candles = await option_history_service.load_candles(
-                underlying=pos.underlying,
-                expiry=date.fromisoformat(pos.expiry),
-                strike=pos.strike,
-                option_type=pos.option_type,
-                instrument_key=pos.instrument_key,
-                interval="30minute",
-                limit=80,
-            )
-
-            closes = [float(c["close"]) for c in candles if c.get("close")] if candles else []
-
-            # Determine the best available exit price:
-            #   1. Last closed 30-min candle (most accurate for MACD-based exits)
-            #   2. Live watchlist LTP (fallback when candles are missing/stale)
-            live_ltp: Optional[float] = None
-            wl_row = row_map.get(pos.underlying)
-            if wl_row:
-                side_key = "ce" if pos.option_type == "CE" else "pe"
-                wl_side = wl_row.get(side_key) or {}
-                raw_ltp = wl_side.get("ltp")
-                if raw_ltp:
-                    try:
-                        live_ltp = float(raw_ltp)
-                    except (TypeError, ValueError):
-                        pass
-
-            if closes:
-                latest_close = closes[-1]
-                # If live LTP is significantly newer/different, prefer it for exit simulation
-                if live_ltp and live_ltp > 0 and abs(latest_close - live_ltp) / max(live_ltp, 1.0) > 0.10:
-                    latest_close = live_ltp
-            elif live_ltp and live_ltp > 0:
-                # No candle data at all — use live LTP so exits still fire
-                latest_close = live_ltp
-                logger.debug(
-                    f"[Strategy] No candles for {pos.underlying} {pos.option_type} — "
-                    f"using live LTP {live_ltp:.2f} for exit evaluation"
-                )
-            else:
-                # Truly no price — cannot evaluate exits, skip
-                continue
-
-            pos.current_price = latest_close
-            pos.peak_price = max(pos.peak_price, latest_close)
-
-            # Update MACD line for death signal detection
-            if len(closes) >= MACD_MIN_BARS:
-                macd_line, _, _ = compute_macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-                pos.macd_line = macd_line
-
-            indicators = latest_macd_rsi(closes)
-            pos.latest_rsi = _round_or_none(indicators.get("rsi"), 2)
-
-            return_pct = pos.return_pct
-
-            # ── Priority 1: HARD STOP — exit 100% at -25% ──
-            if return_pct <= -EXIT.hard_stop_pct:
-                await self._close_position(runtime, pos, latest_close, "hard_stop", qty=pos.qty)
-                continue
-
-            # ── Priority 2: WINDOW END — exit 1 day before deadline ──
-            if pos.window_end:
-                window_end = date.fromisoformat(pos.window_end)
-                if _now_ist().date() >= (window_end - timedelta(days=EXIT.window_end_buffer_days)):
-                    await self._close_position(runtime, pos, latest_close, "window_end", qty=pos.qty)
-                    continue
-
-            # ── Priority 3: DEAD ZONE — both CE+PE MACD go negative ──
-            quadrant = self._regime_cache.get(pos.underlying)
-            if quadrant and quadrant.regime == REGIME_DEAD:
-                await self._close_position(runtime, pos, latest_close, "dead_zone_exit", qty=pos.qty)
-                continue
-
-            # ── Priority 4: MACD DEATH SIGNAL — after +30% profit ──
-            if return_pct >= EXIT.macd_death_min_profit_pct and pos.macd_line:
-                if check_macd_death_signal(pos.macd_line, pos.option_type):
-                    await self._close_position(runtime, pos, latest_close, "macd_death_signal", qty=pos.qty)
-                    continue
-
-            # ── Priority 5: TARGET +50% — exit 50% of position (Layer 1) ──
-            if pos.phase == PHASE_1 and return_pct >= EXIT.target_pct:
-                exit_qty = max(1, int(pos.qty * EXIT.target_exit_fraction))
-                await self._close_position(runtime, pos, latest_close, "target_50pct", qty=exit_qty, partial=True)
-                pos.qty -= exit_qty
-                pos.phase = PHASE_2
-                self._append_commentary(
-                    runtime.label,
-                    f"TARGET HIT {pos.underlying} {pos.option_type} +{return_pct:.0f}%. "
-                    f"Exited {exit_qty}, holding {pos.qty} as runner.",
-                    tone="trade",
-                )
-                continue
-
-            # ── Priority 6: TRAILING STOP — after +100% on runner (Layer 2) ──
-            if pos.phase in (PHASE_2, PHASE_TRAILING) and return_pct >= EXIT.trail_activation_pct:
-                pos.phase = PHASE_TRAILING
-                pos.trailing_stop = _round_or_none(
-                    pos.peak_price * (1.0 - EXIT.trail_drawdown_pct / 100.0), 2
-                )
-
-            if pos.phase == PHASE_TRAILING and pos.trailing_stop and latest_close <= pos.trailing_stop:
-                await self._close_position(runtime, pos, latest_close, "trailing_stoploss", qty=pos.qty)
-                continue
-
-        # Update portfolio prices
-        latest_prices = {
-            sym: pos.current_price
-            for sym, pos in runtime.positions.items()
-        }
-        if latest_prices:
-            runtime.portfolio.update_prices(latest_prices)
+        return await StrategyExitMixin._manage_exits(self, runtime, rows)
 
     # ── Watchlist LTP Price Refresh ──────────────────────────────────────────
 
     def _refresh_prices_from_watchlist(
         self, runtime: StrategyRuntime, rows: list[dict[str, Any]]
     ) -> None:
-        """Update current_price for open positions using live watchlist LTP.
-
-        Exits have already run (using closed 30-min candle prices). This is a
-        display-only refresh so the dashboard shows the latest tick price
-        rather than the previous candle close (which can be 30 min stale).
-        """
-        if not runtime.positions:
-            return
-        row_map: dict[str, dict] = {r["underlying"]: r for r in rows}
-        now_str = _now_ist().isoformat()
-        for pos in runtime.positions.values():
-            row = row_map.get(pos.underlying)
-            if not row:
-                continue
-            side = "ce" if pos.option_type == "CE" else "pe"
-            opt = row.get(side) or {}
-            ltp = opt.get("ltp")
-            if ltp:
-                try:
-                    price = float(ltp)
-                    if price > 0:
-                        pos.current_price = price
-                        pos.price_updated_at = now_str
-                        if price > pos.peak_price:
-                            pos.peak_price = price
-                except (TypeError, ValueError):
-                    pass
-        latest_prices = {s: p.current_price for s, p in runtime.positions.items()}
-        if latest_prices:
-            runtime.portfolio.update_prices(latest_prices)
+        return StrategyExitMixin._refresh_prices_from_watchlist(self, runtime, rows)
 
     # ── Position Close ───────────────────────────────────────────────────────
 
@@ -2256,74 +1587,7 @@ class PaperStrategyAgent:
         qty: Optional[int] = None,
         partial: bool = False,
     ) -> None:
-        close_qty = qty or position.qty
-        if position.symbol not in runtime.positions:
-            return
-
-        runtime.order_book.place_order(
-            symbol=position.symbol, action="SELL", order_type="MARKET",
-            qty=close_qty, instrument_type=position.option_type,
-            expiry=position.expiry, strike=position.strike,
-            option_type=position.option_type, ltp=exit_price,
-        )
-        pnl = (exit_price - position.entry_price) * close_qty
-
-        if not partial:
-            runtime.positions.pop(position.symbol, None)
-            runtime.exits += 1
-
-        self._append_event(runtime, StrategyEvent(
-            time=_now_ist().isoformat(), event="exit", symbol=position.symbol,
-            underlying=position.underlying, option_type=position.option_type,
-            strike=position.strike, price=exit_price, qty=close_qty,
-            reason=reason, signal_strength=position.signal_strength,
-            pnl=_round_or_none(pnl, 2), phase=position.phase,
-        ))
-
-        ret_pct = ((exit_price - position.entry_price) / position.entry_price * 100) if position.entry_price > 0 else 0
-        exit_type = "PARTIAL EXIT" if partial else "EXIT"
-        self._append_commentary(
-            runtime.label,
-            f"{exit_type} {position.underlying} {position.option_type} {int(position.strike)} "
-            f"@{exit_price:.2f} | Qty={close_qty} | Return={ret_pct:.1f}% | "
-            f"PnL=₹{pnl:.0f} | Reason={reason}",
-            tone="trade",
-        )
-        await self._send_telegram_text(
-            f"{exit_type} | {position.underlying} {position.option_type} {int(position.strike)} "
-            f"@{exit_price:.2f}\nQty: {close_qty} | PnL: ₹{pnl:.0f} | Reason: {reason}"
-        )
-
-        # ── Persist exit to DB ──
-        await self._persist_order(
-            runtime, position.symbol, "SELL", close_qty, exit_price,
-            position.expiry, position.strike, position.option_type, reason,
-        )
-        await self._persist_macd_signal(
-            underlying=position.underlying,
-            expiry=position.expiry,
-            strike=position.strike,
-            option_type=position.option_type,
-            macd_value=float(position.macd_line[-1] or 0) if position.macd_line else 0,
-            signal_value=None,
-            histogram=None,
-            signal_type=f"exit_{reason}",
-            premium_at_signal=exit_price,
-        )
-        if not partial:
-            # Position fully closed — persist with qty=0 to mark closed
-            closed_pos = StrategyPosition(
-                symbol=position.symbol, underlying=position.underlying,
-                expiry=position.expiry, strike=position.strike,
-                option_type=position.option_type, instrument_key=None,
-                trading_symbol=None, qty=0, initial_qty=position.initial_qty,
-                entry_price=position.entry_price, current_price=exit_price,
-                peak_price=position.peak_price, entry_bar_time=position.entry_bar_time,
-                entered_at=position.entered_at, signal_reason=position.signal_reason,
-            )
-            await self._persist_position(runtime, closed_pos, realized_pnl=pnl)
-        else:
-            await self._persist_position(runtime, position)
+        return await StrategyExitMixin._close_position(self, runtime, position, exit_price, reason, qty, partial)
 
     # ── Helper Methods ───────────────────────────────────────────────────────
 
@@ -3201,6 +2465,202 @@ class PaperStrategyAgent:
                 await session.commit()
         except Exception as exc:
             logger.warning(f"[Strategy] Failed to persist position: {exc}")
+
+    async def _persist_agent_signal(
+        self,
+        runtime: StrategyRuntime,
+        pos: StrategyPosition,
+        *,
+        status: str,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> None:
+        try:
+            async with AsyncSessionLocal() as session:
+                session_id = await self._ensure_paper_session_record(session, runtime)
+                payload = metadata or {}
+                signal_bar_time = _parse_iso_timestamp(str(payload.get("entry_bar_time") or pos.entry_bar_time))
+                entered_at = _parse_iso_timestamp(pos.entered_at)
+                closed_at = _now_ist() if status in {"closed", "cancelled"} else None
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO agent_signals (
+                            id, session_id, market, strategy_key, strategy_label, signal_key,
+                            symbol, underlying, expiry, strike, option_type, signal_reason,
+                            signal_strength, spot_setup, regime, status, entry_price,
+                            entry_iv_pct, tte_days, option_ma20, option_ma50,
+                            above_option_ma20, above_option_ma50, signal_bar_time, entered_at,
+                            closed_at, metadata, created_at, updated_at
+                        ) VALUES (
+                            :id, :session_id, 'NSE', :strategy_key, :strategy_label, :signal_key,
+                            :symbol, :underlying, :expiry::date, :strike, :option_type, :signal_reason,
+                            :signal_strength, :spot_setup, :regime, :status, :entry_price,
+                            :entry_iv_pct, :tte_days, :option_ma20, :option_ma50,
+                            :above_option_ma20, :above_option_ma50, :signal_bar_time, :entered_at,
+                            :closed_at, CAST(:metadata AS JSONB), NOW(), NOW()
+                        )
+                        ON CONFLICT (signal_key) DO UPDATE SET
+                            status = EXCLUDED.status,
+                            entry_price = EXCLUDED.entry_price,
+                            entry_iv_pct = EXCLUDED.entry_iv_pct,
+                            option_ma20 = EXCLUDED.option_ma20,
+                            option_ma50 = EXCLUDED.option_ma50,
+                            above_option_ma20 = EXCLUDED.above_option_ma20,
+                            above_option_ma50 = EXCLUDED.above_option_ma50,
+                            closed_at = COALESCE(EXCLUDED.closed_at, agent_signals.closed_at),
+                            metadata = agent_signals.metadata || EXCLUDED.metadata,
+                            updated_at = NOW()
+                        """
+                    ),
+                    {
+                        "id": pos.signal_id or str(uuid.uuid4()),
+                        "session_id": session_id,
+                        "strategy_key": runtime.key,
+                        "strategy_label": runtime.label,
+                        "signal_key": f"{runtime.key}:{pos.symbol}:{pos.entry_bar_time}",
+                        "symbol": pos.symbol,
+                        "underlying": pos.underlying,
+                        "expiry": pos.expiry,
+                        "strike": pos.strike,
+                        "option_type": pos.option_type,
+                        "signal_reason": pos.signal_reason,
+                        "signal_strength": pos.signal_strength,
+                        "spot_setup": pos.spot_setup,
+                        "regime": pos.regime,
+                        "status": status,
+                        "entry_price": pos.entry_price,
+                        "entry_iv_pct": pos.entry_iv_pct,
+                        "tte_days": payload.get("tte_days"),
+                        "option_ma20": pos.option_ma20,
+                        "option_ma50": pos.option_ma50,
+                        "above_option_ma20": pos.above_option_ma20,
+                        "above_option_ma50": pos.above_option_ma50,
+                        "signal_bar_time": signal_bar_time,
+                        "entered_at": entered_at,
+                        "closed_at": closed_at,
+                        "metadata": json.dumps(payload),
+                    },
+                )
+                unrealized_pnl = _round_or_none(pos.unrealized_pnl, 2) or 0.0
+                realized_pnl = float(payload.get("realized_pnl") or 0.0)
+                position_status = "open" if pos.qty > 0 and status not in {"closed", "cancelled"} else "closed"
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO agent_positions (
+                            id, signal_id, session_id, market, strategy_key, strategy_label,
+                            symbol, underlying, expiry, strike, option_type, qty, initial_qty,
+                            entry_price, current_price, peak_price, realized_pnl, unrealized_pnl,
+                            entry_iv_pct, spot_setup, regime, signal_reason, phase, status,
+                            option_ma20, option_ma50, above_option_ma20, above_option_ma50,
+                            entered_at, closed_at, metadata, created_at, updated_at
+                        ) VALUES (
+                            :id, :signal_id, :session_id, 'NSE', :strategy_key, :strategy_label,
+                            :symbol, :underlying, :expiry::date, :strike, :option_type, :qty, :initial_qty,
+                            :entry_price, :current_price, :peak_price, :realized_pnl, :unrealized_pnl,
+                            :entry_iv_pct, :spot_setup, :regime, :signal_reason, :phase, :status,
+                            :option_ma20, :option_ma50, :above_option_ma20, :above_option_ma50,
+                            :entered_at, :closed_at, CAST(:metadata AS JSONB), NOW(), NOW()
+                        )
+                        ON CONFLICT (symbol) DO UPDATE SET
+                            signal_id = EXCLUDED.signal_id,
+                            qty = EXCLUDED.qty,
+                            initial_qty = EXCLUDED.initial_qty,
+                            current_price = EXCLUDED.current_price,
+                            peak_price = EXCLUDED.peak_price,
+                            realized_pnl = EXCLUDED.realized_pnl,
+                            unrealized_pnl = EXCLUDED.unrealized_pnl,
+                            phase = EXCLUDED.phase,
+                            status = EXCLUDED.status,
+                            closed_at = EXCLUDED.closed_at,
+                            metadata = agent_positions.metadata || EXCLUDED.metadata,
+                            updated_at = NOW()
+                        """
+                    ),
+                    {
+                        "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{runtime.key}:{pos.symbol}")),
+                        "signal_id": pos.signal_id,
+                        "session_id": session_id,
+                        "strategy_key": runtime.key,
+                        "strategy_label": runtime.label,
+                        "symbol": pos.symbol,
+                        "underlying": pos.underlying,
+                        "expiry": pos.expiry,
+                        "strike": pos.strike,
+                        "option_type": pos.option_type,
+                        "qty": pos.qty,
+                        "initial_qty": pos.initial_qty,
+                        "entry_price": pos.entry_price,
+                        "current_price": pos.current_price,
+                        "peak_price": pos.peak_price,
+                        "realized_pnl": realized_pnl,
+                        "unrealized_pnl": unrealized_pnl,
+                        "entry_iv_pct": pos.entry_iv_pct,
+                        "spot_setup": pos.spot_setup,
+                        "regime": pos.regime,
+                        "signal_reason": pos.signal_reason,
+                        "phase": pos.phase if pos.qty > 0 else PHASE_EXITED,
+                        "status": position_status,
+                        "option_ma20": pos.option_ma20,
+                        "option_ma50": pos.option_ma50,
+                        "above_option_ma20": pos.above_option_ma20,
+                        "above_option_ma50": pos.above_option_ma50,
+                        "entered_at": entered_at,
+                        "closed_at": closed_at,
+                        "metadata": json.dumps(payload),
+                    },
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.warning(f"[Strategy] Failed to persist agent audit rows: {exc}")
+
+    async def _persist_agent_risk_state(self, status_payload: dict[str, Any]) -> None:
+        try:
+            broker_snapshot = (status_payload.get("data_health") or {}).get("broker_snapshot") or {}
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO agent_risk_state (
+                            id, market, strategy_key, strategy_label, trading_allowed,
+                            kill_switch_active, auto_run_enabled, loop_active, running,
+                            scan_interval_seconds, open_positions, active_windows, last_run_at,
+                            broker_ready, connected_brokers, status_payload, created_at
+                        ) VALUES (
+                            :id, 'NSE', 'paper_strategy_agent', 'NSE Strategy Agent', :trading_allowed,
+                            :kill_switch_active, :auto_run_enabled, :loop_active, :running,
+                            :scan_interval_seconds, :open_positions, :active_windows, :last_run_at,
+                            :broker_ready, CAST(:connected_brokers AS JSONB), CAST(:status_payload AS JSONB), NOW()
+                        )
+                        """
+                    ),
+                    {
+                        "id": str(uuid.uuid4()),
+                        "trading_allowed": not bool(status_payload.get("kill_switch_active")),
+                        "kill_switch_active": bool(status_payload.get("kill_switch_active")),
+                        "auto_run_enabled": bool(status_payload.get("auto_run_enabled")),
+                        "loop_active": bool(status_payload.get("loop_active")),
+                        "running": bool(status_payload.get("running")),
+                        "scan_interval_seconds": int(status_payload.get("scan_interval_seconds") or 0),
+                        "open_positions": sum(
+                            int(item.get("summary", {}).get("open_positions") or 0)
+                            for item in status_payload.get("strategies", [])
+                        ),
+                        "active_windows": int(status_payload.get("active_windows") or 0),
+                        "last_run_at": _parse_iso_timestamp(status_payload.get("last_run_at")),
+                        "broker_ready": bool(broker_snapshot.get("broker_ready")),
+                        "connected_brokers": json.dumps(broker_snapshot.get("connected_brokers") or []),
+                        "status_payload": json.dumps(status_payload),
+                    },
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.warning(f"[Strategy] Failed to persist agent risk state: {exc}")
+
+    async def _status_with_risk_snapshot(self) -> dict[str, Any]:
+        status = self.get_status()
+        await self._persist_agent_risk_state(status)
+        return status
 
     def _append_event(self, runtime: StrategyRuntime, event: StrategyEvent) -> None:
         runtime.recent_events.insert(0, event)

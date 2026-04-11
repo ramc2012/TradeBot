@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 from datetime import date, datetime, timedelta, timezone
 
+from paper_engine.order_book import PaperOrderBook
 from paper_engine.portfolio import PaperPortfolio
 import paper_engine.strategy_agent as strategy_agent_module
 from paper_engine.strategy_agent import (
+    PHASE_TRAILING,
     PaperStrategyAgent,
     StrategyPosition,
     _ensure_ist_datetime,
@@ -61,6 +63,45 @@ def test_paper_portfolio_summary_sanitizes_infinite_profit_factor() -> None:
     summary = portfolio.get_summary()
 
     assert summary["profit_factor"] is None
+
+
+def test_trade_history_persists_signal_metadata() -> None:
+    portfolio = PaperPortfolio(initial_capital=1_000_000.0, session_id="meta")
+    order_book = PaperOrderBook(on_fill=portfolio.on_fill)
+
+    order_book.place_order(
+        symbol="OPT:AUROPHARMA:2026-04-30:1340:CE",
+        action="BUY",
+        order_type="MARKET",
+        qty=2500,
+        instrument_type="CE",
+        expiry="2026-04-30",
+        strike=1340.0,
+        option_type="CE",
+        ltp=80.0,
+        signal_id="signal-123",
+        setup_type="breakout",
+        entry_iv_pct=24.5,
+        regime="bullish",
+    )
+    order_book.place_order(
+        symbol="OPT:AUROPHARMA:2026-04-30:1340:CE",
+        action="SELL",
+        order_type="MARKET",
+        qty=2500,
+        instrument_type="CE",
+        expiry="2026-04-30",
+        strike=1340.0,
+        option_type="CE",
+        ltp=100.0,
+    )
+
+    trade = portfolio._trade_history[0]
+
+    assert trade.signal_id == "signal-123"
+    assert trade.setup_type == "breakout"
+    assert trade.entry_iv_pct == 24.5
+    assert trade.regime == "bullish"
 
 
 def test_candidate_expiries_include_next_when_front_is_near() -> None:
@@ -293,3 +334,100 @@ def test_run_once_stops_when_no_valid_broker_session_is_available(monkeypatch) -
     assert "No valid NSE broker session is available" in status["last_message"]
     assert status["data_health"]["broker_snapshot"]["broker_ready"] is False
     assert status["strategies"][0]["last_message"] == status["last_message"]
+
+
+def test_manage_exits_ignores_first_ma20_pullback(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    runtime = agent._strategy1
+    runtime.positions.clear()
+    position = StrategyPosition(
+        symbol="OPT:AUROPHARMA:2026-04-30:1340:CE",
+        underlying="AUROPHARMA",
+        expiry="2026-04-30",
+        strike=1340.0,
+        option_type="CE",
+        instrument_key="NSE_FO|123",
+        trading_symbol="AUROPHARMA 1340 CE",
+        qty=2500,
+        initial_qty=2500,
+        entry_price=80.0,
+        current_price=99.0,
+        peak_price=120.0,
+        entry_bar_time="2026-04-09T09:15:00+05:30",
+        entered_at="2026-04-09T09:15:00+05:30",
+        signal_reason="macd_zero_cross",
+        phase=PHASE_TRAILING,
+        trailing_stop=90.0,
+    )
+    runtime.positions[position.symbol] = position
+
+    start = datetime(2026, 4, 9, 9, 15, tzinfo=UTC)
+    candles = [
+        {"time": (start + timedelta(minutes=30 * index)).isoformat(), "close": 100.0}
+        for index in range(20)
+    ]
+    candles[-1]["close"] = 99.0
+
+    async def fake_load_candles(**_kwargs):
+        return candles
+
+    closed: list[str] = []
+
+    async def fake_close_position(_runtime, _position, _exit_price, reason, **_kwargs):
+        closed.append(reason)
+
+    monkeypatch.setattr(strategy_agent_module.option_history_service, "load_candles", fake_load_candles)
+    monkeypatch.setattr(agent, "_close_position", fake_close_position)
+
+    asyncio.run(agent._manage_exits(runtime))
+
+    assert closed == []
+    assert position.first_pullback_ignored_at is not None
+
+
+def test_manage_exits_closes_after_pullback_ignore_window(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    runtime = agent._strategy1
+    runtime.positions.clear()
+    position = StrategyPosition(
+        symbol="OPT:AUROPHARMA:2026-04-30:1340:CE",
+        underlying="AUROPHARMA",
+        expiry="2026-04-30",
+        strike=1340.0,
+        option_type="CE",
+        instrument_key="NSE_FO|123",
+        trading_symbol="AUROPHARMA 1340 CE",
+        qty=2500,
+        initial_qty=2500,
+        entry_price=80.0,
+        current_price=99.0,
+        peak_price=120.0,
+        entry_bar_time="2026-04-09T09:15:00+05:30",
+        entered_at="2026-04-09T09:15:00+05:30",
+        signal_reason="macd_zero_cross",
+        phase=PHASE_TRAILING,
+        trailing_stop=90.0,
+    )
+    runtime.positions[position.symbol] = position
+
+    start = datetime(2026, 4, 9, 9, 15, tzinfo=UTC)
+    candles = [
+        {"time": (start + timedelta(minutes=30 * index)).isoformat(), "close": 100.0}
+        for index in range(25)
+    ]
+    candles[-1]["close"] = 99.0
+
+    async def fake_load_candles(**_kwargs):
+        return candles
+
+    closed: list[str] = []
+
+    async def fake_close_position(_runtime, _position, _exit_price, reason, **_kwargs):
+        closed.append(reason)
+
+    monkeypatch.setattr(strategy_agent_module.option_history_service, "load_candles", fake_load_candles)
+    monkeypatch.setattr(agent, "_close_position", fake_close_position)
+
+    asyncio.run(agent._manage_exits(runtime))
+
+    assert closed == ["ma20_pullback_exit"]

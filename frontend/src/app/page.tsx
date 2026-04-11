@@ -24,9 +24,11 @@ import {
   SystemHealthBoard,
   type SystemHealthResponse,
 } from "@/components/system/SystemHealthBoard";
+import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import {
   getSystemOverview,
 } from "@/lib/api";
+import { createSystemOverviewSocket } from "@/lib/websocket";
 
 type StrategyLaneSummary = StrategyAgentStatus["strategies"][number];
 
@@ -270,10 +272,11 @@ function WorkspaceGroup({
 }
 
 export default function HomePage() {
-  const overviewQuery = useQuery({
+  const overviewQuery = useLiveSnapshotQuery<SystemOverview>({
     queryKey: ["systemOverview"],
     queryFn: () => getSystemOverview().then((response) => response.data as SystemOverview),
-    refetchInterval: 15_000,
+    streamFactory: (onData, onStatusChange) =>
+      createSystemOverviewSocket((data) => onData(data as SystemOverview), onStatusChange),
     staleTime: 10_000,
   });
 

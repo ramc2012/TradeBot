@@ -11,7 +11,7 @@ import json
 import os
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -29,10 +29,18 @@ from market_data.commodity_contract_specs import (
     get_commodity_display_name,
 )
 from market_data.option_history import option_history_service
+from paper_engine.base_strategy_agent import (
+    BaseStrategyAgent,
+    IST,
+    _deserialize_trade_history,
+    _latest_session_rows,
+    _now_ist,
+    _parse_iso_timestamp,
+    _round_or_none,
+    _serialize_trade_history,
+)
 from paper_engine.order_book import PaperOrder, PaperOrderBook
-from paper_engine.portfolio import PaperPortfolio, TradeRecord, VirtualPosition
-
-IST = timezone(timedelta(hours=5, minutes=30))
+from paper_engine.portfolio import PaperPortfolio, VirtualPosition
 
 DEFAULT_COMMODITY_SCAN_INTERVAL_SECONDS = 30
 DEFAULT_COMMODITY_HISTORY_DAYS = 21
@@ -86,10 +94,6 @@ def _canonicalize_symbol(raw_symbol: str) -> str:
     return symbol
 
 
-def _now_ist() -> datetime:
-    return datetime.now(IST)
-
-
 def _in_commodity_hours(now: Optional[datetime] = None) -> bool:
     current = now or _now_ist()
     if current.weekday() >= 5:
@@ -97,49 +101,8 @@ def _in_commodity_hours(now: Optional[datetime] = None) -> bool:
     return time(9, 0) <= current.time() <= time(23, 30)
 
 
-def _round_or_none(value: Optional[float], digits: int = 2) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    if numeric != numeric or numeric in (float("inf"), float("-inf")):
-        return None
-    return round(numeric, digits)
-
-
-def _parse_iso_timestamp(value: Any) -> Optional[datetime]:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=IST)
-    return parsed.astimezone(IST)
-
-
 def _parse_datetime(value: Any) -> Optional[datetime]:
     return _parse_iso_timestamp(value)
-
-
-def _latest_session_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], Optional[date]]:
-    parsed_rows: list[tuple[datetime, dict[str, Any]]] = []
-    for row in rows:
-        parsed = _parse_iso_timestamp(row.get("time") or row.get("timestamp"))
-        if parsed is not None:
-            parsed_rows.append((parsed, row))
-
-    if not parsed_rows:
-        return [], None
-
-    parsed_rows.sort(key=lambda item: item[0])
-    session_date = max(parsed.date() for parsed, _ in parsed_rows)
-    session_rows = [row for parsed, row in parsed_rows if parsed.date() == session_date]
-    return session_rows, session_date
 
 
 def _normalize_symbols(symbols: list[str]) -> list[str]:
@@ -209,56 +172,6 @@ def _default_saved_state() -> dict[str, Any]:
         },
     }
 
-
-def _serialize_trade_history(portfolio: PaperPortfolio) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for trade in getattr(portfolio, "_trade_history", []):
-        rows.append(
-            {
-                "symbol": trade.symbol,
-                "action": trade.action,
-                "qty": int(trade.qty),
-                "entry_price": float(trade.entry_price),
-                "exit_price": float(trade.exit_price),
-                "pnl": float(trade.pnl),
-                "entry_time": trade.entry_time.isoformat(),
-                "exit_time": trade.exit_time.isoformat(),
-                "instrument_type": trade.instrument_type,
-                "expiry": trade.expiry,
-                "strike": trade.strike,
-                "option_type": trade.option_type,
-            }
-        )
-    return rows
-
-
-def _deserialize_trade_history(rows: list[dict[str, Any]]) -> list[TradeRecord]:
-    trades: list[TradeRecord] = []
-    for row in rows:
-        entry_time = _parse_datetime(row.get("entry_time"))
-        exit_time = _parse_datetime(row.get("exit_time"))
-        if entry_time is None or exit_time is None:
-            continue
-        try:
-            trades.append(
-                TradeRecord(
-                    symbol=str(row.get("symbol") or ""),
-                    action=str(row.get("action") or ""),
-                    qty=int(row.get("qty") or 0),
-                    entry_price=float(row.get("entry_price") or 0.0),
-                    exit_price=float(row.get("exit_price") or 0.0),
-                    pnl=float(row.get("pnl") or 0.0),
-                    entry_time=entry_time,
-                    exit_time=exit_time,
-                    instrument_type=str(row.get("instrument_type") or "FUT"),
-                    expiry=row.get("expiry"),
-                    strike=float(row["strike"]) if row.get("strike") is not None else None,
-                    option_type=row.get("option_type"),
-                )
-            )
-        except (TypeError, ValueError):
-            continue
-    return trades
 
 
 def _load_saved_state() -> dict[str, Any]:
@@ -598,7 +511,7 @@ class _CommodityOptionsLaneAgent(_BaseCommodityLaneAgent):
         await self.owner._open_new_option_positions(rows)
 
 
-class CommodityStrategyAgent:
+class CommodityStrategyAgent(BaseStrategyAgent):
     scan_interval_seconds = DEFAULT_COMMODITY_SCAN_INTERVAL_SECONDS
 
     def __init__(self) -> None:

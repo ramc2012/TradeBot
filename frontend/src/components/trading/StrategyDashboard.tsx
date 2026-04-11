@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { memo, useEffect, useMemo, useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import {
   Activity,
@@ -31,6 +31,8 @@ import {
   runStrategyAgentOnce,
   updateTradingKillSwitch,
 } from "@/lib/api";
+import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
+import { createStrategyDashboardSocket } from "@/lib/websocket";
 
 type StrategyPosition = {
   symbol: string;
@@ -198,7 +200,7 @@ function statusTone(status?: string | null) {
   return "border-bg-active bg-bg-secondary/50 text-text-secondary";
 }
 
-function MetricTile({
+const MetricTile = memo(function MetricTile({
   label,
   value,
   detail,
@@ -216,7 +218,7 @@ function MetricTile({
       <div className="mt-1 text-[10px] text-text-muted">{detail}</div>
     </div>
   );
-}
+});
 
 function LaneSelector({
   lane,
@@ -267,7 +269,7 @@ function LaneSelector({
   );
 }
 
-function PositionsTable({ positions }: { positions: StrategyPosition[] }) {
+const PositionsTable = memo(function PositionsTable({ positions }: { positions: StrategyPosition[] }) {
   if (!positions.length) {
     return <div className="rounded-xl border border-dashed border-bg-border p-6 text-sm text-text-muted">No open positions in this lane.</div>;
   }
@@ -315,9 +317,9 @@ function PositionsTable({ positions }: { positions: StrategyPosition[] }) {
       </table>
     </div>
   );
-}
+});
 
-function TradeHistoryTable({ trades }: { trades: TradeRecord[] }) {
+const TradeHistoryTable = memo(function TradeHistoryTable({ trades }: { trades: TradeRecord[] }) {
   if (!trades.length) {
     return <div className="rounded-xl border border-dashed border-bg-border p-6 text-sm text-text-muted">No closed trades in this lane yet.</div>;
   }
@@ -366,9 +368,9 @@ function TradeHistoryTable({ trades }: { trades: TradeRecord[] }) {
       </table>
     </div>
   );
-}
+});
 
-function CommentaryFeed({
+const CommentaryFeed = memo(function CommentaryFeed({
   items,
 }: {
   items: Array<{ time: string; scope: string; tone: string; message: string }>;
@@ -390,9 +392,9 @@ function CommentaryFeed({
       ))}
     </div>
   );
-}
+});
 
-function RegimeTable({ regimes }: { regimes: Record<string, string> }) {
+const RegimeTable = memo(function RegimeTable({ regimes }: { regimes: Record<string, string> }) {
   const entries = Object.entries(regimes || {});
   if (!entries.length) {
     return <div className="rounded-xl border border-dashed border-bg-border p-6 text-sm text-text-muted">No regime states reported yet.</div>;
@@ -418,9 +420,9 @@ function RegimeTable({ regimes }: { regimes: Record<string, string> }) {
       </table>
     </div>
   );
-}
+});
 
-function EquityCurve({
+const EquityCurve = memo(function EquityCurve({
   curves,
   laneKey,
   initialCapital,
@@ -465,43 +467,61 @@ function EquityCurve({
       </LineChart>
     </ResponsiveContainer>
   );
-}
+});
 
 export default function StrategyDashboard() {
   const queryClient = useQueryClient();
   const [selectedKey, setSelectedKey] = useState<string>("");
   const [activeTab, setActiveTab] = useState<"positions" | "trades" | "commentary" | "regimes">("positions");
 
-  const { data: agentStatus, isLoading, dataUpdatedAt } = useQuery({
-    queryKey: ["strategyAgentStatus"],
-    queryFn: () => getStrategyAgentStatus().then((response) => response.data as AgentStatus),
-    refetchInterval: 15_000,
+  const dashboardQuery = useLiveSnapshotQuery<{
+    agent_status: AgentStatus;
+    kill_switch_state: KillSwitchState;
+    orders: OrderRow[];
+    risk_status: RiskStatus;
+    equity_curves: Array<{ key: string; label: string; equity_curve: Array<{ time: string; equity: number }> }>;
+  }>({
+    queryKey: ["strategyDashboardSnapshot"],
+    queryFn: async () => {
+      const [agent_status, kill_switch_state, orders, risk_status, equity_curves] = await Promise.all([
+        getStrategyAgentStatus().then((response) => response.data as AgentStatus),
+        getTradingKillSwitchStatus().then((response) => response.data as KillSwitchState),
+        getOrders().then((response) => response.data as OrderRow[]),
+        getRiskStatus().then((response) => response.data as RiskStatus),
+        getStrategyEquityHistory().then((response) =>
+          response.data as Array<{ key: string; label: string; equity_curve: Array<{ time: string; equity: number }> }>,
+        ),
+      ]);
+      return {
+        agent_status,
+        kill_switch_state,
+        orders,
+        risk_status,
+        equity_curves,
+      };
+    },
+    streamFactory: (onData, onStatusChange) =>
+      createStrategyDashboardSocket(
+        (data) =>
+          onData(data as {
+            agent_status: AgentStatus;
+            kill_switch_state: KillSwitchState;
+            orders: OrderRow[];
+            risk_status: RiskStatus;
+            equity_curves: Array<{ key: string; label: string; equity_curve: Array<{ time: string; equity: number }> }>;
+          }),
+        onStatusChange,
+      ),
     staleTime: 10_000,
   });
-  const { data: killSwitchState } = useQuery({
-    queryKey: ["nseKillSwitch"],
-    queryFn: () => getTradingKillSwitchStatus().then((response) => response.data as KillSwitchState),
-    refetchInterval: 15_000,
-    staleTime: 10_000,
-  });
-  const { data: orders } = useQuery({
-    queryKey: ["nseOrders"],
-    queryFn: () => getOrders().then((response) => response.data as OrderRow[]),
-    refetchInterval: 10_000,
-    staleTime: 5_000,
-  });
-  const { data: riskStatus } = useQuery({
-    queryKey: ["nseRiskStatus"],
-    queryFn: () => getRiskStatus().then((response) => response.data as RiskStatus),
-    refetchInterval: 15_000,
-    staleTime: 10_000,
-  });
-  const { data: equityCurves } = useQuery({
-    queryKey: ["strategyEquityHistory"],
-    queryFn: () => getStrategyEquityHistory().then((response) => response.data as Array<{ key: string; label: string; equity_curve: Array<{ time: string; equity: number }> }>),
-    refetchInterval: 30_000,
-    staleTime: 15_000,
-  });
+
+  const agentStatus = dashboardQuery.data?.agent_status;
+  const killSwitchState = dashboardQuery.data?.kill_switch_state;
+  const orders = dashboardQuery.data?.orders;
+  const riskStatus = dashboardQuery.data?.risk_status;
+  const equityCurves = dashboardQuery.data?.equity_curves;
+  const isLoading = dashboardQuery.isLoading;
+  const dataUpdatedAt = dashboardQuery.dataUpdatedAt;
 
   const runScan = useMutation({
     mutationFn: () => runStrategyAgentOnce(true),

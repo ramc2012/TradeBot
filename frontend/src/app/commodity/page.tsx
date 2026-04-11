@@ -1,7 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { startTransition, useDeferredValue, useEffect, useState } from "react";
+import { startTransition, useDeferredValue, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import {
@@ -40,6 +40,8 @@ import {
   updateCommodityStrategyConfig,
   updateCommodityStrategyContracts,
 } from "@/lib/api";
+import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
+import { createCommodityOverviewSocket } from "@/lib/websocket";
 
 type KillSwitchState = {
   market: string;
@@ -788,42 +790,54 @@ export default function CommodityPage() {
   const [hasEditedContractExpiries, setHasEditedContractExpiries] = useState(false);
   const deferredDraftSymbols = useDeferredValue(draftSymbols);
 
-  const { data: status } = useQuery({
-    queryKey: ["commodityStrategyStatus"],
-    queryFn: () => getCommodityStrategyStatus().then((response) => response.data as CommodityStatus),
-    refetchInterval: 5_000,
+  const commodityOverviewQuery = useLiveSnapshotQuery<{
+    status: CommodityStatus;
+    kill_switch_state: KillSwitchState;
+    orders: CommodityOrder[];
+    positions: CommodityPosition[];
+    reports: CommodityReport[];
+  }>({
+    queryKey: ["commodityOverview"],
+    queryFn: async () => {
+      const [status, kill_switch_state, orders, positions, reports] = await Promise.all([
+        getCommodityStrategyStatus().then((response) => response.data as CommodityStatus),
+        getCommodityKillSwitchStatus().then((response) => response.data as KillSwitchState),
+        getCommodityOrders(40).then((response) => response.data as CommodityOrder[]),
+        getCommodityPositions().then((response) => response.data as CommodityPosition[]),
+        getCommodityReports(24).then((response) => response.data as CommodityReport[]),
+      ]);
+      return {
+        status,
+        kill_switch_state,
+        orders,
+        positions,
+        reports,
+      };
+    },
+    streamFactory: (onData, onStatusChange) =>
+      createCommodityOverviewSocket(
+        (data) =>
+          onData(data as {
+            status: CommodityStatus;
+            kill_switch_state: KillSwitchState;
+            orders: CommodityOrder[];
+            positions: CommodityPosition[];
+            reports: CommodityReport[];
+          }),
+        onStatusChange,
+      ),
     staleTime: 10_000,
   });
 
-  const { data: killSwitchState } = useQuery({
-    queryKey: ["commodityKillSwitch"],
-    queryFn: () => getCommodityKillSwitchStatus().then((response) => response.data as KillSwitchState),
-    refetchInterval: 5_000,
-    staleTime: 10_000,
-  });
-
-  const { data: orders } = useQuery({
-    queryKey: ["commodityOrders"],
-    queryFn: () => getCommodityOrders(40).then((response) => response.data as CommodityOrder[]),
-    refetchInterval: 5_000,
-  });
-
-  const { data: positions } = useQuery({
-    queryKey: ["commodityPositions"],
-    queryFn: () => getCommodityPositions().then((response) => response.data as CommodityPosition[]),
-    refetchInterval: 5_000,
-  });
-
-  const { data: reports } = useQuery({
-    queryKey: ["commodityReports"],
-    queryFn: () => getCommodityReports(24).then((response) => response.data as CommodityReport[]),
-    refetchInterval: 15_000,
-  });
+  const status = commodityOverviewQuery.data?.status;
+  const killSwitchState = commodityOverviewQuery.data?.kill_switch_state;
+  const orders = commodityOverviewQuery.data?.orders;
+  const positions = commodityOverviewQuery.data?.positions;
+  const reports = commodityOverviewQuery.data?.reports;
 
   const contractCatalogQuery = useQuery<CommodityContractCatalogPayload>({
     queryKey: ["commodityStrategyContracts"],
     queryFn: () => getCommodityStrategyContracts().then((response) => response.data),
-    refetchInterval: 180_000,
     staleTime: 60_000,
   });
 
@@ -852,10 +866,14 @@ export default function CommodityPage() {
     setContractExpiryDrafts(nextDrafts);
   }, [contractCatalogQuery.data, hasEditedContractExpiries]);
 
-  const parsedSymbols = deferredDraftSymbols
-    .split("\n")
-    .map((value) => value.trim().toUpperCase())
-    .filter(Boolean);
+  const parsedSymbols = useMemo(
+    () =>
+      deferredDraftSymbols
+        .split("\n")
+        .map((value) => value.trim().toUpperCase())
+        .filter(Boolean),
+    [deferredDraftSymbols],
+  );
 
   const invalidateCommodityQueries = () => {
     queryClient.invalidateQueries({ queryKey: ["commodityStrategyStatus"] });
@@ -894,15 +912,15 @@ export default function CommodityPage() {
     },
   });
 
-  const commentary = status?.commentary ?? [];
-  const positionRows = positions ?? status?.positions ?? [];
-  const tradeHistoryRows = status?.trade_history ?? [];
-  const orderRows = orders ?? status?.orders ?? [];
-  const reportRows = reports ?? status?.reports ?? [];
-  const strategies = status?.strategies ?? [];
-  const contractCatalog = contractCatalogQuery.data?.contracts ?? [];
-  const futuresRows = status?.futures_watchlist ?? status?.watchlist ?? [];
-  const optionRows = status?.option_watchlist ?? [];
+  const commentary = useMemo(() => status?.commentary ?? [], [status?.commentary]);
+  const positionRows = useMemo(() => positions ?? status?.positions ?? [], [positions, status?.positions]);
+  const tradeHistoryRows = useMemo(() => status?.trade_history ?? [], [status?.trade_history]);
+  const orderRows = useMemo(() => orders ?? status?.orders ?? [], [orders, status?.orders]);
+  const reportRows = useMemo(() => reports ?? status?.reports ?? [], [reports, status?.reports]);
+  const strategies = useMemo(() => status?.strategies ?? [], [status?.strategies]);
+  const contractCatalog = useMemo(() => contractCatalogQuery.data?.contracts ?? [], [contractCatalogQuery.data?.contracts]);
+  const futuresRows = useMemo(() => status?.futures_watchlist ?? status?.watchlist ?? [], [status?.futures_watchlist, status?.watchlist]);
+  const optionRows = useMemo(() => status?.option_watchlist ?? [], [status?.option_watchlist]);
   const killSwitchActive = killSwitchState?.kill_switch_active ?? status?.kill_switch_active ?? false;
   const loopActive = status?.loop_active ?? killSwitchState?.loop_active ?? false;
   const startRequired = status?.start_required ?? killSwitchState?.start_required ?? false;
@@ -912,20 +930,27 @@ export default function CommodityPage() {
   const optionHistoryHealth = status?.data_health?.option_history;
   const optionHistoryFailures = Number(optionHistoryHealth?.failure_count || 0);
   const optionHistorySuccesses = Number(optionHistoryHealth?.success_count || 0);
-  const optionHistoryLatestFailure = Object.entries(optionHistoryHealth?.brokers || {})
-    .map(([broker, brokerState]) => {
-      const failures = Number(brokerState.failure || 0);
-      if (!failures) return null;
-      return `${broker.toUpperCase()}: ${brokerState.last_detail || "fetch failed"}`;
-    })
-    .filter(Boolean)
-    .join(" | ");
+  const optionHistoryLatestFailure = useMemo(
+    () =>
+      Object.entries(optionHistoryHealth?.brokers || {})
+        .map(([broker, brokerState]) => {
+          const failures = Number(brokerState.failure || 0);
+          if (!failures) return null;
+          return `${broker.toUpperCase()}: ${brokerState.last_detail || "fetch failed"}`;
+        })
+        .filter(Boolean)
+        .join(" | "),
+    [optionHistoryHealth?.brokers],
+  );
 
-  const futuresLane = strategies.find((lane) => lane.key === "commodity_futures");
-  const optionsLane = strategies.find((lane) => lane.key === "commodity_options");
-  const actionableFutures = futuresRows.filter((row) => row.signal_validation === "ready");
-  const actionableOptions = optionRows.filter((row) => row.signal_validation === "ready");
-  const portfolioRows = buildCommodityPortfolioRows(positionRows, tradeHistoryRows, status?.last_run_at);
+  const futuresLane = useMemo(() => strategies.find((lane) => lane.key === "commodity_futures"), [strategies]);
+  const optionsLane = useMemo(() => strategies.find((lane) => lane.key === "commodity_options"), [strategies]);
+  const actionableFutures = useMemo(() => futuresRows.filter((row) => row.signal_validation === "ready"), [futuresRows]);
+  const actionableOptions = useMemo(() => optionRows.filter((row) => row.signal_validation === "ready"), [optionRows]);
+  const portfolioRows = useMemo(
+    () => buildCommodityPortfolioRows(positionRows, tradeHistoryRows, status?.last_run_at),
+    [positionRows, status?.last_run_at, tradeHistoryRows],
+  );
 
   return (
     <div className="max-w-[1880px] space-y-6 pb-10">

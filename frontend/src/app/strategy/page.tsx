@@ -1,8 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { startTransition, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { startTransition, useMemo, useState } from "react";
 import { clsx } from "clsx";
 import {
   Activity,
@@ -30,6 +29,7 @@ import {
 } from "recharts";
 
 import type { StrategyAgentStatus } from "@/components/trading/StrategyAgentMonitor";
+import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import {
   getBrokerStatus,
   getStrategyAgentComments,
@@ -38,6 +38,7 @@ import {
   getStrategyOpenSignals,
   getStrategyPortfolio,
 } from "@/lib/api";
+import { createStrategyOverviewSocket } from "@/lib/websocket";
 
 type StrategyTab = "portfolio" | "signals" | "operations";
 
@@ -367,79 +368,104 @@ function buildStrategyPortfolioRows(
 export default function StrategyPage() {
   const [activeTab, setActiveTab] = useState<StrategyTab>("portfolio");
 
-  const { data: agentStatus } = useQuery({
-    queryKey: ["strategyAgentStatus"],
-    queryFn: () => getStrategyAgentStatus().then((response) => response.data as StrategyAgentStatus),
-    refetchInterval: 15_000,
+  const strategyOverviewQuery = useLiveSnapshotQuery<{
+    agent_status: StrategyAgentStatus;
+    open_signals: any;
+    comments: StrategyComment[];
+    brokers: any[];
+    pipeline: any;
+    live_portfolio: any;
+  }>({
+    queryKey: ["strategyOverview"],
+    queryFn: async () => {
+      const [agent_status, open_signals, comments, brokers, pipeline, live_portfolio] = await Promise.all([
+        getStrategyAgentStatus().then((response) => response.data as StrategyAgentStatus),
+        getStrategyOpenSignals().then((response) => response.data as any),
+        getStrategyAgentComments().then((response) => response.data as StrategyComment[]),
+        getBrokerStatus().then((response) => response.data as any[]),
+        getStrategyDataStatus().then((response) => response.data as any),
+        getStrategyPortfolio().then((response) => response.data as any),
+      ]);
+      return {
+        agent_status,
+        open_signals,
+        comments,
+        brokers,
+        pipeline,
+        live_portfolio,
+      };
+    },
+    streamFactory: (onData, onStatusChange) =>
+      createStrategyOverviewSocket(
+        (data) =>
+          onData(data as {
+            agent_status: StrategyAgentStatus;
+            open_signals: any;
+            comments: StrategyComment[];
+            brokers: any[];
+            pipeline: any;
+            live_portfolio: any;
+          }),
+        onStatusChange,
+      ),
     staleTime: 10_000,
   });
 
-  const { data: openSignals } = useQuery({
-    queryKey: ["strategyOpenSignals"],
-    queryFn: () => getStrategyOpenSignals().then((response) => response.data as any),
-    refetchInterval: 15_000,
-    staleTime: 10_000,
-  });
+  const agentStatus = strategyOverviewQuery.data?.agent_status;
+  const openSignals = strategyOverviewQuery.data?.open_signals;
+  const comments = strategyOverviewQuery.data?.comments;
+  const brokers = strategyOverviewQuery.data?.brokers;
+  const pipeline = strategyOverviewQuery.data?.pipeline;
+  const livePortfolio = strategyOverviewQuery.data?.live_portfolio;
 
-  const { data: comments } = useQuery({
-    queryKey: ["strategyAgentComments"],
-    queryFn: () => getStrategyAgentComments().then((response) => response.data as StrategyComment[]),
-    refetchInterval: 30_000,
-    staleTime: 10_000,
-  });
+  const strategies = useMemo(() => agentStatus?.strategies || [], [agentStatus?.strategies]);
+  const {
+    allPositions,
+    totalOpenPnl,
+    totalRealized,
+    totalTrades,
+    combinedWinRate,
+    strategy1Rows,
+    strategy2Rows,
+    portfolioRows,
+  } = useMemo(() => {
+    const nextAllPositions = strategies.flatMap((strategy) =>
+      (strategy.positions || []).map((position) => ({
+        ...position,
+        strategyKey: strategy.key,
+        strategyLabel: strategy.label,
+      })),
+    );
+    const nextTotalOpenPnl = strategies.reduce((sum, strategy) => sum + (strategy.summary.unrealized_pnl || 0), 0);
+    const nextTotalRealized = strategies.reduce((sum, strategy) => sum + (strategy.summary.realized_pnl || 0), 0);
+    const nextTotalTrades = strategies.reduce((sum, strategy) => sum + (strategy.summary.total_trades || 0), 0);
+    const weightedWins = strategies.reduce(
+      (sum, strategy) => sum + Math.round((strategy.summary.win_rate || 0) * (strategy.summary.total_trades || 0)),
+      0,
+    );
 
-  const { data: brokers } = useQuery({
-    queryKey: ["brokerStatus"],
-    queryFn: () => getBrokerStatus().then((response) => response.data as any[]),
-    refetchInterval: 30_000,
-    staleTime: 10_000,
-  });
-
-  const { data: pipeline } = useQuery({
-    queryKey: ["strategyDataStatus"],
-    queryFn: () => getStrategyDataStatus().then((response) => response.data as any),
-    refetchInterval: 60_000,
-    staleTime: 30_000,
-  });
-
-  const { data: livePortfolio } = useQuery({
-    queryKey: ["strategyPortfolio"],
-    queryFn: () => getStrategyPortfolio().then((response) => response.data as any),
-    refetchInterval: 60_000,
-    staleTime: 30_000,
-  });
-
-  const strategies = agentStatus?.strategies || [];
-  const allPositions = strategies.flatMap((strategy) =>
-    (strategy.positions || []).map((position) => ({
-      ...position,
-      strategyKey: strategy.key,
-      strategyLabel: strategy.label,
-    })),
-  );
-  const totalOpenPnl = strategies.reduce((sum, strategy) => sum + (strategy.summary.unrealized_pnl || 0), 0);
-  const totalRealized = strategies.reduce((sum, strategy) => sum + (strategy.summary.realized_pnl || 0), 0);
-  const totalTrades = strategies.reduce((sum, strategy) => sum + (strategy.summary.total_trades || 0), 0);
-  const weightedWins = strategies.reduce(
-    (sum, strategy) => sum + Math.round((strategy.summary.win_rate || 0) * (strategy.summary.total_trades || 0)),
-    0,
-  );
-  const combinedWinRate = totalTrades ? (weightedWins / totalTrades) * 100 : 0;
-
-  const strategy1Rows = normalizeSignalRows([
-    ...(openSignals?.live_positions || []),
-    ...(openSignals?.strategy1_watchlist || []),
-  ]);
-  const strategy2Rows = normalizeSignalRows(openSignals?.strategy2_signals || []);
-  const brokerRows = brokers || [];
-  const commentRows = comments || [];
+    return {
+      allPositions: nextAllPositions,
+      totalOpenPnl: nextTotalOpenPnl,
+      totalRealized: nextTotalRealized,
+      totalTrades: nextTotalTrades,
+      combinedWinRate: nextTotalTrades ? (weightedWins / nextTotalTrades) * 100 : 0,
+      strategy1Rows: normalizeSignalRows([
+        ...(openSignals?.live_positions || []),
+        ...(openSignals?.strategy1_watchlist || []),
+      ]),
+      strategy2Rows: normalizeSignalRows(openSignals?.strategy2_signals || []),
+      portfolioRows: buildStrategyPortfolioRows(strategies, agentStatus?.last_run_at),
+    };
+  }, [agentStatus?.last_run_at, openSignals?.live_positions, openSignals?.strategy1_watchlist, openSignals?.strategy2_signals, strategies]);
+  const brokerRows = useMemo(() => brokers || [], [brokers]);
+  const commentRows = useMemo(() => comments || [], [comments]);
   const brokerSnapshot = agentStatus?.data_health?.broker_snapshot;
   const upstoxHealth = brokerSnapshot?.upstox_token_health;
   const fyersHealth = brokerSnapshot?.fyers_token_health;
   const optionHistoryHealth = summarizeOptionHistoryHealth(agentStatus);
-  const portfolioRows = buildStrategyPortfolioRows(strategies, agentStatus?.last_run_at);
-  const equityCurve = livePortfolio?.equity_curve || [];
-  const monthly = livePortfolio?.monthly || [];
+  const equityCurve = useMemo(() => livePortfolio?.equity_curve || [], [livePortfolio?.equity_curve]);
+  const monthly = useMemo(() => livePortfolio?.monthly || [], [livePortfolio?.monthly]);
 
   return (
     <div className="mx-auto max-w-[1680px] space-y-6 pb-10">

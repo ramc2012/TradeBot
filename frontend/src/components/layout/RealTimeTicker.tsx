@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import { clsx } from "clsx";
 import { useQuery } from "@tanstack/react-query";
 
@@ -17,7 +17,7 @@ function formatChangePct(ltp?: number, close?: number) {
   return `${prefix}${pct.toFixed(2)}%`;
 }
 
-function TickerItem({ symbol }: { symbol: string }) {
+const TickerItem = memo(function TickerItem({ symbol }: { symbol: string }) {
   const tick = useTickSymbol(symbol);
   const positive = tick && tick.close > 0 ? tick.ltp >= tick.close : undefined;
 
@@ -54,7 +54,7 @@ function TickerItem({ symbol }: { symbol: string }) {
       </div>
     </div>
   );
-}
+});
 
 export default function RealTimeTicker() {
   const updateTick = useTickStore((state) => state.updateTick);
@@ -63,13 +63,12 @@ export default function RealTimeTicker() {
   const ltpQuery = useQuery<Record<string, number>>({
     queryKey: ["headerIndexLtp"],
     queryFn: () => getLTP([...MARKET_INDEX_SYMBOLS]).then((response) => response.data),
-    refetchInterval: 5000,
-    staleTime: 2000,
+    staleTime: Infinity,
   });
 
   useEffect(() => {
     socketsRef.current = MARKET_INDEX_SYMBOLS.map((symbol) =>
-      createTickSocket(symbol, (data: object) => updateTick(data as Tick))
+      createTickSocket(symbol, (data: unknown) => updateTick(data as Tick))
     );
 
     return () => {
