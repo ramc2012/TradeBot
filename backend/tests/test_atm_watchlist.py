@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import date
 
 import market_data.atm_watchlist as atm_watchlist_module
@@ -285,6 +286,7 @@ def test_get_watchlist_returns_building_payload_on_first_load(monkeypatch) -> No
     monkeypatch.setattr(service, "get_expiries", fake_get_expiries)
     monkeypatch.setattr(service, "_load_underlyings", fake_load_underlyings)
     monkeypatch.setattr(service, "_get_upstox_adapter", fake_get_upstox_adapter)
+    monkeypatch.setattr(service, "_load_persisted_watchlist_rows", lambda expiry, underlyings: _async_payload([]))
     monkeypatch.setattr(service, "_build_row", fake_build_row)
 
     payload = asyncio.run(service.get_watchlist("2026-04-28"))
@@ -294,3 +296,79 @@ def test_get_watchlist_returns_building_payload_on_first_load(monkeypatch) -> No
     assert payload["rows"][0]["underlying"] in {"BANKNIFTY", "NIFTY"}
     assert "Building 1 remaining symbols in background." in str(payload["detail"])
     assert scheduled
+
+
+def test_get_watchlist_returns_cached_building_payload_without_rebuild(monkeypatch) -> None:
+    service = ATMWatchlistService()
+    redis = _FakeRedis()
+    cache_key = "atm_watchlist:v3:2026-04-28"
+    cached_payload = {
+        "expiry": "2026-04-28",
+        "rows": [{"underlying": "NIFTY", "kind": "INDEX"}],
+        "summary": {"total_rows": 1, "ce_ready": 0, "pe_ready": 0},
+        "source": "snapshot",
+        "detail": "Building remaining symbols in background.",
+        "build_status": "building",
+        "timestamp": "2026-04-11T10:00:00+00:00",
+    }
+    redis._values[cache_key] = json.dumps(cached_payload)
+
+    monkeypatch.setattr(atm_watchlist_module, "get_redis", lambda: _fake_get_redis(redis))
+    monkeypatch.setattr(service, "get_expiries", lambda: _async_payload({"default_expiry": "2026-04-28"}))
+
+    payload = asyncio.run(service.get_watchlist("2026-04-28"))
+
+    assert payload == cached_payload
+    assert redis._values[cache_key] == json.dumps(cached_payload)
+
+
+def test_get_watchlist_uses_persisted_snapshot_board_when_brokers_are_offline(monkeypatch) -> None:
+    service = ATMWatchlistService()
+    redis = _FakeRedis()
+
+    async def fake_get_expiries() -> dict:
+        return {"default_expiry": "2026-04-28"}
+
+    async def fake_load_underlyings() -> list[UnderlyingMeta]:
+        return [
+            UnderlyingMeta("NIFTY", "INDEX", "NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty 50"),
+            UnderlyingMeta("BANKNIFTY", "INDEX", "NSE_INDEX|Nifty Bank", "NSE_INDEX|Nifty Bank"),
+        ]
+
+    async def fake_load_persisted_rows(expiry: str, underlyings: list[UnderlyingMeta]) -> list[dict]:
+        assert expiry == "2026-04-28"
+        assert len(underlyings) == 2
+        return [
+            {
+                "underlying": "BANKNIFTY",
+                "kind": "INDEX",
+                "spot_price": 55912.75,
+                "expiry": "2026-04-28",
+                "atm_strike": 55900.0,
+                "live_source": "fyers",
+                "fyers_symbol": "NSE:NIFTYBANK-INDEX",
+                "lot_size": 30,
+                "ce": {"ltp": 212.0, "option_type": "CE", "strike": 55900.0},
+                "pe": {"ltp": 188.0, "option_type": "PE", "strike": 55900.0},
+            }
+        ]
+
+    monkeypatch.setattr(atm_watchlist_module, "get_redis", lambda: _fake_get_redis(redis))
+    monkeypatch.setattr(service, "get_expiries", fake_get_expiries)
+    monkeypatch.setattr(service, "_load_underlyings", fake_load_underlyings)
+    monkeypatch.setattr(service, "_load_persisted_watchlist_rows", fake_load_persisted_rows)
+    monkeypatch.setattr(service, "_get_upstox_adapter", lambda: _async_payload(None))
+    monkeypatch.setattr(atm_watchlist_module, "get_active_adapter", lambda broker: None)
+    monkeypatch.setattr(atm_watchlist_module, "ensure_fyers_session", lambda **kwargs: _async_payload(False))
+
+    payload = asyncio.run(service.get_watchlist("2026-04-28"))
+
+    assert payload["source"] == "snapshot"
+    assert payload["build_status"] == "ready"
+    assert payload["summary"]["total_rows"] == 1
+    assert payload["rows"][0]["underlying"] == "BANKNIFTY"
+    assert "last saved ATM watchlist" in payload["detail"]
+
+
+async def _async_payload(payload):
+    return payload

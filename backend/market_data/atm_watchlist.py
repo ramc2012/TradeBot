@@ -26,8 +26,10 @@ from market_data.option_history import option_history_service
 
 
 UTC = timezone.utc
-DEFAULT_WATCHLIST_TTL = 120  # 2 min — covers full 211-symbol load time (~55s)
+DEFAULT_WATCHLIST_TTL = 900
 DEFAULT_EXPIRY_TTL = 300
+DEFAULT_PARTIAL_TTL = 900
+DEFAULT_BUILD_LOCK_TTL = 900
 
 # ── NSE expiry rules ──────────────────────────────────────────────────────────
 # Index F&O: weekly expiry every Thursday (NIFTY on Thursdays, BANKNIFTY on
@@ -319,15 +321,46 @@ class ATMWatchlistService:
         cached = await redis.get(cache_key)
         if cached:
             cached_payload = json.loads(cached)
-            if cached_payload.get("build_status") != "building":
-                return cached_payload
-            await redis.delete(cache_key)
+            return cached_payload
 
         fyers_adapter = get_active_adapter("fyers")
         if fyers_adapter is None and await ensure_fyers_session(force_validate=True):
             fyers_adapter = get_active_adapter("fyers")
         upstox_adapter = await self._get_upstox_adapter()
+
+        underlyings = await self._load_underlyings()
+
+        partial_cache = await redis.get(partial_key)
+        prior_rows: dict[str, dict] = {}
+        loaded_from_persisted = False
+        if partial_cache:
+            for row in json.loads(partial_cache):
+                prior_rows[row["underlying"]] = row
+        else:
+            for row in await self._load_persisted_watchlist_rows(selected_expiry, underlyings):
+                prior_rows[row["underlying"]] = row
+            loaded_from_persisted = bool(prior_rows)
+
         if upstox_adapter is None and fyers_adapter is None:
+            if prior_rows:
+                rows = sorted(prior_rows.values(), key=lambda r: (r["kind"] != "INDEX", r["underlying"]))
+                payload = {
+                    "expiry": selected_expiry,
+                    "rows": rows,
+                    "summary": {
+                        "total_rows": len(rows),
+                        "ce_ready": sum(1 for row in rows if row.get("ce")),
+                        "pe_ready": sum(1 for row in rows if row.get("pe")),
+                        "fyers_rows": sum(1 for row in rows if row.get("live_source") == "fyers"),
+                        "upstox_rows": sum(1 for row in rows if row.get("live_source") == "upstox"),
+                    },
+                    "source": "snapshot",
+                    "detail": "Live brokers are offline. Showing the last saved ATM watchlist board.",
+                    "build_status": "ready",
+                    "timestamp": datetime.now(UTC).isoformat(),
+                }
+                await redis.set(cache_key, json.dumps(payload), ex=DEFAULT_WATCHLIST_TTL)
+                return payload
             payload = {
                 "expiry": selected_expiry,
                 "rows": [],
@@ -339,16 +372,6 @@ class ATMWatchlistService:
             await redis.set(cache_key, json.dumps(payload), ex=30)
             return payload
 
-        underlyings = await self._load_underlyings()
-
-        # Load any partially-built rows from a prior partial-cache key
-        partial_cache = await redis.get(partial_key)
-        prior_rows: dict[str, dict] = {}
-        if partial_cache:
-            for row in json.loads(partial_cache):
-                prior_rows[row["underlying"]] = row
-
-        # Only fetch symbols not already in cache
         pending = [m for m in underlyings if m.symbol not in prior_rows]
         logger.info(
             f"[ATM watchlist] {len(prior_rows)} cached, {len(pending)} to fetch for {selected_expiry}"
@@ -391,8 +414,9 @@ class ATMWatchlistService:
             pending_metas: list,
             prior: dict[str, dict],
             all_underlyings: list,
+            interim_status: str,
+            detail_prefix: Optional[str],
         ) -> None:
-            """Background task: finish building remaining rows and update caches."""
             completed = 0
             for meta in pending_metas:
                 row = await build(meta)
@@ -400,7 +424,16 @@ class ATMWatchlistService:
                 if row:
                     prior[row["underlying"]] = row
                 rows = sorted(prior.values(), key=lambda r: (r["kind"] != "INDEX", r["underlying"]))
-                await redis.set(partial_key, json.dumps(rows), ex=300)
+                await redis.set(partial_key, json.dumps(rows), ex=DEFAULT_PARTIAL_TTL)
+                remaining_count = max(len(all_underlyings) - len(rows), 0)
+                detail_msg = detail_prefix
+                if interim_status == "building" and remaining_count > 0:
+                    detail_msg = (
+                        (detail_msg + " " if detail_msg else "")
+                        + f"Building {remaining_count} remaining symbols in background."
+                    )
+                interim_payload = _build_payload(rows, detail_msg, interim_status if interim_status == "building" else "ready")
+                await redis.set(cache_key, json.dumps(interim_payload), ex=DEFAULT_WATCHLIST_TTL)
                 if completed % 10 == 0 or row:
                     logger.info(
                         f"[ATM watchlist] BG progress: {len(rows)}/{len(all_underlyings)} rows for {selected_expiry}"
@@ -416,7 +449,7 @@ class ATMWatchlistService:
             if build_complete:
                 await redis.delete(partial_key)
                 await redis.delete(build_lock_key)
-            detail_msg = None if fyers_adapter else "Fyers is not connected, using Upstox live chain data."
+            detail_msg = detail_prefix
             if not build_complete:
                 detail_msg = (
                     (detail_msg + " " if detail_msg else "")
@@ -425,33 +458,42 @@ class ATMWatchlistService:
             if build_complete:
                 _payload = _build_payload(rows, detail_msg, "ready")
                 await redis.set(cache_key, json.dumps(_payload), ex=DEFAULT_WATCHLIST_TTL)
-            else:
-                await redis.delete(cache_key)
             await self._archive_expired_contracts()
 
-        # ── Fast-return strategy ──────────────────────────────────────────────
-        # If we already have partial rows, return them immediately to the caller
-        # and kick off the remaining build as a background task (avoids blocking
-        # the HTTP request for 60–120 s while all 211 symbols are fetched).
-        # A Redis lock prevents spawning multiple concurrent background builds.
         if prior_rows:
             rows = sorted(prior_rows.values(), key=lambda r: (r["kind"] != "INDEX", r["underlying"]))
             detail_msg = None if fyers_adapter else "Fyers is not connected, using Upstox live chain data."
-            if pending:
+            payload_status = "ready"
+            background_targets = pending
+            if loaded_from_persisted and not partial_cache:
+                background_targets = underlyings
+                detail_msg = (
+                    (detail_msg + " " if detail_msg else "")
+                    + "Showing the last saved ATM watchlist while live refresh updates in background."
+                )
+            elif pending:
+                payload_status = "building"
                 detail_msg = (
                     (detail_msg + " " if detail_msg else "")
                     + f"Building {len(pending)} remaining symbols in background."
                 )
+            if background_targets:
                 already_building = await redis.get(build_lock_key)
                 if not already_building:
-                    await redis.set(build_lock_key, "1", ex=180)
-                    asyncio.ensure_future(_bg_build_and_cache(pending, dict(prior_rows), underlyings))
-            partial_payload = _build_payload(rows, detail_msg, "building" if pending else "ready")
+                    await redis.set(build_lock_key, "1", ex=DEFAULT_BUILD_LOCK_TTL)
+                    asyncio.ensure_future(
+                        _bg_build_and_cache(
+                            background_targets,
+                            dict(prior_rows),
+                            underlyings,
+                            "building" if payload_status == "building" else "ready",
+                            None if fyers_adapter else "Fyers is not connected, using Upstox live chain data.",
+                        )
+                    )
+            partial_payload = _build_payload(rows, detail_msg, payload_status)
+            await redis.set(cache_key, json.dumps(partial_payload), ex=DEFAULT_WATCHLIST_TTL)
             return partial_payload
 
-        # ── First-ever build: seed the index rows, then continue in background ──
-        # This keeps the first page load within HTTP timeout instead of waiting
-        # for the full all-underlying watchlist to finish building.
         priority_metas = [meta for meta in pending if meta.kind == "INDEX"]
         seed_metas = priority_metas or pending[: min(8, len(pending))]
         seed_tasks = [build(meta, delay=i * 0.05) for i, meta in enumerate(seed_metas)]
@@ -466,8 +508,16 @@ class ATMWatchlistService:
         if remaining:
             already_building = await redis.get(build_lock_key)
             if not already_building:
-                await redis.set(build_lock_key, "1", ex=180)
-                asyncio.ensure_future(_bg_build_and_cache(remaining, dict(prior_rows), underlyings))
+                await redis.set(build_lock_key, "1", ex=DEFAULT_BUILD_LOCK_TTL)
+                asyncio.ensure_future(
+                    _bg_build_and_cache(
+                        remaining,
+                        dict(prior_rows),
+                        underlyings,
+                        "building",
+                        None if fyers_adapter else "Fyers is not connected, using Upstox live chain data.",
+                    )
+                )
             detail_msg = (
                 (detail_msg + " " if detail_msg else "")
                 + f"Building {len(remaining)} remaining symbols in background."
@@ -477,10 +527,7 @@ class ATMWatchlistService:
             await self._archive_expired_contracts()
 
         payload = _build_payload(rows, detail_msg, "building" if remaining else "ready")
-        if remaining:
-            await redis.delete(cache_key)
-        else:
-            await redis.set(cache_key, json.dumps(payload), ex=DEFAULT_WATCHLIST_TTL)
+        await redis.set(cache_key, json.dumps(payload), ex=DEFAULT_WATCHLIST_TTL)
         return payload
 
     async def _build_row(
@@ -1055,6 +1102,166 @@ class ATMWatchlistService:
         if not closes and fallback_close > 0:
             closes = [fallback_close]
         return latest_macd_rsi(closes)
+
+    async def _load_persisted_watchlist_rows(
+        self,
+        expiry: str,
+        underlyings: list[UnderlyingMeta],
+    ) -> list[dict[str, Any]]:
+        expiry_date = self._parse_expiry(expiry)
+        if expiry_date is None:
+            return []
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    """
+                    WITH latest_underlying AS (
+                        SELECT DISTINCT ON (underlying)
+                            underlying,
+                            kind,
+                            expiry,
+                            strike,
+                            source_broker,
+                            underlying_price,
+                            time
+                        FROM atm_option_watchlist_snapshots
+                        WHERE expiry = :expiry
+                        ORDER BY underlying, time DESC
+                    )
+                    SELECT
+                        latest.underlying,
+                        latest.kind,
+                        latest.expiry,
+                        latest.strike,
+                        latest.source_broker,
+                        latest.underlying_price,
+                        catalog.lot_size,
+                        ce.instrument_key AS ce_instrument_key,
+                        ce.trading_symbol AS ce_trading_symbol,
+                        ce.ltp AS ce_ltp,
+                        ce.prev_close AS ce_prev_close,
+                        ce.change AS ce_change,
+                        ce.change_pct AS ce_change_pct,
+                        ce.oi AS ce_oi,
+                        ce.prev_oi AS ce_prev_oi,
+                        ce.oi_change AS ce_oi_change,
+                        ce.oi_change_pct AS ce_oi_change_pct,
+                        ce.volume AS ce_volume,
+                        ce.iv AS ce_iv,
+                        ce.macd AS ce_macd,
+                        ce.macd_signal AS ce_macd_signal,
+                        ce.macd_histogram AS ce_macd_histogram,
+                        ce.rsi AS ce_rsi,
+                        pe.instrument_key AS pe_instrument_key,
+                        pe.trading_symbol AS pe_trading_symbol,
+                        pe.ltp AS pe_ltp,
+                        pe.prev_close AS pe_prev_close,
+                        pe.change AS pe_change,
+                        pe.change_pct AS pe_change_pct,
+                        pe.oi AS pe_oi,
+                        pe.prev_oi AS pe_prev_oi,
+                        pe.oi_change AS pe_oi_change,
+                        pe.oi_change_pct AS pe_oi_change_pct,
+                        pe.volume AS pe_volume,
+                        pe.iv AS pe_iv,
+                        pe.macd AS pe_macd,
+                        pe.macd_signal AS pe_macd_signal,
+                        pe.macd_histogram AS pe_macd_histogram,
+                        pe.rsi AS pe_rsi
+                    FROM latest_underlying latest
+                    LEFT JOIN fo_underlying_catalog catalog
+                      ON catalog.symbol = latest.underlying
+                    LEFT JOIN LATERAL (
+                        SELECT instrument_key, trading_symbol, ltp, prev_close, change, change_pct,
+                               oi, prev_oi, oi_change, oi_change_pct, volume, iv,
+                               macd, macd_signal, macd_histogram, rsi
+                        FROM atm_option_watchlist_snapshots
+                        WHERE underlying = latest.underlying
+                          AND expiry = latest.expiry
+                          AND strike = latest.strike
+                          AND option_type = 'CE'
+                        ORDER BY time DESC
+                        LIMIT 1
+                    ) ce ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT instrument_key, trading_symbol, ltp, prev_close, change, change_pct,
+                               oi, prev_oi, oi_change, oi_change_pct, volume, iv,
+                               macd, macd_signal, macd_histogram, rsi
+                        FROM atm_option_watchlist_snapshots
+                        WHERE underlying = latest.underlying
+                          AND expiry = latest.expiry
+                          AND strike = latest.strike
+                          AND option_type = 'PE'
+                        ORDER BY time DESC
+                        LIMIT 1
+                    ) pe ON TRUE
+                    ORDER BY CASE WHEN latest.kind = 'INDEX' THEN 0 ELSE 1 END, latest.underlying
+                    """
+                ),
+                {"expiry": expiry_date},
+            )
+            rows = result.fetchall()
+
+        meta_by_symbol = {meta.symbol: meta for meta in underlyings}
+        payload_rows: list[dict[str, Any]] = []
+        for row in rows:
+            meta = meta_by_symbol.get(str(row.underlying))
+            fyers_symbol = self._to_fyers_symbol(meta) if meta else None
+
+            def _option_payload(prefix: str, option_type: str) -> Optional[dict[str, Any]]:
+                ltp = getattr(row, f"{prefix}_ltp")
+                instrument_key = getattr(row, f"{prefix}_instrument_key")
+                trading_symbol = getattr(row, f"{prefix}_trading_symbol")
+                if all(value is None for value in (ltp, instrument_key, trading_symbol)):
+                    return None
+                return {
+                    "strike": float(row.strike),
+                    "option_type": option_type,
+                    "instrument_key": instrument_key,
+                    "trading_symbol": trading_symbol,
+                    "ltp": round(float(ltp or 0.0), 2),
+                    "prev_close": round(float(getattr(row, f"{prefix}_prev_close") or 0.0), 2)
+                    if getattr(row, f"{prefix}_prev_close") is not None else None,
+                    "change": round(float(getattr(row, f"{prefix}_change") or 0.0), 2)
+                    if getattr(row, f"{prefix}_change") is not None else None,
+                    "change_pct": round(float(getattr(row, f"{prefix}_change_pct") or 0.0), 2)
+                    if getattr(row, f"{prefix}_change_pct") is not None else None,
+                    "oi": int(getattr(row, f"{prefix}_oi") or 0),
+                    "prev_oi": int(getattr(row, f"{prefix}_prev_oi") or 0)
+                    if getattr(row, f"{prefix}_prev_oi") is not None else None,
+                    "oi_change": int(getattr(row, f"{prefix}_oi_change") or 0)
+                    if getattr(row, f"{prefix}_oi_change") is not None else None,
+                    "oi_change_pct": round(float(getattr(row, f"{prefix}_oi_change_pct") or 0.0), 2)
+                    if getattr(row, f"{prefix}_oi_change_pct") is not None else None,
+                    "volume": int(getattr(row, f"{prefix}_volume") or 0),
+                    "iv": round(float(getattr(row, f"{prefix}_iv") or 0.0), 4)
+                    if getattr(row, f"{prefix}_iv") is not None else None,
+                    "macd": float(getattr(row, f"{prefix}_macd"))
+                    if getattr(row, f"{prefix}_macd") is not None else None,
+                    "macd_signal": float(getattr(row, f"{prefix}_macd_signal"))
+                    if getattr(row, f"{prefix}_macd_signal") is not None else None,
+                    "macd_histogram": float(getattr(row, f"{prefix}_macd_histogram"))
+                    if getattr(row, f"{prefix}_macd_histogram") is not None else None,
+                    "rsi": float(getattr(row, f"{prefix}_rsi"))
+                    if getattr(row, f"{prefix}_rsi") is not None else None,
+                }
+
+            payload_rows.append(
+                {
+                    "underlying": str(row.underlying),
+                    "kind": str(row.kind),
+                    "spot_price": round(float(row.underlying_price or 0.0), 2),
+                    "expiry": expiry,
+                    "atm_strike": float(row.strike),
+                    "live_source": str(row.source_broker or "snapshot"),
+                    "fyers_symbol": fyers_symbol,
+                    "lot_size": int(row.lot_size) if row.lot_size is not None else None,
+                    "ce": _option_payload("ce", "CE"),
+                    "pe": _option_payload("pe", "PE"),
+                }
+            )
+        return payload_rows
 
     async def _load_history_closes(
         self,

@@ -9,6 +9,18 @@
   ],
   "commentary": [
     {
+      "time": "2026-04-11T17:26:03.759988+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T17:26:03.751408+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
       "time": "2026-04-11T17:14:30.699662+05:30",
       "scope": "System",
       "tone": "idle",
@@ -235,18 +247,6 @@
       "scope": "System",
       "tone": "idle",
       "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-10T22:42:24.368963+05:30",
-      "scope": "System",
-      "tone": "info",
-      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 2 entry-ready and 61 trend-aligned lanes from 2026-04-10."
-    },
-    {
-      "time": "2026-04-10T22:40:11.259469+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
     }
   ],
   "strategies": {
@@ -261,7 +261,7 @@
         "mode": "market_closed",
         "recovered_trading_day": "2026-04-09",
         "historical_signal_count": 36,
-        "updated_at": "2026-04-11T17:17:30.745053+05:30",
+        "updated_at": "2026-04-11T17:35:07.057609+05:30",
         "broker_snapshot": {
           "connected_brokers": [],
           "upstox_ready": false,
@@ -1514,7 +1514,7 @@
             "last_date": "2026-04-09 15:20"
           }
         ],
-        "updated_at": "2026-04-11T17:17:30.745053+05:30",
+        "updated_at": "2026-04-11T17:35:07.057609+05:30",
         "market_state": "closed",
         "broker_snapshot": {
           "connected_brokers": [],
