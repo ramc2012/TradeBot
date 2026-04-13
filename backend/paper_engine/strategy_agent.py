@@ -2095,6 +2095,8 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
 
     async def _maybe_sync_spot_candles(self) -> None:
         """Periodically sync spot candles from broker to DB during market hours."""
+        if not settings.STRATEGY_SPOT_SYNC_ENABLED:
+            return
         self._scan_count += 1
         if self._scan_count % self.SPOT_SYNC_INTERVAL_SCANS != 1:
             return  # first scan + every 30th scan

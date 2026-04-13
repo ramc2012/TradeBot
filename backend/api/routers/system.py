@@ -13,6 +13,7 @@ from api.routers.auth import get_broker_connection_snapshot
 from analytics.performance import PerformanceAnalytics
 from api.routers.trading import _get_or_create_paper_session, _risk_manager
 from auction_intelligence.config import clone_default_config
+from core.config import settings
 from db.database import AsyncSessionLocal
 from db.redis_client import get_redis
 from market_data.data_router import data_router
@@ -67,8 +68,19 @@ def _lane_status_payload(
     }
 
 
-def _manual_book_summary() -> dict[str, Any]:
-    _, portfolio = _get_or_create_paper_session()
+def _strategy_metric(strategy: dict[str, Any], field: str, default: float = 0.0) -> float:
+    summary = strategy.get("summary") or {}
+    value = summary.get(field)
+    if value is None:
+        value = strategy.get(field)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+async def _manual_book_summary() -> dict[str, Any]:
+    _, _, portfolio = await _get_or_create_paper_session()
     trades = [
         {
             "symbol": trade.symbol,
@@ -149,6 +161,15 @@ async def _redis_service() -> dict[str, Any]:
 
 
 def _research_sync_service(now_utc: datetime) -> dict[str, Any]:
+    if not settings.RESEARCH_SYNC_AUTO_ENABLED:
+        return _service(
+            key="research_sync",
+            label="Research Sync",
+            status="idle",
+            detail="Broker research sync is disabled until explicitly started.",
+            meta={"state": "disabled", "enabled": False},
+        )
+
     runtime = _load_research_sync_runtime_state()
     state = str(runtime.get("state") or "idle")
     completed_at = _parse_iso_datetime(runtime.get("run_completed_at"))
@@ -304,7 +325,7 @@ def _strategy_service(
 
     lanes: list[dict[str, Any]] = []
     for lane, strategy in zip(lane_payloads, strategy_items):
-        positions = int(strategy.get("summary", {}).get("open_positions") or 0)
+        positions = int(_strategy_metric(strategy, "open_positions", 0))
         lanes.append(
             _lane_status_payload(
                 parent=key,
@@ -331,7 +352,7 @@ def _strategy_service(
             "next_scan_at": status.get("next_scan_at"),
             "strategy_lane_count": len(lanes),
             "open_positions": sum(
-                int(item.get("summary", {}).get("open_positions") or 0)
+                int(_strategy_metric(item, "open_positions", 0))
                 for item in strategy_items
             ),
             "data_health": status.get("data_health"),
@@ -431,18 +452,18 @@ async def system_overview() -> dict[str, Any]:
     health = await system_health()
     nse_status = paper_strategy_agent.get_status()
     commodity_status = commodity_strategy_agent.get_status()
-    manual = _manual_book_summary()
+    manual = await _manual_book_summary()
     auction = await auction_intelligence_summary()
     risk = _risk_manager.get_status()
 
     nse_strategies = nse_status.get("strategies") or []
     commodity_strategies = commodity_status.get("strategies") or []
-    nse_realized = sum(float(item.get("summary", {}).get("realized_pnl") or 0.0) for item in nse_strategies)
-    nse_open = sum(float(item.get("summary", {}).get("unrealized_pnl") or 0.0) for item in nse_strategies)
-    nse_equity = sum(float(item.get("summary", {}).get("total_equity") or 0.0) for item in nse_strategies)
-    commodity_realized = sum(float(item.get("summary", {}).get("realized_pnl") or 0.0) for item in commodity_strategies)
-    commodity_open = sum(float(item.get("summary", {}).get("unrealized_pnl") or 0.0) for item in commodity_strategies)
-    commodity_equity = sum(float(item.get("summary", {}).get("total_equity") or 0.0) for item in commodity_strategies)
+    nse_realized = sum(_strategy_metric(item, "realized_pnl", 0.0) for item in nse_strategies)
+    nse_open = sum(_strategy_metric(item, "unrealized_pnl", 0.0) for item in nse_strategies)
+    nse_equity = sum(_strategy_metric(item, "total_equity", 0.0) for item in nse_strategies)
+    commodity_realized = sum(_strategy_metric(item, "realized_pnl", 0.0) for item in commodity_strategies)
+    commodity_open = sum(_strategy_metric(item, "unrealized_pnl", 0.0) for item in commodity_strategies)
+    commodity_equity = sum(_strategy_metric(item, "total_equity", 0.0) for item in commodity_strategies)
 
     return {
         "generated_at": health["generated_at"],
@@ -452,8 +473,8 @@ async def system_overview() -> dict[str, Any]:
                 "equity": round(nse_equity + commodity_equity, 2),
                 "realized_pnl": round(nse_realized + commodity_realized + float(manual.get("total_pnl") or 0.0), 2),
                 "open_pnl": round(nse_open + commodity_open, 2),
-                "open_positions": int(sum(item.get("summary", {}).get("open_positions") or 0 for item in nse_strategies))
-                + int(sum(item.get("summary", {}).get("open_positions") or 0 for item in commodity_strategies)),
+                "open_positions": int(sum(_strategy_metric(item, "open_positions", 0) for item in nse_strategies))
+                + int(sum(_strategy_metric(item, "open_positions", 0) for item in commodity_strategies)),
             },
             "manual": manual,
             "nse_strategy": {

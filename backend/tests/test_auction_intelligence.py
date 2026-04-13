@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 import sys
@@ -16,20 +18,29 @@ from api.routers.auction_intelligence import router
 from auction_intelligence.config import clone_default_config
 from auction_intelligence.demo import build_demo_analysis, build_demo_validation_series
 from auction_intelligence.live import (
+    _build_quote_history_from_ticks,
+    _build_trade_prints_from_ticks,
     _build_quote_from_snapshot,
+    _fetch_recent_minute_rows,
     _load_portfolio_snapshot,
     _normalize_portfolio_symbol,
     available_live_symbols,
 )
 from auction_intelligence.market_profile import MarketProfileEngine
 from auction_intelligence.order_flow import OrderFlowEngine
+from auction_intelligence.options import OptionStrategyMapper
 from auction_intelligence.paper.service import PaperTradingService
 from auction_intelligence.regime import RegimeEngine
 from auction_intelligence.risk import RiskGovernor
 from auction_intelligence.schemas import (
+    AgentDecision,
     AgentContext,
+    AnalysisBundle,
     DepthLevel,
     DepthSnapshot,
+    NTMVolXLevel,
+    NTMVolXSnapshot,
+    RiskDecision,
     MarketBar,
     MarketProfileSnapshot,
     OrderFlowSnapshot,
@@ -38,7 +49,10 @@ from auction_intelligence.schemas import (
     RegimeAssessment,
     SessionContext,
     TradePrint,
+    ExecutionInstruction,
 )
+from auction_intelligence.agents.positional import PositionalAgent
+from auction_intelligence.agents.scalp import ScalpAgent
 from auction_intelligence.agents.swing import SwingAgent
 from auction_intelligence.service import AuctionIntelligenceService
 from auction_intelligence.validation.engine import GateAValidator
@@ -71,6 +85,154 @@ def _make_trades(start: datetime) -> list[TradePrint]:
     ]
 
 
+def _make_profile_snapshot(**overrides) -> MarketProfileSnapshot:
+    base = {
+        "symbol": "NIFTY FUT",
+        "session_date": "2026-04-02",
+        "period_minutes": 30,
+        "tick_size": 0.5,
+        "open_price": 22480.0,
+        "high_price": 22560.0,
+        "low_price": 22410.0,
+        "close_price": 22520.0,
+        "total_volume": 100000.0,
+        "tpo_counts": {22500.0: 3},
+        "tpo_letters": {22500.0: "ABCD"},
+        "poc": 22495.0,
+        "vah": 22525.0,
+        "val": 22455.0,
+        "initial_balance_high": 22505.0,
+        "initial_balance_low": 22445.0,
+        "initial_balance_range": 60.0,
+        "day_range": 150.0,
+        "range_extension_up": 55.0,
+        "range_extension_down": 35.0,
+        "single_prints": [],
+        "buying_tail": [],
+        "selling_tail": [],
+        "poor_high": False,
+        "poor_low": False,
+        "excess_high": 0.0,
+        "excess_low": 0.0,
+        "spike_direction": "none",
+        "spike_price": None,
+        "period_count": 4,
+        "sample_count": 4,
+        "value_area_overlap": 0.4,
+        "poc_shift": 20.0,
+        "value_migration": 25.0,
+        "prior_poc_untouched": True,
+        "bracket_state": "expanding",
+    }
+    base.update(overrides)
+    return MarketProfileSnapshot(**base)
+
+
+def _make_order_flow_snapshot(**overrides) -> OrderFlowSnapshot:
+    base = {
+        "spread": 1.0,
+        "mid_price": 22520.0,
+        "micro_price": 22520.4,
+        "top_imbalance": 0.2,
+        "depth_imbalance": 0.15,
+        "aggressive_buy_volume": 800.0,
+        "aggressive_sell_volume": 400.0,
+        "delta": 400.0,
+        "cumulative_delta": 1200.0,
+        "vwap": 22500.0,
+        "vwap_drift": 20.0,
+        "queue_pressure": 0.18,
+        "volatility_burst": 1.0,
+        "passive_fill_probability": 0.58,
+        "aggressive_fill_probability": 0.78,
+        "adverse_selection_risk": 0.22,
+        "timing_confidence": 0.68,
+        "execution_aggression": "PASSIVE",
+        "micro_stop_distance": 12.0,
+        "trade_imbalance": 0.32,
+        "order_flow_imbalance": 0.24,
+        "book_pressure": 0.22,
+        "micro_price_offset_bps": 0.6,
+        "trade_intensity_per_minute": 3.2,
+        "quote_repricing_rate": 8.0,
+        "toxicity_score": 0.3,
+    }
+    base.update(overrides)
+    return OrderFlowSnapshot(**base)
+
+
+def _make_ntm_volx_snapshot(**overrides) -> NTMVolXSnapshot:
+    base = {
+        "underlying": "NIFTY",
+        "expiry": "2026-04-09",
+        "spot_price": 22520.0,
+        "atm_strike": 22500.0,
+        "dominant_side": "CALLS",
+        "directional_bias": "LONG",
+        "regime": "calls_control",
+        "vxr": 1.82,
+        "call_pressure": 1_800_000.0,
+        "put_pressure": 990_000.0,
+        "net_pressure": 0.29,
+        "call_volume": 52_000.0,
+        "put_volume": 33_000.0,
+        "call_notional": 4_200_000.0,
+        "put_notional": 2_250_000.0,
+        "call_oi_change": 3_100.0,
+        "put_oi_change": 1_200.0,
+        "call_wall_strike": 22550.0,
+        "put_wall_strike": 22450.0,
+        "pair_count": 5,
+        "notes": ["Calls control at 1.82x across 5 NTM pairs."],
+        "pressure_ladder": [
+            NTMVolXLevel(
+                strike=22450.0,
+                distance_from_spot=70.0,
+                distance_from_spot_pct=0.0031,
+                call_volume=9_000.0,
+                put_volume=8_400.0,
+                call_notional=720_000.0,
+                put_notional=560_000.0,
+                call_oi_change=420.0,
+                put_oi_change=520.0,
+                call_pressure=210_000.0,
+                put_pressure=260_000.0,
+                net_pressure=-0.1064,
+            ),
+            NTMVolXLevel(
+                strike=22500.0,
+                distance_from_spot=20.0,
+                distance_from_spot_pct=0.0009,
+                call_volume=12_000.0,
+                put_volume=8_700.0,
+                call_notional=1_100_000.0,
+                put_notional=610_000.0,
+                call_oi_change=900.0,
+                put_oi_change=220.0,
+                call_pressure=540_000.0,
+                put_pressure=220_000.0,
+                net_pressure=0.4211,
+            ),
+            NTMVolXLevel(
+                strike=22550.0,
+                distance_from_spot=30.0,
+                distance_from_spot_pct=0.0013,
+                call_volume=11_500.0,
+                put_volume=7_100.0,
+                call_notional=980_000.0,
+                put_notional=430_000.0,
+                call_oi_change=1_050.0,
+                put_oi_change=180.0,
+                call_pressure=620_000.0,
+                put_pressure=150_000.0,
+                net_pressure=0.6104,
+            ),
+        ],
+    }
+    base.update(overrides)
+    return NTMVolXSnapshot(**base)
+
+
 def test_market_profile_builds_tpo_and_comparative_metrics() -> None:
     config = clone_default_config()
     engine = MarketProfileEngine(config["market_profile"])
@@ -99,9 +261,19 @@ def test_order_flow_engine_computes_positive_imbalance_and_micro_price() -> None
     config = clone_default_config()
     engine = OrderFlowEngine(config["order_flow"])
     start = datetime(2026, 4, 1, 10, 30)
+    quote_history = [
+        QuoteSnapshot(
+            timestamp=start + timedelta(seconds=index * 5),
+            bid=105.0 + (0.05 * index),
+            ask=105.5 + (0.05 * index),
+            bid_size=500 + (index * 20),
+            ask_size=250 - (index * 10),
+        )
+        for index in range(4)
+    ]
 
     snapshot = engine.compute(
-        quote=QuoteSnapshot(timestamp=start, bid=105.0, ask=105.5, bid_size=500, ask_size=250),
+        quote=quote_history[-1],
         trades=_make_trades(start),
         depth=DepthSnapshot(
             timestamp=start,
@@ -109,12 +281,18 @@ def test_order_flow_engine_computes_positive_imbalance_and_micro_price() -> None
             asks=[DepthLevel(price=105.5, quantity=250), DepthLevel(price=106.0, quantity=200)],
         ),
         tick_size=0.5,
+        quote_history=quote_history,
     )
 
     assert snapshot.top_imbalance > 0
     assert snapshot.depth_imbalance > 0
     assert snapshot.delta > 0
     assert snapshot.micro_price > snapshot.mid_price
+    assert snapshot.trade_imbalance > 0
+    assert snapshot.order_flow_imbalance > 0
+    assert snapshot.book_pressure > 0
+    assert snapshot.quote_repricing_rate > 0
+    assert snapshot.toxicity_score >= 0
     assert snapshot.passive_fill_probability > 0
 
 
@@ -147,6 +325,7 @@ def test_regime_engine_classifies_higher_acceptance() -> None:
 
 def test_service_produces_swing_execution_plan_and_journal(tmp_path) -> None:
     config = clone_default_config()
+    config["agents"]["swing"]["enable_acceptance_continuation_long"] = True
     config["paper_trading"]["journal_root"] = str(tmp_path)
     service = AuctionIntelligenceService(config)
     start = datetime(2026, 4, 1, 9, 15)
@@ -173,8 +352,574 @@ def test_service_produces_swing_execution_plan_and_journal(tmp_path) -> None:
     assert tmp_path.joinpath("nifty_fut.jsonl").exists()
 
 
+class _FakeOptionAdapter:
+    def __init__(self, *, option_chain, expiries, contracts):
+        self._option_chain = option_chain
+        self._expiries = expiries
+        self._contracts = contracts
+
+    async def get_option_contracts(self, _symbol: str, expiry: str | None = None):
+        if expiry:
+            return [row for row in self._contracts if str(row.get("expiry")) == expiry]
+        return list(self._expiries)
+
+    async def get_option_chain(self, _symbol: str, _expiry: str):
+        return self._option_chain
+
+
+def test_option_mapper_selects_atm_put_for_scalp_short(monkeypatch) -> None:
+    config = clone_default_config()
+    mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])
+    expiry = "2026-04-09"
+    adapter = _FakeOptionAdapter(
+        expiries=[{"expiry": expiry}, {"expiry": "2026-04-16"}],
+        contracts=[
+            {"instrument_key": "PE22450", "trading_symbol": "NIFTY22450PE", "strike_price": 22450.0, "instrument_type": "PE", "expiry": expiry, "lot_size": 75},
+            {"instrument_key": "PE22500", "trading_symbol": "NIFTY22500PE", "strike_price": 22500.0, "instrument_type": "PE", "expiry": expiry, "lot_size": 75},
+            {"instrument_key": "PE22550", "trading_symbol": "NIFTY22550PE", "strike_price": 22550.0, "instrument_type": "PE", "expiry": expiry, "lot_size": 75},
+        ],
+        option_chain=type("Chain", (), {
+            "spot_price": 22496.0,
+            "entries": [
+                type("Entry", (), {"strike": 22450.0, "option_type": "PE", "ltp": 82.0, "oi": 20000, "volume": 18000, "bid": 81.0, "ask": 82.0, "delta": -0.62, "instrument_key": "PE22450"})(),
+                type("Entry", (), {"strike": 22500.0, "option_type": "PE", "ltp": 61.0, "oi": 26000, "volume": 22000, "bid": 60.5, "ask": 61.0, "delta": -0.50, "instrument_key": "PE22500"})(),
+                type("Entry", (), {"strike": 22550.0, "option_type": "PE", "ltp": 43.0, "oi": 14000, "volume": 12000, "bid": 42.5, "ask": 43.0, "delta": -0.38, "instrument_key": "PE22550"})(),
+            ],
+        })(),
+    )
+
+    async def _fake_load_candles(**_kwargs):
+        return [{"close": 58.0 + (index * 0.1)} for index in range(40)]
+
+    async def _fake_resolve_lot_size(**_kwargs):
+        return 75
+
+    monkeypatch.setattr("auction_intelligence.options.mapper.get_active_adapter", lambda broker=None: adapter if broker == "upstox" else None)
+    monkeypatch.setattr("auction_intelligence.options.mapper.ensure_upstox_session", lambda: asyncio.sleep(0, result=False))
+    monkeypatch.setattr("auction_intelligence.options.mapper.ensure_fyers_session", lambda: asyncio.sleep(0, result=False))
+    monkeypatch.setattr("auction_intelligence.options.mapper.option_history_service.load_candles", _fake_load_candles)
+    monkeypatch.setattr("auction_intelligence.options.mapper.option_history_service.resolve_lot_size", _fake_resolve_lot_size)
+
+    plans = asyncio.run(
+        mapper.map_execution_plan(
+            session=SessionContext(symbol="NIFTY FUT", session_date=date(2026, 4, 9), last_price=22496.0, minutes_to_close=180),
+            decisions=[
+                AgentDecision(
+                    agent_name="scalp",
+                    action="SHORT",
+                    confidence=0.73,
+                    entry_price=22496.0,
+                    stop_price=22512.0,
+                    target_price=22470.0,
+                    quantity=75,
+                    sleeve_fraction=0.2,
+                    rationale=["Responsive sell near upper value."],
+                    metadata={"setup_name": "responsive_sell_short"},
+                )
+            ],
+            execution_plan=[
+                ExecutionInstruction(
+                    agent_name="scalp",
+                    symbol="NIFTY FUT",
+                    action="SHORT",
+                    style="PASSIVE",
+                    order_type="LIMIT",
+                    limit_price=22496.0,
+                    slices=2,
+                    cancel_after_seconds=30,
+                    rationale=["Base execution."],
+                    quantity=75,
+                )
+            ],
+        )
+    )
+
+    assert len(plans) == 1
+    assert plans[0].option_type == "PE"
+    assert plans[0].strike == 22500.0
+    assert plans[0].moneyness == "ATM"
+    assert plans[0].broker_action == "BUY"
+    assert plans[0].quantity == 75
+
+
+def test_option_mapper_select_expiry_accepts_string_session_date() -> None:
+    config = clone_default_config()
+    mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])
+
+    expiry = mapper._select_expiry(
+        expiries=[date(2026, 4, 9), date(2026, 4, 16)],
+        session=SessionContext(  # type: ignore[arg-type]
+            symbol="NIFTY FUT",
+            session_date="2026-04-09",
+            last_price=22496.0,
+            minutes_to_close=180,
+        ),
+        agent_name="scalp",
+    )
+
+    assert expiry == date(2026, 4, 9)
+
+
+def test_option_mapper_prefers_itm_call_for_high_confidence_positional_signal(monkeypatch) -> None:
+    config = clone_default_config()
+    mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])
+    expiry = "2026-04-16"
+    adapter = _FakeOptionAdapter(
+        expiries=[{"expiry": "2026-04-09"}, {"expiry": expiry}],
+        contracts=[
+            {"instrument_key": "CE22450", "trading_symbol": "NIFTY22450CE", "strike_price": 22450.0, "instrument_type": "CE", "expiry": expiry, "lot_size": 75},
+            {"instrument_key": "CE22500", "trading_symbol": "NIFTY22500CE", "strike_price": 22500.0, "instrument_type": "CE", "expiry": expiry, "lot_size": 75},
+            {"instrument_key": "CE22550", "trading_symbol": "NIFTY22550CE", "strike_price": 22550.0, "instrument_type": "CE", "expiry": expiry, "lot_size": 75},
+        ],
+        option_chain=type("Chain", (), {
+            "spot_price": 22498.0,
+            "entries": [
+                type("Entry", (), {"strike": 22450.0, "option_type": "CE", "ltp": 116.0, "oi": 28000, "volume": 24000, "bid": 115.0, "ask": 116.0, "delta": 0.68, "instrument_key": "CE22450"})(),
+                type("Entry", (), {"strike": 22500.0, "option_type": "CE", "ltp": 82.0, "oi": 25000, "volume": 22000, "bid": 81.5, "ask": 82.0, "delta": 0.54, "instrument_key": "CE22500"})(),
+                type("Entry", (), {"strike": 22550.0, "option_type": "CE", "ltp": 57.0, "oi": 15000, "volume": 14000, "bid": 56.5, "ask": 57.0, "delta": 0.41, "instrument_key": "CE22550"})(),
+            ],
+        })(),
+    )
+
+    async def _fake_load_candles(**_kwargs):
+        return [{"close": 78.0 + (index * 0.25)} for index in range(45)]
+
+    async def _fake_resolve_lot_size(**_kwargs):
+        return 75
+
+    monkeypatch.setattr("auction_intelligence.options.mapper.get_active_adapter", lambda broker=None: adapter if broker == "upstox" else None)
+    monkeypatch.setattr("auction_intelligence.options.mapper.ensure_upstox_session", lambda: asyncio.sleep(0, result=False))
+    monkeypatch.setattr("auction_intelligence.options.mapper.ensure_fyers_session", lambda: asyncio.sleep(0, result=False))
+    monkeypatch.setattr("auction_intelligence.options.mapper.option_history_service.load_candles", _fake_load_candles)
+    monkeypatch.setattr("auction_intelligence.options.mapper.option_history_service.resolve_lot_size", _fake_resolve_lot_size)
+
+    plans = asyncio.run(
+        mapper.map_execution_plan(
+            session=SessionContext(symbol="NIFTY FUT", session_date=date(2026, 4, 9), last_price=22498.0, minutes_to_close=240),
+            decisions=[
+                AgentDecision(
+                    agent_name="positional",
+                    action="LONG",
+                    confidence=0.82,
+                    entry_price=22498.0,
+                    stop_price=22440.0,
+                    target_price=22640.0,
+                    quantity=150,
+                    sleeve_fraction=0.45,
+                    rationale=["Gap continuation through prior value."],
+                    metadata={"setup_name": "gap_continuation_long"},
+                )
+            ],
+            execution_plan=[
+                ExecutionInstruction(
+                    agent_name="positional",
+                    symbol="NIFTY FUT",
+                    action="LONG",
+                    style="PASSIVE",
+                    order_type="LIMIT",
+                    limit_price=22498.0,
+                    slices=2,
+                    cancel_after_seconds=30,
+                    rationale=["Base execution."],
+                    quantity=150,
+                )
+            ],
+        )
+    )
+
+    assert len(plans) == 1
+    assert plans[0].option_type == "CE"
+    assert plans[0].strike == 22450.0
+    assert plans[0].moneyness == "ITM1"
+    assert plans[0].days_to_expiry == 7
+
+
+def test_option_mapper_rejects_overpriced_contracts(monkeypatch) -> None:
+    config = clone_default_config()
+    mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])
+    expiry = "2026-04-16"
+    adapter = _FakeOptionAdapter(
+        expiries=[{"expiry": expiry}],
+        contracts=[
+            {"instrument_key": "CE22450", "trading_symbol": "NIFTY22450CE", "strike_price": 22450.0, "instrument_type": "CE", "expiry": expiry, "lot_size": 75},
+            {"instrument_key": "CE22500", "trading_symbol": "NIFTY22500CE", "strike_price": 22500.0, "instrument_type": "CE", "expiry": expiry, "lot_size": 75},
+        ],
+        option_chain=type("Chain", (), {
+            "spot_price": 22498.0,
+            "entries": [
+                type("Entry", (), {"strike": 22450.0, "option_type": "CE", "ltp": 640.0, "oi": 28000, "volume": 24000, "bid": 639.0, "ask": 640.0, "delta": 0.68, "instrument_key": "CE22450"})(),
+                type("Entry", (), {"strike": 22500.0, "option_type": "CE", "ltp": 560.0, "oi": 25000, "volume": 22000, "bid": 559.0, "ask": 560.0, "delta": 0.54, "instrument_key": "CE22500"})(),
+            ],
+        })(),
+    )
+
+    async def _fake_load_candles(**_kwargs):
+        return [{"close": 500.0 + index} for index in range(30)]
+
+    async def _fake_resolve_lot_size(**_kwargs):
+        return 75
+
+    monkeypatch.setattr("auction_intelligence.options.mapper.get_active_adapter", lambda broker=None: adapter if broker == "upstox" else None)
+    monkeypatch.setattr("auction_intelligence.options.mapper.ensure_upstox_session", lambda: asyncio.sleep(0, result=False))
+    monkeypatch.setattr("auction_intelligence.options.mapper.ensure_fyers_session", lambda: asyncio.sleep(0, result=False))
+    monkeypatch.setattr("auction_intelligence.options.mapper.option_history_service.load_candles", _fake_load_candles)
+    monkeypatch.setattr("auction_intelligence.options.mapper.option_history_service.resolve_lot_size", _fake_resolve_lot_size)
+
+    plans = asyncio.run(
+        mapper.map_execution_plan(
+            session=SessionContext(symbol="NIFTY FUT", session_date=date(2026, 4, 9), last_price=22498.0, minutes_to_close=240),
+            decisions=[
+                AgentDecision(
+                    agent_name="swing",
+                    action="LONG",
+                    confidence=0.74,
+                    entry_price=22498.0,
+                    stop_price=22460.0,
+                    target_price=22580.0,
+                    quantity=75,
+                    sleeve_fraction=0.35,
+                    rationale=["Acceptance continuation."],
+                    metadata={"setup_name": "acceptance_continuation_long"},
+                )
+            ],
+            execution_plan=[
+                ExecutionInstruction(
+                    agent_name="swing",
+                    symbol="NIFTY FUT",
+                    action="LONG",
+                    style="PASSIVE",
+                    order_type="LIMIT",
+                    limit_price=22498.0,
+                    slices=2,
+                    cancel_after_seconds=30,
+                    rationale=["Base execution."],
+                    quantity=75,
+                )
+            ],
+        )
+    )
+
+    assert plans == []
+
+
+def test_service_ntm_volx_boosts_aligned_signal() -> None:
+    service = AuctionIntelligenceService(clone_default_config())
+    decision = AgentDecision(
+        agent_name="swing",
+        action="LONG",
+        confidence=0.68,
+        entry_price=22520.0,
+        stop_price=22480.0,
+        target_price=22610.0,
+        quantity=75,
+        sleeve_fraction=0.35,
+        rationale=["Auction is accepting above value."],
+        metadata={"setup_name": "acceptance_continuation_long"},
+    )
+
+    adjusted = service._apply_ntm_volx_overlay([decision], _make_ntm_volx_snapshot())
+
+    assert adjusted[0].confidence > decision.confidence
+    assert adjusted[0].metadata["ntm_alignment"] == "aligned"
+    assert "NTM VolX confirms" in adjusted[0].rationale[-1]
+
+
+def test_service_ntm_volx_blocks_weak_counter_bias_signal() -> None:
+    service = AuctionIntelligenceService(clone_default_config())
+    decision = AgentDecision(
+        agent_name="swing",
+        action="SHORT",
+        confidence=0.66,
+        entry_price=22520.0,
+        stop_price=22560.0,
+        target_price=22430.0,
+        quantity=75,
+        sleeve_fraction=0.35,
+        rationale=["Fade looked attractive near the upper extreme."],
+        metadata={"setup_name": "auction_rejection_short"},
+    )
+
+    adjusted = service._apply_ntm_volx_overlay(
+        [decision],
+        _make_ntm_volx_snapshot(vxr=2.8, net_pressure=0.41, regime="calls_extreme"),
+    )
+
+    assert adjusted[0].action == "FLAT"
+    assert adjusted[0].quantity == 0
+    assert adjusted[0].metadata["flat_reason"] == "ntm_volx_conflict"
+    assert adjusted[0].metadata["ntm_alignment"] == "blocked"
+
+
+def test_option_mapper_ntm_volx_can_shift_selection_toward_atm_pressure(monkeypatch) -> None:
+    config = clone_default_config()
+    mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])
+    expiry = "2026-04-16"
+    adapter = _FakeOptionAdapter(
+        expiries=[{"expiry": expiry}],
+        contracts=[
+            {"instrument_key": "CE22450", "trading_symbol": "NIFTY22450CE", "strike_price": 22450.0, "instrument_type": "CE", "expiry": expiry, "lot_size": 75},
+            {"instrument_key": "CE22500", "trading_symbol": "NIFTY22500CE", "strike_price": 22500.0, "instrument_type": "CE", "expiry": expiry, "lot_size": 75},
+        ],
+        option_chain=type("Chain", (), {
+            "spot_price": 22498.0,
+            "entries": [
+                type("Entry", (), {"strike": 22450.0, "option_type": "CE", "ltp": 116.0, "oi": 21000, "volume": 18000, "bid": 115.0, "ask": 116.0, "delta": 0.61, "instrument_key": "CE22450"})(),
+                type("Entry", (), {"strike": 22500.0, "option_type": "CE", "ltp": 82.0, "oi": 24000, "volume": 20000, "bid": 81.5, "ask": 82.0, "delta": 0.59, "instrument_key": "CE22500"})(),
+            ],
+        })(),
+    )
+
+    async def _fake_load_candles(**_kwargs):
+        return [{"close": 60.0 + (index * 0.15)} for index in range(45)]
+
+    async def _fake_resolve_lot_size(**_kwargs):
+        return 75
+
+    monkeypatch.setattr("auction_intelligence.options.mapper.get_active_adapter", lambda broker=None: adapter if broker == "upstox" else None)
+    monkeypatch.setattr("auction_intelligence.options.mapper.ensure_upstox_session", lambda: asyncio.sleep(0, result=False))
+    monkeypatch.setattr("auction_intelligence.options.mapper.ensure_fyers_session", lambda: asyncio.sleep(0, result=False))
+    monkeypatch.setattr("auction_intelligence.options.mapper.option_history_service.load_candles", _fake_load_candles)
+    monkeypatch.setattr("auction_intelligence.options.mapper.option_history_service.resolve_lot_size", _fake_resolve_lot_size)
+
+    common_kwargs = {
+        "session": SessionContext(symbol="NIFTY FUT", session_date=date(2026, 4, 9), last_price=22498.0, minutes_to_close=240),
+        "decisions": [
+            AgentDecision(
+                agent_name="swing",
+                action="LONG",
+                confidence=0.82,
+                entry_price=22498.0,
+                stop_price=22450.0,
+                target_price=22590.0,
+                quantity=75,
+                sleeve_fraction=0.35,
+                rationale=["Acceptance continuation."],
+                metadata={"setup_name": "acceptance_continuation_long"},
+            )
+        ],
+        "execution_plan": [
+            ExecutionInstruction(
+                agent_name="swing",
+                symbol="NIFTY FUT",
+                action="LONG",
+                style="PASSIVE",
+                order_type="LIMIT",
+                limit_price=22498.0,
+                slices=2,
+                cancel_after_seconds=30,
+                rationale=["Base execution."],
+                quantity=75,
+            )
+        ],
+    }
+
+    baseline = asyncio.run(mapper.map_execution_plan(**common_kwargs))
+    with_ntm = asyncio.run(
+        mapper.map_execution_plan(
+            **common_kwargs,
+            ntm_volx=_make_ntm_volx_snapshot(
+                pressure_ladder=[
+                    NTMVolXLevel(
+                        strike=22450.0,
+                        distance_from_spot=48.0,
+                        distance_from_spot_pct=0.0021,
+                        call_volume=18_000.0,
+                        put_volume=12_000.0,
+                        call_notional=2_000_000.0,
+                        put_notional=1_000_000.0,
+                        call_oi_change=600.0,
+                        put_oi_change=200.0,
+                        call_pressure=120_000.0,
+                        put_pressure=80_000.0,
+                        net_pressure=0.2,
+                    ),
+                    NTMVolXLevel(
+                        strike=22500.0,
+                        distance_from_spot=2.0,
+                        distance_from_spot_pct=0.0001,
+                        call_volume=24_000.0,
+                        put_volume=8_000.0,
+                        call_notional=2_400_000.0,
+                        put_notional=600_000.0,
+                        call_oi_change=1_200.0,
+                        put_oi_change=120.0,
+                        call_pressure=780_000.0,
+                        put_pressure=90_000.0,
+                        net_pressure=0.7931,
+                    ),
+                ],
+                call_pressure=900_000.0,
+                put_pressure=170_000.0,
+                vxr=5.29,
+                net_pressure=0.6822,
+            ),
+        )
+    )
+
+    assert baseline[0].strike == 22450.0
+    assert with_ntm[0].strike == 22500.0
+    assert any("NTM VolX" in reason for reason in with_ntm[0].rationale)
+
+
+def test_service_records_option_paper_proposal(tmp_path, monkeypatch) -> None:
+    config = clone_default_config()
+    config["agents"]["swing"]["enable_acceptance_continuation_long"] = True
+    config["paper_trading"]["journal_root"] = str(tmp_path)
+    service = AuctionIntelligenceService(config)
+
+    async def _fake_map_execution_plan(*, session, decisions, execution_plan, ntm_volx=None):
+        return [
+            replace(
+                execution_plan[0],
+                symbol="NIFTY22500CE",
+                quantity=75,
+                broker_action="BUY",
+                underlying_symbol="NIFTY",
+                instrument_type="CE",
+                expiry="2026-04-16",
+                strike=22500.0,
+                option_type="CE",
+                instrument_key="CE22500",
+                trading_symbol="NIFTY22500CE",
+                lot_size=75,
+                premium=82.0,
+                spot_price=22500.0,
+                moneyness="ATM",
+                expiry_kind="weekly",
+                days_to_expiry=7,
+                selection_reason="swing LONG mapped to CE ATM",
+            )
+        ]
+
+    monkeypatch.setattr(service.options, "map_execution_plan", _fake_map_execution_plan)
+    monkeypatch.setattr(service.options, "build_ntm_volx", AsyncMock(return_value=None))
+
+    bundle, journal_paths, paper_positions = asyncio.run(
+        service.analyze_and_record_option_paper(
+            session=SessionContext(
+                symbol="NIFTY FUT",
+                session_date=date(2026, 4, 1),
+                last_price=105.0,
+                stale_data_seconds=0.0,
+                minutes_to_close=180,
+            ),
+            bars=_make_bars(datetime(2026, 4, 1, 9, 15), [(101.5, 102.5, 101.0, 102.3), (102.3, 103.2, 102.0, 103.0), (103.0, 104.0, 102.8, 103.9), (103.9, 105.2, 103.8, 105.0)]),
+            prior_bars=_make_bars(datetime(2026, 3, 31, 9, 15), [(100, 101, 99.5, 100.5), (100.5, 101.5, 100, 101.0), (101.0, 101.5, 100.5, 101.2)]),
+            quote=QuoteSnapshot(timestamp=datetime(2026, 4, 1, 10, 0), bid=105.0, ask=105.5, bid_size=500, ask_size=250),
+            trades=_make_trades(datetime(2026, 4, 1, 10, 0)),
+            portfolio=PortfolioSnapshot(),
+        )
+    )
+
+    assert bundle.execution_plan
+    assert bundle.execution_plan[0].option_type == "CE"
+    assert journal_paths
+    assert paper_positions["open_count"] == 1
+    journal_row = json.loads(tmp_path.joinpath("nifty_fut.jsonl").read_text().splitlines()[0])
+    assert journal_row["option_type"] == "CE"
+    assert journal_row["broker_action"] == "BUY"
+    assert journal_row["selection_reason"] == "swing LONG mapped to CE ATM"
+
+
+def test_paper_position_book_closes_open_position_on_flat_signal(tmp_path, monkeypatch) -> None:
+    service = PaperTradingService(str(tmp_path))
+
+    async def _fake_latest_option_candle(**kwargs):
+        return [{"close": 92.0}]
+
+    monkeypatch.setattr("auction_intelligence.paper.book.option_history_service.load_candles", _fake_latest_option_candle)
+
+    open_bundle = AnalysisBundle(
+        config_scope={},
+        market_profile=_make_profile_snapshot(symbol="NIFTY FUT", close_price=22510.0),
+        prior_market_profile=None,
+        order_flow=_make_order_flow_snapshot(),
+        regime=RegimeAssessment(label="trend_up", confidence=0.76, allowed_directions=["LONG"], reasons=["Trend day."]),
+        agent_decisions=[
+            AgentDecision(
+                agent_name="swing",
+                action="LONG",
+                confidence=0.78,
+                entry_price=82.0,
+                stop_price=70.0,
+                target_price=118.0,
+                quantity=75,
+                sleeve_fraction=0.35,
+                rationale=["Acceptance continuation long."],
+            )
+        ],
+        risk=RiskDecision(allowed=True, kill_switch=False, max_size_multiplier=1.0, reasons=[]),
+        execution_plan=[
+            ExecutionInstruction(
+                agent_name="swing",
+                symbol="NIFTY22500CE",
+                action="LONG",
+                style="PASSIVE",
+                order_type="LIMIT",
+                limit_price=82.0,
+                slices=2,
+                cancel_after_seconds=30,
+                rationale=["Mapped to ATM CE."],
+                quantity=75,
+                broker_action="BUY",
+                underlying_symbol="NIFTY",
+                instrument_type="CE",
+                expiry="2026-04-16",
+                strike=22500.0,
+                option_type="CE",
+                instrument_key="NIFTY|CE22500",
+                trading_symbol="NIFTY22500CE",
+                lot_size=75,
+                premium=82.0,
+                spot_price=22510.0,
+                moneyness="ATM",
+                expiry_kind="weekly",
+                days_to_expiry=6,
+                selection_reason="swing LONG mapped to CE ATM",
+            )
+        ],
+    )
+
+    open_summary = asyncio.run(service.sync_positions(open_bundle))
+    assert open_summary["open_count"] == 1
+
+    flat_bundle = AnalysisBundle(
+        config_scope={},
+        market_profile=_make_profile_snapshot(symbol="NIFTY FUT", close_price=22540.0),
+        prior_market_profile=None,
+        order_flow=_make_order_flow_snapshot(),
+        regime=RegimeAssessment(label="balance", confidence=0.44, allowed_directions=[], reasons=["No edge."]),
+        agent_decisions=[
+            AgentDecision(
+                agent_name="swing",
+                action="FLAT",
+                confidence=0.0,
+                entry_price=None,
+                stop_price=None,
+                target_price=None,
+                quantity=0,
+                sleeve_fraction=0.0,
+                rationale=["No continuation edge."],
+                metadata={"flat_reason": "no_follow_through"},
+            )
+        ],
+        risk=RiskDecision(allowed=True, kill_switch=False, max_size_multiplier=1.0, reasons=[]),
+        execution_plan=[],
+    )
+
+    close_summary = asyncio.run(service.sync_positions(flat_bundle))
+    state = asyncio.run(service.book.list_positions(symbol="NIFTY"))
+
+    assert close_summary["open_count"] == 0
+    assert close_summary["closed_count"] == 1
+    assert state["open_positions"] == []
+    assert state["closed_positions"][0]["close_reason"] == "flat_signal"
+    assert state["closed_positions"][0]["realized_pnl"] == 750.0
+
+
 def test_swing_agent_uses_contract_aware_margin_sizing() -> None:
     config = clone_default_config()
+    config["agents"]["swing"]["enable_acceptance_continuation_long"] = True
     agent = SwingAgent(config["agents"]["swing"])
 
     decision = agent.evaluate(
@@ -239,6 +984,9 @@ def test_swing_agent_uses_contract_aware_margin_sizing() -> None:
                 timing_confidence=0.6,
                 execution_aggression="PASSIVE",
                 micro_stop_distance=20.0,
+                trade_imbalance=0.25,
+                order_flow_imbalance=0.22,
+                book_pressure=0.24,
             ),
             regime=RegimeAssessment(
                 label="trend_continuation",
@@ -253,6 +1001,206 @@ def test_swing_agent_uses_contract_aware_margin_sizing() -> None:
     assert decision.action == "LONG"
     assert decision.quantity >= 15
     assert decision.metadata["margin_fraction_per_lot"] == 0.18
+
+
+def test_regime_engine_classifies_neutral_extreme_when_prior_value_is_probed_both_sides() -> None:
+    config = clone_default_config()
+    regime_engine = RegimeEngine(config["regime"])
+    prior = _make_profile_snapshot(
+        high_price=22510.0,
+        low_price=22440.0,
+        close_price=22480.0,
+        poc=22478.0,
+        vah=22498.0,
+        val=22458.0,
+        value_area_overlap=None,
+        poc_shift=None,
+        value_migration=None,
+        prior_poc_untouched=None,
+    )
+    current = _make_profile_snapshot(
+        high_price=22545.0,
+        low_price=22405.0,
+        close_price=22486.0,
+        vah=22506.0,
+        val=22452.0,
+        value_area_overlap=0.62,
+        poc_shift=4.0,
+        value_migration=1.5,
+    )
+
+    regime = regime_engine.classify(
+        current=current,
+        prior=prior,
+        order_flow=_make_order_flow_snapshot(delta=120.0, trade_imbalance=0.08, book_pressure=0.04),
+    )
+
+    assert regime.label == "neutral_extreme"
+    assert sorted(regime.allowed_directions) == ["LONG", "SHORT"]
+
+
+def test_swing_agent_trades_eighty_percent_rule_long() -> None:
+    config = clone_default_config()
+    config["agents"]["swing"]["enable_eighty_percent_rule"] = True
+    agent = SwingAgent(config["agents"]["swing"])
+    prior = _make_profile_snapshot(
+        high_price=22520.0,
+        low_price=22440.0,
+        close_price=22485.0,
+        poc=22478.0,
+        vah=22498.0,
+        val=22458.0,
+        value_area_overlap=None,
+        poc_shift=None,
+        value_migration=None,
+        prior_poc_untouched=None,
+    )
+    current = _make_profile_snapshot(
+        open_price=22428.0,
+        close_price=22472.0,
+        high_price=22488.0,
+        low_price=22418.0,
+        poc=22468.0,
+        vah=22490.0,
+        val=22452.0,
+        initial_balance_high=22482.0,
+        initial_balance_low=22428.0,
+        value_area_overlap=0.58,
+        poc_shift=-10.0,
+        value_migration=-8.0,
+    )
+
+    decision = agent.evaluate(
+        AgentContext(
+            session=SessionContext(symbol="NIFTY FUT", session_date=date(2026, 4, 2), last_price=22472.0),
+            portfolio=PortfolioSnapshot(net_liquidation=1_000_000.0),
+            current_profile=current,
+            prior_profile=prior,
+            order_flow=_make_order_flow_snapshot(
+                mid_price=22472.0,
+                micro_price=22472.2,
+                delta=320.0,
+                trade_imbalance=0.42,
+                order_flow_imbalance=0.28,
+                book_pressure=0.46,
+                timing_confidence=0.86,
+            ),
+            regime=RegimeAssessment(
+                label="developing_balance",
+                confidence=0.68,
+                allowed_directions=["LONG", "SHORT"],
+                reasons=["Auction re-entered value from below."],
+            ),
+            config=config,
+        )
+    )
+
+    assert decision.action == "LONG"
+    assert decision.metadata["setup_name"] == "eighty_percent_rule_long"
+
+
+def test_positional_agent_trades_balance_rotation_long() -> None:
+    config = clone_default_config()
+    config["agents"]["positional"]["enable_balance_rotation"] = True
+    agent = PositionalAgent(config["agents"]["positional"])
+    prior = _make_profile_snapshot(
+        high_price=22510.0,
+        low_price=22420.0,
+        close_price=22470.0,
+        poc=22472.0,
+        vah=22492.0,
+        val=22452.0,
+        value_area_overlap=None,
+        poc_shift=None,
+        value_migration=None,
+        prior_poc_untouched=None,
+    )
+    current = _make_profile_snapshot(
+        close_price=22460.0,
+        low_price=22418.0,
+        high_price=22508.0,
+        val=22452.0,
+        vah=22502.0,
+        poc=22478.0,
+        poor_low=True,
+        excess_low=3.0,
+        value_area_overlap=0.74,
+        poc_shift=2.0,
+        value_migration=1.5,
+        prior_poc_untouched=False,
+    )
+
+    decision = agent.evaluate(
+        AgentContext(
+            session=SessionContext(symbol="NIFTY FUT", session_date=date(2026, 4, 2), last_price=22460.0),
+            portfolio=PortfolioSnapshot(net_liquidation=1_000_000.0),
+            current_profile=current,
+            prior_profile=prior,
+            order_flow=_make_order_flow_snapshot(
+                mid_price=22460.0,
+                micro_price=22460.4,
+                delta=260.0,
+                trade_imbalance=0.36,
+                order_flow_imbalance=0.24,
+                book_pressure=0.42,
+                timing_confidence=0.86,
+            ),
+            regime=RegimeAssessment(
+                label="rotational_day",
+                confidence=0.74,
+                allowed_directions=["LONG", "SHORT"],
+                reasons=["Auction rotated through both sides of the initial balance."],
+            ),
+            config=config,
+        )
+    )
+
+    assert decision.action == "LONG"
+    assert decision.metadata["setup_name"] == "balance_rotation_long"
+
+
+def test_scalp_agent_trades_responsive_sell_at_upper_value() -> None:
+    config = clone_default_config()
+    agent = ScalpAgent(config["agents"]["scalp"])
+
+    decision = agent.evaluate(
+        AgentContext(
+            session=SessionContext(symbol="NIFTY FUT", session_date=date(2026, 4, 2), last_price=22518.0),
+            portfolio=PortfolioSnapshot(net_liquidation=2_500_000.0),
+            current_profile=_make_profile_snapshot(
+                close_price=22518.0,
+                high_price=22528.0,
+                low_price=22460.0,
+                vah=22522.0,
+                val=22462.0,
+                poor_high=True,
+                excess_high=3.0,
+                value_area_overlap=0.76,
+                poc_shift=0.0,
+                value_migration=0.0,
+            ),
+            prior_profile=_make_profile_snapshot(),
+                order_flow=_make_order_flow_snapshot(
+                    mid_price=22518.0,
+                    micro_price=22517.6,
+                    delta=-240.0,
+                    trade_imbalance=-0.42,
+                    order_flow_imbalance=-0.32,
+                    book_pressure=-0.54,
+                    timing_confidence=0.92,
+                ),
+            regime=RegimeAssessment(
+                label="balance",
+                confidence=0.72,
+                allowed_directions=["LONG", "SHORT"],
+                reasons=["Value overlap remains high and directional extension is muted."],
+            ),
+            config=config,
+        )
+    )
+
+    assert decision.action == "SHORT"
+    assert decision.metadata["setup_name"] == "responsive_sell_short"
 
 
 def test_risk_governor_blocks_stale_and_loss_breach() -> None:
@@ -296,6 +1244,7 @@ def test_risk_governor_blocks_stale_and_loss_breach() -> None:
 
 def test_risk_governor_uses_margin_ratio_for_projected_futures_exposure() -> None:
     config = clone_default_config()
+    config["agents"]["swing"]["enable_acceptance_continuation_long"] = True
     governor = RiskGovernor({**config["risk"], "contract_specs": config["contract_specs"]})
 
     allowed = governor.evaluate(
@@ -374,6 +1323,9 @@ def test_risk_governor_uses_margin_ratio_for_projected_futures_exposure() -> Non
                         timing_confidence=0.6,
                         execution_aggression="PASSIVE",
                         micro_stop_distance=20.0,
+                        trade_imbalance=0.25,
+                        order_flow_imbalance=0.22,
+                        book_pressure=0.24,
                     ),
                     regime=RegimeAssessment(
                         label="trend_continuation",
@@ -469,7 +1421,103 @@ def test_demo_analysis_exposes_request_and_analysis_payload() -> None:
 
 
 def test_live_symbol_registry_includes_supported_index_symbols() -> None:
-    assert {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}.issubset(set(available_live_symbols()))
+    assert {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"}.issubset(set(available_live_symbols()))
+
+
+def test_tick_reconstruction_builds_quote_history_and_signed_trade_prints() -> None:
+    base = datetime(2026, 4, 11, 10, 0)
+    tick_rows = [
+        {
+            "timestamp": base,
+            "ltp": 24100.0,
+            "bid": 24099.5,
+            "ask": 24100.5,
+            "bid_qty": 120.0,
+            "ask_qty": 100.0,
+            "volume": 1000.0,
+            "oi": 0.0,
+        },
+        {
+            "timestamp": base + timedelta(seconds=2),
+            "ltp": 24100.5,
+            "bid": 24100.0,
+            "ask": 24101.0,
+            "bid_qty": 140.0,
+            "ask_qty": 90.0,
+            "volume": 1080.0,
+            "oi": 0.0,
+        },
+        {
+            "timestamp": base + timedelta(seconds=4),
+            "ltp": 24099.5,
+            "bid": 24099.0,
+            "ask": 24100.0,
+            "bid_qty": 110.0,
+            "ask_qty": 150.0,
+            "volume": 1145.0,
+            "oi": 0.0,
+        },
+    ]
+
+    quote_history = _build_quote_history_from_ticks(tick_rows, tick_size=0.5)
+    trades = _build_trade_prints_from_ticks(tick_rows, tick_size=0.5)
+
+    assert len(quote_history) == 3
+    assert quote_history[-1]["last_price"] == 24099.5
+    assert len(trades) == 2
+    assert trades[0]["aggressor_side"] == "buy"
+    assert trades[0]["quantity"] == 80.0
+    assert trades[1]["aggressor_side"] == "sell"
+    assert trades[1]["quantity"] == 65.0
+
+
+def test_fetch_recent_minute_rows_prefers_persisted_spot_candles(monkeypatch) -> None:
+    class _FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "time": datetime(2026, 4, 11, 9, 15),
+                    "open": 24100.0,
+                    "high": 24110.0,
+                    "low": 24095.0,
+                    "close": 24105.0,
+                    "volume": 1200,
+                },
+                {
+                    "time": datetime(2026, 4, 11, 9, 16),
+                    "open": 24105.0,
+                    "high": 24115.0,
+                    "low": 24100.0,
+                    "close": 24112.0,
+                    "volume": 900,
+                },
+            ]
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, *_args, **_kwargs):
+            return _FakeResult()
+
+    monkeypatch.setattr("auction_intelligence.live.AsyncSessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr("auction_intelligence.live.get_active_adapter", lambda _broker=None: None)
+    monkeypatch.setattr("auction_intelligence.live.ensure_fyers_session", AsyncMock(return_value=False))
+    monkeypatch.setattr("auction_intelligence.live.ensure_upstox_session", AsyncMock(return_value=False))
+    monkeypatch.setattr("auction_intelligence.live.get_broker_token", lambda _broker: "")
+
+    rows, source, history_symbol = asyncio.run(_fetch_recent_minute_rows("NIFTY", lookback_days=2))
+
+    assert len(rows) == 2
+    assert rows[0]["close"] == 24105.0
+    assert source == "timescaledb_spot_1minute"
+    assert history_symbol == "NSE:NIFTY50-INDEX"
 
 
 def test_live_snapshot_rejects_unknown_symbol_with_client_error() -> None:
@@ -481,6 +1529,79 @@ def test_live_snapshot_rejects_unknown_symbol_with_client_error() -> None:
 
     assert response.status_code == 400
     assert "Unsupported live symbol" in response.json()["detail"]
+
+
+def test_fetch_recent_minute_rows_prefers_broker_history_when_persisted_rows_are_incomplete(monkeypatch) -> None:
+    class _FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "time": datetime(2026, 4, 11, 9, 15),
+                    "open": 24100.0,
+                    "high": 24110.0,
+                    "low": 24095.0,
+                    "close": 24105.0,
+                    "volume": 1200,
+                },
+                {
+                    "time": datetime(2026, 4, 11, 9, 16),
+                    "open": 24105.0,
+                    "high": 24115.0,
+                    "low": 24100.0,
+                    "close": 24112.0,
+                    "volume": 900,
+                },
+            ]
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, *_args, **_kwargs):
+            return _FakeResult()
+
+    def _broker_rows() -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        for session_date in (date(2026, 4, 10), date(2026, 4, 11)):
+            start = datetime.combine(session_date, datetime.min.time()).replace(hour=9, minute=15)
+            for minute in range(375):
+                candle_time = start + timedelta(minutes=minute)
+                rows.append(
+                    {
+                        "time": candle_time.isoformat() + "+05:30",
+                        "open": 24100.0 + minute,
+                        "high": 24101.0 + minute,
+                        "low": 24099.0 + minute,
+                        "close": 24100.5 + minute,
+                        "volume": 1000 + minute,
+                    }
+                )
+        return rows
+
+    class _FakeFyers:
+        async def get_historical_candles(self, *_args, **_kwargs):
+            return _broker_rows()
+
+    monkeypatch.setattr("auction_intelligence.live.AsyncSessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "auction_intelligence.live.get_active_adapter",
+        lambda broker=None: _FakeFyers() if broker == "fyers" else None,
+    )
+    monkeypatch.setattr("auction_intelligence.live.ensure_fyers_session", AsyncMock(return_value=False))
+    monkeypatch.setattr("auction_intelligence.live.ensure_upstox_session", AsyncMock(return_value=False))
+    monkeypatch.setattr("auction_intelligence.live.get_broker_token", lambda _broker: "")
+
+    rows, source, history_symbol = asyncio.run(_fetch_recent_minute_rows("NIFTY", lookback_days=7))
+
+    assert len(rows) == 750
+    assert source == "fyers_continuous_futures"
+    assert history_symbol.startswith("NSE:NIFTY")
 
 
 def test_gate_a_validator_passes_on_consistent_session() -> None:
@@ -835,6 +1956,49 @@ def test_shadow_records_endpoint_returns_persisted_records(monkeypatch) -> None:
     assert payload["records"][0]["action"] == "LONG"
 
 
+def test_paper_journal_endpoint_returns_filtered_summary(monkeypatch) -> None:
+    monkeypatch.setattr(
+        auction_intelligence_router._paper_journal,
+        "iter_records",
+        lambda: [
+            {
+                "recorded_at": "2026-04-03T10:10:00+00:00",
+                "symbol": "NIFTY FUT",
+                "underlying_symbol": "NIFTY",
+                "trading_symbol": "NIFTY26APR22500CE",
+                "agent_name": "swing",
+                "action": "LONG",
+                "confidence": 0.78,
+                "premium": 184.5,
+                "execution_style": "PASSIVE",
+            },
+            {
+                "recorded_at": "2026-04-02T10:10:00+00:00",
+                "symbol": "BANKNIFTY FUT",
+                "underlying_symbol": "BANKNIFTY",
+                "trading_symbol": "BANKNIFTY26APR51000PE",
+                "agent_name": "scalp",
+                "action": "SHORT",
+                "confidence": 0.61,
+                "premium": 212.0,
+                "execution_style": "AGGRESSIVE",
+            },
+        ],
+    )
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.get("/api/auction-intelligence/paper-journal", params={"symbol": "NIFTY", "limit": 10})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbol_filter"] == "NIFTY"
+    assert payload["total_records"] == 1
+    assert payload["summary"]["action_breakdown"]["LONG"] == 1
+    assert payload["records"][0]["trading_symbol"] == "NIFTY26APR22500CE"
+
+
 def test_shadow_backfill_endpoint_records_broker_history_snapshots(monkeypatch) -> None:
     monkeypatch.setattr(
         auction_intelligence_router,
@@ -911,6 +2075,13 @@ def test_shadow_backfill_endpoint_records_broker_history_snapshots(monkeypatch) 
     assert payload["record_count"] == 1
     assert payload["storage"]["persisted"] is True
     assert payload["skipped_sessions"][0]["session_date"] == "2026-03-12"
+
+
+def test_build_demo_analysis_includes_quote_history_payload() -> None:
+    payload = build_demo_analysis(symbol_code="NIFTY", scenario="acceptance_up")
+
+    assert payload["request"]["quote_history"]
+    assert payload["request"]["quote_history"][0]["bid"] < payload["request"]["quote_history"][0]["ask"]
 
 
 def test_validate_gate_c_endpoint_returns_report(monkeypatch) -> None:
@@ -1014,7 +2185,82 @@ def test_canary_readiness_endpoint_reports_gate_status(monkeypatch) -> None:
     assert payload["requirements"]["manual_approval_required"] is True
 
 
+def test_rl_cycle_endpoint_returns_guarded_cycle_result(monkeypatch) -> None:
+    class _Trainer:
+        async def run_cycle(self, **kwargs):
+            return {"status": "promoted", "source": kwargs["source"], "decision": {"should_promote": True}}
+
+    monkeypatch.setattr("auction_intelligence.rl.automation.rl_auto_trainer", _Trainer())
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/auction-intelligence/rl-cycle",
+        params={"max_trades": 100, "symbol": "NIFTY FUT", "promote_if_eligible": True},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "promoted"
+    assert payload["source"] == "manual"
+
+
+def test_rl_versions_endpoint_returns_active_and_history(monkeypatch) -> None:
+    class _Store:
+        async def list_versions(self, *, limit=20, status=None):
+            return [{"id": "version-1", "status": "candidate"}]
+
+        async def latest_version(self, *, status=None):
+            return {"id": "version-0", "status": "active"} if status == "active" else None
+
+    monkeypatch.setattr("auction_intelligence.rl.versions.RLPolicyVersionStore", _Store)
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.get("/api/auction-intelligence/rl-versions", params={"limit": 10})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["active_version"]["status"] == "active"
+    assert payload["versions"][0]["id"] == "version-1"
+
+
 def test_paper_service_resolves_relative_root_under_backend_runtime() -> None:
     service = PaperTradingService("runtime/auction_intelligence")
 
     assert service.writer.root == Path(__file__).resolve().parents[1] / "runtime" / "auction_intelligence"
+
+
+def test_paper_positions_endpoint_returns_open_and_closed_positions(monkeypatch) -> None:
+    monkeypatch.setattr(
+        auction_intelligence_router._paper_book,
+        "list_positions",
+        AsyncMock(
+            return_value={
+                "symbol_filter": "NIFTY",
+                "status": "all",
+                "summary": {
+                    "open_count": 1,
+                    "closed_count": 2,
+                    "realized_pnl": 4200.0,
+                    "unrealized_pnl": 350.0,
+                },
+                "open_positions": [{"position_id": "open-1", "trading_symbol": "NIFTY26APR22500CE"}],
+                "closed_positions": [{"position_id": "closed-1", "trading_symbol": "NIFTY26APR22400PE"}],
+            }
+        ),
+    )
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.get("/api/auction-intelligence/paper-positions", params={"symbol": "NIFTY", "status": "all", "limit": 20})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["open_count"] == 1
+    assert payload["open_positions"][0]["trading_symbol"] == "NIFTY26APR22500CE"
+    assert payload["closed_positions"][0]["trading_symbol"] == "NIFTY26APR22400PE"

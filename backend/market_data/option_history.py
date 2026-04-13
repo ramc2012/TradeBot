@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from api.routers.auth import ensure_fyers_session, ensure_upstox_session, get_active_adapter, get_broker_token
 from db.database import AsyncSessionLocal
+from market_data.candle_timeframes import interval_minutes
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -101,6 +102,7 @@ class OptionHistoryService:
     def _upstox_interval(interval: str) -> str:
         mapping = {
             "1minute": "1minute",
+            "3minute": "1minute",
             "5minute": "5minute",
             "15minute": "15minute",
             "30minute": "30minute",
@@ -112,6 +114,7 @@ class OptionHistoryService:
     def _fyers_resolution(interval: str) -> str:
         mapping = {
             "1minute": "1",
+            "3minute": "1",
             "5minute": "5",
             "15minute": "15",
             "30minute": "30",
@@ -125,14 +128,14 @@ class OptionHistoryService:
 
     @classmethod
     def _needs_upstox_minute_fallback(cls, instrument_key: str, interval: str) -> bool:
-        return cls._is_upstox_key(instrument_key) and interval in {"5minute", "15minute"}
+        return cls._is_upstox_key(instrument_key) and interval in {"3minute", "5minute", "15minute"}
 
     @staticmethod
     def _broker_lookback_days(interval: str, *, limit: int) -> int:
         normalized = str(interval or "30minute")
         if normalized == "1minute":
             return 5
-        if normalized in {"5minute", "15minute"}:
+        if normalized in {"3minute", "5minute", "15minute"}:
             return 5
         if normalized == "30minute":
             estimated_days = max(3, math.ceil(max(limit, 1) / 13) + 7)
@@ -148,7 +151,7 @@ class OptionHistoryService:
 
     @classmethod
     def _is_intraday_interval(cls, interval: str) -> bool:
-        return str(interval or "30minute") in {"1minute", "5minute", "15minute", "30minute"}
+        return str(interval or "30minute") in {"1minute", "3minute", "5minute", "15minute", "30minute"}
 
     @classmethod
     def _range_includes_current_ist_day(cls, from_date: date, to_date: date) -> bool:
@@ -541,8 +544,11 @@ class OptionHistoryService:
             direct_lookback_days = self._broker_lookback_days(interval, limit=limit)
             fetch_from = to_date - timedelta(days=direct_lookback_days)
             broker_rows: list[dict[str, Any]] = []
+            aggregate_minutes: Optional[int] = None
+            if interval in {"3minute", "5minute", "15minute"}:
+                aggregate_minutes = interval_minutes(interval)
 
-            if not self._needs_upstox_minute_fallback(instrument_key, interval):
+            if aggregate_minutes is None and not self._needs_upstox_minute_fallback(instrument_key, interval):
                 broker_rows = await self._fetch_broker_candles(
                     instrument_key=instrument_key,
                     from_date=fetch_from,
@@ -550,9 +556,9 @@ class OptionHistoryService:
                     interval=interval,
                 )
 
-            if not broker_rows and interval in {"5minute", "15minute"}:
+            if aggregate_minutes is not None:
                 minute_fetch_from = to_date - timedelta(
-                    days=self._broker_lookback_days("1minute", limit=limit * (5 if interval == "5minute" else 15))
+                    days=self._broker_lookback_days("1minute", limit=limit * aggregate_minutes)
                 )
                 minute_rows = await self._fetch_broker_candles(
                     instrument_key=instrument_key,
@@ -563,7 +569,7 @@ class OptionHistoryService:
                 if minute_rows:
                     broker_rows = self._aggregate_rows(
                         minute_rows,
-                        5 if interval == "5minute" else 15,
+                        aggregate_minutes,
                     )
             if broker_rows:
                 # Persist new rows to DB so subsequent calls skip the API

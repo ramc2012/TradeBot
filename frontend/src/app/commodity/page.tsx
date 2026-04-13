@@ -29,6 +29,7 @@ import {
 } from "recharts";
 
 import {
+  getCommodityATMWatchlist,
   getCommodityKillSwitchStatus,
   getCommodityOrders,
   getCommodityPositions,
@@ -281,6 +282,21 @@ type CommodityContractCatalogPayload = {
   timestamp?: string;
 };
 
+type CommodityATMWatchlistPayload = {
+  expiry: string | null;
+  rows: CommodityOptionRow[];
+  summary: {
+    total_rows: number;
+    ce_ready: number;
+    pe_ready: number;
+    tracked_symbols?: number;
+    configured_contracts?: number;
+  };
+  source?: string;
+  detail?: string | null;
+  timestamp?: string;
+};
+
 type CommodityStatus = {
   enabled: boolean;
   auto_run_enabled?: boolean;
@@ -505,6 +521,66 @@ function commodityUnderlyingFromSymbol(symbol?: string | null) {
     return contract.replace(/\d.*$/, "");
   }
   return raw || "--";
+}
+
+function commodityOptionRowKey(row: {
+  symbol?: string | null;
+  active_expiry?: string | null;
+  expiry?: string | null;
+}) {
+  return `${row.symbol || "--"}:${row.active_expiry || row.expiry || "--"}`;
+}
+
+function mergeCommodityOptionRow(
+  snapshotRow: CommodityOptionRow,
+  liveRow?: CommodityOptionRow | null,
+): CommodityOptionRow {
+  if (!liveRow) {
+    return snapshotRow;
+  }
+
+  const liveTradeSide =
+    snapshotRow.signal_side === "CE"
+      ? liveRow.ce
+      : snapshotRow.signal_side === "PE"
+        ? liveRow.pe
+        : null;
+  const lotSize = liveRow.lot_size ?? snapshotRow.lot_size ?? 0;
+  const capitalPerTrade = snapshotRow.capital_per_trade ?? 0;
+  const liveTradePrice = liveTradeSide?.ltp ?? snapshotRow.trade_price ?? null;
+  const lotsAffordable =
+    capitalPerTrade > 0 && lotSize > 0 && liveTradePrice && liveTradePrice > 0
+      ? Math.floor(capitalPerTrade / (liveTradePrice * lotSize))
+      : snapshotRow.lots_affordable;
+
+  return {
+    ...snapshotRow,
+    spot_price: liveRow.spot_price,
+    expiry: liveRow.expiry,
+    selected_expiry: liveRow.selected_expiry ?? snapshotRow.selected_expiry,
+    suggested_expiry: liveRow.suggested_expiry ?? snapshotRow.suggested_expiry,
+    active_expiry: liveRow.active_expiry ?? snapshotRow.active_expiry,
+    available_expiries: liveRow.available_expiries ?? snapshotRow.available_expiries,
+    lookup_symbol: liveRow.lookup_symbol ?? snapshotRow.lookup_symbol,
+    live_source: liveRow.live_source || snapshotRow.live_source,
+    fyers_symbol: liveRow.fyers_symbol ?? snapshotRow.fyers_symbol,
+    lot_size: liveRow.lot_size ?? snapshotRow.lot_size,
+    contract_unit_label: liveRow.contract_unit_label ?? snapshotRow.contract_unit_label,
+    quote_unit_label: liveRow.quote_unit_label ?? snapshotRow.quote_unit_label,
+    contract_notes: liveRow.contract_notes ?? snapshotRow.contract_notes,
+    selection_policy: liveRow.selection_policy ?? snapshotRow.selection_policy,
+    ce: liveRow.ce ?? snapshotRow.ce,
+    pe: liveRow.pe ?? snapshotRow.pe,
+    ce_symbol: liveRow.ce?.instrument_key || liveRow.ce?.trading_symbol || snapshotRow.ce_symbol,
+    pe_symbol: liveRow.pe?.instrument_key || liveRow.pe?.trading_symbol || snapshotRow.pe_symbol,
+    ce_trade_price: liveRow.ce?.ltp ?? snapshotRow.ce_trade_price,
+    pe_trade_price: liveRow.pe?.ltp ?? snapshotRow.pe_trade_price,
+    trade_symbol: liveTradeSide?.instrument_key || liveTradeSide?.trading_symbol || snapshotRow.trade_symbol,
+    trade_strike: liveTradeSide?.strike ?? snapshotRow.trade_strike,
+    trade_price: liveTradePrice,
+    lots_affordable: lotsAffordable,
+    is_trade_contract_liquid: liveTradeSide?.is_liquid ?? snapshotRow.is_trade_contract_liquid,
+  };
 }
 
 function buildCommodityPortfolioRows(
@@ -841,6 +917,15 @@ export default function CommodityPage() {
     staleTime: 60_000,
   });
 
+  const commodityATMWatchlistQuery = useQuery<CommodityATMWatchlistPayload>({
+    queryKey: ["commodityATMWatchlist"],
+    queryFn: () => getCommodityATMWatchlist().then((response) => response.data),
+    staleTime: 15_000,
+    refetchInterval: 20_000,
+    refetchIntervalInBackground: true,
+    retry: 1,
+  });
+
   useEffect(() => {
     if (hasEditedSymbols) {
       return;
@@ -876,12 +961,14 @@ export default function CommodityPage() {
   );
 
   const invalidateCommodityQueries = () => {
+    queryClient.invalidateQueries({ queryKey: ["commodityOverview"] });
     queryClient.invalidateQueries({ queryKey: ["commodityStrategyStatus"] });
     queryClient.invalidateQueries({ queryKey: ["commodityKillSwitch"] });
     queryClient.invalidateQueries({ queryKey: ["commodityOrders"] });
     queryClient.invalidateQueries({ queryKey: ["commodityPositions"] });
     queryClient.invalidateQueries({ queryKey: ["commodityReports"] });
     queryClient.invalidateQueries({ queryKey: ["commodityStrategyContracts"] });
+    queryClient.invalidateQueries({ queryKey: ["commodityATMWatchlist"] });
   };
 
   const saveConfigMutation = useMutation({
@@ -920,7 +1007,40 @@ export default function CommodityPage() {
   const strategies = useMemo(() => status?.strategies ?? [], [status?.strategies]);
   const contractCatalog = useMemo(() => contractCatalogQuery.data?.contracts ?? [], [contractCatalogQuery.data?.contracts]);
   const futuresRows = useMemo(() => status?.futures_watchlist ?? status?.watchlist ?? [], [status?.futures_watchlist, status?.watchlist]);
-  const optionRows = useMemo(() => status?.option_watchlist ?? [], [status?.option_watchlist]);
+  const strategyOptionRows = useMemo(() => status?.option_watchlist ?? [], [status?.option_watchlist]);
+  const liveOptionRows = useMemo(() => commodityATMWatchlistQuery.data?.rows ?? [], [commodityATMWatchlistQuery.data?.rows]);
+  const optionRows = useMemo(() => {
+    if (!liveOptionRows.length) {
+      return strategyOptionRows;
+    }
+    if (!strategyOptionRows.length) {
+      return liveOptionRows;
+    }
+
+    const liveRowsByKey = new Map(
+      liveOptionRows.map((row) => [commodityOptionRowKey(row), row] as const),
+    );
+    const liveRowsBySymbol = new Map(
+      liveOptionRows.map((row) => [row.symbol, row] as const),
+    );
+    const consumedLiveKeys = new Set<string>();
+    const mergedRows = strategyOptionRows.map((row) => {
+      const liveRow = liveRowsByKey.get(commodityOptionRowKey(row)) || liveRowsBySymbol.get(row.symbol);
+      if (liveRow) {
+        consumedLiveKeys.add(commodityOptionRowKey(liveRow));
+      }
+      return mergeCommodityOptionRow(row, liveRow);
+    });
+
+    for (const liveRow of liveOptionRows) {
+      const liveKey = commodityOptionRowKey(liveRow);
+      if (!consumedLiveKeys.has(liveKey)) {
+        mergedRows.push(liveRow);
+      }
+    }
+
+    return mergedRows;
+  }, [liveOptionRows, strategyOptionRows]);
   const killSwitchActive = killSwitchState?.kill_switch_active ?? status?.kill_switch_active ?? false;
   const loopActive = status?.loop_active ?? killSwitchState?.loop_active ?? false;
   const startRequired = status?.start_required ?? killSwitchState?.start_required ?? false;
@@ -1533,7 +1653,7 @@ export default function CommodityPage() {
             icon={<Boxes size={16} className="text-accent-amber" />}
             title="Strategy 1 · Options"
             detail="The options sleeve waits for its own 30-minute CE or PE zero-cross. Each row shows the nearest liquid contract selection so thin ATM ladders do not block trades."
-            meta={`${actionableOptions.length} ready`}
+            meta={`${actionableOptions.length} ready · ${commodityATMWatchlistQuery.data?.source || "strategy"} live board`}
           />
 
           <div className="mt-4 overflow-x-auto">

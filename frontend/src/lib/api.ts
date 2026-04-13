@@ -209,6 +209,12 @@ export const getAuctionIntelligenceGateCValidation = (
   });
 export const getAuctionIntelligenceCanaryReadiness = (symbol = "BANKNIFTY") =>
   api.get("/api/auction-intelligence/canary-readiness", { params: { symbol } });
+export const getAuctionIntelligencePaperJournal = (symbol?: string, limit = 50) =>
+  api.get("/api/auction-intelligence/paper-journal", { params: { symbol, limit } });
+export const getAuctionIntelligencePaperPositions = (symbol?: string, status = "all", limit = 50) =>
+  api.get("/api/auction-intelligence/paper-positions", { params: { symbol, status, limit } });
+export const getAuctionIntelligenceShadowRecords = (symbol = "BANKNIFTY", limit = 50) =>
+  api.get("/api/auction-intelligence/shadow-records", { params: { symbol, limit } });
 
 // ── Auction Intelligence — MP signal layer ────────────────────────────────
 export const getAuctionIntelligenceMPDataStatus = () =>
@@ -219,6 +225,22 @@ export const getAuctionIntelligenceMPOpenSignal = (underlying = "NIFTY") =>
   api.get("/api/auction-intelligence/mp-open-signal", { params: { underlying } });
 export const getAuctionIntelligenceMPAgentContext = (underlying = "NIFTY", limit = 10) =>
   api.get("/api/auction-intelligence/mp-agent-context", { params: { underlying, limit } });
+
+// ── Fractal Market Profile ────────────────────────────────────────────────
+export const getFractalMarketProfileSummary = () =>
+  api.get("/api/fractal-market-profile/summary");
+export const getFractalMarketProfileLiveSnapshot = (symbol = "NIFTY") =>
+  api.get("/api/fractal-market-profile/live-snapshot", { params: { symbol } });
+export const runFractalMarketProfilePaperProposal = (symbol = "NIFTY") =>
+  api.post("/api/fractal-market-profile/paper-proposal", null, { params: { symbol } });
+export const getFractalMarketProfilePaperJournal = (symbol?: string, limit = 50) =>
+  api.get("/api/fractal-market-profile/paper-journal", { params: { symbol, limit } });
+export const getFractalMarketProfilePaperPositions = (symbol?: string, status = "all", limit = 50) =>
+  api.get("/api/fractal-market-profile/paper-positions", { params: { symbol, status, limit } });
+export const getFractalMarketProfileReplayReport = (symbol = "NIFTY", force = false) =>
+  api.get("/api/fractal-market-profile/replay-report", { params: { symbol, force } });
+export const getFractalMarketProfileReplaySuite = (force = false) =>
+  api.get("/api/fractal-market-profile/replay-suite", { params: { force } });
 
 // ── Backtester ────────────────────────────────────────────────────────────
 export const getBacktesterDefaultConfig = () => api.get("/api/backtester/default-config");

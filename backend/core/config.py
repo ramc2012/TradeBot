@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     # DB / Redis
     DATABASE_URL: str = "postgresql+asyncpg://nomadcurie:nomadcurie@localhost:5433/nomadcurie"
     REDIS_URL: str = "redis://localhost:6383/0"
+    RESEARCH_SYNC_AUTO_ENABLED: bool = False
+    STRATEGY_SPOT_SYNC_ENABLED: bool = False
 
     # Security
     SECRET_KEY: str = "change-me-to-a-random-secret-key"

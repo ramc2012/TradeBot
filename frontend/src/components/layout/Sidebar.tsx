@@ -14,6 +14,7 @@ import {
   Crosshair,
   Database,
   FlaskConical,
+  Fingerprint,
   Globe,
   LayoutDashboard,
   Layers3,
@@ -41,6 +42,7 @@ const NAV_GROUPS = [
     items: [
       { href: "/analytics", label: "Analytics", icon: BarChart3 },
       { href: "/auction-intelligence", label: "Auction IQ", icon: Layers3 },
+      { href: "/fractal-market-profile", label: "Fractal MP", icon: Fingerprint },
       { href: "/analysis", label: "Research Monitor", icon: Activity },
       { href: "/backtester", label: "Backtester", icon: FlaskConical },
       { href: "/agent", label: "Agent", icon: Bot },

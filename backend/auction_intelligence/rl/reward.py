@@ -5,10 +5,53 @@ Rewards are normalized to roughly [-2.0, +3.0] range:
   - Loss (stop hit):      -1.0 (flat regardless of stop size — risk is risk)
   - Confidence bonus:     +0.2 for high confidence entries (≥0.70)
   - Confidence penalty:   -0.1 for low confidence entries (<0.60)
+
+Quality penalties then adjust for entry quality and operational drag:
+  - fill drift / slippage
+  - stale signals
+  - reconciliation incidents
+  - toxic / adverse microstructure
 """
 from __future__ import annotations
 
 from typing import Optional
+
+
+_INCIDENT_PENALTIES = {
+    "critical_incident": 0.75,
+    "position_mismatch": 0.45,
+    "non_critical_incident": 0.20,
+}
+
+
+def _apply_quality_adjustment(
+    reward: float,
+    *,
+    fill_drift_ticks: Optional[float] = None,
+    stale_signal: bool = False,
+    reconciliation_status: Optional[str] = None,
+    toxicity_score: Optional[float] = None,
+    adverse_selection_risk: Optional[float] = None,
+    timing_confidence: Optional[float] = None,
+) -> float:
+    adjustment = 0.0
+
+    if fill_drift_ticks is not None:
+        adjustment -= min(max(float(fill_drift_ticks), 0.0) * 0.04, 0.40)
+    if stale_signal:
+        adjustment -= 0.35
+
+    status_key = str(reconciliation_status or "matched").lower()
+    adjustment -= _INCIDENT_PENALTIES.get(status_key, 0.0)
+
+    if toxicity_score is not None:
+        adjustment -= 0.25 * max(0.0, min(float(toxicity_score), 1.0))
+    if adverse_selection_risk is not None:
+        adjustment -= 0.20 * max(0.0, min(float(adverse_selection_risk), 1.0))
+    if timing_confidence is not None:
+        adjustment += 0.15 * (max(0.0, min(float(timing_confidence), 1.0)) - 0.5)
+
+    return round(reward + adjustment, 4)
 
 
 def compute_reward(
@@ -20,6 +63,12 @@ def compute_reward(
     outcome: str,  # "win" | "loss" | "timeout"
     exit_price: Optional[float] = None,
     confidence: float = 0.62,
+    fill_drift_ticks: Optional[float] = None,
+    stale_signal: bool = False,
+    reconciliation_status: Optional[str] = None,
+    toxicity_score: Optional[float] = None,
+    adverse_selection_risk: Optional[float] = None,
+    timing_confidence: Optional[float] = None,
 ) -> float:
     """Compute a scalar reward from a completed paper trade.
 
@@ -72,7 +121,15 @@ def compute_reward(
     elif outcome == "loss" and confidence < 0.60:
         base_reward -= 0.10
 
-    return round(base_reward, 4)
+    return _apply_quality_adjustment(
+        base_reward,
+        fill_drift_ticks=fill_drift_ticks,
+        stale_signal=stale_signal,
+        reconciliation_status=reconciliation_status,
+        toxicity_score=toxicity_score,
+        adverse_selection_risk=adverse_selection_risk,
+        timing_confidence=timing_confidence,
+    )
 
 
 def compute_proxy_reward(
@@ -82,6 +139,12 @@ def compute_proxy_reward(
     stop_price: Optional[float],
     target_price: Optional[float],
     confidence: float = 0.62,
+    fill_drift_ticks: Optional[float] = None,
+    stale_signal: bool = False,
+    reconciliation_status: Optional[str] = None,
+    toxicity_score: Optional[float] = None,
+    adverse_selection_risk: Optional[float] = None,
+    timing_confidence: Optional[float] = None,
 ) -> float:
     """Compute a proxy reward from entry/stop/target alone (no outcome data).
 
@@ -117,4 +180,12 @@ def compute_proxy_reward(
     p_loss = 1.0 - p_win
     expected = p_win * rr - p_loss * 1.0
 
-    return round(expected, 4)
+    return _apply_quality_adjustment(
+        expected,
+        fill_drift_ticks=fill_drift_ticks,
+        stale_signal=stale_signal,
+        reconciliation_status=reconciliation_status,
+        toxicity_score=toxicity_score,
+        adverse_selection_risk=adverse_selection_risk,
+        timing_confidence=timing_confidence,
+    )

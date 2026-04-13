@@ -21,6 +21,9 @@ class ExecutionPlanner:
                 slices=0,
                 cancel_after_seconds=0,
                 rationale=["No executable action."],
+                quantity=0,
+                underlying_symbol=session.symbol,
+                instrument_type="FUT",
             )
 
         style = order_flow.execution_aggression
@@ -33,6 +36,7 @@ class ExecutionPlanner:
             f"Execution style chosen from order flow: {style.lower()}",
             f"Passive fill probability={order_flow.passive_fill_probability:.2f}",
             f"Aggressive fill probability={order_flow.aggressive_fill_probability:.2f}",
+            f"Book pressure={order_flow.book_pressure:.2f}, toxicity={order_flow.toxicity_score:.2f}",
         ]
         return ExecutionInstruction(
             agent_name=decision.agent_name,
@@ -44,4 +48,9 @@ class ExecutionPlanner:
             slices=2 if style == "PASSIVE" else 1,
             cancel_after_seconds=30 if style == "PASSIVE" else 5,
             rationale=rationale,
+            quantity=int(decision.quantity or 0),
+            broker_action="BUY" if decision.action == "LONG" else "SELL",
+            underlying_symbol=session.symbol,
+            instrument_type="FUT",
+            decision_confidence=round(float(decision.confidence), 4),
         )

@@ -180,16 +180,20 @@ def test_latest_macd_rsi_returns_values_once_series_is_long_enough() -> None:
     assert indicators["rsi"] is not None
 
 
-def test_option_history_interval_mappings_cover_five_minute_backfill() -> None:
+def test_option_history_interval_mappings_cover_intraday_backfill() -> None:
     service = OptionHistoryService()
 
+    assert service._upstox_interval("3minute") == "1minute"
+    assert service._fyers_resolution("3minute") == "1"
     assert service._upstox_interval("5minute") == "5minute"
     assert service._fyers_resolution("5minute") == "5"
     assert service._upstox_interval("30minute") == "30minute"
+    assert service._needs_upstox_minute_fallback("NSE_FO|12345", "3minute") is True
     assert service._needs_upstox_minute_fallback("NSE_FO|12345", "5minute") is True
     assert service._needs_upstox_minute_fallback("NSE_FO|12345", "15minute") is True
     assert service._needs_upstox_minute_fallback("NSE_FO|12345", "30minute") is False
     assert service._broker_lookback_days("1minute", limit=500) == 5
+    assert service._broker_lookback_days("3minute", limit=96) == 5
     assert service._broker_lookback_days("5minute", limit=96) == 5
 
 
@@ -214,6 +218,29 @@ def test_option_history_can_aggregate_one_minute_rows_to_five_minute() -> None:
     assert aggregated[0]["open"] == 100
     assert aggregated[0]["close"] == 104.5
     assert aggregated[0]["volume"] == 50
+
+
+def test_option_history_can_aggregate_one_minute_rows_to_three_minute() -> None:
+    service = OptionHistoryService()
+    rows = [
+        {
+            "time": f"2026-04-09T09:{15 + idx:02d}:00+05:30",
+            "open": 200 + idx,
+            "high": 201 + idx,
+            "low": 199 + idx,
+            "close": 200.5 + idx,
+            "volume": 5,
+        }
+        for idx in range(3)
+    ]
+
+    aggregated = service._aggregate_rows(rows, 3)
+
+    assert len(aggregated) == 1
+    assert aggregated[0]["time"].startswith("2026-04-09T09:15:00")
+    assert aggregated[0]["open"] == 200
+    assert aggregated[0]["close"] == 202.5
+    assert aggregated[0]["volume"] == 15
 
 
 def test_option_history_upstox_ssl_errors_degrade_to_empty_rows(monkeypatch) -> None:

@@ -21,7 +21,10 @@ import {
   Zap,
 } from "lucide-react";
 import {
+  Bar,
+  BarChart,
   CartesianGrid,
+  Cell,
   Line,
   LineChart,
   ReferenceLine,
@@ -197,7 +200,58 @@ type AnalysisResponse = {
     slices: number;
     cancel_after_seconds: number;
     rationale: string[];
+    quantity?: number;
+    broker_action?: string | null;
+    underlying_symbol?: string | null;
+    instrument_type?: string | null;
+    expiry?: string | null;
+    strike?: number | null;
+    option_type?: string | null;
+    trading_symbol?: string | null;
+    premium?: number | null;
+    spot_price?: number | null;
+    moneyness?: string | null;
+    expiry_kind?: string | null;
+    days_to_expiry?: number | null;
+    selection_reason?: string | null;
   }[];
+  ntm_volx?: {
+    underlying: string;
+    expiry: string;
+    spot_price: number;
+    atm_strike: number;
+    dominant_side: "CALLS" | "PUTS" | "BALANCED";
+    directional_bias: string;
+    regime: string;
+    vxr: number;
+    call_pressure: number;
+    put_pressure: number;
+    net_pressure: number;
+    call_volume: number;
+    put_volume: number;
+    call_notional: number;
+    put_notional: number;
+    call_oi_change: number;
+    put_oi_change: number;
+    call_wall_strike: number | null;
+    put_wall_strike: number | null;
+    pair_count: number;
+    notes: string[];
+    pressure_ladder: {
+      strike: number;
+      distance_from_spot: number;
+      distance_from_spot_pct: number;
+      call_volume: number;
+      put_volume: number;
+      call_notional: number;
+      put_notional: number;
+      call_oi_change: number;
+      put_oi_change: number;
+      call_pressure: number;
+      put_pressure: number;
+      net_pressure: number;
+    }[];
+  } | null;
 };
 
 type WorkspacePayload = {
@@ -335,9 +389,17 @@ const FALLBACK_SCENARIOS: DemoScenarioOption[] = [
   { id: "balance", label: "Rotational balance session" },
 ];
 
-function formatPrice(value: number | null | undefined) {
+function formatPrice(value: number | null | undefined, digits = 2) {
   if (value === null || value === undefined) return "—";
-  return value.toLocaleString("en-IN", { maximumFractionDigits: 2 });
+  return value.toLocaleString("en-IN", { maximumFractionDigits: digits });
+}
+
+function formatCompact(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  return Intl.NumberFormat("en-IN", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value);
 }
 
 function formatPct(value: number | null | undefined, digits = 1) {
@@ -626,6 +688,19 @@ export default function AuctionIntelligenceWorkspace() {
     }),
     index,
   }));
+  const ntmVolxRows = (analysis?.ntm_volx?.pressure_ladder ?? []).map((level) => ({
+    label: formatPrice(level.strike, 0),
+    strike: level.strike,
+    callPressure: level.call_pressure,
+    putPressureSigned: -Math.abs(level.put_pressure),
+    netPressure: level.net_pressure,
+  }));
+  const ntmPressureDomain: [number, number] = (() => {
+    const values = ntmVolxRows.flatMap((row) => [row.callPressure, row.putPressureSigned]);
+    if (!values.length) return [-100, 100];
+    const edge = Math.max(...values.map((value) => Math.abs(value)));
+    return [-(edge * 1.15), edge * 1.15];
+  })();
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 pb-8">
@@ -1051,6 +1126,91 @@ export default function AuctionIntelligenceWorkspace() {
         </div>
       </section>
 
+      <section className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+        <div className={sectionChrome("p-5")}>
+          <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-text-muted">
+            <Activity size={13} className="text-accent-amber" />
+            NTM VolX
+          </div>
+          <div className="mt-2 text-sm leading-6 text-text-secondary">
+            Near-the-money option control proxy built from premium turnover, positive OI change, and liquidity quality across the closest strike pairs.
+          </div>
+          <div className="mt-4 h-[240px] rounded-2xl border border-white/6 bg-black/15 p-3">
+            {ntmVolxRows.length ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={ntmVolxRows} margin={{ top: 12, right: 18, left: 4, bottom: 0 }}>
+                  <CartesianGrid stroke="rgba(255,255,255,0.06)" vertical={false} />
+                  <XAxis dataKey="label" tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={false} tickLine={false} />
+                  <YAxis domain={ntmPressureDomain} tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={false} tickLine={false} width={72} />
+                  <ReferenceLine y={0} stroke="rgba(255,255,255,0.12)" />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: "#091120", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 18 }}
+                    formatter={(value: number, name: string) => {
+                      if (name === "Net pressure") return [formatPct(Number(value), 0), name];
+                      return [formatCompact(Math.abs(Number(value))), name];
+                    }}
+                  />
+                  <Bar dataKey="callPressure" name="Call pressure" barSize={14} radius={[6, 6, 0, 0]}>
+                    {ntmVolxRows.map((row) => (
+                      <Cell key={`call-${row.strike}`} fill="rgba(52,211,153,0.58)" />
+                    ))}
+                  </Bar>
+                  <Bar dataKey="putPressureSigned" name="Put pressure" barSize={14} radius={[0, 0, 6, 6]}>
+                    {ntmVolxRows.map((row) => (
+                      <Cell key={`put-${row.strike}`} fill="rgba(244,63,94,0.58)" />
+                    ))}
+                  </Bar>
+                  <Line type="monotone" dataKey="netPressure" name="Net pressure" stroke="#fbbf24" strokeWidth={2} dot={false} />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex h-full items-center justify-center text-sm text-text-secondary">
+                No option-chain snapshot was available for NTM VolX.
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className={sectionChrome("p-5")}>
+          <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-text-muted">
+            <Gauge size={13} className="text-accent-green" />
+            NTM Read
+          </div>
+          <div className="mt-4 grid gap-x-6 gap-y-2 sm:grid-cols-2">
+            <SmallMetric
+              label="Dominant side"
+              value={analysis?.ntm_volx ? `${analysis.ntm_volx.dominant_side} · ${analysis.ntm_volx.directional_bias}` : "—"}
+              hint={analysis?.ntm_volx?.notes?.[0] ?? "Waiting for an option-chain snapshot."}
+            />
+            <SmallMetric
+              label="VXR"
+              value={analysis?.ntm_volx ? analysis.ntm_volx.vxr.toFixed(2) : "—"}
+              hint={analysis?.ntm_volx ? `Net pressure ${formatPct(analysis.ntm_volx.net_pressure, 0)}` : "1.0 is balanced; higher values mean one side is pressing harder."}
+            />
+            <SmallMetric
+              label="Premium turnover"
+              value={analysis?.ntm_volx ? `${formatCompact(analysis.ntm_volx.call_notional)} / ${formatCompact(analysis.ntm_volx.put_notional)}` : "—"}
+              hint="Call versus put premium turnover in the NTM ladder."
+            />
+            <SmallMetric
+              label="Wall strikes"
+              value={analysis?.ntm_volx ? `${formatPrice(analysis.ntm_volx.call_wall_strike, 0)} / ${formatPrice(analysis.ntm_volx.put_wall_strike, 0)}` : "—"}
+              hint="Highest-pressure call and put strikes."
+            />
+            <SmallMetric
+              label="OI change"
+              value={analysis?.ntm_volx ? `${formatCompact(analysis.ntm_volx.call_oi_change)} / ${formatCompact(analysis.ntm_volx.put_oi_change)}` : "—"}
+              hint="Positive OI additions used as a pressure confirmation layer."
+            />
+            <SmallMetric
+              label="Pairs tracked"
+              value={analysis?.ntm_volx ? String(analysis.ntm_volx.pair_count) : "—"}
+              hint={analysis?.ntm_volx ? `${analysis.ntm_volx.expiry} expiry around ATM ${formatPrice(analysis.ntm_volx.atm_strike, 0)}` : "No expiry selected yet."}
+            />
+          </div>
+        </div>
+      </section>
+
       <section className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
         <div className={sectionChrome("p-5")}>
           <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-text-muted">
@@ -1070,9 +1230,22 @@ export default function AuctionIntelligenceWorkspace() {
                   </div>
                 </div>
                 <div className="mt-3 grid gap-2 text-sm text-text-secondary sm:grid-cols-2">
+                  <div>Contract: <span className="font-mono text-text-primary">{step.trading_symbol ?? step.symbol}</span></div>
+                  <div>Broker side: <span className="font-mono text-text-primary">{step.broker_action ?? "—"}</span></div>
+                  <div>Premium: <span className="font-mono text-text-primary">{formatPrice(step.premium ?? step.limit_price)}</span></div>
+                  <div>Qty: <span className="font-mono text-text-primary">{step.quantity ?? "—"}</span></div>
+                  <div>Strike: <span className="font-mono text-text-primary">{step.strike ? step.strike.toFixed(0) : "—"}</span></div>
+                  <div>Expiry: <span className="font-mono text-text-primary">{step.expiry ?? "—"}</span></div>
+                  <div>Moneyness: <span className="font-mono text-text-primary">{step.moneyness ?? "—"}</span></div>
+                  <div>DTE: <span className="font-mono text-text-primary">{step.days_to_expiry ?? "—"}</span></div>
                   <div>Limit: <span className="font-mono text-text-primary">{formatPrice(step.limit_price)}</span></div>
                   <div>Cancel after: <span className="font-mono text-text-primary">{step.cancel_after_seconds}s</span></div>
                 </div>
+                {step.selection_reason && (
+                  <div className="mt-3 rounded-2xl border border-white/6 bg-black/20 px-3 py-2 text-sm text-text-secondary">
+                    {step.selection_reason}
+                  </div>
+                )}
                 <div className="mt-3 space-y-2 text-sm text-text-secondary">
                   {step.rationale.map((reason) => (
                     <div key={reason} className="flex items-start gap-2">

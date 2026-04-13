@@ -6,6 +6,8 @@ from typing import Any
 
 from fastapi.encoders import jsonable_encoder
 
+from auction_intelligence.config import clone_default_config
+from auction_intelligence.options.ntm_volx import NTMVolXAnalyzer
 from auction_intelligence.service import AuctionIntelligenceService
 from auction_intelligence.schemas import (
     DepthLevel,
@@ -16,6 +18,7 @@ from auction_intelligence.schemas import (
     SessionContext,
     TradePrint,
 )
+from brokers.base import OptionChain, OptionChainEntry
 
 
 _SCENARIO_LABELS = {
@@ -193,6 +196,7 @@ def build_demo_payload(symbol_code: str = "NIFTY", scenario: str = "acceptance_u
     prior_bars = _make_bars(start - timedelta(days=1), prior_rows)
     bars = _make_bars(start, current_rows)
     trades = _make_trades(start + timedelta(hours=3), trade_rows)
+    quote_history = _make_quote_history(bars)
 
     request = {
         "session": {
@@ -220,6 +224,7 @@ def build_demo_payload(symbol_code: str = "NIFTY", scenario: str = "acceptance_u
             "bids": [{"price": price, "quantity": qty} for price, qty in depth["bids"]],
             "asks": [{"price": price, "quantity": qty} for price, qty in depth["asks"]],
         },
+        "quote_history": quote_history,
         "bars": bars,
         "prior_bars": prior_bars,
         "trades": trades,
@@ -236,6 +241,7 @@ def build_demo_payload(symbol_code: str = "NIFTY", scenario: str = "acceptance_u
 def build_demo_analysis(symbol_code: str = "NIFTY", scenario: str = "acceptance_up") -> dict[str, Any]:
     payload = build_demo_payload(symbol_code, scenario)
     service = AuctionIntelligenceService()
+    ntm_volx = _build_demo_ntm_volx(payload)
     bundle = service.analyze(
         session=SessionContext(**payload["session"]),
         bars=[MarketBar(**_parse_bar(item)) for item in payload["bars"]],
@@ -248,6 +254,7 @@ def build_demo_analysis(symbol_code: str = "NIFTY", scenario: str = "acceptance_
             asks=[DepthLevel(**item) for item in payload["depth"]["asks"]],
         ),
         portfolio=PortfolioSnapshot(**payload["portfolio"]),
+        ntm_volx=ntm_volx,
     )
     return {
         "scenario": scenario,
@@ -288,6 +295,23 @@ def _make_trades(start: datetime, rows: list[tuple[float, float, str]]) -> list[
     ]
 
 
+def _make_quote_history(bars: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    quotes: list[dict[str, Any]] = []
+    for index, bar in enumerate(bars):
+        close = float(bar["close"])
+        spread = 2.0 if close >= 10_000 else 1.0
+        quotes.append(
+            {
+                "timestamp": bar["timestamp"],
+                "bid": round(close - (spread / 2), 2),
+                "ask": round(close + (spread / 2), 2),
+                "bid_size": 280 + (index * 18),
+                "ask_size": 250 + max(0, (len(bars) - index - 1) * 16),
+            }
+        )
+    return quotes
+
+
 def _parse_bar(item: dict[str, Any]) -> dict[str, Any]:
     return {
         **item,
@@ -307,3 +331,89 @@ def _parse_trade(item: dict[str, Any]) -> dict[str, Any]:
         **item,
         "timestamp": datetime.fromisoformat(item["timestamp"]),
     }
+
+
+def _build_demo_ntm_volx(payload: dict[str, Any]):
+    symbol_code = str(payload.get("metadata", {}).get("symbol_code") or "").upper()
+    scenario = str(payload.get("metadata", {}).get("scenario") or "")
+    spot_price = float(payload.get("session", {}).get("last_price") or 0.0)
+    if not symbol_code or spot_price <= 0:
+        return None
+
+    strike_step = 50.0 if symbol_code == "NIFTY" else 100.0
+    atm_strike = round(spot_price / strike_step) * strike_step
+    strikes = [atm_strike + (offset * strike_step) for offset in (-2, -1, 0, 1, 2)]
+    bias = {
+        "acceptance_up": "CALLS",
+        "failed_auction": "CALLS",
+        "balance": "BALANCED",
+    }.get(scenario, "BALANCED")
+
+    entries: list[OptionChainEntry] = []
+    for index, strike in enumerate(strikes):
+        distance = abs(strike - spot_price) / max(strike_step, 1.0)
+        base_extrinsic = max((strike_step * 1.45) - (distance * strike_step * 0.28), strike_step * 0.45)
+        call_intrinsic = max(spot_price - strike, 0.0)
+        put_intrinsic = max(strike - spot_price, 0.0)
+        base_volume = max(4_500.0, 18_000.0 - (index * 2_200.0))
+        base_oi = max(10_000.0, 26_000.0 - (index * 2_000.0))
+
+        if bias == "CALLS":
+            call_volume = base_volume * (1.75 if distance <= 1 else 1.35)
+            put_volume = base_volume * (0.72 if distance <= 1 else 0.82)
+            call_oi_change = base_oi * 0.08
+            put_oi_change = base_oi * 0.02
+        elif bias == "PUTS":
+            call_volume = base_volume * (0.72 if distance <= 1 else 0.82)
+            put_volume = base_volume * (1.75 if distance <= 1 else 1.35)
+            call_oi_change = base_oi * 0.02
+            put_oi_change = base_oi * 0.08
+        else:
+            call_volume = base_volume * (1.05 if distance <= 1 else 0.95)
+            put_volume = base_volume * (0.98 if distance <= 1 else 1.02)
+            call_oi_change = base_oi * 0.03
+            put_oi_change = base_oi * 0.03
+
+        call_ltp = round(call_intrinsic + base_extrinsic, 2)
+        put_ltp = round(put_intrinsic + base_extrinsic, 2)
+        entries.append(
+            OptionChainEntry(
+                strike=strike,
+                option_type="CE",
+                ltp=call_ltp,
+                oi=int(base_oi + call_oi_change),
+                volume=int(call_volume),
+                bid=round(call_ltp - 0.5, 2),
+                ask=round(call_ltp + 0.5, 2),
+                delta=0.55 if strike <= atm_strike else 0.42,
+                prev_oi=int(base_oi),
+                prev_close=round(max(call_ltp - (1.8 if bias == "CALLS" else 0.8), 1.0), 2),
+            )
+        )
+        entries.append(
+            OptionChainEntry(
+                strike=strike,
+                option_type="PE",
+                ltp=put_ltp,
+                oi=int(base_oi + put_oi_change),
+                volume=int(put_volume),
+                bid=round(put_ltp - 0.5, 2),
+                ask=round(put_ltp + 0.5, 2),
+                delta=-0.55 if strike >= atm_strike else -0.42,
+                prev_oi=int(base_oi),
+                prev_close=round(max(put_ltp - (1.8 if bias == "PUTS" else 0.8), 1.0), 2),
+            )
+        )
+
+    analyzer = NTMVolXAnalyzer(clone_default_config().get("options_mapping", {}).get("ntm_volx"))
+    chain = OptionChain(
+        symbol=f"{symbol_code} DEMO",
+        expiry=(date.fromisoformat(payload["session"]["session_date"]) + timedelta(days=2)).isoformat(),
+        spot_price=spot_price,
+        entries=entries,
+    )
+    return analyzer.analyze_chain(
+        underlying=symbol_code,
+        expiry=chain.expiry,
+        chain=chain,
+    )

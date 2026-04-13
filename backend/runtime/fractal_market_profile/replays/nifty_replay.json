@@ -1,0 +1,132 @@
+{
+  "symbol": "NIFTY",
+  "generated_at": "2026-04-11T19:13:09.345406+00:00",
+  "metrics": {
+    "trade_count": 3,
+    "win_rate": 66.67,
+    "expectancy": 134.33,
+    "profit_factor": 5.4286,
+    "max_drawdown": -91.0,
+    "avg_risk_reward": 2.55,
+    "trades_per_week": 0.06,
+    "net_pnl": 403.0
+  },
+  "thresholds": {
+    "win_rate_min": 48.0,
+    "win_rate_target": 55.0,
+    "avg_risk_reward_min": 1.8,
+    "profit_factor_min": 1.4,
+    "max_drawdown_max": 18.0
+  },
+  "gate_status": {
+    "win_rate": true,
+    "avg_risk_reward": true,
+    "profit_factor": true,
+    "max_drawdown": true
+  },
+  "equity_curve": [
+    {
+      "time": "2025-07-18T05:06:00+00:00",
+      "equity": 399.75
+    },
+    {
+      "time": "2025-07-18T05:15:00+00:00",
+      "equity": 494.0
+    },
+    {
+      "time": "2025-07-25T06:15:00+00:00",
+      "equity": 403.0
+    }
+  ],
+  "setup_breakdown": [
+    {
+      "setup_name": "daily_balance_mean_reversion_call",
+      "count": 3,
+      "pnl": 403.0,
+      "win_rate": 66.67
+    }
+  ],
+  "trades": [
+    {
+      "trade_id": "003b7cd3161c43aaa00932b830c498d6",
+      "underlying": "NIFTY",
+      "setup_name": "daily_balance_mean_reversion_call",
+      "action": "LONG",
+      "horizon": "scalp",
+      "entry_time": "2025-07-18T05:03:00+00:00",
+      "exit_time": "2025-07-18T05:06:00+00:00",
+      "entry_underlying": 24949.9,
+      "exit_underlying": 24957.8,
+      "entry_premium": 149.45,
+      "exit_premium": 155.6,
+      "strike": 24950.0,
+      "expiry": "2025-07-24",
+      "option_type": "CE",
+      "quantity": 65,
+      "pnl": 399.75,
+      "return_pct": 4.12,
+      "max_adverse_pct": 0.0,
+      "max_favorable_pct": 4.12,
+      "stop_level": 25013.15,
+      "target_level": 25077.97,
+      "exit_reason": "profile_stop",
+      "confidence": 0.65,
+      "daily_shape": "D-shape",
+      "hourly_shape": "b-shape"
+    },
+    {
+      "trade_id": "9df6d96105bb4ce89c73de4123584bc4",
+      "underlying": "NIFTY",
+      "setup_name": "daily_balance_mean_reversion_call",
+      "action": "LONG",
+      "horizon": "scalp",
+      "entry_time": "2025-07-18T05:12:00+00:00",
+      "exit_time": "2025-07-18T05:15:00+00:00",
+      "entry_underlying": 24942.35,
+      "exit_underlying": 24946.4,
+      "entry_premium": 147.8,
+      "exit_premium": 149.25,
+      "strike": 24950.0,
+      "expiry": "2025-07-24",
+      "option_type": "CE",
+      "quantity": 65,
+      "pnl": 94.25,
+      "return_pct": 0.98,
+      "max_adverse_pct": 0.0,
+      "max_favorable_pct": 0.98,
+      "stop_level": 25013.15,
+      "target_level": 25070.42,
+      "exit_reason": "profile_stop",
+      "confidence": 0.65,
+      "daily_shape": "D-shape",
+      "hourly_shape": "b-shape"
+    },
+    {
+      "trade_id": "cdb0f90b25214bfe967bf38077a90007",
+      "underlying": "NIFTY",
+      "setup_name": "daily_balance_mean_reversion_call",
+      "action": "LONG",
+      "horizon": "scalp",
+      "entry_time": "2025-07-25T06:12:00+00:00",
+      "exit_time": "2025-07-25T06:15:00+00:00",
+      "entry_underlying": 24865.45,
+      "exit_underlying": 24838.75,
+      "entry_premium": 145.7,
+      "exit_premium": 144.3,
+      "strike": 24850.0,
+      "expiry": "2025-07-31",
+      "option_type": "CE",
+      "quantity": 65,
+      "pnl": -91.0,
+      "return_pct": -0.96,
+      "max_adverse_pct": 0.96,
+      "max_favorable_pct": 0.0,
+      "stop_level": 24883.05,
+      "target_level": 24935.65,
+      "exit_reason": "profile_stop",
+      "confidence": 0.65,
+      "daily_shape": "D-shape",
+      "hourly_shape": "b-shape"
+    }
+  ]
+}

@@ -64,7 +64,9 @@ services:
       timeout: 5s
       retries: 5
     command: >
-      sh -c "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000"
+      sh -c "python scripts/wait_for_db.py &&
+             alembic upgrade head &&
+             uvicorn main:app --host 0.0.0.0 --port 8000"
     restart: unless-stopped
 
   research-sync:
@@ -98,6 +100,7 @@ services:
       - sh
       - -lc
       - >
+          python scripts/wait_for_db.py &&
           alembic upgrade head &&
           python -m data.run_upstox_research_sync
           --from-date $$RESEARCH_FROM_DATE

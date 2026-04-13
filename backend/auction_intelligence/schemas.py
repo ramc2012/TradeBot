@@ -143,6 +143,13 @@ class OrderFlowSnapshot:
     timing_confidence: float
     execution_aggression: ExecutionStyle
     micro_stop_distance: float
+    trade_imbalance: float = 0.0
+    order_flow_imbalance: float = 0.0
+    book_pressure: float = 0.0
+    micro_price_offset_bps: float = 0.0
+    trade_intensity_per_minute: float = 0.0
+    quote_repricing_rate: float = 0.0
+    toxicity_score: float = 0.0
 
 
 @dataclass
@@ -152,6 +159,48 @@ class RegimeAssessment:
     allowed_directions: list[Direction]
     reasons: list[str]
     scorecard: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class NTMVolXLevel:
+    strike: float
+    distance_from_spot: float
+    distance_from_spot_pct: float
+    call_volume: float
+    put_volume: float
+    call_notional: float
+    put_notional: float
+    call_oi_change: float
+    put_oi_change: float
+    call_pressure: float
+    put_pressure: float
+    net_pressure: float
+
+
+@dataclass
+class NTMVolXSnapshot:
+    underlying: str
+    expiry: str
+    spot_price: float
+    atm_strike: float
+    dominant_side: Literal["CALLS", "PUTS", "BALANCED"]
+    directional_bias: Direction
+    regime: str
+    vxr: float
+    call_pressure: float
+    put_pressure: float
+    net_pressure: float
+    call_volume: float
+    put_volume: float
+    call_notional: float
+    put_notional: float
+    call_oi_change: float
+    put_oi_change: float
+    call_wall_strike: Optional[float]
+    put_wall_strike: Optional[float]
+    pair_count: int
+    notes: list[str] = field(default_factory=list)
+    pressure_ladder: list[NTMVolXLevel] = field(default_factory=list)
 
 
 @dataclass
@@ -187,6 +236,27 @@ class ExecutionInstruction:
     slices: int
     cancel_after_seconds: int
     rationale: list[str]
+    quantity: int = 0
+    broker_action: Optional[str] = None
+    underlying_symbol: Optional[str] = None
+    instrument_type: Optional[str] = None
+    expiry: Optional[str] = None
+    strike: Optional[float] = None
+    option_type: Optional[str] = None
+    instrument_key: Optional[str] = None
+    trading_symbol: Optional[str] = None
+    lot_size: Optional[int] = None
+    premium: Optional[float] = None
+    spot_price: Optional[float] = None
+    moneyness: Optional[str] = None
+    expiry_kind: Optional[str] = None
+    days_to_expiry: Optional[int] = None
+    selection_reason: Optional[str] = None
+    premium_ma20: Optional[float] = None
+    premium_ma50: Optional[float] = None
+    above_premium_ma20: Optional[bool] = None
+    above_premium_ma50: Optional[bool] = None
+    decision_confidence: Optional[float] = None
 
 
 @dataclass
@@ -198,6 +268,7 @@ class AgentContext:
     order_flow: OrderFlowSnapshot
     regime: RegimeAssessment
     config: dict[str, Any]
+    ntm_volx: Optional[NTMVolXSnapshot] = None
 
 
 @dataclass
@@ -210,6 +281,7 @@ class AnalysisBundle:
     agent_decisions: list[AgentDecision]
     risk: RiskDecision
     execution_plan: list[ExecutionInstruction]
+    ntm_volx: Optional[NTMVolXSnapshot] = None
 
 
 @dataclass
@@ -219,9 +291,68 @@ class PaperTradeRecord:
     regime: str
     agent_name: str
     action: Direction
+    broker_action: Optional[str]
     confidence: float
+    quantity: int
     entry_price: Optional[float]
     stop_price: Optional[float]
     target_price: Optional[float]
     execution_style: str
+    underlying_symbol: Optional[str] = None
+    instrument_type: Optional[str] = None
+    expiry: Optional[str] = None
+    strike: Optional[float] = None
+    option_type: Optional[str] = None
+    instrument_key: Optional[str] = None
+    trading_symbol: Optional[str] = None
+    lot_size: Optional[int] = None
+    premium: Optional[float] = None
+    spot_price: Optional[float] = None
+    moneyness: Optional[str] = None
+    expiry_kind: Optional[str] = None
+    days_to_expiry: Optional[int] = None
+    selection_reason: Optional[str] = None
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class PaperPositionRecord:
+    position_id: str
+    status: str
+    opened_at: str
+    updated_at: str
+    agent_name: str
+    signal_action: Direction
+    broker_action: Optional[str]
+    underlying_symbol: str
+    symbol: str
+    regime_entry: str
+    regime_last: str
+    quantity: int
+    entry_confidence: float
+    latest_confidence: float
+    entry_premium: float
+    latest_premium: float
+    entry_spot_price: Optional[float] = None
+    latest_spot_price: Optional[float] = None
+    execution_style: Optional[str] = None
+    instrument_type: Optional[str] = None
+    expiry: Optional[str] = None
+    strike: Optional[float] = None
+    option_type: Optional[str] = None
+    instrument_key: Optional[str] = None
+    trading_symbol: Optional[str] = None
+    lot_size: Optional[int] = None
+    moneyness: Optional[str] = None
+    expiry_kind: Optional[str] = None
+    days_to_expiry: Optional[int] = None
+    selection_reason: Optional[str] = None
+    stop_price: Optional[float] = None
+    target_price: Optional[float] = None
+    unrealized_pnl: float = 0.0
+    close_reason: Optional[str] = None
+    closed_at: Optional[str] = None
+    exit_premium: Optional[float] = None
+    exit_spot_price: Optional[float] = None
+    realized_pnl: Optional[float] = None
     notes: list[str] = field(default_factory=list)

@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi.encoders import jsonable_encoder
+from sqlalchemy import text
 
 from api.routers.auth import (
     ensure_fyers_session,
@@ -27,6 +28,7 @@ from auction_intelligence.schemas import (
     TradePrint,
 )
 from brokers.base import Tick
+from db.database import AsyncSessionLocal
 from market_data import data_router as market_data_router
 from market_data.symbols import to_broker_symbol, to_fyers_symbol
 
@@ -63,6 +65,13 @@ SYMBOL_MAP = {
         "display": "MIDCPNIFTY",
         "instrument_proxy": "continuous_futures_proxy",
         "lot_size": 75,
+        "tick_size": 0.5,
+    },
+    "SENSEX": {
+        "app_symbol": "BSE:SENSEX-INDEX",
+        "display": "SENSEX",
+        "instrument_proxy": "continuous_futures_proxy",
+        "lot_size": 10,
         "tick_size": 0.5,
     },
 }
@@ -150,7 +159,7 @@ async def build_live_analysis(symbol_code: str = "NIFTY") -> dict[str, Any]:
 
     recent_rows, history_source, history_symbol = await _fetch_recent_minute_rows(normalized_symbol)
     if not recent_rows:
-        raise RuntimeError("No historical broker data returned for the requested symbol.")
+        raise RuntimeError("No local or broker minute data returned for the requested symbol.")
 
     sessions = _group_rows_by_session(recent_rows)
     session_dates = sorted(sessions.keys())
@@ -184,7 +193,7 @@ async def build_shadow_backfill_snapshots(
 
     recent_rows, history_source, history_symbol = await _fetch_recent_minute_rows(normalized_symbol, lookback_days=lookback_days)
     if not recent_rows:
-        raise RuntimeError("No historical broker data returned for the requested symbol.")
+        raise RuntimeError("No local or broker minute data returned for the requested symbol.")
 
     sessions = _group_rows_by_session(recent_rows)
     session_dates = sorted(sessions.keys())
@@ -266,17 +275,23 @@ async def _build_analysis_from_session_rows(
     if len(current_bars) < 4 or len(prior_bars) < 4:
         raise RuntimeError("Insufficient 30-minute bars were built from the broker history.")
 
-    current_quote_tick = market_data_router.get_latest_tick(app_symbol) if not is_futures_source else None
+    current_quote_tick = market_data_router.get_latest_tick(app_symbol)
     futures_quote = await _fetch_fyers_quote(history_symbol) if is_futures_source and snapshot_mode == "live_session" else None
-    quote_payload, quote_source, stale_data_seconds = _build_quote_from_snapshot(
-        current_rows,
-        current_quote_tick,
+    order_flow_inputs = await _build_order_flow_inputs(
+        app_symbol=app_symbol,
+        current_rows=current_rows,
+        current_tick=current_quote_tick,
         quote_override=futures_quote,
         tick_size=tick_size,
         snapshot_mode=snapshot_mode,
     )
-    depth_payload = _build_depth_from_quote(quote_payload, tick_size=tick_size)
-    trades_payload = _infer_trade_prints(current_rows)
+    quote_payload = order_flow_inputs["quote"]
+    depth_payload = order_flow_inputs["depth"]
+    trades_payload = order_flow_inputs["trades"]
+    quote_history_payload = order_flow_inputs["quote_history"]
+    quote_source = str(order_flow_inputs["quote_source"])
+    order_flow_source = str(order_flow_inputs["order_flow_source"])
+    stale_data_seconds = float(order_flow_inputs["stale_data_seconds"])
     portfolio_payload = portfolio_payload or await _load_portfolio_snapshot(session_symbol=session_symbol)
 
     request = {
@@ -306,6 +321,7 @@ async def _build_analysis_from_session_rows(
             "ask_size": quote_payload["ask_size"],
         },
         "depth": depth_payload,
+        "quote_history": quote_history_payload,
         "bars": current_bars,
         "prior_bars": prior_bars,
         "trades": trades_payload,
@@ -317,6 +333,9 @@ async def _build_analysis_from_session_rows(
             "history_source": history_source,
             "history_symbol": history_symbol,
             "quote_source": quote_source,
+            "order_flow_source": order_flow_source,
+            "quote_event_count": len(quote_history_payload),
+            "trade_print_count": len(trades_payload),
             "snapshot_mode": snapshot_mode,
             "snapshot_time": snapshot_time_local.isoformat(),
             "instrument_proxy": config["instrument_proxy"] if is_futures_source else "spot_index_proxy",
@@ -324,7 +343,7 @@ async def _build_analysis_from_session_rows(
     }
 
     service = AuctionIntelligenceService()
-    bundle = service.analyze(
+    bundle = await service.analyze_with_options(
         session=SessionContext(**request["session"]),
         bars=[MarketBar(**_parse_bar(item)) for item in request["bars"]],
         prior_bars=[MarketBar(**_parse_bar(item)) for item in request["prior_bars"]],
@@ -336,6 +355,7 @@ async def _build_analysis_from_session_rows(
             asks=[DepthLevel(**item) for item in request["depth"]["asks"]],
         ),
         portfolio=PortfolioSnapshot(**request["portfolio"]),
+        quote_history=[QuoteSnapshot(**_parse_quote(item)) for item in quote_history_payload],
     )
     return {
         "mode": "live",
@@ -358,6 +378,26 @@ async def _fetch_recent_minute_rows(symbol_code: str, *, lookback_days: int = 7)
     app_symbol = str(config["app_symbol"])
     fyers_symbol = to_fyers_symbol(app_symbol)
     upstox_symbol = to_broker_symbol(app_symbol)
+    best_available: tuple[list[dict[str, Any]], str, str] | None = None
+
+    def _choose_source(
+        rows: list[dict[str, Any]],
+        source: str,
+        history_symbol: str,
+    ) -> tuple[list[dict[str, Any]], str, str] | None:
+        nonlocal best_available
+        if not rows:
+            return None
+        if best_available is None:
+            best_available = (rows, source, history_symbol)
+        if len(_group_rows_by_session(rows)) >= 2:
+            return rows, source, history_symbol
+        return None
+
+    persisted_rows = await _fetch_persisted_spot_rows(symbol_code.upper(), from_date=from_date)
+    selected = _choose_source(persisted_rows, "timescaledb_spot_1minute", app_symbol)
+    if selected is not None:
+        return selected
 
     fyers = get_active_adapter("fyers")
     if fyers is None and await ensure_fyers_session():
@@ -374,8 +414,9 @@ async def _fetch_recent_minute_rows(symbol_code: str, *, lookback_days: int = 7)
                 chunk_days=4,
                 cont_flag=1,
             )
-            if rows:
-                return rows, "fyers_continuous_futures", futures_symbol
+            selected = _choose_source(rows, "fyers_continuous_futures", futures_symbol)
+            if selected is not None:
+                return selected
         except Exception:
             pass
         try:
@@ -388,8 +429,9 @@ async def _fetch_recent_minute_rows(symbol_code: str, *, lookback_days: int = 7)
                 chunk_days=4,
                 cont_flag=1,
             )
-            if rows:
-                return rows, "fyers_spot_index", fyers_symbol
+            selected = _choose_source(rows, "fyers_spot_index", fyers_symbol)
+            if selected is not None:
+                return selected
         except Exception:
             pass
 
@@ -424,8 +466,9 @@ async def _fetch_recent_minute_rows(symbol_code: str, *, lookback_days: int = 7)
                 }
                 for candle in reversed(candles)
             ]
-            if rows:
-                return rows, "upstox_spot_index", upstox_symbol
+            selected = _choose_source(rows, "upstox_spot_index", upstox_symbol)
+            if selected is not None:
+                return selected
 
     # ── CSV fallback: use locally downloaded 1-min spot data ─────────────────
     try:
@@ -454,12 +497,59 @@ async def _fetch_recent_minute_rows(symbol_code: str, *, lookback_days: int = 7)
                             })
                     except Exception:
                         continue
-            if rows:
-                return rows, "local_csv_spot", csv_path.name
+            selected = _choose_source(rows, "local_csv_spot", csv_path.name)
+            if selected is not None:
+                return selected
     except Exception:
         pass
 
+    if best_available is not None:
+        return best_available
     return [], "none", futures_symbol
+
+
+async def _fetch_persisted_spot_rows(
+    symbol_code: str,
+    *,
+    from_date: date,
+) -> list[dict[str, Any]]:
+    from_time = datetime.combine(from_date, time.min, tzinfo=IST).astimezone(timezone.utc)
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT time, open, high, low, close, volume
+                FROM underlying_spot_candles
+                WHERE underlying = :underlying
+                  AND interval = '1minute'
+                  AND time >= :from_time
+                ORDER BY time ASC
+                """
+            ),
+            {
+                "underlying": symbol_code,
+                "from_time": from_time,
+            },
+        )
+        rows = result.mappings().all()
+
+    return [
+        {
+            "time": row["time"].astimezone(timezone.utc).isoformat()
+            if isinstance(row["time"], datetime) and row["time"].tzinfo is not None
+            else (
+                row["time"].replace(tzinfo=timezone.utc).isoformat()
+                if isinstance(row["time"], datetime)
+                else str(row["time"])
+            ),
+            "open": float(row["open"] or row["close"] or 0.0),
+            "high": float(row["high"] or row["close"] or 0.0),
+            "low": float(row["low"] or row["close"] or 0.0),
+            "close": float(row["close"] or 0.0),
+            "volume": int(row["volume"] or 0),
+        }
+        for row in rows
+    ]
 
 
 def _resolve_analytics_root():
@@ -622,6 +712,284 @@ def _aggregate_rows(rows: list[dict[str, Any]], *, interval_minutes: int) -> lis
     if bucket is not None:
         aggregated.append(bucket)
     return aggregated
+
+
+async def _build_order_flow_inputs(
+    *,
+    app_symbol: str,
+    current_rows: list[dict[str, Any]],
+    current_tick: Tick | None,
+    quote_override: dict[str, Any] | None,
+    tick_size: float,
+    snapshot_mode: str,
+) -> dict[str, Any]:
+    recent_ticks = await _fetch_recent_tick_rows(
+        app_symbol,
+        snapshot_end=_row_time(current_rows[-1]).astimezone(timezone.utc),
+    )
+    if current_tick is not None:
+        recent_ticks = _append_live_tick_row(recent_ticks, current_tick)
+
+    quote_history_payload = _build_quote_history_from_ticks(recent_ticks, tick_size=tick_size)
+    if snapshot_mode == "live_session" and len(quote_history_payload) >= 4:
+        latest_quote = quote_history_payload[-1]
+        depth_payload = _build_depth_from_tick_history(
+            quote_history_payload,
+            tick_size=tick_size,
+        )
+        trades_payload = _build_trade_prints_from_ticks(
+            recent_ticks,
+            tick_size=tick_size,
+        )
+        if len(trades_payload) < 4:
+            trades_payload = _infer_trade_prints(current_rows)
+
+        quote_timestamp = datetime.fromisoformat(str(latest_quote["timestamp"]))
+        stale_data_seconds = max(
+            0.0,
+            (datetime.now(timezone.utc) - quote_timestamp.astimezone(timezone.utc)).total_seconds(),
+        )
+        return {
+            "quote": {
+                **latest_quote,
+                "last_price": latest_quote["last_price"],
+            },
+            "depth": depth_payload,
+            "trades": trades_payload,
+            "quote_history": quote_history_payload,
+            "quote_source": "market_ticks",
+            "order_flow_source": "tick_reconstruction",
+            "stale_data_seconds": stale_data_seconds,
+        }
+
+    quote_payload, quote_source, stale_data_seconds = _build_quote_from_snapshot(
+        current_rows,
+        current_tick,
+        quote_override=quote_override,
+        tick_size=tick_size,
+        snapshot_mode=snapshot_mode,
+    )
+    return {
+        "quote": quote_payload,
+        "depth": _build_depth_from_quote(quote_payload, tick_size=tick_size),
+        "trades": _infer_trade_prints(current_rows),
+        "quote_history": [
+            {
+                "timestamp": quote_payload["timestamp"],
+                "bid": quote_payload["bid"],
+                "ask": quote_payload["ask"],
+                "bid_size": quote_payload["bid_size"],
+                "ask_size": quote_payload["ask_size"],
+                "last_price": quote_payload["last_price"],
+            }
+        ],
+        "quote_source": quote_source,
+        "order_flow_source": "bar_inference",
+        "stale_data_seconds": stale_data_seconds,
+    }
+
+
+async def _fetch_recent_tick_rows(
+    symbol: str,
+    *,
+    snapshot_end: datetime,
+) -> list[dict[str, Any]]:
+    lookback_minutes = int(DEFAULT_CONFIG.get("order_flow", {}).get("tick_lookback_minutes", 20))
+    from_time = max(
+        snapshot_end - timedelta(minutes=max(lookback_minutes, 1)),
+        datetime.combine(snapshot_end.astimezone(IST).date(), SESSION_OPEN, tzinfo=IST).astimezone(timezone.utc),
+    )
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT time, ltp, bid, ask, bid_qty, ask_qty, volume, oi
+                FROM market_ticks
+                WHERE symbol = :symbol
+                  AND time >= :from_time
+                  AND time <= :snapshot_end
+                ORDER BY time ASC
+                LIMIT 600
+                """
+            ),
+            {
+                "symbol": symbol,
+                "from_time": from_time,
+                "snapshot_end": snapshot_end,
+            },
+        )
+        rows = result.mappings().all()
+
+    return [
+        {
+            "timestamp": _row_time_from_value(row["time"]).astimezone(timezone.utc),
+            "ltp": float(row["ltp"] or 0.0),
+            "bid": float(row["bid"] or 0.0),
+            "ask": float(row["ask"] or 0.0),
+            "bid_qty": float(row["bid_qty"] or 0.0),
+            "ask_qty": float(row["ask_qty"] or 0.0),
+            "volume": float(row["volume"] or 0.0),
+            "oi": float(row["oi"] or 0.0),
+        }
+        for row in rows
+    ]
+
+
+def _append_live_tick_row(
+    rows: list[dict[str, Any]],
+    tick: Tick,
+) -> list[dict[str, Any]]:
+    timestamp = tick.timestamp or datetime.now(timezone.utc)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    else:
+        timestamp = timestamp.astimezone(timezone.utc)
+
+    if rows and rows[-1]["timestamp"] >= timestamp:
+        return rows
+
+    return rows + [
+        {
+            "timestamp": timestamp,
+            "ltp": float(tick.ltp or 0.0),
+            "bid": float(tick.bid or 0.0),
+            "ask": float(tick.ask or 0.0),
+            "bid_qty": float(tick.bid_qty or 0.0),
+            "ask_qty": float(tick.ask_qty or 0.0),
+            "volume": float(tick.volume or 0.0),
+            "oi": float(tick.oi or 0.0),
+        }
+    ]
+
+
+def _build_quote_history_from_ticks(
+    rows: list[dict[str, Any]],
+    *,
+    tick_size: float,
+) -> list[dict[str, Any]]:
+    history: list[dict[str, Any]] = []
+    for row in rows:
+        ltp = float(row.get("ltp") or 0.0)
+        if ltp <= 0:
+            continue
+        bid = float(row.get("bid") or 0.0)
+        ask = float(row.get("ask") or 0.0)
+        if bid <= 0 and ask <= 0:
+            bid = round(ltp - (tick_size / 2.0), 4)
+            ask = round(ltp + (tick_size / 2.0), 4)
+        elif bid <= 0:
+            bid = round(ask - max(tick_size, 0.01), 4)
+        elif ask <= 0:
+            ask = round(bid + max(tick_size, 0.01), 4)
+        history.append(
+            {
+                "timestamp": _row_time_from_value(row["timestamp"]).astimezone(timezone.utc).isoformat(),
+                "bid": bid,
+                "ask": ask,
+                "bid_size": max(float(row.get("bid_qty") or 0.0), 1.0),
+                "ask_size": max(float(row.get("ask_qty") or 0.0), 1.0),
+                "last_price": ltp,
+            }
+        )
+    return history
+
+
+def _build_depth_from_tick_history(
+    quote_history: list[dict[str, Any]],
+    *,
+    tick_size: float,
+) -> dict[str, Any]:
+    latest = quote_history[-1]
+    bid = float(latest["bid"])
+    ask = float(latest["ask"])
+    bid_size = max(float(latest["bid_size"]), 1.0)
+    ask_size = max(float(latest["ask_size"]), 1.0)
+    avg_bid_size = sum(float(item["bid_size"]) for item in quote_history[-12:]) / max(len(quote_history[-12:]), 1)
+    avg_ask_size = sum(float(item["ask_size"]) for item in quote_history[-12:]) / max(len(quote_history[-12:]), 1)
+    bid_anchor = max(bid_size, avg_bid_size)
+    ask_anchor = max(ask_size, avg_ask_size)
+    decay = (1.0, 0.72, 0.51)
+    return {
+        "timestamp": str(latest["timestamp"]),
+        "bids": [
+            {
+                "price": round(bid - (tick_size * level), 4),
+                "quantity": round(max(bid_anchor * factor, 1.0), 2),
+            }
+            for level, factor in enumerate(decay)
+        ],
+        "asks": [
+            {
+                "price": round(ask + (tick_size * level), 4),
+                "quantity": round(max(ask_anchor * factor, 1.0), 2),
+            }
+            for level, factor in enumerate(decay)
+        ],
+    }
+
+
+def _build_trade_prints_from_ticks(
+    rows: list[dict[str, Any]],
+    *,
+    tick_size: float,
+) -> list[dict[str, Any]]:
+    if len(rows) < 2:
+        return []
+
+    prints: list[dict[str, Any]] = []
+    prev = rows[0]
+    for row in rows[1:]:
+        price = float(row.get("ltp") or 0.0)
+        if price <= 0:
+            prev = row
+            continue
+        prev_price = float(prev.get("ltp") or 0.0)
+        volume_delta = max(float(row.get("volume") or 0.0) - float(prev.get("volume") or 0.0), 0.0)
+        side = _classify_trade_side(row, prev, tick_size=tick_size)
+        if volume_delta <= 0 and side == "unknown":
+            prev = row
+            continue
+        quantity = volume_delta if volume_delta > 0 else 1.0
+        if quantity <= 0 and price != prev_price:
+            quantity = 1.0
+        prints.append(
+            {
+                "timestamp": _row_time_from_value(row["timestamp"]).astimezone(timezone.utc).isoformat(),
+                "price": price,
+                "quantity": round(quantity, 2),
+                "aggressor_side": side,
+            }
+        )
+        prev = row
+
+    return prints[-120:]
+
+
+def _classify_trade_side(
+    row: dict[str, Any],
+    prev: dict[str, Any],
+    *,
+    tick_size: float,
+) -> str:
+    price = float(row.get("ltp") or 0.0)
+    prev_price = float(prev.get("ltp") or 0.0)
+    prev_bid = float(prev.get("bid") or 0.0)
+    prev_ask = float(prev.get("ask") or 0.0)
+    tolerance = max(tick_size / 2.0, 0.01)
+
+    if prev_ask > 0 and price >= (prev_ask - tolerance):
+        return "buy"
+    if prev_bid > 0 and price <= (prev_bid + tolerance):
+        return "sell"
+    if price > prev_price:
+        return "buy"
+    if price < prev_price:
+        return "sell"
+    if float(row.get("bid") or 0.0) > prev_bid:
+        return "buy"
+    if float(row.get("ask") or 0.0) < prev_ask:
+        return "sell"
+    return "unknown"
 
 
 def _build_quote_from_snapshot(
@@ -831,11 +1199,17 @@ async def _load_portfolio_snapshot(session_symbol: str) -> dict[str, Any]:
 
 
 def _row_time(row: dict[str, Any]) -> datetime:
-    raw = str(row.get("time") or row.get("timestamp") or "")
-    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    return _row_time_from_value(row.get("time") or row.get("timestamp") or "").astimezone(IST)
+
+
+def _row_time_from_value(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(IST)
+    return parsed
 
 
 def _parse_bar(item: dict[str, Any]) -> dict[str, Any]:

@@ -192,3 +192,11 @@ export function createCommodityOverviewSocket(
 ): ReconnectingWS {
   return createReconnectingSocket(`${WS_URL}/ws/commodity-overview`, onMessage, onStatusChange);
 }
+
+export function createFractalMarketProfileSocket(
+  symbol: string,
+  onMessage: (data: unknown) => void,
+  onStatusChange?: (connected: boolean) => void,
+): ReconnectingWS {
+  return createReconnectingSocket(`${WS_URL}/ws/fractal-market-profile/${encodeURIComponent(symbol)}`, onMessage, onStatusChange);
+}

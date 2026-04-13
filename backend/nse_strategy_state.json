@@ -1,13 +1,174 @@
 {
-  "last_run_at": "2026-04-09T14:59:07.612330+05:30",
+  "last_run_at": "2026-04-13T15:25:00+05:30",
   "last_error": null,
-  "last_message": "Market closed. Showing last live strategy state from 2026-04-09T14:59:07.612330+05:30.",
+  "last_message": "Market closed. Showing last live strategy state from 2026-04-13T15:25:00+05:30.",
   "last_expiry": "2026-04-23",
   "last_candidate_expiries": [
-    "2026-04-23",
-    "2026-04-22"
+    "2026-04-23"
   ],
   "commentary": [
+    {
+      "time": "2026-04-13T22:10:27.571054+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-13T22:10:27.566808+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 2 trend-aligned lanes from 2026-04-13."
+    },
+    {
+      "time": "2026-04-13T20:27:34.314992+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-13T20:27:34.304449+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 1 trend-aligned lanes from 2026-04-13."
+    },
+    {
+      "time": "2026-04-13T20:26:05.599617+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-13T20:26:05.589458+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 1 trend-aligned lanes from 2026-04-13."
+    },
+    {
+      "time": "2026-04-13T20:16:13.840198+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-13T20:16:13.835587+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-13T20:14:36.745709+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-13T20:14:36.740929+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-13T09:35:53.447250+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-04-12T00:55:41.065393+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-12T00:55:41.060023+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T21:52:15.095507+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T21:52:15.088071+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T21:31:20.042397+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T21:30:58.738309+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Option history warnings detected: fyers: 46 failure(s), latest 'Fyers data API error 429: request limit reached'."
+    },
+    {
+      "time": "2026-04-11T21:30:58.738291+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Scan complete. 220 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-04-11T21:29:20.005552+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T21:29:19.997362+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T21:28:59.263379+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Option history warnings detected: fyers: 70 failure(s), latest 'Fyers data API error 429: request limit reached'."
+    },
+    {
+      "time": "2026-04-11T21:26:26.192874+05:30",
+      "scope": "System",
+      "tone": "success",
+      "message": "Scan complete. 220 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-04-11T21:25:00.555675+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T21:25:00.546771+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T21:23:24.885462+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-04-11T21:23:24.871560+05:30",
+      "scope": "System",
+      "tone": "info",
+      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
+    },
+    {
+      "time": "2026-04-11T21:22:57.481379+05:30",
+      "scope": "System",
+      "tone": "success",
+      "message": "Scan complete. 220 rows, S1=2, S2=0."
+    },
     {
       "time": "2026-04-11T17:26:03.759988+05:30",
       "scope": "System",
@@ -85,168 +246,6 @@
       "scope": "System",
       "tone": "info",
       "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
-    },
-    {
-      "time": "2026-04-11T16:11:55.399901+05:30",
-      "scope": "System",
-      "tone": "error",
-      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
-    },
-    {
-      "time": "2026-04-11T15:17:35.871860+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-11T15:17:35.863086+05:30",
-      "scope": "System",
-      "tone": "info",
-      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
-    },
-    {
-      "time": "2026-04-11T15:16:38.678653+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-11T15:16:38.670644+05:30",
-      "scope": "System",
-      "tone": "info",
-      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
-    },
-    {
-      "time": "2026-04-11T15:15:25.611089+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-11T15:15:25.603557+05:30",
-      "scope": "System",
-      "tone": "info",
-      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
-    },
-    {
-      "time": "2026-04-11T15:13:36.741566+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-11T15:13:36.732779+05:30",
-      "scope": "System",
-      "tone": "info",
-      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
-    },
-    {
-      "time": "2026-04-11T15:07:09.963162+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-11T15:07:09.955453+05:30",
-      "scope": "System",
-      "tone": "info",
-      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
-    },
-    {
-      "time": "2026-04-11T14:53:56.736932+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-11T14:53:56.720559+05:30",
-      "scope": "System",
-      "tone": "info",
-      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
-    },
-    {
-      "time": "2026-04-11T14:52:15.647928+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-11T14:52:15.624467+05:30",
-      "scope": "System",
-      "tone": "info",
-      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
-    },
-    {
-      "time": "2026-04-11T14:47:23.027869+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-11T14:47:23.018051+05:30",
-      "scope": "System",
-      "tone": "info",
-      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 0 trend-aligned lanes from 2026-04-11."
-    },
-    {
-      "time": "2026-04-11T14:33:28.455961+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-11T14:33:28.447589+05:30",
-      "scope": "System",
-      "tone": "info",
-      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 2 entry-ready and 61 trend-aligned lanes from 2026-04-10."
-    },
-    {
-      "time": "2026-04-11T14:16:57.465169+05:30",
-      "scope": "System",
-      "tone": "error",
-      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
-    },
-    {
-      "time": "2026-04-11T14:16:57.456978+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-11T14:16:12.517149+05:30",
-      "scope": "System",
-      "tone": "error",
-      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
-    },
-    {
-      "time": "2026-04-11T14:16:12.509464+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-11T14:16:00.644332+05:30",
-      "scope": "System",
-      "tone": "error",
-      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
-    },
-    {
-      "time": "2026-04-11T14:16:00.633197+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-11T14:15:46.092432+05:30",
-      "scope": "System",
-      "tone": "error",
-      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
-    },
-    {
-      "time": "2026-04-10T22:42:24.386872+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
     }
   ],
   "strategies": {
@@ -261,20 +260,37 @@
         "mode": "market_closed",
         "recovered_trading_day": "2026-04-09",
         "historical_signal_count": 36,
-        "updated_at": "2026-04-11T21:13:32.723767+05:30",
+        "updated_at": "2026-04-13T22:12:27.621865+05:30",
         "broker_snapshot": {
           "connected_brokers": [],
           "upstox_ready": false,
           "fyers_ready": false,
           "broker_ready": false,
           "upstox_token_health": {
-            "status": "expired_reconnect_required"
+            "connected": false,
+            "source": "active_session",
+            "valid": false,
+            "status": "expired_reconnect_required",
+            "checked_at": "2026-04-13T08:40:29.759937+00:00",
+            "has_saved_token": true,
+            "needs_reconnect": true,
+            "message": "Saved Upstox access token is invalid. Upstox does not provide refresh tokens for this flow, so reconnect Upstox in Settings.",
+            "expires_at_ist": "2026-04-14T03:30:00+05:30"
           },
           "fyers_token_health": {
-            "status": "expired_reconnect_required"
+            "connected": false,
+            "source": "active_session",
+            "valid": false,
+            "status": "expired_reconnect_required",
+            "checked_at": "2026-04-13T08:40:29.779881+00:00",
+            "has_saved_token": true,
+            "needs_reconnect": true,
+            "message": "Saved Fyers access token is invalid. Reconnect Fyers in Settings."
           }
         },
-        "market_state": "closed"
+        "market_state": "closed",
+        "scan_interval": "30minute",
+        "watchlist_rows": 220
       },
       "recent_events": [
         {
@@ -308,6 +324,7 @@
       ],
       "positions": [
         {
+          "signal_id": "1e617eb6-e378-5940-93e9-f9bbae229f22",
           "symbol": "OPT:AUROPHARMA:2026-04-30:1340:CE",
           "underlying": "AUROPHARMA",
           "expiry": "2026-04-30",
@@ -329,12 +346,19 @@
           "trailing_stop": null,
           "entry_iv_pct": null,
           "spot_setup": null,
+          "regime": null,
+          "option_ma20": null,
+          "option_ma50": null,
+          "above_option_ma20": false,
+          "above_option_ma50": false,
+          "first_pullback_ignored_at": null,
           "window_end": null,
           "lot_size": null,
           "price_updated_at": null,
           "macd_line": null
         },
         {
+          "signal_id": "05f08027-5d8f-5c0c-ab0a-4b1373b32bee",
           "symbol": "OPT:LUPIN:2026-04-30:2300:CE",
           "underlying": "LUPIN",
           "expiry": "2026-04-30",
@@ -356,6 +380,12 @@
           "trailing_stop": null,
           "entry_iv_pct": null,
           "spot_setup": null,
+          "regime": null,
+          "option_ma20": null,
+          "option_ma50": null,
+          "above_option_ma20": false,
+          "above_option_ma50": false,
+          "first_pullback_ignored_at": null,
           "window_end": null,
           "lot_size": null,
           "price_updated_at": null,
@@ -1484,6 +1514,22 @@
           {
             "time": "2026-04-10T09:59:18.553003+05:30",
             "equity": 974757.0
+          },
+          {
+            "time": "2026-04-11T15:52:57.481425+05:30",
+            "equity": 1017632.0
+          },
+          {
+            "time": "2026-04-11T15:56:26.192980+05:30",
+            "equity": 1017632.0
+          },
+          {
+            "time": "2026-04-11T15:58:59.263434+05:30",
+            "equity": 1017632.0
+          },
+          {
+            "time": "2026-04-11T16:00:58.738330+05:30",
+            "equity": 1017632.0
           }
         ]
       }
@@ -1491,43 +1537,53 @@
     "index_mp_strategy": {
       "entries": 0,
       "exits": 0,
-      "last_scan_at": "2026-04-09T15:20:00+05:30",
-      "last_message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required.",
+      "last_scan_at": "2026-04-13T15:25:00+05:30",
+      "last_message": "Recovered Strategy 2 from 2026-04-13: 0 entry-ready, 2 trend-aligned.",
       "processed_signals": {},
       "signal_lane": [
         {
+          "strategy": "Strategy 2",
+          "source": "historical_replay",
           "underlying": "NIFTY",
+          "signal_date": "2026-04-13",
+          "trade_date": "historical replay",
+          "as_of": "2026-04-13T22:00:00+05:30",
+          "direction": "PE",
+          "reason": "holding_below_poc",
+          "strength": "monitoring",
           "status": "trend-aligned",
-          "freshness": "live",
-          "instruction": "NIFTY aligned"
+          "freshness": "session-close",
+          "instruction": "NIFTY: MP balance_below_poc gate is aligned; waiting for the next fresh trigger.",
+          "mp_day_type": "balance_below_poc",
+          "spot_price": 23818.9,
+          "poc": 23841.0,
+          "vah": 23904.5,
+          "val": 23718.0,
+          "option_last_bar_time": "2026-04-13T15:25:00+05:30",
+          "spot_last_time": "2026-04-13T15:29:00+05:30",
+          "spot_source": "historical",
+          "spot_session_date": "2026-04-13"
         }
       ],
       "meta": {
         "mode": "market_closed",
         "scan_interval": "5minute",
-        "watchlist_rows": 0,
+        "watchlist_rows": 1,
+        "updated_at": "2026-04-13T22:12:27.621865+05:30",
         "pipeline": [
           {
             "name": "Strategy 2 NIFTY",
             "status": "ok",
-            "rows": 45,
-            "last_date": "2026-04-09 15:20"
+            "rows": 375,
+            "last_date": "2026-04-13T15:25:00+05:30",
+            "detail": "Historical replay \u00b7 MP balance_below_poc \u00b7 trend-aligned",
+            "freshness": "session-close"
           }
         ],
-        "updated_at": "2026-04-11T21:13:32.723767+05:30",
-        "market_state": "closed",
-        "broker_snapshot": {
-          "connected_brokers": [],
-          "upstox_ready": false,
-          "fyers_ready": false,
-          "broker_ready": false,
-          "upstox_token_health": {
-            "status": "expired_reconnect_required"
-          },
-          "fyers_token_health": {
-            "status": "expired_reconnect_required"
-          }
-        }
+        "recovered_trading_day": "2026-04-13",
+        "entry_ready_count": 0,
+        "trend_aligned_count": 2,
+        "market_state": "closed"
       },
       "recent_events": [],
       "positions": [],
@@ -2492,6 +2548,22 @@
           },
           {
             "time": "2026-04-10T09:59:18.556527+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-11T15:52:57.483173+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-11T15:56:26.196844+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-11T15:58:59.266727+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-11T16:00:58.742608+05:30",
             "equity": 1000000.0
           }
         ]

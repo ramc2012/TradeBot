@@ -24,6 +24,7 @@ class DataRouter:
         self._ws_client: Any = None
         self._subscribed_symbols: List[str] = []
         self._callbacks: Dict[str, List[Callable[[Tick], None]]] = {}
+        self._global_callbacks: List[Callable[[Tick], None]] = []
         self._tick_buffer: Dict[str, Tick] = {}  # latest tick per symbol
         self._mock_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -33,6 +34,10 @@ class DataRouter:
 
     def register_callback(self, symbol: str, callback: Callable[[Tick], None]):
         self._callbacks.setdefault(symbol, []).append(callback)
+
+    def register_global_callback(self, callback: Callable[[Tick], None]):
+        if callback not in self._global_callbacks:
+            self._global_callbacks.append(callback)
 
     async def subscribe(self, symbols: List[str]):
         if not self._broker:
@@ -80,6 +85,11 @@ class DataRouter:
                 cb(tick)
             except Exception as e:
                 logger.error(f"[DataRouter] Callback error for {tick.symbol}: {e}")
+        for cb in self._global_callbacks:
+            try:
+                cb(tick)
+            except Exception as e:
+                logger.error(f"[DataRouter] Global callback error for {tick.symbol}: {e}")
         # Fyers websocket callbacks can arrive on a non-async thread.
         try:
             running_loop = asyncio.get_running_loop()

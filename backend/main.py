@@ -14,9 +14,11 @@ from api.routers import fo_data as fo_data_router
 from api.routers import analysis as analysis_router
 from api.routers import strategy as strategy_router
 from api.routers import auction_intelligence as auction_intelligence_router
+from api.routers import fractal_market_profile as fractal_market_profile_router
 from api.routers import system as system_router
 from api.websockets.ticks import (
     ws_commodity_overview,
+    ws_fractal_market_profile,
     ws_layout,
     ws_positions,
     ws_positions_overview,
@@ -28,7 +30,9 @@ from api.websockets.ticks import (
     ws_ticks,
 )
 from market_data import data_router as market_data_router
+from market_data.live_candle_store import live_candle_store
 from market_data.symbols import LIVE_INDEX_APP_SYMBOLS
+from auction_intelligence.rl.automation import rl_auto_trainer
 from paper_engine.commodity_strategy_agent import commodity_strategy_agent
 from paper_engine.strategy_agent import paper_strategy_agent
 
@@ -59,6 +63,8 @@ async def lifespan(app: FastAPI):
     from market_data.market_profile import market_profile_builder
     for symbol in LIVE_INDEX_APP_SYMBOLS:
         market_data_router.register_callback(symbol, market_profile_builder.on_tick)
+    market_data_router.register_global_callback(live_candle_store.on_tick)
+    await live_candle_store.start()
 
     # Prefer the real broker feed when a session exists; fall back to mock only otherwise.
     if adapter:
@@ -82,12 +88,19 @@ async def lifespan(app: FastAPI):
         logger.info("✓ RL Q-table cache loaded")
     except Exception as e:
         logger.warning(f"RL Q-table cache load skipped: {e}")
+    try:
+        await rl_auto_trainer.start()
+        logger.info("✓ RL auto-trainer scheduled")
+    except Exception as e:
+        logger.warning(f"RL auto-trainer start skipped: {e}")
 
     yield
 
     # Shutdown
+    await rl_auto_trainer.stop()
     await paper_strategy_agent.stop()
     await commodity_strategy_agent.stop()
+    await live_candle_store.stop()
     await market_data_router.stop_mock_feed()
     await close_redis()
     await market_data_router.unsubscribe()
@@ -122,6 +135,7 @@ app.include_router(fo_data_router.router)
 app.include_router(analysis_router.router)
 app.include_router(strategy_router.router)
 app.include_router(auction_intelligence_router.router)
+app.include_router(fractal_market_profile_router.router)
 app.include_router(system_router.router)
 
 
@@ -169,6 +183,11 @@ async def websocket_positions_overview(websocket: WebSocket):
 @app.websocket("/ws/commodity-overview")
 async def websocket_commodity_overview(websocket: WebSocket):
     await ws_commodity_overview(websocket)
+
+
+@app.websocket("/ws/fractal-market-profile/{symbol}")
+async def websocket_fractal_market_profile(websocket: WebSocket, symbol: str):
+    await ws_fractal_market_profile(websocket, symbol)
 
 
 @app.websocket("/ws/proposals")

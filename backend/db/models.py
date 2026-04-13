@@ -264,3 +264,21 @@ class ShadowObservation(Base):
     manual_override_tested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     details: Mapped[Optional[Any]] = mapped_column("metadata", JSON)
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class RLPolicyVersion(Base):
+    __tablename__ = "rl_policy_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    version_name: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="candidate", index=True)
+    source: Mapped[str] = mapped_column(String(30), nullable=False, default="manual")
+    symbol: Mapped[Optional[str]] = mapped_column(String(50))
+    trained_on: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    skipped: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    average_reward: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    metrics: Mapped[Optional[Any]] = mapped_column(JSON)
+    qtable_snapshot: Mapped[Any] = mapped_column(JSON, nullable=False)
+    promotion_reason: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    promoted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))

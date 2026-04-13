@@ -14,20 +14,34 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from auction_intelligence.rl.policy import rl_policy, decode_action, DEFAULT_ACTION_IDX, N_ACTIONS
+from auction_intelligence.rl.policy import QLearningPolicy, rl_policy, encode_action, N_ACTIONS
 from auction_intelligence.rl.reward import compute_proxy_reward, compute_reward
-from auction_intelligence.rl.state import MPState, _day_type_idx, _tail_bin, _ib_bin
+from auction_intelligence.rl.state import MPState, extract_state_from_bins, _ib_bin
 
 logger = logging.getLogger(__name__)
 
 # Regime label → integer for day_type lookup
-_REGIME_LABELS = [
-    "trend_day", "trend_continuation", "breakout_acceptance",
-    "balance", "developing_balance",
-    "rotational_day", "neutral_extreme",
-    "failed_auction", "breakout_rejection", "reversal",
-    "no_trade",
-]
+def _safe_float(value: object, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: object, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _decision_metadata(record: dict[str, Any]) -> dict[str, Any]:
+    meta = record.get("metadata") or {}
+    return meta.get("decision_metadata") or {}
+
+
+def _diagnostics(record: dict[str, Any]) -> dict[str, Any]:
+    return _decision_metadata(record).get("diagnostics") or {}
 
 
 def _state_from_record(record: dict[str, Any]) -> MPState | None:
@@ -40,33 +54,47 @@ def _state_from_record(record: dict[str, Any]) -> MPState | None:
     if action_str == "FLAT":
         return None  # No state for FLAT decisions
 
-    direction = 1 if action_str == "SHORT" else 0
     regime_label = str(record.get("regime_label") or "no_trade")
-
-    # Extract tail / IB info from metadata if available
+    decision_meta = _decision_metadata(record)
     meta = record.get("metadata") or {}
-    decision_meta = meta.get("decision_metadata") or {}
-    diagnostics = decision_meta.get("diagnostics") or {}
 
-    # Infer buyer/seller fail from diagnostics if stored
-    buyer_fail_bin = int(meta.get("buyer_fail_bin", 0))
-    seller_fail_bin = int(meta.get("seller_fail_bin", 0))
-    ib_size_bin = int(meta.get("ib_size_bin", 1))
+    state_key = str(decision_meta.get("rl_state_key") or meta.get("rl_state_key") or "")
+    parsed_state = MPState.from_key(state_key)
+    if parsed_state is not None:
+        return parsed_state
 
-    # Use close_price and computed tolerance as ib proxy
-    close_price = float(diagnostics.get("close_price") or 0.0)
-    vah = float(diagnostics.get("vah") or 0.0)
-    val = float(diagnostics.get("val") or 0.0)
+    diagnostics = _diagnostics(record)
+
+    buyer_fail_bin = _safe_int(
+        decision_meta.get("buyer_fail_bin", meta.get("buyer_fail_bin")),
+        0,
+    )
+    seller_fail_bin = _safe_int(
+        decision_meta.get("seller_fail_bin", meta.get("seller_fail_bin")),
+        0,
+    )
+    ib_size_bin = _safe_int(
+        decision_meta.get("ib_size_bin", meta.get("ib_size_bin")),
+        1,
+    )
+
+    close_price = _safe_float(diagnostics.get("close_price"), 0.0)
+    vah = _safe_float(diagnostics.get("vah"), 0.0)
+    val = _safe_float(diagnostics.get("val"), 0.0)
     ib_range = vah - val  # rough IB proxy from value area
     if ib_range > 0 and close_price > 0:
         ib_size_bin = _ib_bin(ib_range, close_price)
 
-    return MPState(
-        day_type_idx=_day_type_idx(regime_label, direction),
+    return extract_state_from_bins(
+        regime_label=regime_label,
+        direction=action_str,
         buyer_fail_bin=buyer_fail_bin,
         seller_fail_bin=seller_fail_bin,
         ib_size_bin=ib_size_bin,
-        direction=direction,
+        trade_imbalance=_safe_float(diagnostics.get("trade_imbalance"), 0.0),
+        book_pressure=_safe_float(diagnostics.get("book_pressure"), 0.0),
+        toxicity_score=_safe_float(diagnostics.get("toxicity_score"), 0.5),
+        timing_confidence=_safe_float(diagnostics.get("timing_confidence"), 0.5),
     )
 
 
@@ -78,23 +106,159 @@ def _action_from_record(record: dict[str, Any]) -> int:
     Defaults to DEFAULT_ACTION_IDX if nothing can be inferred.
     """
     meta = record.get("metadata") or {}
-    rl_action_idx = meta.get("rl_action_idx")
+    decision_meta = _decision_metadata(record)
+    rl_action_idx = decision_meta.get("rl_action_idx", meta.get("rl_action_idx"))
     if rl_action_idx is not None:
-        idx = int(rl_action_idx)
+        try:
+            idx = int(rl_action_idx)
+        except (TypeError, ValueError):
+            idx = -1
         if 0 <= idx < N_ACTIONS:
             return idx
 
-    # Infer from confidence — pick action tier
-    confidence = float(record.get("confidence") or 0.62)
-    if confidence >= 0.70:
-        conf_idx = 2
-    elif confidence >= 0.62:
-        conf_idx = 1
-    else:
-        conf_idx = 0
+    return encode_action(
+        min_confidence=_safe_float(
+            decision_meta.get("min_confidence"),
+            _safe_float(record.get("confidence"), 0.62),
+        ),
+        risk_multiple=_safe_float(decision_meta.get("risk_multiple"), 2.0),
+        sleeve_fraction=_safe_float(decision_meta.get("sleeve_fraction"), 0.35),
+    )
 
-    # Default risk and size
-    return conf_idx * 9 + 1 * 3 + 1  # risk_idx=1 (2.0×), size_idx=1 (0.35)
+
+def _reward_kwargs(record: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = _diagnostics(record)
+    return {
+        "fill_drift_ticks": record.get("fill_drift_ticks"),
+        "stale_signal": bool(record.get("stale_signal", False)),
+        "reconciliation_status": record.get("reconciliation_status"),
+        "toxicity_score": diagnostics.get("toxicity_score"),
+        "adverse_selection_risk": diagnostics.get("adverse_selection_risk"),
+        "timing_confidence": diagnostics.get("timing_confidence"),
+    }
+
+
+def _reward_from_record(record: dict[str, Any], *, use_proxy_reward: bool) -> float | None:
+    if use_proxy_reward:
+        return compute_proxy_reward(
+            action=record["action"],
+            entry_price=record["entry_price"],
+            stop_price=record["stop_price"],
+            target_price=record["target_price"],
+            confidence=float(record.get("confidence") or 0.62),
+            **_reward_kwargs(record),
+        )
+
+    metadata = record.get("metadata") or {}
+    decision_meta = _decision_metadata(record)
+    outcome = metadata.get("outcome") or decision_meta.get("outcome")
+    exit_price = (
+        metadata.get("exit_price")
+        or decision_meta.get("exit_price")
+        or record.get("observed_fill_price")
+    )
+    if not outcome:
+        return None
+    return compute_reward(
+        action=record["action"],
+        entry_price=record["entry_price"],
+        stop_price=record["stop_price"],
+        target_price=record["target_price"],
+        outcome=outcome,
+        exit_price=exit_price,
+        confidence=float(record.get("confidence") or 0.62),
+        **_reward_kwargs(record),
+    )
+
+
+async def fetch_training_records(
+    *,
+    max_trades: int = 500,
+    symbol: str | None = None,
+) -> list[dict[str, Any]]:
+    from db.database import AsyncSessionLocal
+    from sqlalchemy import text
+
+    where_clauses = [
+        "action != 'FLAT'",
+        "entry_price IS NOT NULL",
+        "stop_price IS NOT NULL",
+        "target_price IS NOT NULL",
+    ]
+    params: dict[str, Any] = {"limit": max_trades}
+
+    if symbol:
+        where_clauses.append("symbol = :symbol")
+        params["symbol"] = symbol
+
+    where_sql = " AND ".join(where_clauses)
+    sql = f"""
+        SELECT signal_id, symbol, action, regime_label, confidence,
+               entry_price, stop_price, target_price,
+               observed_fill_price, fill_drift_ticks, stale_signal,
+               reconciliation_status, metadata
+        FROM shadow_observations
+        WHERE {where_sql}
+        ORDER BY recorded_at DESC
+        LIMIT :limit
+    """
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(text(sql), params)
+        return [
+            {
+                "signal_id": row.signal_id,
+                "symbol": row.symbol,
+                "action": row.action,
+                "regime_label": row.regime_label,
+                "confidence": row.confidence,
+                "entry_price": row.entry_price,
+                "stop_price": row.stop_price,
+                "target_price": row.target_price,
+                "observed_fill_price": row.observed_fill_price,
+                "fill_drift_ticks": row.fill_drift_ticks,
+                "stale_signal": row.stale_signal,
+                "reconciliation_status": row.reconciliation_status,
+                "metadata": row.metadata or {},
+            }
+            for row in result.fetchall()
+        ]
+
+
+async def train_policy_from_records(
+    policy: QLearningPolicy,
+    records: list[dict[str, Any]],
+    *,
+    use_proxy_reward: bool = True,
+    persist: bool = False,
+) -> dict[str, Any]:
+    trained = 0
+    skipped = 0
+    reward_total = 0.0
+
+    for record in records:
+        state = _state_from_record(record)
+        if state is None:
+            skipped += 1
+            continue
+
+        reward = _reward_from_record(record, use_proxy_reward=use_proxy_reward)
+        if reward is None:
+            skipped += 1
+            continue
+
+        action_idx = _action_from_record(record)
+        await policy.update(state, action_idx, reward, persist=persist)
+        trained += 1
+        reward_total += float(reward)
+
+    return {
+        "trained_on": trained,
+        "skipped": skipped,
+        "average_reward": round(reward_total / trained, 4) if trained else 0.0,
+        "states_in_cache": len(policy._q_cache),
+        "total_episodes": policy._total_episodes,
+    }
 
 
 async def train_from_journal(
@@ -120,42 +284,7 @@ async def train_from_journal(
     Returns:
         Summary dict with stats.
     """
-    from db.database import AsyncSessionLocal
-    from sqlalchemy import text
-
-    where_clauses = ["action != 'FLAT'", "entry_price IS NOT NULL", "stop_price IS NOT NULL", "target_price IS NOT NULL"]
-    params: dict[str, Any] = {"limit": max_trades}
-
-    if symbol:
-        where_clauses.append("symbol = :symbol")
-        params["symbol"] = symbol
-
-    where_sql = " AND ".join(where_clauses)
-    sql = f"""
-        SELECT signal_id, symbol, action, regime_label, confidence,
-               entry_price, stop_price, target_price, metadata
-        FROM shadow_observations
-        WHERE {where_sql}
-        ORDER BY recorded_at DESC
-        LIMIT :limit
-    """
-
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(text(sql), params)
-        records = [
-            {
-                "signal_id": row.signal_id,
-                "symbol": row.symbol,
-                "action": row.action,
-                "regime_label": row.regime_label,
-                "confidence": row.confidence,
-                "entry_price": row.entry_price,
-                "stop_price": row.stop_price,
-                "target_price": row.target_price,
-                "metadata": row.metadata or {},
-            }
-            for row in result.fetchall()
-        ]
+    records = await fetch_training_records(max_trades=max_trades, symbol=symbol)
 
     if not records:
         return {
@@ -164,50 +293,16 @@ async def train_from_journal(
             "message": "No eligible shadow observations found for training.",
         }
 
-    trained = 0
-    skipped = 0
-
-    for record in records:
-        state = _state_from_record(record)
-        if state is None:
-            skipped += 1
-            continue
-
-        action_idx = _action_from_record(record)
-
-        if use_proxy_reward:
-            reward = compute_proxy_reward(
-                action=record["action"],
-                entry_price=record["entry_price"],
-                stop_price=record["stop_price"],
-                target_price=record["target_price"],
-                confidence=float(record.get("confidence") or 0.62),
-            )
-        else:
-            # Look for real outcome in metadata
-            outcome = (record["metadata"] or {}).get("outcome")
-            exit_price = (record["metadata"] or {}).get("exit_price")
-            if not outcome:
-                skipped += 1
-                continue
-            reward = compute_reward(
-                action=record["action"],
-                entry_price=record["entry_price"],
-                stop_price=record["stop_price"],
-                target_price=record["target_price"],
-                outcome=outcome,
-                exit_price=exit_price,
-                confidence=float(record.get("confidence") or 0.62),
-            )
-
-        await rl_policy.update(state, action_idx, reward)
-        trained += 1
-
-    logger.info("[RL] Training complete: %d trained, %d skipped", trained, skipped)
-    return {
-        "trained_on": trained,
-        "skipped": skipped,
-        "states_in_cache": len(rl_policy._q_cache),
-        "total_episodes": rl_policy._total_episodes,
-        "message": f"Q-table updated from {trained} shadow observations.",
-    }
+    summary = await train_policy_from_records(
+        rl_policy,
+        records,
+        use_proxy_reward=use_proxy_reward,
+        persist=True,
+    )
+    logger.info(
+        "[RL] Training complete: %d trained, %d skipped",
+        summary["trained_on"],
+        summary["skipped"],
+    )
+    summary["message"] = f"Q-table updated from {summary['trained_on']} shadow observations."
+    return summary

@@ -2,7 +2,7 @@
   "mvp_scope": {
     "primary_underlyings": ["NIFTY"],
     "secondary_underlyings": ["BANKNIFTY"],
-    "instrument_type": "futures",
+    "instrument_type": "options_buy",
     "session": {
       "timezone": "Asia/Kolkata",
       "open": "09:15",
@@ -28,6 +28,10 @@
     "MIDCPNIFTY": {
       "lot_size": 75,
       "margin_fraction_per_lot": 0.18
+    },
+    "SENSEX": {
+      "lot_size": 10,
+      "margin_fraction_per_lot": 0.18
     }
   },
   "market_profile": {
@@ -43,9 +47,11 @@
   },
   "order_flow": {
     "trade_lookback": 50,
+    "quote_lookback": 160,
     "baseline_window": 120,
     "spread_normalizer_ticks": 2.0,
-    "volatility_burst_threshold": 1.5
+    "volatility_burst_threshold": 1.5,
+    "tick_lookback_minutes": 20
   },
   "regime": {
     "balance_overlap_min": 0.7,
@@ -53,6 +59,9 @@
     "breakout_acceptance_overlap_max": 0.45,
     "trend_day_extension_min": 0.3,
     "trend_close_extreme_min": 0.8,
+    "rotational_extension_min_fraction": 0.18,
+    "rotational_middle_low": 0.3,
+    "rotational_middle_high": 0.7,
     "no_trade_confidence_max": 0.55
   },
   "agents": {
@@ -61,7 +70,20 @@
       "sleeve_fraction": 0.45,
       "min_confidence": 0.7,
       "risk_multiple": 2.5,
-      "lot_size": 25
+      "lot_size": 25,
+      "value_tolerance_fraction": 0.18,
+      "value_tolerance_min_points": 12.0,
+      "value_tolerance_max_points": 45.0,
+      "gap_tolerance_fraction": 0.12,
+      "gap_tolerance_min_points": 10.0,
+      "gap_tolerance_max_points": 40.0,
+      "vpoc_tolerance_fraction": 0.12,
+      "vpoc_tolerance_min_points": 8.0,
+      "vpoc_tolerance_max_points": 30.0,
+      "enable_gap_continuation": true,
+      "enable_gap_failure": false,
+      "enable_balance_rotation": false,
+      "enable_vpoc_rejection": false
     },
     "swing": {
       "enabled": true,
@@ -72,14 +94,31 @@
       "margin_fraction_per_lot": 0.18,
       "value_entry_tolerance_fraction": 0.25,
       "value_entry_tolerance_min_points": 10.0,
-      "value_entry_tolerance_max_points": 50.0
+      "value_entry_tolerance_max_points": 50.0,
+      "prior_value_reentry_tolerance_fraction": 0.15,
+      "prior_value_reentry_tolerance_min_points": 8.0,
+      "prior_value_reentry_tolerance_max_points": 35.0,
+      "ib_break_tolerance_fraction": 0.12,
+      "ib_break_tolerance_min_points": 8.0,
+      "ib_break_tolerance_max_points": 35.0,
+      "enable_eighty_percent_rule": false,
+      "enable_ib_failure": false,
+      "enable_auction_rejection_long": false,
+      "enable_auction_rejection_short": true,
+      "enable_acceptance_continuation_long": false,
+      "enable_acceptance_continuation_short": true,
+      "enable_spike_acceptance": true,
+      "enable_balance_area_breakout": false
     },
     "scalp": {
       "enabled": true,
       "sleeve_fraction": 0.2,
       "min_confidence": 0.68,
       "risk_multiple": 1.2,
-      "lot_size": 25
+      "lot_size": 25,
+      "value_tolerance_fraction": 0.12,
+      "value_tolerance_min_points": 6.0,
+      "value_tolerance_max_points": 20.0
     }
   },
   "meta_controller": {
@@ -102,6 +141,68 @@
     "shadow_net_liquidation": 1000000.0,
     "slippage_bps": 1.0,
     "fees_per_order": 20.0
+  },
+  "options_mapping": {
+    "enabled": true,
+    "min_premium": 2.0,
+    "max_premium": 500.0,
+    "history_interval": "5minute",
+    "history_limit": 60,
+    "require_option_ma20": true,
+    "min_volume": 1,
+    "min_oi": 1,
+    "max_spread_pct": 0.15,
+    "same_day_close_buffer_minutes": {
+      "scalp": 45,
+      "swing": 120,
+      "positional": 240
+    },
+    "min_dte_by_agent": {
+      "scalp": 0,
+      "swing": 2,
+      "positional": 5
+    },
+    "target_delta_by_agent": {
+      "scalp": 0.5,
+      "swing": 0.6,
+      "positional": 0.7
+    },
+    "ntm_volx": {
+      "enabled": true,
+      "max_pairs": 5,
+      "max_spread_pct": 0.18,
+      "balance_ratio": 1.15,
+      "control_ratio": 1.5,
+      "extreme_ratio": 2.25,
+      "aligned_confidence_boost": 0.06,
+      "conflict_confidence_penalty": 0.1,
+      "conflict_flatten_ratio": 2.25,
+      "conflict_flatten_confidence_ceiling": 0.72,
+      "min_alignment_pressure": 0.12
+    },
+    "strong_confidence": 0.78,
+    "very_strong_confidence": 0.86,
+    "preferred_moneyness": {
+      "scalp": ["ATM", "OTM1", "ITM1", "OTM2", "ITM2"],
+      "swing": ["ATM", "ITM1", "OTM1", "ITM2", "OTM2"],
+      "swing_strong": ["ITM1", "ATM", "ITM2", "OTM1", "OTM2"],
+      "positional": ["ITM1", "ATM", "ITM2", "OTM1", "OTM2"],
+      "positional_strong": ["ITM2", "ITM1", "ATM", "OTM1", "OTM2"]
+    }
+  },
+  "rl": {
+    "auto_train_enabled": true,
+    "timezone": "Asia/Kolkata",
+    "run_after_close_minutes": 45,
+    "max_trades": 600,
+    "use_proxy_reward": true,
+    "holdout_fraction": 0.2,
+    "min_train_records": 80,
+    "min_holdout_records": 20,
+    "min_candidate_matches": 8,
+    "min_avg_reward_edge": 0.03,
+    "max_negative_ratio_worsening": 0.05,
+    "max_fill_drift_worsening_ticks": 0.5
   },
   "live_canary": {
     "allowed_symbols": ["BANKNIFTY"],

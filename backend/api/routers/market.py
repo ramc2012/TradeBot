@@ -1,6 +1,6 @@
 """Market data routes."""
 from __future__ import annotations
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from typing import List, Optional
 from urllib.parse import quote
@@ -30,10 +30,26 @@ router = APIRouter(prefix="/api/market", tags=["market"])
 _PROFILE_TIMEFRAMES = {"day", "week", "month", "daily", "hourly"}
 
 
-def _market_symbol_for_adapter(adapter, app_symbol: str, broker_symbol: str) -> str:
+@dataclass(frozen=True)
+class _ResolvedMarketSymbol:
+    app_symbol: str
+    broker_symbol: str
+    fyers_symbol: str
+
+
+def _resolve_market_symbol(symbol: str) -> _ResolvedMarketSymbol:
+    app_symbol = to_app_symbol(symbol)
+    return _ResolvedMarketSymbol(
+        app_symbol=app_symbol,
+        broker_symbol=to_broker_symbol(app_symbol),
+        fyers_symbol=to_fyers_symbol(app_symbol),
+    )
+
+
+def _market_symbol_for_adapter(adapter, market_symbol: _ResolvedMarketSymbol) -> str:
     if getattr(adapter, "broker_name", "") == "fyers":
-        return to_fyers_symbol(app_symbol)
-    return broker_symbol
+        return market_symbol.fyers_symbol
+    return market_symbol.broker_symbol
 
 
 async def _get_market_adapter():
@@ -157,15 +173,15 @@ async def _fetch_upstox_historical_rows(
 
 async def _fetch_market_historical_rows(
     *,
-    app_symbol: str,
     broker_symbol: str,
+    fyers_symbol: str,
     fyers_resolution: str,
     upstox_interval: str,
     from_date: date,
     to_date: date,
 ) -> tuple[list[dict], str]:
     fyers_rows = await _fetch_fyers_historical_rows(
-        app_symbol,
+        fyers_symbol,
         fyers_resolution,
         from_date,
         to_date,
@@ -197,28 +213,27 @@ def _merge_rows(primary: list[dict], secondary: list[dict]) -> list[dict]:
 @router.get("/option-chain/{symbol}")
 async def get_option_chain(symbol: str, expiry: Optional[str] = Query(None)):
     """Get full option chain with PCR, max pain, greeks."""
-    app_symbol = to_app_symbol(symbol)
-    broker_symbol = to_broker_symbol(symbol)
+    market_symbol = _resolve_market_symbol(symbol)
     adapter, source = await _get_market_adapter()
-    adapter_symbol = _market_symbol_for_adapter(adapter, app_symbol, broker_symbol) if adapter else broker_symbol
+    adapter_symbol = _market_symbol_for_adapter(adapter, market_symbol) if adapter else market_symbol.broker_symbol
     expiry = await _resolve_option_expiry(adapter, adapter_symbol, expiry) if adapter else expiry
     if not expiry:
         from agent.trading_agent import TradingAgent
         expiry = TradingAgent._next_expiry()
 
-    cached = await option_chain_service.get_cached(app_symbol, expiry)
+    cached = await option_chain_service.get_cached(market_symbol.app_symbol, expiry)
     if cached and cached.get("source") == source:
         return cached
 
     if adapter:
         option_chain_service.set_broker(adapter)
-        option_chain_service.track(app_symbol, expiry)
-        await option_chain_service._refresh(app_symbol, expiry)
-        cached = await option_chain_service.get_cached(app_symbol, expiry)
+        option_chain_service.track(market_symbol.app_symbol, expiry)
+        await option_chain_service._refresh(market_symbol.app_symbol, expiry)
+        cached = await option_chain_service.get_cached(market_symbol.app_symbol, expiry)
         if cached:
             return cached
     return {
-        "symbol": app_symbol,
+        "symbol": market_symbol.app_symbol,
         "expiry": expiry,
         "entries": [],
         "source": source,
@@ -242,24 +257,23 @@ async def get_market_profile(
     timeframe: str = Query("day"),
 ):
     """Get Market Profile (POC, VAH, VAL, IB, TPO data)."""
-    app_symbol = to_app_symbol(symbol)
-    broker_symbol = to_broker_symbol(symbol)
+    market_symbol = _resolve_market_symbol(symbol)
     normalized_timeframe = _normalize_profile_timeframe(timeframe)
-    profile = await market_profile_builder.get_cached_profile(app_symbol, normalized_timeframe)
+    profile = await market_profile_builder.get_cached_profile(market_symbol.app_symbol, normalized_timeframe)
     if not profile:
         built = None
         source = "live"
         today = date.today()
         if normalized_timeframe == "hourly":
-            built = market_profile_builder.build_hourly_profile(app_symbol)
+            built = market_profile_builder.build_hourly_profile(market_symbol.app_symbol)
         elif normalized_timeframe == "day":
-            live_rows = market_profile_builder.get_tick_rows(app_symbol)
+            live_rows = market_profile_builder.get_tick_rows(market_symbol.app_symbol)
             rows = live_rows
             source_interval = "tick"
             if len(rows) < 50:
                 rows, source = await _fetch_market_historical_rows(
-                    app_symbol=app_symbol,
-                    broker_symbol=broker_symbol,
+                    broker_symbol=market_symbol.broker_symbol,
+                    fyers_symbol=market_symbol.fyers_symbol,
                     fyers_resolution="1",
                     upstox_interval="1minute",
                     from_date=today - timedelta(days=5),
@@ -267,44 +281,44 @@ async def get_market_profile(
                 )
                 source_interval = "1minute" if source == "upstox" else "1"
             built = market_profile_builder.build_profile_from_rows(
-                app_symbol,
+                market_symbol.app_symbol,
                 rows,
                 normalized_timeframe,
                 source_interval,
             )
         elif normalized_timeframe == "week":
             historical_rows, source = await _fetch_market_historical_rows(
-                app_symbol=app_symbol,
-                broker_symbol=broker_symbol,
+                broker_symbol=market_symbol.broker_symbol,
+                fyers_symbol=market_symbol.fyers_symbol,
                 fyers_resolution="1",
                 upstox_interval="1minute",
                 from_date=today - timedelta(days=9),
                 to_date=today,
             )
             rows = market_profile_builder.aggregate_rows(historical_rows, 3)
-            rows = _merge_rows(rows, market_profile_builder.get_three_minute_rows(app_symbol))
+            rows = _merge_rows(rows, market_profile_builder.get_three_minute_rows(market_symbol.app_symbol))
             built = market_profile_builder.build_profile_from_rows(
-                app_symbol,
+                market_symbol.app_symbol,
                 rows,
                 normalized_timeframe,
                 "3minute" if source == "upstox" else "3minute",
             )
         elif normalized_timeframe == "month":
             historical_rows, source = await _fetch_market_historical_rows(
-                app_symbol=app_symbol,
-                broker_symbol=broker_symbol,
+                broker_symbol=market_symbol.broker_symbol,
+                fyers_symbol=market_symbol.fyers_symbol,
                 fyers_resolution="30",
                 upstox_interval="30minute",
                 from_date=today - timedelta(days=40),
                 to_date=today,
             )
             live_month_rows = market_profile_builder.aggregate_rows(
-                market_profile_builder.get_three_minute_rows(app_symbol),
+                market_profile_builder.get_three_minute_rows(market_symbol.app_symbol),
                 30,
             )
             rows = _merge_rows(historical_rows, live_month_rows)
             built = market_profile_builder.build_profile_from_rows(
-                app_symbol,
+                market_symbol.app_symbol,
                 rows,
                 normalized_timeframe,
                 "30minute",
@@ -317,7 +331,7 @@ async def get_market_profile(
             await market_profile_builder.store_profile(built)
             return payload
         return {
-            "symbol": app_symbol,
+            "symbol": market_symbol.app_symbol,
             "timeframe": normalized_timeframe,
             "error": "No market profile data. Waiting for live tick feed.",
         }
@@ -334,16 +348,17 @@ async def get_pcr(symbol: str, expiry: Optional[str] = Query(None)):
     if not expiry:
         from agent.trading_agent import TradingAgent
         expiry = TradingAgent._next_expiry()
-    chain = await option_chain_service.get_cached(symbol, expiry)
+    app_symbol = to_app_symbol(symbol)
+    chain = await option_chain_service.get_cached(app_symbol, expiry)
     if chain:
         return {
-            "symbol": symbol,
+            "symbol": app_symbol,
             "pcr_oi": chain.get("pcr_oi", 1.0),
             "pcr_volume": chain.get("pcr_volume", 1.0),
             "total_ce_oi": chain.get("total_ce_oi", 0),
             "total_pe_oi": chain.get("total_pe_oi", 0),
         }
-    return {"symbol": symbol, "pcr_oi": 1.0, "pcr_volume": 1.0}
+    return {"symbol": app_symbol, "pcr_oi": 1.0, "pcr_volume": 1.0}
 
 
 class LTPRequest(BaseModel):
@@ -352,23 +367,23 @@ class LTPRequest(BaseModel):
 
 @router.post("/ltp")
 async def get_ltp(req: LTPRequest):
-    app_symbols = [to_app_symbol(symbol) for symbol in req.symbols]
+    market_symbols = [_resolve_market_symbol(symbol) for symbol in req.symbols]
     adapter, source = await _get_market_adapter()
     if not adapter:
         # Return cached from data_router
-        return {symbol: data_router.get_ltp(symbol) for symbol in app_symbols}
+        return {item.app_symbol: data_router.get_ltp(item.app_symbol) for item in market_symbols}
     try:
         mapped = {
-            symbol: _market_symbol_for_adapter(adapter, symbol, to_broker_symbol(symbol))
-            for symbol in app_symbols
+            item.app_symbol: _market_symbol_for_adapter(adapter, item)
+            for item in market_symbols
         }
         live = await adapter.get_ltp(list(mapped.values()))
         return {
-            symbol: float(live.get(broker_symbol, 0.0) or data_router.get_ltp(symbol))
-            for symbol, broker_symbol in mapped.items()
+            app_symbol: float(live.get(adapter_symbol, 0.0) or data_router.get_ltp(app_symbol))
+            for app_symbol, adapter_symbol in mapped.items()
         }
     except Exception:
-        return {symbol: data_router.get_ltp(symbol) for symbol in app_symbols}
+        return {item.app_symbol: data_router.get_ltp(item.app_symbol) for item in market_symbols}
 
 
 @router.get("/greeks/{symbol}/{strike}/{expiry}/{option_type}")
@@ -413,33 +428,33 @@ async def get_greeks(
 @router.get("/expiries/{symbol}")
 async def get_expiries(symbol: str):
     """Get available expiry dates for a symbol."""
-    app_symbol = to_app_symbol(symbol)
-    broker_symbol = to_broker_symbol(symbol)
+    market_symbol = _resolve_market_symbol(symbol)
     adapter, source = await _get_market_adapter()
     if not adapter:
-        return {"symbol": app_symbol, "expiries": [], "default_expiry": None, "source": "none"}
+        return {"symbol": market_symbol.app_symbol, "expiries": [], "default_expiry": None, "source": "none"}
     try:
         get_contracts = getattr(adapter, "get_option_contracts", None)
         if not callable(get_contracts):
-            return {"symbol": app_symbol, "expiries": [], "default_expiry": None, "source": source}
+            return {"symbol": market_symbol.app_symbol, "expiries": [], "default_expiry": None, "source": source}
 
-        contracts = await get_contracts(_market_symbol_for_adapter(adapter, app_symbol, broker_symbol))
+        adapter_symbol = _market_symbol_for_adapter(adapter, market_symbol)
+        contracts = await get_contracts(adapter_symbol)
         expiries = sorted({row.get("expiry") for row in contracts if row.get("expiry")})
         default_expiry = (
             await _resolve_option_expiry(
                 adapter,
-                _market_symbol_for_adapter(adapter, app_symbol, broker_symbol),
+                adapter_symbol,
                 None,
             )
             if expiries
             else None
         )
         return {
-            "symbol": app_symbol,
+            "symbol": market_symbol.app_symbol,
             "expiries": expiries,
             "default_expiry": default_expiry,
             "count": len(expiries),
             "source": source,
         }
     except Exception:
-        return {"symbol": app_symbol, "expiries": [], "default_expiry": None, "source": source}
+        return {"symbol": market_symbol.app_symbol, "expiries": [], "default_expiry": None, "source": source}

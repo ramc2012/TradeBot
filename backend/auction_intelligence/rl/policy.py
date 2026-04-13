@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import logging
 import random
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Optional
 
-from auction_intelligence.rl.state import MPState
+from auction_intelligence.rl.state import MPState, describe_state_key
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,23 @@ def decode_action(idx: int) -> TradeParams:
     )
 
 
+def encode_action(
+    *,
+    min_confidence: float,
+    risk_multiple: float,
+    sleeve_fraction: float,
+) -> int:
+    """Map parameter values to the nearest discrete action index."""
+
+    def _nearest(value: float, choices: list[float]) -> int:
+        return min(range(len(choices)), key=lambda idx: abs(choices[idx] - value))
+
+    confidence_idx = _nearest(min_confidence, _CONFIDENCE_LEVELS)
+    risk_idx = _nearest(risk_multiple, _RISK_MULTIPLES)
+    size_idx = _nearest(sleeve_fraction, _SLEEVE_FRACTIONS)
+    return (confidence_idx * 9) + (risk_idx * 3) + size_idx
+
+
 # Precompute all 27 params for fast lookup
 _ALL_PARAMS: list[TradeParams] = [decode_action(i) for i in range(N_ACTIONS)]
 
@@ -77,6 +95,7 @@ class QLearningPolicy:
     def __init__(self) -> None:
         # state_key → list of 27 q-values
         self._q_cache: dict[str, list[float]] = {}
+        self._visit_cache: dict[str, list[int]] = {}
         self._cache_loaded = False
         self._total_episodes = 0
 
@@ -90,17 +109,20 @@ class QLearningPolicy:
 
             async with AsyncSessionLocal() as session:
                 result = await session.execute(
-                    text("SELECT state_hash, action_idx, q_value FROM rl_agent_qtable")
+                    text("SELECT state_hash, action_idx, q_value, visit_count FROM rl_agent_qtable")
                 )
                 rows = result.fetchall()
 
             # Reset and rebuild cache
             self._q_cache = {}
+            self._visit_cache = {}
             for row in rows:
                 state_key = row.state_hash
                 if state_key not in self._q_cache:
                     self._q_cache[state_key] = [0.0] * N_ACTIONS
+                    self._visit_cache[state_key] = [0] * N_ACTIONS
                 self._q_cache[state_key][row.action_idx] = float(row.q_value)
+                self._visit_cache[state_key][row.action_idx] = int(row.visit_count or 0)
 
             # Also load total episodes
             async with AsyncSessionLocal() as session:
@@ -124,7 +146,14 @@ class QLearningPolicy:
         """Return Q-values for state, initializing to zeros if unknown."""
         if state_key not in self._q_cache:
             self._q_cache[state_key] = [0.0] * N_ACTIONS
+        if state_key not in self._visit_cache:
+            self._visit_cache[state_key] = [0] * N_ACTIONS
         return self._q_cache[state_key]
+
+    def _ensure_visits(self, state_key: str) -> list[int]:
+        """Return visit counts for state, initializing to zeros if unknown."""
+        self._ensure_state(state_key)
+        return self._visit_cache[state_key]
 
     # ── Action selection ──────────────────────────────────────────────────────
 
@@ -168,6 +197,8 @@ class QLearningPolicy:
         state: MPState,
         action_idx: int,
         reward: float,
+        *,
+        persist: bool = True,
     ) -> None:
         """Update Q-value for (state, action) with reward signal.
 
@@ -178,12 +209,16 @@ class QLearningPolicy:
 
         # Update in-memory cache
         q_values = self._ensure_state(state_key)
+        visits = self._ensure_visits(state_key)
         q_old = q_values[action_idx]
         q_new = q_old + self.LEARNING_RATE * (reward - q_old)
         self._q_cache[state_key][action_idx] = q_new
+        self._visit_cache[state_key][action_idx] += 1
         self._total_episodes += 1
 
         # Persist to DB
+        if not persist:
+            return
         try:
             from db.database import AsyncSessionLocal
             from sqlalchemy import text
@@ -222,6 +257,7 @@ class QLearningPolicy:
             summary.append(
                 {
                     "state": state_key,
+                    "state_label": describe_state_key(state_key),
                     "best_action": best_idx,
                     "min_confidence": best.min_confidence,
                     "risk_multiple": best.risk_multiple,
@@ -239,6 +275,82 @@ class QLearningPolicy:
             "policy": summary,
         }
 
+    def snapshot(self) -> dict:
+        """Return a serializable in-memory snapshot of the Q-table."""
+        return {
+            "q_values": deepcopy(self._q_cache),
+            "visit_counts": deepcopy(self._visit_cache),
+            "total_episodes": int(self._total_episodes),
+        }
+
+    def load_snapshot(self, snapshot: dict | None) -> None:
+        """Load a serializable Q-table snapshot into memory."""
+        snapshot = snapshot or {}
+        raw_q_values = snapshot.get("q_values") or {}
+        raw_visits = snapshot.get("visit_counts") or {}
+
+        self._q_cache = {
+            str(state_key): [float(value) for value in values]
+            for state_key, values in raw_q_values.items()
+        }
+        self._visit_cache = {
+            str(state_key): [int(value) for value in values]
+            for state_key, values in raw_visits.items()
+        }
+        for state_key in list(self._q_cache.keys()):
+            if state_key not in self._visit_cache:
+                self._visit_cache[state_key] = [0] * N_ACTIONS
+        self._total_episodes = int(snapshot.get("total_episodes") or 0)
+        self._cache_loaded = True
+
+    def clone(self) -> "QLearningPolicy":
+        """Clone the current in-memory policy for offline candidate training."""
+        clone = QLearningPolicy()
+        clone.load_snapshot(self.snapshot())
+        clone._cache_loaded = self._cache_loaded
+        return clone
+
+    async def activate_snapshot(self, snapshot: dict) -> None:
+        """Persist a candidate snapshot as the active live Q-table."""
+        from db.database import AsyncSessionLocal
+        from sqlalchemy import text
+
+        q_values = snapshot.get("q_values") or {}
+        visit_counts = snapshot.get("visit_counts") or {}
+
+        async with AsyncSessionLocal() as session:
+            await session.execute(text("DELETE FROM rl_agent_qtable"))
+
+            rows: list[dict[str, object]] = []
+            for state_key, values in q_values.items():
+                visits = visit_counts.get(state_key) or [0] * len(values)
+                for action_idx, q_value in enumerate(values):
+                    visit_count = int(visits[action_idx]) if action_idx < len(visits) else 0
+                    if float(q_value) == 0.0 and visit_count == 0:
+                        continue
+                    rows.append(
+                        {
+                            "state_hash": str(state_key),
+                            "action_idx": int(action_idx),
+                            "q_value": float(q_value),
+                            "visit_count": visit_count,
+                        }
+                    )
+
+            if rows:
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO rl_agent_qtable (state_hash, action_idx, q_value, visit_count, last_updated)
+                        VALUES (:state_hash, :action_idx, :q_value, :visit_count, now())
+                        """
+                    ),
+                    rows,
+                )
+            await session.commit()
+
+        self.load_snapshot(snapshot)
+
     async def reset(self) -> None:
         """Wipe Q-table from DB and in-memory cache."""
         try:
@@ -251,6 +363,7 @@ class QLearningPolicy:
         except Exception as exc:
             logger.warning("[RL] Q-table reset failed: %s", exc)
         self._q_cache = {}
+        self._visit_cache = {}
         self._total_episodes = 0
         logger.info("[RL] Q-table reset complete.")
 

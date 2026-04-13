@@ -12,6 +12,7 @@ import {
   CandlestickChart,
   Crosshair,
   Database,
+  Fingerprint,
   Globe,
   Layers3,
   Settings,
@@ -115,6 +116,7 @@ const WORKSPACE_GROUPS = [
     links: [
       { href: "/analytics", label: "Analytics", icon: BarChart3, detail: "App-wide and strategy-wise results." },
       { href: "/auction-intelligence", label: "Auction IQ", icon: Layers3, detail: "MP validation, gates, and paper promotion." },
+      { href: "/fractal-market-profile", label: "Fractal MP", icon: Fingerprint, detail: "Dedicated fractal profile options desk with ledger and replays." },
       { href: "/analysis", label: "Research Monitor", icon: Activity, detail: "Research cache and validation jobs." },
       { href: "/backtester", label: "Backtester", icon: CandlestickChart, detail: "Walk-forward and scenario testing." },
       { href: "/agent", label: "Agent", icon: Bot, detail: "Proposal and reasoning surface." },

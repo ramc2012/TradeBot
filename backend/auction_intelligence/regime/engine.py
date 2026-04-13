@@ -17,6 +17,9 @@ class RegimeEngine:
         self.breakout_acceptance_overlap_max = float(config.get("breakout_acceptance_overlap_max", 0.45))
         self.trend_day_extension_min = float(config.get("trend_day_extension_min", 0.30))
         self.trend_close_extreme_min = float(config.get("trend_close_extreme_min", 0.80))
+        self.rotational_extension_min_fraction = float(config.get("rotational_extension_min_fraction", 0.18))
+        self.rotational_middle_low = float(config.get("rotational_middle_low", 0.30))
+        self.rotational_middle_high = float(config.get("rotational_middle_high", 0.70))
         self.no_trade_confidence_max = float(config.get("no_trade_confidence_max", 0.55))
 
     def classify(
@@ -30,6 +33,11 @@ class RegimeEngine:
         overlap = current.value_area_overlap or 0.0
         poc_shift = current.poc_shift or 0.0
         delta_bias = 1.0 if order_flow.delta > 0 else -1.0 if order_flow.delta < 0 else 0.0
+        two_sided_extension = (
+            current.range_extension_up >= (current.initial_balance_range * self.rotational_extension_min_fraction)
+            and current.range_extension_down >= (current.initial_balance_range * self.rotational_extension_min_fraction)
+        )
+        close_in_middle = self.rotational_middle_low <= close_location <= self.rotational_middle_high
         reasons: list[str] = []
         scorecard = {
             "range_extension_fraction": round(range_fraction, 4),
@@ -40,6 +48,20 @@ class RegimeEngine:
         }
 
         if prior is not None:
+            if (
+                current.high_price > prior.vah
+                and current.low_price < prior.val
+                and close_in_middle
+                and overlap >= self.developing_balance_overlap_min
+            ):
+                reasons.append("Auction explored both sides of prior value and rotated back toward balance.")
+                return RegimeAssessment(
+                    label="neutral_extreme",
+                    confidence=0.75,
+                    allowed_directions=["LONG", "SHORT"],
+                    reasons=reasons,
+                    scorecard=scorecard,
+                )
             if current.high_price > prior.vah and current.close_price < prior.vah and overlap >= self.developing_balance_overlap_min:
                 reasons.append("Auction probed above prior value and was rejected back into value.")
                 return RegimeAssessment(
@@ -116,6 +138,16 @@ class RegimeEngine:
                     reasons=reasons,
                     scorecard=scorecard,
                 )
+
+        if overlap >= self.balance_overlap_min and two_sided_extension and close_in_middle:
+            reasons.append("Auction rotated through both sides of the initial balance and closed back near the middle.")
+            return RegimeAssessment(
+                label="rotational_day",
+                confidence=0.74,
+                allowed_directions=["LONG", "SHORT"],
+                reasons=reasons,
+                scorecard=scorecard,
+            )
 
         if overlap >= self.balance_overlap_min and range_fraction < self.trend_day_extension_min:
             reasons.append("Value overlap remains high and directional extension is muted.")

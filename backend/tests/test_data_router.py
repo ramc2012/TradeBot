@@ -50,3 +50,21 @@ def test_market_profile_builder_accepts_timezone_aware_ticks_without_type_errors
     assert len(rows) == 2
     assert rows[0]["time"].endswith("+00:00")
     assert rows[1]["time"].endswith("+00:00")
+
+
+def test_data_router_global_callbacks_receive_ticks() -> None:
+    router = DataRouter()
+    captured: list[Tick] = []
+
+    router.register_global_callback(captured.append)
+    router._on_tick(
+        Tick(
+            symbol="NSE:NIFTY50-INDEX",
+            ltp=24075.4,
+            timestamp=datetime(2026, 4, 11, 9, 15, tzinfo=timezone.utc),
+        )
+    )
+
+    assert len(captured) == 1
+    assert captured[0].symbol == "NSE:NIFTY50-INDEX"
+    assert captured[0].timestamp is not None

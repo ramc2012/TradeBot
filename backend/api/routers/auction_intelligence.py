@@ -1,6 +1,7 @@
 """Isolated API for the Market Profile + order-flow strategy module."""
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import asdict
 from datetime import date, datetime, time
 from typing import Optional
@@ -23,6 +24,8 @@ from auction_intelligence.live import (
     build_shadow_backfill_snapshots,
     build_live_validation_series,
 )
+from auction_intelligence.paper import PaperPositionBook
+from auction_intelligence.paper.journal import JournalReader
 from auction_intelligence.shadow import ShadowPersistenceService
 from auction_intelligence.validation.gate_b import GateBValidator
 from auction_intelligence.validation.gate_c import GateCValidator
@@ -42,6 +45,8 @@ from api.routers.auth import get_connected_brokers
 router = APIRouter(prefix="/api/auction-intelligence", tags=["auction-intelligence"])
 _validation_store = ValidationPersistenceService()
 _shadow_store = ShadowPersistenceService()
+_paper_journal = JournalReader(clone_default_config()["paper_trading"]["journal_root"])
+_paper_book = PaperPositionBook(clone_default_config()["paper_trading"]["journal_root"])
 
 
 class BarPayload(BaseModel):
@@ -100,6 +105,7 @@ class PortfolioPayload(BaseModel):
 class AnalysisRequest(BaseModel):
     session: SessionPayload
     quote: QuotePayload
+    quote_history: list[QuotePayload] = Field(default_factory=list)
     bars: list[BarPayload]
     prior_bars: list[BarPayload] = Field(default_factory=list)
     trades: list[TradePayload] = Field(default_factory=list)
@@ -130,6 +136,10 @@ def _trades(payload: list[TradePayload]) -> list[TradePrint]:
     return [TradePrint(**item.model_dump()) for item in payload]
 
 
+def _quotes(payload: list[QuotePayload]) -> list[QuoteSnapshot]:
+    return [QuoteSnapshot(**item.model_dump()) for item in payload]
+
+
 def _depth(payload: Optional[DepthPayload]) -> Optional[DepthSnapshot]:
     if payload is None:
         return None
@@ -148,6 +158,28 @@ def _parse_time_value(raw: str | None) -> time | None:
     if not raw:
         return None
     return time.fromisoformat(raw)
+
+
+def _normalize_symbol_filter(symbol: str | None) -> str | None:
+    if not symbol:
+        return None
+    return symbol.upper().replace(" FUT", "").strip()
+
+
+def _journal_matches_symbol(record: dict, symbol: str | None) -> bool:
+    normalized = _normalize_symbol_filter(symbol)
+    if not normalized:
+        return True
+
+    symbol_field = str(record.get("symbol") or "").upper().replace(" FUT", "").strip()
+    underlying_field = str(record.get("underlying_symbol") or "").upper().replace(" FUT", "").strip()
+    trading_symbol = str(record.get("trading_symbol") or "").upper().strip()
+
+    return (
+        normalized == symbol_field
+        or normalized == underlying_field
+        or trading_symbol.startswith(normalized)
+    )
 
 
 def _shadow_records_from_snapshot(snapshot: dict, options: ShadowCaptureOptions) -> list[dict]:
@@ -279,6 +311,9 @@ async def summary() -> dict:
             "/api/auction-intelligence/canary-readiness",
             "/api/auction-intelligence/validation-runs/latest",
             "/api/auction-intelligence/validation-runs/{run_id}/artifacts",
+            "/api/auction-intelligence/rl-policy",
+            "/api/auction-intelligence/rl-cycle",
+            "/api/auction-intelligence/rl-versions",
         ],
     }
 
@@ -384,10 +419,63 @@ async def shadow_records(symbol: str = "BANKNIFTY", limit: int = 50) -> dict:
     }
 
 
+@router.get("/paper-journal")
+async def paper_journal(symbol: str | None = None, limit: int = 50) -> dict:
+    limit = max(1, min(limit, 500))
+    filtered = [
+        record
+        for record in _paper_journal.iter_records()
+        if _journal_matches_symbol(record, symbol)
+    ]
+    filtered.sort(key=lambda item: str(item.get("recorded_at") or ""), reverse=True)
+    records = filtered[:limit]
+
+    action_breakdown = Counter(str(item.get("action") or "UNKNOWN") for item in filtered)
+    style_breakdown = Counter(str(item.get("execution_style") or "unknown") for item in filtered)
+    agent_breakdown = Counter(str(item.get("agent_name") or "unknown") for item in filtered)
+    premiums = [
+        float(item["premium"])
+        for item in filtered
+        if item.get("premium") is not None
+    ]
+    confidences = [
+        float(item["confidence"])
+        for item in filtered
+        if item.get("confidence") is not None
+    ]
+
+    return {
+        "symbol_filter": _normalize_symbol_filter(symbol),
+        "count": len(records),
+        "total_records": len(filtered),
+        "summary": {
+            "latest_recorded_at": records[0].get("recorded_at") if records else None,
+            "avg_confidence": round(sum(confidences) / len(confidences), 4) if confidences else None,
+            "avg_premium": round(sum(premiums) / len(premiums), 4) if premiums else None,
+            "action_breakdown": dict(action_breakdown),
+            "style_breakdown": dict(style_breakdown),
+            "agent_breakdown": dict(agent_breakdown),
+        },
+        "records": records,
+    }
+
+
+@router.get("/paper-positions")
+async def paper_positions(symbol: str | None = None, status: str = "all", limit: int = 50) -> dict:
+    normalized_status = str(status or "all").lower()
+    if normalized_status not in {"all", "open", "closed"}:
+        raise HTTPException(status_code=400, detail="status must be one of: all, open, closed")
+    return await _paper_book.list_positions(
+        symbol=symbol,
+        status=normalized_status,
+        limit=max(1, min(limit, 200)),
+    )
+
+
 @router.post("/analyze")
 async def analyze(request: AnalysisRequest) -> dict:
     service = _service()
-    bundle = service.analyze(
+    bundle = await service.analyze_with_options(
         session=SessionContext(**request.session.model_dump()),
         bars=_bars(request.bars),
         quote=QuoteSnapshot(**request.quote.model_dump()),
@@ -395,6 +483,7 @@ async def analyze(request: AnalysisRequest) -> dict:
         prior_bars=_bars(request.prior_bars),
         depth=_depth(request.depth),
         portfolio=PortfolioSnapshot(**request.portfolio.model_dump()),
+        quote_history=_quotes(request.quote_history),
     )
     return _serialize(bundle)
 
@@ -402,7 +491,7 @@ async def analyze(request: AnalysisRequest) -> dict:
 @router.post("/paper-proposal")
 async def paper_proposal(request: AnalysisRequest) -> dict:
     service = _service()
-    bundle, journal_paths = service.analyze_and_record_paper(
+    bundle, journal_paths, paper_positions = await service.analyze_and_record_option_paper(
         session=SessionContext(**request.session.model_dump()),
         bars=_bars(request.bars),
         quote=QuoteSnapshot(**request.quote.model_dump()),
@@ -410,9 +499,11 @@ async def paper_proposal(request: AnalysisRequest) -> dict:
         prior_bars=_bars(request.prior_bars),
         depth=_depth(request.depth),
         portfolio=PortfolioSnapshot(**request.portfolio.model_dump()),
+        quote_history=_quotes(request.quote_history),
     )
     payload = _serialize(bundle)
     payload["journal_paths"] = journal_paths
+    payload["paper_positions"] = paper_positions
     return payload
 
 
@@ -638,6 +729,40 @@ async def rl_train(
         symbol=symbol,
     )
     return result
+
+
+@router.post("/rl-cycle")
+async def rl_cycle(
+    max_trades: int | None = None,
+    symbol: str | None = None,
+    use_proxy_reward: bool | None = None,
+    promote_if_eligible: bool = True,
+) -> dict:
+    """Run the guarded offline RL cycle: train candidate, evaluate, then promote if eligible."""
+    from auction_intelligence.rl.automation import rl_auto_trainer
+
+    return await rl_auto_trainer.run_cycle(
+        source="manual",
+        symbol=symbol,
+        max_trades=max_trades,
+        use_proxy_reward=use_proxy_reward,
+        promote_if_eligible=promote_if_eligible,
+    )
+
+
+@router.get("/rl-versions")
+async def rl_versions(limit: int = 20, status: str | None = None) -> dict:
+    """List persisted RL policy versions and their promotion status."""
+    from auction_intelligence.rl.versions import RLPolicyVersionStore
+
+    store = RLPolicyVersionStore()
+    versions = await store.list_versions(limit=limit, status=status)
+    active = await store.latest_version(status="active")
+    return {
+        "count": len(versions),
+        "active_version": active,
+        "versions": versions,
+    }
 
 
 @router.delete("/rl-reset")

@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import json
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 from loguru import logger
@@ -21,6 +21,7 @@ DEFAULT_BACKLOG_POLL_SECONDS = 60.0
 DEFAULT_ERROR_POLL_SECONDS = 180.0
 RUNTIME_HISTORY_RETENTION_HOURS = 48
 RUNTIME_HISTORY_MAX_ENTRIES = 256
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _load_upstox_token() -> str:
@@ -54,6 +55,69 @@ def _load_runtime_state() -> dict:
     except Exception as exc:
         logger.warning(f"Could not read research sync runtime state: {exc}")
         return {}
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_hhmm(value: str) -> time:
+    try:
+        hour_text, minute_text = value.split(":", 1)
+        parsed = time(hour=int(hour_text), minute=int(minute_text))
+    except Exception as exc:
+        raise argparse.ArgumentTypeError(
+            f"Invalid HH:MM time value: {value!r}"
+        ) from exc
+    return parsed
+
+
+def _window_session_date(local_dt: datetime, *, start_time: time, end_time: time) -> date:
+    if start_time < end_time:
+        return local_dt.date()
+    if local_dt.timetz().replace(tzinfo=None) < end_time:
+        return local_dt.date() - timedelta(days=1)
+    return local_dt.date()
+
+
+def _window_status(
+    now_utc: datetime,
+    *,
+    start_time: time,
+    end_time: time,
+) -> tuple[bool, datetime, date]:
+    local_now = now_utc.astimezone(IST)
+    now_time = local_now.timetz().replace(tzinfo=None)
+    overnight = start_time >= end_time
+
+    if not overnight:
+        in_window = start_time <= now_time < end_time
+        next_date = local_now.date()
+        if now_time >= end_time:
+            next_date += timedelta(days=1)
+        next_start_local = datetime.combine(next_date, start_time, tzinfo=IST)
+        return in_window, next_start_local.astimezone(timezone.utc), local_now.date()
+
+    in_window = now_time >= start_time or now_time < end_time
+    if now_time >= start_time:
+        session_date = local_now.date()
+        next_start_date = local_now.date() + timedelta(days=1)
+    elif now_time < end_time:
+        session_date = local_now.date() - timedelta(days=1)
+        next_start_date = local_now.date()
+    else:
+        session_date = local_now.date()
+        next_start_date = local_now.date()
+    next_start_local = datetime.combine(next_start_date, start_time, tzinfo=IST)
+    return in_window, next_start_local.astimezone(timezone.utc), session_date
 
 
 def _trim_history(entries: list[dict], now_utc: datetime) -> list[dict]:
@@ -141,6 +205,23 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep running the sync every --poll-minutes instead of exiting after one pass.",
     )
+    parser.add_argument(
+        "--window-start-ist",
+        type=_parse_hhmm,
+        default=None,
+        help="Optional IST window start (HH:MM). When set with --window-end-ist, daemon runs only inside that daily window.",
+    )
+    parser.add_argument(
+        "--window-end-ist",
+        type=_parse_hhmm,
+        default=None,
+        help="Optional IST window end (HH:MM). Supports overnight windows such as 16:30 to 08:45.",
+    )
+    parser.add_argument(
+        "--daily-once-per-window",
+        action="store_true",
+        help="When used with an IST window, run at most one sync cycle per window session.",
+    )
     return parser.parse_args()
 
 
@@ -201,30 +282,109 @@ async def _sleep_until(next_run_at: datetime) -> None:
 async def _run() -> int:
     _configure_logging()
     args = _parse_args()
-    token = _load_upstox_token()
-    if not token:
-        print("No saved Upstox token found in backend/credentials.json")
-        return 1
+    token = _load_upstox_token().strip()
+    sync: UpstoxResearchSync | None = None
 
-    sync = UpstoxResearchSync(
-        access_token=token,
-        from_date=date.fromisoformat(args.from_date),
-        to_date=date.fromisoformat(args.to_date),
-        risk_free_rate=args.risk_free_rate,
-        upstox_gap_seconds=args.upstox_gap_seconds,
-    )
+    def _build_sync(access_token: str) -> UpstoxResearchSync:
+        return UpstoxResearchSync(
+            access_token=access_token,
+            from_date=date.fromisoformat(args.from_date),
+            to_date=date.fromisoformat(args.to_date),
+            risk_free_rate=args.risk_free_rate,
+            upstox_gap_seconds=args.upstox_gap_seconds,
+        )
+
+    if token:
+        sync = _build_sync(token)
 
     if args.daemon:
         persisted_state = _load_runtime_state()
         history = list(persisted_state.get("history") or [])
         while True:
-            cycle_started_at = datetime.now(timezone.utc)
+            runtime_state = _load_runtime_state()
+            history = list(runtime_state.get("history") or history)
+            now_utc = datetime.now(timezone.utc)
+
             latest_token = _load_upstox_token().strip()
             if not latest_token:
+                next_run_at, elapsed_seconds, sleep_seconds = _compute_cycle_schedule(
+                    cycle_started_at=now_utc,
+                    sleep_seconds=min(DEFAULT_ERROR_POLL_SECONDS, max(60.0, args.poll_minutes * 60.0)),
+                    now_utc=now_utc,
+                )
+                _write_runtime_state(
+                    {
+                        "state": "waiting",
+                        "poll_minutes": args.poll_minutes,
+                        "run_started_at": runtime_state.get("run_started_at"),
+                        "run_completed_at": runtime_state.get("run_completed_at"),
+                        "next_run_at": next_run_at.isoformat(),
+                        "sleep_seconds": round(sleep_seconds, 2),
+                        "elapsed_seconds": round(elapsed_seconds, 2),
+                        "error": None,
+                        "detail": "Waiting for a saved Upstox token in backend/credentials.json",
+                        "last_result": runtime_state.get("last_result"),
+                        "history": history,
+                    }
+                )
                 logger.warning("No saved Upstox token found in backend/credentials.json")
+                await _sleep_until(next_run_at)
+                continue
+
+            if sync is None:
+                sync = _build_sync(latest_token)
             elif latest_token != sync.client.access_token:
                 logger.info("Reloaded Upstox access token from saved credentials for research sync")
                 sync.client.set_access_token(latest_token)
+
+            if args.window_start_ist and args.window_end_ist:
+                in_window, next_window_start, session_date = _window_status(
+                    now_utc,
+                    start_time=args.window_start_ist,
+                    end_time=args.window_end_ist,
+                )
+                last_completed_at = _parse_iso_datetime(runtime_state.get("run_completed_at"))
+                already_ran_window = False
+                if last_completed_at and args.daily_once_per_window:
+                    completed_local = last_completed_at.astimezone(IST)
+                    already_ran_window = (
+                        _window_session_date(
+                            completed_local,
+                            start_time=args.window_start_ist,
+                            end_time=args.window_end_ist,
+                        )
+                        == session_date
+                    )
+                if not in_window or already_ran_window:
+                    detail = (
+                        "Daily research sync already completed for the current allowed window."
+                        if already_ran_window
+                        else "Waiting for the next allowed research sync window."
+                    )
+                    _write_runtime_state(
+                        {
+                            "state": "waiting",
+                            "poll_minutes": args.poll_minutes,
+                            "run_started_at": runtime_state.get("run_started_at"),
+                            "run_completed_at": runtime_state.get("run_completed_at"),
+                            "next_run_at": next_window_start.isoformat(),
+                            "sleep_seconds": round(
+                                max(0.0, (next_window_start - now_utc).total_seconds()), 2
+                            ),
+                            "elapsed_seconds": runtime_state.get("elapsed_seconds"),
+                            "error": None,
+                            "detail": detail,
+                            "last_result": runtime_state.get("last_result"),
+                            "history": history,
+                        }
+                    )
+                    logger.info(
+                        f"Research sync waiting until allowed window at {next_window_start.isoformat()}"
+                    )
+                    await _sleep_until(next_window_start)
+                    continue
+
+            cycle_started_at = datetime.now(timezone.utc)
             sync.to_date = max(sync.to_date, date.today())
 
             _write_runtime_state(
@@ -317,6 +477,10 @@ async def _run() -> int:
             if sleep_seconds > 0:
                 await _sleep_until(next_run_at)
         return 0
+
+    if sync is None:
+        print("No saved Upstox token found in backend/credentials.json")
+        return 1
 
     result = await sync.run_once(
         underlying_limit=args.underlying_limit,

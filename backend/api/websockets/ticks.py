@@ -240,6 +240,22 @@ async def ws_commodity_overview(websocket: WebSocket):
     )
 
 
+async def ws_fractal_market_profile(websocket: WebSocket, symbol: str):
+    """Stream the Fractal Market Profile desk snapshot for one symbol."""
+
+    async def payload_factory():
+        from api.routers.fractal_market_profile import fractal_market_profile_live_snapshot
+
+        return await fractal_market_profile_live_snapshot(symbol=symbol)
+
+    await _stream_snapshot(
+        websocket,
+        channel=f"fractal_market_profile:{symbol}",
+        interval_seconds=5.0,
+        payload_factory=payload_factory,
+    )
+
+
 async def ws_proposals(websocket: WebSocket):
     """Stream real-time agent proposals via Redis pub/sub."""
     await _accept_authenticated_socket(websocket, "proposals")
