@@ -9,6 +9,7 @@ class RiskGovernor:
     def __init__(self, config: dict[str, Any]):
         self.config = config
         self.contract_specs = config.get("contract_specs", {})
+        self.scope = config.get("mvp_scope", {})
         self.max_daily_loss = float(config.get("max_daily_loss", 75_000.0))
         self.max_agent_drawdown = float(config.get("max_agent_drawdown", 0.08))
         self.max_symbol_exposure = float(config.get("max_symbol_exposure", 0.35))
@@ -119,6 +120,8 @@ class RiskGovernor:
         return round(numeric / max(net_liquidation, 1.0), 4)
 
     def _margin_fraction(self, symbol: str) -> float:
+        if str(self.scope.get("instrument_type") or "").lower() == "options_buy":
+            return float(self.scope.get("option_buy_price_fraction", 0.02))
         normalized_symbol = str(symbol or "").upper().replace(" INDEX", "").replace(" FUT", "").strip()
         return float(
             self.contract_specs.get(normalized_symbol, {}).get("margin_fraction_per_lot", 1.0)

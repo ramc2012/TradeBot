@@ -45,11 +45,9 @@ import {
   getAuctionIntelligenceGateBValidation,
   getAuctionIntelligenceGateCValidation,
   getAuctionIntelligenceLiveSnapshot,
-  getAuctionIntelligenceMPAgentContext,
+  getAuctionIntelligenceMPDashboard,
   getAuctionIntelligenceMPDataStatus,
-  getAuctionIntelligenceMPOpenSignal,
   getAuctionIntelligencePaperPositions,
-  getAuctionIntelligenceMPSignals,
   getAuctionIntelligencePaperJournal,
   getAuctionIntelligenceShadowRecords,
   getAuctionIntelligenceSummary,
@@ -472,22 +470,6 @@ type MpDataSource = {
   detail: string;
 };
 
-type MpSignalRecord = {
-  date: string;
-  day_type: string;
-  direction: string;
-  buyer_fail: number;
-  seller_fail: number;
-  net_failure: number;
-  daily_move: number;
-};
-
-type MpSignalsResponse = {
-  underlying: string;
-  signals: MpSignalRecord[];
-  latest?: MpSignalRecord | null;
-};
-
 type MpOpenSignalResponse = {
   as_of?: string;
   signals: {
@@ -507,6 +489,72 @@ type MpAgentContextItem = {
   type: string;
   level: string;
   message: string;
+};
+
+type MpDashboardSession = {
+  date: string;
+  day_type: string;
+  direction: string;
+  signal_strength: string;
+  poc: number;
+  vah: number;
+  val: number;
+  ibh: number;
+  ibl: number;
+  ibr: number;
+  session_high: number;
+  session_low: number;
+  day_range: number;
+  buyer_fail: number;
+  seller_fail: number;
+  net_failure: number;
+  close: number;
+  daily_move: number;
+  daily_pct: number;
+  close_location: number;
+  value_shift: number;
+  range_factor: number;
+  inside_value: boolean;
+  above_value: boolean;
+  below_value: boolean;
+  poor_high: boolean;
+  poor_low: boolean;
+  fa_up: boolean;
+  fa_dn: boolean;
+};
+
+type MpDashboardResponse = {
+  underlying: string;
+  lookback: number;
+  overview: {
+    session_count: number;
+    strong_signal_count: number;
+    conflict_count: number;
+    ce_count: number;
+    pe_count: number;
+    neutral_count: number;
+    avg_buyer_fail: number;
+    avg_seller_fail: number;
+    avg_net_failure: number;
+    avg_range_factor: number;
+    avg_close_location: number;
+    value_acceptance_ratio: number;
+  };
+  structure_summary: {
+    above_value_count: number;
+    inside_value_count: number;
+    below_value_count: number;
+    poor_high_count: number;
+    poor_low_count: number;
+    failed_auction_count: number;
+  };
+  day_type_distribution: Array<{ day_type: string; count: number }>;
+  direction_distribution: Array<{ direction: string; count: number }>;
+  sessions: MpDashboardSession[];
+  latest?: MpDashboardSession | null;
+  open_signal?: MpOpenSignalResponse["signals"][number] | null;
+  skip_reason?: string | null;
+  context: MpAgentContextItem[];
 };
 
 type DataMode = "live" | "demo";
@@ -535,6 +583,24 @@ type NTMVolXRow = {
   netPressure: number;
   callVolume: number;
   putVolume: number;
+};
+
+type MpStructureRow = {
+  label: string;
+  date: string;
+  close: number;
+  poc: number;
+  vah: number;
+  val: number;
+  buyerFail: number;
+  sellerFail: number;
+  netFailure: number;
+  dailyMove: number;
+  valueShift: number;
+  rangeFactor: number;
+  direction: string;
+  signalStrength: string;
+  dayType: string;
 };
 
 const FALLBACK_SCENARIOS: DemoScenarioOption[] = [
@@ -575,6 +641,15 @@ function formatCompact(value: number | null | undefined) {
   }).format(value);
 }
 
+function formatShortDate(value: string) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+  });
+}
+
 function sectionChrome(extra?: string) {
   return clsx(
     "rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,rgba(11,18,30,0.95),rgba(7,11,21,0.98))] shadow-[0_24px_60px_rgba(3,8,18,0.38)] backdrop-blur",
@@ -593,6 +668,13 @@ function toneForStatus(status: string) {
   if (status === "warning" || status === "blocked") return "text-amber-300";
   if (status === "missing" || status === "fail") return "text-rose-300";
   return "text-slate-300";
+}
+
+function toneForSignalStrength(strength: string) {
+  if (strength === "strong") return "border-emerald-400/35 bg-emerald-400/12 text-emerald-300";
+  if (strength === "conflict") return "border-amber-400/35 bg-amber-400/12 text-amber-300";
+  if (strength === "moderate") return "border-sky-400/35 bg-sky-400/12 text-sky-300";
+  return "border-white/12 bg-white/6 text-slate-300";
 }
 
 function toneForRegime(label: string) {
@@ -939,6 +1021,308 @@ const GateSummaryCard = memo(function GateSummaryCard({
   );
 });
 
+const MPDashboardPanel = memo(function MPDashboardPanel({
+  dashboard,
+  dataSources,
+  loading,
+}: {
+  dashboard?: MpDashboardResponse;
+  dataSources: MpDataSource[];
+  loading: boolean;
+}) {
+  const sessions = dashboard?.sessions ?? [];
+  const openSignal = dashboard?.open_signal;
+  const chartRows = useMemo<MpStructureRow[]>(
+    () =>
+      sessions.map((session) => ({
+        label: formatShortDate(session.date),
+        date: session.date,
+        close: session.close,
+        poc: session.poc,
+        vah: session.vah,
+        val: session.val,
+        buyerFail: session.buyer_fail,
+        sellerFail: session.seller_fail,
+        netFailure: session.net_failure,
+        dailyMove: session.daily_move,
+        valueShift: session.value_shift,
+        rangeFactor: session.range_factor,
+        direction: session.direction,
+        signalStrength: session.signal_strength,
+        dayType: session.day_type,
+      })),
+    [sessions],
+  );
+
+  const priceDomain = useMemo<[number, number]>(() => {
+    const values = chartRows.flatMap((row) => [row.close, row.poc, row.vah, row.val]);
+    if (!values.length) return [0, 100];
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const padding = Math.max((max - min) * 0.08, 20);
+    return [min - padding, max + padding];
+  }, [chartRows]);
+
+  const failureDomain = useMemo(() => {
+    const values = chartRows.flatMap((row) => [row.buyerFail, row.sellerFail, Math.abs(row.netFailure)]);
+    return Math.max(...values, 4);
+  }, [chartRows]);
+
+  const totalSessions = Math.max(dashboard?.overview.session_count ?? 0, 1);
+
+  return (
+    <section className="grid gap-6 xl:grid-cols-[1.08fr_0.92fr]">
+      <div className={sectionChrome("p-5")}>
+        <SectionTitle
+          icon={<CandlestickChart size={14} className="text-sky-300" />}
+          eyebrow="Market Profile Diagnostics"
+          title={`${dashboard?.underlying ?? "MP"} structure and failure pressure`}
+          detail="The overnight MP layer now carries its own diagnostics: recent value migration, close versus value, and buyer-versus-seller failure pressure over the research window."
+          action={
+            dashboard?.latest ? (
+              <div className="flex items-center gap-2">
+                <StatusPill
+                  label={dashboard.latest.direction}
+                  className={toneForAction(dashboard.latest.direction)}
+                />
+                <StatusPill
+                  label={dashboard.latest.signal_strength}
+                  className={toneForSignalStrength(dashboard.latest.signal_strength)}
+                />
+              </div>
+            ) : null
+          }
+        />
+
+        <div className="mt-5 grid gap-4">
+          <div className="h-[250px] rounded-[26px] border border-white/8 bg-black/20 p-3">
+            {chartRows.length ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={chartRows} margin={{ top: 12, right: 18, left: 4, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="mpCloseFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="rgba(96,165,250,0.22)" />
+                      <stop offset="100%" stopColor="rgba(96,165,250,0.02)" />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid stroke="rgba(255,255,255,0.06)" vertical={false} />
+                  <XAxis dataKey="label" tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={18} />
+                  <YAxis domain={priceDomain} tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false} width={72} />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: "#091120", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 18 }}
+                    formatter={(value: number, name: string) => [formatPrice(Number(value)), name]}
+                    labelFormatter={(value) => `Session ${value}`}
+                  />
+                  <Area type="monotone" dataKey="close" name="Close" stroke="#e2e8f0" fill="url(#mpCloseFill)" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="poc" name="POC" stroke="#34d399" strokeWidth={2.1} dot={false} />
+                  <Line type="monotone" dataKey="vah" name="VAH" stroke="#60a5fa" strokeWidth={1.5} dot={false} strokeDasharray="3 4" />
+                  <Line type="monotone" dataKey="val" name="VAL" stroke="#f59e0b" strokeWidth={1.5} dot={false} strokeDasharray="3 4" />
+                </ComposedChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex h-full items-center justify-center text-sm text-slate-400">
+                {loading ? "Loading MP structure…" : "No MP structure history available for this underlying."}
+              </div>
+            )}
+          </div>
+
+          <div className="h-[220px] rounded-[26px] border border-white/8 bg-black/20 p-3">
+            {chartRows.length ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={chartRows} margin={{ top: 12, right: 18, left: 4, bottom: 0 }}>
+                  <CartesianGrid stroke="rgba(255,255,255,0.06)" vertical={false} />
+                  <XAxis dataKey="label" tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={18} />
+                  <YAxis yAxisId="fail" domain={[0, failureDomain + 0.5]} tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false} width={60} />
+                  <YAxis yAxisId="net" orientation="right" domain={[-failureDomain, failureDomain]} tick={{ fill: "#94a3b8", fontSize: 10 }} axisLine={false} tickLine={false} width={52} />
+                  <ReferenceLine yAxisId="net" y={0} stroke="rgba(255,255,255,0.12)" strokeDasharray="4 4" />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: "#091120", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 18 }}
+                    formatter={(value: number, name: string) => [formatSigned(Number(value), 2), name]}
+                  />
+                  <Bar yAxisId="fail" dataKey="buyerFail" name="Buyer fail" barSize={12} radius={[5, 5, 0, 0]} fill="rgba(244,63,94,0.56)" />
+                  <Bar yAxisId="fail" dataKey="sellerFail" name="Seller fail" barSize={12} radius={[5, 5, 0, 0]} fill="rgba(52,211,153,0.56)" />
+                  <Line yAxisId="net" type="monotone" dataKey="netFailure" name="Net failure" stroke="#c084fc" strokeWidth={2.1} dot={false} />
+                </ComposedChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex h-full items-center justify-center text-sm text-slate-400">
+                Failure-pressure history is unavailable.
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          <KpiCard
+            label="Value acceptance"
+            value={formatPct(dashboard?.overview.value_acceptance_ratio, 0)}
+            detail={`${dashboard?.structure_summary.inside_value_count ?? 0} of ${dashboard?.overview.session_count ?? 0} closes finished inside value.`}
+          />
+          <KpiCard
+            label="Avg net failure"
+            value={formatSigned(dashboard?.overview.avg_net_failure, 2)}
+            detail={`Buyer ${formatSigned(dashboard?.overview.avg_buyer_fail, 2)} · seller ${formatSigned(dashboard?.overview.avg_seller_fail, 2)} averages over the research window.`}
+          />
+          <KpiCard
+            label="Range factor"
+            value={formatSigned(dashboard?.overview.avg_range_factor, 2)}
+            detail="Session range divided by initial balance range. Higher values imply more one-timeframe extension."
+          />
+        </div>
+      </div>
+
+      <div className={sectionChrome("p-5")}>
+        <SectionTitle
+          icon={<TrendingUp size={14} className="text-amber-300" />}
+          eyebrow="Overnight Bias"
+          title="Signal mix, context, and data health"
+          detail="This panel compresses the next-session read into one operator view: current overnight bias, distribution of recent day types, structural acceptance counts, and the health of the research inputs."
+        />
+
+        <div className="mt-5 space-y-4">
+          <div className="rounded-[26px] border border-white/8 bg-black/15 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Next session read</div>
+                <div className="mt-2 text-sm font-semibold text-slate-100">
+                  {dashboard?.underlying ?? "MP"} · {dashboard?.latest?.date ?? "—"}
+                </div>
+              </div>
+              {openSignal ? (
+                <StatusPill label={openSignal.direction} className={toneForAction(openSignal.direction)} />
+              ) : dashboard?.latest ? (
+                <StatusPill label={dashboard.latest.direction} className={toneForAction(dashboard.latest.direction)} />
+              ) : null}
+            </div>
+            <div className="mt-4 space-y-3 text-sm text-slate-400">
+              {openSignal ? (
+                <>
+                  <div>
+                    <span className="font-semibold text-slate-100">{openSignal.day_type}</span>
+                    {" · "}
+                    {openSignal.reason}
+                  </div>
+                  <div>{openSignal.instruction}</div>
+                  <div className="text-xs uppercase tracking-[0.18em] text-slate-500">
+                    Strength {openSignal.strength} · allocation {formatPct(openSignal.alloc, 0)}
+                  </div>
+                </>
+              ) : (
+                <div className="leading-6 text-slate-400">
+                  {dashboard?.skip_reason ?? "No next-session MP signal available."}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div className="rounded-[26px] border border-white/8 bg-black/15 p-4">
+              <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Direction mix</div>
+              <div className="mt-4 space-y-3">
+                {(dashboard?.direction_distribution ?? []).map((row) => (
+                  <div key={row.direction} className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-3 text-sm">
+                      <span className="text-slate-300">{row.direction}</span>
+                      <span className="font-mono text-slate-100">{row.count}</span>
+                    </div>
+                    <div className="h-2 rounded-full bg-white/6">
+                      <div
+                        className={clsx(
+                          "h-2 rounded-full",
+                          row.direction === "CE"
+                            ? "bg-emerald-400"
+                            : row.direction === "PE"
+                              ? "bg-rose-400"
+                              : row.direction === "CONFLICT"
+                                ? "bg-amber-400"
+                                : "bg-slate-500",
+                        )}
+                        style={{ width: `${(row.count / totalSessions) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                <MetricRow
+                  label="Above value"
+                  value={String(dashboard?.structure_summary.above_value_count ?? 0)}
+                  hint="Closes above VAH."
+                />
+                <MetricRow
+                  label="Inside value"
+                  value={String(dashboard?.structure_summary.inside_value_count ?? 0)}
+                  hint="Closes inside value."
+                />
+                <MetricRow
+                  label="Below value"
+                  value={String(dashboard?.structure_summary.below_value_count ?? 0)}
+                  hint="Closes below VAL."
+                />
+              </div>
+            </div>
+
+            <div className="rounded-[26px] border border-white/8 bg-black/15 p-4">
+              <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Day-type mix</div>
+              <div className="mt-4 space-y-3">
+                {(dashboard?.day_type_distribution ?? []).slice(0, 6).map((row) => (
+                  <div key={row.day_type} className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-3 text-sm">
+                      <span className="text-slate-300">{row.day_type.replaceAll("_", " ")}</span>
+                      <span className="font-mono text-slate-100">{row.count}</span>
+                    </div>
+                    <div className="h-2 rounded-full bg-white/6">
+                      <div
+                        className="h-2 rounded-full bg-sky-400"
+                        style={{ width: `${(row.count / totalSessions) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-[26px] border border-white/8 bg-black/15 p-4">
+            <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Context stream</div>
+            <div className="mt-4 space-y-3 text-sm text-slate-400">
+              {(dashboard?.context ?? []).map((item) => (
+                <div key={`${item.time}:${item.type}:${item.message}`} className="flex items-start gap-2">
+                  <ChevronRight size={14} className="mt-1 shrink-0 text-sky-300" />
+                  <span>{item.message}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-[26px] border border-white/8 bg-black/15 p-4">
+            <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Research inputs</div>
+            <div className="mt-4 space-y-3">
+              {dataSources.map((source) => (
+                <div key={source.name} className="flex items-start justify-between gap-3 rounded-2xl border border-white/8 bg-white/5 px-3 py-3 text-sm">
+                  <div>
+                    <div className="font-medium text-slate-100">{source.name}</div>
+                    <div className="mt-1 text-xs leading-5 text-slate-400">{source.detail}</div>
+                  </div>
+                  <div className="text-right">
+                    <div className={clsx("font-mono uppercase", toneForStatus(source.status))}>{source.status}</div>
+                    <div className="mt-1 text-xs text-slate-500">{source.last_date}</div>
+                  </div>
+                </div>
+              ))}
+              {!dataSources.length ? (
+                <div className="text-sm text-slate-400">
+                  {loading ? "Loading data status…" : "No data-source diagnostics available."}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+});
+
 export default function AuctionIntelligenceOperatorView() {
   const [dataMode, setDataMode] = useState<DataMode>("live");
   const [symbol, setSymbol] = useState("NIFTY");
@@ -1045,23 +1429,9 @@ export default function AuctionIntelligenceOperatorView() {
     refetchOnWindowFocus: false,
   });
 
-  const mpSignalsQuery = useQuery<MpSignalsResponse>({
-    queryKey: ["auction-intelligence", "mp-signals", deferredSymbol],
-    queryFn: async () => (await getAuctionIntelligenceMPSignals(deferredSymbol)).data,
-    staleTime: 60_000,
-    refetchOnWindowFocus: false,
-  });
-
-  const mpOpenSignalQuery = useQuery<MpOpenSignalResponse>({
-    queryKey: ["auction-intelligence", "mp-open-signal", deferredSymbol],
-    queryFn: async () => (await getAuctionIntelligenceMPOpenSignal(deferredSymbol)).data,
-    staleTime: 60_000,
-    refetchOnWindowFocus: false,
-  });
-
-  const mpAgentContextQuery = useQuery<MpAgentContextItem[]>({
-    queryKey: ["auction-intelligence", "mp-agent-context", deferredSymbol],
-    queryFn: async () => (await getAuctionIntelligenceMPAgentContext(deferredSymbol)).data,
+  const mpDashboardQuery = useQuery<MpDashboardResponse>({
+    queryKey: ["auction-intelligence", "mp-dashboard", deferredSymbol],
+    queryFn: async () => (await getAuctionIntelligenceMPDashboard(deferredSymbol, 30)).data,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
   });
@@ -1184,6 +1554,9 @@ export default function AuctionIntelligenceOperatorView() {
     () => (mpDataStatusQuery.data ?? []).filter((item) => item.name.startsWith(deferredSymbol)),
     [deferredSymbol, mpDataStatusQuery.data],
   );
+  const mpOpenSignal = mpDashboardQuery.data?.open_signal;
+  const mpContext = mpDashboardQuery.data?.context ?? [];
+  const mpSessions = mpDashboardQuery.data?.sessions ?? [];
 
   const journalRows = useMemo<ReactNode[][]>(() => (
     (paperJournalQuery.data?.records ?? []).slice(0, 8).map((record) => [
@@ -1295,9 +1668,7 @@ export default function AuctionIntelligenceOperatorView() {
     ?? paperPositionsQuery.error
     ?? shadowRecordsQuery.error
     ?? mpDataStatusQuery.error
-    ?? mpSignalsQuery.error
-    ?? mpOpenSignalQuery.error
-    ?? mpAgentContextQuery.error
+    ?? mpDashboardQuery.error
     ?? shadowBackfill.error;
 
   return (
@@ -1777,28 +2148,28 @@ export default function AuctionIntelligenceOperatorView() {
                     <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Next Session MP Signal</div>
                     <div className="mt-1 text-sm font-semibold text-slate-100">{deferredSymbol}</div>
                   </div>
-                  {mpOpenSignalQuery.data?.signals?.[0] ? (
+                  {mpOpenSignal ? (
                     <StatusPill
-                      label={mpOpenSignalQuery.data.signals[0].direction}
-                      className={toneForAction(mpOpenSignalQuery.data.signals[0].direction)}
+                      label={mpOpenSignal.direction}
+                      className={toneForAction(mpOpenSignal.direction)}
                     />
                   ) : null}
                 </div>
-                {mpOpenSignalQuery.data?.signals?.length ? (
+                {mpOpenSignal ? (
                   <div className="mt-4 space-y-3 text-sm text-slate-400">
                     <div>
-                      <span className="font-semibold text-slate-100">{mpOpenSignalQuery.data.signals[0].day_type}</span>
+                      <span className="font-semibold text-slate-100">{mpOpenSignal.day_type}</span>
                       {" · "}
-                      {mpOpenSignalQuery.data.signals[0].reason}
+                      {mpOpenSignal.reason}
                     </div>
-                    <div>{mpOpenSignalQuery.data.signals[0].instruction}</div>
+                    <div>{mpOpenSignal.instruction}</div>
                     <div className="text-xs uppercase tracking-[0.18em] text-slate-500">
-                      Strength {mpOpenSignalQuery.data.signals[0].strength} · allocation {formatPct(mpOpenSignalQuery.data.signals[0].alloc, 0)}
+                      Strength {mpOpenSignal.strength} · allocation {formatPct(mpOpenSignal.alloc, 0)}
                     </div>
                   </div>
                 ) : (
                   <div className="mt-4 text-sm leading-6 text-slate-400">
-                    {mpOpenSignalQuery.data?.skip_reason ?? "No next-session MP signal available."}
+                    {mpDashboardQuery.data?.skip_reason ?? "No next-session MP signal available."}
                   </div>
                 )}
               </div>
@@ -1806,7 +2177,7 @@ export default function AuctionIntelligenceOperatorView() {
               <div className="rounded-[26px] border border-white/8 bg-black/15 p-4">
                 <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Agent context</div>
                 <div className="mt-4 space-y-3 text-sm text-slate-400">
-                  {(mpAgentContextQuery.data ?? []).slice(0, 5).map((item) => (
+                  {mpContext.slice(0, 5).map((item) => (
                     <div key={`${item.time}:${item.type}:${item.message}`} className="flex items-start gap-2">
                       <ChevronRight size={14} className="mt-1 shrink-0 text-sky-300" />
                       <span>{item.message}</span>
@@ -1889,6 +2260,12 @@ export default function AuctionIntelligenceOperatorView() {
           </div>
         </div>
       </section>
+
+      <MPDashboardPanel
+        dashboard={mpDashboardQuery.data}
+        dataSources={dataSources}
+        loading={mpDashboardQuery.isFetching || mpDataStatusQuery.isFetching}
+      />
 
       <section className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
         <div className={sectionChrome("p-5")}>
@@ -1973,14 +2350,17 @@ export default function AuctionIntelligenceOperatorView() {
               <div className="rounded-[26px] border border-white/8 bg-black/15 p-4">
                 <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Recent MP day signals</div>
                 <div className="mt-4 space-y-3">
-                  {(mpSignalsQuery.data?.signals ?? []).slice(-4).reverse().map((signal) => (
+                  {mpSessions.slice(-4).reverse().map((signal) => (
                     <div key={`${signal.date}:${signal.day_type}`} className="rounded-2xl border border-white/8 bg-white/5 p-3">
                       <div className="flex items-center justify-between gap-3">
                         <div>
                           <div className="text-sm font-semibold text-slate-100">{signal.date}</div>
                           <div className="text-xs uppercase tracking-[0.18em] text-slate-500">{signal.day_type}</div>
                         </div>
-                        <StatusPill label={signal.direction} className={toneForAction(signal.direction)} />
+                        <div className="flex items-center gap-2">
+                          <StatusPill label={signal.direction} className={toneForAction(signal.direction)} />
+                          <StatusPill label={signal.signal_strength} className={toneForSignalStrength(signal.signal_strength)} />
+                        </div>
                       </div>
                       <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-400">
                         <span>Buyer fail {signal.buyer_fail.toFixed(1)}</span>

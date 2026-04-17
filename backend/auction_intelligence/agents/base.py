@@ -39,7 +39,18 @@ class StrategyAgent(ABC):
         sleeve_fraction: float,
     ) -> tuple[int, int, float]:
         lot_size = self._lot_size(context)
-        margin_fraction_per_lot = self._margin_fraction_per_lot(context)
+        scope = context.config.get("mvp_scope", {})
+        instrument_type = str(scope.get("instrument_type") or "").lower()
+        if instrument_type == "options_buy":
+            option_buy_price_fraction = float(
+                self.config.get(
+                    "option_buy_price_fraction",
+                    scope.get("option_buy_price_fraction", 0.02),
+                )
+            )
+            margin_fraction_per_lot = max(option_buy_price_fraction, 0.001)
+        else:
+            margin_fraction_per_lot = self._margin_fraction_per_lot(context)
         max_notional = context.portfolio.net_liquidation * sleeve_fraction
         margin_per_lot = max(entry_price * lot_size * margin_fraction_per_lot, 1.0)
         quantity = floor(max_notional / margin_per_lot) * lot_size

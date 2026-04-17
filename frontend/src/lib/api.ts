@@ -1,6 +1,7 @@
 import axios from "axios";
+import { resolveApiBaseUrl } from "./runtime-url";
 
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+export const API_URL = resolveApiBaseUrl();
 
 export const api = axios.create({
   baseURL: API_URL,
@@ -18,7 +19,10 @@ export const saveCredentials = (broker: string, credentials: Record<string, stri
 export const getCredentialsStatus = (broker: string) =>
   api.get(`/api/auth/credentials/${broker}`);
 
-export const getBrokerStatus = () => api.get("/api/auth/broker-status");
+export const getBrokerStatus = (options?: { forceValidate?: boolean }) =>
+  api.get("/api/auth/broker-status", {
+    params: options?.forceValidate ? { force_validate: true } : undefined,
+  });
 export const getSystemHealth = () => api.get("/api/system/health");
 export const getSystemOverview = () => api.get("/api/system/overview");
 
@@ -89,8 +93,8 @@ export const getOptionChain = (symbol: string, expiry?: string) =>
   api.get(`/api/market/option-chain/${encodeURIComponent(symbol)}`, { params: { expiry } });
 export const getOptionExpiries = (symbol: string) =>
   api.get(`/api/market/expiries/${encodeURIComponent(symbol)}`);
-export const getATMWatchlistExpiries = () =>
-  api.get("/api/market/atm-watchlist/expiries");
+export const getATMWatchlistExpiries = (expiry?: string) =>
+  api.get("/api/market/atm-watchlist/expiries", { params: { expiry } });
 export const getATMWatchlist = (expiry?: string) =>
   api.get("/api/market/atm-watchlist", { params: { expiry } });
 export const getMarketProfile = (symbol: string, timeframe = "daily") =>
@@ -225,6 +229,8 @@ export const getAuctionIntelligenceMPOpenSignal = (underlying = "NIFTY") =>
   api.get("/api/auction-intelligence/mp-open-signal", { params: { underlying } });
 export const getAuctionIntelligenceMPAgentContext = (underlying = "NIFTY", limit = 10) =>
   api.get("/api/auction-intelligence/mp-agent-context", { params: { underlying, limit } });
+export const getAuctionIntelligenceMPDashboard = (underlying = "NIFTY", lookback = 30) =>
+  api.get("/api/auction-intelligence/mp-dashboard", { params: { underlying, lookback } });
 
 // ── Fractal Market Profile ────────────────────────────────────────────────
 export const getFractalMarketProfileSummary = () =>

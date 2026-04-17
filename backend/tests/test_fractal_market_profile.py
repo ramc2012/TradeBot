@@ -8,7 +8,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from auction_intelligence import live as auction_live
 from fractal_market_profile.paper import FMPPaperStore
+import fractal_market_profile.service as fmp_service_module
 from fractal_market_profile.service import FractalMarketProfileService
 
 
@@ -98,6 +100,54 @@ async def test_live_order_flow_falls_back_to_bar_proxy_when_ticks_are_missing() 
     assert "timing_confidence" in snapshot
 
 
+@pytest.mark.asyncio
+async def test_load_live_rows_reuses_shared_broker_history_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = FractalMarketProfileService()
+    first_session = _minute_rows(datetime(2026, 4, 2, 3, 45, tzinfo=timezone.utc), count=220)
+    second_session = _minute_rows(
+        datetime(2026, 4, 3, 3, 45, tzinfo=timezone.utc),
+        count=220,
+        base=22650.0,
+    )
+    expected_rows = first_session + second_session
+
+    async def _fake_recent_rows(symbol_code: str, *, lookback_days: int = 7):
+        assert symbol_code == "NIFTY"
+        assert lookback_days == 10
+        return expected_rows, "fyers_spot_index", "NSE:NIFTY50-INDEX"
+
+    monkeypatch.setattr(auction_live, "_fetch_recent_minute_rows", _fake_recent_rows)
+
+    rows, source, history_symbol = await service._load_live_rows("NIFTY")
+
+    assert rows == expected_rows
+    assert source == "fyers_spot_index"
+    assert history_symbol == "NSE:NIFTY50-INDEX"
+
+
+def test_fmp_group_rows_by_session_keeps_partial_live_session_when_requested(monkeypatch: pytest.MonkeyPatch) -> None:
+    ist = timezone(timedelta(hours=5, minutes=30))
+    fixed_now = datetime(2026, 4, 16, 11, 30, tzinfo=ist)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return fixed_now.replace(tzinfo=None)
+            return fixed_now.astimezone(tz)
+
+    monkeypatch.setattr(fmp_service_module, "datetime", _FixedDateTime)
+
+    rows = _minute_rows(datetime(2026, 4, 16, 3, 45, tzinfo=timezone.utc), count=130)
+
+    dropped = fmp_service_module._group_rows_by_session(rows)
+    kept = fmp_service_module._group_rows_by_session(rows, allow_partial_live_session=True)
+
+    assert datetime(2026, 4, 16).date() not in dropped
+    assert datetime(2026, 4, 16).date() in kept
+    assert len(kept[datetime(2026, 4, 16).date()]) == 130
+
+
 def test_build_signal_detects_bullish_hourly_breakout() -> None:
     service = FractalMarketProfileService()
     current_rows = _minute_rows(datetime(2026, 4, 2, 9, 15, tzinfo=timezone.utc), count=12)
@@ -171,6 +221,129 @@ def test_build_signal_detects_bullish_hourly_breakout() -> None:
     assert signal["action"] == "LONG"
     assert signal["actionable"] is True
     assert signal["confidence"] >= 0.64
+
+
+def test_build_signal_detects_bearish_trend_pullback() -> None:
+    service = FractalMarketProfileService()
+    current_rows = _minute_rows(datetime(2026, 4, 16, 8, 0, tzinfo=timezone.utc), count=12, base=24195.0, drift=-1.8)
+    daily_profile = {
+        "shape": "Elongated",
+        "direction_bias": "bearish",
+        "day_type": "TREND_DN",
+        "tick_size": 5.0,
+        "initial_balance_range": 90.0,
+        "daily_ib_ratio": 1.15,
+        "vah": 24260.0,
+        "val": 24190.0,
+        "poc": 24220.0,
+        "single_prints": [24170.0],
+        "high_price": 24310.0,
+        "low_price": 24120.0,
+    }
+    prior_daily = {
+        "vah": 24140.0,
+        "val": 24070.0,
+        "high_price": 24180.0,
+        "low_price": 24020.0,
+        "single_prints": [24090.0],
+    }
+    hourly_profiles = [
+        _profile(
+            hour_number=4,
+            shape="P-shape",
+            direction_bias="bearish",
+            close_price=24162.3,
+            vah=24205.0,
+            val=24145.0,
+            poc=24179.76,
+            ib_high=24215.0,
+            ib_low=24138.0,
+            score=-2,
+            step=-1,
+        )
+    ]
+    order_flow = {
+        "delta": 2329.1667,
+        "timing_confidence": 0.4088,
+        "execution_aggression": "AGGRESSIVE",
+    }
+
+    signal = service._build_signal(
+        "NIFTY",
+        current_rows=current_rows,
+        daily_profile=daily_profile,
+        prior_daily_profile=prior_daily,
+        current_hour_profile=hourly_profiles[-1],
+        hourly_profiles=hourly_profiles,
+        order_flow=order_flow,
+        historical_options=False,
+    )
+
+    assert signal["setup_name"] == "trend_pullback_put"
+    assert signal["action"] == "SHORT"
+    assert signal["confidence"] >= 0.58
+    assert signal["actionable"] is True
+
+
+def test_build_signal_detects_balance_extreme_reversion_from_d_shape() -> None:
+    service = FractalMarketProfileService()
+    current_rows = _minute_rows(datetime(2026, 4, 16, 8, 0, tzinfo=timezone.utc), count=12, base=24205.0, drift=0.4)
+    daily_profile = {
+        "shape": "D-shape",
+        "direction_bias": "bullish",
+        "day_type": "NORMAL",
+        "tick_size": 5.0,
+        "initial_balance_range": 80.0,
+        "daily_ib_ratio": 1.0,
+        "vah": 24230.0,
+        "val": 24170.0,
+        "poc": 24200.0,
+        "single_prints": [],
+        "high_price": 24245.0,
+        "low_price": 24150.0,
+    }
+    prior_daily = {
+        "vah": 24220.0,
+        "val": 24160.0,
+        "high_price": 24255.0,
+        "low_price": 24140.0,
+        "single_prints": [],
+    }
+    hourly_profiles = [
+        _profile(
+            hour_number=3,
+            shape="D-shape",
+            direction_bias="bullish",
+            close_price=24224.0,
+            vah=24228.0,
+            val=24192.0,
+            poc=24208.0,
+            ib_high=24216.0,
+            ib_low=24188.0,
+            score=0,
+            step=0,
+        ),
+    ]
+    order_flow = {
+        "delta": -220.0,
+        "timing_confidence": 0.69,
+        "execution_aggression": "AGGRESSIVE",
+    }
+
+    signal = service._build_signal(
+        "NIFTY",
+        current_rows=current_rows,
+        daily_profile=daily_profile,
+        prior_daily_profile=prior_daily,
+        current_hour_profile=hourly_profiles[-1],
+        hourly_profiles=hourly_profiles,
+        order_flow=order_flow,
+        historical_options=False,
+    )
+
+    assert signal["setup_name"] == "daily_balance_extreme_reversion_put"
+    assert signal["action"] == "SHORT"
+    assert signal["actionable"] is True
 
 
 @pytest.mark.asyncio

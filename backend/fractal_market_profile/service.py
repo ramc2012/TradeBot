@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import pandas as pd
 from fastapi.encoders import jsonable_encoder
+from loguru import logger
 from sqlalchemy import text
 
 from analytics.sector import sector_tracker
@@ -124,7 +125,11 @@ def _aggregate_rows(rows: list[dict[str, Any]], interval_minutes: int) -> list[d
     return aggregated
 
 
-def _group_rows_by_session(rows: list[dict[str, Any]]) -> dict[date, list[dict[str, Any]]]:
+def _group_rows_by_session(
+    rows: list[dict[str, Any]],
+    *,
+    allow_partial_live_session: bool = False,
+) -> dict[date, list[dict[str, Any]]]:
     grouped: dict[date, list[dict[str, Any]]] = {}
     for row in rows:
         timestamp = _to_ist(row.get("time") or row.get("timestamp"))
@@ -141,7 +146,18 @@ def _group_rows_by_session(rows: list[dict[str, Any]]) -> dict[date, list[dict[s
         grouped.setdefault(timestamp.date(), []).append(normalized)
     for session_rows in grouped.values():
         session_rows.sort(key=lambda item: item["time"])
-    return {key: rows for key, rows in grouped.items() if len(rows) >= 180}
+    now_ist = datetime.now(IST)
+    return {
+        key: rows
+        for key, rows in grouped.items()
+        if len(rows) >= 180
+        or (
+            allow_partial_live_session
+            and key == now_ist.date()
+            and SESSION_OPEN <= now_ist.time() < SESSION_CLOSE
+            and len(rows) >= 120
+        )
+    }
 
 
 def _hour_number(timestamp: datetime) -> int:
@@ -472,8 +488,8 @@ class FractalMarketProfileService:
 
     async def live_snapshot(self, symbol_code: str = "NIFTY") -> dict[str, Any]:
         normalized = self._normalize_symbol(symbol_code)
-        rows = await self._load_live_rows(normalized)
-        sessions = _group_rows_by_session(rows)
+        rows, history_source, history_symbol = await self._load_live_rows(normalized)
+        sessions = _group_rows_by_session(rows, allow_partial_live_session=True)
         if not sessions:
             raise RuntimeError(f"No spot history available for {normalized}.")
 
@@ -490,11 +506,30 @@ class FractalMarketProfileService:
             live_mode=True,
         )
         analysis["symbol_code"] = normalized
+        analysis["history_source"] = history_source
+        analysis["history_symbol"] = history_symbol
         analysis["supported_symbols"] = list(SUPPORTED_SYMBOLS)
         analysis["generated_at"] = _utc_now().isoformat()
         analysis["paper_positions"] = await self.paper.list_positions(symbol=normalized, status="all", limit=8)
         analysis["paper_journal"] = await self.paper.list_journal(symbol=normalized, limit=8)
         return analysis
+
+    async def live_health(self, symbol_code: str = "NIFTY") -> dict[str, Any]:
+        normalized = self._normalize_symbol(symbol_code)
+        rows, history_source, history_symbol = await self._load_live_rows(normalized)
+        sessions = _group_rows_by_session(rows, allow_partial_live_session=True)
+        if not sessions:
+            raise RuntimeError(f"No spot history available for {normalized}.")
+
+        session_dates = sorted(sessions)
+        return {
+            "symbol_code": normalized,
+            "history_source": history_source,
+            "history_symbol": history_symbol,
+            "row_count": len(rows),
+            "session_count": len(session_dates),
+            "latest_session_date": session_dates[-1].isoformat(),
+        }
 
     async def record_paper_snapshot(self, symbol_code: str = "NIFTY") -> dict[str, Any]:
         snapshot = await self.live_snapshot(symbol_code)
@@ -928,6 +963,7 @@ class FractalMarketProfileService:
 
         filters = list(signal.get("filters") or [])
         rationale = list(signal.get("rationale") or [])
+        advisories = list(signal.get("metadata", {}).get("advisories") or [])
         option_selection = await self._live_option_selection(
             symbol_code,
             direction=str(signal["action"]),
@@ -941,19 +977,15 @@ class FractalMarketProfileService:
             pcr = option_selection.get("pcr_oi")
             oi_change = float(option_selection.get("oi_change") or 0.0)
             iv_rank = option_selection.get("iv_rank")
-            if signal["action"] == "LONG":
-                if pcr is not None and float(pcr) < float(SCAN_CONFIG["bullish_pcr_min"]):
-                    filters.append("PCR is not confirming the bullish thesis.")
-                if oi_change <= 0:
-                    filters.append("Call-side OI is not building yet.")
-            else:
-                if pcr is not None and float(pcr) > float(SCAN_CONFIG["bearish_pcr_max"]):
-                    filters.append("PCR is not confirming the bearish thesis.")
-                if oi_change <= 0:
-                    filters.append("Put-side OI is not building yet.")
-            if iv_rank is not None and float(iv_rank) > float(SCAN_CONFIG["max_iv_rank_for_buying"]):
-                filters.append("IV rank is above the premium-buying threshold.")
-            if not filters:
+            signal["confidence"], advisories = self._apply_option_confirmation_penalties(
+                action=str(signal["action"]),
+                confidence=float(signal["confidence"]),
+                pcr=pcr,
+                oi_change=oi_change,
+                iv_rank=iv_rank,
+                advisories=advisories,
+            )
+            if not filters and not advisories:
                 rationale.append("Live ATM options flow is aligned with the FMP thesis.")
 
         try:
@@ -963,12 +995,56 @@ class FractalMarketProfileService:
             india_vix = 0.0
         signal["metadata"]["india_vix"] = india_vix
         if india_vix > float(SCAN_CONFIG["india_vix_defined_risk"]):
-            filters.append("India VIX is above the naked premium-buying threshold.")
+            signal["confidence"] = round(
+                max(0.0, float(signal["confidence"]) - float(SCAN_CONFIG["soft_vix_penalty"])),
+                4,
+            )
+            advisories.append("India VIX is above the naked premium-buying threshold.")
 
         signal["filters"] = filters
         signal["rationale"] = rationale
-        signal["actionable"] = bool(signal["action"] != "FLAT" and not filters and float(signal["confidence"]) >= 0.64)
+        signal["metadata"]["advisories"] = advisories
+        signal["actionable"] = bool(
+            signal["action"] != "FLAT"
+            and not filters
+            and float(signal["confidence"]) >= float(SCAN_CONFIG["actionable_confidence_min"])
+        )
         return signal
+
+    def _apply_option_confirmation_penalties(
+        self,
+        *,
+        action: str,
+        confidence: float,
+        pcr: float | None,
+        oi_change: float | None,
+        iv_rank: float | None,
+        advisories: list[str] | None = None,
+    ) -> tuple[float, list[str]]:
+        adjusted = float(confidence)
+        messages = list(advisories or [])
+        option_penalty = float(SCAN_CONFIG["soft_option_penalty"])
+        iv_penalty = float(SCAN_CONFIG["soft_iv_penalty"])
+
+        if action == "LONG":
+            if pcr is not None and float(pcr) < float(SCAN_CONFIG["bullish_pcr_min"]):
+                adjusted -= option_penalty
+                messages.append("PCR is not confirming the bullish thesis.")
+            if oi_change is not None and oi_change <= 0:
+                adjusted -= option_penalty
+                messages.append("Call-side OI is not building yet.")
+        else:
+            if pcr is not None and float(pcr) > float(SCAN_CONFIG["bearish_pcr_max"]):
+                adjusted -= option_penalty
+                messages.append("PCR is not confirming the bearish thesis.")
+            if oi_change is not None and oi_change <= 0:
+                adjusted -= option_penalty
+                messages.append("Put-side OI is not building yet.")
+        if iv_rank is not None and float(iv_rank) > float(SCAN_CONFIG["max_iv_rank_for_buying"]):
+            adjusted -= iv_penalty
+            messages.append("IV rank is above the premium-buying threshold.")
+
+        return round(max(0.0, adjusted), 4), messages
 
     async def _live_option_selection(
         self,
@@ -1052,12 +1128,11 @@ class FractalMarketProfileService:
         va_score = int(current_hour_profile.get("value_migration_score") or 0)
         daily_shape = str(daily_profile.get("shape") or "Unknown")
         hourly_shape = str(current_hour_profile.get("shape") or "Unknown")
+        balance_day = daily_shape == "D-shape" and hourly_shape == "D-shape"
 
         filters: list[str] = []
         if hour_number < 2:
             filters.append("Layer 1 starts after the opening hour (10:15 IST).")
-        if daily_shape == "D-shape" and hourly_shape == "D-shape":
-            filters.append("Daily and hourly profiles are both D-shape balance.")
         if hourly_shape == "Ledge":
             filters.append("Current hourly profile is a ledge; wait for the break.")
         if float(daily_profile.get("daily_ib_ratio") or 0.0) > float(SCAN_CONFIG["wide_daily_ib_factor"]):
@@ -1068,11 +1143,39 @@ class FractalMarketProfileService:
         daily_direction = str(daily_profile.get("direction_bias") or "neutral")
         order_flow_direction = "bullish" if float(order_flow.get("delta") or 0.0) >= 0 else "bearish"
         order_flow_alignment = float(order_flow.get("timing_confidence") or 0.0)
+        pullback_tolerance = max(
+            float(daily_profile["tick_size"]) * 6,
+            float(current_hour_profile["initial_balance_range"]) * float(SCAN_CONFIG["trend_pullback_tolerance_factor"]),
+        )
+        balance_reversion_tolerance = max(
+            float(daily_profile["tick_size"]) * 6,
+            float(daily_profile["initial_balance_range"]) * float(SCAN_CONFIG["balance_reversion_tolerance_factor"]),
+        )
+        near_balance_vah = abs(last_price - float(daily_profile["vah"])) <= balance_reversion_tolerance
+        near_balance_val = abs(last_price - float(daily_profile["val"])) <= balance_reversion_tolerance
+        balance_breakout_up = (
+            balance_day
+            and hour_number >= 2
+            and last_price > float(current_hour_profile["initial_balance_high"])
+            and va_score >= 0
+        )
+        balance_breakout_down = (
+            balance_day
+            and hour_number >= 2
+            and last_price < float(current_hour_profile["initial_balance_low"])
+            and va_score <= 0
+        )
+        if balance_day and not (near_balance_vah or near_balance_val or balance_breakout_up or balance_breakout_down):
+            filters.append("Daily and hourly profiles are both D-shape balance away from the edge.")
 
         setup_name = "no_trade"
         action = "FLAT"
         confidence = 0.22
         daily_context = str(daily_profile.get("day_type") or "NORMAL")
+        if daily_context.startswith("TREND_UP"):
+            daily_direction = "bullish"
+        elif daily_context.startswith("TREND_DN"):
+            daily_direction = "bearish"
         rationale = [
             f"Daily context {daily_context} with {daily_shape} structure.",
             f"Hourly H{hour_number} is {hourly_shape} with VA migration score {va_score}.",
@@ -1098,6 +1201,46 @@ class FractalMarketProfileService:
             action = "LONG"
             confidence = 0.62
             rationale.append("Balanced day is rejecting VAL with a b-shape hourly profile.")
+        elif balance_day and near_balance_vah and order_flow_direction == "bearish":
+            setup_name = "daily_balance_extreme_reversion_put"
+            action = "SHORT"
+            confidence = 0.56
+            rationale.append("Balanced profiles are rejecting VAH with bearish order flow at the upper edge.")
+        elif balance_day and near_balance_val and order_flow_direction == "bullish":
+            setup_name = "daily_balance_extreme_reversion_call"
+            action = "LONG"
+            confidence = 0.56
+            rationale.append("Balanced profiles are defending VAL with bullish order flow at the lower edge.")
+        elif balance_breakout_up:
+            setup_name = "daily_balance_breakout_call"
+            action = "LONG"
+            confidence = 0.55 + min(abs(va_score), 3) * 0.04
+            rationale.append("Balanced profiles are expanding above hourly IB and can rotate into a fresh upside auction.")
+        elif balance_breakout_down:
+            setup_name = "daily_balance_breakout_put"
+            action = "SHORT"
+            confidence = 0.55 + min(abs(va_score), 3) * 0.04
+            rationale.append("Balanced profiles are breaking below hourly IB and can rotate into a fresh downside auction.")
+        elif (
+            daily_direction == "bullish"
+            and va_score >= int(SCAN_CONFIG["min_value_migration_abs"])
+            and hourly_shape in {"Elongated", "P-shape", "D-shape"}
+            and last_price >= (float(current_hour_profile["poc"]) - pullback_tolerance)
+        ):
+            setup_name = "trend_pullback_call"
+            action = "LONG"
+            confidence = 0.56 + min(abs(va_score), 4) * 0.05
+            rationale.append("Bullish value migration is holding through an intraday pullback near POC.")
+        elif (
+            daily_direction == "bearish"
+            and va_score <= -int(SCAN_CONFIG["min_value_migration_abs"])
+            and hourly_shape in {"Elongated", "b-shape", "P-shape"}
+            and last_price <= (float(current_hour_profile["poc"]) + pullback_tolerance)
+        ):
+            setup_name = "trend_pullback_put"
+            action = "SHORT"
+            confidence = 0.56 + min(abs(va_score), 4) * 0.05
+            rationale.append("Bearish value migration is holding through an intraday pullback near POC.")
 
         horizon = "swing"
         if setup_name.startswith("daily_balance"):
@@ -1113,7 +1256,7 @@ class FractalMarketProfileService:
             rationale.append("Order flow is not fully aligned with the profile thesis yet.")
 
         options = None
-        options_filter_messages: list[str] = []
+        advisories: list[str] = []
         signal_timestamp = _utc_now() if not current_rows else _to_ist(current_rows[-1]["time"]).astimezone(timezone.utc)
         if action != "FLAT":
             if historical_options:
@@ -1131,25 +1274,27 @@ class FractalMarketProfileService:
                 options = asdict(option_selection)
                 pcr = float(option_selection.pcr_oi or 1.0) if option_selection.pcr_oi is not None else 1.0
                 oi_change = float(option_selection.oi_change or 0.0)
-                if action == "LONG":
-                    if pcr < float(SCAN_CONFIG["bullish_pcr_min"]):
-                        options_filter_messages.append("PCR is not confirming the bullish thesis.")
-                    if oi_change <= 0:
-                        options_filter_messages.append("Call-side OI is not building yet.")
-                else:
-                    if pcr > float(SCAN_CONFIG["bearish_pcr_max"]):
-                        options_filter_messages.append("PCR is not confirming the bearish thesis.")
-                    if oi_change <= 0:
-                        options_filter_messages.append("Put-side OI is not building yet.")
-                if not options_filter_messages:
+                confidence, advisories = self._apply_option_confirmation_penalties(
+                    action=action,
+                    confidence=confidence,
+                    pcr=pcr,
+                    oi_change=oi_change,
+                    iv_rank=getattr(option_selection, "iv_rank", None),
+                    advisories=advisories,
+                )
+                if not advisories:
                     confidence += 0.08
                     rationale.append("The options overlay confirms the direction at the chosen strike.")
             elif historical_options:
-                options_filter_messages.append("Historical options context was unavailable for this timestamp.")
+                filters.append("Historical options context was unavailable for this timestamp.")
 
-        filters.extend(options_filter_messages)
         confidence = max(0.0, min(confidence, 0.94))
-        actionable = action != "FLAT" and not filters and confidence >= 0.64 and hour_number <= 6
+        actionable = (
+            action != "FLAT"
+            and not filters
+            and confidence >= float(SCAN_CONFIG["actionable_confidence_min"])
+            and hour_number <= 6
+        )
 
         stop_level = (
             max(float(current_hour_profile["poc"]), float(current_hour_profile["initial_balance_high"]))
@@ -1185,6 +1330,7 @@ class FractalMarketProfileService:
                 "daily_direction": daily_direction,
                 "order_flow_direction": order_flow_direction,
                 "order_flow_alignment": round(order_flow_alignment, 4),
+                "advisories": advisories,
             },
         }
 
@@ -1514,44 +1660,48 @@ class FractalMarketProfileService:
         if not rows:
             return
         async with AsyncSessionLocal() as session:
-            await session.execute(
-                text(
-                    """
-                    INSERT INTO hourly_profiles (
-                        time, symbol, session_date, hour_num, window_start, window_end,
-                        ib_high, ib_low, vah, val, poc, shape, direction_bias,
-                        single_prints, tpo_rows, poor_high, poor_low, tick_size,
-                        value_migration_score, source, updated_at
-                    ) VALUES (
-                        :time, :symbol, :session_date, :hour_num, :window_start, :window_end,
-                        :ib_high, :ib_low, :vah, :val, :poc, :shape, :direction_bias,
-                        CAST(:single_prints AS jsonb), CAST(:tpo_rows AS jsonb), :poor_high, :poor_low, :tick_size,
-                        :value_migration_score, :source, NOW()
-                    )
-                    ON CONFLICT (symbol, session_date, hour_num) DO UPDATE SET
-                        time = EXCLUDED.time,
-                        window_start = EXCLUDED.window_start,
-                        window_end = EXCLUDED.window_end,
-                        ib_high = EXCLUDED.ib_high,
-                        ib_low = EXCLUDED.ib_low,
-                        vah = EXCLUDED.vah,
-                        val = EXCLUDED.val,
-                        poc = EXCLUDED.poc,
-                        shape = EXCLUDED.shape,
-                        direction_bias = EXCLUDED.direction_bias,
-                        single_prints = EXCLUDED.single_prints,
-                        tpo_rows = EXCLUDED.tpo_rows,
-                        poor_high = EXCLUDED.poor_high,
-                        poor_low = EXCLUDED.poor_low,
-                        tick_size = EXCLUDED.tick_size,
-                        value_migration_score = EXCLUDED.value_migration_score,
-                        source = EXCLUDED.source,
-                        updated_at = NOW()
-                    """
-                ),
-                rows,
-            )
-            await session.commit()
+            try:
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO hourly_profiles (
+                            time, symbol, session_date, hour_num, window_start, window_end,
+                            ib_high, ib_low, vah, val, poc, shape, direction_bias,
+                            single_prints, tpo_rows, poor_high, poor_low, tick_size,
+                            value_migration_score, source, updated_at
+                        ) VALUES (
+                            :time, :symbol, :session_date, :hour_num, :window_start, :window_end,
+                            :ib_high, :ib_low, :vah, :val, :poc, :shape, :direction_bias,
+                            CAST(:single_prints AS jsonb), CAST(:tpo_rows AS jsonb), :poor_high, :poor_low, :tick_size,
+                            :value_migration_score, :source, NOW()
+                        )
+                        ON CONFLICT (symbol, session_date, hour_num) DO UPDATE SET
+                            time = EXCLUDED.time,
+                            window_start = EXCLUDED.window_start,
+                            window_end = EXCLUDED.window_end,
+                            ib_high = EXCLUDED.ib_high,
+                            ib_low = EXCLUDED.ib_low,
+                            vah = EXCLUDED.vah,
+                            val = EXCLUDED.val,
+                            poc = EXCLUDED.poc,
+                            shape = EXCLUDED.shape,
+                            direction_bias = EXCLUDED.direction_bias,
+                            single_prints = EXCLUDED.single_prints,
+                            tpo_rows = EXCLUDED.tpo_rows,
+                            poor_high = EXCLUDED.poor_high,
+                            poor_low = EXCLUDED.poor_low,
+                            tick_size = EXCLUDED.tick_size,
+                            value_migration_score = EXCLUDED.value_migration_score,
+                            source = EXCLUDED.source,
+                            updated_at = NOW()
+                        """
+                    ),
+                    rows,
+                )
+                await session.commit()
+            except Exception as exc:
+                await session.rollback()
+                logger.warning(f"Skipping hourly_profiles persistence for {symbol_code}: {exc}")
 
     def _daily_references(self, session_lookup: dict[date, list[dict[str, Any]]], current_date: date) -> dict[str, float]:
         prior_dates = sorted(key for key in session_lookup if key < current_date)[-20:]
@@ -1582,7 +1732,17 @@ class FractalMarketProfileService:
         atr_based = round(max(avg_atr, 1.0) / 50.0, 2)
         return round(max(lot_based, atr_based, 0.5), 2)
 
-    async def _load_live_rows(self, symbol_code: str) -> list[dict[str, Any]]:
+    async def _load_live_rows(self, symbol_code: str) -> tuple[list[dict[str, Any]], str, str]:
+        # Reuse the broker-aware minute-history fallback already hardened for Auction IQ.
+        try:
+            from auction_intelligence.live import _fetch_recent_minute_rows as _fetch_shared_recent_minute_rows
+
+            rows, source, history_symbol = await _fetch_shared_recent_minute_rows(symbol_code, lookback_days=10)
+            if rows:
+                return rows, source, history_symbol
+        except Exception:
+            pass
+
         from_date = date.today() - timedelta(days=10)
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -1611,8 +1771,10 @@ class FractalMarketProfileService:
             for row in rows
         ]
         if payload:
-            return payload
-        return self._load_local_csv_rows(symbol_code)
+            return payload, "timescaledb_spot_1minute", symbol_code
+
+        local_rows = self._load_local_csv_rows(symbol_code)
+        return local_rows, "local_csv_spot", f"{symbol_code}.1minute.csv.gz"
 
     def _load_local_csv_rows(self, symbol_code: str) -> list[dict[str, Any]]:
         path = analytics_root() / "spot" / f"underlying={symbol_code}" / "1minute.csv.gz"

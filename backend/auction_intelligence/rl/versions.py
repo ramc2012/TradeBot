@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import date
 from typing import Any
@@ -38,7 +39,7 @@ class RLPolicyVersionStore:
                     VALUES (
                         :id, :version_name, :status, :source, :symbol,
                         :trained_on, :skipped, :average_reward,
-                        :metrics, :qtable_snapshot, :promotion_reason
+                        CAST(:metrics AS jsonb), CAST(:qtable_snapshot AS jsonb), :promotion_reason
                     )
                     """
                 ),
@@ -51,8 +52,8 @@ class RLPolicyVersionStore:
                     "trained_on": trained_on,
                     "skipped": skipped,
                     "average_reward": average_reward,
-                    "metrics": metrics,
-                    "qtable_snapshot": qtable_snapshot,
+                    "metrics": json.dumps(metrics),
+                    "qtable_snapshot": json.dumps(qtable_snapshot),
                     "promotion_reason": promotion_reason,
                 },
             )

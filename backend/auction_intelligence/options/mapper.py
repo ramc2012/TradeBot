@@ -36,6 +36,11 @@ _DEFAULT_CONFIG = {
     "min_volume": 1.0,
     "min_oi": 1.0,
     "max_spread_pct": 0.15,
+    "enable_relaxed_fallback": True,
+    "relaxed_max_premium": 1500.0,
+    "relaxed_min_volume": 0.0,
+    "relaxed_min_oi": 0.0,
+    "relaxed_max_spread_pct": 0.35,
     "strong_confidence": 0.78,
     "very_strong_confidence": 0.86,
     "same_day_close_buffer_minutes": {
@@ -482,60 +487,39 @@ class OptionStrategyMapper:
         min_volume = float(self.config.get("min_volume", 1.0))
         min_oi = float(self.config.get("min_oi", 1.0))
         max_spread_pct = float(self.config.get("max_spread_pct", 0.15))
+        scored = self._score_candidates(
+            option_entries=option_entries,
+            contracts=contracts,
+            option_type=option_type,
+            atm_strike=atm_strike,
+            strikes=strikes,
+            preferred_moneyness=preferred_moneyness,
+            target_delta=target_delta,
+            ntm_volx=ntm_volx,
+            min_premium=min_premium,
+            max_premium=max_premium,
+            min_volume=min_volume,
+            min_oi=min_oi,
+            max_spread_pct=max_spread_pct,
+            relaxed_filters=False,
+        )
 
-        scored: list[tuple[float, dict[str, Any]]] = []
-        for entry in option_entries:
-            strike = float(entry.strike)
-            contract = contracts.get((strike, option_type), {})
-            premium = self._buy_touch_price(entry)
-            if premium < min_premium or premium > max_premium:
-                continue
-            if float(entry.volume or 0.0) < min_volume:
-                continue
-            if float(entry.oi or 0.0) < min_oi:
-                continue
-
-            spread_pct = self._spread_pct(entry, premium)
-            if spread_pct > max_spread_pct:
-                continue
-
-            moneyness = self._moneyness_label(
+        if not scored and self.config.get("enable_relaxed_fallback", True):
+            scored = self._score_candidates(
+                option_entries=option_entries,
+                contracts=contracts,
                 option_type=option_type,
-                strike=strike,
                 atm_strike=atm_strike,
                 strikes=strikes,
-            )
-            preference_penalty = self._preference_penalty(moneyness, preferred_moneyness)
-            delta_penalty = 0.0
-            if entry.delta is not None and isfinite(float(entry.delta)):
-                delta_penalty = abs(abs(float(entry.delta)) - target_delta)
-            ntm_level = self._ntm_level(ntm_volx, strike)
-            pressure_bonus = 0.0
-            if ntm_level is not None:
-                dominant_pressure = max(float(ntm_volx.call_pressure), float(ntm_volx.put_pressure), 1.0)
-                strike_pressure = float(ntm_level["call_pressure"] if option_type == "CE" else ntm_level["put_pressure"])
-                pressure_bonus = (strike_pressure / dominant_pressure) * 5.0
-
-            score = (
-                (float(entry.volume or 0.0) / 1000.0)
-                + (float(entry.oi or 0.0) / 10000.0)
-                - (spread_pct * 50.0)
-                - (preference_penalty * 2.5)
-                - (delta_penalty * 5.0)
-                + pressure_bonus
-            )
-            scored.append(
-                (
-                    score,
-                    {
-                        "entry": entry,
-                        "contract": contract,
-                        "premium": premium,
-                        "spread_pct": spread_pct,
-                        "moneyness": moneyness,
-                        "ntm_level": ntm_level,
-                    },
-                )
+                preferred_moneyness=preferred_moneyness,
+                target_delta=target_delta,
+                ntm_volx=ntm_volx,
+                min_premium=min_premium,
+                max_premium=float(self.config.get("relaxed_max_premium", max_premium)),
+                min_volume=float(self.config.get("relaxed_min_volume", min_volume)),
+                min_oi=float(self.config.get("relaxed_min_oi", min_oi)),
+                max_spread_pct=float(self.config.get("relaxed_max_spread_pct", max_spread_pct)),
+                relaxed_filters=True,
             )
 
         if not scored:
@@ -598,7 +582,8 @@ class OptionStrategyMapper:
             instrument_key=instrument_key,
             premium=premium,
         )
-        if self.config.get("require_option_ma20", True) and premium_ma20 is not None and not above_ma20:
+        relaxed_filters = bool(candidate.get("relaxed_filters"))
+        if self.config.get("require_option_ma20", True) and premium_ma20 is not None and not above_ma20 and not relaxed_filters:
             return None
 
         underlying_lot_size = int(
@@ -644,6 +629,10 @@ class OptionStrategyMapper:
             )
         else:
             rationale.append("Premium MA20 unavailable from saved history; using live premium and liquidity checks only.")
+        if relaxed_filters:
+            rationale.append(
+                "Used the relaxed paper-trade fallback because no contract passed the primary premium/liquidity filter stack."
+            )
 
         return {
             "symbol": symbol,
@@ -666,6 +655,83 @@ class OptionStrategyMapper:
             "above_premium_ma50": above_ma50,
             "rationale": rationale,
         }
+
+    def _score_candidates(
+        self,
+        *,
+        option_entries: list[OptionChainEntry],
+        contracts: dict[tuple[float, str], dict[str, Any]],
+        option_type: str,
+        atm_strike: float,
+        strikes: list[float],
+        preferred_moneyness: list[str],
+        target_delta: float,
+        ntm_volx: NTMVolXSnapshot | None,
+        min_premium: float,
+        max_premium: float,
+        min_volume: float,
+        min_oi: float,
+        max_spread_pct: float,
+        relaxed_filters: bool,
+    ) -> list[tuple[float, dict[str, Any]]]:
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for entry in option_entries:
+            strike = float(entry.strike)
+            contract = contracts.get((strike, option_type), {})
+            premium = self._buy_touch_price(entry)
+            if premium < min_premium or premium > max_premium:
+                continue
+            if float(entry.volume or 0.0) < min_volume:
+                continue
+            if float(entry.oi or 0.0) < min_oi:
+                continue
+
+            spread_pct = self._spread_pct(entry, premium)
+            if spread_pct > max_spread_pct:
+                continue
+
+            moneyness = self._moneyness_label(
+                option_type=option_type,
+                strike=strike,
+                atm_strike=atm_strike,
+                strikes=strikes,
+            )
+            preference_penalty = self._preference_penalty(moneyness, preferred_moneyness)
+            delta_penalty = 0.0
+            if entry.delta is not None and isfinite(float(entry.delta)):
+                delta_penalty = abs(abs(float(entry.delta)) - target_delta)
+            ntm_level = self._ntm_level(ntm_volx, strike)
+            pressure_bonus = 0.0
+            if ntm_level is not None:
+                dominant_pressure = max(float(ntm_volx.call_pressure), float(ntm_volx.put_pressure), 1.0)
+                strike_pressure = float(ntm_level["call_pressure"] if option_type == "CE" else ntm_level["put_pressure"])
+                pressure_bonus = (strike_pressure / dominant_pressure) * 5.0
+
+            score = (
+                (float(entry.volume or 0.0) / 1000.0)
+                + (float(entry.oi or 0.0) / 10000.0)
+                - (spread_pct * 50.0)
+                - (preference_penalty * 2.5)
+                - (delta_penalty * 5.0)
+                + pressure_bonus
+            )
+            if relaxed_filters:
+                score -= 0.35
+            scored.append(
+                (
+                    score,
+                    {
+                        "entry": entry,
+                        "contract": contract,
+                        "premium": premium,
+                        "spread_pct": spread_pct,
+                        "moneyness": moneyness,
+                        "ntm_level": ntm_level,
+                        "relaxed_filters": relaxed_filters,
+                    },
+                )
+            )
+        return scored
 
     def _ntm_level(
         self,

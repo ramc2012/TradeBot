@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import sys
 
@@ -22,6 +22,7 @@ from auction_intelligence.live import (
     _build_trade_prints_from_ticks,
     _build_quote_from_snapshot,
     _fetch_recent_minute_rows,
+    _group_rows_by_session,
     _load_portfolio_snapshot,
     _normalize_portfolio_symbol,
     available_live_symbols,
@@ -352,6 +353,149 @@ def test_service_produces_swing_execution_plan_and_journal(tmp_path) -> None:
     assert tmp_path.joinpath("nifty_fut.jsonl").exists()
 
 
+def test_swing_agent_trend_pullback_long_is_actionable() -> None:
+    config = clone_default_config()
+    agent = SwingAgent(config["agents"]["swing"])
+    context = AgentContext(
+        session=SessionContext(
+            symbol="NIFTY FUT",
+            session_date=date(2026, 4, 16),
+            last_price=24218.45,
+            stale_data_seconds=0.0,
+            minutes_to_close=140,
+        ),
+        portfolio=PortfolioSnapshot(net_liquidation=1_000_000.0),
+        current_profile=_make_profile_snapshot(
+            open_price=24163.8,
+            close_price=24218.45,
+            high_price=24260.0,
+            low_price=24145.8,
+            poc=24235.0,
+            vah=24252.5,
+            val=24188.5,
+            initial_balance_high=24280.9,
+            initial_balance_low=24145.8,
+            initial_balance_range=135.1,
+            day_range=114.2,
+            range_extension_up=10.0,
+            range_extension_down=4.0,
+            value_area_overlap=0.0,
+            poc_shift=400.5,
+            value_migration=420.25,
+            bracket_state="expanding",
+        ),
+        prior_profile=_make_profile_snapshot(
+            session_date="2026-04-15",
+            open_price=23810.0,
+            close_price=23834.5,
+            high_price=23912.0,
+            low_price=23688.0,
+            poc=23834.5,
+            vah=23907.5,
+            val=23693.0,
+            initial_balance_high=23880.0,
+            initial_balance_low=23750.0,
+            value_area_overlap=0.32,
+            poc_shift=24.0,
+        ),
+        order_flow=_make_order_flow_snapshot(
+            mid_price=24218.45,
+            delta=1.0,
+            trade_imbalance=0.0435,
+            order_flow_imbalance=0.0,
+            book_pressure=0.1125,
+            timing_confidence=0.3938,
+            toxicity_score=0.0265,
+        ),
+        regime=RegimeAssessment(
+            label="trend_continuation",
+            confidence=0.8,
+            allowed_directions=["LONG"],
+            reasons=["Value migrated higher after acceptance above prior value."],
+            scorecard={},
+        ),
+        config=config,
+        ntm_volx=None,
+    )
+
+    decision = agent.evaluate(context)
+
+    assert decision.action == "LONG"
+    assert decision.metadata["setup_name"] == "trend_pullback_long"
+    assert decision.confidence >= config["agents"]["swing"]["min_confidence"]
+
+
+def test_swing_agent_options_buy_proxy_sizing_keeps_one_lot_with_small_paper_book() -> None:
+    config = clone_default_config()
+    agent = SwingAgent(config["agents"]["swing"])
+    context = AgentContext(
+        session=SessionContext(
+            symbol="NIFTY FUT",
+            session_date=date(2026, 4, 16),
+            last_price=24218.45,
+            stale_data_seconds=0.0,
+            minutes_to_close=140,
+        ),
+        portfolio=PortfolioSnapshot(net_liquidation=100_000.0),
+        current_profile=_make_profile_snapshot(
+            open_price=24163.8,
+            close_price=24218.45,
+            high_price=24260.0,
+            low_price=24145.8,
+            poc=24235.0,
+            vah=24252.5,
+            val=24188.5,
+            initial_balance_high=24280.9,
+            initial_balance_low=24145.8,
+            initial_balance_range=135.1,
+            day_range=114.2,
+            range_extension_up=10.0,
+            range_extension_down=4.0,
+            value_area_overlap=0.0,
+            poc_shift=400.5,
+            value_migration=420.25,
+            bracket_state="expanding",
+        ),
+        prior_profile=_make_profile_snapshot(
+            session_date="2026-04-15",
+            open_price=23810.0,
+            close_price=23834.5,
+            high_price=23912.0,
+            low_price=23688.0,
+            poc=23834.5,
+            vah=23907.5,
+            val=23693.0,
+            initial_balance_high=23880.0,
+            initial_balance_low=23750.0,
+            value_area_overlap=0.32,
+            poc_shift=24.0,
+        ),
+        order_flow=_make_order_flow_snapshot(
+            mid_price=24218.45,
+            delta=1.0,
+            trade_imbalance=0.0435,
+            order_flow_imbalance=0.0,
+            book_pressure=0.1125,
+            timing_confidence=0.3938,
+            toxicity_score=0.0265,
+        ),
+        regime=RegimeAssessment(
+            label="trend_continuation",
+            confidence=0.8,
+            allowed_directions=["LONG"],
+            reasons=["Value migrated higher after acceptance above prior value."],
+            scorecard={},
+        ),
+        config=config,
+        ntm_volx=None,
+    )
+
+    decision = agent.evaluate(context)
+
+    assert decision.action == "LONG"
+    assert decision.quantity == 65
+
+
 class _FakeOptionAdapter:
     def __init__(self, *, option_chain, expiries, contracts):
         self._option_chain = option_chain
@@ -536,6 +680,7 @@ def test_option_mapper_prefers_itm_call_for_high_confidence_positional_signal(mo
 
 def test_option_mapper_rejects_overpriced_contracts(monkeypatch) -> None:
     config = clone_default_config()
+    config["options_mapping"]["enable_relaxed_fallback"] = False
     mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])
     expiry = "2026-04-16"
     adapter = _FakeOptionAdapter(
@@ -600,6 +745,74 @@ def test_option_mapper_rejects_overpriced_contracts(monkeypatch) -> None:
     )
 
     assert plans == []
+
+
+def test_option_mapper_relaxed_fallback_allows_paper_trade_when_primary_filters_fail(monkeypatch) -> None:
+    config = clone_default_config()
+    mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])
+    expiry = "2026-04-16"
+    adapter = _FakeOptionAdapter(
+        expiries=[{"expiry": expiry}],
+        contracts=[
+            {"instrument_key": "CE22500", "trading_symbol": "NIFTY22500CE", "strike_price": 22500.0, "instrument_type": "CE", "expiry": expiry, "lot_size": 75},
+        ],
+        option_chain=type("Chain", (), {
+            "spot_price": 22498.0,
+            "entries": [
+                type("Entry", (), {"strike": 22500.0, "option_type": "CE", "ltp": 620.0, "oi": 0, "volume": 0, "bid": 612.0, "ask": 620.0, "delta": 0.54, "instrument_key": "CE22500"})(),
+            ],
+        })(),
+    )
+
+    async def _fake_load_candles(**_kwargs):
+        return [{"close": 700.0 - index} for index in range(30)]
+
+    async def _fake_resolve_lot_size(**_kwargs):
+        return 75
+
+    monkeypatch.setattr("auction_intelligence.options.mapper.get_active_adapter", lambda broker=None: adapter if broker == "upstox" else None)
+    monkeypatch.setattr("auction_intelligence.options.mapper.ensure_upstox_session", lambda: asyncio.sleep(0, result=False))
+    monkeypatch.setattr("auction_intelligence.options.mapper.ensure_fyers_session", lambda: asyncio.sleep(0, result=False))
+    monkeypatch.setattr("auction_intelligence.options.mapper.option_history_service.load_candles", _fake_load_candles)
+    monkeypatch.setattr("auction_intelligence.options.mapper.option_history_service.resolve_lot_size", _fake_resolve_lot_size)
+
+    plans = asyncio.run(
+        mapper.map_execution_plan(
+            session=SessionContext(symbol="NIFTY FUT", session_date=date(2026, 4, 9), last_price=22498.0, minutes_to_close=240),
+            decisions=[
+                AgentDecision(
+                    agent_name="swing",
+                    action="LONG",
+                    confidence=0.74,
+                    entry_price=22498.0,
+                    stop_price=22460.0,
+                    target_price=22580.0,
+                    quantity=75,
+                    sleeve_fraction=0.35,
+                    rationale=["Acceptance continuation."],
+                    metadata={"setup_name": "acceptance_continuation_long"},
+                )
+            ],
+            execution_plan=[
+                ExecutionInstruction(
+                    agent_name="swing",
+                    symbol="NIFTY FUT",
+                    action="LONG",
+                    style="PASSIVE",
+                    order_type="LIMIT",
+                    limit_price=22498.0,
+                    slices=2,
+                    cancel_after_seconds=30,
+                    rationale=["Base execution."],
+                    quantity=75,
+                )
+            ],
+        )
+    )
+
+    assert len(plans) == 1
+    assert plans[0].premium == 620.0
+    assert any("relaxed paper-trade fallback" in reason for reason in plans[0].rationale)
 
 
 def test_service_ntm_volx_boosts_aligned_signal() -> None:
@@ -920,6 +1133,7 @@ def test_paper_position_book_closes_open_position_on_flat_signal(tmp_path, monke
 def test_swing_agent_uses_contract_aware_margin_sizing() -> None:
     config = clone_default_config()
     config["agents"]["swing"]["enable_acceptance_continuation_long"] = True
+    config["mvp_scope"]["instrument_type"] = "futures"
     agent = SwingAgent(config["agents"]["swing"])
 
     decision = agent.evaluate(
@@ -1364,6 +1578,39 @@ def test_live_quote_builder_prefers_quote_override_for_live_session() -> None:
     assert quote["last_price"] == 52010.0
     assert quote["bid"] == 52009.5
     assert stale_seconds >= 0.0
+
+
+def test_group_rows_by_session_keeps_partial_live_session_when_requested(monkeypatch) -> None:
+    ist = timezone(timedelta(hours=5, minutes=30))
+    fixed_now = datetime(2026, 4, 16, 11, 30, tzinfo=ist)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return fixed_now.replace(tzinfo=None)
+            return fixed_now.astimezone(tz)
+
+    monkeypatch.setattr("auction_intelligence.live.datetime", _FixedDateTime)
+
+    rows = [
+        {
+            "time": (datetime(2026, 4, 16, 3, 45, tzinfo=timezone.utc) + timedelta(minutes=index)).isoformat(),
+            "open": 24200.0 + index,
+            "high": 24201.0 + index,
+            "low": 24199.0 + index,
+            "close": 24200.5 + index,
+            "volume": 1000 + index,
+        }
+        for index in range(130)
+    ]
+
+    dropped = _group_rows_by_session(rows)
+    kept = _group_rows_by_session(rows, allow_partial_live_session=True)
+
+    assert date(2026, 4, 16) not in dropped
+    assert date(2026, 4, 16) in kept
+    assert len(kept[date(2026, 4, 16)]) == 130
 
 
 def test_normalize_portfolio_symbol_maps_index_and_futures_aliases() -> None:
@@ -2264,3 +2511,26 @@ def test_paper_positions_endpoint_returns_open_and_closed_positions(monkeypatch)
     assert payload["summary"]["open_count"] == 1
     assert payload["open_positions"][0]["trading_symbol"] == "NIFTY26APR22500CE"
     assert payload["closed_positions"][0]["trading_symbol"] == "NIFTY26APR22400PE"
+
+
+def test_mp_dashboard_endpoint_returns_aggregated_structure() -> None:
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/auction-intelligence/mp-dashboard",
+        params={"underlying": "NIFTY", "lookback": 12},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["underlying"] == "NIFTY"
+    assert len(payload["sessions"]) <= 12
+    assert payload["overview"]["session_count"] == len(payload["sessions"])
+    assert "direction_distribution" in payload
+    assert "day_type_distribution" in payload
+
+    if payload["sessions"]:
+        assert payload["latest"]["date"] == payload["sessions"][-1]["date"]
+        assert isinstance(payload["context"], list)

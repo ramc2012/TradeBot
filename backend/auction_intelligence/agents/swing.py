@@ -16,7 +16,8 @@ class SwingAgent(StrategyAgent):
         prior = context.prior_profile
         flow = context.order_flow
 
-        min_confidence = float(self.config.get("min_confidence", 0.62))
+        base_min_confidence = float(self.config.get("min_confidence", 0.62))
+        min_confidence = base_min_confidence
         sleeve_fraction = float(self.config.get("sleeve_fraction", 0.35))
         risk_multiple = float(self.config.get("risk_multiple", 2.0))
         enable_eighty_percent_rule = bool(self.config.get("enable_eighty_percent_rule", False))
@@ -27,6 +28,7 @@ class SwingAgent(StrategyAgent):
         enable_acceptance_continuation_short = bool(self.config.get("enable_acceptance_continuation_short", True))
         enable_spike_acceptance = bool(self.config.get("enable_spike_acceptance", True))
         enable_balance_area_breakout = bool(self.config.get("enable_balance_area_breakout", False))
+        enable_trend_pullback = bool(self.config.get("enable_trend_pullback", False))
 
         _rl_action_idx: int | None = None
         _rl_state = None
@@ -40,7 +42,10 @@ class SwingAgent(StrategyAgent):
                 if rl_policy._cache_loaded:
                     _rl_params = rl_policy.select_action_sync(_rl_state)
                     _rl_action_idx = _rl_params.action_idx
-                    min_confidence = _rl_params.min_confidence
+                    min_confidence = min(
+                        _rl_params.min_confidence,
+                        float(self.config.get("rl_max_min_confidence", base_min_confidence)),
+                    )
                     sleeve_fraction = _rl_params.sleeve_fraction
                     risk_multiple = _rl_params.risk_multiple
         except Exception:
@@ -66,6 +71,13 @@ class SwingAgent(StrategyAgent):
             minimum=float(self.config.get("ib_break_tolerance_min_points", 8.0)),
             maximum=float(self.config.get("ib_break_tolerance_max_points", 35.0)),
         )
+        trend_pullback_tolerance = self._bounded_tolerance(
+            reference_range=max(value_width, float(current.initial_balance_range), float(current.tick_size)),
+            fraction=float(self.config.get("trend_pullback_tolerance_fraction", 0.20)),
+            minimum=float(self.config.get("trend_pullback_tolerance_min_points", 8.0)),
+            maximum=float(self.config.get("trend_pullback_tolerance_max_points", 35.0)),
+        )
+        trend_pullback_timing_floor = float(self.config.get("trend_pullback_timing_floor", 0.38))
         delta_strength = min(abs(float(flow.delta or 0.0)) / 10.0, 1.0)
         book_unavailable = abs(flow.book_pressure) < 0.02 and abs(flow.order_flow_imbalance) < 0.02
 
@@ -272,6 +284,52 @@ class SwingAgent(StrategyAgent):
             else:
                 flat_reason = "entry_filter_failed"
                 blockers.append("negative_initiative_missing")
+        elif enable_trend_pullback and regime.label in {"breakout_acceptance", "trend_continuation", "trend_day"} and "LONG" in regime.allowed_directions:
+            candidate_action = "LONG"
+            if (
+                current.close_price >= (current.poc - trend_pullback_tolerance)
+                and current.close_price >= (current.val - trend_pullback_tolerance)
+                and positive_response
+                and flow.timing_confidence >= trend_pullback_timing_floor
+            ):
+                action = "LONG"
+                stop = min(current.val, current.initial_balance_low)
+                target = max(current.high_price, current.vah + entry_tolerance)
+                setup_name = "trend_pullback_long"
+                rationale.append("Trend continuation is pulling back toward value and responsive buyers are holding the auction above lower value.")
+            else:
+                flat_reason = "entry_filter_failed"
+                if current.close_price < (current.poc - trend_pullback_tolerance):
+                    blockers.append("price_below_pullback_zone")
+                if current.close_price < (current.val - trend_pullback_tolerance):
+                    blockers.append("price_below_value_support")
+                if not positive_response:
+                    blockers.append("positive_response_missing")
+                if flow.timing_confidence < trend_pullback_timing_floor:
+                    blockers.append("trend_pullback_timing_missing")
+        elif enable_trend_pullback and regime.label in {"breakout_acceptance", "trend_continuation", "trend_day"} and "SHORT" in regime.allowed_directions:
+            candidate_action = "SHORT"
+            if (
+                current.close_price <= (current.poc + trend_pullback_tolerance)
+                and current.close_price <= (current.vah + trend_pullback_tolerance)
+                and negative_response
+                and flow.timing_confidence >= trend_pullback_timing_floor
+            ):
+                action = "SHORT"
+                stop = max(current.vah, current.initial_balance_high)
+                target = min(current.low_price, current.val - entry_tolerance)
+                setup_name = "trend_pullback_short"
+                rationale.append("Trend continuation is pulling back toward value and responsive sellers are holding the auction below upper value.")
+            else:
+                flat_reason = "entry_filter_failed"
+                if current.close_price > (current.poc + trend_pullback_tolerance):
+                    blockers.append("price_above_pullback_zone")
+                if current.close_price > (current.vah + trend_pullback_tolerance):
+                    blockers.append("price_above_value_resistance")
+                if not negative_response:
+                    blockers.append("negative_response_missing")
+                if flow.timing_confidence < trend_pullback_timing_floor:
+                    blockers.append("trend_pullback_timing_missing")
         elif enable_acceptance_continuation_long and regime.label in {"breakout_acceptance", "trend_continuation", "trend_day"} and "LONG" in regime.allowed_directions:
             candidate_action = "LONG"
             if current.close_price >= (current.vah - entry_tolerance) and positive_initiative:
@@ -316,6 +374,8 @@ class SwingAgent(StrategyAgent):
             ),
             4,
         )
+        if setup_name in {"trend_pullback_long", "trend_pullback_short"}:
+            confidence = round(min(1.0, confidence + 0.08), 4)
 
         metadata = self._decision_metadata(
             regime_label=regime.label,
@@ -330,6 +390,7 @@ class SwingAgent(StrategyAgent):
             entry_tolerance=entry_tolerance,
             prior_reentry_tolerance=prior_reentry_tolerance,
             ib_break_tolerance=ib_break_tolerance,
+            trend_pullback_tolerance=trend_pullback_tolerance,
             current=current,
             flow=flow,
             rl_state=_rl_state,
@@ -353,6 +414,7 @@ class SwingAgent(StrategyAgent):
                 entry_tolerance=entry_tolerance,
                 prior_reentry_tolerance=prior_reentry_tolerance,
                 ib_break_tolerance=ib_break_tolerance,
+                trend_pullback_tolerance=trend_pullback_tolerance,
                 current=current,
                 flow=flow,
                 rl_state=_rl_state,
@@ -374,6 +436,7 @@ class SwingAgent(StrategyAgent):
                 entry_tolerance=entry_tolerance,
                 prior_reentry_tolerance=prior_reentry_tolerance,
                 ib_break_tolerance=ib_break_tolerance,
+                trend_pullback_tolerance=trend_pullback_tolerance,
                 current=current,
                 flow=flow,
                 rl_state=_rl_state,
@@ -409,6 +472,7 @@ class SwingAgent(StrategyAgent):
                 entry_tolerance=entry_tolerance,
                 prior_reentry_tolerance=prior_reentry_tolerance,
                 ib_break_tolerance=ib_break_tolerance,
+                trend_pullback_tolerance=trend_pullback_tolerance,
                 current=current,
                 flow=flow,
                 rl_state=_rl_state,
@@ -429,6 +493,7 @@ class SwingAgent(StrategyAgent):
             entry_tolerance=entry_tolerance,
             prior_reentry_tolerance=prior_reentry_tolerance,
             ib_break_tolerance=ib_break_tolerance,
+            trend_pullback_tolerance=trend_pullback_tolerance,
             current=current,
             flow=flow,
             rl_state=_rl_state,
@@ -465,6 +530,7 @@ class SwingAgent(StrategyAgent):
         entry_tolerance: float,
         prior_reentry_tolerance: float,
         ib_break_tolerance: float,
+        trend_pullback_tolerance: float,
         current,
         flow,
         rl_state,
@@ -482,6 +548,7 @@ class SwingAgent(StrategyAgent):
             "entry_tolerance": round(entry_tolerance, 4),
             "prior_reentry_tolerance": round(prior_reentry_tolerance, 4),
             "ib_break_tolerance": round(ib_break_tolerance, 4),
+            "trend_pullback_tolerance": round(trend_pullback_tolerance, 4),
             "diagnostics": {
                 "close_price": round(current.close_price, 4),
                 "open_price": round(current.open_price, 4),

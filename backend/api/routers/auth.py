@@ -7,15 +7,18 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
+from time import monotonic
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketException, status
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketException, status
 from pydantic import BaseModel
 import httpx
 from loguru import logger
+import psycopg2
+from psycopg2.extras import Json
 
 from brokers import get_broker, BROKER_MAP
-from core.config import settings
+from core.config import FYERS_FIXED_REDIRECT_URI, normalize_fyers_redirect_uri, settings
 from core.security import decrypt_token, encrypt_token, issue_ephemeral_token, verify_ephemeral_token
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -66,9 +69,13 @@ WS_TOKEN_TTL_SECONDS = 300
 _ENCRYPTED_VALUE_PREFIX = "fernet::"
 _ENCRYPTED_CREDENTIALS_VERSION = "fernet-v1"
 _credentials_require_migration = False
+_CREDENTIAL_STORE_DB_KEY = "broker_credentials"
+_CREDENTIAL_REFRESH_TTL_SECONDS = 15.0
+_credentials_db_checked_at_monotonic = 0.0
+_credentials_db_updated_at: datetime | None = None
 _SENSITIVE_CREDENTIAL_FIELDS = {
-    "fyers": {"app_id", "secret", "redirect_uri", "access_token"},
-    "upstox": {"api_key", "secret", "redirect_uri", "access_token"},
+    "fyers": {"app_id", "secret", "redirect_uri", "access_token", "refresh_token"},
+    "upstox": {"api_key", "secret", "redirect_uri", "access_token", "refresh_token"},
     "fivepaisa": {"app_name", "app_source", "user_id", "email", "password", "user_key", "encryption_key"},
     "icici_breeze": {"api_key", "secret"},
     "telegram": {"bot_token", "chat_id"},
@@ -152,6 +159,98 @@ def _load_credentials() -> dict:
     return {}
 
 
+def _database_url_for_credentials() -> Optional[str]:
+    raw = str(settings.DATABASE_URL or "").strip()
+    if not raw:
+        return None
+    return (
+        raw.replace("postgresql+asyncpg://", "postgresql://")
+        .replace("postgresql+psycopg2://", "postgresql://")
+    )
+
+
+def _save_credentials_to_database(creds: dict) -> None:
+    """Persist broker credentials to Postgres for durable cloud storage."""
+    db_url = _database_url_for_credentials()
+    if not db_url:
+        return
+    conn = None
+    try:
+        conn = psycopg2.connect(db_url)
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_runtime_state (
+                    state_key TEXT PRIMARY KEY,
+                    payload JSONB NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO app_runtime_state (state_key, payload, updated_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (state_key) DO UPDATE SET
+                    payload = EXCLUDED.payload,
+                    updated_at = NOW()
+                """,
+                (_CREDENTIAL_STORE_DB_KEY, Json(_encode_credentials_payload(creds))),
+            )
+        conn.commit()
+    except Exception as exc:
+        if conn is not None:
+            conn.rollback()
+        logger.warning(f"Could not persist broker credentials to database: {exc}")
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _load_credentials_from_database() -> dict:
+    """Load broker credentials from Postgres when available."""
+    payload, _ = _load_credentials_payload_from_database()
+    return payload
+
+
+def _load_credentials_payload_from_database() -> tuple[dict, datetime | None]:
+    """Load broker credentials and the row timestamp from Postgres when available."""
+    db_url = _database_url_for_credentials()
+    if not db_url:
+        return {}, None
+    conn = None
+    try:
+        conn = psycopg2.connect(db_url)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_runtime_state (
+                    state_key TEXT PRIMARY KEY,
+                    payload JSONB NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                "SELECT payload, updated_at FROM app_runtime_state WHERE state_key = %s",
+                (_CREDENTIAL_STORE_DB_KEY,),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        if not row:
+            return {}, None
+        return _decode_credentials_payload(row[0]), row[1]
+    except Exception as exc:
+        if conn is not None:
+            conn.rollback()
+        logger.warning(f"Could not load broker credentials from database: {exc}")
+        return {}, None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _save_credentials_to_disk(creds: dict) -> None:
     """Persist broker credentials to disk."""
     global _credentials_require_migration
@@ -162,6 +261,12 @@ def _save_credentials_to_disk(creds: dict) -> None:
         logger.debug(f"Credentials saved to {_CREDS_FILE}")
     except Exception as e:
         logger.error(f"Could not write credentials to {_CREDS_FILE}: {e}")
+
+
+def _persist_credentials(creds: dict) -> None:
+    """Persist credentials to all configured stores."""
+    _save_credentials_to_disk(creds)
+    _save_credentials_to_database(creds)
 
 
 def _reset_upstox_token_health_cache() -> None:
@@ -195,7 +300,91 @@ def _persist_access_token(broker: str, access_token: Optional[str]) -> None:
         return
 
     entry["access_token"] = token_value
-    _save_credentials_to_disk(_broker_credentials)
+    _persist_credentials(_broker_credentials)
+    if broker == "upstox":
+        _reset_upstox_token_health_cache()
+    if broker == "fyers":
+        _reset_fyers_token_health_cache()
+
+
+def _serialize_token_expiry(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value))
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _parse_token_expiry(value: Any) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _looks_like_jwt(token: str) -> bool:
+    return token.count(".") >= 2 and token.startswith("eyJ")
+
+
+def _token_is_expired(access_token: str, *, expires_at: Any = None) -> bool:
+    expiry = _parse_token_expiry(expires_at)
+    if expiry is not None:
+        return datetime.now(timezone.utc) >= expiry
+    if _looks_like_jwt(access_token):
+        return _jwt_expired(access_token)
+    return False
+
+
+def _persist_broker_session(
+    broker: str,
+    token: Any,
+    *,
+    connected_at: Optional[datetime] = None,
+) -> None:
+    """Persist the full broker session payload for cross-instance same-day restore."""
+    access_token = str(getattr(token, "access_token", None) or "").strip()
+    if not access_token:
+        return
+
+    refresh_token = str(getattr(token, "refresh_token", None) or "").strip()
+    expires_at = _serialize_token_expiry(getattr(token, "expires_at", None))
+    saved_at = (connected_at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+
+    entry = _broker_credentials.setdefault(broker, {})
+    changed = False
+    updates = {
+        "access_token": access_token,
+        "refresh_token": refresh_token or None,
+        "expires_at": expires_at,
+        "token_saved_at": saved_at,
+    }
+    for key, value in updates.items():
+        if value in (None, ""):
+            if key in entry and key in {"refresh_token", "expires_at"}:
+                entry.pop(key, None)
+                changed = True
+            continue
+        if entry.get(key) != value:
+            entry[key] = value
+            changed = True
+
+    if not changed:
+        return
+
+    _persist_credentials(_broker_credentials)
     if broker == "upstox":
         _reset_upstox_token_health_cache()
     if broker == "fyers":
@@ -224,12 +413,76 @@ def _explicit_env(name: str) -> Optional[str]:
     return value or None
 
 
+def _merge_explicit_env_credentials(creds: dict) -> dict:
+    merged_creds = dict(creds or {})
+    fyers_app_id = _explicit_env("FYERS_APP_ID")
+    fyers_secret = _explicit_env("FYERS_SECRET")
+    fyers_redirect = _explicit_env("FYERS_REDIRECT_URI")
+    fyers_existing = dict(merged_creds.get("fyers") or {})
+    fyers_seed = {
+        "app_id": fyers_app_id,
+        "secret": fyers_secret,
+    }
+    if fyers_redirect and (fyers_existing or fyers_app_id or fyers_secret):
+        fyers_seed["redirect_uri"] = normalize_fyers_redirect_uri(fyers_redirect)
+    env_seed = {
+        "fyers": fyers_seed,
+        "upstox": {
+            "api_key": _explicit_env("UPSTOX_API_KEY"),
+            "secret": _explicit_env("UPSTOX_SECRET"),
+            "redirect_uri": _explicit_env("UPSTOX_REDIRECT_URI"),
+        },
+        "fivepaisa": {
+            "app_name": _explicit_env("FIVEPAISA_APP_NAME"),
+            "app_source": _explicit_env("FIVEPAISA_APP_SOURCE"),
+            "user_id": _explicit_env("FIVEPAISA_USER_ID"),
+            "email": _explicit_env("FIVEPAISA_EMAIL"),
+            "password": _explicit_env("FIVEPAISA_PASSWORD"),
+            "user_key": _explicit_env("FIVEPAISA_USER_KEY"),
+            "encryption_key": _explicit_env("FIVEPAISA_ENCRYPTION_KEY"),
+        },
+        "icici_breeze": {
+            "api_key": _explicit_env("ICICI_BREEZE_API_KEY"),
+            "secret": _explicit_env("ICICI_BREEZE_SECRET"),
+        },
+        "telegram": {
+            "bot_token": _explicit_env("TELEGRAM_BOT_TOKEN"),
+            "chat_id": _explicit_env("TELEGRAM_CHAT_ID"),
+            "report_interval": _explicit_env("TELEGRAM_REPORT_INTERVAL"),
+        },
+    }
+    for broker, env_creds in env_seed.items():
+        filled = {k: v for k, v in env_creds.items() if v}
+        if filled:
+            existing = merged_creds.get(broker, {})
+            merged_creds[broker] = {**existing, **filled}
+    return merged_creds
+
+
+def _normalize_broker_credentials(creds: dict) -> tuple[dict, bool]:
+    normalized: dict[str, dict[str, Any]] = {}
+    changed = False
+    for broker, values in dict(creds or {}).items():
+        if not isinstance(values, dict):
+            continue
+        broker_values = dict(values)
+        if broker == "fyers" and broker_values:
+            redirect_uri = normalize_fyers_redirect_uri(broker_values.get("redirect_uri"))
+            if broker_values.get("redirect_uri") != redirect_uri:
+                broker_values["redirect_uri"] = redirect_uri
+                changed = True
+        normalized[broker] = broker_values
+    return normalized, changed
+
+
 def _apply_credentials_to_settings(broker: str, creds: dict) -> None:
     """Push saved credentials into the live settings object."""
     if broker == "fyers":
         if creds.get("app_id"):   settings.FYERS_APP_ID = creds["app_id"]
         if creds.get("secret"):   settings.FYERS_SECRET = creds["secret"]
-        if creds.get("redirect_uri"): settings.FYERS_REDIRECT_URI = creds["redirect_uri"]
+        settings.FYERS_REDIRECT_URI = normalize_fyers_redirect_uri(
+            creds.get("redirect_uri") or settings.FYERS_REDIRECT_URI
+        )
     elif broker == "upstox":
         if creds.get("api_key"):      settings.UPSTOX_API_KEY = creds["api_key"]
         if creds.get("secret"):       settings.UPSTOX_SECRET = creds["secret"]
@@ -260,59 +513,66 @@ def _bootstrap_credentials() -> None:
     """
     global _broker_credentials
     # Load persisted file first
-    _broker_credentials = _load_credentials()
-
-    # Only explicit environment variables should override persisted credentials.
-    # Do not treat settings defaults as persisted user intent, or saved values
-    # like broker redirect URIs will appear to "not persist" across restarts.
-    env_seed = {
-        "fyers": {
-            "app_id": _explicit_env("FYERS_APP_ID"),
-            "secret": _explicit_env("FYERS_SECRET"),
-            "redirect_uri": _explicit_env("FYERS_REDIRECT_URI"),
-        },
-        "upstox": {
-            "api_key": _explicit_env("UPSTOX_API_KEY"),
-            "secret": _explicit_env("UPSTOX_SECRET"),
-            "redirect_uri": _explicit_env("UPSTOX_REDIRECT_URI"),
-        },
-        "fivepaisa": {
-            "app_name":       _explicit_env("FIVEPAISA_APP_NAME"),
-            "app_source":     _explicit_env("FIVEPAISA_APP_SOURCE"),
-            "user_id":        _explicit_env("FIVEPAISA_USER_ID"),
-            "email":          _explicit_env("FIVEPAISA_EMAIL"),
-            "password":       _explicit_env("FIVEPAISA_PASSWORD"),
-            "user_key":       _explicit_env("FIVEPAISA_USER_KEY"),
-            "encryption_key": _explicit_env("FIVEPAISA_ENCRYPTION_KEY"),
-        },
-        "icici_breeze": {
-            "api_key": _explicit_env("ICICI_BREEZE_API_KEY"),
-            "secret":  _explicit_env("ICICI_BREEZE_SECRET"),
-        },
-        "telegram": {
-            "bot_token": _explicit_env("TELEGRAM_BOT_TOKEN"),
-            "chat_id": _explicit_env("TELEGRAM_CHAT_ID"),
-            "report_interval": _explicit_env("TELEGRAM_REPORT_INTERVAL"),
-        },
-    }
-    for broker, env_creds in env_seed.items():
-        filled = {k: v for k, v in env_creds.items() if v}
-        if filled:
-            existing = _broker_credentials.get(broker, {})
-            # env overrides file for fields present in env
-            merged = {**existing, **filled}
-            _broker_credentials[broker] = merged
+    loaded_creds, normalized_loaded = _normalize_broker_credentials(_load_credentials())
+    _broker_credentials = _merge_explicit_env_credentials(loaded_creds)
+    _broker_credentials, normalized_merged = _normalize_broker_credentials(_broker_credentials)
 
     # Apply everything to live settings
     for broker, creds in _broker_credentials.items():
         _apply_credentials_to_settings(broker, creds)
 
-    if _broker_credentials and _credentials_require_migration:
-        _save_credentials_to_disk(_broker_credentials)
+    if _broker_credentials and (_credentials_require_migration or normalized_loaded or normalized_merged):
+        _persist_credentials(_broker_credentials)
 
     saved = [b for b, c in _broker_credentials.items() if c]
     if saved:
         logger.info(f"Credentials loaded for: {', '.join(saved)}")
+
+
+def load_persistent_credentials() -> None:
+    """Merge durable database credentials into memory, then re-apply explicit env overrides."""
+    global _broker_credentials, _credentials_db_updated_at, _credentials_db_checked_at_monotonic
+    db_creds, updated_at = _load_credentials_payload_from_database()
+    if not db_creds:
+        _credentials_db_checked_at_monotonic = monotonic()
+        return
+    merged_store: dict[str, dict[str, Any]] = dict(_broker_credentials)
+    for broker, values in db_creds.items():
+        existing = merged_store.get(broker, {})
+        merged_store[broker] = {**existing, **dict(values or {})}
+    _broker_credentials = _merge_explicit_env_credentials(merged_store)
+    _broker_credentials, _ = _normalize_broker_credentials(_broker_credentials)
+    for broker, creds in _broker_credentials.items():
+        _apply_credentials_to_settings(broker, creds)
+    _credentials_db_updated_at = updated_at
+    _credentials_db_checked_at_monotonic = monotonic()
+    logger.info(f"Loaded durable credentials from database for: {', '.join(sorted(db_creds.keys()))}")
+
+
+def refresh_persistent_credentials(force: bool = False) -> None:
+    """Refresh in-memory credentials from the durable store when another instance updated them."""
+    global _credentials_db_checked_at_monotonic, _credentials_db_updated_at, _broker_credentials
+
+    now = monotonic()
+    if not force and (now - _credentials_db_checked_at_monotonic) < _CREDENTIAL_REFRESH_TTL_SECONDS:
+        return
+
+    db_creds, updated_at = _load_credentials_payload_from_database()
+    _credentials_db_checked_at_monotonic = now
+    if not db_creds:
+        return
+    if not force and updated_at is not None and _credentials_db_updated_at is not None and updated_at <= _credentials_db_updated_at:
+        return
+
+    merged_store: dict[str, dict[str, Any]] = dict(_broker_credentials)
+    for broker, values in db_creds.items():
+        existing = merged_store.get(broker, {})
+        merged_store[broker] = {**existing, **dict(values or {})}
+    _broker_credentials = _merge_explicit_env_credentials(merged_store)
+    _broker_credentials, _ = _normalize_broker_credentials(_broker_credentials)
+    for broker, creds in _broker_credentials.items():
+        _apply_credentials_to_settings(broker, creds)
+    _credentials_db_updated_at = updated_at
 
 
 def _persist_active_session_tokens() -> None:
@@ -322,8 +582,30 @@ def _persist_active_session_tokens() -> None:
         if not info:
             continue
         token = info.get("token")
-        access_token = getattr(token, "access_token", None) if token else None
-        _persist_access_token(broker, access_token)
+        connected_at_raw = info.get("connected_at")
+        connected_at: Optional[datetime] = None
+        if isinstance(connected_at_raw, str):
+            try:
+                connected_at = datetime.fromisoformat(connected_at_raw)
+            except Exception:
+                connected_at = None
+        _persist_broker_session(broker, token, connected_at=connected_at)
+
+
+def _get_active_broker_info(broker: str) -> dict[str, Any] | None:
+    with _active_brokers_lock:
+        info = _active_brokers.get(broker)
+        return dict(info) if info else None
+
+
+def _get_active_session_access_token(broker: str) -> str | None:
+    info = _get_active_broker_info(broker)
+    if not info:
+        return None
+    token = info.get("token")
+    if token is None:
+        return None
+    return getattr(token, "access_token", None) or None
 
 
 async def _validate_upstox_access_token(access_token: str) -> bool:
@@ -367,8 +649,9 @@ def _next_upstox_expiry_ist(now_utc: datetime) -> datetime:
 
 
 async def get_upstox_token_health(force: bool = False) -> dict:
+    refresh_persistent_credentials(force=force)
     upstox_creds = _broker_credentials.get("upstox", {})
-    active_token = get_broker_token("upstox")
+    active_token = _get_active_session_access_token("upstox")
     saved_token = str(upstox_creds.get("access_token", "")).strip()
     token_to_check = active_token or saved_token
     with _active_brokers_lock:
@@ -438,8 +721,9 @@ async def get_upstox_token_health(force: bool = False) -> dict:
 
 
 async def get_fyers_token_health(force: bool = False) -> dict:
+    refresh_persistent_credentials(force=force)
     fyers_creds = _broker_credentials.get("fyers", {})
-    active_token = get_broker_token("fyers")
+    active_token = _get_active_session_access_token("fyers")
     saved_token = str(fyers_creds.get("access_token", "")).strip()
     token_to_check = active_token or saved_token
     with _active_brokers_lock:
@@ -496,18 +780,31 @@ async def get_fyers_token_health(force: bool = False) -> dict:
 
 async def get_broker_connection_snapshot(force_validate: bool = False) -> dict[str, Any]:
     """Return a compact broker connection snapshot for UI and Telegram usage."""
+    refresh_persistent_credentials(force=force_validate)
     await ensure_upstox_session(force_validate=force_validate)
     await ensure_fyers_session(force_validate=force_validate)
 
-    connected = get_connected_brokers()
+    session_brokers = get_connected_brokers()
     upstox_health = await get_upstox_token_health(force=force_validate)
     fyers_health = await get_fyers_token_health(force=force_validate)
+    upstox_ready = "upstox" in session_brokers and bool(upstox_health.get("valid"))
+    fyers_ready = "fyers" in session_brokers and bool(fyers_health.get("valid"))
+
+    connected: list[str] = []
+    if fyers_ready:
+        connected.append("fyers")
+    if upstox_ready:
+        connected.append("upstox")
+    for broker in session_brokers:
+        if broker not in {"fyers", "upstox"} and broker not in connected:
+            connected.append(broker)
 
     return {
         "connected_brokers": connected,
-        "upstox_ready": bool(upstox_health.get("valid")),
-        "fyers_ready": bool(fyers_health.get("valid")),
-        "broker_ready": bool(upstox_health.get("valid")) or bool(fyers_health.get("valid")),
+        "session_brokers": session_brokers,
+        "upstox_ready": upstox_ready,
+        "fyers_ready": fyers_ready,
+        "broker_ready": upstox_ready or fyers_ready,
         "upstox_token_health": upstox_health,
         "fyers_token_health": fyers_health,
     }
@@ -549,13 +846,17 @@ async def ensure_upstox_session(force_validate: bool = False) -> bool:
     clears `_active_brokers` even though credentials.json still contains a valid
     Upstox access token.
     """
+    refresh_persistent_credentials(force=force_validate)
     with _active_brokers_lock:
         info = _active_brokers.get("upstox")
     if info:
         # Validate existing in-memory session — evict if token is expired
         token = info.get("token")
         access_token = getattr(token, "access_token", None) if token else None
-        if access_token and not _jwt_expired(access_token):
+        if access_token and not _token_is_expired(
+            access_token,
+            expires_at=getattr(token, "expires_at", None),
+        ):
             if not force_validate or await _validate_upstox_access_token(access_token):
                 return True
             logger.info("[Upstox] In-memory session token failed validation — evicting")
@@ -569,7 +870,7 @@ async def ensure_upstox_session(force_validate: bool = False) -> bool:
         return False
 
     # Don't try to restore an already-expired saved token
-    if _jwt_expired(saved_token):
+    if _token_is_expired(saved_token, expires_at=_broker_credentials.get("upstox", {}).get("expires_at")):
         logger.info("[Upstox] Saved token is expired — re-authentication required")
         return False
 
@@ -603,6 +904,7 @@ async def ensure_upstox_session(force_validate: bool = False) -> bool:
                 "connected_at": datetime.utcnow().isoformat(),
                 "auto_restored": True,
             }
+        _persist_broker_session("upstox", token)
         await _sync_market_data_feed()
         logger.info(f"✓ Upstox restored from saved credentials (token ends …{saved_token[-8:]})")
         return True
@@ -619,13 +921,17 @@ async def ensure_fyers_session(force_validate: bool = False) -> bool:
     during the same trading day we can usually reuse the saved token until it
     naturally expires.
     """
+    refresh_persistent_credentials(force=force_validate)
     with _active_brokers_lock:
         info = _active_brokers.get("fyers")
     if info:
         # Validate existing in-memory session — evict if token is expired
         token = info.get("token")
         access_token = getattr(token, "access_token", None) if token else None
-        if access_token and not _jwt_expired(access_token):
+        if access_token and not _token_is_expired(
+            access_token,
+            expires_at=getattr(token, "expires_at", None),
+        ):
             if not force_validate or await _validate_fyers_access_token(access_token):
                 return True
             logger.info("[Fyers] In-memory session token failed validation — evicting")
@@ -639,7 +945,7 @@ async def ensure_fyers_session(force_validate: bool = False) -> bool:
         return False
 
     # Don't try to restore an already-expired saved token
-    if _jwt_expired(saved_token):
+    if _token_is_expired(saved_token, expires_at=_broker_credentials.get("fyers", {}).get("expires_at")):
         logger.info("[Fyers] Saved token is expired — re-authentication required")
         return False
 
@@ -661,6 +967,7 @@ async def ensure_fyers_session(force_validate: bool = False) -> bool:
                 "connected_at": datetime.utcnow().isoformat(),
                 "auto_restored": True,
             }
+        _persist_broker_session("fyers", token)
         logger.info("✓ Fyers restored from saved credentials")
         return True
     except Exception as exc:
@@ -682,6 +989,13 @@ class ConnectBrokerRequest(BaseModel):
 class BrokerStatusResponse(BaseModel):
     broker: str
     connected: bool
+    ready: bool = False
+    session_active: bool = False
+    state: str = "disconnected"
+    detail: Optional[str] = None
+    source: Optional[str] = None
+    checked_at: Optional[str] = None
+    needs_reconnect: bool = False
     user_id: Optional[str] = None
     name: Optional[str] = None
     connected_at: Optional[str] = None
@@ -743,19 +1057,26 @@ def authenticate_websocket_client(websocket: WebSocket) -> dict[str, Any]:
 async def save_credentials(req: SaveCredentialsRequest):
     """
     Save broker API credentials.
-    Persisted to credentials.json on disk — survives container restarts.
+    Persisted to the durable store and local dev file fallback.
     Also pushed into live settings immediately.
     """
+    refresh_persistent_credentials()
     if req.broker not in BROKER_MAP:
         raise HTTPException(400, f"Unknown broker: {req.broker}")
 
     # Merge with existing (partial saves allowed — don't wipe other fields)
     existing = _broker_credentials.get(req.broker, {})
     merged = {**existing, **{k: v for k, v in req.credentials.items() if v}}
+    if req.broker == "fyers":
+        merged["redirect_uri"] = normalize_fyers_redirect_uri(
+            req.credentials.get("redirect_uri")
+            or existing.get("redirect_uri")
+            or FYERS_FIXED_REDIRECT_URI
+        )
     _broker_credentials[req.broker] = merged
 
-    # Persist to disk immediately
-    _save_credentials_to_disk(_broker_credentials)
+    # Persist immediately so cloud revisions can restore later.
+    _persist_credentials(_broker_credentials)
 
     # Push into live settings
     _apply_credentials_to_settings(req.broker, merged)
@@ -774,6 +1095,7 @@ async def get_credentials_status(broker: str):
     Return which credential fields are saved for a broker.
     Values are never returned — only field names and presence.
     """
+    refresh_persistent_credentials()
     if broker not in BROKER_MAP:
         raise HTTPException(400, f"Unknown broker: {broker}")
     creds = _broker_credentials.get(broker, {})
@@ -782,7 +1104,9 @@ async def get_credentials_status(broker: str):
     if broker == "fyers":
         if creds.get("app_id"):
             display["app_id"] = str(creds["app_id"])
-        display["redirect_uri"] = str(creds.get("redirect_uri") or settings.FYERS_REDIRECT_URI or "")
+        display["redirect_uri"] = normalize_fyers_redirect_uri(
+            str(creds.get("redirect_uri") or settings.FYERS_REDIRECT_URI or "")
+        )
     elif broker == "upstox":
         if creds.get("api_key"):
             display["api_key"] = str(creds["api_key"])
@@ -798,6 +1122,7 @@ async def get_credentials_status(broker: str):
 @router.get("/all-credentials-status")
 async def all_credentials_status():
     """Return credential field presence for all brokers at once."""
+    refresh_persistent_credentials()
     result = {}
     for broker in BROKER_MAP:
         creds = _broker_credentials.get(broker, {})
@@ -824,6 +1149,7 @@ async def websocket_token():
 
 @router.get("/telegram-settings")
 async def get_telegram_settings():
+    refresh_persistent_credentials(force=True)
     saved = _broker_credentials.get("telegram", {})
     return {
         "bot_token_saved": bool(saved.get("bot_token")),
@@ -836,6 +1162,7 @@ async def get_telegram_settings():
 
 @router.post("/telegram-discover-chats")
 async def telegram_discover_chats(req: TelegramChatLookupRequest):
+    refresh_persistent_credentials()
     saved = _broker_credentials.get("telegram", {})
     bot_token = (req.bot_token or saved.get("bot_token") or "").strip()
     if not bot_token:
@@ -886,6 +1213,7 @@ async def telegram_discover_chats(req: TelegramChatLookupRequest):
 
 @router.post("/telegram-settings")
 async def save_telegram_settings(req: TelegramSettingsRequest):
+    refresh_persistent_credentials()
     saved = _broker_credentials.get("telegram", {})
     merged = {
         **saved,
@@ -899,7 +1227,7 @@ async def save_telegram_settings(req: TelegramSettingsRequest):
         "report_interval": req.report_interval,
     }
     _broker_credentials["telegram"] = merged
-    _save_credentials_to_disk(_broker_credentials)
+    _persist_credentials(_broker_credentials)
     _apply_credentials_to_settings("telegram", merged)
     return {
         "status": "saved",
@@ -912,6 +1240,7 @@ async def save_telegram_settings(req: TelegramSettingsRequest):
 
 @router.post("/telegram-test")
 async def send_telegram_test(req: TelegramTestRequest):
+    refresh_persistent_credentials(force=True)
     saved = _broker_credentials.get("telegram", {})
     bot_token = str(saved.get("bot_token") or "").strip()
     chat_id = str(saved.get("chat_id") or "").strip()
@@ -951,6 +1280,7 @@ async def send_telegram_test(req: TelegramTestRequest):
 @router.post("/connect-broker")
 async def connect_broker(req: ConnectBrokerRequest):
     """Authenticate with a broker and store session."""
+    refresh_persistent_credentials(force=True)
     if req.broker not in BROKER_MAP:
         raise HTTPException(400, f"Unknown broker: {req.broker}")
 
@@ -965,10 +1295,8 @@ async def connect_broker(req: ConnectBrokerRequest):
                 "profile": profile,
                 "connected_at": datetime.utcnow().isoformat(),
             }
-        if req.broker == "upstox":
-            _persist_access_token("upstox", getattr(token, "access_token", None))
-        if req.broker == "fyers":
-            _persist_access_token("fyers", getattr(token, "access_token", None))
+        if req.broker in {"upstox", "fyers"}:
+            _persist_broker_session(req.broker, token)
         await _sync_market_data_feed()
         return {
             "status": "connected",
@@ -989,26 +1317,64 @@ async def disconnect_broker(broker: str):
 
 
 @router.get("/broker-status")
-async def broker_status():
-    await ensure_upstox_session(force_validate=False)
-    await ensure_fyers_session()
+async def broker_status(force_validate: bool = Query(False)):
+    refresh_persistent_credentials(force=True)
+    snapshot = await get_broker_connection_snapshot(force_validate=force_validate)
     _persist_active_session_tokens()
+    ready_brokers = set(snapshot.get("connected_brokers") or [])
+    session_brokers = set(snapshot.get("session_brokers") or [])
+    upstox_health = snapshot.get("upstox_token_health") or {}
+    fyers_health = snapshot.get("fyers_token_health") or {}
     statuses = []
     with _active_brokers_lock:
         active_snapshot = list(_active_brokers.items())
         active_names = set(_active_brokers.keys())
-    for broker, info in active_snapshot:
-        profile = info.get("profile")
-        statuses.append(BrokerStatusResponse(
-            broker=broker,
-            connected=True,
-            user_id=profile.user_id if profile else None,
-            name=profile.name if profile else None,
-            connected_at=info.get("connected_at"),
-        ))
+    info_by_broker = {broker: info for broker, info in active_snapshot}
     for broker in BROKER_MAP:
-        if broker not in active_names:
-            statuses.append(BrokerStatusResponse(broker=broker, connected=False))
+        info = info_by_broker.get(broker, {})
+        profile = info.get("profile")
+        session_active = broker in session_brokers or broker in active_names
+        connected = broker in ready_brokers
+        ready = connected
+        state = "connected" if connected else "disconnected"
+        detail = None
+        source = None
+        checked_at = None
+        needs_reconnect = False
+
+        if broker == "upstox":
+            ready = bool(snapshot.get("upstox_ready"))
+            connected = ready
+            state = "connected" if ready else str(upstox_health.get("status") or "disconnected")
+            detail = str(upstox_health.get("message") or "").strip() or None
+            source = str(upstox_health.get("source") or "").strip() or None
+            checked_at = str(upstox_health.get("checked_at") or "").strip() or None
+            needs_reconnect = bool(upstox_health.get("needs_reconnect"))
+        elif broker == "fyers":
+            ready = bool(snapshot.get("fyers_ready"))
+            connected = ready
+            state = "connected" if ready else str(fyers_health.get("status") or "disconnected")
+            detail = str(fyers_health.get("message") or "").strip() or None
+            source = str(fyers_health.get("source") or "").strip() or None
+            checked_at = str(fyers_health.get("checked_at") or "").strip() or None
+            needs_reconnect = bool(fyers_health.get("needs_reconnect"))
+
+        statuses.append(
+            BrokerStatusResponse(
+                broker=broker,
+                connected=connected,
+                ready=ready,
+                session_active=session_active,
+                state=state,
+                detail=detail,
+                source=source,
+                checked_at=checked_at,
+                needs_reconnect=needs_reconnect,
+                user_id=profile.user_id if profile else None,
+                name=profile.name if profile else None,
+                connected_at=info.get("connected_at"),
+            )
+        )
     return statuses
 
 
@@ -1042,7 +1408,7 @@ async def fyers_callback(auth_code: str = None, code: str = None):
             "adapter": adapter, "token": token, "profile": profile,
             "connected_at": datetime.utcnow().isoformat(),
         }
-    _persist_access_token("fyers", token.access_token)
+    _persist_broker_session("fyers", token)
     await _sync_market_data_feed()
     return HTMLResponse(content="""
     <html><body style="background:#080b18;color:#00ff88;font-family:monospace;padding:2rem">
@@ -1100,7 +1466,7 @@ async def upstox_connect_manual(body: dict):
         }
 
     # Persist the access token so it auto-restores until the daily Upstox expiry.
-    _persist_access_token("upstox", token.access_token)
+    _persist_broker_session("upstox", token)
     logger.info(f"Upstox connected — token persisted for auto-restore (ends …{token.access_token[-8:]})")
     await _sync_market_data_feed()
 
@@ -1125,7 +1491,7 @@ async def upstox_callback(code: str):
             "adapter": adapter, "token": token, "profile": profile,
             "connected_at": datetime.utcnow().isoformat(),
         }
-    _persist_access_token("upstox", token.access_token)
+    _persist_broker_session("upstox", token)
     await _sync_market_data_feed()
     return HTMLResponse(content="""
     <html><body style="background:#080b18;color:#00ff88;font-family:monospace;padding:2rem">

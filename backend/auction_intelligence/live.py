@@ -161,7 +161,7 @@ async def build_live_analysis(symbol_code: str = "NIFTY") -> dict[str, Any]:
     if not recent_rows:
         raise RuntimeError("No local or broker minute data returned for the requested symbol.")
 
-    sessions = _group_rows_by_session(recent_rows)
+    sessions = _group_rows_by_session(recent_rows, allow_partial_live_session=True)
     session_dates = sorted(sessions.keys())
     if len(session_dates) < 2:
         raise RuntimeError("At least two completed sessions are required for live validation.")
@@ -390,7 +390,7 @@ async def _fetch_recent_minute_rows(symbol_code: str, *, lookback_days: int = 7)
             return None
         if best_available is None:
             best_available = (rows, source, history_symbol)
-        if len(_group_rows_by_session(rows)) >= 2:
+        if len(_group_rows_by_session(rows, allow_partial_live_session=True)) >= 2:
             return rows, source, history_symbol
         return None
 
@@ -615,7 +615,11 @@ async def _build_shadow_portfolio_snapshot(
     }
 
 
-def _group_rows_by_session(rows: list[dict[str, Any]]) -> dict[date, list[dict[str, Any]]]:
+def _group_rows_by_session(
+    rows: list[dict[str, Any]],
+    *,
+    allow_partial_live_session: bool = False,
+) -> dict[date, list[dict[str, Any]]]:
     sessions: dict[date, list[dict[str, Any]]] = {}
     for row in rows:
         timestamp = _row_time(row)
@@ -634,10 +638,17 @@ def _group_rows_by_session(rows: list[dict[str, Any]]) -> dict[date, list[dict[s
 
     for session_rows in sessions.values():
         session_rows.sort(key=lambda item: item["time"])
+    now_ist = datetime.now(IST)
     return {
         key: value
         for key, value in sessions.items()
         if len(value) >= 180
+        or (
+            allow_partial_live_session
+            and key == now_ist.date()
+            and SESSION_OPEN <= now_ist.time() < SESSION_CLOSE
+            and len(value) >= 120
+        )
     }
 
 

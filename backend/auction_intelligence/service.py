@@ -37,7 +37,13 @@ class AuctionIntelligenceService:
         self.positional_agent = PositionalAgent(self.config["agents"]["positional"])
         self.scalp_agent = ScalpAgent(self.config["agents"]["scalp"])
         self.meta_controller = MetaController(self.config["meta_controller"])
-        self.risk = RiskGovernor({**self.config["risk"], "contract_specs": self.config.get("contract_specs", {})})
+        self.risk = RiskGovernor(
+            {
+                **self.config["risk"],
+                "contract_specs": self.config.get("contract_specs", {}),
+                "mvp_scope": self.config.get("mvp_scope", {}),
+            }
+        )
         self.execution = ExecutionPlanner()
         self.options = OptionStrategyMapper(
             self.config.get("options_mapping", {}),

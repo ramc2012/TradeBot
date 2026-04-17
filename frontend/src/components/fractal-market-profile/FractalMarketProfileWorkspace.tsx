@@ -389,6 +389,16 @@ type OrderFlowPanelProps = {
   orderFlow?: FMPOrderFlow | null;
 };
 
+type ValueMigrationPanelProps = {
+  dailyProfile?: FMPProfile | null;
+  hourlyProfiles: FMPProfile[];
+};
+
+type TpoDistributionPanelProps = {
+  dailyProfile?: FMPProfile | null;
+  currentHourProfile?: FMPProfile | null;
+};
+
 type OrderFlowChartRow = {
   timestamp: string;
   label: string;
@@ -480,6 +490,11 @@ function formatIntradayLabel(value: string) {
     minute: "2-digit",
     hour12: false,
   });
+}
+
+function formatShapeLabel(value?: string | null) {
+  if (!value) return "—";
+  return value.replaceAll("-", " ");
 }
 
 function sectionChrome(className?: string) {
@@ -946,10 +961,213 @@ const PriceStructurePanel = memo(function PriceStructurePanel({
   );
 });
 
+const ValueMigrationPanel = memo(function ValueMigrationPanel({
+  dailyProfile,
+  hourlyProfiles,
+}: ValueMigrationPanelProps) {
+  const rows = useMemo(
+    () =>
+      hourlyProfiles.map((profile) => ({
+        label: `H${profile.hour_number ?? "?"}`,
+        close: Number(profile.close_price),
+        poc: Number(profile.poc),
+        vah: Number(profile.vah),
+        val: Number(profile.val),
+        score: Number(profile.value_migration_score ?? 0),
+        dayRange: Number(profile.day_range),
+        shape: profile.shape,
+      })),
+    [hourlyProfiles],
+  );
+
+  const priceDomain = useMemo<[number, number]>(() => {
+    const values = rows.flatMap((row) => [row.close, row.poc, row.vah, row.val]);
+    if (!values.length) return [0, 100];
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const padding = Math.max((max - min) * 0.08, 12);
+    return [min - padding, max + padding];
+  }, [rows]);
+
+  if (!rows.length) {
+    return (
+      <div className={sectionChrome("p-5")}>
+        <SectionTitle
+          icon={<Activity size={14} className="text-sky-300" />}
+          eyebrow="Value Migration"
+          title="Hourly migration path"
+          detail="The session has not built enough hourly profiles yet to draw a migration path."
+        />
+        <div className="mt-5 flex h-[320px] items-center justify-center rounded-[26px] border border-white/8 bg-black/20 text-sm text-slate-400">
+          Waiting for completed hourly profiles.
+        </div>
+      </div>
+    );
+  }
+
+  const latest = rows[rows.length - 1];
+
+  return (
+    <div className={sectionChrome("p-5")}>
+      <SectionTitle
+        icon={<Activity size={14} className="text-sky-300" />}
+        eyebrow="Value Migration"
+        title="Hourly migration path"
+        detail="POC, value, and the close are plotted hour by hour on the same axis. This shows whether the intraday auction is truly migrating or just rotating around prior acceptance."
+        action={
+          dailyProfile ? (
+            <StatusPill
+              label={`${formatShapeLabel(dailyProfile.shape)} · ${dailyProfile.direction_bias}`}
+              className="border-sky-300/25 bg-sky-400/10 text-sky-200"
+            />
+          ) : null
+        }
+      />
+
+      <div className="mt-5 h-[320px] rounded-[26px] border border-white/8 bg-black/20 p-3">
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={rows} margin={{ top: 12, right: 18, left: 4, bottom: 0 }}>
+            <CartesianGrid stroke="rgba(255,255,255,0.06)" vertical={false} />
+            <XAxis dataKey="label" tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false} />
+            <YAxis yAxisId="price" domain={priceDomain} tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false} width={70} />
+            <YAxis yAxisId="score" orientation="right" domain={[-4, 4]} tick={{ fill: "#94a3b8", fontSize: 10 }} axisLine={false} tickLine={false} width={42} />
+            <ReferenceLine yAxisId="score" y={0} stroke="rgba(255,255,255,0.12)" strokeDasharray="4 4" />
+            <Tooltip
+              contentStyle={{ backgroundColor: "#091120", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 18 }}
+              formatter={(value: number, name: string) => (
+                name === "Score"
+                  ? [formatSignedNumber(Number(value), 0), name]
+                  : [formatPrice(Number(value)), name]
+              )}
+            />
+            <Line yAxisId="price" type="monotone" dataKey="close" name="Close" stroke="#e2e8f0" strokeWidth={2.2} dot={false} />
+            <Line yAxisId="price" type="monotone" dataKey="poc" name="POC" stroke="#34d399" strokeWidth={2.1} dot={false} />
+            <Line yAxisId="price" type="monotone" dataKey="vah" name="VAH" stroke="#60a5fa" strokeWidth={1.5} dot={false} strokeDasharray="3 4" />
+            <Line yAxisId="price" type="monotone" dataKey="val" name="VAL" stroke="#f59e0b" strokeWidth={1.5} dot={false} strokeDasharray="3 4" />
+            <Line yAxisId="score" type="monotone" dataKey="score" name="Score" stroke="#c084fc" strokeWidth={2} dot={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-3">
+        <MetricRow
+          label="Latest migration"
+          value={formatSignedNumber(latest.score, 0)}
+          hint={`Current hour ${formatShapeLabel(latest.shape)} · close ${formatPrice(latest.close)}`}
+        />
+        <MetricRow
+          label="Daily value"
+          value={dailyProfile ? `${formatPrice(dailyProfile.val)} / ${formatPrice(dailyProfile.vah)}` : "—"}
+          hint={dailyProfile ? `POC ${formatPrice(dailyProfile.poc)} · IB ${formatPrice(dailyProfile.initial_balance_range)}` : "Daily profile is unavailable."}
+        />
+        <MetricRow
+          label="Session range"
+          value={formatPrice(latest.dayRange)}
+          hint="Latest completed hourly day-range snapshot."
+        />
+      </div>
+    </div>
+  );
+});
+
+const TpoDistributionPanel = memo(function TpoDistributionPanel({
+  dailyProfile,
+  currentHourProfile,
+}: TpoDistributionPanelProps) {
+  const renderProfile = (label: string, profile?: FMPProfile | null, accent = "bg-sky-400") => {
+    if (!profile) {
+      return (
+        <div className="rounded-[26px] border border-white/8 bg-black/20 p-4 text-sm text-slate-400">
+          {label}: no TPO distribution is available yet.
+        </div>
+      );
+    }
+
+    const rows = [...profile.tpo_rows]
+      .sort((left, right) => right.price - left.price)
+      .slice(0, 18);
+    const maxCount = Math.max(...rows.map((row) => row.count), 1);
+
+    return (
+      <div className="rounded-[26px] border border-white/8 bg-black/20 p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-slate-100">{label}</div>
+            <div className="mt-1 text-[11px] uppercase tracking-[0.16em] text-slate-500">
+              {formatShapeLabel(profile.shape)} · {profile.direction_bias}
+            </div>
+          </div>
+          <StatusPill
+            label={profile.scope === "daily" ? "30m TPO" : `H${profile.hour_number ?? "?"}`}
+            className="border-white/10 bg-white/6 text-slate-300"
+          />
+        </div>
+
+        <div className="mt-4 space-y-2">
+          {rows.map((row) => (
+            <div key={`${label}:${row.price}`} className="grid grid-cols-[72px_1fr_64px] items-center gap-3 text-xs">
+              <div className="font-mono text-slate-300">{formatPrice(row.price)}</div>
+              <div className="h-5 overflow-hidden rounded-full bg-white/6">
+                <div
+                  className={clsx("flex h-5 items-center px-2 text-[10px] text-slate-950", accent)}
+                  style={{ width: `${Math.max((row.count / maxCount) * 100, 10)}%` }}
+                >
+                  {row.count}
+                </div>
+              </div>
+              <div className="truncate text-right font-mono text-slate-500">{row.letters || "—"}</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <MetricRow
+            label="Single prints"
+            value={String(profile.single_prints.length)}
+            hint={profile.single_prints.length ? profile.single_prints.slice(0, 3).map((value) => formatPrice(value)).join(" · ") : "No single prints recorded."}
+          />
+          <MetricRow
+            label="Poor extremes"
+            value={`${profile.poor_high ? "PH" : "—"} / ${profile.poor_low ? "PL" : "—"}`}
+            hint={`Value ${formatPrice(profile.val)} to ${formatPrice(profile.vah)}`}
+          />
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className={sectionChrome("p-5")}>
+      <SectionTitle
+        icon={<Layers3 size={14} className="text-amber-300" />}
+        eyebrow="TPO Distribution"
+        title="Daily and current-hour distributions"
+        detail="This is the raw auction print view. The daily 30-minute distribution and the active hourly fractal distribution are shown side by side so acceptance, excess, and unfinished business stand out immediately."
+      />
+
+      <div className="mt-5 grid gap-4 xl:grid-cols-2">
+        {renderProfile("Daily profile", dailyProfile, "bg-sky-400")}
+        {renderProfile(
+          currentHourProfile ? `Current hour H${currentHourProfile.hour_number ?? "?"}` : "Current hour",
+          currentHourProfile,
+          "bg-emerald-400",
+        )}
+      </div>
+    </div>
+  );
+});
+
 const OrderFlowPanel = memo(function OrderFlowPanel({
   orderFlow,
 }: OrderFlowPanelProps) {
   const rows = useMemo(() => buildOrderFlowRows(orderFlow), [orderFlow]);
+  const depthScale = useMemo(() => {
+    const levels = [
+      ...(orderFlow?.depth_snapshot?.bids ?? []).map((level) => Number(level.quantity)),
+      ...(orderFlow?.depth_snapshot?.asks ?? []).map((level) => Number(level.quantity)),
+    ];
+    return Math.max(...levels, 1);
+  }, [orderFlow?.depth_snapshot?.asks, orderFlow?.depth_snapshot?.bids]);
   const priceDomain = useMemo(() => {
     if (!rows.length) return [0, 1];
     const values = rows.flatMap((row) => [row.mid, row.micro]);
@@ -1046,6 +1264,65 @@ const OrderFlowPanel = memo(function OrderFlowPanel({
             hint={`Repricing ${formatPrice(orderFlow?.quote_repricing_rate, 2)} · VWAP drift ${formatPrice(orderFlow?.vwap_drift, 2)}`}
           />
         </div>
+
+        <div className="rounded-[26px] border border-white/8 bg-black/20 p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-slate-100">Depth ladder</div>
+              <div className="mt-1 text-[11px] uppercase tracking-[0.16em] text-slate-500">
+                Best three bid and ask levels from the live snapshot
+              </div>
+            </div>
+            <StatusPill
+              label={orderFlow?.depth_snapshot ? "Live book" : "Unavailable"}
+              className={orderFlow?.depth_snapshot ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-200" : "border-white/10 bg-white/6 text-slate-300"}
+            />
+          </div>
+
+          {orderFlow?.depth_snapshot ? (
+            <div className="mt-4 grid gap-4 xl:grid-cols-2">
+              <div className="rounded-[22px] border border-white/8 bg-white/[0.04] px-4 py-4">
+                <div className="mb-3 text-[11px] uppercase tracking-[0.16em] text-slate-400">Bids</div>
+                <div className="space-y-2">
+                  {(orderFlow.depth_snapshot.bids ?? []).map((level) => (
+                    <div key={`bid-${level.price}`} className="grid grid-cols-[78px_1fr_72px] items-center gap-3 text-xs">
+                      <div className="font-mono text-emerald-200">{formatPrice(level.price)}</div>
+                      <div className="h-5 rounded-full bg-white/6">
+                        <div
+                          className="h-5 rounded-full bg-emerald-400"
+                          style={{ width: `${Math.max((Number(level.quantity) / depthScale) * 100, 12)}%` }}
+                        />
+                      </div>
+                      <div className="text-right font-mono text-slate-300">{formatCompact(level.quantity)}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-[22px] border border-white/8 bg-white/[0.04] px-4 py-4">
+                <div className="mb-3 text-[11px] uppercase tracking-[0.16em] text-slate-400">Asks</div>
+                <div className="space-y-2">
+                  {(orderFlow.depth_snapshot.asks ?? []).map((level) => (
+                    <div key={`ask-${level.price}`} className="grid grid-cols-[78px_1fr_72px] items-center gap-3 text-xs">
+                      <div className="font-mono text-rose-200">{formatPrice(level.price)}</div>
+                      <div className="h-5 rounded-full bg-white/6">
+                        <div
+                          className="h-5 rounded-full bg-rose-400"
+                          style={{ width: `${Math.max((Number(level.quantity) / depthScale) * 100, 12)}%` }}
+                        />
+                      </div>
+                      <div className="text-right font-mono text-slate-300">{formatCompact(level.quantity)}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-4 text-sm text-slate-400">
+              No depth snapshot is attached to the current tape.
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1122,7 +1399,6 @@ export default function FractalMarketProfileWorkspace() {
     () => replaySuite?.reports ?? summaryQuery.data?.replay_reports ?? [],
     [replaySuite?.reports, summaryQuery.data?.replay_reports],
   );
-  const orderFlowRows = useMemo(() => buildOrderFlowRows(live?.order_flow), [live?.order_flow]);
   const equityCurveRows = useMemo(
     () =>
       (activeReplay?.equity_curve ?? []).map((point) => ({
@@ -1283,6 +1559,17 @@ export default function FractalMarketProfileWorkspace() {
             />
           </div>
         </div>
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-[1.02fr_0.98fr]">
+        <ValueMigrationPanel
+          dailyProfile={live?.daily_profile}
+          hourlyProfiles={live?.hourly_profiles ?? []}
+        />
+        <TpoDistributionPanel
+          dailyProfile={live?.daily_profile}
+          currentHourProfile={live?.current_hour_profile}
+        />
       </section>
 
       <section className="grid gap-6 xl:grid-cols-[0.92fr_1.08fr]">

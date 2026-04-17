@@ -40,12 +40,18 @@ PROFILE_CONFIG: dict[str, float | int] = {
 SCAN_CONFIG: dict[str, float | int] = {
     "narrow_hourly_ib_factor": 0.70,
     "wide_daily_ib_factor": 1.50,
-    "min_value_migration_abs": 2,
+    "min_value_migration_abs": 1,
+    "trend_pullback_tolerance_factor": 0.18,
+    "balance_reversion_tolerance_factor": 0.14,
+    "actionable_confidence_min": 0.55,
     "bullish_pcr_min": 1.20,
     "bearish_pcr_max": 0.80,
     "max_iv_rank_for_buying": 50.0,
     "india_vix_defined_risk": 22.0,
     "min_dte_for_long_options": 5,
+    "soft_option_penalty": 0.04,
+    "soft_iv_penalty": 0.03,
+    "soft_vix_penalty": 0.03,
 }
 
 RISK_CONFIG: dict[str, float | int] = {

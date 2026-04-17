@@ -3,6 +3,7 @@
     "primary_underlyings": ["NIFTY"],
     "secondary_underlyings": ["BANKNIFTY"],
     "instrument_type": "options_buy",
+    "option_buy_price_fraction": 0.02,
     "session": {
       "timezone": "Asia/Kolkata",
       "open": "09:15",
@@ -81,14 +82,15 @@
       "vpoc_tolerance_min_points": 8.0,
       "vpoc_tolerance_max_points": 30.0,
       "enable_gap_continuation": true,
-      "enable_gap_failure": false,
-      "enable_balance_rotation": false,
-      "enable_vpoc_rejection": false
+      "enable_gap_failure": true,
+      "enable_balance_rotation": true,
+      "enable_vpoc_rejection": true
     },
     "swing": {
       "enabled": true,
       "sleeve_fraction": 0.35,
-      "min_confidence": 0.62,
+      "min_confidence": 0.55,
+      "rl_max_min_confidence": 0.55,
       "risk_multiple": 2.0,
       "lot_size": 25,
       "margin_fraction_per_lot": 0.18,
@@ -101,14 +103,19 @@
       "ib_break_tolerance_fraction": 0.12,
       "ib_break_tolerance_min_points": 8.0,
       "ib_break_tolerance_max_points": 35.0,
+      "trend_pullback_tolerance_fraction": 0.2,
+      "trend_pullback_tolerance_min_points": 8.0,
+      "trend_pullback_tolerance_max_points": 35.0,
+      "trend_pullback_timing_floor": 0.38,
       "enable_eighty_percent_rule": false,
       "enable_ib_failure": false,
       "enable_auction_rejection_long": false,
       "enable_auction_rejection_short": true,
-      "enable_acceptance_continuation_long": false,
+      "enable_acceptance_continuation_long": true,
       "enable_acceptance_continuation_short": true,
       "enable_spike_acceptance": true,
-      "enable_balance_area_breakout": false
+      "enable_balance_area_breakout": true,
+      "enable_trend_pullback": true
     },
     "scalp": {
       "enabled": true,
@@ -134,7 +141,7 @@
     "max_concurrent_positions": 3,
     "session_close_buffer_minutes": 15,
     "stale_data_seconds": 10,
-    "min_model_confidence": 0.55
+    "min_model_confidence": 0.5
   },
   "paper_trading": {
     "journal_root": "runtime/auction_intelligence",
@@ -152,6 +159,11 @@
     "min_volume": 1,
     "min_oi": 1,
     "max_spread_pct": 0.15,
+    "enable_relaxed_fallback": true,
+    "relaxed_max_premium": 1500.0,
+    "relaxed_min_volume": 0,
+    "relaxed_min_oi": 0,
+    "relaxed_max_spread_pct": 0.35,
     "same_day_close_buffer_minutes": {
       "scalp": 45,
       "swing": 120,
