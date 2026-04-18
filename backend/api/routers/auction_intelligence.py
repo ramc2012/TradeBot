@@ -787,12 +787,21 @@ import math
 from collections import defaultdict
 from pathlib import Path
 
-_DATA_ROOT = Path(__file__).resolve().parent.parent.parent / "runtime" / "index_analytics_data"
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
+# Primary: compact mp_data/ directory shipped inside the Docker image (1.5 MB)
+# Fallback: full runtime/ tree used during local development
+_MP_DATA_ROOT = _BACKEND_ROOT / "mp_data"
+_DATA_ROOT = _BACKEND_ROOT / "runtime" / "index_analytics_data"
 
 _SUPPORTED_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "SENSEX")
 
 
 def _mp_enr_path(underlying: str) -> Path:
+    # Try compact ship-in-image path first
+    compact = _MP_DATA_ROOT / f"underlying={underlying}" / "enriched_mp_with_failures.csv"
+    if compact.exists():
+        return compact
+    # Fallback to full runtime tree
     sub = _DATA_ROOT / "market_profile" / f"underlying={underlying}" / "enriched_mp_with_failures.csv"
     if sub.exists():
         return sub
@@ -801,6 +810,9 @@ def _mp_enr_path(underlying: str) -> Path:
 
 
 def _mp_params_path(underlying: str) -> Path:
+    compact = _MP_DATA_ROOT / f"underlying={underlying}" / "daily_mp_params.csv"
+    if compact.exists():
+        return compact
     sub = _DATA_ROOT / "market_profile" / f"underlying={underlying}" / "daily_mp_params.csv"
     if sub.exists():
         return sub

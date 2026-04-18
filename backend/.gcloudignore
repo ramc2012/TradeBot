@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.env
+*.egg-info/
+.venv/
+venv/
+credentials.json
+commodity_strategy.json
+nse_strategy_state.json
+runtime/
+tests/
+# Exclude large PNGs from mp_data — only the CSVs are needed
+mp_data/**/*.png
