@@ -231,6 +231,18 @@ export const getAuctionIntelligenceMPAgentContext = (underlying = "NIFTY", limit
   api.get("/api/auction-intelligence/mp-agent-context", { params: { underlying, limit } });
 export const getAuctionIntelligenceMPDashboard = (underlying = "NIFTY", lookback = 30) =>
   api.get("/api/auction-intelligence/mp-dashboard", { params: { underlying, lookback } });
+export const getMPAnalytics = (underlying = "NIFTY", lookback = 60) =>
+  api.get("/api/auction-intelligence/mp-analytics", { params: { underlying, lookback } });
+export const getMPMultiTFProfile = (underlying = "NIFTY") =>
+  api.get("/api/auction-intelligence/mp-multi-tf-profile", { params: { underlying } });
+export const getMPRegimeHistory = (underlying = "NIFTY", lookback = 60) =>
+  api.get("/api/auction-intelligence/mp-regime-history", { params: { underlying, lookback } });
+export const getMPSetupPerformance = (underlying = "NIFTY") =>
+  api.get("/api/auction-intelligence/mp-setup-performance", { params: { underlying } });
+export const getMPConceptDrift = (underlying = "NIFTY", window = 20) =>
+  api.get("/api/auction-intelligence/mp-concept-drift", { params: { underlying, window } });
+export const getMPOrderflowProxy = (underlying = "NIFTY", lookback = 60) =>
+  api.get("/api/auction-intelligence/mp-orderflow-proxy", { params: { underlying, lookback } });
 
 // ── Fractal Market Profile ────────────────────────────────────────────────
 export const getFractalMarketProfileSummary = () =>

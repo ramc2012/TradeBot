@@ -11,6 +11,7 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 
 from auction_intelligence import AuctionIntelligenceService
+from auction_intelligence.analytics import MPAnalyticsEngine
 from auction_intelligence.config import clone_default_config
 from auction_intelligence.demo import (
     available_scenarios as get_available_demo_scenarios,
@@ -1323,3 +1324,141 @@ async def mp_dashboard(
         "skip_reason": open_signal_payload["skip_reason"],
         "context": _build_mp_agent_context_payload(underlying, latest_row, limit=6),
     }
+
+
+# ---------------------------------------------------------------------------
+# MP Intelligence Analytics — multi-TF profiles, regime history, setup perf
+# ---------------------------------------------------------------------------
+
+_mp_analytics_engine = MPAnalyticsEngine()
+
+
+@router.get("/mp-analytics")
+async def mp_analytics(
+    underlying: str = Query("NIFTY"),
+    lookback: int = Query(60, ge=10, le=250),
+    composite_20d: bool = Query(True),
+    composite_60d: bool = Query(True),
+) -> dict:
+    """
+    Full MP Intelligence bundle:
+    - Composite (20d / 60d) multi-timeframe profiles
+    - Weekly profile aggregates
+    - Value migration trend (POC shift, VA center, VA width over time)
+    - Regime history (day-type sequence, transition matrix, streaks)
+    - Setup performance matrix (day_type × direction → win rate, expectancy)
+    - Concept drift detection (Page-Hinkley on rolling win rate)
+    - Orderflow proxy CVD series
+    """
+    enr_path = _mp_enr_path(underlying)
+    rows = _safe_csv(enr_path)
+    if not rows:
+        # Fall back to daily_mp_params for lighter requests
+        rows = _safe_csv(_mp_params_path(underlying))
+    if not rows:
+        return {
+            "underlying": underlying,
+            "error": f"No MP data found for {underlying}",
+            "profiles": {},
+            "weekly_profiles": [],
+            "value_migration": {"sessions": [], "summary": {}},
+            "regime_history": {"sessions": [], "distribution": [], "transition_matrix": {}, "streaks": []},
+            "setup_performance": {"total_signals": 0, "cells": [], "calibration": []},
+            "concept_drift": {"drift_detected": False, "series": [], "drift_events": [], "current_state": "no_data"},
+            "orderflow_proxy": {"series": [], "summary": {}},
+        }
+
+    result = _mp_analytics_engine.full_analytics(
+        rows=rows,
+        lookback=lookback,
+        composite_20d=composite_20d,
+        composite_60d=composite_60d,
+    )
+    result["underlying"] = underlying
+    result["lookback"] = lookback
+    result["total_sessions"] = len(rows)
+    return result
+
+
+@router.get("/mp-multi-tf-profile")
+async def mp_multi_tf_profile(
+    underlying: str = Query("NIFTY"),
+) -> dict:
+    """
+    Multi-timeframe profile snapshot: composite_20d, composite_60d, weekly,
+    plus today's daily profile from FMP if available.
+
+    Designed to power the multi-TF stacked profile panel in the UI.
+    """
+    enr_path = _mp_enr_path(underlying)
+    rows = _safe_csv(enr_path) or _safe_csv(_mp_params_path(underlying))
+    if not rows:
+        return {"underlying": underlying, "profiles": {}, "weekly_profiles": []}
+
+    rows_sorted = sorted(rows, key=lambda r: r.get("date", ""))
+    profiles = {
+        "composite_20d": _mp_analytics_engine.build_composite_profile(rows_sorted, lookback=20, label="Composite 20D"),
+        "composite_60d": _mp_analytics_engine.build_composite_profile(rows_sorted, lookback=60, label="Composite 60D"),
+    }
+    weekly = _mp_analytics_engine.build_weekly_profiles(rows_sorted)
+
+    return {
+        "underlying": underlying,
+        "profiles": profiles,
+        "weekly_profiles": weekly[-8:],
+        "latest_daily": _build_mp_signal_record(rows_sorted[-1]) if rows_sorted else None,
+    }
+
+
+@router.get("/mp-regime-history")
+async def mp_regime_history(
+    underlying: str = Query("NIFTY"),
+    lookback: int = Query(60, ge=10, le=250),
+) -> dict:
+    """Day-type sequence, transition matrix, and streak analysis."""
+    rows = _safe_csv(_mp_enr_path(underlying)) or _safe_csv(_mp_params_path(underlying))
+    if not rows:
+        return {"underlying": underlying, "sessions": [], "distribution": [], "transition_matrix": {}, "streaks": []}
+    result = _mp_analytics_engine.regime_history(rows, lookback=lookback)
+    result["underlying"] = underlying
+    return result
+
+
+@router.get("/mp-setup-performance")
+async def mp_setup_performance(underlying: str = Query("NIFTY")) -> dict:
+    """Setup performance matrix with win rates and expectancy by day_type × direction."""
+    rows = _safe_csv(_mp_enr_path(underlying))
+    if not rows:
+        return {"underlying": underlying, "total_signals": 0, "cells": [], "calibration": []}
+    result = _mp_analytics_engine.setup_performance(rows)
+    result["underlying"] = underlying
+    return result
+
+
+@router.get("/mp-concept-drift")
+async def mp_concept_drift(
+    underlying: str = Query("NIFTY"),
+    window: int = Query(20, ge=10, le=60),
+    threshold: float = Query(8.0, ge=2.0, le=30.0),
+) -> dict:
+    """Page-Hinkley concept drift detection on rolling signal win rate."""
+    rows = _safe_csv(_mp_enr_path(underlying))
+    if not rows:
+        return {"underlying": underlying, "drift_detected": False, "series": [], "current_state": "no_data"}
+    result = _mp_analytics_engine.concept_drift(rows, window=window, threshold=threshold)
+    result["underlying"] = underlying
+    return result
+
+
+@router.get("/mp-orderflow-proxy")
+async def mp_orderflow_proxy(
+    underlying: str = Query("NIFTY"),
+    lookback: int = Query(60, ge=10, le=250),
+) -> dict:
+    """Approximate CVD series derived from daily auction structure."""
+    rows = _safe_csv(_mp_enr_path(underlying)) or _safe_csv(_mp_params_path(underlying))
+    if not rows:
+        return {"underlying": underlying, "series": [], "summary": {}}
+    result = _mp_analytics_engine.orderflow_proxy(rows, lookback=lookback)
+    result["underlying"] = underlying
+    return result
