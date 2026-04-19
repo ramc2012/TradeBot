@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import types
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from directional_options.config import clone_default_config
+from directional_options.dashboard import mount_directional_options_dashboard
 from directional_options.regime import RegimeClassifier
 from directional_options.risk import DirectionalOptionsRiskEngine
-from directional_options.schemas import ContractCandidate, DirectionalSignal, RegimeSnapshot
+from directional_options.schemas import ContractCandidate, DashboardMountState, DirectionalSignal, RegimeSnapshot
 from directional_options.service import DirectionalOptionsService
 from directional_options.signals import DirectionalSignalEngine
 
@@ -143,3 +145,67 @@ def test_directional_options_service_handles_missing_runtime_dataset(tmp_path) -
     assert summary["underlyings"] == []
     assert payload["snapshot"]["as_of"] is None
     assert payload["backtest"]["summary"]["trade_count"] == 0
+
+
+def test_dash_mount_primes_workspace_cache_with_mounted_state(monkeypatch) -> None:
+    from directional_options import dashboard as dashboard_module
+
+    class _ComponentFactory:
+        def __getattr__(self, name):
+            def component(*args, **kwargs):
+                return {"component": name, "args": args, "kwargs": kwargs}
+
+            return component
+
+    class FakeDash:
+        def __init__(self, *args, **kwargs):
+            self.server = object()
+            self._layout = None
+
+        @property
+        def layout(self):
+            return self._layout
+
+        @layout.setter
+        def layout(self, value):
+            self._layout = value
+            if callable(value):
+                value()
+
+    class FakeApp:
+        def __init__(self):
+            self.mounts: list[tuple[str, object]] = []
+
+        def mount(self, path: str, target: object) -> None:
+            self.mounts.append((path, target))
+
+    original_state = dashboard_module._DASHBOARD_STATE
+    fake_dash_module = types.SimpleNamespace(
+        Dash=FakeDash,
+        dcc=_ComponentFactory(),
+        html=_ComponentFactory(),
+    )
+    service = DirectionalOptionsService()
+    service.workspace.cache_clear()
+    dashboard_module._DASHBOARD_STATE = DashboardMountState(
+        mounted=False,
+        url=None,
+        reason="Dash dependency is not installed yet.",
+    )
+    monkeypatch.setitem(sys.modules, "dash", fake_dash_module)
+
+    app = FakeApp()
+    try:
+        mount_directional_options_dashboard(app, service)
+        payload = service.workspace(
+            service.config["default_underlying"],
+            service.config["default_timeframe"],
+            int(service.config["backtest"]["lookback_sessions"]),
+        )
+    finally:
+        dashboard_module._DASHBOARD_STATE = original_state
+        service.workspace.cache_clear()
+
+    assert app.mounts
+    assert payload["module"]["dashboard"]["mounted"] is True
+    assert payload["module"]["dashboard"]["url"] == "/directional-options/dashboard/"

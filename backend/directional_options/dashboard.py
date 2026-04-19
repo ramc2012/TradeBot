@@ -27,6 +27,13 @@ def mount_directional_options_dashboard(app, service) -> dict[str, object]:
     except ModuleNotFoundError:
         return get_dashboard_mount_state()
 
+    _DASHBOARD_STATE = DashboardMountState(
+        mounted=True,
+        url="/directional-options/dashboard/",
+        reason="Dash workspace mounted successfully.",
+    )
+    service.workspace.cache_clear()
+
     dash_app = Dash(__name__, requests_pathname_prefix="/directional-options/dashboard/")
 
     def serve_layout():
@@ -117,11 +124,6 @@ def mount_directional_options_dashboard(app, service) -> dict[str, object]:
 
     dash_app.layout = serve_layout
     app.mount("/directional-options/dashboard", WSGIMiddleware(dash_app.server))
-    _DASHBOARD_STATE = DashboardMountState(
-        mounted=True,
-        url="/directional-options/dashboard/",
-        reason="Dash workspace mounted successfully.",
-    )
     return get_dashboard_mount_state()
 
 
