@@ -14,6 +14,20 @@ import pandas as pd
 from directional_options.schemas import ContractMeta
 
 
+def _empty_price_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "time": pd.Series(dtype="datetime64[ns]"),
+            "open": pd.Series(dtype="float64"),
+            "high": pd.Series(dtype="float64"),
+            "low": pd.Series(dtype="float64"),
+            "close": pd.Series(dtype="float64"),
+            "volume": pd.Series(dtype="float64"),
+            "oi": pd.Series(dtype="float64"),
+        }
+    )
+
+
 def _parse_ts(value: str | datetime | pd.Timestamp) -> pd.Timestamp:
     if isinstance(value, pd.Timestamp):
         return value
@@ -22,7 +36,13 @@ def _parse_ts(value: str | datetime | pd.Timestamp) -> pd.Timestamp:
 
 @lru_cache(maxsize=1)
 def _load_contract_index(index_path: str) -> tuple[ContractMeta, ...]:
-    raw = json.loads(Path(index_path).read_text())
+    path = Path(index_path)
+    if not path.exists():
+        return tuple()
+    try:
+        raw = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return tuple()
     rows: list[ContractMeta] = []
     for item in raw.values():
         file_path = item.get("file_path")
@@ -52,7 +72,7 @@ def _load_contract_index(index_path: str) -> tuple[ContractMeta, ...]:
 def _load_gzip_csv(path_str: str) -> pd.DataFrame:
     path = Path(path_str)
     if not path.exists():
-        raise FileNotFoundError(path)
+        return _empty_price_frame()
     with gzip.open(path, "rt") as handle:
         frame = pd.read_csv(handle, parse_dates=["time"])
     frame = frame.sort_values("time").reset_index(drop=True)

@@ -37,6 +37,8 @@ def timeframe_minutes(timeframe: str) -> int:
 
 
 def resample_frame(frame: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    if frame.empty or "time" not in frame.columns:
+        return frame.copy()
     if timeframe == "1minute":
         return frame.copy()
     rule = TIMEFRAME_TO_PANDAS[timeframe]

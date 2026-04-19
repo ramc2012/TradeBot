@@ -130,3 +130,16 @@ def test_directional_options_service_returns_workspace_payload() -> None:
     assert payload["module"]["key"] == "directional_long_options"
     assert payload["snapshot"]["as_of"] is not None
     assert "summary" in payload["backtest"]
+
+
+def test_directional_options_service_handles_missing_runtime_dataset(tmp_path) -> None:
+    config = clone_default_config()
+    config["data_root"] = tmp_path / "missing-runtime-data"
+    service = DirectionalOptionsService(config)
+
+    summary = service.summary()
+    payload = service.workspace("NIFTY", "5minute", 4)
+
+    assert summary["underlyings"] == []
+    assert payload["snapshot"]["as_of"] is None
+    assert payload["backtest"]["summary"]["trade_count"] == 0
