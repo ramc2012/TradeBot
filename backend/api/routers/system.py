@@ -16,6 +16,7 @@ from auction_intelligence.config import clone_default_config
 from core.config import settings
 from db.database import AsyncSessionLocal
 from db.redis_client import get_redis
+from fractal_market_profile.service import fmp_service
 from market_data.data_router import data_router
 from paper_engine.commodity_strategy_agent import commodity_strategy_agent, _in_commodity_hours
 from paper_engine.strategy_agent import paper_strategy_agent, _in_market_hours
@@ -23,6 +24,7 @@ from paper_engine.strategy_agent import paper_strategy_agent, _in_market_hours
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 _perf = PerformanceAnalytics()
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _service(
@@ -207,11 +209,40 @@ def _research_sync_service(now_utc: datetime) -> dict[str, Any]:
     )
 
 
-async def _broker_service() -> dict[str, Any]:
+def _next_market_open_ist(now_utc: datetime) -> datetime:
+    next_open = now_utc.astimezone(IST).replace(hour=9, minute=15, second=0, microsecond=0)
+    if now_utc.astimezone(IST) >= next_open:
+        next_open += timedelta(days=1)
+    while next_open.weekday() >= 5:
+        next_open += timedelta(days=1)
+    return next_open
+
+
+def _broker_rollover_meta(snapshot: dict[str, Any], now_utc: datetime) -> dict[str, Any]:
+    next_open_ist = _next_market_open_ist(now_utc)
+    warnings: list[str] = []
+
+    upstox = snapshot.get("upstox_token_health") or {}
+    upstox_expiry = _parse_iso_datetime(upstox.get("expires_at_ist"))
+    if snapshot.get("upstox_ready") and upstox_expiry and upstox_expiry <= next_open_ist:
+        warnings.append("Upstox access tokens expire before the next market open.")
+
+    if snapshot.get("fyers_ready"):
+        warnings.append("Fyers requires re-authentication before a new trading day.")
+
+    return {
+        "next_market_open_ist": next_open_ist.isoformat(),
+        "reconnect_required_before_next_market_open": bool(warnings),
+        "reconnect_warnings": warnings,
+    }
+
+
+async def _broker_service(now_utc: datetime) -> dict[str, Any]:
     snapshot = await get_broker_connection_snapshot(force_validate=False)
     connected = snapshot.get("connected_brokers") or []
     upstox = snapshot.get("upstox_token_health") or {}
     fyers = snapshot.get("fyers_token_health") or {}
+    rollover_meta = _broker_rollover_meta(snapshot, now_utc)
 
     if snapshot.get("broker_ready"):
         status = "healthy"
@@ -235,6 +266,7 @@ async def _broker_service() -> dict[str, Any]:
             "fyers_ready": snapshot.get("fyers_ready"),
             "upstox_token_health": upstox,
             "fyers_token_health": fyers,
+            **rollover_meta,
         },
     )
 
@@ -385,6 +417,35 @@ async def _auction_service() -> dict[str, Any]:
     )
 
 
+async def _fractal_market_profile_service() -> dict[str, Any]:
+    try:
+        live_probe = await fmp_service.live_health("NIFTY")
+        return _service(
+            key="fractal_market_profile",
+            label="Fractal Market Profile",
+            status="healthy",
+            detail="Live FMP snapshot has recent minute history available.",
+            meta=live_probe,
+        )
+    except RuntimeError as exc:
+        return _service(
+            key="fractal_market_profile",
+            label="Fractal Market Profile",
+            status="degraded",
+            detail=f"Live FMP snapshot unavailable: {exc}",
+            meta={"symbol_code": "NIFTY"},
+        )
+    except Exception as exc:
+        logger.debug(f"[System] Fractal Market Profile health check failed: {exc}")
+        return _service(
+            key="fractal_market_profile",
+            label="Fractal Market Profile",
+            status="critical",
+            detail=f"FMP health check failed: {exc}",
+            meta={"symbol_code": "NIFTY"},
+        )
+
+
 @router.get("/health")
 async def system_health() -> dict[str, Any]:
     now_utc = datetime.now(timezone.utc)
@@ -400,7 +461,7 @@ async def system_health() -> dict[str, Any]:
     postgres_service = await _postgres_service()
     redis_service = await _redis_service()
     research_sync_service = _research_sync_service(now_utc)
-    broker_service = await _broker_service()
+    broker_service = await _broker_service(now_utc)
     market_service = _market_data_service()
     nse_strategy_service, nse_lanes = _strategy_service(
         key="nse_strategy",
@@ -413,6 +474,7 @@ async def system_health() -> dict[str, Any]:
         status=commodity_strategy_agent.get_status(),
     )
     auction_service = await _auction_service()
+    fractal_market_profile_service = await _fractal_market_profile_service()
 
     services = [
         backend_service,
@@ -424,6 +486,7 @@ async def system_health() -> dict[str, Any]:
         nse_strategy_service,
         commodity_strategy_service,
         auction_service,
+        fractal_market_profile_service,
     ]
 
     overall = "healthy"

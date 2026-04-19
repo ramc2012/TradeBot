@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 from loguru import logger
 
+from core.runtime_state import load_runtime_state, save_runtime_state
 from paper_engine.base_strategy_agent import IST
 from paper_engine.order_book import PaperOrderBook
 from paper_engine.portfolio import PaperPortfolio
@@ -113,9 +114,10 @@ def _resolve_strategy_state_file() -> Path:
 
 
 _NSE_STRATEGY_STATE_FILE = _resolve_strategy_state_file()
+_NSE_STRATEGY_STATE_DB_KEY = "nse_strategy_state"
 
 
-def _load_saved_strategy_state() -> dict[str, Any]:
+def _load_saved_strategy_state_from_disk() -> dict[str, Any]:
     if not _NSE_STRATEGY_STATE_FILE.exists():
         return {}
     try:
@@ -126,12 +128,32 @@ def _load_saved_strategy_state() -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _save_strategy_state(payload: dict[str, Any]) -> None:
+def _load_saved_strategy_state_from_database() -> tuple[Optional[dict[str, Any]], Optional[datetime]]:
+    payload, updated_at = load_runtime_state(_NSE_STRATEGY_STATE_DB_KEY)
+    if not isinstance(payload, dict):
+        return None, updated_at
+    return payload, updated_at
+
+
+def _load_saved_strategy_state() -> tuple[dict[str, Any], Optional[datetime]]:
+    database_payload, updated_at = _load_saved_strategy_state_from_database()
+    if database_payload is not None:
+        return database_payload, updated_at
+
+    disk_payload = _load_saved_strategy_state_from_disk()
+    if disk_payload:
+        migrated_at = save_runtime_state(_NSE_STRATEGY_STATE_DB_KEY, disk_payload)
+        return disk_payload, migrated_at or updated_at
+    return {}, updated_at
+
+
+def _save_strategy_state(payload: dict[str, Any]) -> Optional[datetime]:
     try:
         _NSE_STRATEGY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         _NSE_STRATEGY_STATE_FILE.write_text(json.dumps(payload, indent=2))
     except Exception as exc:
         logger.warning(f"[Strategy] Failed to persist {_NSE_STRATEGY_STATE_FILE}: {exc}")
+    return save_runtime_state(_NSE_STRATEGY_STATE_DB_KEY, payload)
 
 
 __all__ = [
@@ -141,6 +163,8 @@ __all__ = [
     "StrategyPosition",
     "StrategyRuntime",
     "_NSE_STRATEGY_STATE_FILE",
+    "_NSE_STRATEGY_STATE_DB_KEY",
     "_load_saved_strategy_state",
+    "_load_saved_strategy_state_from_database",
     "_save_strategy_state",
 ]

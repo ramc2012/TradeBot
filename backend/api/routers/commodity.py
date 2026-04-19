@@ -50,15 +50,17 @@ async def update_commodity_strategy_config(body: CommodityConfigRequest):
 
 @router.get("/strategy-agent/contracts")
 async def commodity_strategy_contracts():
+    await commodity_strategy_agent.ensure_selected_option_setup_locks()
     return await commodity_atm_watchlist_service.get_contract_catalog(
         commodity_strategy_agent.get_symbols(),
         commodity_strategy_agent.get_selected_option_expiries(),
+        commodity_strategy_agent.get_selected_option_lookup_symbols(),
     )
 
 
 @router.put("/strategy-agent/contracts")
 async def update_commodity_strategy_contracts(body: CommodityExpirySelectionRequest):
-    return commodity_strategy_agent.update_selected_option_expiries(body.selected_option_expiries)
+    return await commodity_strategy_agent.update_selected_option_expiries(body.selected_option_expiries)
 
 
 @router.get("/kill-switch")
@@ -80,9 +82,11 @@ async def commodity_atm_watchlist_expiries():
 
 @router.get("/atm-watchlist")
 async def commodity_atm_watchlist(expiry: Optional[str] = Query(None)):
+    await commodity_strategy_agent.ensure_selected_option_setup_locks()
     return await commodity_atm_watchlist_service.get_watchlist(
         commodity_strategy_agent.get_symbols(),
         commodity_strategy_agent.get_selected_option_expiries(),
+        commodity_strategy_agent.get_selected_option_lookup_symbols(),
         expiry,
     )
 

@@ -92,9 +92,11 @@ class UpstoxAdapter(BrokerAdapter):
             raise ValueError(f"Upstox token exchange failed ({r.status_code}): {msgs}")
 
         self._access_token = data["access_token"]
+        refresh_token = data.get("refresh_token") or data.get("refreshToken")
         logger.info("Upstox authenticated via code exchange")
         return AuthToken(
             access_token=self._access_token,
+            refresh_token=str(refresh_token).strip() or None,
             expires_at=datetime.utcnow() + timedelta(seconds=data.get("expires_in", 86400)),
         )
 
@@ -253,6 +255,50 @@ class UpstoxAdapter(BrokerAdapter):
             v.get("instrument_token") or k: float(v.get("last_price", 0) or 0)
             for k, v in data.items()
         }
+
+    async def search_instruments(
+        self,
+        *,
+        query: str,
+        exchanges: Optional[str] = None,
+        segments: Optional[str] = None,
+        instrument_types: Optional[str] = None,
+        expiry: Optional[str] = None,
+        atm_offset: Optional[int] = None,
+        page_number: int = 1,
+        records: int = 20,
+    ) -> list[dict]:
+        params: dict[str, Any] = {
+            "query": str(query or "").strip(),
+            "page_number": max(1, int(page_number or 1)),
+            "records": max(1, min(int(records or 20), 30)),
+        }
+        if exchanges:
+            params["exchanges"] = exchanges
+        if segments:
+            params["segments"] = segments
+        if instrument_types:
+            params["instrument_types"] = instrument_types
+        if expiry:
+            params["expiry"] = expiry
+        if atm_offset is not None:
+            params["atm_offset"] = int(atm_offset)
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{self.BASE_URL}/instruments/search",
+                params=params,
+                headers=self._headers(),
+            )
+        body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        if r.status_code != 200:
+            errors = body.get("errors", [])
+            if errors:
+                detail = "; ".join(str(error.get("message") or error) for error in errors)
+            else:
+                detail = str(body.get("message") or body or r.text)
+            raise ValueError(f"Upstox instrument search failed ({r.status_code}): {detail}")
+        return list(body.get("data") or [])
 
     async def get_option_contracts(self, symbol: str, expiry: Optional[str] = None) -> list[dict]:
         params = {"instrument_key": symbol}

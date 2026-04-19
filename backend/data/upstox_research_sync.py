@@ -11,7 +11,7 @@ from loguru import logger
 from sqlalchemy import text
 
 from analysis.backtest import MACDBacktester, UpstoxAuthError
-from analysis.instruments import get_first_trading_day_after
+from analysis.instruments import get_first_trading_day_after, get_fo_market
 from db.database import AsyncSessionLocal
 
 
@@ -583,6 +583,7 @@ class UpstoxResearchSync:
                         "instrument_key": contract.get("instrument_key"),
                         "trading_symbol": contract.get("trading_symbol"),
                         "underlying": underlying,
+                        "market": get_fo_market(underlying),
                         "expiry": expiry,
                         "strike": float(strike),
                         "option_type": option_type,
@@ -601,13 +602,13 @@ class UpstoxResearchSync:
                         text("""
                             INSERT INTO fo_contract_catalog (
                                 instrument_key, trading_symbol, underlying, expiry,
-                                strike, option_type, lot_size, tick_size,
+                                strike, option_type, lot_size, market, tick_size,
                                 minimum_lot, freeze_quantity, candle_from_date,
                                 candle_to_date, updated_at
                             )
                             VALUES (
                                 :instrument_key, :trading_symbol, :underlying, :expiry,
-                                :strike, :option_type, :lot_size, :tick_size,
+                                :strike, :option_type, :lot_size, :market, :tick_size,
                                 :minimum_lot, :freeze_quantity, :candle_from_date,
                                 :candle_to_date, NOW()
                             )
@@ -618,6 +619,7 @@ class UpstoxResearchSync:
                                 strike = EXCLUDED.strike,
                                 option_type = EXCLUDED.option_type,
                                 lot_size = EXCLUDED.lot_size,
+                                market = EXCLUDED.market,
                                 tick_size = EXCLUDED.tick_size,
                                 minimum_lot = EXCLUDED.minimum_lot,
                                 freeze_quantity = EXCLUDED.freeze_quantity,

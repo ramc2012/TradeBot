@@ -215,6 +215,14 @@ def _utc_naive(value: Any) -> Optional[datetime]:
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def _utc_aware(value: Any) -> Optional[datetime]:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _get_int_env(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -504,6 +512,8 @@ def _build_research_scheduler_summary(
         ),
     )
     active_grace_minutes = max(1, _get_int_env("RESEARCH_ACTIVE_GRACE_MINUTES", 2))
+    now_utc = _utc_aware(now_utc) or datetime.now(timezone.utc)
+    recent_activity_at = _utc_aware(recent_activity_at)
 
     state = "idle"
     label = "Aggregation idle"

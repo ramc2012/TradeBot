@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react";
 import { startTransition, useDeferredValue, useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import {
   Activity,
@@ -28,6 +28,7 @@ import {
   YAxis,
 } from "recharts";
 
+import { StreamStatus } from "@/components/live/StreamStatus";
 import {
   getCommodityATMWatchlist,
   getCommodityKillSwitchStatus,
@@ -42,7 +43,7 @@ import {
   updateCommodityStrategyContracts,
 } from "@/lib/api";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
-import { createCommodityOverviewSocket } from "@/lib/websocket";
+import { createCommodityOverviewSocket, createCommodityWatchlistSocket } from "@/lib/websocket";
 
 type KillSwitchState = {
   market: string;
@@ -227,6 +228,11 @@ type CommodityOptionRow = {
   suggested_expiry?: string | null;
   active_expiry?: string | null;
   available_expiries?: string[];
+  expiry_mappings?: Array<{
+    expiry: string;
+    lookup_symbol: string;
+  }>;
+  selected_lookup_symbol?: string | null;
   atm_strike: number;
   live_source: string;
   fyers_symbol?: string | null;
@@ -236,6 +242,7 @@ type CommodityOptionRow = {
   strategy_title?: string | null;
   contract_notes?: string | null;
   selection_policy?: string | null;
+  selection_locked?: boolean;
   regime?: string | null;
   signal_side?: "CE" | "PE" | null;
   signal_reason?: string | null;
@@ -261,10 +268,19 @@ type CommodityContractCatalogPayload = {
     symbol: string;
     underlying: string;
     lookup_symbol?: string | null;
+    active_lookup_symbol?: string | null;
+    default_lookup_symbol?: string | null;
     expiries: string[];
+    expiry_mappings?: Array<{
+      expiry: string;
+      lookup_symbol: string;
+    }>;
+    selected_lookup_symbol?: string | null;
     selected_expiry?: string | null;
     suggested_expiry?: string | null;
     active_expiry?: string | null;
+    selection_policy?: string | null;
+    selection_locked?: boolean;
     has_options: boolean;
     lot_size?: number | null;
     contract_unit_label?: string | null;
@@ -295,6 +311,11 @@ type CommodityATMWatchlistPayload = {
   source?: string;
   detail?: string | null;
   timestamp?: string;
+};
+
+type CommodityWatchlistSnapshot = {
+  contract_catalog: CommodityContractCatalogPayload;
+  atm_watchlist: CommodityATMWatchlistPayload;
 };
 
 type CommodityStatus = {
@@ -531,6 +552,11 @@ function commodityOptionRowKey(row: {
   return `${row.symbol || "--"}:${row.active_expiry || row.expiry || "--"}`;
 }
 
+function commodityExpiryLookupLabel(mapping?: { expiry: string; lookup_symbol: string } | null) {
+  if (!mapping) return "--";
+  return `${mapping.expiry} -> ${mapping.lookup_symbol}`;
+}
+
 function mergeCommodityOptionRow(
   snapshotRow: CommodityOptionRow,
   liveRow?: CommodityOptionRow | null,
@@ -561,6 +587,8 @@ function mergeCommodityOptionRow(
     suggested_expiry: liveRow.suggested_expiry ?? snapshotRow.suggested_expiry,
     active_expiry: liveRow.active_expiry ?? snapshotRow.active_expiry,
     available_expiries: liveRow.available_expiries ?? snapshotRow.available_expiries,
+    expiry_mappings: liveRow.expiry_mappings ?? snapshotRow.expiry_mappings,
+    selected_lookup_symbol: liveRow.selected_lookup_symbol ?? snapshotRow.selected_lookup_symbol,
     lookup_symbol: liveRow.lookup_symbol ?? snapshotRow.lookup_symbol,
     live_source: liveRow.live_source || snapshotRow.live_source,
     fyers_symbol: liveRow.fyers_symbol ?? snapshotRow.fyers_symbol,
@@ -569,6 +597,7 @@ function mergeCommodityOptionRow(
     quote_unit_label: liveRow.quote_unit_label ?? snapshotRow.quote_unit_label,
     contract_notes: liveRow.contract_notes ?? snapshotRow.contract_notes,
     selection_policy: liveRow.selection_policy ?? snapshotRow.selection_policy,
+    selection_locked: liveRow.selection_locked ?? snapshotRow.selection_locked,
     ce: liveRow.ce ?? snapshotRow.ce,
     pe: liveRow.pe ?? snapshotRow.pe,
     ce_symbol: liveRow.ce?.instrument_key || liveRow.ce?.trading_symbol || snapshotRow.ce_symbol,
@@ -902,6 +931,7 @@ export default function CommodityPage() {
           }),
         onStatusChange,
       ),
+    storageKey: "commodityOverviewSnapshot",
     staleTime: 10_000,
   });
 
@@ -911,20 +941,30 @@ export default function CommodityPage() {
   const positions = commodityOverviewQuery.data?.positions;
   const reports = commodityOverviewQuery.data?.reports;
 
-  const contractCatalogQuery = useQuery<CommodityContractCatalogPayload>({
-    queryKey: ["commodityStrategyContracts"],
-    queryFn: () => getCommodityStrategyContracts().then((response) => response.data),
-    staleTime: 60_000,
-  });
-
-  const commodityATMWatchlistQuery = useQuery<CommodityATMWatchlistPayload>({
-    queryKey: ["commodityATMWatchlist"],
-    queryFn: () => getCommodityATMWatchlist().then((response) => response.data),
+  const commodityWatchlistQuery = useLiveSnapshotQuery<CommodityWatchlistSnapshot>({
+    queryKey: ["commodityWatchlistSnapshot"],
+    queryFn: async () => {
+      const [contract_catalog, atm_watchlist] = await Promise.all([
+        getCommodityStrategyContracts().then((response) => response.data as CommodityContractCatalogPayload),
+        getCommodityATMWatchlist().then((response) => response.data as CommodityATMWatchlistPayload),
+      ]);
+      return {
+        contract_catalog,
+        atm_watchlist,
+      };
+    },
+    streamFactory: (onData, onStatusChange) =>
+      createCommodityWatchlistSocket(
+        (data) => onData(data as CommodityWatchlistSnapshot),
+        onStatusChange,
+      ),
+    storageKey: "commodityWatchlistSnapshot",
     staleTime: 15_000,
-    refetchInterval: 20_000,
-    refetchIntervalInBackground: true,
     retry: 1,
   });
+
+  const contractCatalogData = commodityWatchlistQuery.data?.contract_catalog;
+  const commodityATMWatchlistData = commodityWatchlistQuery.data?.atm_watchlist;
 
   useEffect(() => {
     if (hasEditedSymbols) {
@@ -943,13 +983,14 @@ export default function CommodityPage() {
       return;
     }
     const nextDrafts: Record<string, string> = {};
-    for (const contract of contractCatalogQuery.data?.contracts ?? []) {
-      if (contract.active_expiry) {
-        nextDrafts[contract.symbol] = contract.active_expiry;
+    for (const contract of contractCatalogData?.contracts ?? []) {
+      const persistedExpiry = contract.selected_expiry || contract.active_expiry;
+      if (persistedExpiry) {
+        nextDrafts[contract.symbol] = persistedExpiry;
       }
     }
     setContractExpiryDrafts(nextDrafts);
-  }, [contractCatalogQuery.data, hasEditedContractExpiries]);
+  }, [contractCatalogData, hasEditedContractExpiries]);
 
   const parsedSymbols = useMemo(
     () =>
@@ -967,8 +1008,7 @@ export default function CommodityPage() {
     queryClient.invalidateQueries({ queryKey: ["commodityOrders"] });
     queryClient.invalidateQueries({ queryKey: ["commodityPositions"] });
     queryClient.invalidateQueries({ queryKey: ["commodityReports"] });
-    queryClient.invalidateQueries({ queryKey: ["commodityStrategyContracts"] });
-    queryClient.invalidateQueries({ queryKey: ["commodityATMWatchlist"] });
+    queryClient.invalidateQueries({ queryKey: ["commodityWatchlistSnapshot"] });
   };
 
   const saveConfigMutation = useMutation({
@@ -1005,10 +1045,10 @@ export default function CommodityPage() {
   const orderRows = useMemo(() => orders ?? status?.orders ?? [], [orders, status?.orders]);
   const reportRows = useMemo(() => reports ?? status?.reports ?? [], [reports, status?.reports]);
   const strategies = useMemo(() => status?.strategies ?? [], [status?.strategies]);
-  const contractCatalog = useMemo(() => contractCatalogQuery.data?.contracts ?? [], [contractCatalogQuery.data?.contracts]);
+  const contractCatalog = useMemo(() => contractCatalogData?.contracts ?? [], [contractCatalogData?.contracts]);
   const futuresRows = useMemo(() => status?.futures_watchlist ?? status?.watchlist ?? [], [status?.futures_watchlist, status?.watchlist]);
   const strategyOptionRows = useMemo(() => status?.option_watchlist ?? [], [status?.option_watchlist]);
-  const liveOptionRows = useMemo(() => commodityATMWatchlistQuery.data?.rows ?? [], [commodityATMWatchlistQuery.data?.rows]);
+  const liveOptionRows = useMemo(() => commodityATMWatchlistData?.rows ?? [], [commodityATMWatchlistData?.rows]);
   const optionRows = useMemo(() => {
     if (!liveOptionRows.length) {
       return strategyOptionRows;
@@ -1233,6 +1273,25 @@ export default function CommodityPage() {
             label="Setup"
             detail="Saved MCX universe and per-symbol expiry map for the option lane."
             onClick={() => setActiveTab("setup")}
+          />
+        </div>
+
+        <div className="mt-4 grid gap-2 xl:grid-cols-2">
+          <StreamStatus
+            title="Portfolio"
+            isStreamConnected={commodityOverviewQuery.isStreamConnected}
+            isShowingSnapshot={commodityOverviewQuery.isShowingSnapshot}
+            snapshotSavedAt={commodityOverviewQuery.snapshotSavedAt}
+            liveText="positions, orders, and runtime rail update automatically"
+            bootstrapText="loading execution state before the live socket takes over"
+          />
+          <StreamStatus
+            title="Watchlists"
+            isStreamConnected={commodityWatchlistQuery.isStreamConnected}
+            isShowingSnapshot={commodityWatchlistQuery.isShowingSnapshot}
+            snapshotSavedAt={commodityWatchlistQuery.snapshotSavedAt}
+            liveText="contract map and ATM option board are streaming"
+            bootstrapText="loading contract map and ATM option board"
           />
         </div>
       </section>
@@ -1652,8 +1711,8 @@ export default function CommodityPage() {
           <PanelHeader
             icon={<Boxes size={16} className="text-accent-amber" />}
             title="Strategy 1 · Options"
-            detail="The options sleeve waits for its own 30-minute CE or PE zero-cross. Each row shows the nearest liquid contract selection so thin ATM ladders do not block trades."
-            meta={`${actionableOptions.length} ready · ${commodityATMWatchlistQuery.data?.source || "strategy"} live board`}
+            detail="The options sleeve waits for its own 30-minute CE or PE zero-cross. Each row shows the expiry-specific MCX future that backs the current option chain, so the board stays aligned with the exchange ladder."
+            meta={`${actionableOptions.length} ready · ${commodityATMWatchlistData?.source || "strategy"} live board`}
           />
 
           <div className="mt-4 overflow-x-auto">
@@ -1683,6 +1742,7 @@ export default function CommodityPage() {
                       <td className="py-3 pr-3 font-mono text-text-secondary">
                         <div>{row.active_expiry || row.expiry}</div>
                         <div className="mt-1 text-[11px] text-text-muted">ATM {row.atm_strike}</div>
+                        <div className="mt-1 text-[11px] text-text-muted">{row.lookup_symbol || row.fyers_symbol || "--"}</div>
                         <div className="mt-1 text-[11px] text-text-muted">{row.live_source}</div>
                       </td>
                       <td className="py-3 pr-3">
@@ -1744,7 +1804,7 @@ export default function CommodityPage() {
         <PanelHeader
           icon={<Boxes size={16} className="text-accent-amber" />}
           title="Setup"
-          detail="Save the MCX futures universe first, then map each future to the option expiry the Strategy 1 lane should use."
+          detail="Save the MCX futures universe first, then choose the MCX expiry-to-future pair that Strategy 1 should follow for each root."
           meta={`${selectedExpiryCount} expiry selections`}
         />
 
@@ -1753,7 +1813,7 @@ export default function CommodityPage() {
             <PanelHeader
               icon={<Save size={16} className="text-accent-blue" />}
               title="Symbol Universe"
-              detail="One MCX future per line. The options lane inherits this universe directly, so the watchlist and expiry map stay in sync with the futures engine."
+              detail="One primary MCX future per line. The options lane resolves each expiry into the correct MCX future contract from the exchange-style ladder instead of assuming the same symbol for every expiry."
               meta={`${parsedSymbols.length} symbols`}
             />
 
@@ -1804,9 +1864,18 @@ export default function CommodityPage() {
               </div>
             ) : null}
 
+            <StreamStatus
+              className="mt-4"
+              title="Setup Feed"
+              isStreamConnected={commodityWatchlistQuery.isStreamConnected}
+              isShowingSnapshot={commodityWatchlistQuery.isShowingSnapshot}
+              snapshotSavedAt={commodityWatchlistQuery.snapshotSavedAt}
+              liveText="saved universe and expiry map refresh from the live setup feed"
+            />
+
             <div className="mt-6 grid gap-3 sm:grid-cols-3">
               <MetricTile label="Tracked" value={`${status?.summary.tracked_symbols ?? 0}`} />
-              <MetricTile label="Contracts Ready" value={`${contractCatalogQuery.data?.summary.contracts_ready ?? 0}`} />
+              <MetricTile label="Contracts Ready" value={`${contractCatalogData?.summary.contracts_ready ?? 0}`} />
               <MetricTile label="Expiry Map" value={`${selectedExpiryCount}`} />
             </div>
           </div>
@@ -1815,12 +1884,12 @@ export default function CommodityPage() {
             <PanelHeader
               icon={<RefreshCw size={16} className="text-accent-green" />}
               title="Per-Symbol Expiry Map"
-              detail="Strategy 1 does not guess globally. Each saved future keeps its own option ladder, and this map decides which expiry the ATM board follows."
+              detail="MCX option expiries can resolve into different underlying futures. This map shows the exchange-style expiry ladder and which future contract each expiry will query."
               meta={`${contractCatalog.length} contracts`}
             />
 
-            {contractCatalogQuery.data?.detail ? (
-              <div className="mt-3 text-xs text-accent-amber">{contractCatalogQuery.data.detail}</div>
+            {contractCatalogData?.detail ? (
+              <div className="mt-3 text-xs text-accent-amber">{contractCatalogData.detail}</div>
             ) : null}
 
             <div className="mt-4 overflow-x-auto">
@@ -1829,9 +1898,9 @@ export default function CommodityPage() {
                   <tr className="border-b border-bg-border text-text-muted">
                     <th className="pb-2 pr-3">Underlying</th>
                     <th className="pb-2 pr-3">Saved Future</th>
-                    <th className="pb-2 pr-3">Option Root</th>
+                    <th className="pb-2 pr-3">Active Option Future</th>
                     <th className="pb-2 pr-3">Lot</th>
-                    <th className="pb-2 pr-3">Available Expiries</th>
+                    <th className="pb-2 pr-3">MCX Expiry Ladder</th>
                     <th className="pb-2 pr-3">Trade Expiry</th>
                     <th className="pb-2">Status</th>
                   </tr>
@@ -1842,12 +1911,24 @@ export default function CommodityPage() {
                       <tr key={contract.symbol} className="border-b border-bg-border/40 align-top">
                         <td className="py-3 pr-3 font-medium text-text-primary">{contract.underlying}</td>
                         <td className="py-3 pr-3 font-mono text-text-muted">{contract.symbol}</td>
-                        <td className="py-3 pr-3 font-mono text-text-muted">{contract.lookup_symbol || contract.symbol}</td>
+                        <td className="py-3 pr-3 font-mono text-text-muted">
+                          {contract.active_lookup_symbol || contract.lookup_symbol || contract.symbol}
+                        </td>
                         <td className="py-3 pr-3 text-text-secondary">
                           {contract.lot_size ? `${contract.lot_size} · ${contract.contract_unit_label}` : "--"}
                         </td>
                         <td className="py-3 pr-3 text-text-secondary">
-                          {contract.expiries.length ? contract.expiries.join(", ") : "--"}
+                          {contract.expiry_mappings?.length ? (
+                            <div className="space-y-1">
+                              {contract.expiry_mappings.map((mapping) => (
+                                <div key={`${contract.symbol}:${mapping.expiry}`} className="font-mono text-[11px] text-text-muted">
+                                  {commodityExpiryLookupLabel(mapping)}
+                                </div>
+                              ))}
+                            </div>
+                          ) : contract.expiries.length ? (
+                            contract.expiries.join(", ")
+                          ) : "--"}
                         </td>
                         <td className="py-3 pr-3">
                           <select
@@ -1863,9 +1944,9 @@ export default function CommodityPage() {
                             className="terminal-input min-w-[176px] py-1.5 text-xs"
                           >
                             <option value="">No selection</option>
-                            {contract.expiries.map((item) => (
-                              <option key={`${contract.symbol}:${item}`} value={item}>
-                                {item}
+                            {(contract.expiry_mappings?.length ? contract.expiry_mappings : contract.expiries.map((item) => ({ expiry: item, lookup_symbol: contract.active_lookup_symbol || contract.lookup_symbol || contract.symbol }))).map((item) => (
+                              <option key={`${contract.symbol}:${item.expiry}`} value={item.expiry}>
+                                {commodityExpiryLookupLabel(item)}
                               </option>
                             ))}
                           </select>
@@ -1875,12 +1956,25 @@ export default function CommodityPage() {
                             <div className="text-accent-amber">{contract.detail || "No option contracts"}</div>
                           ) : contract.selected_expiry ? (
                             <div className="space-y-1">
-                              <div className="text-accent-green">Saved {contract.selected_expiry}</div>
-                              <div className="text-[11px] text-text-muted">{contract.quote_unit_label}</div>
+                              <div className="text-accent-green">
+                                Saved {contract.selected_expiry}
+                                {contract.selection_locked ? " · locked till expiry" : ""}
+                              </div>
+                              <div className="font-mono text-[11px] text-text-muted">
+                                {contract.selected_lookup_symbol || contract.active_lookup_symbol || contract.lookup_symbol || contract.symbol}
+                              </div>
+                              <div className="text-[11px] text-text-muted">
+                                {contract.selection_policy ? prettifyToken(contract.selection_policy) : "exchange ladder"}
+                                {" · "}
+                                {contract.quote_unit_label}
+                              </div>
                             </div>
                           ) : contract.suggested_expiry ? (
                             <div className="space-y-1">
                               <div className="text-text-secondary">Suggested {contract.suggested_expiry}</div>
+                              <div className="font-mono text-[11px] text-text-muted">
+                                {contract.active_lookup_symbol || contract.lookup_symbol || contract.symbol}
+                              </div>
                               <div className="text-[11px] text-text-muted">{contract.quote_unit_label}</div>
                             </div>
                           ) : (
@@ -1923,8 +2017,9 @@ export default function CommodityPage() {
                   setHasEditedContractExpiries(false);
                   const nextDrafts: Record<string, string> = {};
                   for (const contract of contractCatalog) {
-                    if (contract.active_expiry) {
-                      nextDrafts[contract.symbol] = contract.active_expiry;
+                    const persistedExpiry = contract.selected_expiry || contract.active_expiry;
+                    if (persistedExpiry) {
+                      nextDrafts[contract.symbol] = persistedExpiry;
                     }
                   }
                   setContractExpiryDrafts(nextDrafts);

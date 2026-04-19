@@ -19,16 +19,24 @@ from loguru import logger
 
 from analysis.macd_engine import compute_ema, compute_macd
 from analytics.technicals import latest_macd_rsi
-from api.routers.auth import ensure_fyers_session, get_active_adapter, get_fyers_token_health
+from api.routers.auth import (
+    ensure_fyers_session,
+    ensure_upstox_session,
+    get_active_adapter,
+    get_fyers_token_health,
+    get_upstox_token_health,
+)
 from auction_intelligence.market_profile.engine import MarketProfileEngine
 from auction_intelligence.schemas import MarketBar
 from brokers.base import BrokerAdapter
+from core.runtime_state import load_runtime_state, save_runtime_state
 from market_data.commodity_atm_watchlist import commodity_atm_watchlist_service
 from market_data.commodity_contract_specs import (
     get_commodity_contract_spec,
     get_commodity_display_name,
 )
 from market_data.option_history import option_history_service
+from market_data.upstox_commodity import load_upstox_mcx_quotes, resolve_upstox_mcx_future
 from paper_engine.base_strategy_agent import (
     BaseStrategyAgent,
     IST,
@@ -50,6 +58,7 @@ DEFAULT_COMMODITY_MARGIN_PCT = 0.15
 DEFAULT_COMMODITY_REPORTS_MAX = 40
 DEFAULT_COMMODITY_ORDERS_MAX = 80
 DEFAULT_COMMODITY_COMMENTARY_MAX = 80
+DEFAULT_COMMODITY_SIGNAL_AUDIT_MAX = 120
 DEFAULT_COMMODITY_INITIAL_CAPITAL = 1_000_000.0
 
 FUTURES_MACD_FAST = 12
@@ -59,6 +68,12 @@ FUTURES_MACD_MIN_BARS = 35
 FUTURES_TIMEFRAME = "15minute"
 FUTURES_MAX_POSITIONS = 3
 FUTURES_MP_MIN_PERIODS = 8
+FUTURES_MIN_HOLD_BARS = 4
+FUTURES_CONTINUATION_LOOKBACK_BARS = 12
+FUTURES_CONTINUATION_BREAKOUT_LOOKBACK = 4
+FUTURES_TRAIL_ATR_MULTIPLIER = 1.25
+FUTURES_BREAK_EVEN_R_MULTIPLIER = 1.0
+FUTURES_TARGET_ARM_R_MULTIPLIER = 2.0
 
 OPTIONS_MACD_FAST = 12
 OPTIONS_MACD_SLOW = 26
@@ -85,6 +100,7 @@ def _resolve_commodity_config_file() -> Path:
 
 
 _COMMODITY_CONFIG_FILE = _resolve_commodity_config_file()
+_COMMODITY_STATE_DB_KEY = "commodity_strategy_state"
 
 
 def _canonicalize_symbol(raw_symbol: str) -> str:
@@ -138,11 +154,30 @@ def _normalize_selected_option_expiries(
     return normalized
 
 
+def _normalize_selected_option_lookup_symbols(
+    symbols: list[str],
+    selected_option_lookup_symbols: Optional[dict[str, Any]],
+    *,
+    selected_option_expiries: Optional[dict[str, str]] = None,
+) -> dict[str, str]:
+    allowed = set(_normalize_symbols(symbols))
+    active_expiries = dict(selected_option_expiries or {})
+    normalized: dict[str, str] = {}
+    for raw_symbol, raw_lookup_symbol in dict(selected_option_lookup_symbols or {}).items():
+        symbol = _canonicalize_symbol(raw_symbol)
+        lookup_symbol = _canonicalize_symbol(raw_lookup_symbol)
+        if symbol not in allowed or symbol not in active_expiries or not lookup_symbol:
+            continue
+        normalized[symbol] = lookup_symbol
+    return normalized
+
+
 def _default_saved_state() -> dict[str, Any]:
     return {
         "config": {
             "symbols": [],
             "selected_option_expiries": {},
+            "selected_option_lookup_symbols": {},
             "lots_per_trade": DEFAULT_COMMODITY_LOTS_PER_TRADE,
         },
         "control": {
@@ -161,6 +196,7 @@ def _default_saved_state() -> dict[str, Any]:
             "reports": [],
             "commentary": [],
             "processed_signals": {},
+            "signal_audit": [],
             "portfolio": {
                 "initial_capital": DEFAULT_COMMODITY_INITIAL_CAPITAL,
                 "available_capital": DEFAULT_COMMODITY_INITIAL_CAPITAL,
@@ -174,22 +210,15 @@ def _default_saved_state() -> dict[str, Any]:
 
 
 
-def _load_saved_state() -> dict[str, Any]:
-    if not _COMMODITY_CONFIG_FILE.exists():
-        return _default_saved_state()
-    try:
-        payload = json.loads(_COMMODITY_CONFIG_FILE.read_text())
-    except Exception as exc:
-        logger.warning(f"[CommodityStrategy] Failed to load {_COMMODITY_CONFIG_FILE}: {exc}")
-        return _default_saved_state()
-
+def _normalize_saved_state(payload: Optional[dict[str, Any]]) -> dict[str, Any]:
     default_state = _default_saved_state()
-    if "config" in payload or "runtime" in payload or "control" in payload:
-        config_payload = payload.get("config") or {}
-        control_payload = payload.get("control") or {}
-        runtime_payload = payload.get("runtime") or {}
+    raw_payload = payload or {}
+    if "config" in raw_payload or "runtime" in raw_payload or "control" in raw_payload:
+        config_payload = raw_payload.get("config") or {}
+        control_payload = raw_payload.get("control") or {}
+        runtime_payload = raw_payload.get("runtime") or {}
     else:
-        config_payload = payload
+        config_payload = raw_payload
         control_payload = {}
         runtime_payload = {}
 
@@ -198,10 +227,16 @@ def _load_saved_state() -> dict[str, Any]:
         symbols,
         config_payload.get("selected_option_expiries"),
     )
+    selected_option_lookup_symbols = _normalize_selected_option_lookup_symbols(
+        symbols,
+        config_payload.get("selected_option_lookup_symbols"),
+        selected_option_expiries=selected_option_expiries,
+    )
 
     default_state["config"] = {
         "symbols": symbols,
         "selected_option_expiries": selected_option_expiries,
+        "selected_option_lookup_symbols": selected_option_lookup_symbols,
         "lots_per_trade": max(1, int(config_payload.get("lots_per_trade") or DEFAULT_COMMODITY_LOTS_PER_TRADE)),
     }
     default_state["control"] = {
@@ -243,6 +278,9 @@ def _load_saved_state() -> dict[str, Any]:
         for key, bar_time in dict(runtime_payload.get("processed_signals") or {}).items()
         if str(key or "").strip() and str(bar_time or "").strip()
     }
+    runtime_state["signal_audit"] = [
+        row for row in list(runtime_payload.get("signal_audit") or []) if isinstance(row, dict)
+    ]
     portfolio_payload = runtime_payload.get("portfolio") or {}
     runtime_state["portfolio"] = {
         "initial_capital": float(portfolio_payload.get("initial_capital") or DEFAULT_COMMODITY_INITIAL_CAPITAL),
@@ -263,12 +301,43 @@ def _load_saved_state() -> dict[str, Any]:
     return default_state
 
 
-def _save_state(state: dict[str, Any]) -> None:
+def _load_saved_state_from_disk() -> Optional[dict[str, Any]]:
+    if not _COMMODITY_CONFIG_FILE.exists():
+        return None
+    try:
+        return json.loads(_COMMODITY_CONFIG_FILE.read_text())
+    except Exception as exc:
+        logger.warning(f"[CommodityStrategy] Failed to load {_COMMODITY_CONFIG_FILE}: {exc}")
+        return None
+
+
+def _load_saved_state_from_database() -> tuple[Optional[dict[str, Any]], Optional[datetime]]:
+    payload, updated_at = load_runtime_state(_COMMODITY_STATE_DB_KEY)
+    if not isinstance(payload, dict):
+        return None, updated_at
+    return _normalize_saved_state(payload), updated_at
+
+
+def _load_saved_state() -> tuple[dict[str, Any], Optional[datetime]]:
+    database_state, updated_at = _load_saved_state_from_database()
+    if database_state is not None:
+        return database_state, updated_at
+
+    disk_payload = _load_saved_state_from_disk()
+    normalized = _normalize_saved_state(disk_payload)
+    if disk_payload is not None:
+        migrated_at = save_runtime_state(_COMMODITY_STATE_DB_KEY, normalized)
+        return normalized, migrated_at or updated_at
+    return normalized, updated_at
+
+
+def _save_state(state: dict[str, Any]) -> Optional[datetime]:
     try:
         _COMMODITY_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         _COMMODITY_CONFIG_FILE.write_text(json.dumps(state, indent=2))
     except Exception as exc:
         logger.warning(f"[CommodityStrategy] Failed to persist {_COMMODITY_CONFIG_FILE}: {exc}")
+    return save_runtime_state(_COMMODITY_STATE_DB_KEY, state)
 
 
 def _compute_atr(candles: list[dict[str, Any]], period: int) -> list[Optional[float]]:
@@ -288,6 +357,71 @@ def _compute_atr(candles: list[dict[str, Any]], period: int) -> list[Optional[fl
         previous_close = close
 
     return compute_ema(tr_values, period)
+
+
+def _interval_minutes(interval: str) -> int:
+    mapping = {
+        "1minute": 1,
+        "3minute": 3,
+        "5minute": 5,
+        "15minute": 15,
+        "30minute": 30,
+        "1day": 1440,
+    }
+    return int(mapping.get(str(interval or "15minute"), 15))
+
+
+def _filter_closed_interval_rows(
+    candles: list[dict[str, Any]],
+    *,
+    interval: str,
+    now: Optional[datetime] = None,
+) -> list[dict[str, Any]]:
+    if not candles:
+        return []
+    current = now or _now_ist()
+    interval_minutes = _interval_minutes(interval)
+    filtered = list(candles)
+    while filtered:
+        last_time = _parse_iso_timestamp(filtered[-1].get("time"))
+        if last_time is None:
+            break
+        if last_time + timedelta(minutes=interval_minutes) <= current:
+            break
+        filtered.pop()
+    return filtered
+
+
+def _bars_between(
+    start_time: Optional[str],
+    end_time: Optional[str],
+    *,
+    interval: str,
+) -> int:
+    start_dt = _parse_iso_timestamp(start_time)
+    end_dt = _parse_iso_timestamp(end_time)
+    if start_dt is None or end_dt is None or end_dt <= start_dt:
+        return 0
+    interval_minutes = _interval_minutes(interval)
+    elapsed_minutes = int((end_dt - start_dt).total_seconds() // 60)
+    return max(0, elapsed_minutes // max(interval_minutes, 1))
+
+
+def _recent_zero_cross(macd_line: list[Optional[float]], *, lookback_bars: int) -> tuple[Optional[str], Optional[int]]:
+    if len(macd_line) < 2:
+        return None, None
+    latest_index = len(macd_line) - 1
+    min_index = max(1, latest_index - max(lookback_bars, 1))
+    for index in range(latest_index, min_index - 1, -1):
+        current_macd = macd_line[index]
+        previous_macd = macd_line[index - 1]
+        if current_macd is None or previous_macd is None:
+            continue
+        if previous_macd <= 0 < current_macd:
+            return "BUY", latest_index - index
+        if previous_macd >= 0 > current_macd:
+            return "SELL", latest_index - index
+    return None, None
 
 
 def evaluate_commodity_signal(
@@ -321,6 +455,10 @@ def evaluate_commodity_signal(
     latest_close = closes[-1]
     previous_close = closes[-2]
     latest_atr = _compute_atr(candles, DEFAULT_COMMODITY_ATR_PERIOD)[-1]
+    recent_cross_signal, recent_cross_bars_ago = _recent_zero_cross(
+        macd_line,
+        lookback_bars=FUTURES_CONTINUATION_LOOKBACK_BARS,
+    )
 
     signal: Optional[str] = None
     reason = "no_cross"
@@ -339,6 +477,42 @@ def evaluate_commodity_signal(
         elif latest_macd < 0:
             regime = "bearish"
 
+    continuation_signal: Optional[str] = None
+    continuation_reason: Optional[str] = None
+    recent_window = candles[-(FUTURES_CONTINUATION_BREAKOUT_LOOKBACK + 1):-1]
+    recent_high = max(
+        (float(item.get("high") or item.get("close") or 0.0) for item in recent_window),
+        default=latest_close,
+    )
+    recent_low = min(
+        (float(item.get("low") or item.get("close") or 0.0) for item in recent_window),
+        default=latest_close,
+    )
+    if (
+        signal is None
+        and recent_cross_signal in {"BUY", "SELL"}
+        and recent_cross_bars_ago is not None
+        and 0 < recent_cross_bars_ago <= FUTURES_CONTINUATION_LOOKBACK_BARS
+        and latest_macd is not None
+        and latest_hist is not None
+    ):
+        if (
+            recent_cross_signal == "BUY"
+            and latest_macd > 0
+            and latest_hist > 0
+            and latest_close >= recent_high
+        ):
+            continuation_signal = "BUY"
+            continuation_reason = "macd_continuation_breakout_up"
+        elif (
+            recent_cross_signal == "SELL"
+            and latest_macd < 0
+            and latest_hist < 0
+            and latest_close <= recent_low
+        ):
+            continuation_signal = "SELL"
+            continuation_reason = "macd_continuation_breakdown_down"
+
     return {
         "signal": signal,
         "reason": reason,
@@ -350,6 +524,10 @@ def evaluate_commodity_signal(
         "macd_histogram": _round_or_none(latest_hist, 4),
         "atr": _round_or_none(latest_atr, 4),
         "bar_time": str(candles[-1].get("time") or ""),
+        "recent_cross_signal": recent_cross_signal,
+        "recent_cross_bars_ago": recent_cross_bars_ago,
+        "continuation_signal": continuation_signal,
+        "continuation_reason": continuation_reason,
     }
 
 
@@ -406,6 +584,8 @@ class CommodityPositionState:
     expiry: Optional[str] = None
     strike: Optional[float] = None
     option_type: Optional[str] = None
+    entry_style: Optional[str] = None
+    last_reviewed_bar_time: Optional[str] = None
 
     @property
     def unrealized_pnl(self) -> float:
@@ -430,6 +610,7 @@ class CommodityRuntime:
     futures_watchlist: list[dict[str, Any]] = field(default_factory=list)
     option_watchlist: list[dict[str, Any]] = field(default_factory=list)
     processed_signals: dict[str, str] = field(default_factory=dict)
+    signal_audit: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -515,7 +696,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
     scan_interval_seconds = DEFAULT_COMMODITY_SCAN_INTERVAL_SECONDS
 
     def __init__(self) -> None:
-        saved_state = _load_saved_state()
+        saved_state, saved_updated_at = _load_saved_state()
         portfolio_state = saved_state["runtime"]["portfolio"]
         portfolio = PaperPortfolio(
             initial_capital=float(portfolio_state.get("initial_capital") or DEFAULT_COMMODITY_INITIAL_CAPITAL),
@@ -529,21 +710,32 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             _CommodityFuturesLaneAgent(self),
             _CommodityOptionsLaneAgent(self),
         ]
-        saved_config = saved_state["config"]
-        self._symbols: list[str] = list(saved_config["symbols"])
-        self._selected_option_expiries: dict[str, str] = dict(saved_config["selected_option_expiries"])
-        self._lots_per_trade = max(1, int(saved_config.get("lots_per_trade") or DEFAULT_COMMODITY_LOTS_PER_TRADE))
         self._task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
         self._enabled = True
         self._auto_run_enabled = True
-        self._kill_switch_active = bool(saved_state["control"].get("kill_switch_active", False))
-        self._start_required = bool(saved_state["control"].get("start_required", self._kill_switch_active))
         self._running = False
-        self._last_run_at: Optional[str] = saved_state["control"].get("last_run_at")
-        self._last_error: Optional[str] = saved_state["control"].get("last_error")
+        self._last_data_health: dict[str, Any] = {}
+        self._commentary: list[CommodityCommentaryEntry] = []
+        self._state_synced_at: Optional[datetime] = None
+        self._apply_saved_state(saved_state)
+        self._state_synced_at = saved_updated_at
+        self._persist_state()
+
+    def _apply_saved_state(self, saved_state: dict[str, Any]) -> None:
+        saved_config = saved_state["config"]
+        self._symbols = list(saved_config["symbols"])
+        self._selected_option_expiries = dict(saved_config["selected_option_expiries"])
+        self._selected_option_lookup_symbols = dict(saved_config.get("selected_option_lookup_symbols") or {})
+        self._lots_per_trade = max(1, int(saved_config.get("lots_per_trade") or DEFAULT_COMMODITY_LOTS_PER_TRADE))
+
+        saved_control = saved_state["control"]
+        self._kill_switch_active = bool(saved_control.get("kill_switch_active", False))
+        self._start_required = bool(saved_control.get("start_required", self._kill_switch_active))
+        self._last_run_at = saved_control.get("last_run_at")
+        self._last_error = saved_control.get("last_error")
         self._last_message = (
-            saved_state["control"].get("last_message")
+            saved_control.get("last_message")
             or (
                 "Commodity kill switch active. Release it and start the agent to resume scanning."
                 if self._kill_switch_active
@@ -560,10 +752,23 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 else "Configure MCX symbols to start the commodity agent."
             )
         )
-        self._last_data_health: dict[str, Any] = {}
-        self._commentary: list[CommodityCommentaryEntry] = []
         self._restore_runtime_state(saved_state["runtime"])
-        self._persist_state()
+
+    def _refresh_state_from_store(self, *, force: bool = False) -> bool:
+        saved_state, updated_at = _load_saved_state_from_database()
+        if saved_state is None:
+            return False
+        if (
+            not force
+            and updated_at is not None
+            and self._state_synced_at is not None
+            and updated_at <= self._state_synced_at
+        ):
+            return False
+        self._apply_saved_state(saved_state)
+        if updated_at is not None:
+            self._state_synced_at = updated_at
+        return True
 
     def _strategy_agents(self) -> list[_BaseCommodityLaneAgent]:
         return list(self._lane_agents)
@@ -642,6 +847,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     expiry=row.get("expiry"),
                     strike=float(row["strike"]) if row.get("strike") is not None else None,
                     option_type=row.get("option_type"),
+                    entry_style=str(row.get("entry_style") or "") or None,
+                    last_reviewed_bar_time=str(row.get("last_reviewed_bar_time") or row.get("entry_bar_time") or "") or None,
                 )
             except (TypeError, ValueError):
                 continue
@@ -653,6 +860,9 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             for key, bar_time in dict(runtime_state.get("processed_signals") or {}).items()
             if str(key or "").strip() and str(bar_time or "").strip()
         }
+        self._runtime.signal_audit = [
+            row for row in list(runtime_state.get("signal_audit") or []) if isinstance(row, dict)
+        ][:DEFAULT_COMMODITY_SIGNAL_AUDIT_MAX]
 
         self._commentary = []
         for row in list(runtime_state.get("commentary") or []):
@@ -710,6 +920,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "config": {
                 "symbols": list(self._symbols),
                 "selected_option_expiries": dict(self._selected_option_expiries),
+                "selected_option_lookup_symbols": dict(self._selected_option_lookup_symbols),
                 "lots_per_trade": self._lots_per_trade,
             },
             "control": {
@@ -728,6 +939,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "reports": [asdict(report) for report in self._runtime.reports],
                 "commentary": [asdict(entry) for entry in self._commentary],
                 "processed_signals": dict(self._runtime.processed_signals),
+                "signal_audit": list(self._runtime.signal_audit),
                 "portfolio": {
                     "initial_capital": float(portfolio.initial_capital),
                     "available_capital": float(portfolio.available_capital),
@@ -743,7 +955,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         }
 
     def _persist_state(self) -> None:
-        _save_state(self._build_saved_state())
+        self._state_synced_at = _save_state(self._build_saved_state()) or self._state_synced_at
 
     def _loop_active(self) -> bool:
         return self._task is not None and not self._task.done()
@@ -762,6 +974,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             self._running = False
 
     async def start(self, *, force: bool = False) -> None:
+        self._refresh_state_from_store()
         self._enabled = True
         if not self._auto_run_enabled or self._kill_switch_active:
             self._persist_state()
@@ -779,16 +992,18 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._persist_state()
 
     async def stop(self) -> None:
+        self._refresh_state_from_store()
         self._enabled = False
         await self._stop_loop()
         self._persist_state()
 
     async def start_loop(self) -> dict[str, Any]:
+        self._refresh_state_from_store()
         if self._kill_switch_active:
             self._last_message = "Commodity kill switch is active. Release it before starting the agent."
             self._append_commentary("warning", self._last_message)
             self._persist_state()
-            return self.get_status()
+            return self.get_status(refresh=False)
         await self.start(force=True)
         if self._symbols:
             self._last_message = "Commodity agent started. Futures and options sleeves are armed."
@@ -796,7 +1011,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             self._last_message = "Commodity agent started. Add MCX symbols to begin scanning."
         self._append_commentary("success", self._last_message)
         self._persist_state()
-        return self.get_status()
+        return self.get_status(refresh=False)
 
     def update_symbols(
         self,
@@ -804,9 +1019,15 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         *,
         selected_option_expiries: Optional[dict[str, str]] = None,
     ) -> dict[str, Any]:
+        self._refresh_state_from_store()
         self._symbols = _normalize_symbols(symbols)
         base_selection = selected_option_expiries if selected_option_expiries is not None else self._selected_option_expiries
         self._selected_option_expiries = _normalize_selected_option_expiries(self._symbols, base_selection)
+        self._selected_option_lookup_symbols = _normalize_selected_option_lookup_symbols(
+            self._symbols,
+            self._selected_option_lookup_symbols,
+            selected_option_expiries=self._selected_option_expiries,
+        )
         if self._symbols:
             self._append_commentary(
                 "success",
@@ -817,16 +1038,116 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             self._append_commentary("warning", "Commodity symbol list cleared.")
             self._last_message = "Configure MCX symbols to start the commodity agent."
         self._persist_state()
-        return {"symbols": list(self._symbols), "selected_option_expiries": dict(self._selected_option_expiries)}
+        return {
+            "symbols": list(self._symbols),
+            "selected_option_expiries": dict(self._selected_option_expiries),
+            "selected_option_lookup_symbols": dict(self._selected_option_lookup_symbols),
+        }
 
     def get_symbols(self) -> list[str]:
+        self._refresh_state_from_store()
         return list(self._symbols)
 
     def get_selected_option_expiries(self) -> dict[str, str]:
+        self._refresh_state_from_store()
         return dict(self._selected_option_expiries)
 
-    def update_selected_option_expiries(self, selected_option_expiries: dict[str, str]) -> dict[str, Any]:
-        self._selected_option_expiries = _normalize_selected_option_expiries(self._symbols, selected_option_expiries)
+    def get_selected_option_lookup_symbols(self) -> dict[str, str]:
+        self._refresh_state_from_store()
+        return dict(self._selected_option_lookup_symbols)
+
+    async def ensure_selected_option_setup_locks(self) -> dict[str, str]:
+        self._refresh_state_from_store()
+        missing_symbols = {
+            symbol: expiry
+            for symbol, expiry in self._selected_option_expiries.items()
+            if expiry and not str(self._selected_option_lookup_symbols.get(symbol) or "").strip()
+        }
+        if not missing_symbols:
+            return dict(self._selected_option_lookup_symbols)
+
+        catalog = await commodity_atm_watchlist_service.get_contract_catalog(
+            self._symbols,
+            self._selected_option_expiries,
+            None,
+        )
+        updated_lookup_symbols = dict(self._selected_option_lookup_symbols)
+        for contract in list(catalog.get("contracts") or []):
+            symbol = _canonicalize_symbol(contract.get("symbol"))
+            selected_expiry = missing_symbols.get(symbol)
+            if not selected_expiry:
+                continue
+            expiry_mappings = list(contract.get("expiry_mappings") or [])
+            resolved_lookup_symbol = next(
+                (
+                    _canonicalize_symbol(item.get("lookup_symbol"))
+                    for item in expiry_mappings
+                    if str(item.get("expiry")) == selected_expiry and str(item.get("lookup_symbol") or "").strip()
+                ),
+                "",
+            )
+            if not resolved_lookup_symbol:
+                resolved_lookup_symbol = _canonicalize_symbol(
+                    contract.get("active_lookup_symbol")
+                    or contract.get("lookup_symbol")
+                    or contract.get("default_lookup_symbol")
+                    or symbol
+                )
+            if resolved_lookup_symbol:
+                updated_lookup_symbols[symbol] = resolved_lookup_symbol
+
+        normalized_lookup_symbols = _normalize_selected_option_lookup_symbols(
+            self._symbols,
+            updated_lookup_symbols,
+            selected_option_expiries=self._selected_option_expiries,
+        )
+        if normalized_lookup_symbols == self._selected_option_lookup_symbols:
+            return dict(self._selected_option_lookup_symbols)
+
+        self._selected_option_lookup_symbols = normalized_lookup_symbols
+        self._persist_state()
+        return dict(self._selected_option_lookup_symbols)
+
+    async def update_selected_option_expiries(self, selected_option_expiries: dict[str, str]) -> dict[str, Any]:
+        self._refresh_state_from_store()
+        normalized_expiries = _normalize_selected_option_expiries(self._symbols, selected_option_expiries)
+        selected_lookup_symbols: dict[str, str] = {}
+        if normalized_expiries:
+            catalog = await commodity_atm_watchlist_service.get_contract_catalog(
+                self._symbols,
+                normalized_expiries,
+                None,
+            )
+            for contract in list(catalog.get("contracts") or []):
+                symbol = _canonicalize_symbol(contract.get("symbol"))
+                selected_expiry = normalized_expiries.get(symbol)
+                if not selected_expiry:
+                    continue
+                expiry_mappings = list(contract.get("expiry_mappings") or [])
+                resolved_lookup_symbol = next(
+                    (
+                        _canonicalize_symbol(item.get("lookup_symbol"))
+                        for item in expiry_mappings
+                        if str(item.get("expiry")) == selected_expiry and str(item.get("lookup_symbol") or "").strip()
+                    ),
+                    "",
+                )
+                if not resolved_lookup_symbol:
+                    resolved_lookup_symbol = _canonicalize_symbol(
+                        contract.get("active_lookup_symbol")
+                        or contract.get("lookup_symbol")
+                        or contract.get("default_lookup_symbol")
+                        or symbol
+                    )
+                if resolved_lookup_symbol:
+                    selected_lookup_symbols[symbol] = resolved_lookup_symbol
+
+        self._selected_option_expiries = normalized_expiries
+        self._selected_option_lookup_symbols = _normalize_selected_option_lookup_symbols(
+            self._symbols,
+            selected_lookup_symbols,
+            selected_option_expiries=self._selected_option_expiries,
+        )
         if self._selected_option_expiries:
             self._append_commentary(
                 "success",
@@ -835,7 +1156,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         else:
             self._append_commentary("warning", "Commodity option expiry selections cleared.")
         self._persist_state()
-        return {"selected_option_expiries": dict(self._selected_option_expiries)}
+        return {
+            "selected_option_expiries": dict(self._selected_option_expiries),
+            "selected_option_lookup_symbols": dict(self._selected_option_lookup_symbols),
+        }
 
     def _estimate_futures_margin_required(self, price: float, qty: int) -> float:
         return max(price, 0.0) * max(qty, 0) * DEFAULT_COMMODITY_MARGIN_PCT
@@ -864,8 +1188,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "execution_mode": lane_map["commodity_futures"].descriptor.execution_mode,
                 "position_cap": lane_map["commodity_futures"].descriptor.position_cap,
                 "lots_per_trade": self._lots_per_trade,
-                "broker": "fyers",
-                "notes": "Entries require a fresh 15-minute MACD zero-cross aligned with intraday Market Profile direction and visible MP parameters.",
+                "broker": "upstox primary · fyers fallback",
+                "notes": "Entries use closed 15-minute bars only, accept fresh zero-crosses plus continuation breakouts after a recent cross, and keep hard stops live while delaying soft exits until the trade has had time to work. MCX futures quotes/history prefer Upstox and fall back to FYERS.",
             },
             {
                 "key": "commodity_options",
@@ -879,8 +1203,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "timeframe": lane_map["commodity_options"].descriptor.timeframe,
                 "execution_mode": lane_map["commodity_options"].descriptor.execution_mode,
                 "position_cap": lane_map["commodity_options"].descriptor.position_cap,
-                "broker": "fyers",
-                "notes": "Entries use liquid near-ATM contracts, 30-minute MACD zero-cross, 25% hard stop, and 20% capital budget per trade.",
+                "broker": "fyers chain · upstox spot assist",
+                "notes": "Entries use liquid near-ATM contracts, 30-minute MACD zero-cross, 25% hard stop, and 20% capital budget per trade. Underlying MCX spot quotes prefer Upstox before FYERS.",
             },
         ]
 
@@ -892,21 +1216,26 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             symbol = str(row.get("symbol") or "")
             signal = str(row.get("signal") or "")
             raw_signal = str(row.get("raw_signal") or "")
+            continuation_signal = str(row.get("continuation_signal") or "")
+            candidate_signal = signal or raw_signal or continuation_signal
             bar_time = str(row.get("bar_time") or "")
             spec = get_commodity_contract_spec(symbol)
             price = float(row.get("price") or 0.0)
             qty = spec.futures_lot_size * self._lots_per_trade
             validation = "waiting_cross"
-            validation_detail = "Waiting for a fresh 15-minute MACD cross."
+            validation_detail = "Waiting for a closed 15-minute MACD cross or a continuation breakout."
             if row.get("reason") == "insufficient_data":
                 validation = "warming_up"
                 validation_detail = "More 15-minute candles are required before futures MACD is valid."
             elif row.get("mp_status") == "warming_up":
                 validation = "mp_warming_up"
                 validation_detail = "Market Profile needs more intraday periods before confirming direction."
-            elif raw_signal in {"BUY", "SELL"} and signal != raw_signal:
+            elif candidate_signal in {"BUY", "SELL"} and signal != candidate_signal:
                 validation = "mp_conflict" if row.get("mp_direction") else "mp_pending"
-                validation_detail = str(row.get("signal_validation_detail") or "MACD fired, but MP confirmation is missing or opposite.")
+                validation_detail = str(
+                    row.get("signal_validation_detail")
+                    or "Signal candidate fired, but Market Profile confirmation is missing or opposite."
+                )
             elif signal in {"BUY", "SELL"} and (price <= 0 or float(row.get("atr") or 0.0) <= 0):
                 validation = "price_unavailable"
                 validation_detail = "Signal exists, but price or ATR is missing so the entry is blocked."
@@ -929,7 +1258,14 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     validation_detail = "Available paper capital cannot fund the next futures lot."
                 else:
                     validation = "ready"
-                    validation_detail = "15-minute MACD and Market Profile are aligned for entry."
+                    validation_detail = str(
+                        row.get("signal_validation_detail")
+                        or (
+                            "15-minute continuation setup and Market Profile are aligned for entry."
+                            if row.get("entry_style") == "continuation"
+                            else "15-minute MACD and Market Profile are aligned for entry."
+                        )
+                    )
 
             decorated.append(
                 {
@@ -1022,6 +1358,14 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             return get_active_adapter("fyers")
         return None
 
+    async def _get_upstox_adapter(self) -> Optional[BrokerAdapter]:
+        adapter = get_active_adapter("upstox")
+        if adapter:
+            return adapter
+        if await ensure_upstox_session(force_validate=True):
+            return get_active_adapter("upstox")
+        return None
+
     @staticmethod
     def _fyers_failure_message(health: dict[str, Any]) -> str:
         status = str(health.get("status") or "disconnected")
@@ -1054,12 +1398,36 @@ class CommodityStrategyAgent(BaseStrategyAgent):
     ) -> list[dict[str, Any]]:
         fetch_from = _now_ist().date() - timedelta(days=lookback_days)
         fetch_to = _now_ist().date()
-        rows = await option_history_service._fetch_broker_candles(
-            instrument_key=symbol,
-            from_date=fetch_from,
-            to_date=fetch_to,
-            interval=interval,
-        )
+        rows: list[dict[str, Any]] = []
+        resolved_upstox = await resolve_upstox_mcx_future(symbol)
+        upstox_key = str((resolved_upstox or {}).get("instrument_key") or "")
+        if upstox_key:
+            if interval in {"5minute", "15minute"}:
+                minute_rows = await option_history_service._fetch_broker_candles(
+                    instrument_key=upstox_key,
+                    from_date=fetch_from,
+                    to_date=fetch_to,
+                    interval="1minute",
+                )
+                if minute_rows:
+                    rows = option_history_service._aggregate_rows(
+                        minute_rows,
+                        15 if interval == "15minute" else 5,
+                    )
+            else:
+                rows = await option_history_service._fetch_broker_candles(
+                    instrument_key=upstox_key,
+                    from_date=fetch_from,
+                    to_date=fetch_to,
+                    interval=interval,
+                )
+        if not rows:
+            rows = await option_history_service._fetch_broker_candles(
+                instrument_key=symbol,
+                from_date=fetch_from,
+                to_date=fetch_to,
+                interval=interval,
+            )
         if not rows and interval in {"5minute", "15minute"}:
             minute_rows = await option_history_service._fetch_broker_candles(
                 instrument_key=symbol,
@@ -1072,7 +1440,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     minute_rows,
                     15 if interval == "15minute" else 5,
                 )
-        return rows
+        return _filter_closed_interval_rows(rows, interval=interval)
 
     def _build_market_profile(self, symbol: str, rows: list[dict[str, Any]]):
         if not rows:
@@ -1166,6 +1534,13 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         mp_status = "warming_up"
         signal = None
         signal_reason = analysis.get("reason")
+        entry_style: Optional[str] = "fresh_cross" if analysis.get("signal") in {"BUY", "SELL"} else None
+        candidate_signal = analysis.get("signal")
+        candidate_reason = analysis.get("reason")
+        if candidate_signal not in {"BUY", "SELL"} and analysis.get("continuation_signal") in {"BUY", "SELL"}:
+            candidate_signal = analysis.get("continuation_signal")
+            candidate_reason = analysis.get("continuation_reason") or analysis.get("reason")
+            entry_style = "continuation"
         validation_detail = ""
         if profile and len(session_rows) >= FUTURES_MP_MIN_PERIODS:
             mp_status = "ready"
@@ -1174,13 +1549,19 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 current_price=price or float(latest_close or 0.0),
                 session_rows=session_rows,
             )
-            raw_signal = analysis.get("signal")
-            if raw_signal and raw_signal == mp_direction:
-                signal = raw_signal
-                signal_reason = f"{analysis.get('reason')}_{mp_reason}"
-                validation_detail = "15-minute MACD cross matches the current MP gate."
-            elif raw_signal:
-                validation_detail = f"15-minute MACD fired {raw_signal}, but MP gate is {mp_direction or 'neutral'}."
+            if candidate_signal in {"BUY", "SELL"} and candidate_signal == mp_direction:
+                signal = candidate_signal
+                signal_reason = f"{candidate_reason}_{mp_reason}"
+                validation_detail = (
+                    "15-minute continuation setup still aligns with the current MP gate."
+                    if entry_style == "continuation"
+                    else "15-minute MACD cross matches the current MP gate."
+                )
+            elif candidate_signal in {"BUY", "SELL"}:
+                setup_label = "continuation" if entry_style == "continuation" else "MACD cross"
+                validation_detail = (
+                    f"15-minute {setup_label} fired {candidate_signal}, but MP gate is {mp_direction or 'neutral'}."
+                )
         elif session_rows:
             validation_detail = f"Only {len(session_rows)} intraday periods are available for Market Profile."
         else:
@@ -1195,7 +1576,12 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "change_pct": _round_or_none(change_pct, 2),
             "signal": signal,
             "raw_signal": analysis.get("signal"),
+            "continuation_signal": analysis.get("continuation_signal"),
+            "continuation_reason": analysis.get("continuation_reason"),
+            "recent_cross_signal": analysis.get("recent_cross_signal"),
+            "recent_cross_bars_ago": analysis.get("recent_cross_bars_ago"),
             "reason": signal_reason,
+            "entry_style": entry_style,
             "signal_validation_detail": validation_detail,
             "regime": analysis.get("regime"),
             "macd": analysis.get("macd"),
@@ -1217,9 +1603,11 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         }
 
     async def _build_option_watchlist(self) -> list[dict[str, Any]]:
+        await self.ensure_selected_option_setup_locks()
         payload = await commodity_atm_watchlist_service.get_watchlist(
             self._symbols,
             self._selected_option_expiries,
+            self._selected_option_lookup_symbols,
         )
         rows = list(payload.get("rows") or [])
         decorated_rows: list[dict[str, Any]] = []
@@ -1228,6 +1616,111 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             if decorated:
                 decorated_rows.append(decorated)
         return decorated_rows
+
+    @staticmethod
+    def _mark_retained_watchlist_row(row: dict[str, Any], *, note: str) -> dict[str, Any]:
+        retained = dict(row)
+        retained["runtime_retained"] = True
+        retained["runtime_retention_note"] = note
+        return retained
+
+    def _stabilize_futures_watchlist(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        live_quotes: Optional[dict[str, float]] = None,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        previous_by_symbol = {
+            str(row.get("symbol") or ""): row
+            for row in self._runtime.futures_watchlist
+            if str(row.get("symbol") or "").strip()
+        }
+        fresh_by_symbol = {
+            str(row.get("symbol") or ""): row
+            for row in rows
+            if str(row.get("symbol") or "").strip()
+        }
+
+        stabilized: list[dict[str, Any]] = []
+        retained_symbols: list[str] = []
+        for symbol in self._symbols:
+            fresh = fresh_by_symbol.get(symbol)
+            if fresh is not None:
+                stabilized.append(fresh)
+                continue
+            previous = previous_by_symbol.get(symbol)
+            if previous is None:
+                continue
+
+            retained = self._mark_retained_watchlist_row(
+                previous,
+                note="Retained after a temporary futures history gap.",
+            )
+            quote = float((live_quotes or {}).get(symbol) or 0.0)
+            previous_close = retained.get("previous_close")
+            if quote > 0:
+                retained["price"] = _round_or_none(quote, 2)
+                try:
+                    prior_close = float(previous_close or 0.0)
+                except (TypeError, ValueError):
+                    prior_close = 0.0
+                if prior_close > 0:
+                    retained["change_pct"] = _round_or_none(((quote - prior_close) / prior_close) * 100.0, 2)
+            stabilized.append(retained)
+            retained_symbols.append(symbol)
+
+        return stabilized, retained_symbols
+
+    def _stabilize_option_watchlist(self, rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+        previous_by_symbol = {
+            str(row.get("symbol") or ""): row
+            for row in self._runtime.option_watchlist
+            if str(row.get("symbol") or "").strip()
+        }
+        fresh_by_symbol = {
+            str(row.get("symbol") or ""): row
+            for row in rows
+            if str(row.get("symbol") or "").strip()
+        }
+
+        stabilized: list[dict[str, Any]] = []
+        retained_symbols: list[str] = []
+        for symbol in self._symbols:
+            selected_expiry = str(self._selected_option_expiries.get(symbol) or "").strip()
+            selected_lookup_symbol = str(self._selected_option_lookup_symbols.get(symbol) or "").strip()
+            fresh = fresh_by_symbol.get(symbol)
+            if fresh is not None:
+                stabilized.append(fresh)
+                continue
+            previous = previous_by_symbol.get(symbol)
+            if previous is None or not selected_expiry:
+                continue
+            try:
+                expiry_date = date.fromisoformat(selected_expiry)
+            except ValueError:
+                continue
+            if expiry_date < _now_ist().date():
+                continue
+            previous_expiry = str(previous.get("selected_expiry") or previous.get("active_expiry") or previous.get("expiry") or "").strip()
+            previous_lookup_symbol = str(
+                previous.get("selected_lookup_symbol")
+                or previous.get("lookup_symbol")
+                or previous.get("fyers_symbol")
+                or ""
+            ).strip()
+            if previous_expiry != selected_expiry:
+                continue
+            if selected_lookup_symbol and previous_lookup_symbol and previous_lookup_symbol != selected_lookup_symbol:
+                continue
+            stabilized.append(
+                self._mark_retained_watchlist_row(
+                    previous,
+                    note="Retained after a temporary options history gap.",
+                )
+            )
+            retained_symbols.append(symbol)
+
+        return stabilized, retained_symbols
 
     async def _analyze_option_row(self, row: dict[str, Any]) -> Optional[dict[str, Any]]:
         symbol = str(row.get("symbol") or "")
@@ -1263,6 +1756,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 interval=OPTIONS_TIMEFRAME,
                 limit=96,
             )
+        ce_candles = _filter_closed_interval_rows(ce_candles, interval=OPTIONS_TIMEFRAME)
+        pe_candles = _filter_closed_interval_rows(pe_candles, interval=OPTIONS_TIMEFRAME)
 
         ce_closes = [float(item["close"]) for item in ce_candles if item.get("close") is not None]
         pe_closes = [float(item["close"]) for item in pe_candles if item.get("close") is not None]
@@ -1359,8 +1854,9 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         }
 
     async def run_once(self, *, force: bool = False) -> dict[str, Any]:
+        self._refresh_state_from_store()
         if self._lock.locked() and not force:
-            return self.get_status()
+            return self.get_status(refresh=False)
 
         async with self._lock:
             self._running = True
@@ -1371,16 +1867,20 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 if not self._symbols:
                     self._last_message = "Configure MCX symbols to start the commodity agent."
                     self._append_commentary("warning", self._last_message)
-                    return self.get_status()
+                    return self.get_status(refresh=False)
 
                 if not force and not _in_commodity_hours(started_at):
                     self._last_message = "Waiting for MCX market hours."
                     self._append_commentary("idle", "Commodity market closed. Agent idle.")
-                    return self.get_status()
+                    return self.get_status(refresh=False)
 
+                await ensure_fyers_session(force_validate=True)
+                await ensure_upstox_session(force_validate=True)
                 fyers_health = await get_fyers_token_health(force=True)
+                upstox_health = await get_upstox_token_health(force=True)
                 self._last_data_health = {
                     "fyers_token_health": fyers_health,
+                    "upstox_token_health": upstox_health,
                     "option_history": option_history_service.get_health_snapshot(),
                 }
                 if not fyers_health.get("valid"):
@@ -1388,14 +1888,14 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     self._last_error = message
                     self._last_message = message
                     self._append_commentary("error", message)
-                    return self.get_status()
+                    return self.get_status(refresh=False)
 
                 adapter = await self._get_fyers_adapter()
                 if not adapter:
                     self._last_message = "Fyers adapter is unavailable. Commodity agent cannot scan."
                     self._last_error = self._last_message
                     self._append_commentary("error", self._last_message)
-                    return self.get_status()
+                    return self.get_status(refresh=False)
 
                 quote_map = await self._safe_get_ltp(adapter, self._symbols)
                 futures_rows: list[dict[str, Any]] = []
@@ -1404,8 +1904,14 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     if row:
                         futures_rows.append(row)
                 futures_rows = self._decorate_futures_rows(futures_rows)
+                futures_rows, retained_futures = self._stabilize_futures_watchlist(
+                    futures_rows,
+                    live_quotes=quote_map,
+                )
+                self._audit_futures_watchlist(futures_rows)
 
                 option_rows = self._decorate_option_rows(await self._build_option_watchlist())
+                option_rows, retained_options = self._stabilize_option_watchlist(option_rows)
 
                 latest_prices = {
                     row["symbol"]: float(row["price"])
@@ -1447,12 +1953,20 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 option_history_health = option_history_service.get_health_snapshot()
                 self._last_data_health = {
                     "fyers_token_health": fyers_health,
+                    "upstox_token_health": upstox_health,
                     "option_history": option_history_health,
                 }
                 self._last_message = (
                     f"Scanned {len(futures_rows)} futures rows and {len(option_rows)} option rows. "
                     f"{open_positions} open positions."
                 )
+                if retained_futures or retained_options:
+                    retention_parts: list[str] = []
+                    if retained_futures:
+                        retention_parts.append(f"retained {len(retained_futures)} futures rows")
+                    if retained_options:
+                        retention_parts.append(f"retained {len(retained_options)} option rows")
+                    self._last_message = f"{self._last_message} Reused the last good snapshot for {', '.join(retention_parts)}."
                 health_warning = self._option_history_warning(option_history_health)
                 if health_warning:
                     self._last_message = f"{self._last_message} {health_warning}"
@@ -1464,7 +1978,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     tone = "warning"
                 self._append_commentary(tone, self._last_message)
                 self._append_report()
-                return self.get_status()
+                return self.get_status(refresh=False)
             except Exception as exc:
                 self._last_error = str(exc)
                 self._last_message = f"Commodity strategy error: {exc}"
@@ -1475,12 +1989,24 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 self._persist_state()
 
     async def _safe_get_ltp(self, adapter: BrokerAdapter, symbols: list[str]) -> dict[str, float]:
+        quotes = await load_upstox_mcx_quotes(symbols)
+        remaining_symbols = [symbol for symbol in symbols if symbol not in quotes]
+        if not remaining_symbols:
+            return quotes
         try:
-            return await adapter.get_ltp(symbols)
+            payload = await adapter.get_ltp(remaining_symbols)
         except Exception as exc:
             logger.warning(f"[CommodityStrategy] LTP fetch failed: {exc}")
             self._append_commentary("warning", f"Live LTP fetch failed. Using candle closes where available. ({exc})")
-            return {}
+            return quotes
+        for symbol in remaining_symbols:
+            try:
+                value = float(payload.get(symbol, 0) or 0)
+            except (TypeError, ValueError):
+                value = 0.0
+            if value > 0:
+                quotes[symbol] = value
+        return quotes
 
     async def _manage_positions(
         self,
@@ -1514,25 +2040,74 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 position.mp_poc = row.get("mp_poc")
                 position.mp_vah = row.get("mp_vah")
                 position.mp_val = row.get("mp_val")
+                row_bar_time = str(row.get("bar_time") or "")
+                if row_bar_time:
+                    position.last_reviewed_bar_time = row_bar_time
+                if position.action == "BUY":
+                    position.peak_price = max(position.peak_price, current_price)
+                else:
+                    favorable_anchor = position.peak_price if position.peak_price > 0 else position.entry_price
+                    position.peak_price = min(favorable_anchor, current_price)
+
+                risk_distance = 0.0
+                if position.target_price is not None and FUTURES_TARGET_ARM_R_MULTIPLIER > 0:
+                    risk_distance = abs(position.target_price - position.entry_price) / FUTURES_TARGET_ARM_R_MULTIPLIER
+                if risk_distance <= 0:
+                    risk_distance = abs(position.entry_price - position.stop_price)
+                hold_bars = _bars_between(
+                    position.entry_bar_time,
+                    row_bar_time or position.last_reviewed_bar_time,
+                    interval=FUTURES_TIMEFRAME,
+                )
+                trailing_label: Optional[str] = None
+                if risk_distance > 0:
+                    if position.action == "BUY":
+                        favorable_move = current_price - position.entry_price
+                        if favorable_move >= risk_distance * FUTURES_BREAK_EVEN_R_MULTIPLIER:
+                            position.stop_price = max(position.stop_price, round(position.entry_price, 2))
+                        if not position.target_reached and position.target_price is not None and current_price >= position.target_price:
+                            position.target_reached = True
+                            position.stop_price = max(
+                                position.stop_price,
+                                round(position.entry_price + (risk_distance * 0.5), 2),
+                            )
+                            self._append_commentary(
+                                "info",
+                                f"{position.display_name}: 2R reached, runner trail armed from {row_bar_time or 'current bar'}.",
+                            )
+                        if position.target_reached:
+                            trail_buffer = max(float(position.atr or 0.0) * FUTURES_TRAIL_ATR_MULTIPLIER, risk_distance)
+                            position.stop_price = max(position.stop_price, round(position.peak_price - trail_buffer, 2))
+                            trailing_label = "trail_stop"
+                    else:
+                        favorable_move = position.entry_price - current_price
+                        if favorable_move >= risk_distance * FUTURES_BREAK_EVEN_R_MULTIPLIER:
+                            position.stop_price = min(position.stop_price, round(position.entry_price, 2))
+                        if not position.target_reached and position.target_price is not None and current_price <= position.target_price:
+                            position.target_reached = True
+                            position.stop_price = min(
+                                position.stop_price,
+                                round(position.entry_price - (risk_distance * 0.5), 2),
+                            )
+                            self._append_commentary(
+                                "info",
+                                f"{position.display_name}: 2R reached, runner trail armed from {row_bar_time or 'current bar'}.",
+                            )
+                        if position.target_reached:
+                            trail_buffer = max(float(position.atr or 0.0) * FUTURES_TRAIL_ATR_MULTIPLIER, risk_distance)
+                            position.stop_price = min(position.stop_price, round(position.peak_price + trail_buffer, 2))
+                            trailing_label = "trail_stop"
 
                 if position.action == "BUY":
                     if current_price <= position.stop_price:
-                        reason = "stop_loss"
-                    elif position.target_price is not None and current_price >= position.target_price:
-                        reason = "target_hit"
-                    elif row.get("raw_signal") == "SELL":
+                        reason = trailing_label or "stop_loss"
+                    elif hold_bars >= FUTURES_MIN_HOLD_BARS and row.get("raw_signal") == "SELL":
                         reason = "macd_reversal"
-                    elif row.get("mp_direction") == "SELL":
-                        reason = "mp_gate_flip"
                 else:
                     if current_price >= position.stop_price:
-                        reason = "stop_loss"
-                    elif position.target_price is not None and current_price <= position.target_price:
-                        reason = "target_hit"
-                    elif row.get("raw_signal") == "BUY":
+                        reason = trailing_label or "stop_loss"
+                    elif hold_bars >= FUTURES_MIN_HOLD_BARS and row.get("raw_signal") == "BUY":
                         reason = "macd_reversal"
-                    elif row.get("mp_direction") == "BUY":
-                        reason = "mp_gate_flip"
 
                 if reason:
                     exit_action = "SELL" if position.action == "BUY" else "BUY"
@@ -1749,12 +2324,14 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 display_name=spec.display_name,
                 initial_qty=qty,
                 peak_price=fill_price,
+                entry_style=str(row.get("entry_style") or "fresh_cross"),
+                last_reviewed_bar_time=bar_time,
             )
             self._runtime.processed_signals[f"commodity_futures:{symbol}"] = bar_time
             self._append_commentary(
                 "trade",
                 f"ENTRY {spec.display_name} {row.get('signal')} @{fill_price:.2f} | {self._lots_per_trade} lot | "
-                f"MP {row.get('mp_day_type')} | stop {stop_price:.2f}",
+                f"{str(row.get('entry_style') or 'fresh_cross').replace('_', ' ')} | MP {row.get('mp_day_type')} | stop {stop_price:.2f}",
             )
 
     async def _open_new_option_positions(self, option_rows: list[dict[str, Any]]) -> None:
@@ -1916,6 +2493,64 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         )
         del self._runtime.reports[DEFAULT_COMMODITY_REPORTS_MAX:]
 
+    def _append_signal_audit(self, entry: dict[str, Any]) -> None:
+        audit_entry = dict(entry)
+        audit_key = str(audit_entry.get("audit_key") or "").strip()
+        if not audit_key:
+            return
+        if any(str(existing.get("audit_key") or "") == audit_key for existing in self._runtime.signal_audit[:12]):
+            return
+        self._runtime.signal_audit.insert(0, audit_entry)
+        del self._runtime.signal_audit[DEFAULT_COMMODITY_SIGNAL_AUDIT_MAX:]
+
+    def _audit_futures_watchlist(self, rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            symbol = str(row.get("symbol") or "").strip()
+            bar_time = str(row.get("bar_time") or "").strip()
+            validation = str(row.get("signal_validation") or "").strip()
+            entry_style = str(row.get("entry_style") or "").strip() or "fresh_cross"
+            candidate_signal = (
+                str(row.get("signal") or "")
+                or str(row.get("raw_signal") or "")
+                or str(row.get("continuation_signal") or "")
+            )
+            if not symbol or not bar_time:
+                continue
+            if not candidate_signal and validation in {"waiting_cross", "warming_up", "mp_warming_up"}:
+                continue
+            self._append_signal_audit(
+                {
+                    "audit_key": ":".join(
+                        [
+                            "commodity_futures",
+                            symbol,
+                            bar_time,
+                            validation or "unknown",
+                            candidate_signal or "none",
+                            entry_style,
+                        ]
+                    ),
+                    "time": _now_ist().isoformat(),
+                    "lane": "commodity_futures",
+                    "symbol": symbol,
+                    "underlying": row.get("underlying"),
+                    "bar_time": bar_time,
+                    "entry_style": entry_style,
+                    "signal": row.get("signal"),
+                    "raw_signal": row.get("raw_signal"),
+                    "continuation_signal": row.get("continuation_signal"),
+                    "recent_cross_signal": row.get("recent_cross_signal"),
+                    "recent_cross_bars_ago": row.get("recent_cross_bars_ago"),
+                    "mp_direction": row.get("mp_direction"),
+                    "mp_day_type": row.get("mp_day_type"),
+                    "validation": validation,
+                    "detail": row.get("signal_validation_detail"),
+                    "price": row.get("price"),
+                    "regime": row.get("regime"),
+                    "runtime_retained": bool(row.get("runtime_retained")),
+                }
+            )
+
     async def set_kill_switch(self, active: bool) -> dict[str, Any]:
         self._kill_switch_active = bool(active)
         cancelled_orders = 0
@@ -1937,6 +2572,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         return self.get_control_state(cancelled_orders=cancelled_orders)
 
     def get_control_state(self, *, cancelled_orders: int = 0) -> dict[str, Any]:
+        self._refresh_state_from_store()
         return {
             "market": "commodity",
             "auto_run_enabled": self._auto_run_enabled,
@@ -1946,7 +2582,9 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "cancelled_orders": cancelled_orders,
         }
 
-    def get_status(self) -> dict[str, Any]:
+    def get_status(self, *, refresh: bool = True) -> dict[str, Any]:
+        if refresh:
+            self._refresh_state_from_store()
         summary = self._runtime.portfolio.get_summary()
         lane_agents = self._strategy_agents()
         lane_map = {lane.descriptor.key: lane for lane in lane_agents}
@@ -1966,6 +2604,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "config": {
                 "symbols": list(self._symbols),
                 "selected_option_expiries": dict(self._selected_option_expiries),
+                "selected_option_lookup_symbols": dict(self._selected_option_lookup_symbols),
                 "futures_timeframe": FUTURES_TIMEFRAME,
                 "options_timeframe": OPTIONS_TIMEFRAME,
                 "futures_macd_fast": FUTURES_MACD_FAST,
@@ -1976,6 +2615,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "options_macd_signal": OPTIONS_MACD_SIGNAL,
                 "mp_period_minutes": 15,
                 "lots_per_trade": self._lots_per_trade,
+                "futures_min_hold_bars": FUTURES_MIN_HOLD_BARS,
+                "futures_continuation_lookback_bars": FUTURES_CONTINUATION_LOOKBACK_BARS,
+                "futures_trail_atr_multiplier": FUTURES_TRAIL_ATR_MULTIPLIER,
+                "futures_target_arm_r_multiplier": FUTURES_TARGET_ARM_R_MULTIPLIER,
                 "option_capital_fraction": OPTIONS_CAPITAL_FRACTION,
                 "option_hard_stop_pct": OPTIONS_HARD_STOP_PCT,
             },
@@ -2005,19 +2648,26 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "orders": list(self._runtime.orders),
             "reports": [asdict(report) for report in self._runtime.reports],
             "commentary": [asdict(entry) for entry in self._commentary],
+            "signal_audit": [
+                {key: value for key, value in entry.items() if key != "audit_key"}
+                for entry in self._runtime.signal_audit
+            ],
             "data_health": self._last_data_health,
         }
 
     def get_orders(self) -> list[dict[str, Any]]:
+        self._refresh_state_from_store()
         return list(self._runtime.orders)
 
     def get_positions(self) -> list[dict[str, Any]]:
         return self.get_status()["positions"]
 
     def get_trade_history(self) -> list[dict[str, Any]]:
+        self._refresh_state_from_store()
         return _serialize_trade_history(self._runtime.portfolio)
 
     def get_reports(self) -> list[dict[str, Any]]:
+        self._refresh_state_from_store()
         return [asdict(report) for report in self._runtime.reports]
 
 

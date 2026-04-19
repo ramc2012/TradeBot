@@ -12,7 +12,7 @@ from sqlalchemy.dialects import postgresql
 
 
 revision: str = "006_validation_runs"
-down_revision: Union[str, None] = "005_atm_watchlist_history"
+down_revision: Union[str, None] = "006_analytics_tables_plain_pg"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

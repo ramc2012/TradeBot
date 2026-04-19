@@ -1,14 +1,81 @@
 """WebSocket endpoint for real-time tick streaming via Redis pub/sub."""
 from __future__ import annotations
+
 import asyncio
 import json
+from dataclasses import dataclass, field
+from time import monotonic
 
 from fastapi.encoders import jsonable_encoder
 from fastapi import WebSocket, WebSocketDisconnect
 from loguru import logger
+from starlette.websockets import WebSocketState
 
 from api.routers.auth import authenticate_websocket_client
 from db.redis_client import get_redis
+
+
+@dataclass
+class _SnapshotCacheEntry:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    payload: object | None = None
+    encoded: str | None = None
+    expires_at: float = 0.0
+
+
+_snapshot_cache_lock = asyncio.Lock()
+_snapshot_cache: dict[str, _SnapshotCacheEntry] = {}
+
+
+def _is_socket_closed_error(exc: Exception) -> bool:
+    return isinstance(exc, RuntimeError) and "Cannot call \"send\" once a close message has been sent" in str(exc)
+
+
+def _socket_is_connected(websocket: WebSocket) -> bool:
+    return (
+        websocket.client_state == WebSocketState.CONNECTED
+        and websocket.application_state == WebSocketState.CONNECTED
+    )
+
+
+async def _get_snapshot_cache_entry(channel: str) -> _SnapshotCacheEntry:
+    async with _snapshot_cache_lock:
+        entry = _snapshot_cache.get(channel)
+        if entry is None:
+            entry = _SnapshotCacheEntry()
+            _snapshot_cache[channel] = entry
+        return entry
+
+
+async def _get_snapshot_payload(
+    *,
+    channel: str,
+    payload_factory,
+    cache_ttl_seconds: float,
+) -> tuple[object, str]:
+    entry = await _get_snapshot_cache_entry(channel)
+    now = monotonic()
+    if entry.payload is not None and entry.encoded is not None and entry.expires_at > now:
+        return entry.payload, entry.encoded
+
+    async with entry.lock:
+        now = monotonic()
+        if entry.payload is not None and entry.encoded is not None and entry.expires_at > now:
+            return entry.payload, entry.encoded
+
+        try:
+            payload = await payload_factory()
+            encoded = json.dumps(jsonable_encoder(payload), separators=(",", ":"), sort_keys=True)
+            entry.payload = payload
+            entry.encoded = encoded
+            entry.expires_at = now + max(cache_ttl_seconds, 0.5)
+            return payload, encoded
+        except Exception:
+            if entry.payload is not None and entry.encoded is not None:
+                entry.expires_at = now + 1.0
+                logger.warning(f"[WS] Reusing stale snapshot for {channel} after refresh failure")
+                return entry.payload, entry.encoded
+            raise
 
 
 async def _accept_authenticated_socket(websocket: WebSocket, channel: str) -> dict:
@@ -43,18 +110,34 @@ async def _stream_snapshot(
     channel: str,
     interval_seconds: float,
     payload_factory,
+    cache_ttl_seconds: float | None = None,
 ):
     """Push snapshot payloads only when the encoded value changes."""
     await _accept_authenticated_socket(websocket, channel)
     last_payload: str | None = None
+    effective_cache_ttl = interval_seconds if cache_ttl_seconds is None else cache_ttl_seconds
 
     try:
         while True:
-            payload = await payload_factory()
-            encoded = json.dumps(jsonable_encoder(payload), separators=(",", ":"), sort_keys=True)
-            if encoded != last_payload:
-                await websocket.send_text(encoded)
-                last_payload = encoded
+            try:
+                _, encoded = await _get_snapshot_payload(
+                    channel=channel,
+                    payload_factory=payload_factory,
+                    cache_ttl_seconds=effective_cache_ttl,
+                )
+                if encoded != last_payload:
+                    if not _socket_is_connected(websocket):
+                        break
+                    await websocket.send_text(encoded)
+                    last_payload = encoded
+            except WebSocketDisconnect:
+                logger.info(f"[WS] Client disconnected from {channel}")
+                break
+            except Exception as e:
+                if _is_socket_closed_error(e):
+                    logger.debug(f"[WS] Snapshot channel {channel} closed during send")
+                    break
+                logger.error(f"[WS] Error refreshing {channel}: {e}")
             await asyncio.sleep(interval_seconds)
     except WebSocketDisconnect:
         logger.info(f"[WS] Client disconnected from {channel}")
@@ -236,6 +319,54 @@ async def ws_commodity_overview(websocket: WebSocket):
         websocket,
         channel="commodity_overview",
         interval_seconds=2.0,
+        payload_factory=payload_factory,
+    )
+
+
+async def ws_commodity_watchlist(websocket: WebSocket):
+    """Stream the commodity watchlist setup snapshot."""
+
+    async def payload_factory():
+        from api.routers.commodity import (
+            commodity_atm_watchlist,
+            commodity_strategy_contracts,
+        )
+
+        return {
+            "contract_catalog": await commodity_strategy_contracts(),
+            "atm_watchlist": await commodity_atm_watchlist(),
+        }
+
+    await _stream_snapshot(
+        websocket,
+        channel="commodity_watchlist",
+        interval_seconds=8.0,
+        payload_factory=payload_factory,
+    )
+
+
+async def ws_market_watchlist(websocket: WebSocket):
+    """Stream the market ATM watchlist snapshot for a selected expiry."""
+
+    requested_expiry = str(websocket.query_params.get("expiry") or "").strip() or None
+
+    async def payload_factory():
+        from api.routers.market import (
+            get_atm_watchlist,
+            get_atm_watchlist_expiries,
+        )
+
+        expiry_payload = await get_atm_watchlist_expiries(requested_expiry)
+        effective_expiry = requested_expiry or expiry_payload.get("default_expiry")
+        return {
+            "expiry_catalog": expiry_payload,
+            "watchlist": await get_atm_watchlist(effective_expiry),
+        }
+
+    await _stream_snapshot(
+        websocket,
+        channel=f"market_watchlist:{requested_expiry or 'default'}",
+        interval_seconds=8.0,
         payload_factory=payload_factory,
     )
 

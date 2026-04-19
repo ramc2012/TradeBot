@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import uuid
 from datetime import date
+from types import SimpleNamespace
 from typing import Any, Optional, TYPE_CHECKING
 
 from loguru import logger
 from sqlalchemy import text
 
-from analysis.macd_engine import check_iv_filter, compute_ema, compute_macd, compute_spot_ma_context
-from agent.macd_quadrant import compute_quadrant
+from analysis.macd_engine import check_iv_filter, compute_spot_ma_context
 from agent.strategy_config import (
     COMMENTARY_MAX,
     EXCLUDED_UNDERLYINGS,
@@ -17,18 +17,11 @@ from agent.strategy_config import (
     KELLY_CAUTIOUS_FRACTION,
     KELLY_FRACTION,
     KELLY_PREMIUM_FRACTION,
-    MACD_FAST,
-    MACD_MIN_BARS,
-    MACD_SIGNAL,
-    MACD_SLOW,
     MAX_ENTRY_IV_PCT,
     MAX_PREMIUM,
     MAX_SIMULTANEOUS_POSITIONS,
     MIN_PREMIUM,
     MIN_TTE_DAYS,
-    OPTION_ENTRY_MA_FAST,
-    OPTION_ENTRY_MA_SLOW,
-    OPTION_ENTRY_REQUIRE_ABOVE_MA20,
     REGIME_BEARISH,
     REGIME_BULLISH,
     REGIME_DEAD,
@@ -37,6 +30,7 @@ from agent.strategy_config import (
 )
 from agent.window_calculator import days_remaining_in_window
 from analytics.technicals import latest_macd_rsi
+from core.config import settings
 from market_data import market_profile_builder, option_history_service
 from db.database import AsyncSessionLocal
 from paper_engine.base_strategy_agent import _latest_session_rows, _now_ist, _round_or_none
@@ -51,11 +45,135 @@ if TYPE_CHECKING:
 class StrategyEntryMixin:
     max_positions = MAX_SIMULTANEOUS_POSITIONS
 
+    async def _load_strategy1_recent_snapshot_state(
+        self: "PaperStrategyAgent",
+        rows: list[dict[str, Any]],
+    ) -> dict[str, dict[int, dict[str, Any]]]:
+        instrument_keys = sorted(
+            {
+                str((side or {}).get("instrument_key") or "").strip()
+                for row in rows
+                for side in (row.get("ce"), row.get("pe"))
+                if str((side or {}).get("instrument_key") or "").strip()
+            }
+        )
+        if not instrument_keys:
+            return {}
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    """
+                    WITH ranked AS (
+                        SELECT instrument_key,
+                               option_type,
+                               time,
+                               macd,
+                               macd_signal,
+                               macd_histogram,
+                               rsi,
+                               ltp,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY instrument_key
+                                   ORDER BY time DESC
+                               ) AS rn
+                        FROM atm_option_watchlist_snapshots
+                        WHERE time::date = :trading_day
+                          AND instrument_key = ANY(:instrument_keys)
+                    )
+                    SELECT instrument_key,
+                           option_type,
+                           time,
+                           macd,
+                           macd_signal,
+                           macd_histogram,
+                           rsi,
+                           ltp,
+                           rn
+                    FROM ranked
+                    WHERE rn <= 2
+                    ORDER BY instrument_key ASC, rn ASC
+                    """
+                ),
+                {
+                    "trading_day": _now_ist().date(),
+                    "instrument_keys": instrument_keys,
+                },
+            )
+            rows = result.mappings().all()
+
+        state: dict[str, dict[int, dict[str, Any]]] = {}
+        for row in rows:
+            instrument_key = str(row.get("instrument_key") or "").strip()
+            if not instrument_key:
+                continue
+            try:
+                rank = int(row.get("rn") or 0)
+            except (TypeError, ValueError):
+                continue
+            if rank <= 0:
+                continue
+            state.setdefault(instrument_key, {})[rank] = dict(row)
+        return state
+
+    @staticmethod
+    def _strategy1_side_snapshot(
+        side: dict[str, Any],
+        snapshot_state: dict[str, dict[int, dict[str, Any]]],
+    ) -> dict[str, Any]:
+        instrument_key = str(side.get("instrument_key") or "").strip()
+        ranked = snapshot_state.get(instrument_key, {})
+        latest = ranked.get(1) or {}
+        previous = ranked.get(2) or {}
+
+        current_macd = side.get("macd")
+        if current_macd is None:
+            current_macd = latest.get("macd")
+        current_signal = side.get("macd_signal")
+        if current_signal is None:
+            current_signal = latest.get("macd_signal")
+        current_histogram = side.get("macd_histogram")
+        if current_histogram is None:
+            current_histogram = latest.get("macd_histogram")
+        current_rsi = side.get("rsi")
+        if current_rsi is None:
+            current_rsi = latest.get("rsi")
+        latest_ltp = side.get("ltp")
+        if latest_ltp in (None, 0, 0.0):
+            latest_ltp = latest.get("ltp")
+
+        latest_time = latest.get("time")
+        latest_time_iso = latest_time.isoformat() if hasattr(latest_time, "isoformat") else str(latest_time or "")
+
+        return {
+            "instrument_key": instrument_key or None,
+            "current_macd": float(current_macd) if current_macd is not None else None,
+            "previous_macd": float(previous.get("macd")) if previous.get("macd") is not None else None,
+            "current_signal": float(current_signal) if current_signal is not None else None,
+            "current_histogram": float(current_histogram) if current_histogram is not None else None,
+            "current_rsi": float(current_rsi) if current_rsi is not None else None,
+            "latest_ltp": float(latest_ltp) if latest_ltp is not None else 0.0,
+            "latest_bar_time": latest_time_iso,
+        }
+
     async def _build_strategy1_market_profile_gate(
         self: "PaperStrategyAgent",
         underlying: str,
         expected_direction: str,
     ) -> dict[str, Any]:
+        if settings.NSE_STRATEGY_BYPASS_MARKET_PROFILE_GATE:
+            return {
+                "confirmed": True,
+                "direction": expected_direction,
+                "day_type": "bypassed",
+                "reason": "market_profile_gate_bypassed",
+                "source": "bypass",
+                "session_date": _now_ist().date().isoformat(),
+                "poc": None,
+                "vah": None,
+                "val": None,
+            }
+
         started_at = _now_ist()
         spot_rows: list[dict[str, Any]] = []
         spot_source = "spot_store"
@@ -140,6 +258,7 @@ class StrategyEntryMixin:
             return
 
         candidates: list[dict[str, Any]] = []
+        snapshot_state = await self._load_strategy1_recent_snapshot_state(rows)
 
         for row in rows:
             underlying = row.get("underlying", "")
@@ -172,75 +291,58 @@ class StrategyEntryMixin:
             if not ce_side or not pe_side:
                 continue
 
-            ce_candles = await self._load_candles(row, ce_side)
-            pe_candles = await self._load_candles(row, pe_side)
+            ce_snapshot = self._strategy1_side_snapshot(ce_side, snapshot_state)
+            pe_snapshot = self._strategy1_side_snapshot(pe_side, snapshot_state)
+            ce_macd = ce_snapshot.get("current_macd")
+            pe_macd = pe_snapshot.get("current_macd")
+            if ce_macd is None or pe_macd is None:
+                continue
 
-            ce_closes = [float(c["close"]) for c in ce_candles if c.get("close")] if ce_candles else []
-            pe_closes = [float(c["close"]) for c in pe_candles if c.get("close")] if pe_candles else []
-
-            quadrant = compute_quadrant(
-                ce_closes,
-                pe_closes,
-                underlying=underlying,
-                expiry=expiry_str,
+            regime_name = (
+                REGIME_BULLISH
+                if ce_macd >= 0 > pe_macd
+                else REGIME_BEARISH
+                if ce_macd < 0 <= pe_macd
+                else REGIME_DEAD
             )
+            quadrant = SimpleNamespace(regime=regime_name)
             self._regime_cache[underlying] = quadrant
-            if quadrant.regime == REGIME_DEAD:
+            if regime_name == REGIME_DEAD:
                 continue
 
             expected_mp_direction: Optional[str] = None
-            if quadrant.regime == REGIME_BULLISH and quadrant.ce_has_zero_cross:
+            if regime_name == REGIME_BULLISH and (ce_snapshot.get("previous_macd") is not None and ce_snapshot["previous_macd"] <= 0 < ce_macd):
                 side = ce_side
-                candles = ce_candles
-                closes = ce_closes
+                side_snapshot = ce_snapshot
                 opt_type = "CE"
                 expected_mp_direction = "CE"
-            elif quadrant.regime == REGIME_BEARISH and quadrant.pe_has_zero_cross:
+            elif regime_name == REGIME_BEARISH and (pe_snapshot.get("previous_macd") is not None and pe_snapshot["previous_macd"] >= 0 > pe_macd):
                 side = pe_side
-                candles = pe_candles
-                closes = pe_closes
+                side_snapshot = pe_snapshot
                 opt_type = "PE"
                 expected_mp_direction = "PE"
             else:
                 continue
 
-            if len(closes) < MACD_MIN_BARS:
-                continue
+            strength = abs(float(side_snapshot.get("current_macd") or 0.0))
+            reason = "macd_zero_cross"
 
-            from paper_engine.strategy_agent import detect_macd_zero_cross
-
-            should_enter, strength, reason = detect_macd_zero_cross(closes, opt_type)
-            if not should_enter or not reason:
-                continue
-
-            live_ltp = float(side.get("ltp") or 0.0)
+            live_ltp = float(side_snapshot.get("latest_ltp") or side.get("ltp") or 0.0)
             if live_ltp > 0:
-                candle_close = closes[-1]
-                if abs(candle_close - live_ltp) / max(live_ltp, 1.0) > 0.15:
-                    logger.warning(
-                        f"[Strategy] Stale candle detected for {underlying} {opt_type}: "
-                        f"candle_close={candle_close:.2f} vs live_ltp={live_ltp:.2f}. "
-                        "Using live LTP as entry basis."
-                    )
                 latest_close = live_ltp
-            elif closes:
-                latest_close = closes[-1]
             else:
                 continue
 
             if latest_close < MIN_PREMIUM or latest_close > MAX_PREMIUM:
                 continue
 
-            option_ma20 = compute_ema(closes, OPTION_ENTRY_MA_FAST)[-1] if len(closes) >= OPTION_ENTRY_MA_FAST else None
-            option_ma50 = compute_ema(closes, OPTION_ENTRY_MA_SLOW)[-1] if len(closes) >= OPTION_ENTRY_MA_SLOW else None
-            above_option_ma20 = bool(option_ma20 is not None and latest_close >= option_ma20)
-            above_option_ma50 = bool(option_ma50 is not None and latest_close >= option_ma50)
-            if OPTION_ENTRY_REQUIRE_ABOVE_MA20 and not above_option_ma20:
-                continue
+            option_ma20 = None
+            option_ma50 = None
+            above_option_ma20 = True
+            above_option_ma50 = True
 
-            latest_candle = candles[-1] if candles else {}
             iv_pct = None
-            iv_raw = side.get("iv") or latest_candle.get("iv")
+            iv_raw = side.get("iv")
             if iv_raw is not None:
                 iv_val = float(iv_raw)
                 iv_pct = iv_val * 100.0 if iv_val < 1.0 else iv_val
@@ -248,7 +350,9 @@ class StrategyEntryMixin:
             if iv_status == "reject":
                 continue
 
-            latest_bar_time = str(candles[-1]["time"]) if candles else ""
+            latest_bar_time = str(side_snapshot.get("latest_bar_time") or "")
+            if not latest_bar_time:
+                continue
             signal_key = f"{underlying}:{opt_type}"
             if runtime.processed_signals.get(signal_key) == latest_bar_time:
                 continue
@@ -259,20 +363,18 @@ class StrategyEntryMixin:
             if not mp_gate.get("confirmed"):
                 continue
 
-            macd_line, _, _ = compute_macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-            indicators = latest_macd_rsi(closes)
             candidates.append(
                 {
                     "row": row,
                     "side": side,
-                    "candles": candles,
-                    "closes": closes,
+                    "candles": [],
+                    "closes": [],
                     "latest_close": latest_close,
                     "latest_bar_time": latest_bar_time,
                     "signal_key": signal_key,
                     "strength": strength or 0.0,
                     "reason": reason,
-                    "rsi": indicators.get("rsi"),
+                    "rsi": side_snapshot.get("current_rsi"),
                     "opt_type": opt_type,
                     "iv_pct": iv_pct,
                     "iv_status": iv_status,
@@ -284,7 +386,9 @@ class StrategyEntryMixin:
                     "quadrant": quadrant,
                     "window": window,
                     "tte_days": tte,
-                    "macd_line": macd_line,
+                    "macd_line": [value for value in (side_snapshot.get("previous_macd"), side_snapshot.get("current_macd")) if value is not None],
+                    "macd_signal": side_snapshot.get("current_signal"),
+                    "macd_histogram": side_snapshot.get("current_histogram"),
                     "mp_day_type": mp_gate.get("day_type"),
                     "mp_reason": mp_gate.get("reason"),
                     "mp_direction": mp_gate.get("direction"),
@@ -477,7 +581,14 @@ class StrategyEntryMixin:
             f"MP: {candidate.get('mp_day_type')}"
         )
 
-        indicators = latest_macd_rsi(candidate["closes"])
+        if candidate.get("closes"):
+            indicators = latest_macd_rsi(candidate["closes"])
+        else:
+            indicators = {
+                "macd_signal": candidate.get("macd_signal"),
+                "macd_histogram": candidate.get("macd_histogram"),
+                "rsi": candidate.get("rsi"),
+            }
         await self._persist_macd_signal(
             underlying=row["underlying"],
             expiry=expiry,

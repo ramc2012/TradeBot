@@ -2,6 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { getBrokerStatus, getStrategyAgentStatus } from "@/lib/api";
+import { isBrokerReady } from "@/lib/broker-status";
 import {
   AgentCommentaryFeed,
   StrategyAgentStatus,
@@ -29,7 +30,7 @@ export default function AgentPage() {
     (sum, strategy) => sum + (strategy.summary.open_positions || 0),
     0,
   );
-  const connectedBrokers = (brokers || []).filter((broker: any) => broker.connected);
+  const connectedBrokers = (brokers || []).filter((broker: any) => isBrokerReady(broker));
 
   return (
     <div className="max-w-screen-xl space-y-4">

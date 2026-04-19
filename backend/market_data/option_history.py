@@ -38,7 +38,7 @@ def _parse_time(value: Any) -> datetime:
 
 
 class OptionHistoryService:
-    _UPSTOX_KEYS = ("NSE_FO|", "NSE_INDEX|", "BSE_FO|", "BSE_INDEX|")
+    _UPSTOX_KEYS = ("NSE_FO|", "NSE_INDEX|", "BSE_FO|", "BSE_INDEX|", "MCX_FO|")
 
     def __init__(self) -> None:
         self.reset_health()

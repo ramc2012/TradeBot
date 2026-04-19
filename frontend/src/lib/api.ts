@@ -156,6 +156,26 @@ export const getStrategyPortfolio = (underlying = "SENSEX") =>
 export const getStrategyOpenSignals = (underlying = "SENSEX") =>
   api.get("/api/strategy/open-signals", { params: { underlying } });
 
+// ── Directional Long Options ───────────────────────────────────────────────
+export const getDirectionalOptionsSummary = () =>
+  api.get("/api/directional-options/summary");
+export const getDirectionalOptionsWorkspace = (
+  underlying = "NIFTY",
+  timeframe = "5minute",
+  lookbackSessions = 16,
+) =>
+  api.get("/api/directional-options/workspace", {
+    params: { underlying, timeframe, lookback_sessions: lookbackSessions },
+  });
+export const getDirectionalOptionsBacktest = (
+  underlying = "NIFTY",
+  timeframe = "5minute",
+  lookbackSessions = 16,
+) =>
+  api.get("/api/directional-options/backtest", {
+    params: { underlying, timeframe, lookback_sessions: lookbackSessions },
+  });
+
 // ── Auction Intelligence ─────────────────────────────────────────────────
 export const getAuctionIntelligenceSummary = () =>
   api.get("/api/auction-intelligence/summary");

@@ -1,18 +1,15 @@
 "use client";
 import { useEffect } from "react";
 import { getBrokerStatus, getPortfolioSummary } from "@/lib/api";
+import { isBrokerReady, type BrokerStatusEntry } from "@/lib/broker-status";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import { createLayoutSocket } from "@/lib/websocket";
 import { type BrokerName, useStore } from "@/store";
 import { clsx } from "clsx";
 
 type LayoutSnapshot = {
-  broker_status: Array<{
+  broker_status: Array<BrokerStatusEntry & {
     broker: BrokerName;
-    connected: boolean;
-    user_id?: string;
-    name?: string;
-    connected_at?: string;
   }>;
   portfolio_summary: {
     total_equity: number;
@@ -54,7 +51,7 @@ export default function BrokerStatusBar() {
     if (portfolioData) setPortfolio(portfolioData);
   }, [portfolioData, setPortfolio]);
 
-  const connectedBroker = statusData?.find((s: { broker: string; connected: boolean }) => s.connected);
+  const connectedBroker = statusData?.find((status) => isBrokerReady(status));
   const dayPnl = portfolio?.day_pnl ?? 0;
   const showingSnapshot = layoutQuery.isShowingSnapshot;
   const statusMessage = showingSnapshot ? "last layout state" : null;

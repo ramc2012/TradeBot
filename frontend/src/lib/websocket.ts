@@ -1,7 +1,6 @@
 "use client";
 
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000";
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { resolveApiBaseUrl, resolveWebSocketBaseUrl } from "./runtime-url";
 
 interface ReconnectingWS {
   close: () => void;
@@ -25,7 +24,7 @@ async function getWebSocketToken(): Promise<string> {
     return webSocketTokenPromise;
   }
 
-  webSocketTokenPromise = fetch(`${API_URL}/api/auth/ws-token`, {
+  webSocketTokenPromise = fetch(`${resolveApiBaseUrl()}/api/auth/ws-token`, {
     method: "GET",
     headers: { Accept: "application/json" },
   })
@@ -50,6 +49,15 @@ async function getWebSocketToken(): Promise<string> {
 function withWebSocketToken(url: string, token: string): string {
   const parsed = new URL(url);
   parsed.searchParams.set("auth", token);
+  return parsed.toString();
+}
+
+function withQuery(url: string, query: Record<string, string | null | undefined>): string {
+  const parsed = new URL(url);
+  for (const [key, value] of Object.entries(query)) {
+    if (value == null || value === "") continue;
+    parsed.searchParams.set(key, value);
+  }
   return parsed.toString();
 }
 
@@ -127,7 +135,7 @@ export function createTickSocket(
   onMessage: (data: unknown) => void,
 ): ReconnectingWS {
   return createReconnectingSocket(
-    `${WS_URL}/ws/ticks/${encodeURIComponent(symbol)}`,
+    `${resolveWebSocketBaseUrl()}/ws/ticks/${encodeURIComponent(symbol)}`,
     onMessage,
   );
 }
@@ -135,62 +143,81 @@ export function createTickSocket(
 export function createPositionsSocket(
   onMessage: (data: unknown) => void,
 ): ReconnectingWS {
-  return createReconnectingSocket(`${WS_URL}/ws/positions`, onMessage);
+  return createReconnectingSocket(`${resolveWebSocketBaseUrl()}/ws/positions`, onMessage);
 }
 
 export function createProposalsSocket(
   onMessage: (data: unknown) => void,
 ): ReconnectingWS {
-  return createReconnectingSocket(`${WS_URL}/ws/proposals`, onMessage);
+  return createReconnectingSocket(`${resolveWebSocketBaseUrl()}/ws/proposals`, onMessage);
 }
 
 export function createLayoutSocket(
   onMessage: (data: unknown) => void,
   onStatusChange?: (connected: boolean) => void,
 ): ReconnectingWS {
-  return createReconnectingSocket(`${WS_URL}/ws/layout`, onMessage, onStatusChange);
+  return createReconnectingSocket(`${resolveWebSocketBaseUrl()}/ws/layout`, onMessage, onStatusChange);
 }
 
 export function createSystemOverviewSocket(
   onMessage: (data: unknown) => void,
   onStatusChange?: (connected: boolean) => void,
 ): ReconnectingWS {
-  return createReconnectingSocket(`${WS_URL}/ws/system-overview`, onMessage, onStatusChange);
+  return createReconnectingSocket(`${resolveWebSocketBaseUrl()}/ws/system-overview`, onMessage, onStatusChange);
 }
 
 export function createSystemHealthSocket(
   onMessage: (data: unknown) => void,
   onStatusChange?: (connected: boolean) => void,
 ): ReconnectingWS {
-  return createReconnectingSocket(`${WS_URL}/ws/system-health`, onMessage, onStatusChange);
+  return createReconnectingSocket(`${resolveWebSocketBaseUrl()}/ws/system-health`, onMessage, onStatusChange);
 }
 
 export function createStrategyOverviewSocket(
   onMessage: (data: unknown) => void,
   onStatusChange?: (connected: boolean) => void,
 ): ReconnectingWS {
-  return createReconnectingSocket(`${WS_URL}/ws/strategy-overview`, onMessage, onStatusChange);
+  return createReconnectingSocket(`${resolveWebSocketBaseUrl()}/ws/strategy-overview`, onMessage, onStatusChange);
 }
 
 export function createStrategyDashboardSocket(
   onMessage: (data: unknown) => void,
   onStatusChange?: (connected: boolean) => void,
 ): ReconnectingWS {
-  return createReconnectingSocket(`${WS_URL}/ws/strategy-dashboard`, onMessage, onStatusChange);
+  return createReconnectingSocket(`${resolveWebSocketBaseUrl()}/ws/strategy-dashboard`, onMessage, onStatusChange);
 }
 
 export function createPositionsOverviewSocket(
   onMessage: (data: unknown) => void,
   onStatusChange?: (connected: boolean) => void,
 ): ReconnectingWS {
-  return createReconnectingSocket(`${WS_URL}/ws/positions-overview`, onMessage, onStatusChange);
+  return createReconnectingSocket(`${resolveWebSocketBaseUrl()}/ws/positions-overview`, onMessage, onStatusChange);
 }
 
 export function createCommodityOverviewSocket(
   onMessage: (data: unknown) => void,
   onStatusChange?: (connected: boolean) => void,
 ): ReconnectingWS {
-  return createReconnectingSocket(`${WS_URL}/ws/commodity-overview`, onMessage, onStatusChange);
+  return createReconnectingSocket(`${resolveWebSocketBaseUrl()}/ws/commodity-overview`, onMessage, onStatusChange);
+}
+
+export function createCommodityWatchlistSocket(
+  onMessage: (data: unknown) => void,
+  onStatusChange?: (connected: boolean) => void,
+): ReconnectingWS {
+  return createReconnectingSocket(`${resolveWebSocketBaseUrl()}/ws/commodity-watchlist`, onMessage, onStatusChange);
+}
+
+export function createMarketWatchlistSocket(
+  expiry: string,
+  onMessage: (data: unknown) => void,
+  onStatusChange?: (connected: boolean) => void,
+): ReconnectingWS {
+  return createReconnectingSocket(
+    withQuery(`${resolveWebSocketBaseUrl()}/ws/market-watchlist`, { expiry }),
+    onMessage,
+    onStatusChange,
+  );
 }
 
 export function createFractalMarketProfileSocket(
@@ -198,5 +225,5 @@ export function createFractalMarketProfileSocket(
   onMessage: (data: unknown) => void,
   onStatusChange?: (connected: boolean) => void,
 ): ReconnectingWS {
-  return createReconnectingSocket(`${WS_URL}/ws/fractal-market-profile/${encodeURIComponent(symbol)}`, onMessage, onStatusChange);
+  return createReconnectingSocket(`${resolveWebSocketBaseUrl()}/ws/fractal-market-profile/${encodeURIComponent(symbol)}`, onMessage, onStatusChange);
 }

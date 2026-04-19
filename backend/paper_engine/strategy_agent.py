@@ -29,6 +29,7 @@ from analysis.macd_engine import (
     compute_spot_ma_context,
     check_iv_filter,
 )
+from analysis.instruments import get_monthly_expiry
 from agent.macd_quadrant import (
     QuadrantResult,
     compute_quadrant,
@@ -68,6 +69,7 @@ from agent.strategy_config import (
 )
 from agent.window_calculator import (
     get_all_active_windows,
+    get_all_strategy1_scan_windows,
     days_remaining_in_window,
 )
 from analytics.technicals import latest_macd_rsi
@@ -79,6 +81,7 @@ from api.routers.auth import (
 )
 from db.database import AsyncSessionLocal
 from market_data import atm_watchlist_service, market_profile_builder, option_history_service
+from market_data.fo_universe_bootstrap import ensure_fo_underlying_catalog
 from paper_engine import strategy_agent_state as strategy_state_module
 from paper_engine.base_strategy_agent import (
     BaseStrategyAgent,
@@ -105,6 +108,7 @@ from paper_engine.strategy_agent_state import (
     StrategyRuntime,
     _NSE_STRATEGY_STATE_FILE,
     _load_saved_strategy_state,
+    _load_saved_strategy_state_from_database,
     _save_strategy_state,
 )
 
@@ -137,7 +141,7 @@ def _report_interval_seconds(value: str) -> int:
     return mapping.get(str(value or "1h"), 3600)
 
 
-STRATEGY2_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
+STRATEGY2_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
 STRATEGY2_ENTRY_CUTOFF = time(15, 0)
 STRATEGY2_FORCE_EXIT = time(15, 20)
 STRATEGY2_SPOT_CACHE_TTL_SECONDS = 90
@@ -151,6 +155,7 @@ STRATEGY2_FYERS_SYMBOLS = {
     "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
     "FINNIFTY": "NSE:FINNIFTY-INDEX",
     "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
+    "SENSEX": "BSE:SENSEX-INDEX",
 }
 
 
@@ -429,7 +434,7 @@ class _Strategy2LaneAgent(_BaseNSEStrategyLaneAgent):
         key="index_mp_strategy",
         label="Strategy 2 · 5m Index MACD + MP",
         timeframe="5minute",
-        instrument_scope="NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY ATM options",
+        instrument_scope="NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX ATM options",
         execution_mode="paper_execution",
         position_cap=STRATEGY2_MAX_POSITIONS,
     )
@@ -519,13 +524,17 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         self._telegram_last_sent_at: Optional[datetime] = None
         self._commentary: list[CommentaryEntry] = []
         self._active_windows: list[dict] = []
+        self._scan_windows: list[dict] = []
         self._regime_cache: dict[str, QuadrantResult] = {}
         self._scan_count: int = 0
         self._last_spot_sync: Optional[datetime] = None
         self._strategy2_spot_cache: dict[str, tuple[datetime, list[dict[str, Any]], str]] = {}
         self._last_data_health: dict[str, Any] = {}
         self._historical_recovery_attempted = False
-        self._restore_saved_state(_load_saved_strategy_state())
+        self._state_synced_at: Optional[datetime] = None
+        saved_state, saved_updated_at = _load_saved_strategy_state()
+        self._restore_saved_state(saved_state)
+        self._state_synced_at = saved_updated_at
 
     def _runtimes(self) -> list[StrategyRuntime]:
         return [self._strategy1, self._strategy2]
@@ -736,7 +745,25 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 for runtime in self._runtimes()
             },
         }
-        _save_strategy_state(payload)
+        updated_at = _save_strategy_state(payload)
+        if updated_at is not None:
+            self._state_synced_at = updated_at
+
+    def _refresh_state_from_store(self, *, force: bool = False) -> bool:
+        payload, updated_at = _load_saved_strategy_state_from_database()
+        if payload is None:
+            return False
+        if (
+            not force
+            and updated_at is not None
+            and self._state_synced_at is not None
+            and updated_at <= self._state_synced_at
+        ):
+            return False
+        self._restore_saved_state(payload)
+        if updated_at is not None:
+            self._state_synced_at = updated_at
+        return True
 
     def _select_candidate_expiries(self, as_of: date, expiries: list[str]) -> list[str]:
         """Legacy expiry chooser retained for compatibility with older tests."""
@@ -761,6 +788,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
+        self._refresh_state_from_store()
         self._enabled = True
         # Restore equity curve from Redis (survives backend restart)
         for runtime in self._runtimes():
@@ -777,6 +805,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         self._task = asyncio.create_task(self._loop(), name="paper-strategy-agent")
 
     async def stop(self) -> None:
+        self._refresh_state_from_store()
         self._enabled = False
         if self._task:
             self._task.cancel()
@@ -1416,19 +1445,59 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 for lane in self._lane_agents():
                     lane.mark_scan_started(started_at)
 
-                # 1. Get active trading windows
+                universe_bootstrap = await ensure_fo_underlying_catalog()
+                if universe_bootstrap.get("status") in {"partial", "skipped_no_upstox"}:
+                    self._append_commentary(
+                        "Strategy 1",
+                        (
+                            "F&O universe bootstrap is incomplete. "
+                            f"Catalog rows with keys: {((universe_bootstrap.get('counts_after') or {}).get('keyed_rows') or 0)}."
+                        ),
+                        tone="warning",
+                    )
+
+                # 1. Get trading windows
                 self._active_windows = await get_all_active_windows(as_of=started_at.date())
-                self._last_candidate_expiries = list({
-                    str(w["expiry"]) for w in self._active_windows
+                self._scan_windows = await get_all_strategy1_scan_windows(as_of=started_at.date())
+                self._last_candidate_expiries = sorted({
+                    get_monthly_expiry(w["expiry"].year, w["expiry"].month).isoformat()
+                    for w in self._scan_windows
                 })
                 self._last_expiry = self._last_candidate_expiries[0] if self._last_candidate_expiries else None
+                rolled_underlyings = sorted(
+                    str(window.get("underlying") or "")
+                    for window in self._scan_windows
+                    if str(window.get("window_state") or "") == "future"
+                )
+                if rolled_underlyings:
+                    preview = ", ".join(rolled_underlyings[:5])
+                    suffix = "..." if len(rolled_underlyings) > 5 else ""
+                    self._append_commentary(
+                        "Strategy 1",
+                        (
+                            "Current monthly window is exhausted for "
+                            f"{len(rolled_underlyings)} underlyings. "
+                            f"Rolling scan to the next expiry: {preview}{suffix}"
+                        ),
+                        tone="warning",
+                    )
 
                 # 2. Get ATM watchlist rows for each active expiry.
                 # Also include the broker's default (nearest weekly) expiry in
                 # case the monthly expiry isn't directly available in the live chain.
-                monthly_expiries = list({str(w["expiry"]) for w in self._active_windows})
-                # Always include the nearest available expiry (None = broker default)
-                expiries_to_fetch = monthly_expiries + [None]
+                monthly_expiries = list(self._last_candidate_expiries)
+                expiry_scope = await atm_watchlist_service.get_expiries(self._last_expiry)
+                native_index_expiries = sorted(
+                    {
+                        str(expiry)
+                        for underlying, expiry in dict(expiry_scope.get("index_monthlies") or {}).items()
+                        if underlying in STRATEGY2_UNDERLYINGS and str(expiry or "").strip()
+                    }
+                )
+                expiries_to_fetch: list[Optional[str]] = []
+                for candidate in [*monthly_expiries, *native_index_expiries, None]:
+                    if candidate not in expiries_to_fetch:
+                        expiries_to_fetch.append(candidate)
                 watchlists = await asyncio.gather(
                     *(atm_watchlist_service.get_watchlist(exp) for exp in expiries_to_fetch),
                     return_exceptions=True,
@@ -1463,7 +1532,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                             rows_by_underlying[und] = r
 
                 rows = list(rows_by_underlying.values())
-                expiries = list({r.get("expiry", "") for r in rows if r.get("expiry")})
+                expiries = sorted({r.get("expiry", "") for r in rows if r.get("expiry")})
 
                 if not rows:
                     detail_messages = [
@@ -1487,7 +1556,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     return await self._status_with_risk_snapshot()
 
                 # 3. Build window lookup
-                window_map = {w["underlying"]: w for w in self._active_windows}
+                window_map = {w["underlying"]: w for w in self._scan_windows}
 
                 for lane in self._lane_agents():
                     await lane.run_cycle(
@@ -1837,6 +1906,137 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 "can_enter": False,
             }
 
+        ce_candles = await self._load_candles(row, ce_side, interval="5minute", limit=96)
+        pe_candles = await self._load_candles(row, pe_side, interval="5minute", limit=96)
+        ce_closes = [float(item["close"]) for item in ce_candles if item.get("close")] if ce_candles else []
+        pe_closes = [float(item["close"]) for item in pe_candles if item.get("close")] if pe_candles else []
+        option_last_bar_time = (
+            (ce_candles[-1].get("time") if ce_candles else None)
+            or (pe_candles[-1].get("time") if pe_candles else None)
+        )
+
+        ce_macd_line, _, _ = compute_macd(ce_closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL) if len(ce_closes) >= MACD_MIN_BARS else ([], [], [])
+        pe_macd_line, _, _ = compute_macd(pe_closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL) if len(pe_closes) >= MACD_MIN_BARS else ([], [], [])
+        ce_macd_value = ce_macd_line[-1] if ce_macd_line else None
+        pe_macd_value = pe_macd_line[-1] if pe_macd_line else None
+        fresh_ce, _, _ = detect_macd_zero_cross(ce_closes, "CE")
+        fresh_pe, _, _ = detect_macd_zero_cross(pe_closes, "PE")
+        ce_aligned = ce_macd_value is not None and ce_macd_value > 0
+        pe_aligned = pe_macd_value is not None and pe_macd_value < 0
+
+        if settings.NSE_STRATEGY_BYPASS_MARKET_PROFILE_GATE:
+            current_spot = float(row.get("spot_price") or 0.0)
+            day_type = "bypassed"
+            gate_reason = "market_profile_gate_bypassed"
+            spot_source = "watchlist_live"
+            spot_last_time = None
+            session_date = started_at.date()
+
+            def _stronger_direction() -> str:
+                return "CE" if abs(float(ce_macd_value or 0.0)) >= abs(float(pe_macd_value or 0.0)) else "PE"
+
+            direction = None
+            if fresh_ce and not fresh_pe:
+                direction = "CE"
+                status = "entry-ready"
+                instruction = f"{underlying}: CE zero-cross confirmed while Market Profile gate is bypassed for test mode."
+                can_enter = True
+            elif fresh_pe and not fresh_ce:
+                direction = "PE"
+                status = "entry-ready"
+                instruction = f"{underlying}: PE zero-cross confirmed while Market Profile gate is bypassed for test mode."
+                can_enter = True
+            elif fresh_ce and fresh_pe:
+                direction = _stronger_direction()
+                status = "entry-ready"
+                instruction = (
+                    f"{underlying}: Both option sides zero-crossed; using the stronger MACD while "
+                    "Market Profile gate is bypassed for test mode."
+                )
+                can_enter = True
+            elif ce_aligned and not pe_aligned:
+                direction = "CE"
+                status = "trend-aligned"
+                instruction = f"{underlying}: CE MACD stays above zero while Market Profile gate is bypassed for test mode."
+                can_enter = False
+            elif pe_aligned and not ce_aligned:
+                direction = "PE"
+                status = "trend-aligned"
+                instruction = f"{underlying}: PE MACD stays aligned while Market Profile gate is bypassed for test mode."
+                can_enter = False
+            elif ce_aligned and pe_aligned:
+                direction = _stronger_direction()
+                status = "trend-aligned"
+                instruction = (
+                    f"{underlying}: Both option sides are aligned; using the stronger MACD while "
+                    "Market Profile gate is bypassed for test mode."
+                )
+                can_enter = False
+            else:
+                status = "waiting-cross"
+                instruction = f"{underlying}: Market Profile gate is bypassed for test mode; waiting for CE or PE zero-cross."
+                can_enter = False
+
+            option_fresh = _parse_iso_timestamp(option_last_bar_time)
+            freshness = "live"
+            if not option_fresh:
+                freshness = "missing"
+            elif started_at - option_fresh > timedelta(minutes=20):
+                freshness = "stale"
+            can_enter = can_enter and freshness == "live"
+
+            signal = {
+                "strategy": "Strategy 2",
+                "source": "live_scan",
+                "underlying": underlying,
+                "signal_date": started_at.date().isoformat(),
+                "trade_date": "live scan",
+                "as_of": started_at.isoformat(),
+                "direction": direction,
+                "reason": gate_reason,
+                "strength": "strong" if status == "entry-ready" else "monitoring",
+                "status": status,
+                "freshness": freshness,
+                "instruction": instruction,
+                "mp_day_type": day_type,
+                "spot_price": _round_or_none(current_spot, 2),
+                "poc": None,
+                "vah": None,
+                "val": None,
+                "ce_macd": _round_or_none(ce_macd_value, 4),
+                "pe_macd": _round_or_none(pe_macd_value, 4),
+                "option_last_bar_time": option_last_bar_time,
+                "spot_last_time": spot_last_time,
+                "spot_source": spot_source,
+                "spot_session_date": session_date.isoformat(),
+            }
+            pipeline = {
+                "name": f"Strategy 2 {underlying}",
+                "status": "ok" if freshness == "live" else ("warning" if freshness == "stale" else "missing"),
+                "rows": max(len(ce_candles), len(pe_candles)),
+                "last_date": str(option_last_bar_time or "—"),
+                "detail": f"option-only test mode · MP bypassed · {status}",
+                "freshness": freshness,
+            }
+            return {
+                "direction": direction,
+                "day_type": day_type,
+                "gate_reason": gate_reason,
+                "signal": signal,
+                "pipeline": pipeline,
+                "can_enter": can_enter,
+                "option_last_bar_time": option_last_bar_time,
+                "spot_last_time": spot_last_time,
+                "ce_closes": ce_closes,
+                "pe_closes": pe_closes,
+                "ce_candles": ce_candles,
+                "pe_candles": pe_candles,
+                "ce_macd_line": ce_macd_line,
+                "pe_macd_line": pe_macd_line,
+                "ce_macd_value": ce_macd_value,
+                "pe_macd_value": pe_macd_value,
+            }
+
         spot_rows, spot_source = await self._load_strategy2_spot_rows(underlying, started_at)
         session_rows, session_date = _latest_session_rows(spot_rows)
         spot_last_time = session_rows[-1].get("time") if session_rows else None
@@ -1888,24 +2088,6 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             current_spot=current_spot,
             today_rows=session_rows,
         )
-
-        ce_candles = await self._load_candles(row, ce_side, interval="5minute", limit=96)
-        pe_candles = await self._load_candles(row, pe_side, interval="5minute", limit=96)
-        ce_closes = [float(item["close"]) for item in ce_candles if item.get("close")] if ce_candles else []
-        pe_closes = [float(item["close"]) for item in pe_candles if item.get("close")] if pe_candles else []
-        option_last_bar_time = (
-            (ce_candles[-1].get("time") if ce_candles else None)
-            or (pe_candles[-1].get("time") if pe_candles else None)
-        )
-
-        ce_macd_line, _, _ = compute_macd(ce_closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL) if len(ce_closes) >= MACD_MIN_BARS else ([], [], [])
-        pe_macd_line, _, _ = compute_macd(pe_closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL) if len(pe_closes) >= MACD_MIN_BARS else ([], [], [])
-        ce_macd_value = ce_macd_line[-1] if ce_macd_line else None
-        pe_macd_value = pe_macd_line[-1] if pe_macd_line else None
-        fresh_ce, _, _ = detect_macd_zero_cross(ce_closes, "CE")
-        fresh_pe, _, _ = detect_macd_zero_cross(pe_closes, "PE")
-        ce_aligned = ce_macd_value is not None and ce_macd_value > 0
-        pe_aligned = pe_macd_value is not None and pe_macd_value < 0
 
         if direction == "CE":
             if fresh_ce:
@@ -2273,30 +2455,28 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
     async def _compute_spot_context(self, underlying: str, window: dict) -> dict:
         """Load spot candles and classify the MA setup."""
         try:
-            from db.database import async_session
-            import asyncpg
-            conn = await asyncpg.connect(
-                str(settings.DATABASE_URL).replace("+asyncpg", "")
-            )
-            try:
-                rows = await conn.fetch(
-                    """
-                    SELECT close FROM underlying_spot_candles
-                    WHERE underlying = $1 AND interval = '30minute'
-                      AND time::date BETWEEN ($2::date - INTERVAL '60 days')::date AND $3
-                    ORDER BY time
-                    """,
-                    underlying,
-                    window["window_start"],
-                    window["window_end"],
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT close FROM underlying_spot_candles
+                        WHERE underlying = :underlying AND interval = '30minute'
+                          AND time::date BETWEEN (CAST(:window_start AS date) - INTERVAL '60 days')::date AND CAST(:window_end AS date)
+                        ORDER BY time
+                        """
+                    ),
+                    {
+                        "underlying": underlying,
+                        "window_start": window["window_start"],
+                        "window_end": window["window_end"],
+                    },
                 )
-            finally:
-                await conn.close()
+                rows = result.fetchall()
 
             if len(rows) < SPOT_MA_SLOW + 10:
                 return {"setup": "unknown"}
 
-            spot_closes = [float(r["close"]) for r in rows]
+            spot_closes = [float(row.close) for row in rows]
             return compute_spot_ma_context(spot_closes, SPOT_MA_FAST, SPOT_MA_SLOW)
         except Exception as exc:
             logger.debug(f"[Strategy] Spot context failed for {underlying}: {exc}")
@@ -2695,6 +2875,9 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             return None
 
     async def _send_telegram_text(self, message: str) -> None:
+        from api.routers.auth import refresh_persistent_credentials
+
+        refresh_persistent_credentials()
         if not settings.TELEGRAM_REPORTS_ENABLED:
             return
         if not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_CHAT_ID:
@@ -2711,6 +2894,9 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             logger.warning(f"[Strategy] Telegram failed: {exc}")
 
     async def _maybe_send_telegram_report(self) -> None:
+        from api.routers.auth import refresh_persistent_credentials
+
+        refresh_persistent_credentials()
         if not settings.TELEGRAM_REPORTS_ENABLED or not settings.TELEGRAM_BOT_TOKEN:
             return
         now = _now_ist()
@@ -2795,6 +2981,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         return self.get_control_state()
 
     def get_control_state(self, *, cancelled_orders: int = 0) -> dict[str, Any]:
+        self._refresh_state_from_store()
         return {
             "market": "nse",
             "auto_run_enabled": self._auto_run_enabled,
@@ -2805,7 +2992,9 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
 
     # ── Status API ───────────────────────────────────────────────────────────
 
-    def get_status(self) -> dict[str, Any]:
+    def get_status(self, *, refresh: bool = True) -> dict[str, Any]:
+        if refresh:
+            self._refresh_state_from_store()
         next_scan_at = None
         if self._last_run_at and self._auto_run_enabled:
             try:
@@ -2830,6 +3019,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "target_expiry": self._last_expiry,
             "candidate_expiries": self._last_candidate_expiries,
             "active_windows": len(self._active_windows),
+            "strategy1_scan_windows": len(self._scan_windows),
             "regime_summary": {
                 und: q.regime for und, q in self._regime_cache.items()
             } if self._regime_cache else {},

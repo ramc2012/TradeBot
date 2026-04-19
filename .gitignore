@@ -20,6 +20,7 @@ venv/
 node_modules/
 .next/
 frontend/.next/
+*.tsbuildinfo
 
 # Logs and runtime state
 *.log

@@ -17,6 +17,7 @@ import {
   Layers3,
   Settings,
   Shield,
+  Target,
   Waves,
 } from "lucide-react";
 
@@ -106,6 +107,7 @@ const WORKSPACE_GROUPS = [
       { href: "/positions", label: "Positions", icon: BriefcaseBusiness, detail: "Combined manual and strategy exposure." },
       { href: "/trading", label: "Execution", icon: Activity, detail: "Orders, approvals, and broker mode." },
       { href: "/strategy", label: "NSE Strategy", icon: Crosshair, detail: "Strategy 1 and Strategy 2 supervisor." },
+      { href: "/directional-options", label: "Long Premium", icon: Target, detail: "Directional long-option research, contract scoring, and walk-forward diagnostics." },
       { href: "/commodity", label: "Commodity", icon: Waves, detail: "MCX options and futures desk." },
       { href: "/market", label: "Market", icon: Globe, detail: "Watchlists, chains, and live market context." },
     ],

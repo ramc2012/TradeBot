@@ -90,6 +90,19 @@ class FyersAdapter(BrokerAdapter):
         except Exception:
             return None
 
+    @staticmethod
+    def _coerce_float(*values: Any) -> float:
+        for value in values:
+            if value in (None, "", 0, "0", "0.0"):
+                continue
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed:
+                return parsed
+        return 0.0
+
     async def get_historical_candles(
         self,
         symbol: str,
@@ -158,10 +171,21 @@ class FyersAdapter(BrokerAdapter):
             session.set_token(auth_code)
             response = await asyncio.to_thread(session.generate_token)
             self._access_token = response.get("access_token", "")
+            refresh_token = response.get("refresh_token") or response.get("refreshToken")
+            expires_at_raw = response.get("expires_at") or response.get("expiresAt")
+            parsed_expiry: Optional[datetime] = None
+            if expires_at_raw:
+                try:
+                    parsed_expiry = datetime.fromisoformat(str(expires_at_raw))
+                    if parsed_expiry.tzinfo is None:
+                        parsed_expiry = parsed_expiry.replace(tzinfo=UTC)
+                except Exception:
+                    parsed_expiry = None
             logger.info("Fyers authenticated successfully")
             return AuthToken(
                 access_token=self._access_token,
-                expires_at=datetime.now(UTC) + timedelta(hours=8),
+                refresh_token=str(refresh_token).strip() or None,
+                expires_at=parsed_expiry or datetime.now(UTC) + timedelta(hours=8),
             )
         except Exception as e:
             logger.error(f"Fyers authentication failed: {e}")
@@ -410,7 +434,27 @@ class FyersAdapter(BrokerAdapter):
         spot_price = 0.0
         if data.get("optionsChain"):
             head = data["optionsChain"][0]
-            spot_price = float(head.get("ltp", 0) or head.get("fp", 0) or 0)
+            # Fyers carries the underlying future price in `fp` for commodity chains.
+            # Some responses also include an option-row `ltp`, which is not the
+            # underlying and can skew ATM selection if it is preferred first.
+            spot_price = self._coerce_float(
+                head.get("fp"),
+                data.get("fp"),
+                head.get("underlying_price"),
+                data.get("underlying_price"),
+                head.get("underlyingPrice"),
+                data.get("underlyingPrice"),
+                head.get("underlying_ltp"),
+                data.get("underlying_ltp"),
+                head.get("underlyingLtp"),
+                data.get("underlyingLtp"),
+            )
+        if spot_price <= 0:
+            try:
+                live_quotes = await self.get_ltp([symbol])
+                spot_price = float(live_quotes.get(symbol, 0) or 0)
+            except Exception as exc:
+                logger.debug(f"Fyers option-chain spot fallback failed for {symbol}: {exc}")
 
         try:
             expiry_dt = datetime.strptime(expiry_iso, "%Y-%m-%d").date()

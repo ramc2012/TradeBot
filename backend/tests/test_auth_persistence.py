@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from api.routers import auth
+from core.config import FYERS_FIXED_REDIRECT_URI
 
 
 def test_bootstrap_credentials_keeps_saved_redirect_uri_when_env_is_absent(monkeypatch) -> None:
@@ -47,7 +49,7 @@ def test_bootstrap_credentials_keeps_saved_redirect_uri_when_env_is_absent(monke
 
 def test_persist_active_session_tokens_backfills_saved_token(monkeypatch) -> None:
     saved_payloads: list[dict] = []
-    monkeypatch.setattr(auth, "_save_credentials_to_disk", lambda creds: saved_payloads.append(dict(creds)))
+    monkeypatch.setattr(auth, "_persist_credentials", lambda creds: saved_payloads.append(dict(creds)))
 
     auth._broker_credentials = {"fyers": {"app_id": "APP"}}
     auth._active_brokers = {
@@ -60,6 +62,125 @@ def test_persist_active_session_tokens_backfills_saved_token(monkeypatch) -> Non
 
     assert auth._broker_credentials["fyers"]["access_token"] == "LIVE_FYERS_TOKEN"
     assert saved_payloads
+
+
+def test_load_persistent_credentials_prefers_explicit_env(monkeypatch) -> None:
+    auth._broker_credentials = {
+        "fyers": {
+            "app_id": "FILE_APP",
+            "redirect_uri": "https://file.example/callback",
+        }
+    }
+    monkeypatch.setattr(
+        auth,
+        "_load_credentials_payload_from_database",
+        lambda: (
+            {
+                "fyers": {
+                    "app_id": "DB_APP",
+                    "secret": "DB_SECRET",
+                    "redirect_uri": "https://db.example/callback",
+                }
+            },
+            datetime.now(timezone.utc),
+        ),
+    )
+    applied: list[tuple[str, dict]] = []
+    monkeypatch.setattr(auth, "_apply_credentials_to_settings", lambda broker, creds: applied.append((broker, dict(creds))))
+    monkeypatch.setenv("FYERS_REDIRECT_URI", "https://env.example/callback")
+
+    auth.load_persistent_credentials()
+
+    assert auth._broker_credentials["fyers"]["app_id"] == "DB_APP"
+    assert auth._broker_credentials["fyers"]["secret"] == "DB_SECRET"
+    assert auth._broker_credentials["fyers"]["redirect_uri"] == "https://env.example/callback"
+    assert applied[-1][1]["redirect_uri"] == "https://env.example/callback"
+
+
+def test_refresh_persistent_credentials_updates_telegram_toggle(monkeypatch) -> None:
+    updated_at = datetime.now(timezone.utc)
+    auth._broker_credentials = {
+        "telegram": {
+            "bot_token": "123:abc",
+            "chat_id": "-10042",
+            "enabled": False,
+            "report_interval": "30m",
+        }
+    }
+    auth.settings.TELEGRAM_REPORTS_ENABLED = False
+    auth._credentials_db_checked_at_monotonic = 0.0
+    auth._credentials_db_updated_at = None
+
+    monkeypatch.setattr(
+        auth,
+        "_load_credentials_payload_from_database",
+        lambda: (
+            {
+                "telegram": {
+                    "bot_token": "123:abc",
+                    "chat_id": "-10042",
+                    "enabled": True,
+                    "report_interval": "30m",
+                }
+            },
+            updated_at,
+        ),
+    )
+
+    auth.refresh_persistent_credentials(force=True)
+
+    assert auth._broker_credentials["telegram"]["enabled"] is True
+    assert auth.settings.TELEGRAM_REPORTS_ENABLED is True
+    assert auth._credentials_db_updated_at == updated_at
+
+
+def test_bootstrap_credentials_normalizes_legacy_fyers_callback(monkeypatch) -> None:
+    monkeypatch.setattr(
+        auth,
+        "_load_credentials",
+        lambda: {
+            "fyers": {
+                "app_id": "APP",
+                "secret": "SECRET",
+                "redirect_uri": "https://legacy.example/api/auth/fyers/callback",
+            }
+        },
+    )
+    monkeypatch.setattr(auth, "_persist_credentials", lambda creds: None)
+    monkeypatch.setattr(auth, "_apply_credentials_to_settings", lambda broker, creds: None)
+    monkeypatch.delenv("FYERS_REDIRECT_URI", raising=False)
+
+    auth._broker_credentials = {}
+    auth._bootstrap_credentials()
+
+    assert auth._broker_credentials["fyers"]["redirect_uri"] == FYERS_FIXED_REDIRECT_URI
+
+
+def test_save_fyers_credentials_persists_fixed_redirect_uri(monkeypatch) -> None:
+    saved_payloads: list[dict] = []
+    applied: list[tuple[str, dict]] = []
+    monkeypatch.setattr(auth, "_persist_credentials", lambda creds: saved_payloads.append(dict(creds)))
+    monkeypatch.setattr(auth, "_apply_credentials_to_settings", lambda broker, creds: applied.append((broker, dict(creds))))
+
+    auth._broker_credentials = {
+        "fyers": {
+            "app_id": "APP",
+            "secret": "SECRET",
+            "redirect_uri": "https://legacy.example/api/auth/fyers/callback",
+        }
+    }
+
+    payload = auth.SaveCredentialsRequest(
+        broker="fyers",
+        credentials={"app_id": "APP", "redirect_uri": "http://localhost:8000/api/auth/fyers/callback"},
+    )
+
+    result = asyncio.run(auth.save_credentials(payload))
+
+    assert result["status"] == "saved"
+    assert auth._broker_credentials["fyers"]["redirect_uri"] == FYERS_FIXED_REDIRECT_URI
+    assert saved_payloads[-1]["fyers"]["redirect_uri"] == FYERS_FIXED_REDIRECT_URI
+    assert applied[-1][1]["redirect_uri"] == FYERS_FIXED_REDIRECT_URI
 
 
 def test_save_credentials_to_disk_encrypts_sensitive_values(monkeypatch, tmp_path) -> None:
@@ -106,6 +227,66 @@ def test_load_credentials_decrypts_encrypted_payload(monkeypatch, tmp_path) -> N
     assert loaded["telegram"]["bot_token"] == "123:abc"
     assert loaded["telegram"]["chat_id"] == "-10042"
     assert loaded["telegram"]["enabled"] is True
+
+
+def test_persist_broker_session_stores_refresh_metadata(monkeypatch) -> None:
+    saved_payloads: list[dict] = []
+    monkeypatch.setattr(auth, "_persist_credentials", lambda creds: saved_payloads.append(json.loads(json.dumps(creds))))
+
+    auth._broker_credentials = {"upstox": {"api_key": "client-key"}}
+    expires_at = datetime(2026, 4, 16, 3, 30, tzinfo=timezone.utc)
+
+    auth._persist_broker_session(
+        "upstox",
+        SimpleNamespace(
+            access_token="ACCESS_TOKEN",
+            refresh_token="REFRESH_TOKEN",
+            expires_at=expires_at,
+        ),
+    )
+
+    stored = auth._broker_credentials["upstox"]
+    assert stored["access_token"] == "ACCESS_TOKEN"
+    assert stored["refresh_token"] == "REFRESH_TOKEN"
+    assert stored["expires_at"] == expires_at.isoformat()
+    assert stored["token_saved_at"]
+    assert saved_payloads[-1]["upstox"]["refresh_token"] == "REFRESH_TOKEN"
+
+
+def test_ensure_fyers_session_refreshes_durable_credentials_before_restore(monkeypatch) -> None:
+    auth._active_brokers = {}
+    auth._broker_credentials = {
+        "fyers": {
+            "app_id": "APP",
+            "secret": "SECRET",
+            "access_token": "STALE_TOKEN",
+        }
+    }
+
+    def fake_refresh(*, force: bool = False) -> None:
+        auth._broker_credentials["fyers"]["access_token"] = "LIVE_TOKEN"
+
+    async def fake_validate(token: str) -> bool:
+        return token == "LIVE_TOKEN"
+
+    class _FakeFyersAdapter:
+        async def authenticate(self, credentials: dict):
+            assert credentials["access_token"] == "LIVE_TOKEN"
+            return SimpleNamespace(access_token="LIVE_TOKEN", refresh_token=None, expires_at=None)
+
+        async def get_profile(self):
+            return SimpleNamespace(user_id="FY123", name="Fyers User")
+
+    monkeypatch.setattr(auth, "refresh_persistent_credentials", fake_refresh)
+    monkeypatch.setattr(auth, "_validate_fyers_access_token", fake_validate)
+    monkeypatch.setattr(auth, "_persist_broker_session", lambda broker, token, connected_at=None: None)
+    monkeypatch.setattr(auth, "_sync_market_data_feed", lambda: asyncio.sleep(0))
+    monkeypatch.setattr("brokers.fyers.FyersAdapter", _FakeFyersAdapter)
+
+    restored = asyncio.run(auth.ensure_fyers_session(force_validate=True))
+
+    assert restored is True
+    assert auth._active_brokers["fyers"]["token"].access_token == "LIVE_TOKEN"
 
 
 def test_websocket_token_is_required_and_verifiable() -> None:

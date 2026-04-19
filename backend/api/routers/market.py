@@ -242,8 +242,8 @@ async def get_option_chain(symbol: str, expiry: Optional[str] = Query(None)):
 
 
 @router.get("/atm-watchlist/expiries")
-async def get_atm_watchlist_expiries():
-    return await atm_watchlist_service.get_expiries()
+async def get_atm_watchlist_expiries(expiry: Optional[str] = Query(None)):
+    return await atm_watchlist_service.get_expiries(expiry)
 
 
 @router.get("/atm-watchlist")

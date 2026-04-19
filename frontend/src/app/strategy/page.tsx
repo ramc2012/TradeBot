@@ -38,6 +38,7 @@ import {
   getStrategyOpenSignals,
   getStrategyPortfolio,
 } from "@/lib/api";
+import { isBrokerReady } from "@/lib/broker-status";
 import { createStrategyOverviewSocket } from "@/lib/websocket";
 
 type StrategyTab = "portfolio" | "signals" | "operations";
@@ -972,7 +973,7 @@ export default function StrategyPage() {
                 icon={<Radio size={16} className="text-accent-green" />}
                 title="Broker Links"
                 detail="Connection health for the adapters used by the live option desks."
-                meta={`${brokerRows.filter((broker) => broker.connected).length} connected`}
+                meta={`${brokerRows.filter((broker) => isBrokerReady(broker)).length} connected`}
               />
               <div className="mt-4 flex flex-wrap gap-2">
                 {upstoxHealth ? (
@@ -1018,9 +1019,9 @@ export default function StrategyPage() {
               <div className="mt-4 space-y-2">
                 {brokerRows.map((broker) => (
                   <div key={broker.broker} className="flex items-center gap-2 rounded-2xl border border-bg-border bg-bg-secondary/20 px-3 py-3 text-xs">
-                    <StatusBadge label={broker.connected ? "connected" : "offline"} tone={broker.connected ? "ready" : "error"} />
+                    <StatusBadge label={isBrokerReady(broker) ? "connected" : "offline"} tone={isBrokerReady(broker) ? "ready" : "error"} />
                     <span className="font-semibold uppercase text-text-primary">{broker.broker}</span>
-                    <span className="text-text-muted">{broker.connected ? broker.name || broker.user_id || "connected" : "disconnected"}</span>
+                    <span className="text-text-muted">{isBrokerReady(broker) ? broker.name || broker.user_id || "connected" : broker.detail || "disconnected"}</span>
                     <span className="ml-auto text-[11px] text-text-muted">{broker.connected_at ? formatTimestamp(broker.connected_at) : "--"}</span>
                   </div>
                 ))}

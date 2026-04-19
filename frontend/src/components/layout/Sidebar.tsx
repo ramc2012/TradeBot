@@ -21,6 +21,7 @@ import {
   Layers3,
   Settings,
   Shield,
+  Target,
   Waves,
 } from "lucide-react";
 
@@ -35,6 +36,7 @@ const NAV_GROUPS = [
       { href: "/trading", label: "Execution", icon: Activity },
       { href: "/market", label: "Market", icon: Globe },
       { href: "/strategy", label: "NSE Strategy", icon: Crosshair },
+      { href: "/directional-options", label: "Long Premium", icon: Target },
       { href: "/commodity", label: "Commodity", icon: Waves },
     ],
   },

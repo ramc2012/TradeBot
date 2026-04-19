@@ -14,12 +14,16 @@ from api.routers import fo_data as fo_data_router
 from api.routers import analysis as analysis_router
 from api.routers import strategy as strategy_router
 from api.routers import auction_intelligence as auction_intelligence_router
+from api.routers import directional_options as directional_options_router
 from api.routers import fractal_market_profile as fractal_market_profile_router
 from api.routers import system as system_router
+from directional_options import DirectionalOptionsService, mount_directional_options_dashboard
 from api.websockets.ticks import (
     ws_commodity_overview,
+    ws_commodity_watchlist,
     ws_fractal_market_profile,
     ws_layout,
+    ws_market_watchlist,
     ws_positions,
     ws_positions_overview,
     ws_proposals,
@@ -52,7 +56,8 @@ async def lifespan(app: FastAPI):
 
     # Restore broker sessions from saved credentials (e.g. Upstox JWT token)
     try:
-        from api.routers.auth import auto_restore_sessions, get_active_adapter
+        from api.routers.auth import auto_restore_sessions, get_active_adapter, load_persistent_credentials
+        await asyncio.to_thread(load_persistent_credentials)
         await auto_restore_sessions()
         adapter = get_active_adapter("fyers") or get_active_adapter("upstox") or get_active_adapter()
     except Exception as e:
@@ -113,11 +118,13 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+mount_directional_options_dashboard(app, DirectionalOptionsService())
 
 # ── CORS ─────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.BACKEND_CORS_ORIGINS,
+    allow_origin_regex=settings.BACKEND_CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -135,6 +142,7 @@ app.include_router(fo_data_router.router)
 app.include_router(analysis_router.router)
 app.include_router(strategy_router.router)
 app.include_router(auction_intelligence_router.router)
+app.include_router(directional_options_router.router)
 app.include_router(fractal_market_profile_router.router)
 app.include_router(system_router.router)
 
@@ -183,6 +191,16 @@ async def websocket_positions_overview(websocket: WebSocket):
 @app.websocket("/ws/commodity-overview")
 async def websocket_commodity_overview(websocket: WebSocket):
     await ws_commodity_overview(websocket)
+
+
+@app.websocket("/ws/commodity-watchlist")
+async def websocket_commodity_watchlist(websocket: WebSocket):
+    await ws_commodity_watchlist(websocket)
+
+
+@app.websocket("/ws/market-watchlist")
+async def websocket_market_watchlist(websocket: WebSocket):
+    await ws_market_watchlist(websocket)
 
 
 @app.websocket("/ws/fractal-market-profile/{symbol}")

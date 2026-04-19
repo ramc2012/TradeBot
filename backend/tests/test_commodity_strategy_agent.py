@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 import paper_engine.commodity_strategy_agent as commodity_module
 from paper_engine.commodity_strategy_agent import (
@@ -13,6 +16,26 @@ from paper_engine.commodity_strategy_agent import (
 
 
 UTC = timezone.utc
+
+
+@pytest.fixture(autouse=True)
+def _fake_runtime_state_store(monkeypatch):
+    store: dict[str, object | None] = {
+        "payload": None,
+        "updated_at": None,
+    }
+
+    def _load_runtime_state(_state_key: str):
+        return copy.deepcopy(store["payload"]), store["updated_at"]
+
+    def _save_runtime_state(_state_key: str, payload: dict):
+        store["payload"] = copy.deepcopy(payload)
+        store["updated_at"] = datetime.now(UTC)
+        return store["updated_at"]
+
+    monkeypatch.setattr(commodity_module, "load_runtime_state", _load_runtime_state)
+    monkeypatch.setattr(commodity_module, "save_runtime_state", _save_runtime_state)
+    return store
 
 
 def _build_candles(closes: list[float]) -> list[dict]:
@@ -63,6 +86,23 @@ def test_evaluate_commodity_signal_reports_insufficient_data() -> None:
 
     assert signal["signal"] is None
     assert signal["reason"] == "insufficient_data"
+
+
+def test_filter_closed_interval_rows_drops_incomplete_tail_bar() -> None:
+    start = datetime(2026, 4, 16, 9, 15, tzinfo=UTC)
+    candles = [
+        {"time": (start + timedelta(minutes=15 * index)).isoformat(), "close": 100.0 + index}
+        for index in range(3)
+    ]
+
+    filtered = commodity_module._filter_closed_interval_rows(  # type: ignore[attr-defined]
+        candles,
+        interval="15minute",
+        now=start + timedelta(minutes=37),
+    )
+
+    assert len(filtered) == 2
+    assert filtered[-1]["time"] == (start + timedelta(minutes=15)).isoformat()
 
 
 def test_commodity_symbols_persist_to_config_file(tmp_path: Path, monkeypatch) -> None:
@@ -154,6 +194,118 @@ def test_commodity_runtime_persists_orders_positions_and_commentary(tmp_path: Pa
     assert reloaded.get_orders()[0]["order_id"] == "ord-1"
     assert reloaded.get_reports()[0]["tracked_symbols"] == 2
     assert reloaded.get_status()["commentary"][0]["message"] == "ENTRY MCX:SILVERM26JUNFUT BUY @120.00"
+
+
+def test_commodity_symbols_refresh_from_runtime_store_across_instances(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    writer = CommodityStrategyAgent()
+    reader = CommodityStrategyAgent()
+
+    writer.update_symbols(
+        ["MCX:GOLD26JUNFUT", "MCX:CRUDEOIL26MAYFUT"],
+        selected_option_expiries={"MCX:GOLD26JUNFUT": "2099-05-27"},
+    )
+
+    assert reader.get_symbols() == ["MCX:GOLD26JUNFUT", "MCX:CRUDEOIL26MAYFUT"]
+    assert reader.get_selected_option_expiries() == {"MCX:GOLD26JUNFUT": "2099-05-27"}
+
+
+def test_selected_option_setup_persists_lookup_symbol(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    async def _fake_catalog(symbols, selected_option_expiries=None, selected_option_lookup_symbols=None):
+        return {
+            "contracts": [
+                {
+                    "symbol": "MCX:GOLD26JUNFUT",
+                    "expiry_mappings": [
+                        {"expiry": "2099-05-27", "lookup_symbol": "MCX:GOLD26AUGFUT"},
+                    ],
+                    "active_lookup_symbol": "MCX:GOLD26AUGFUT",
+                    "lookup_symbol": "MCX:GOLD26JUNFUT",
+                    "default_lookup_symbol": "MCX:GOLD26JUNFUT",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        commodity_module.commodity_atm_watchlist_service,
+        "get_contract_catalog",
+        _fake_catalog,
+    )
+
+    agent = CommodityStrategyAgent()
+    agent.update_symbols(["MCX:GOLD26JUNFUT"])
+
+    result = asyncio.run(
+        agent.update_selected_option_expiries({"MCX:GOLD26JUNFUT": "2099-05-27"})
+    )
+
+    reloaded = CommodityStrategyAgent()
+
+    assert result["selected_option_expiries"] == {"MCX:GOLD26JUNFUT": "2099-05-27"}
+    assert result["selected_option_lookup_symbols"] == {"MCX:GOLD26JUNFUT": "MCX:GOLD26AUGFUT"}
+    assert reloaded.get_selected_option_expiries() == {"MCX:GOLD26JUNFUT": "2099-05-27"}
+    assert reloaded.get_selected_option_lookup_symbols() == {"MCX:GOLD26JUNFUT": "MCX:GOLD26AUGFUT"}
+
+
+def test_legacy_selected_option_setup_backfills_lookup_symbol(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    async def _fake_catalog(symbols, selected_option_expiries=None, selected_option_lookup_symbols=None):
+        return {
+            "contracts": [
+                {
+                    "symbol": "MCX:GOLD26JUNFUT",
+                    "expiry_mappings": [
+                        {"expiry": "2099-05-27", "lookup_symbol": "MCX:GOLD26AUGFUT"},
+                    ],
+                    "active_lookup_symbol": "MCX:GOLD26AUGFUT",
+                    "lookup_symbol": "MCX:GOLD26JUNFUT",
+                    "default_lookup_symbol": "MCX:GOLD26JUNFUT",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        commodity_module.commodity_atm_watchlist_service,
+        "get_contract_catalog",
+        _fake_catalog,
+    )
+
+    legacy_agent = CommodityStrategyAgent()
+    legacy_agent.update_symbols(
+        ["MCX:GOLD26JUNFUT"],
+        selected_option_expiries={"MCX:GOLD26JUNFUT": "2099-05-27"},
+    )
+
+    result = asyncio.run(legacy_agent.ensure_selected_option_setup_locks())
+    reloaded = CommodityStrategyAgent()
+
+    assert result == {"MCX:GOLD26JUNFUT": "MCX:GOLD26AUGFUT"}
+    assert reloaded.get_selected_option_lookup_symbols() == {"MCX:GOLD26JUNFUT": "MCX:GOLD26AUGFUT"}
+
+
+def test_commodity_symbol_save_preserves_latest_expiry_map_on_stale_instance(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    fresh = CommodityStrategyAgent()
+    stale = CommodityStrategyAgent()
+
+    fresh.update_symbols(
+        ["MCX:GOLD26JUNFUT"],
+        selected_option_expiries={"MCX:GOLD26JUNFUT": "2099-05-27"},
+    )
+
+    result = stale.update_symbols(["MCX:GOLD26JUNFUT", "MCX:CRUDEOIL26MAYFUT"])
+
+    assert result["symbols"] == ["MCX:GOLD26JUNFUT", "MCX:CRUDEOIL26MAYFUT"]
+    assert result["selected_option_expiries"] == {"MCX:GOLD26JUNFUT": "2099-05-27"}
 
 
 def test_commodity_agent_runs_automatically_until_kill_then_requires_restart(tmp_path: Path, monkeypatch) -> None:
@@ -263,3 +415,450 @@ def test_commodity_run_once_stops_on_invalid_fyers_session(monkeypatch, tmp_path
     assert status["last_error"] is not None
     assert "No valid Fyers session is available for the commodity scan." in status["last_message"]
     assert status["data_health"]["fyers_token_health"]["valid"] is False
+
+
+def test_commodity_run_once_retains_previous_watchlists_on_transient_scan_gap(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+    monkeypatch.setattr(commodity_module, "_in_commodity_hours", lambda _: True)
+
+    async def fake_fyers_health(*, force: bool = False):
+        return {
+            "connected": True,
+            "valid": True,
+            "status": "valid_session",
+            "message": "ok",
+        }
+
+    async def fake_ensure_fyers_session(*, force_validate: bool = False):
+        return True
+
+    class _FakeAdapter:
+        pass
+
+    async def fake_get_fyers_adapter(self):
+        return _FakeAdapter()
+
+    async def fake_get_ltp(self, adapter, symbols):
+        return {"MCX:GOLD26JUNFUT": 101.5}
+
+    async def fake_analyze_futures_symbol(self, symbol, live_ltp):
+        return None
+
+    async def fake_build_option_watchlist(self):
+        return []
+
+    async def fake_manage_positions(self, adapter, futures_rows, option_rows):
+        return None
+
+    class _FakeDescriptor:
+        def __init__(self, key: str):
+            self.key = key
+            self.title = key
+            self.timeframe = "test"
+            self.instrument_scope = "test"
+            self.execution_mode = "paper_execution"
+            self.position_cap = 0
+
+    class _FakeLane:
+        def __init__(self, key: str):
+            self.descriptor = _FakeDescriptor(key)
+
+        def ready_signals(self):
+            return 0
+
+        def open_positions(self):
+            return 0
+
+        def build_status_payload(self):
+            return {
+                "key": self.descriptor.key,
+                "title": self.descriptor.title,
+                "timeframe": self.descriptor.timeframe,
+                "instrument_scope": self.descriptor.instrument_scope,
+                "execution_mode": self.descriptor.execution_mode,
+                "position_cap": self.descriptor.position_cap,
+                "tracked_symbols": 0,
+                "open_positions": 0,
+                "ready_signals": 0,
+            }
+
+        async def run_entries(self, rows):
+            return None
+
+    monkeypatch.setattr(commodity_module, "get_fyers_token_health", fake_fyers_health)
+    monkeypatch.setattr(commodity_module, "ensure_fyers_session", fake_ensure_fyers_session)
+    monkeypatch.setattr(CommodityStrategyAgent, "_get_fyers_adapter", fake_get_fyers_adapter)
+    monkeypatch.setattr(CommodityStrategyAgent, "_safe_get_ltp", fake_get_ltp)
+    monkeypatch.setattr(CommodityStrategyAgent, "_analyze_futures_symbol", fake_analyze_futures_symbol)
+    monkeypatch.setattr(CommodityStrategyAgent, "_build_option_watchlist", fake_build_option_watchlist)
+    monkeypatch.setattr(CommodityStrategyAgent, "_manage_positions", fake_manage_positions)
+    monkeypatch.setattr(
+        CommodityStrategyAgent,
+        "_strategy_agents",
+        lambda self: [_FakeLane("commodity_futures"), _FakeLane("commodity_options")],
+    )
+    monkeypatch.setattr(
+        commodity_module.option_history_service,
+        "get_health_snapshot",
+        lambda: {
+            "failure_count": 1,
+            "success_count": 0,
+            "brokers": {"fyers": {"failure": 1, "last_detail": "Fyers data API error 429: request limit reached"}},
+        },
+    )
+
+    agent = CommodityStrategyAgent()
+    agent.update_symbols(
+        ["MCX:GOLD26JUNFUT"],
+        selected_option_expiries={"MCX:GOLD26JUNFUT": "2099-05-27"},
+    )
+    agent._selected_option_lookup_symbols = {"MCX:GOLD26JUNFUT": "MCX:GOLD26JUNFUT"}  # type: ignore[attr-defined]
+    agent._runtime.futures_watchlist = [  # type: ignore[attr-defined]
+        {
+            "symbol": "MCX:GOLD26JUNFUT",
+            "underlying": "GOLD",
+            "price": 100.0,
+            "previous_close": 98.0,
+            "signal_validation": "waiting_cross",
+        }
+    ]
+    agent._runtime.option_watchlist = [  # type: ignore[attr-defined]
+        {
+            "symbol": "MCX:GOLD26JUNFUT",
+            "selected_expiry": "2099-05-27",
+            "active_expiry": "2099-05-27",
+            "selected_lookup_symbol": "MCX:GOLD26JUNFUT",
+            "lookup_symbol": "MCX:GOLD26JUNFUT",
+            "signal_validation": "warming_up",
+        }
+    ]
+
+    status = asyncio.run(agent.run_once(force=False))
+
+    assert len(status["futures_watchlist"]) == 1
+    assert len(status["option_watchlist"]) == 1
+    assert status["futures_watchlist"][0]["runtime_retained"] is True
+    assert status["option_watchlist"][0]["runtime_retained"] is True
+    assert status["futures_watchlist"][0]["price"] == 101.5
+    assert "Reused the last good snapshot" in status["last_message"]
+
+
+def test_load_history_prefers_resolved_upstox_future_before_fyers_symbol(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    async def fake_resolve(symbol: str):
+        assert symbol == "MCX:GOLD26JUNFUT"
+        return {"instrument_key": "MCX_FO|123"}
+
+    requests: list[tuple[str, str]] = []
+
+    async def fake_fetch(*, instrument_key, from_date, to_date, interval):
+        requests.append((instrument_key, interval))
+        if instrument_key == "MCX_FO|123":
+            return [
+                {
+                    "time": "2026-04-16T09:15:00+05:30",
+                    "open": 1.0,
+                    "high": 2.0,
+                    "low": 0.5,
+                    "close": 1.5,
+                    "volume": 10,
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(commodity_module, "resolve_upstox_mcx_future", fake_resolve)
+    monkeypatch.setattr(commodity_module.option_history_service, "_fetch_broker_candles", fake_fetch)
+
+    agent = CommodityStrategyAgent()
+    rows = asyncio.run(agent._load_history("MCX:GOLD26JUNFUT", interval="15minute", lookback_days=1))
+
+    assert len(rows) == 1
+    assert requests[0] == ("MCX_FO|123", "1minute")
+    assert all(instrument_key != "MCX:GOLD26JUNFUT" for instrument_key, _ in requests)
+
+
+def test_load_history_falls_back_to_fyers_symbol_when_upstox_rows_are_missing(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    async def fake_resolve(_symbol: str):
+        return {"instrument_key": "MCX_FO|123"}
+
+    requests: list[tuple[str, str]] = []
+
+    async def fake_fetch(*, instrument_key, from_date, to_date, interval):
+        requests.append((instrument_key, interval))
+        if instrument_key == "MCX:GOLD26JUNFUT":
+            return [
+                {
+                    "time": "2026-04-16T09:15:00+05:30",
+                    "open": 1.0,
+                    "high": 2.0,
+                    "low": 0.5,
+                    "close": 1.5,
+                    "volume": 10,
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(commodity_module, "resolve_upstox_mcx_future", fake_resolve)
+    monkeypatch.setattr(commodity_module.option_history_service, "_fetch_broker_candles", fake_fetch)
+
+    agent = CommodityStrategyAgent()
+    rows = asyncio.run(agent._load_history("MCX:GOLD26JUNFUT", interval="30minute", lookback_days=1))
+
+    assert len(rows) == 1
+    assert requests[:2] == [("MCX_FO|123", "30minute"), ("MCX:GOLD26JUNFUT", "30minute")]
+
+
+def test_safe_get_ltp_prefers_upstox_quotes_then_fyers_fallback(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    async def fake_upstox_quotes(symbols: list[str]) -> dict[str, float]:
+        assert symbols == ["MCX:GOLD26JUNFUT", "MCX:CRUDEOIL26MAYFUT"]
+        return {"MCX:GOLD26JUNFUT": 101.5}
+
+    class _Adapter:
+        def __init__(self) -> None:
+            self.requests: list[list[str]] = []
+
+        async def get_ltp(self, symbols: list[str]) -> dict[str, float]:
+            self.requests.append(list(symbols))
+            return {"MCX:CRUDEOIL26MAYFUT": 86.2}
+
+    monkeypatch.setattr(commodity_module, "load_upstox_mcx_quotes", fake_upstox_quotes)
+
+    agent = CommodityStrategyAgent()
+    adapter = _Adapter()
+
+    quotes = asyncio.run(agent._safe_get_ltp(adapter, ["MCX:GOLD26JUNFUT", "MCX:CRUDEOIL26MAYFUT"]))
+
+    assert quotes == {"MCX:GOLD26JUNFUT": 101.5, "MCX:CRUDEOIL26MAYFUT": 86.2}
+    assert adapter.requests == [["MCX:CRUDEOIL26MAYFUT"]]
+
+
+def test_analyze_futures_symbol_uses_continuation_signal_when_mp_aligns(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    async def fake_load_history(self, symbol: str, *, interval: str, lookback_days: int = 0):
+        assert symbol == "MCX:CRUDEOIL26MAYFUT"
+        assert interval == "15minute"
+        return _build_candles([8700.0 + (index * 2.0) for index in range(40)])
+
+    def fake_evaluate(*args, **kwargs):
+        return {
+            "signal": None,
+            "reason": "no_cross",
+            "regime": "bearish",
+            "latest_close": 8650.0,
+            "previous_close": 8680.0,
+            "macd": -18.2,
+            "macd_signal": -16.5,
+            "macd_histogram": -1.7,
+            "atr": 72.0,
+            "bar_time": "2026-04-16T19:00:00+05:30",
+            "recent_cross_signal": "SELL",
+            "recent_cross_bars_ago": 2,
+            "continuation_signal": "SELL",
+            "continuation_reason": "macd_continuation_breakdown_down",
+        }
+
+    monkeypatch.setattr(CommodityStrategyAgent, "_load_history", fake_load_history)
+    monkeypatch.setattr(commodity_module, "evaluate_commodity_signal", fake_evaluate)
+    monkeypatch.setattr(
+        commodity_module,
+        "_latest_session_rows",
+        lambda candles: (list(candles), datetime(2026, 4, 16, 19, 0, tzinfo=UTC).date()),
+    )
+    monkeypatch.setattr(CommodityStrategyAgent, "_build_market_profile", lambda self, symbol, rows: object())
+    monkeypatch.setattr(
+        CommodityStrategyAgent,
+        "_classify_market_profile",
+        lambda self, **kwargs: ("SELL", "trend_down", "mp_trend_down"),
+    )
+
+    agent = CommodityStrategyAgent()
+
+    row = asyncio.run(agent._analyze_futures_symbol("MCX:CRUDEOIL26MAYFUT", 8648.0))
+
+    assert row is not None
+    assert row["signal"] == "SELL"
+    assert row["entry_style"] == "continuation"
+    assert row["reason"] == "macd_continuation_breakdown_down_mp_trend_down"
+    assert "continuation" in row["signal_validation_detail"]
+
+
+def test_futures_reversal_exit_waits_for_min_hold_bars(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    agent = CommodityStrategyAgent()
+    position = commodity_module.CommodityPositionState(
+        position_key="commodity_futures:MCX:NATURALGAS26MAYFUT",
+        symbol="MCX:NATURALGAS26MAYFUT",
+        live_symbol="MCX:NATURALGAS26MAYFUT",
+        underlying="NATURALGAS",
+        strategy_key="commodity_futures",
+        strategy_title="Strategy 2 · Futures",
+        instrument_type="FUT",
+        action="BUY",
+        qty=1250,
+        lots=1,
+        lot_size=1250,
+        entry_price=245.0,
+        current_price=245.0,
+        stop_price=242.0,
+        target_price=251.0,
+        regime="bullish",
+        signal_reason="macd_zero_cross_up_mp_trend_up",
+        atr=2.5,
+        macd_value=0.8,
+        mp_poc=244.5,
+        mp_vah=246.2,
+        mp_val=243.8,
+        entered_at="2026-04-16T09:31:00+05:30",
+        entry_bar_time="2026-04-16T09:30:00+05:30",
+        contract_unit_label="1250 MMBtu",
+        quote_unit_label="Rs / MMBtu",
+        display_name="Natural Gas",
+        initial_qty=1250,
+        peak_price=245.0,
+        entry_style="fresh_cross",
+        last_reviewed_bar_time="2026-04-16T09:30:00+05:30",
+    )
+    agent._runtime.positions[position.position_key] = position  # type: ignore[attr-defined]
+
+    early_row = {
+        "symbol": "MCX:NATURALGAS26MAYFUT",
+        "price": 246.8,
+        "raw_signal": "SELL",
+        "mp_direction": "SELL",
+        "bar_time": "2026-04-16T10:15:00+05:30",
+        "macd": -0.3,
+        "mp_poc": 245.0,
+        "mp_vah": 246.5,
+        "mp_val": 244.0,
+    }
+
+    asyncio.run(agent._manage_positions(object(), [early_row], []))
+
+    assert position.position_key in agent._runtime.positions  # type: ignore[attr-defined]
+    assert agent.get_orders() == []
+
+    mature_row = dict(early_row)
+    mature_row["bar_time"] = "2026-04-16T10:30:00+05:30"
+    asyncio.run(agent._manage_positions(object(), [mature_row], []))
+
+    assert position.position_key not in agent._runtime.positions  # type: ignore[attr-defined]
+    assert agent.get_orders()[0]["reason"] == "macd_reversal"
+
+
+def test_futures_target_hit_arms_trailing_runner_instead_of_full_exit(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    agent = CommodityStrategyAgent()
+    position = commodity_module.CommodityPositionState(
+        position_key="commodity_futures:MCX:CRUDEOIL26MAYFUT",
+        symbol="MCX:CRUDEOIL26MAYFUT",
+        live_symbol="MCX:CRUDEOIL26MAYFUT",
+        underlying="CRUDEOIL",
+        strategy_key="commodity_futures",
+        strategy_title="Strategy 2 · Futures",
+        instrument_type="FUT",
+        action="BUY",
+        qty=100,
+        lots=1,
+        lot_size=100,
+        entry_price=100.0,
+        current_price=100.0,
+        stop_price=95.0,
+        target_price=110.0,
+        regime="bullish",
+        signal_reason="macd_zero_cross_up_mp_trend_up",
+        atr=2.5,
+        macd_value=0.5,
+        mp_poc=99.5,
+        mp_vah=101.0,
+        mp_val=98.8,
+        entered_at="2026-04-16T10:01:00+05:30",
+        entry_bar_time="2026-04-16T10:00:00+05:30",
+        contract_unit_label="100 barrel contract",
+        quote_unit_label="Rs / barrel",
+        display_name="Crude Oil",
+        initial_qty=100,
+        peak_price=100.0,
+        entry_style="fresh_cross",
+        last_reviewed_bar_time="2026-04-16T10:00:00+05:30",
+    )
+    agent._runtime.positions[position.position_key] = position  # type: ignore[attr-defined]
+
+    target_row = {
+        "symbol": "MCX:CRUDEOIL26MAYFUT",
+        "price": 111.0,
+        "raw_signal": None,
+        "mp_direction": "BUY",
+        "bar_time": "2026-04-16T11:00:00+05:30",
+        "macd": 0.9,
+        "mp_poc": 108.5,
+        "mp_vah": 110.5,
+        "mp_val": 107.8,
+    }
+
+    asyncio.run(agent._manage_positions(object(), [target_row], []))
+
+    current = agent._runtime.positions[position.position_key]  # type: ignore[attr-defined]
+    assert current.target_reached is True
+    assert current.stop_price == pytest.approx(106.0)
+    assert agent.get_orders() == []
+
+    trail_exit_row = dict(target_row)
+    trail_exit_row["price"] = 105.5
+    asyncio.run(agent._manage_positions(object(), [trail_exit_row], []))
+
+    assert position.position_key not in agent._runtime.positions  # type: ignore[attr-defined]
+    assert agent.get_orders()[0]["reason"] == "trail_stop"
+
+
+def test_signal_audit_persists_across_instances(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    agent = CommodityStrategyAgent()
+    agent._runtime.signal_audit = [  # type: ignore[attr-defined]
+        {
+            "audit_key": "commodity_futures:MCX:GOLD26JUNFUT:2026-04-16T14:30:00+05:30:mp_conflict:SELL:continuation",
+            "time": "2026-04-16T14:31:00+05:30",
+            "lane": "commodity_futures",
+            "symbol": "MCX:GOLD26JUNFUT",
+            "underlying": "GOLD",
+            "bar_time": "2026-04-16T14:30:00+05:30",
+            "entry_style": "continuation",
+            "signal": None,
+            "raw_signal": None,
+            "continuation_signal": "SELL",
+            "recent_cross_signal": "SELL",
+            "recent_cross_bars_ago": 3,
+            "mp_direction": "BUY",
+            "mp_day_type": "balance",
+            "validation": "mp_conflict",
+            "detail": "15-minute continuation fired SELL, but MP gate is BUY.",
+            "price": 153420.0,
+            "regime": "bearish",
+            "runtime_retained": False,
+        }
+    ]
+    agent._persist_state()  # type: ignore[attr-defined]
+
+    reloaded = CommodityStrategyAgent()
+    status = reloaded.get_status()
+
+    assert len(status["signal_audit"]) == 1
+    assert status["signal_audit"][0]["symbol"] == "MCX:GOLD26JUNFUT"
+    assert status["signal_audit"][0]["validation"] == "mp_conflict"
+    assert "audit_key" not in status["signal_audit"][0]

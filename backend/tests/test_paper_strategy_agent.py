@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import date, datetime, timedelta, timezone
 
+from agent import window_calculator as window_calculator_module
 from paper_engine.order_book import PaperOrderBook
 from paper_engine.portfolio import PaperPortfolio
 import paper_engine.strategy_agent as strategy_agent_module
@@ -126,13 +127,278 @@ def test_candidate_expiries_only_front_when_not_near() -> None:
     assert expiries == ["2026-03-26"]
 
 
+def test_get_all_strategy1_scan_windows_prefers_active_then_rolls_to_next(monkeypatch) -> None:
+    async def fake_fetch(_query: str, _params: dict[str, object]) -> list[dict]:
+        return [
+            {
+                "symbol": "ACTIVE",
+                "kind": "STOCK",
+            },
+            {
+                "symbol": "BANKNIFTY",
+                "kind": "INDEX",
+            },
+            {
+                "symbol": "UPCOMING",
+                "kind": "STOCK",
+            },
+        ]
+
+    monkeypatch.setattr(window_calculator_module, "_fetch_underlying_rows", fake_fetch)
+
+    windows = asyncio.run(window_calculator_module.get_all_strategy1_scan_windows(as_of=date(2026, 4, 15)))
+    selected = {str(window["underlying"]): window for window in windows}
+
+    assert selected["ACTIVE"]["expiry"] == date(2026, 4, 28)
+    assert selected["ACTIVE"]["window_state"] == "active"
+    assert selected["BANKNIFTY"]["expiry"] == date(2026, 4, 28)
+    assert selected["BANKNIFTY"]["window_state"] == "active"
+    assert selected["UPCOMING"]["expiry"] == date(2026, 4, 28)
+    assert selected["UPCOMING"]["window_state"] == "active"
+
+
+def test_run_once_uses_next_strategy1_window_instead_of_idling(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+
+    async def fake_snapshot(*, force_validate: bool = False):
+        return {
+            "connected_brokers": ["fyers"],
+            "upstox_ready": False,
+            "fyers_ready": True,
+            "broker_ready": True,
+            "upstox_token_health": {"status": "disconnected"},
+            "fyers_token_health": {"status": "valid"},
+        }
+
+    async def fake_active_windows(*, as_of: date | None = None):
+        return []
+
+    async def fake_scan_windows(*, as_of: date | None = None):
+        return [
+            {
+                "underlying": "AUROPHARMA",
+                "expiry": date(2026, 5, 26),
+                "prev_expiry": date(2026, 4, 28),
+                "window_start": date(2026, 4, 21),
+                "window_end": date(2026, 5, 19),
+                "window_state": "future",
+            }
+        ]
+
+    async def fake_watchlist(expiry: str | None = None):
+        if expiry == "2026-05-26":
+            return {
+                "rows": [
+                    {
+                        "underlying": "AUROPHARMA",
+                        "kind": "STOCK",
+                        "expiry": "2026-05-26",
+                        "spot_price": 1298.5,
+                        "ce": None,
+                        "pe": None,
+                    }
+                ],
+                "detail": None,
+            }
+        return {"rows": [], "detail": None}
+
+    async def fake_expiries(_expiry: str | None = None):
+        return {
+            "default_expiry": "2026-05-26",
+            "index_monthlies": {
+                "NIFTY": "2026-05-26",
+                "BANKNIFTY": "2026-05-26",
+                "FINNIFTY": "2026-05-26",
+                "MIDCPNIFTY": "2026-05-26",
+                "SENSEX": "2026-05-30",
+            },
+        }
+
+    async def fake_manage_exits(_runtime, _rows=None):
+        return None
+
+    async def fake_bootstrap(**_kwargs):
+        return {
+            "status": "ready",
+            "counts_after": {"keyed_rows": 100, "keyed_stocks": 95},
+        }
+
+    async def fake_scan_entries(runtime, rows, window_map):
+        runtime.last_message = f"Scanned {len(rows)} instruments across {len(window_map)} windows."
+
+    async def fake_run_strategy2(runtime, rows, started_at):
+        runtime.last_message = "Strategy 2 skipped for unit test."
+        runtime.meta = {
+            **(runtime.meta or {}),
+            "mode": "test_stub",
+            "updated_at": started_at.isoformat(),
+            "watchlist_rows": len(rows),
+        }
+
+    async def fake_status():
+        return agent.get_status()
+
+    async def fake_async_noop():
+        return None
+
+    monkeypatch.setattr(strategy_agent_module, "_in_market_hours", lambda _: True)
+    monkeypatch.setattr(strategy_agent_module, "get_broker_connection_snapshot", fake_snapshot)
+    monkeypatch.setattr(strategy_agent_module, "get_all_active_windows", fake_active_windows)
+    monkeypatch.setattr(strategy_agent_module, "get_all_strategy1_scan_windows", fake_scan_windows)
+    monkeypatch.setattr(strategy_agent_module, "ensure_fo_underlying_catalog", fake_bootstrap)
+    monkeypatch.setattr(strategy_agent_module.atm_watchlist_service, "get_expiries", fake_expiries)
+    monkeypatch.setattr(strategy_agent_module.atm_watchlist_service, "get_watchlist", fake_watchlist)
+    monkeypatch.setattr(agent, "_manage_exits", fake_manage_exits)
+    monkeypatch.setattr(agent, "_scan_entries", fake_scan_entries)
+    monkeypatch.setattr(agent, "_run_strategy2", fake_run_strategy2)
+    monkeypatch.setattr(agent, "_status_with_risk_snapshot", fake_status)
+    monkeypatch.setattr(agent, "_maybe_send_telegram_report", fake_async_noop)
+    monkeypatch.setattr(agent, "_maybe_sync_spot_candles", fake_async_noop)
+    monkeypatch.setattr(strategy_agent_module.option_history_service, "reset_health", lambda: None)
+    monkeypatch.setattr(strategy_agent_module.option_history_service, "get_health_snapshot", lambda: {})
+
+    for runtime in (agent._strategy1, agent._strategy2):
+        runtime.portfolio.snapshot_equity = lambda: None
+        runtime.portfolio.persist_equity_to_redis = fake_async_noop
+
+    status = asyncio.run(agent.run_once(force=False))
+
+    assert status["active_windows"] == 0
+    assert status["strategy1_scan_windows"] == 1
+    assert status["candidate_expiries"] == ["2026-05-26"]
+    assert status["target_expiry"] == "2026-05-26"
+    assert status["strategy_agents"][0]["mode"] == "live_scan"
+    assert "No active Strategy 1 monthly trading windows." not in status["strategy_agents"][0]["last_message"]
+
+
+def test_run_once_includes_native_strategy2_index_expiry_rows(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    captured: dict[str, list[str]] = {}
+
+    async def fake_snapshot(*, force_validate: bool = False):
+        return {
+            "connected_brokers": ["fyers"],
+            "upstox_ready": False,
+            "fyers_ready": True,
+            "broker_ready": True,
+            "upstox_token_health": {"status": "disconnected"},
+            "fyers_token_health": {"status": "valid"},
+        }
+
+    async def fake_active_windows(*, as_of: date | None = None):
+        return []
+
+    async def fake_scan_windows(*, as_of: date | None = None):
+        return [
+            {
+                "underlying": "AUROPHARMA",
+                "expiry": date(2026, 4, 28),
+                "prev_expiry": date(2026, 3, 26),
+                "window_start": date(2026, 3, 19),
+                "window_end": date(2026, 4, 21),
+                "window_state": "active",
+            }
+        ]
+
+    async def fake_expiries(_expiry: str | None = None):
+        return {
+            "default_expiry": "2026-04-28",
+            "index_monthlies": {
+                "NIFTY": "2026-04-28",
+                "BANKNIFTY": "2026-04-28",
+                "FINNIFTY": "2026-04-28",
+                "MIDCPNIFTY": "2026-04-28",
+                "SENSEX": "2026-04-24",
+            },
+        }
+
+    async def fake_watchlist(expiry: str | None = None):
+        if expiry == "2026-04-24":
+            return {
+                "rows": [
+                    {
+                        "underlying": "SENSEX",
+                        "kind": "INDEX",
+                        "expiry": "2026-04-24",
+                        "spot_price": 78000.0,
+                        "ce": {"option_type": "CE"},
+                        "pe": {"option_type": "PE"},
+                    }
+                ],
+                "detail": None,
+            }
+        return {
+            "rows": [
+                {"underlying": "NIFTY", "kind": "INDEX", "expiry": "2026-04-28", "spot_price": 24200.0, "ce": {"option_type": "CE"}, "pe": {"option_type": "PE"}},
+                {"underlying": "BANKNIFTY", "kind": "INDEX", "expiry": "2026-04-28", "spot_price": 56500.0, "ce": {"option_type": "CE"}, "pe": {"option_type": "PE"}},
+                {"underlying": "FINNIFTY", "kind": "INDEX", "expiry": "2026-04-28", "spot_price": 26600.0, "ce": {"option_type": "CE"}, "pe": {"option_type": "PE"}},
+                {"underlying": "MIDCPNIFTY", "kind": "INDEX", "expiry": "2026-04-28", "spot_price": 13500.0, "ce": {"option_type": "CE"}, "pe": {"option_type": "PE"}},
+                {"underlying": "AUROPHARMA", "kind": "STOCK", "expiry": "2026-04-28", "spot_price": 1298.5, "ce": None, "pe": None},
+            ],
+            "detail": None,
+        }
+
+    async def fake_manage_exits(_runtime, _rows=None):
+        return None
+
+    async def fake_bootstrap(**_kwargs):
+        return {"status": "ready", "counts_after": {"keyed_rows": 100}}
+
+    async def fake_scan_entries(runtime, rows, window_map):
+        runtime.last_message = f"Scanned {len(rows)} instruments across {len(window_map)} windows."
+
+    async def fake_run_strategy2(runtime, rows, started_at):
+        index_rows = [row for row in rows if row.get("underlying") in strategy_agent_module.STRATEGY2_UNDERLYINGS]
+        captured["underlyings"] = [row["underlying"] for row in index_rows]
+        runtime.last_message = f"Scanned {len(index_rows)} indices."
+        runtime.signal_lane = [{"underlying": row["underlying"], "status": "waiting-cross"} for row in index_rows]
+        runtime.meta = {
+            "mode": "live_scan",
+            "updated_at": started_at.isoformat(),
+            "watchlist_rows": len(index_rows),
+            "pipeline": [],
+        }
+
+    async def fake_status():
+        return agent.get_status()
+
+    async def fake_async_noop():
+        return None
+
+    monkeypatch.setattr(strategy_agent_module, "_in_market_hours", lambda _: True)
+    monkeypatch.setattr(strategy_agent_module, "get_broker_connection_snapshot", fake_snapshot)
+    monkeypatch.setattr(strategy_agent_module, "get_all_active_windows", fake_active_windows)
+    monkeypatch.setattr(strategy_agent_module, "get_all_strategy1_scan_windows", fake_scan_windows)
+    monkeypatch.setattr(strategy_agent_module, "ensure_fo_underlying_catalog", fake_bootstrap)
+    monkeypatch.setattr(strategy_agent_module.atm_watchlist_service, "get_expiries", fake_expiries)
+    monkeypatch.setattr(strategy_agent_module.atm_watchlist_service, "get_watchlist", fake_watchlist)
+    monkeypatch.setattr(agent, "_manage_exits", fake_manage_exits)
+    monkeypatch.setattr(agent, "_scan_entries", fake_scan_entries)
+    monkeypatch.setattr(agent, "_run_strategy2", fake_run_strategy2)
+    monkeypatch.setattr(agent, "_status_with_risk_snapshot", fake_status)
+    monkeypatch.setattr(agent, "_maybe_send_telegram_report", fake_async_noop)
+    monkeypatch.setattr(agent, "_maybe_sync_spot_candles", fake_async_noop)
+    monkeypatch.setattr(strategy_agent_module.option_history_service, "reset_health", lambda: None)
+    monkeypatch.setattr(strategy_agent_module.option_history_service, "get_health_snapshot", lambda: {})
+
+    for runtime in (agent._strategy1, agent._strategy2):
+        runtime.portfolio.snapshot_equity = lambda: None
+        runtime.portfolio.persist_equity_to_redis = fake_async_noop
+
+    status = asyncio.run(agent.run_once(force=False))
+
+    assert "SENSEX" in captured["underlyings"]
+    assert status["strategy_agents"][1]["mode"] == "live_scan"
+    assert status["strategy_agents"][1]["signals"] == 5
+
+
 def test_get_status_exposes_next_scan_and_runtime_timestamps() -> None:
     agent = PaperStrategyAgent()
     agent._last_run_at = "2026-04-09T09:15:00+05:30"
     agent._strategy.last_scan_at = "2026-04-09T09:15:00+05:30"
     agent._strategy.last_message = "Scanned 218 instruments."
     agent._strategy2.last_scan_at = "2026-04-09T09:15:00+05:30"
-    agent._strategy2.last_message = "Scanned 4 indices."
+    agent._strategy2.last_message = "Scanned 5 indices."
 
     status = agent.get_status()
 
@@ -144,7 +410,150 @@ def test_get_status_exposes_next_scan_and_runtime_timestamps() -> None:
     assert status["strategies"][0]["last_message"] == "Scanned 218 instruments."
     assert status["strategies"][1]["key"] == "index_mp_strategy"
     assert status["strategies"][1]["agent"]["timeframe"] == "5minute"
-    assert status["strategies"][1]["last_message"] == "Scanned 4 indices."
+    assert status["strategies"][1]["last_message"] == "Scanned 5 indices."
+
+
+def test_strategy1_market_profile_gate_can_be_bypassed(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+
+    monkeypatch.setattr(strategy_agent_module.settings, "NSE_STRATEGY_BYPASS_MARKET_PROFILE_GATE", True)
+
+    gate = asyncio.run(agent._build_strategy1_market_profile_gate("SENSEX", "CE"))
+
+    assert gate["confirmed"] is True
+    assert gate["direction"] == "CE"
+    assert gate["day_type"] == "bypassed"
+    assert gate["reason"] == "market_profile_gate_bypassed"
+    assert gate["source"] == "bypass"
+
+
+def test_strategy1_scan_entries_uses_snapshot_macd_cross(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    runtime = agent._strategy1
+    runtime.positions.clear()
+    runtime.processed_signals.clear()
+    opened: list[dict] = []
+
+    async def fake_snapshot_state(_rows):
+        return {
+            "NSE_FO|CE1": {
+                1: {"time": datetime(2026, 4, 16, 11, 58, tzinfo=strategy_agent_module.IST), "macd": 1.4, "macd_signal": 0.8, "macd_histogram": 0.6, "rsi": 62.5, "ltp": 118.0},
+                2: {"time": datetime(2026, 4, 16, 11, 28, tzinfo=strategy_agent_module.IST), "macd": -0.3},
+            },
+            "NSE_FO|PE1": {
+                1: {"time": datetime(2026, 4, 16, 11, 58, tzinfo=strategy_agent_module.IST), "macd": -0.6, "macd_signal": -0.9, "macd_histogram": 0.3, "rsi": 38.0, "ltp": 91.0},
+                2: {"time": datetime(2026, 4, 16, 11, 28, tzinfo=strategy_agent_module.IST), "macd": -0.4},
+            },
+        }
+
+    async def fake_spot_context(_underlying, _window):
+        return {"setup": "breakout"}
+
+    async def fake_mp_gate(_underlying, _direction):
+        return {"confirmed": True, "day_type": "bypassed", "reason": "market_profile_gate_bypassed", "direction": "CE", "source": "bypass", "session_date": "2026-04-16"}
+
+    async def fake_open_position(_runtime, candidate):
+        opened.append(candidate)
+
+    monkeypatch.setattr(agent, "_load_strategy1_recent_snapshot_state", fake_snapshot_state)
+    monkeypatch.setattr(agent, "_compute_spot_context", fake_spot_context)
+    monkeypatch.setattr(agent, "_build_strategy1_market_profile_gate", fake_mp_gate)
+    monkeypatch.setattr(agent, "_open_position", fake_open_position)
+
+    rows = [
+        {
+            "underlying": "AUROPHARMA",
+            "expiry": "2026-04-28",
+            "spot_price": 1298.5,
+            "lot_size": 550,
+                "ce": {
+                    "instrument_key": "NSE_FO|CE1",
+                    "option_type": "CE",
+                    "strike": 1300.0,
+                    "ltp": 118.0,
+                    "iv": 18.5,
+                    "macd": 1.4,
+                    "macd_signal": 0.8,
+                    "macd_histogram": 0.6,
+                    "rsi": 62.5,
+                },
+                "pe": {
+                    "instrument_key": "NSE_FO|PE1",
+                    "option_type": "PE",
+                    "strike": 1300.0,
+                    "ltp": 91.0,
+                    "iv": 19.0,
+                    "macd": -0.6,
+                    "macd_signal": -0.9,
+                    "macd_histogram": 0.3,
+                    "rsi": 38.0,
+                },
+        }
+    ]
+    window_map = {
+        "AUROPHARMA": {
+            "underlying": "AUROPHARMA",
+            "window_start": date(2026, 4, 1),
+            "window_end": date(2026, 4, 21),
+            "expiry": date(2026, 4, 28),
+        }
+    }
+
+    asyncio.run(agent._scan_entries(runtime, rows, window_map))
+
+    assert len(opened) == 1
+    assert opened[0]["opt_type"] == "CE"
+    assert opened[0]["reason"] == "macd_zero_cross"
+    assert opened[0]["strength"] == 1.4
+    assert opened[0]["quadrant"].regime == "bullish"
+
+
+def test_strategy2_signal_context_can_bypass_market_profile_gate(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    started_at = datetime(2026, 4, 16, 9, 45, tzinfo=strategy_agent_module.IST)
+
+    def _candles_from_closes(closes: list[float]) -> list[dict]:
+        base = datetime(2026, 4, 16, 9, 15, tzinfo=strategy_agent_module.IST)
+        rows: list[dict] = []
+        for index, close in enumerate(closes):
+            rows.append(
+                {
+                    "time": (base + timedelta(minutes=5 * index)).isoformat(),
+                    "open": close,
+                    "high": close,
+                    "low": close,
+                    "close": close,
+                    "volume": 1000 + index,
+                }
+            )
+        return rows
+
+    ce_closes = [120.0 - (index * 1.2) for index in range(38)] + [80.0, 180.0]
+    pe_closes = [110.0 + (index * 0.1) for index in range(40)]
+
+    async def fake_load_candles(_row, side, *, interval="5minute", limit=96):
+        option_type = side.get("option_type")
+        return _candles_from_closes(ce_closes if option_type == "CE" else pe_closes)
+
+    monkeypatch.setattr(strategy_agent_module.settings, "NSE_STRATEGY_BYPASS_MARKET_PROFILE_GATE", True)
+    monkeypatch.setattr(agent, "_load_candles", fake_load_candles)
+
+    row = {
+        "underlying": "SENSEX",
+        "expiry": "2026-04-16",
+        "spot_price": 78211.7,
+        "ce": {"option_type": "CE", "ltp": 180.0},
+        "pe": {"option_type": "PE", "ltp": 95.0},
+    }
+
+    context = asyncio.run(agent._build_strategy2_signal_context(row, started_at))
+
+    assert context["direction"] == "CE"
+    assert context["day_type"] == "bypassed"
+    assert context["gate_reason"] == "market_profile_gate_bypassed"
+    assert context["can_enter"] is True
+    assert context["signal"]["status"] == "entry-ready"
+    assert context["signal"]["instruction"].startswith("SENSEX: CE zero-cross confirmed while Market Profile gate is bypassed")
 
 
 def test_market_closed_keeps_strategy2_last_signal_snapshot(monkeypatch) -> None:
@@ -152,7 +561,7 @@ def test_market_closed_keeps_strategy2_last_signal_snapshot(monkeypatch) -> None
     agent._last_run_at = "2026-04-09T15:20:00+05:30"
     agent._strategy1.last_scan_at = "2026-04-09T15:20:00+05:30"
     agent._strategy2.last_scan_at = "2026-04-09T15:20:00+05:30"
-    agent._strategy2.last_message = "Scanned 4 indices. 2 aligned lanes, 0 open positions."
+    agent._strategy2.last_message = "Scanned 5 indices. 2 aligned lanes, 0 open positions."
     agent._strategy2.signal_lane = [
         {
             "underlying": "NIFTY",
@@ -236,6 +645,60 @@ def test_strategy_agent_persists_and_restores_runtime_state(monkeypatch, tmp_pat
     assert restored.get_status()["strategies"][0]["summary"]["open_positions"] == 1
 
 
+def test_strategy_agent_refreshes_runtime_state_from_database(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    updated_at = datetime(2026, 4, 16, 6, 0, tzinfo=UTC)
+    payload = {
+        "last_run_at": "2026-04-16T11:30:00+05:30",
+        "last_error": None,
+        "last_message": "Scanned 218 rows, S1=1, S2=0.",
+        "last_expiry": "2026-04-28",
+        "last_candidate_expiries": ["2026-04-28"],
+        "commentary": [],
+        "strategies": {
+            "macd_strategy": {
+                "entries": 0,
+                "exits": 0,
+                "last_scan_at": "2026-04-16T11:30:00+05:30",
+                "last_message": "Strategy 1 live scan complete.",
+                "processed_signals": {},
+                "signal_lane": [],
+                "meta": {"mode": "live_scan"},
+                "recent_events": [],
+                "positions": [],
+                "portfolio": {},
+            },
+            "index_mp_strategy": {
+                "entries": 0,
+                "exits": 0,
+                "last_scan_at": "2026-04-16T11:30:00+05:30",
+                "last_message": "Strategy 2 live scan complete.",
+                "processed_signals": {},
+                "signal_lane": [{"underlying": "SENSEX", "status": "trend-aligned"}],
+                "meta": {"mode": "live_scan"},
+                "recent_events": [],
+                "positions": [],
+                "portfolio": {},
+            },
+        },
+    }
+
+    monkeypatch.setattr(
+        strategy_agent_module,
+        "_load_saved_strategy_state_from_database",
+        lambda: (payload, updated_at),
+    )
+
+    agent._state_synced_at = datetime(2026, 4, 16, 5, 0, tzinfo=UTC)
+    changed = agent._refresh_state_from_store()
+
+    assert changed is True
+    assert agent._last_run_at == "2026-04-16T11:30:00+05:30"
+    assert agent._strategy2.last_scan_at == "2026-04-16T11:30:00+05:30"
+    assert agent._strategy2.meta["mode"] == "live_scan"
+    assert agent._strategy2.signal_lane[0]["underlying"] == "SENSEX"
+
+
 def test_ensure_ist_datetime_preserves_naive_ist_wall_clock() -> None:
     naive = datetime(2026, 4, 10, 15, 25)
 
@@ -276,7 +739,7 @@ def test_ensure_recovered_state_refreshes_stale_strategy2_signal_lane(monkeypatc
     agent._last_run_at = "2026-04-10T15:29:18.552610+05:30"
     agent._strategy2.signal_lane = [
         {"underlying": underlying, "spot_session_date": "2026-04-09", "signal_date": "2026-04-09"}
-        for underlying in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
+        for underlying in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
     ]
 
     class FakeSession:

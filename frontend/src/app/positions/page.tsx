@@ -6,10 +6,12 @@ import {
   Activity,
   Boxes,
   Filter,
+  RefreshCw,
   Search,
   TrendingUp,
 } from "lucide-react";
 
+import { StreamStatus } from "@/components/live/StreamStatus";
 import type { StrategyAgentStatus } from "@/components/trading/StrategyAgentMonitor";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import {
@@ -269,6 +271,7 @@ export default function PositionsPage() {
           }),
         onStatusChange,
       ),
+    storageKey: "globalPositionsSnapshot",
     staleTime: 5_000,
   });
   const data = positionsQuery.data;
@@ -416,9 +419,26 @@ export default function PositionsPage() {
             <div className="mt-1 text-xs text-text-muted">
               The second menu slot now leads directly to the normalized positions ledger.
             </div>
+            <StreamStatus
+              className="mt-3"
+              title="Positions"
+              isStreamConnected={positionsQuery.isStreamConnected}
+              isShowingSnapshot={positionsQuery.isShowingSnapshot}
+              snapshotSavedAt={positionsQuery.snapshotSavedAt}
+              liveText="manual, NSE strategy, and commodity books are streaming"
+              bootstrapText="loading the combined ledger before the live socket takes over"
+            />
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void positionsQuery.refetch()}
+              className="inline-flex items-center gap-2 rounded-full border border-bg-border bg-bg-secondary/25 px-3 py-2 text-xs font-semibold text-text-secondary transition-colors hover:border-bg-active hover:text-text-primary"
+            >
+              <RefreshCw size={13} />
+              Refresh
+            </button>
             <div className="relative">
               <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
               <input

@@ -19,6 +19,8 @@ import {
   WifiOff,
 } from "lucide-react";
 
+import { StreamStatus } from "@/components/live/StreamStatus";
+import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import {
   getATMWatchlist,
   getATMWatchlistExpiries,
@@ -28,6 +30,8 @@ import {
   getOptionExpiries,
   getSectorRotation,
 } from "@/lib/api";
+import { isBrokerReady, type BrokerStatusEntry } from "@/lib/broker-status";
+import { createMarketWatchlistSocket } from "@/lib/websocket";
 import {
   MARKET_INDEX_SYMBOLS,
   type MarketIndexSymbol,
@@ -210,6 +214,11 @@ type ATMWatchlistExpiryPayload = {
   expiry_scope_note?: string | null;
   source?: string;
   detail?: string | null;
+};
+
+type MarketWatchlistSnapshot = {
+  expiry_catalog: ATMWatchlistExpiryPayload;
+  watchlist: ATMWatchlistPayload;
 };
 
 type MarketWorkspace = "options" | "sectors" | "watchlist";
@@ -787,14 +796,6 @@ function ATMOptionCell({
   );
 }
 
-type BrokerStatusEntry = {
-  broker: string;
-  connected: boolean;
-  user_id?: string | null;
-  name?: string | null;
-  connected_at?: string | null;
-};
-
 const BROKER_LABEL: Record<string, string> = {
   fyers: "Fyers",
   upstox: "Upstox",
@@ -814,8 +815,8 @@ function BrokerHealthBanner() {
 
   const entries = statusQuery.data ?? [];
   const trading = entries.filter((e) => TRADING_BROKERS.includes(e.broker));
-  const disconnected = trading.filter((e) => !e.connected);
-  const connected = trading.filter((e) => e.connected);
+  const disconnected = trading.filter((e) => !isBrokerReady(e));
+  const connected = trading.filter((e) => isBrokerReady(e));
 
   if (statusQuery.isLoading) return null;
 
@@ -930,46 +931,43 @@ export default function MarketPage() {
     staleTime: 5000,
   });
 
-  const watchlistExpiryQuery = useQuery<ATMWatchlistExpiryPayload>({
-    queryKey: ["atmWatchlistExpiries"],
-    queryFn: () => getATMWatchlistExpiries().then((response) => response.data),
+  const watchlistLiveQuery = useLiveSnapshotQuery<MarketWatchlistSnapshot>({
+    queryKey: ["marketWatchlistSnapshot", watchlistExpiry || "default"],
+    queryFn: async () => {
+      const expiry_catalog = await getATMWatchlistExpiries(watchlistExpiry || undefined).then(
+        (response) => response.data as ATMWatchlistExpiryPayload,
+      );
+      const effectiveExpiry = watchlistExpiry || expiry_catalog.default_expiry || expiry_catalog.expiries[0] || undefined;
+      const watchlist = await getATMWatchlist(effectiveExpiry).then((response) => response.data as ATMWatchlistPayload);
+      return {
+        expiry_catalog,
+        watchlist,
+      };
+    },
     enabled: workspace === "watchlist",
-    refetchInterval: 300000,
-    staleTime: 60000,
+    streamFactory: (onData, onStatusChange) =>
+      createMarketWatchlistSocket(
+        watchlistExpiry || "",
+        (data) => onData(data as MarketWatchlistSnapshot),
+        onStatusChange,
+      ),
+    storageKey: `marketWatchlistSnapshot:${watchlistExpiry || "default"}`,
+    staleTime: 10_000,
+    retry: 2,
+    retryDelay: 1500,
   });
 
+  const watchlistExpiryData = watchlistLiveQuery.data?.expiry_catalog;
+  const watchlistData = watchlistLiveQuery.data?.watchlist;
+
   useEffect(() => {
-    const available = watchlistExpiryQuery.data?.expiries ?? [];
-    const defaultExpiry = watchlistExpiryQuery.data?.default_expiry || available[0] || "";
+    const available = watchlistExpiryData?.expiries ?? [];
+    const defaultExpiry = watchlistExpiryData?.default_expiry || available[0] || "";
     if (!defaultExpiry) return;
     if (!watchlistExpiry || !available.includes(watchlistExpiry)) {
       setWatchlistExpiry(defaultExpiry);
     }
-  }, [watchlistExpiry, watchlistExpiryQuery.data]);
-
-  const watchlistQuery = useQuery<ATMWatchlistPayload>({
-    queryKey: ["atmWatchlist", watchlistExpiry],
-    queryFn: () => getATMWatchlist(watchlistExpiry || undefined).then((response) => response.data),
-    enabled: workspace === "watchlist" && Boolean(watchlistExpiry),
-    refetchInterval: (query) => {
-      const data = query.state.data as ATMWatchlistPayload | undefined;
-      if (workspace !== "watchlist" || !watchlistExpiry) return false;
-      if (data?.build_status === "building") return 5000;
-      if (!data?.rows?.length) return 15000;
-      return 60000;
-    },
-    refetchIntervalInBackground: true,
-    refetchOnMount: "always",
-    retry: 2,
-    retryDelay: 1500,
-    staleTime: 5000,
-  });
-
-  useEffect(() => {
-    if (workspace === "watchlist" && watchlistExpiry) {
-      void watchlistQuery.refetch();
-    }
-  }, [workspace, watchlistExpiry]);
+  }, [watchlistExpiry, watchlistExpiryData]);
 
   useEffect(() => {
     const available = sectorQuery.data?.watchlist ?? [];
@@ -1027,8 +1025,8 @@ export default function MarketPage() {
   const stockImproving = selectedSectorStockRows.filter((stock) => stock.quadrant === "improving");
   const stockWeakening = selectedSectorStockRows.filter((stock) => stock.quadrant === "weakening");
   const stockLagging = selectedSectorStockRows.filter((stock) => stock.quadrant === "lagging");
-  const isWatchlistBuilding = watchlistQuery.data?.build_status === "building";
-  const showWatchlistLoading = watchlistQuery.isLoading || (isWatchlistBuilding && !(watchlistQuery.data?.rows?.length));
+  const isWatchlistBuilding = watchlistData?.build_status === "building";
+  const showWatchlistLoading = watchlistLiveQuery.isLoading || (isWatchlistBuilding && !(watchlistData?.rows?.length));
 
   return (
     <div className="mx-auto max-w-[1800px] space-y-4 pb-8">
@@ -1503,40 +1501,47 @@ export default function MarketPage() {
             <div>
               <div className="text-[11px] uppercase tracking-[0.14em] text-text-muted">ATM CE / PE Watchlist</div>
               <div className="mt-1 text-sm text-text-secondary">
-                All-instrument board · <span className="text-accent-blue/80">Indices use selected expiry (weekly/monthly)</span> · <span className="text-accent-amber/80">Stocks always use nearest monthly expiry</span>
+                All-instrument board · <span className="text-accent-blue/80">Indices resolve to their native expiry for the selected month</span> · <span className="text-accent-amber/80">Stocks use that month&apos;s monthly expiry</span>
               </div>
-              {watchlistExpiryQuery.data?.expiry_scope_note && (
+              {watchlistExpiryData?.expiry_scope_note && (
                 <div className="mt-1.5 text-[11px] text-text-muted font-mono">
-                  {watchlistExpiryQuery.data.expiry_scope_note}
+                  {watchlistExpiryData.expiry_scope_note}
                 </div>
               )}
-              {watchlistExpiryQuery.data?.detail && (
-                <div className="mt-1.5 text-xs text-accent-amber">{watchlistExpiryQuery.data.detail}</div>
+              {watchlistExpiryData?.detail && (
+                <div className="mt-1.5 text-xs text-accent-amber">{watchlistExpiryData.detail}</div>
               )}
-              {watchlistQuery.data?.detail && (
-                <div className="mt-1.5 text-xs text-accent-amber">{watchlistQuery.data.detail}</div>
+              {watchlistData?.detail && (
+                <div className="mt-1.5 text-xs text-accent-amber">{watchlistData.detail}</div>
               )}
             </div>
             <div className="flex items-center gap-2">
+              <StreamStatus
+                title="Watchlist"
+                isStreamConnected={watchlistLiveQuery.isStreamConnected}
+                isShowingSnapshot={watchlistLiveQuery.isShowingSnapshot}
+                snapshotSavedAt={watchlistLiveQuery.snapshotSavedAt}
+                liveText="ATM CE and PE rows are streaming"
+                bootstrapText="loading expiry catalog and ATM rows"
+              />
               <select
                 value={watchlistExpiry}
                 onChange={(event) => setWatchlistExpiry(event.target.value)}
                 className="terminal-input min-w-[176px] py-1.5 text-xs"
               >
-                {(watchlistExpiryQuery.data?.expiries ?? []).map((item) => (
+                {(watchlistExpiryData?.expiries ?? []).map((item) => (
                   <option key={item} value={item}>
                     {item}
                   </option>
                 ))}
-                {!watchlistExpiryQuery.data?.expiries?.length && watchlistExpiry && (
+                {!watchlistExpiryData?.expiries?.length && watchlistExpiry && (
                   <option value={watchlistExpiry}>{watchlistExpiry}</option>
                 )}
-                {!watchlistExpiryQuery.data?.expiries?.length && <option value="">Expiry loading...</option>}
+                {!watchlistExpiryData?.expiries?.length && <option value="">Expiry loading...</option>}
               </select>
               <button
                 onClick={() => {
-                  void watchlistExpiryQuery.refetch();
-                  void watchlistQuery.refetch();
+                  void watchlistLiveQuery.refetch();
                 }}
                 className="rounded-lg border border-bg-border bg-bg-secondary/45 p-2 text-text-muted transition-colors hover:text-text-primary"
                 aria-label="Refresh watchlist"
@@ -1550,25 +1555,25 @@ export default function MarketPage() {
             <div className="rounded-xl border border-bg-border bg-bg-secondary/50 p-3">
               <div className="text-[11px] uppercase tracking-[0.14em] text-text-muted">Rows</div>
               <div className="mt-1 font-mono text-lg font-semibold text-text-primary">
-                {watchlistQuery.data?.summary?.total_rows ?? 0}
+                {watchlistData?.summary?.total_rows ?? 0}
               </div>
             </div>
             <div className="rounded-xl border border-bg-border bg-bg-secondary/50 p-3">
               <div className="text-[11px] uppercase tracking-[0.14em] text-text-muted">CE Ready</div>
               <div className="mt-1 font-mono text-lg font-semibold text-accent-green">
-                {watchlistQuery.data?.summary?.ce_ready ?? 0}
+                {watchlistData?.summary?.ce_ready ?? 0}
               </div>
             </div>
             <div className="rounded-xl border border-bg-border bg-bg-secondary/50 p-3">
               <div className="text-[11px] uppercase tracking-[0.14em] text-text-muted">PE Ready</div>
               <div className="mt-1 font-mono text-lg font-semibold text-accent-red">
-                {watchlistQuery.data?.summary?.pe_ready ?? 0}
+                {watchlistData?.summary?.pe_ready ?? 0}
               </div>
             </div>
             <div className="rounded-xl border border-bg-border bg-bg-secondary/50 p-3">
               <div className="text-[11px] uppercase tracking-[0.14em] text-text-muted">Live Source</div>
               <div className="mt-1 font-mono text-lg font-semibold text-accent-blue">
-                {watchlistQuery.data?.source?.toUpperCase() || "--"}
+                {watchlistData?.source?.toUpperCase() || "--"}
               </div>
             </div>
           </div>
@@ -1587,7 +1592,7 @@ export default function MarketPage() {
                 </tr>
               </thead>
               <tbody>
-                {(watchlistQuery.data?.rows ?? []).map((row) => (
+                {(watchlistData?.rows ?? []).map((row) => (
                   <tr key={`${row.underlying}:${row.expiry}`} className="border-b border-bg-border/40 align-top hover:bg-bg-secondary/20">
                     <td className="py-2.5 pr-3">
                       <div className="font-semibold text-text-primary not-italic">{row.underlying}</div>
@@ -1619,10 +1624,10 @@ export default function MarketPage() {
                     </td>
                   </tr>
                 )}
-                {!showWatchlistLoading && !(watchlistQuery.data?.rows?.length) && (
+                {!showWatchlistLoading && !(watchlistData?.rows?.length) && (
                   <tr>
                     <td colSpan={7} className="py-8 text-center text-sm text-text-muted">
-                      {watchlistQuery.data?.detail || "No ATM watchlist rows are available for the selected expiry."}
+                      {watchlistData?.detail || "No ATM watchlist rows are available for the selected expiry."}
                     </td>
                   </tr>
                 )}

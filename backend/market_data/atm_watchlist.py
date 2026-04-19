@@ -10,11 +10,13 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from loguru import logger
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy import text
 
 from analytics.technicals import latest_macd_rsi
 from analysis.instruments import (
-    INDEX_EXPIRY_WEEKDAY,
+    INDEX_INSTRUMENT_KEYS,
+    get_fo_market,
     get_monthly_expiry,
     get_index_monthly_expiry,
 )
@@ -22,6 +24,7 @@ from api.routers.auth import ensure_fyers_session, ensure_upstox_session, get_ac
 from brokers.base import BrokerAdapter, OptionChain, OptionChainEntry
 from db.database import AsyncSessionLocal
 from db.redis_client import get_redis
+from market_data.fo_universe_bootstrap import ensure_fo_underlying_catalog
 from market_data.option_history import option_history_service
 
 
@@ -30,17 +33,33 @@ DEFAULT_WATCHLIST_TTL = 900
 DEFAULT_EXPIRY_TTL = 300
 DEFAULT_PARTIAL_TTL = 900
 DEFAULT_BUILD_LOCK_TTL = 900
+WATCHLIST_CACHE_VERSION = "v5"
+SYMBOL_EXPIRY_CACHE_VERSION = "v2"
 
 # ── NSE expiry rules ──────────────────────────────────────────────────────────
-# Index F&O: weekly expiry every Thursday (NIFTY on Thursdays, BANKNIFTY on
-#   Wednesdays, etc.) — broker option-chain data always returns the correct
-#   weekly series, so we honour whatever expiry the caller selects.
-# Stock F&O: monthly expiry only (last Thursday of the expiry month).
-#   Passing a weekly expiry date to the stock chain API returns empty results.
-#   We therefore override the expiry to the nearest monthly expiry for stocks.
+# NSE index contracts currently share the same Tuesday expiry ladder. Stocks
+# remain monthly-only, using the monthly expiry for the selected contract month.
+# BSE indices keep their own native weekday ladders.
+
+def _is_nse_derivatives_symbol(symbol: str) -> bool:
+    return symbol in INDEX_INSTRUMENT_KEYS and symbol not in {"SENSEX", "BANKEX"}
+
+
+def _normalize_nse_expiry_ladder(expiries: list[str]) -> list[str]:
+    normalized: set[str] = set()
+    for raw_expiry in expiries:
+        try:
+            parsed = date.fromisoformat(str(raw_expiry))
+        except (TypeError, ValueError):
+            continue
+        monthly = get_monthly_expiry(parsed.year, parsed.month)
+        if parsed > monthly:
+            parsed = monthly
+        normalized.add(parsed.isoformat())
+    return sorted(normalized)
 
 def _nearest_monthly_expiry() -> date:
-    """Return the nearest upcoming (or today's) NSE stock monthly expiry (last Thursday)."""
+    """Return the nearest upcoming NSE monthly expiry."""
     today = date.today()
     monthly = get_monthly_expiry(today.year, today.month)
     if today > monthly:
@@ -53,9 +72,9 @@ def _nearest_index_expiry(symbol: str) -> date:
     """
     Return the nearest upcoming (or today's) monthly expiry for a specific index.
 
-    Each index has a fixed expiry weekday (NIFTY=Thu, BANKNIFTY=Wed, FINNIFTY=Tue,
-    MIDCPNIFTY=Mon, SENSEX=Fri).  This function returns the last occurrence of that
-    weekday in the current (or next) month, adjusted backward past market holidays.
+    NSE indices now share Tuesday monthly expiry. BSE indices keep their native
+    weekday. This function returns the last occurrence of that expiry weekday in
+    the current (or next) month, adjusted backward past market holidays.
     Used as a FALLBACK when broker data is unavailable.
     """
     today = date.today()
@@ -64,6 +83,16 @@ def _nearest_index_expiry(symbol: str) -> date:
         nm = today.replace(day=28) + timedelta(days=4)
         monthly = get_index_monthly_expiry(symbol, nm.year, nm.month)
     return monthly
+
+
+def _stock_monthly_for_selected_expiry(selected_expiry: date) -> date:
+    """Resolve stocks to the monthly expiry for the selected expiry month."""
+    return get_monthly_expiry(selected_expiry.year, selected_expiry.month)
+
+
+def _index_monthly_for_selected_expiry(symbol: str, selected_expiry: date) -> date:
+    """Resolve an index to its monthly expiry for the selected expiry month."""
+    return get_index_monthly_expiry(symbol, selected_expiry.year, selected_expiry.month)
 
 
 def _nearest_monthly_from_expiry_list(expiries: list[str]) -> Optional[date]:
@@ -152,6 +181,40 @@ class UnderlyingMeta:
     underlying_key: str
 
 
+DEFAULT_INDEX_UNDERLYINGS: tuple[UnderlyingMeta, ...] = (
+    UnderlyingMeta(
+        symbol="NIFTY",
+        kind="INDEX",
+        spot_instrument_key=INDEX_INSTRUMENT_KEYS["NIFTY"],
+        underlying_key=INDEX_INSTRUMENT_KEYS["NIFTY"],
+    ),
+    UnderlyingMeta(
+        symbol="BANKNIFTY",
+        kind="INDEX",
+        spot_instrument_key=INDEX_INSTRUMENT_KEYS["BANKNIFTY"],
+        underlying_key=INDEX_INSTRUMENT_KEYS["BANKNIFTY"],
+    ),
+    UnderlyingMeta(
+        symbol="FINNIFTY",
+        kind="INDEX",
+        spot_instrument_key=INDEX_INSTRUMENT_KEYS["FINNIFTY"],
+        underlying_key=INDEX_INSTRUMENT_KEYS["FINNIFTY"],
+    ),
+    UnderlyingMeta(
+        symbol="MIDCPNIFTY",
+        kind="INDEX",
+        spot_instrument_key=INDEX_INSTRUMENT_KEYS["MIDCPNIFTY"],
+        underlying_key=INDEX_INSTRUMENT_KEYS["MIDCPNIFTY"],
+    ),
+    UnderlyingMeta(
+        symbol="SENSEX",
+        kind="INDEX",
+        spot_instrument_key=INDEX_INSTRUMENT_KEYS["SENSEX"],
+        underlying_key=INDEX_INSTRUMENT_KEYS["SENSEX"],
+    ),
+)
+
+
 class ATMWatchlistService:
     """Build an all-F&O ATM call/put watchlist using live chain data."""
 
@@ -159,9 +222,100 @@ class ATMWatchlistService:
     # Fyers/Upstox option-chain requests at 2 simultaneous (stays well under 10/s)
     _chain_semaphore: asyncio.Semaphore = asyncio.Semaphore(2)
 
-    async def get_expiries(self) -> dict[str, Any]:
+    @staticmethod
+    def _persisted_watchlist_query(include_underlying_lot_size: bool) -> str:
+        lot_size_select = (
+            "catalog.lot_size,"
+            if include_underlying_lot_size
+            else "NULL::INTEGER AS lot_size,"
+        )
+        return f"""
+            WITH latest_underlying AS (
+                SELECT DISTINCT ON (underlying)
+                    underlying,
+                    kind,
+                    expiry,
+                    strike,
+                    source_broker,
+                    underlying_price,
+                    time
+                FROM atm_option_watchlist_snapshots
+                WHERE expiry = :expiry
+                ORDER BY underlying, time DESC
+            )
+            SELECT
+                latest.underlying,
+                latest.kind,
+                latest.expiry,
+                latest.strike,
+                latest.source_broker,
+                latest.underlying_price,
+                {lot_size_select}
+                ce.instrument_key AS ce_instrument_key,
+                ce.trading_symbol AS ce_trading_symbol,
+                ce.ltp AS ce_ltp,
+                ce.prev_close AS ce_prev_close,
+                ce.change AS ce_change,
+                ce.change_pct AS ce_change_pct,
+                ce.oi AS ce_oi,
+                ce.prev_oi AS ce_prev_oi,
+                ce.oi_change AS ce_oi_change,
+                ce.oi_change_pct AS ce_oi_change_pct,
+                ce.volume AS ce_volume,
+                ce.iv AS ce_iv,
+                ce.macd AS ce_macd,
+                ce.macd_signal AS ce_macd_signal,
+                ce.macd_histogram AS ce_macd_histogram,
+                ce.rsi AS ce_rsi,
+                pe.instrument_key AS pe_instrument_key,
+                pe.trading_symbol AS pe_trading_symbol,
+                pe.ltp AS pe_ltp,
+                pe.prev_close AS pe_prev_close,
+                pe.change AS pe_change,
+                pe.change_pct AS pe_change_pct,
+                pe.oi AS pe_oi,
+                pe.prev_oi AS pe_prev_oi,
+                pe.oi_change AS pe_oi_change,
+                pe.oi_change_pct AS pe_oi_change_pct,
+                pe.volume AS pe_volume,
+                pe.iv AS pe_iv,
+                pe.macd AS pe_macd,
+                pe.macd_signal AS pe_macd_signal,
+                pe.macd_histogram AS pe_macd_histogram,
+                pe.rsi AS pe_rsi
+            FROM latest_underlying latest
+            LEFT JOIN fo_underlying_catalog catalog
+              ON catalog.symbol = latest.underlying
+            LEFT JOIN LATERAL (
+                SELECT instrument_key, trading_symbol, ltp, prev_close, change, change_pct,
+                       oi, prev_oi, oi_change, oi_change_pct, volume, iv,
+                       macd, macd_signal, macd_histogram, rsi
+                FROM atm_option_watchlist_snapshots
+                WHERE underlying = latest.underlying
+                  AND expiry = latest.expiry
+                  AND strike = latest.strike
+                  AND option_type = 'CE'
+                ORDER BY time DESC
+                LIMIT 1
+            ) ce ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT instrument_key, trading_symbol, ltp, prev_close, change, change_pct,
+                       oi, prev_oi, oi_change, oi_change_pct, volume, iv,
+                       macd, macd_signal, macd_histogram, rsi
+                FROM atm_option_watchlist_snapshots
+                WHERE underlying = latest.underlying
+                  AND expiry = latest.expiry
+                  AND strike = latest.strike
+                  AND option_type = 'PE'
+                ORDER BY time DESC
+                LIMIT 1
+            ) pe ON TRUE
+            ORDER BY CASE WHEN latest.kind = 'INDEX' THEN 0 ELSE 1 END, latest.underlying
+        """
+
+    async def get_expiries(self, selected_expiry: Optional[str] = None) -> dict[str, Any]:
         redis = await get_redis()
-        cache_key = "atm_watchlist:expiries:v3"
+        cache_key = f"atm_watchlist:expiries:{WATCHLIST_CACHE_VERSION}:{selected_expiry or 'default'}"
         cached = await redis.get(cache_key)
         if cached:
             return json.loads(cached)
@@ -186,9 +340,6 @@ class ATMWatchlistService:
         async def fetch_expiries(meta: UnderlyingMeta) -> list[str]:
             nonlocal fyers_failed, used_upstox_fallback, used_catalog_fallback
             persisted_expiries = await self._load_persisted_expiries_for_symbol(meta.symbol)
-            if upstox_adapter is None and persisted_expiries:
-                used_catalog_fallback = True
-                return persisted_expiries
             live_source = "none"
             expiries = await self._get_broker_expiries_for_symbol(
                 meta,
@@ -223,32 +374,36 @@ class ATMWatchlistService:
             return expiries
 
         expiry_results = await asyncio.gather(*(fetch_expiries(meta) for meta in representative))
-        # Map symbol → broker expiry list (for per-index monthly derivation)
+        # Map symbol → broker expiry list.
         sym_to_expiries: dict[str, list[str]] = {
             meta.symbol: exp_list
             for meta, exp_list in zip(representative, expiry_results)
         }
-        expiries = sorted({expiry for items in expiry_results for expiry in items if expiry})
+        nifty_expiries = sym_to_expiries.get("NIFTY", [])
+        if nifty_expiries:
+            nifty_expiries = _normalize_nse_expiry_ladder(nifty_expiries)
+        expiries = list(nifty_expiries) if nifty_expiries else sorted({expiry for items in expiry_results for expiry in items if expiry})
         _today = date.today()
         today = _today.isoformat()
 
-        # Per-index monthlies — derived from broker data (regulation-proof) with computed fallback
+        # NIFTY's live ladder is the canonical dropdown scope for the NSE board.
+        # Normalize any stale broker monthly dates back onto the official NSE
+        # Tuesday monthly schedule before exposing them to the UI.
+        if nifty_expiries:
+            expiries = _normalize_nse_expiry_ladder(expiries)
+        live_nifty_month = _nearest_monthly_from_expiry_list(nifty_expiries)
+        if live_nifty_month is None:
+            live_nifty_month = _nearest_index_expiry("NIFTY")
+        selected_scope_date = self._parse_expiry(selected_expiry) or live_nifty_month
+        monthly_expiry_iso = get_monthly_expiry(selected_scope_date.year, selected_scope_date.month).isoformat()
+
         _index_monthlies: dict[str, str] = {}
         for _sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"):
-            broker_exp_list = sym_to_expiries.get(_sym, [])
-            broker_m = _nearest_monthly_from_expiry_list(broker_exp_list)
-            if broker_m is not None:
-                _index_monthlies[_sym] = broker_m.isoformat()
+            if _is_nse_derivatives_symbol(_sym):
+                _index_monthlies[_sym] = monthly_expiry_iso
             else:
-                # Fallback: computed weekday rule (used when broker is unavailable)
-                _index_monthlies[_sym] = _nearest_index_expiry(_sym).isoformat()
-
-        # NIFTY monthly is the canonical default for the expiry dropdown.
-        # Each index auto-corrects to its own monthly inside _build_row().
-        monthly_expiry_iso = _index_monthlies.get("NIFTY") or get_monthly_expiry(
-            _today.year, _today.month
-        ).isoformat()
-        stock_monthly_expiry_iso = _nearest_monthly_expiry().isoformat()
+                _index_monthlies[_sym] = _index_monthly_for_selected_expiry(_sym, selected_scope_date).isoformat()
+        stock_monthly_expiry_iso = _stock_monthly_for_selected_expiry(selected_scope_date).isoformat()
 
         # Always ensure NIFTY monthly is in the list — prevents empty dropdown when
         # brokers are rate-limited (watchlistExpiry stays "" → enabled:false otherwise).
@@ -285,8 +440,8 @@ class ATMWatchlistService:
             "monthly_expiry": monthly_expiry_iso,
             "source": source,
             "detail": detail,
-            # Each index auto-corrects to its own native expiry weekday in _build_row().
-            # E.g. selecting NIFTY Apr-30 → FINNIFTY auto-uses Apr-28, BANKNIFTY Apr-29.
+            # NSE indices/stocks share the same monthly expiry. BSE indices keep
+            # their native expiry ladder.
             "expiry_scope_note": (
                 f"NIFTY {_index_monthlies.get('NIFTY', monthly_expiry_iso)} · "
                 f"BNKN {_index_monthlies.get('BANKNIFTY', '?')} · "
@@ -301,7 +456,7 @@ class ATMWatchlistService:
         return payload
 
     async def get_watchlist(self, expiry: Optional[str] = None) -> dict[str, Any]:
-        expiry_payload = await self.get_expiries()
+        expiry_payload = await self.get_expiries(expiry)
         selected_expiry = expiry or expiry_payload.get("default_expiry")
         selected_expiry_date = self._parse_expiry(selected_expiry)
         if not selected_expiry or selected_expiry_date is None:
@@ -315,9 +470,9 @@ class ATMWatchlistService:
             }
 
         redis = await get_redis()
-        cache_key = f"atm_watchlist:v3:{selected_expiry}"
-        partial_key = f"atm_watchlist:partial:{selected_expiry}"
-        build_lock_key = f"atm_watchlist:building:{selected_expiry}"
+        cache_key = f"atm_watchlist:{WATCHLIST_CACHE_VERSION}:{selected_expiry}"
+        partial_key = f"atm_watchlist:partial:{WATCHLIST_CACHE_VERSION}:{selected_expiry}"
+        build_lock_key = f"atm_watchlist:building:{WATCHLIST_CACHE_VERSION}:{selected_expiry}"
         cached = await redis.get(cache_key)
         if cached:
             cached_payload = json.loads(cached)
@@ -539,51 +694,22 @@ class ATMWatchlistService:
         fyers_adapter: Optional[BrokerAdapter],
     ) -> Optional[dict[str, Any]]:
         # ── Expiry resolution ──────────────────────────────────────────────────
-        # Priority: broker-reported expiry list → computed weekday fallback
-        #
-        # STOCK underlyings: monthly expiry ONLY (last Thursday of month).
-        #   Passing a weekly expiry returns empty results from the broker.
-        #   Override to the nearest stock monthly expiry unconditionally.
-        #
-        # INDEX underlyings: each index has its own expiry schedule that can
-        #   change due to regulatory updates.  We ALWAYS ask the broker for the
-        #   actual available expiry list and pick the nearest monthly from that.
-        #   "Monthly" = the last expiry in the calendar month (the furthest-out
-        #   contract for that month, which is the monthly contract in every
-        #   weekly+monthly series).
-        #   We only fall back to the hardcoded weekday computation when the
-        #   broker returns no data (disconnected / rate-limited).
+        # Stocks are monthly-only, so they always resolve to the monthly expiry
+        # of the selected contract month. NSE indices honour the selected
+        # expiry directly. BSE indices continue to use their native monthly.
         if meta.kind != "INDEX":
-            # Stock: always use last-Thursday monthly (no weekly series for stocks)
-            monthly = _nearest_monthly_expiry()
+            monthly = _stock_monthly_for_selected_expiry(expiry_date)
             expiry = monthly.isoformat()
             expiry_date = monthly
-        else:
-            # Index: get actual available expiries from the broker
-            broker_expiries = await self._get_broker_expiries_for_symbol(
-                meta, upstox_adapter, fyers_adapter
-            )
-            broker_monthly = _nearest_monthly_from_expiry_list(broker_expiries)
-            if broker_monthly is not None:
-                if broker_monthly.isoformat() != expiry:
-                    logger.debug(
-                        f"[ATM watchlist] {meta.symbol} expiry broker-resolved: "
-                        f"{expiry} → {broker_monthly.isoformat()} "
-                        f"(from {len(broker_expiries)} broker expiries)"
-                    )
-                expiry = broker_monthly.isoformat()
-                expiry_date = broker_monthly
-            else:
-                # Broker unavailable — fall back to computed weekday rule
-                native_weekday = INDEX_EXPIRY_WEEKDAY.get(meta.symbol, 3)
-                if expiry_date.weekday() != native_weekday:
-                    idx_monthly = _nearest_index_expiry(meta.symbol)
-                    logger.debug(
-                        f"[ATM watchlist] {meta.symbol} expiry weekday-corrected (broker offline): "
-                        f"{expiry} → {idx_monthly.isoformat()} (native weekday {native_weekday})"
-                    )
-                    expiry = idx_monthly.isoformat()
-                    expiry_date = idx_monthly
+        elif not _is_nse_derivatives_symbol(meta.symbol):
+            native_monthly = _index_monthly_for_selected_expiry(meta.symbol, expiry_date)
+            if native_monthly.isoformat() != expiry:
+                logger.debug(
+                    f"[ATM watchlist] {meta.symbol} expiry native-monthly resolved: "
+                    f"{expiry} → {native_monthly.isoformat()}"
+                )
+            expiry = native_monthly.isoformat()
+            expiry_date = native_monthly
 
         # Contract metadata comes from Upstox when live, but must continue to
         # resolve from the persisted catalog when Upstox is offline.
@@ -818,7 +944,7 @@ class ATMWatchlistService:
         Falls back to empty list if both brokers are unavailable.
         """
         redis = await get_redis()
-        cache_key = f"atm_watchlist:sym_expiries:v1:{meta.symbol}"
+        cache_key = f"atm_watchlist:sym_expiries:{SYMBOL_EXPIRY_CACHE_VERSION}:{meta.symbol}"
         cached = await redis.get(cache_key)
         if cached:
             return json.loads(cached)
@@ -831,23 +957,22 @@ class ATMWatchlistService:
             try:
                 contracts = await upstox_adapter.get_option_contracts(meta.underlying_key)
                 expiries = sorted({str(row.get("expiry")) for row in contracts if row.get("expiry")})
+                if _is_nse_derivatives_symbol(meta.symbol):
+                    expiries = _normalize_nse_expiry_ladder(expiries)
                 if expiries:
                     await self._persist_expiries_for_symbol(meta.symbol, expiries)
             except Exception as exc:
                 logger.debug(f"[ATM watchlist] Upstox expiry fetch failed for {meta.symbol}: {exc}")
 
-        # Saved Upstox-derived expiry ladders are more stable than Fyers expiry
-        # discovery, so keep using the persisted catalog until it is exhausted.
-        if upstox_adapter is None and persisted_expiries:
-            await redis.set(cache_key, json.dumps(persisted_expiries), ex=DEFAULT_EXPIRY_TTL)
-            return persisted_expiries
-
-        # Fyers is a live fallback when Upstox is unavailable.
+        # Fyers is the live fallback when Upstox is unavailable. Persisted
+        # ladders are only used when both live sources fail.
         if fyers_adapter is not None and not expiries:
             try:
                 fyers_sym = self._to_fyers_symbol(meta)
                 contracts = await fyers_adapter.get_option_contracts(fyers_sym)
                 expiries = sorted({str(row.get("expiry")) for row in contracts if row.get("expiry")})
+                if _is_nse_derivatives_symbol(meta.symbol):
+                    expiries = _normalize_nse_expiry_ladder(expiries)
                 if expiries:
                     await self._persist_expiries_for_symbol(meta.symbol, expiries)
             except Exception as exc:
@@ -858,6 +983,8 @@ class ATMWatchlistService:
             return expiries
 
         if persisted_expiries:
+            if _is_nse_derivatives_symbol(meta.symbol):
+                persisted_expiries = _normalize_nse_expiry_ladder(persisted_expiries)
             await redis.set(cache_key, json.dumps(persisted_expiries), ex=DEFAULT_EXPIRY_TTL)
             return persisted_expiries
         return []
@@ -1045,6 +1172,7 @@ class ATMWatchlistService:
                     "instrument_key": instrument_key,
                     "trading_symbol": contract.get("trading_symbol"),
                     "underlying": symbol,
+                    "market": get_fo_market(symbol),
                     "expiry": expiry_value,
                     "strike": float(contract.get("strike_price") or 0.0),
                     "option_type": option_type,
@@ -1060,11 +1188,11 @@ class ATMWatchlistService:
                         """
                         INSERT INTO fo_contract_catalog (
                             instrument_key, trading_symbol, underlying, expiry,
-                            strike, option_type, lot_size, updated_at
+                            strike, option_type, lot_size, market, updated_at
                         )
                         VALUES (
                             :instrument_key, :trading_symbol, :underlying, :expiry,
-                            :strike, :option_type, :lot_size, NOW()
+                            :strike, :option_type, :lot_size, :market, NOW()
                         )
                         ON CONFLICT (instrument_key) DO UPDATE
                         SET trading_symbol = COALESCE(EXCLUDED.trading_symbol, fo_contract_catalog.trading_symbol),
@@ -1073,6 +1201,7 @@ class ATMWatchlistService:
                             strike = EXCLUDED.strike,
                             option_type = EXCLUDED.option_type,
                             lot_size = COALESCE(EXCLUDED.lot_size, fo_contract_catalog.lot_size),
+                            market = COALESCE(EXCLUDED.market, fo_contract_catalog.market),
                             updated_at = NOW()
                         """
                     ),
@@ -1113,94 +1242,24 @@ class ATMWatchlistService:
             return []
 
         async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                text(
-                    """
-                    WITH latest_underlying AS (
-                        SELECT DISTINCT ON (underlying)
-                            underlying,
-                            kind,
-                            expiry,
-                            strike,
-                            source_broker,
-                            underlying_price,
-                            time
-                        FROM atm_option_watchlist_snapshots
-                        WHERE expiry = :expiry
-                        ORDER BY underlying, time DESC
-                    )
-                    SELECT
-                        latest.underlying,
-                        latest.kind,
-                        latest.expiry,
-                        latest.strike,
-                        latest.source_broker,
-                        latest.underlying_price,
-                        catalog.lot_size,
-                        ce.instrument_key AS ce_instrument_key,
-                        ce.trading_symbol AS ce_trading_symbol,
-                        ce.ltp AS ce_ltp,
-                        ce.prev_close AS ce_prev_close,
-                        ce.change AS ce_change,
-                        ce.change_pct AS ce_change_pct,
-                        ce.oi AS ce_oi,
-                        ce.prev_oi AS ce_prev_oi,
-                        ce.oi_change AS ce_oi_change,
-                        ce.oi_change_pct AS ce_oi_change_pct,
-                        ce.volume AS ce_volume,
-                        ce.iv AS ce_iv,
-                        ce.macd AS ce_macd,
-                        ce.macd_signal AS ce_macd_signal,
-                        ce.macd_histogram AS ce_macd_histogram,
-                        ce.rsi AS ce_rsi,
-                        pe.instrument_key AS pe_instrument_key,
-                        pe.trading_symbol AS pe_trading_symbol,
-                        pe.ltp AS pe_ltp,
-                        pe.prev_close AS pe_prev_close,
-                        pe.change AS pe_change,
-                        pe.change_pct AS pe_change_pct,
-                        pe.oi AS pe_oi,
-                        pe.prev_oi AS pe_prev_oi,
-                        pe.oi_change AS pe_oi_change,
-                        pe.oi_change_pct AS pe_oi_change_pct,
-                        pe.volume AS pe_volume,
-                        pe.iv AS pe_iv,
-                        pe.macd AS pe_macd,
-                        pe.macd_signal AS pe_macd_signal,
-                        pe.macd_histogram AS pe_macd_histogram,
-                        pe.rsi AS pe_rsi
-                    FROM latest_underlying latest
-                    LEFT JOIN fo_underlying_catalog catalog
-                      ON catalog.symbol = latest.underlying
-                    LEFT JOIN LATERAL (
-                        SELECT instrument_key, trading_symbol, ltp, prev_close, change, change_pct,
-                               oi, prev_oi, oi_change, oi_change_pct, volume, iv,
-                               macd, macd_signal, macd_histogram, rsi
-                        FROM atm_option_watchlist_snapshots
-                        WHERE underlying = latest.underlying
-                          AND expiry = latest.expiry
-                          AND strike = latest.strike
-                          AND option_type = 'CE'
-                        ORDER BY time DESC
-                        LIMIT 1
-                    ) ce ON TRUE
-                    LEFT JOIN LATERAL (
-                        SELECT instrument_key, trading_symbol, ltp, prev_close, change, change_pct,
-                               oi, prev_oi, oi_change, oi_change_pct, volume, iv,
-                               macd, macd_signal, macd_histogram, rsi
-                        FROM atm_option_watchlist_snapshots
-                        WHERE underlying = latest.underlying
-                          AND expiry = latest.expiry
-                          AND strike = latest.strike
-                          AND option_type = 'PE'
-                        ORDER BY time DESC
-                        LIMIT 1
-                    ) pe ON TRUE
-                    ORDER BY CASE WHEN latest.kind = 'INDEX' THEN 0 ELSE 1 END, latest.underlying
-                    """
-                ),
-                {"expiry": expiry_date},
-            )
+            try:
+                result = await session.execute(
+                    text(self._persisted_watchlist_query(include_underlying_lot_size=True)),
+                    {"expiry": expiry_date},
+                )
+            except ProgrammingError as exc:
+                message = str(exc).lower()
+                if "catalog.lot_size" not in message and "column lot_size does not exist" not in message:
+                    raise
+                logger.warning(
+                    "[ATM watchlist] fo_underlying_catalog.lot_size is missing; "
+                    "reloading persisted rows without underlying lot size."
+                )
+                await session.rollback()
+                result = await session.execute(
+                    text(self._persisted_watchlist_query(include_underlying_lot_size=False)),
+                    {"expiry": expiry_date},
+                )
             rows = result.fetchall()
 
         meta_by_symbol = {meta.symbol: meta for meta in underlyings}
@@ -1519,24 +1578,38 @@ class ATMWatchlistService:
         return all(self._entry_matches_expiry(entry, expiry_date) for entry in entries if entry is not None)
 
     async def _load_underlyings(self) -> list[UnderlyingMeta]:
-        statement = text("""
-            SELECT symbol, kind, spot_instrument_key, underlying_key
-            FROM fo_underlying_catalog
-            WHERE spot_instrument_key IS NOT NULL
-              AND underlying_key IS NOT NULL
-            ORDER BY CASE WHEN kind = 'INDEX' THEN 0 ELSE 1 END, symbol
-        """)
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(statement)
-            return [
-                UnderlyingMeta(
-                    symbol=str(row.symbol),
-                    kind=str(row.kind),
-                    spot_instrument_key=str(row.spot_instrument_key),
-                    underlying_key=str(row.underlying_key),
-                )
-                for row in result.fetchall()
-            ]
+        async def _query_rows() -> list[UnderlyingMeta]:
+            statement = text("""
+                SELECT symbol, kind, spot_instrument_key, underlying_key
+                FROM fo_underlying_catalog
+                WHERE spot_instrument_key IS NOT NULL
+                  AND underlying_key IS NOT NULL
+                ORDER BY CASE WHEN kind = 'INDEX' THEN 0 ELSE 1 END, symbol
+            """)
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(statement)
+                return [
+                    UnderlyingMeta(
+                        symbol=str(row.symbol),
+                        kind=str(row.kind),
+                        spot_instrument_key=str(row.spot_instrument_key),
+                        underlying_key=str(row.underlying_key),
+                    )
+                    for row in result.fetchall()
+                ]
+
+        rows = await _query_rows()
+        stock_count = sum(1 for row in rows if row.kind == "STOCK")
+        if len(rows) <= len(DEFAULT_INDEX_UNDERLYINGS) or stock_count == 0:
+            await ensure_fo_underlying_catalog()
+            rows = await _query_rows()
+        if rows:
+            return rows
+        logger.warning(
+            "[ATM watchlist] fo_underlying_catalog is empty; "
+            "falling back to the default index watchlist universe."
+        )
+        return list(DEFAULT_INDEX_UNDERLYINGS)
 
     async def _get_upstox_adapter(self) -> Optional[BrokerAdapter]:
         await ensure_upstox_session(force_validate=True)

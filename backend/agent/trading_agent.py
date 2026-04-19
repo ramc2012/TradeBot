@@ -352,14 +352,14 @@ Return a TradeProposal with these exact fields:
 
     @staticmethod
     def _next_expiry() -> str:
-        """Get next Thursday (NSE weekly expiry)."""
+        """Get next Tuesday (current NSE weekly expiry)."""
         from datetime import date
         today = date.today()
-        days_until_thursday = (3 - today.weekday()) % 7
-        if days_until_thursday == 0:
-            days_until_thursday = 7
-        next_thu = today + timedelta(days=days_until_thursday)
-        return next_thu.strftime("%Y-%m-%d")
+        days_until_tuesday = (1 - today.weekday()) % 7
+        if days_until_tuesday == 0:
+            days_until_tuesday = 7
+        next_tuesday = today + timedelta(days=days_until_tuesday)
+        return next_tuesday.strftime("%Y-%m-%d")
 
     async def chat(self, message: str) -> str:
         """Direct chat interface for CURIE."""

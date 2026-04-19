@@ -147,13 +147,27 @@ async def test_system_health_reports_healthy_runtime(monkeypatch: pytest.MonkeyP
             }
         ),
     )
+    monkeypatch.setattr(
+        system,
+        "_fractal_market_profile_service",
+        lambda: _async_result(
+            {
+                "key": "fractal_market_profile",
+                "label": "Fractal Market Profile",
+                "status": "healthy",
+                "detail": "Recent minute history is available.",
+                "meta": {"symbol_code": "NIFTY", "session_count": 2},
+            }
+        ),
+    )
 
     payload = await system.system_health()
 
     assert payload["summary"]["status"] == "healthy"
     assert payload["summary"]["critical_services"] == 0
-    assert len(payload["services"]) == 9
+    assert len(payload["services"]) == 10
     assert any(service["key"] == "brokers" and service["status"] == "healthy" for service in payload["services"])
+    assert any(service["key"] == "fractal_market_profile" and service["status"] == "healthy" for service in payload["services"])
     assert any(lane["key"] == "nse_strategy:macd_strategy" for lane in payload["strategy_lanes"])
 
 
@@ -202,6 +216,19 @@ async def test_system_health_marks_missing_brokers_critical(monkeypatch: pytest.
                 "live_ready": False,
                 "deployable_first_sleeve": "swing",
                 "validation_gates": [{"id": "gate_a", "status": "available"}],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        system,
+        "_fractal_market_profile_service",
+        lambda: _async_result(
+            {
+                "key": "fractal_market_profile",
+                "label": "Fractal Market Profile",
+                "status": "degraded",
+                "detail": "Live snapshot unavailable.",
+                "meta": {"symbol_code": "NIFTY"},
             }
         ),
     )
@@ -301,6 +328,19 @@ async def test_system_overview_excludes_idle_services_from_blockers(monkeypatch:
                 "live_ready": True,
                 "deployable_first_sleeve": "swing",
                 "validation_gates": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        system,
+        "_fractal_market_profile_service",
+        lambda: _async_result(
+            {
+                "key": "fractal_market_profile",
+                "label": "Fractal Market Profile",
+                "status": "healthy",
+                "detail": "Recent minute history is available.",
+                "meta": {"symbol_code": "NIFTY", "session_count": 2},
             }
         ),
     )
@@ -420,6 +460,19 @@ async def test_system_overview_counts_top_level_strategy_positions(monkeypatch: 
             }
         ),
     )
+    monkeypatch.setattr(
+        system,
+        "_fractal_market_profile_service",
+        lambda: _async_result(
+            {
+                "key": "fractal_market_profile",
+                "label": "Fractal Market Profile",
+                "status": "degraded",
+                "detail": "Live snapshot unavailable.",
+                "meta": {"symbol_code": "NIFTY"},
+            }
+        ),
+    )
 
     async def _fake_manual_book_summary() -> dict:
         return {"total_pnl": 0.0, "total_trades": 0, "open_positions": 0, "open_pnl": 0.0}
@@ -438,6 +491,7 @@ async def test_system_overview_counts_top_level_strategy_positions(monkeypatch: 
     assert payload["books"]["combined"]["open_positions"] == 3
     assert payload["books"]["commodity_strategy"]["status"]["running"] is True
     assert commodity_service["meta"]["open_positions"] == 1
+    assert any(item["key"] == "fractal_market_profile" for item in payload["blockers"])
 
 
 async def _async_result(payload: dict) -> dict:
