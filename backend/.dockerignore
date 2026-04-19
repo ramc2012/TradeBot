@@ -9,5 +9,14 @@ venv
 credentials.json
 commodity_strategy.json
 nse_strategy_state.json
-runtime/
+runtime/*
+!runtime/index_analytics_data/
+runtime/index_analytics_data/*
+!runtime/index_analytics_data/contract_index.json
+!runtime/index_analytics_data/spot/
+!runtime/index_analytics_data/spot/**
+!runtime/index_analytics_data/contracts/
+!runtime/index_analytics_data/contracts/**
+!runtime/directional_options/
+!runtime/directional_options/**
 mp_data/**/*.png

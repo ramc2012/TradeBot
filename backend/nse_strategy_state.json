@@ -258,7 +258,7 @@
       "signal_lane": [],
       "meta": {
         "mode": "market_closed",
-        "updated_at": "2026-04-19T23:23:09.411164+05:30",
+        "updated_at": "2026-04-19T23:48:10.030808+05:30",
         "market_state": "closed",
         "scan_interval": "30minute",
         "watchlist_rows": 6,
@@ -1570,7 +1570,7 @@
         "mode": "market_closed",
         "scan_interval": "5minute",
         "watchlist_rows": 1,
-        "updated_at": "2026-04-19T23:23:09.411164+05:30",
+        "updated_at": "2026-04-19T23:48:10.030808+05:30",
         "pipeline": [
           {
             "name": "Strategy 2 NIFTY",
