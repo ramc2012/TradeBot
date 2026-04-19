@@ -160,6 +160,27 @@ function ValueMigrationPanel({ data }: { data: any }) {
   const sessions = data.sessions;
   const summary = data.summary;
 
+  // ── Compute tight domains from actual data ──────────────────────────────
+  const allPriceLevels = sessions.flatMap((s: any) => [s.vah, s.val, s.poc]).filter(Boolean);
+  const priceMin = Math.min(...allPriceLevels);
+  const priceMax = Math.max(...allPriceLevels);
+  const pricePad = Math.max((priceMax - priceMin) * 0.08, 50);
+  const priceDomain = [Math.floor(priceMin - pricePad), Math.ceil(priceMax + pricePad)];
+
+  const vaWidths = sessions.map((s: any) => s.va_width).filter(Boolean);
+  const vaWidthMin = Math.min(...vaWidths);
+  const vaWidthMax = Math.max(...vaWidths);
+  const vaWidthPad = (vaWidthMax - vaWidthMin) * 0.12;
+  const vaWidthDomain = [Math.floor(vaWidthMin - vaWidthPad), Math.ceil(vaWidthMax + vaWidthPad)];
+
+  const netFails = sessions.map((s: any) => s.net_failure).filter((v: any) => v != null);
+  const failAbs = Math.max(...netFails.map(Math.abs), 1);
+  const failDomain = [-(failAbs + 1), failAbs + 1];
+
+  const pocShifts = sessions.map((s: any) => s.poc_shift).filter((v: any) => v != null && v !== 0);
+  const shiftAbs = pocShifts.length ? Math.max(...pocShifts.map(Math.abs), 10) : 50;
+  const shiftDomain = [-(shiftAbs + 10), shiftAbs + 10];
+
   return (
     <div className="space-y-4">
       {/* Summary row */}
@@ -193,12 +214,15 @@ function ValueMigrationPanel({ data }: { data: any }) {
         />
       </div>
 
-      {/* POC + VA Center chart */}
+      {/* POC + VA band — tight Y domain so moves are visible */}
       <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3">
-        <p className="text-[11px] text-zinc-500 mb-2">
-          POC & VA Centre — last {sessions.length} sessions
+        <p className="text-[11px] text-zinc-500 mb-1">
+          POC & Value Area — last {sessions.length} sessions
         </p>
-        <ResponsiveContainer width="100%" height={200}>
+        <p className="text-[9px] text-zinc-600 mb-2">
+          Y axis zoomed to data range {priceMin.toLocaleString()} – {priceMax.toLocaleString()} (±{Math.round(pricePad)} pad)
+        </p>
+        <ResponsiveContainer width="100%" height={220}>
           <ComposedChart data={sessions} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
             <XAxis
@@ -208,149 +232,93 @@ function ValueMigrationPanel({ data }: { data: any }) {
               interval="preserveStartEnd"
             />
             <YAxis
+              domain={priceDomain}
               tick={{ fontSize: 9, fill: "#71717a" }}
               tickFormatter={(v) => v.toLocaleString()}
-              width={52}
+              width={56}
             />
             <Tooltip
-              contentStyle={{
-                background: "#18181b",
-                border: "1px solid #3f3f46",
-                fontSize: 11,
-              }}
+              contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", fontSize: 11 }}
               formatter={(val: number, name: string) => [
-                val.toLocaleString(undefined, { maximumFractionDigits: 1 }),
+                val.toLocaleString(undefined, { maximumFractionDigits: 0 }),
                 name,
               ]}
             />
-            {/* Value area band */}
-            <Area
-              dataKey="vah"
-              name="VAH"
-              stroke={COLORS.vah}
-              fill={`${COLORS.vah}18`}
-              strokeWidth={1}
-              dot={false}
-            />
-            <Area
-              dataKey="val"
-              name="VAL"
-              stroke={COLORS.val}
-              fill={`${COLORS.val}18`}
-              strokeWidth={1}
-              dot={false}
-            />
-            <Line
-              dataKey="poc"
-              name="POC"
-              stroke={COLORS.poc}
-              strokeWidth={2}
-              dot={false}
-            />
-            <Line
-              dataKey="poc_ma"
-              name="POC MA"
-              stroke={`${COLORS.poc}88`}
-              strokeWidth={1}
-              strokeDasharray="4 3"
-              dot={false}
-            />
-            <Line
-              dataKey="va_center"
-              name="VA Centre"
-              stroke={COLORS.va_center}
-              strokeWidth={1.5}
-              dot={false}
-            />
+            <Legend wrapperStyle={{ fontSize: 10, color: "#71717a" }} />
+            {/* VAH filled area on top */}
+            <Area dataKey="vah" name="VAH" stroke={COLORS.vah} fill={`${COLORS.vah}20`} strokeWidth={1.5} dot={false} legendType="line" />
+            {/* VAL filled area underneath — fill between val and chart bottom */}
+            <Area dataKey="val" name="VAL" stroke={COLORS.val} fill={`${COLORS.val}20`} strokeWidth={1.5} dot={false} legendType="line" />
+            <Line dataKey="poc" name="POC" stroke={COLORS.poc} strokeWidth={2.5} dot={false} />
+            <Line dataKey="poc_ma" name={`POC MA`} stroke={`${COLORS.poc}77`} strokeWidth={1} strokeDasharray="5 3" dot={false} />
+            <Line dataKey="va_center" name="VA Centre" stroke={COLORS.va_center} strokeWidth={1.5} strokeDasharray="3 2" dot={false} />
           </ComposedChart>
         </ResponsiveContainer>
       </div>
 
-      {/* VA Width + Net Failure */}
+      {/* POC daily shift bars — separated from price scale */}
       <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3">
         <p className="text-[11px] text-zinc-500 mb-2">
-          VA Width & Net Failure Score
+          Session-on-Session POC Shift — direction of value migration
         </p>
-        <ResponsiveContainer width="100%" height={160}>
+        <ResponsiveContainer width="100%" height={130}>
           <ComposedChart data={sessions} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
-            <XAxis
-              dataKey="date"
-              tickFormatter={shortDate}
-              tick={{ fontSize: 9, fill: "#71717a" }}
-              interval="preserveStartEnd"
-            />
-            <YAxis
-              yAxisId="width"
-              tick={{ fontSize: 9, fill: "#71717a" }}
-              width={40}
-            />
-            <YAxis
-              yAxisId="fail"
-              orientation="right"
-              tick={{ fontSize: 9, fill: "#71717a" }}
-              width={32}
-            />
-            <Tooltip
-              contentStyle={{
-                background: "#18181b",
-                border: "1px solid #3f3f46",
-                fontSize: 11,
-              }}
-            />
-            <ReferenceLine yAxisId="fail" y={0} stroke="#52525b" strokeDasharray="2 2" />
-            <Area
-              yAxisId="width"
-              dataKey="va_width"
-              name="VA Width"
-              stroke="#60a5fa"
-              fill="#60a5fa18"
-              strokeWidth={1}
-              dot={false}
-            />
-            <Bar
-              yAxisId="fail"
-              dataKey="net_failure"
-              name="Net Fail"
-              maxBarSize={6}
-              fill="#f59e0b"
-            >
+            <XAxis dataKey="date" tickFormatter={shortDate} tick={{ fontSize: 9, fill: "#71717a" }} interval="preserveStartEnd" />
+            <YAxis domain={shiftDomain} tick={{ fontSize: 9, fill: "#71717a" }} width={44} tickFormatter={(v) => (v > 0 ? "+" : "") + v} />
+            <Tooltip contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", fontSize: 11 }} formatter={(v: number) => [(v > 0 ? "+" : "") + v.toFixed(0), "POC Shift"]} />
+            <ReferenceLine y={0} stroke="#52525b" />
+            <Bar dataKey="poc_shift" name="POC Shift" maxBarSize={10}>
               {sessions.map((s: any, i: number) => (
-                <Cell
-                  key={i}
-                  fill={s.net_failure < 0 ? COLORS.trend_dn : COLORS.trend_up}
-                />
+                <Cell key={i} fill={s.poc_shift >= 0 ? COLORS.trend_up : COLORS.trend_dn} />
               ))}
             </Bar>
           </ComposedChart>
         </ResponsiveContainer>
       </div>
 
-      {/* Close location stream */}
+      {/* VA Width — own tight axis; Net Failure — own axis on right */}
       <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3">
         <p className="text-[11px] text-zinc-500 mb-2">
-          Close Location (0 = session low, 1 = session high)
+          VA Width <span className="text-blue-400">(left)</span> &amp; Net Failure Score <span className="text-zinc-400">(right, +seller / −buyer)</span>
         </p>
-        <ResponsiveContainer width="100%" height={100}>
+        <ResponsiveContainer width="100%" height={150}>
+          <ComposedChart data={sessions} margin={{ top: 4, right: 40, bottom: 0, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+            <XAxis dataKey="date" tickFormatter={shortDate} tick={{ fontSize: 9, fill: "#71717a" }} interval="preserveStartEnd" />
+            <YAxis yAxisId="width" domain={vaWidthDomain} tick={{ fontSize: 9, fill: "#60a5fa" }} width={40} />
+            <YAxis yAxisId="fail" orientation="right" domain={failDomain} tick={{ fontSize: 9, fill: "#71717a" }} width={36} tickFormatter={(v) => (v > 0 ? "+" : "") + v} />
+            <Tooltip contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", fontSize: 11 }} />
+            <ReferenceLine yAxisId="fail" y={0} stroke="#52525b" strokeDasharray="2 2" />
+            <Area yAxisId="width" dataKey="va_width" name="VA Width" stroke="#60a5fa" fill="#60a5fa18" strokeWidth={1.5} dot={false} />
+            <Bar yAxisId="fail" dataKey="net_failure" name="Net Fail" maxBarSize={8}>
+              {sessions.map((s: any, i: number) => (
+                <Cell key={i} fill={s.net_failure < 0 ? COLORS.trend_dn : COLORS.trend_up} />
+              ))}
+            </Bar>
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Close location — fixed 0–1 domain is correct; add bull/bear zones */}
+      <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3">
+        <p className="text-[11px] text-zinc-500 mb-2">
+          Close Location — 0 = session low · 0.5 = midpoint · 1 = session high
+        </p>
+        <ResponsiveContainer width="100%" height={110}>
           <AreaChart data={sessions} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
-            <XAxis
-              dataKey="date"
-              tickFormatter={shortDate}
-              tick={{ fontSize: 9, fill: "#71717a" }}
-              interval="preserveStartEnd"
+            <XAxis dataKey="date" tickFormatter={shortDate} tick={{ fontSize: 9, fill: "#71717a" }} interval="preserveStartEnd" />
+            <YAxis domain={[0, 1]} ticks={[0, 0.25, 0.5, 0.75, 1]} tick={{ fontSize: 9, fill: "#71717a" }} width={28}
+              tickFormatter={(v) => (v === 0 ? "Low" : v === 0.5 ? "Mid" : v === 1 ? "High" : v.toFixed(2))}
             />
-            <YAxis domain={[0, 1]} tick={{ fontSize: 9, fill: "#71717a" }} width={30} />
-            <Tooltip contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", fontSize: 11 }} />
-            <ReferenceLine y={0.5} stroke="#52525b" strokeDasharray="3 3" />
-            <Area
-              dataKey="close_location"
-              name="Close Loc."
-              stroke="#a78bfa"
-              fill="#a78bfa18"
-              strokeWidth={1.5}
-              dot={false}
+            <Tooltip contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", fontSize: 11 }}
+              formatter={(v: number) => [(v * 100).toFixed(1) + "%", "Close Loc."]}
             />
+            <ReferenceLine y={0.5} stroke="#52525b" strokeDasharray="3 3" label={{ value: "Midpoint", position: "right", fontSize: 8, fill: "#52525b" }} />
+            <ReferenceLine y={0.7} stroke={`${COLORS.trend_up}44`} strokeDasharray="2 2" />
+            <ReferenceLine y={0.3} stroke={`${COLORS.trend_dn}44`} strokeDasharray="2 2" />
+            <Area dataKey="close_location" name="Close Loc." stroke="#a78bfa" fill="#a78bfa25" strokeWidth={2} dot={false} />
           </AreaChart>
         </ResponsiveContainer>
       </div>
@@ -505,15 +473,21 @@ function SetupPerformancePanel({ data }: { data: any }) {
   const calibration: any[] = data.calibration ?? [];
   const dayTypeSummary: any[] = data.day_type_summary ?? [];
 
-  const maxWR = Math.max(...cells.map((c: any) => c.win_rate_1d), 50);
-  const minWR = Math.min(...cells.map((c: any) => c.win_rate_1d), 50);
-
   function wrColor(wr: number) {
     if (wr >= 60) return COLORS.trend_up;
     if (wr >= 50) return "#86efac";
     if (wr >= 40) return "#fca5a5";
     return COLORS.trend_dn;
   }
+
+  // ── Tight domain for day-type move bar chart ──────────────────────────────
+  // Use 5th–95th percentile so a single extreme day-type doesn't squash the rest
+  const allMoves = dayTypeSummary.map((d: any) => d.avg_next_day_move).filter(Boolean).sort((a: number, b: number) => a - b);
+  const moveAbs = allMoves.length ? Math.max(...allMoves.map(Math.abs)) : 50;
+  // Compute a "view max" that clips at 1.5× median abs, labelling true value
+  const medianAbs = allMoves.length ? allMoves[Math.floor(allMoves.length / 2)] : 50;
+  const viewMax = Math.min(moveAbs, Math.max(Math.abs(medianAbs) * 3, 30));
+  const moveDomain = [-Math.ceil(viewMax + 5), Math.ceil(viewMax + 5)];
 
   return (
     <div className="space-y-4">
@@ -546,37 +520,47 @@ function SetupPerformancePanel({ data }: { data: any }) {
         </div>
       </div>
 
-      {/* Day-type summary bars */}
+      {/* Day-type summary bars — clipped domain so small moves are readable */}
       <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3">
-        <p className="text-[11px] text-zinc-500 mb-2">
-          Next-Day Move by Day-Type (avg ± std)
+        <p className="text-[11px] text-zinc-500 mb-1">
+          Avg Next-Day Move by Day-Type (points)
         </p>
-        <ResponsiveContainer width="100%" height={160}>
+        <p className="text-[9px] text-zinc-600 mb-2">
+          Y axis capped at ±{Math.ceil(viewMax + 5)} — true values shown in tooltip
+        </p>
+        <ResponsiveContainer width="100%" height={170}>
           <BarChart
             data={dayTypeSummary}
-            margin={{ top: 4, right: 8, bottom: 20, left: 0 }}
+            margin={{ top: 4, right: 8, bottom: 28, left: 0 }}
           >
             <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
             <XAxis
               dataKey="day_type"
               tick={{ fontSize: 8, fill: "#71717a" }}
-              angle={-25}
+              angle={-30}
               textAnchor="end"
             />
-            <YAxis tick={{ fontSize: 9, fill: "#71717a" }} width={40} />
+            <YAxis domain={moveDomain} tick={{ fontSize: 9, fill: "#71717a" }} width={44}
+              tickFormatter={(v) => (v > 0 ? "+" : "") + v}
+            />
             <Tooltip
               contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", fontSize: 11 }}
-              formatter={(v: number, name: string) => [v.toFixed(1), name]}
+              formatter={(v: number, name: string) => [
+                (v > 0 ? "+" : "") + v.toFixed(1) + " pts · std " + (dayTypeSummary.find((d: any) => d.avg_next_day_move === v)?.std_next_day_move?.toFixed(1) ?? "—"),
+                name,
+              ]}
             />
             <ReferenceLine y={0} stroke="#52525b" />
-            <Bar dataKey="avg_next_day_move" name="Avg Next-Day" maxBarSize={30}>
-              {dayTypeSummary.map((d, i) => (
+            <Bar dataKey="avg_next_day_move" name="Avg Next-Day" maxBarSize={36}
+              label={{ position: "top", fontSize: 8, fill: "#71717a", formatter: (v: number) => v > viewMax || v < -viewMax ? ">" + Math.round(v) : "" }}
+            >
+              {dayTypeSummary.map((d: any, i: number) => (
                 <Cell
                   key={i}
                   fill={
-                    d.avg_next_day_move > 10
+                    d.avg_next_day_move > 15
                       ? COLORS.trend_up
-                      : d.avg_next_day_move < -10
+                      : d.avg_next_day_move < -15
                         ? COLORS.trend_dn
                         : "#71717a"
                   }
@@ -686,6 +670,23 @@ function OrderflowPanel({ data }: { data: any }) {
   const divergences: any[] = data.divergences ?? [];
   const summary = data.summary ?? {};
 
+  // ── Tight domains for CVD charts ─────────────────────────────────────────
+  const cvdVals = series.map((s: any) => s.cvd).filter(Boolean);
+  const cvdMin = Math.min(...cvdVals);
+  const cvdMax = Math.max(...cvdVals);
+  const cvdPad = Math.max((cvdMax - cvdMin) * 0.1, 0.5);
+  const cvdDomain = [cvdMin - cvdPad, cvdMax + cvdPad];
+
+  const closePrices = series.map((s: any) => s.close).filter(Boolean);
+  const closeMin = Math.min(...closePrices);
+  const closeMax = Math.max(...closePrices);
+  const closePad = (closeMax - closeMin) * 0.05;
+  const closeDomain = [Math.floor(closeMin - closePad), Math.ceil(closeMax + closePad)];
+
+  const deltaVals = series.map((s: any) => s.daily_delta).filter((v: any) => v != null);
+  const deltaAbs = Math.max(...deltaVals.map(Math.abs), 0.5);
+  const deltaDomain = [-(deltaAbs + 0.1), deltaAbs + 0.1];
+
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -703,62 +704,53 @@ function OrderflowPanel({ data }: { data: any }) {
         />
       </div>
 
-      {/* CVD line */}
+      {/* Accumulated CVD vs Close price — separate Y axes, both zoomed */}
       <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3">
-        <p className="text-[11px] text-zinc-500 mb-2">
-          Cumulative Volume Delta Proxy — auction-structure derived
+        <p className="text-[11px] text-zinc-500 mb-1">
+          Cumulative Volume Delta <span className="text-purple-400">(left)</span> vs Close <span className="text-blue-400">(right)</span>
         </p>
-        <ResponsiveContainer width="100%" height={180}>
-          <ComposedChart data={series} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+        <p className="text-[9px] text-zinc-600 mb-2">
+          CVD axis: {cvdMin.toFixed(1)} – {cvdMax.toFixed(1)} · Price axis: {closeMin.toLocaleString()} – {closeMax.toLocaleString()}
+        </p>
+        <ResponsiveContainer width="100%" height={200}>
+          <ComposedChart data={series} margin={{ top: 4, right: 56, bottom: 0, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
-            <XAxis
-              dataKey="date"
-              tickFormatter={shortDate}
-              tick={{ fontSize: 9, fill: "#71717a" }}
-              interval="preserveStartEnd"
-            />
-            <YAxis yAxisId="cvd" tick={{ fontSize: 9, fill: "#71717a" }} width={40} />
-            <YAxis
-              yAxisId="close"
-              orientation="right"
-              tick={{ fontSize: 9, fill: "#71717a" }}
-              width={52}
-              tickFormatter={(v) => (v / 1000).toFixed(1) + "k"}
-            />
+            <XAxis dataKey="date" tickFormatter={shortDate} tick={{ fontSize: 9, fill: "#71717a" }} interval="preserveStartEnd" />
+            <YAxis yAxisId="cvd" domain={cvdDomain} tick={{ fontSize: 9, fill: "#a78bfa" }} width={44} tickFormatter={(v) => v.toFixed(1)} />
+            <YAxis yAxisId="close" orientation="right" domain={closeDomain} tick={{ fontSize: 9, fill: "#60a5fa" }} width={52} tickFormatter={(v) => v.toLocaleString()} />
             <Tooltip
               contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", fontSize: 11 }}
               formatter={(v: number, name: string) => [
-                name === "Close" ? v.toLocaleString() : v.toFixed(3),
-                name,
+                name === "Close" ? v.toLocaleString() : v.toFixed(3), name,
               ]}
             />
+            <Legend wrapperStyle={{ fontSize: 10, color: "#71717a" }} />
             <ReferenceLine yAxisId="cvd" y={0} stroke="#52525b" strokeDasharray="2 2" />
-            <Area
-              yAxisId="cvd"
-              dataKey="cvd"
-              name="CVD"
-              stroke="#a78bfa"
-              fill="#a78bfa18"
-              strokeWidth={2}
-              dot={false}
+            <Area yAxisId="cvd" dataKey="cvd" name="CVD (accum.)" stroke="#a78bfa" fill="#a78bfa20" strokeWidth={2} dot={false} />
+            <Line yAxisId="close" dataKey="close" name="Close" stroke="#60a5fa" strokeWidth={1.5} dot={false} opacity={0.7} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Daily delta bars — own axis so ±0.5 bars are clearly visible */}
+      <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3">
+        <p className="text-[11px] text-zinc-500 mb-2">
+          Daily Auction Delta — signed session pressure (green = bull, red = bear)
+        </p>
+        <ResponsiveContainer width="100%" height={130}>
+          <ComposedChart data={series} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+            <XAxis dataKey="date" tickFormatter={shortDate} tick={{ fontSize: 9, fill: "#71717a" }} interval="preserveStartEnd" />
+            <YAxis domain={deltaDomain} tick={{ fontSize: 9, fill: "#71717a" }} width={40} tickFormatter={(v) => v.toFixed(2)} />
+            <Tooltip contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", fontSize: 11 }}
+              formatter={(v: number) => [v.toFixed(3), "Daily Δ"]}
             />
-            <Bar yAxisId="cvd" dataKey="daily_delta" name="Daily Δ" maxBarSize={6}>
+            <ReferenceLine y={0} stroke="#52525b" />
+            <Bar dataKey="daily_delta" name="Daily Δ" maxBarSize={12}>
               {series.map((s: any, i: number) => (
-                <Cell
-                  key={i}
-                  fill={s.daily_delta >= 0 ? COLORS.cvd_bull : COLORS.cvd_bear}
-                />
+                <Cell key={i} fill={s.daily_delta >= 0 ? COLORS.cvd_bull : COLORS.cvd_bear} />
               ))}
             </Bar>
-            <Line
-              yAxisId="close"
-              dataKey="close"
-              name="Close"
-              stroke="#60a5fa"
-              strokeWidth={1}
-              dot={false}
-              opacity={0.5}
-            />
           </ComposedChart>
         </ResponsiveContainer>
       </div>
@@ -815,6 +807,19 @@ function ConceptDriftPanel({ data }: { data: any }) {
         ? COLORS.failed_auction
         : COLORS.stable;
 
+  // Tight Y domain for rolling win rate — zoom to actual variation, not 0–100
+  const wrValues = series.map((s: any) => s.rolling_win_rate).filter(Boolean);
+  const wrMin = Math.min(...wrValues);
+  const wrMax = Math.max(...wrValues);
+  const wrPad = Math.max((wrMax - wrMin) * 0.15, 4);
+  // Always include 50 so reference line is visible
+  const wrDomainLow = Math.floor(Math.min(wrMin - wrPad, 45));
+  const wrDomainHigh = Math.ceil(Math.max(wrMax + wrPad, 55));
+
+  const phValues = series.map((s: any) => s.ph_stat).filter((v: any) => v != null);
+  const phMax = Math.max(...phValues, data.ph_threshold ?? 8);
+  const phDomain = [0, Math.ceil(phMax * 1.15)];
+
   return (
     <div className="space-y-4">
       {/* Status banner */}
@@ -867,76 +872,71 @@ function ConceptDriftPanel({ data }: { data: any }) {
         )}
       </div>
 
-      {/* Rolling win rate + PH stat chart */}
+      {/* Rolling win rate — zoomed domain so 45–55% swings are visible */}
       <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3">
-        <p className="text-[11px] text-zinc-500 mb-2">
-          Rolling Win Rate & Page-Hinkley Statistic
+        <p className="text-[11px] text-zinc-500 mb-1">
+          Rolling Win Rate <span className="text-blue-400">(left)</span>
+          — zoomed to {wrDomainLow}%–{wrDomainHigh}% (not 0–100)
         </p>
-        <ResponsiveContainer width="100%" height={200}>
-          <ComposedChart data={series} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+        <ResponsiveContainer width="100%" height={160}>
+          <AreaChart data={series} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
-            <XAxis
-              dataKey="date"
-              tickFormatter={shortDate}
-              tick={{ fontSize: 9, fill: "#71717a" }}
-              interval="preserveStartEnd"
-            />
-            <YAxis yAxisId="wr" domain={[0, 100]} tick={{ fontSize: 9, fill: "#71717a" }} width={32} />
+            <XAxis dataKey="date" tickFormatter={shortDate} tick={{ fontSize: 9, fill: "#71717a" }} interval="preserveStartEnd" />
             <YAxis
-              yAxisId="ph"
-              orientation="right"
+              domain={[wrDomainLow, wrDomainHigh]}
               tick={{ fontSize: 9, fill: "#71717a" }}
-              width={32}
+              width={34}
+              tickFormatter={(v) => v + "%"}
             />
             <Tooltip
               contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", fontSize: 11 }}
-              formatter={(v: number, name: string) => [v.toFixed(1), name]}
+              formatter={(v: number) => [v.toFixed(1) + "%", "Rolling WR"]}
             />
-            <ReferenceLine yAxisId="wr" y={50} stroke="#52525b" strokeDasharray="2 2" label={{ value: "50%", fontSize: 8, fill: "#71717a" }} />
-            <ReferenceLine
-              yAxisId="ph"
-              y={data.ph_threshold ?? 8}
-              stroke={`${COLORS.drift_alert}88`}
-              strokeDasharray="3 3"
-              label={{ value: "Drift thresh", fontSize: 8, fill: COLORS.drift_alert }}
+            <ReferenceLine y={50} stroke="#52525b" strokeDasharray="3 3"
+              label={{ value: "50%", position: "right", fontSize: 8, fill: "#71717a" }}
             />
-            <Area
-              yAxisId="wr"
-              dataKey="rolling_win_rate"
-              name="Rolling WR"
-              stroke="#60a5fa"
-              fill="#60a5fa18"
-              strokeWidth={2}
-              dot={false}
+            <ReferenceLine y={data.historical_mean_win_rate} stroke="#a78bfa88" strokeDasharray="3 3"
+              label={{ value: "Mean", position: "right", fontSize: 8, fill: "#a78bfa" }}
             />
-            <Line
-              yAxisId="ph"
-              dataKey="ph_stat"
-              name="PH Stat"
-              stroke={COLORS.drift_alert}
-              strokeWidth={1.5}
-              dot={false}
-              strokeDasharray="4 2"
-            />
-            {/* Mark drift events */}
+            {/* Colour fill: red below 50, green above */}
+            <Area dataKey="rolling_win_rate" name="Rolling WR" stroke="#60a5fa" fill="#60a5fa18" strokeWidth={2.5} dot={false} />
             {driftEvents.map((ev, i) => (
-              <ReferenceLine
-                key={i}
-                yAxisId="wr"
-                x={ev.date}
-                stroke={`${COLORS.drift_alert}88`}
-                strokeDasharray="2 2"
-              />
+              <ReferenceLine key={i} x={ev.date} stroke={`${COLORS.drift_alert}99`} strokeDasharray="2 2" />
+            ))}
+          </AreaChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* PH Statistic — own chart so it isn't compressed against win-rate scale */}
+      <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3">
+        <p className="text-[11px] text-zinc-500 mb-1">
+          Page-Hinkley Statistic — rises when win rate persistently falls below mean
+        </p>
+        <ResponsiveContainer width="100%" height={130}>
+          <ComposedChart data={series} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+            <XAxis dataKey="date" tickFormatter={shortDate} tick={{ fontSize: 9, fill: "#71717a" }} interval="preserveStartEnd" />
+            <YAxis domain={phDomain} tick={{ fontSize: 9, fill: "#71717a" }} width={34} />
+            <Tooltip contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", fontSize: 11 }}
+              formatter={(v: number) => [v.toFixed(1), "PH Stat"]}
+            />
+            <ReferenceLine y={data.ph_threshold ?? 8} stroke={COLORS.drift_alert}
+              strokeDasharray="3 3"
+              label={{ value: `Drift (${data.ph_threshold ?? 8})`, position: "right", fontSize: 8, fill: COLORS.drift_alert }}
+            />
+            <Area dataKey="ph_stat" name="PH Stat" stroke={COLORS.drift_alert} fill={`${COLORS.drift_alert}18`} strokeWidth={2} dot={false} />
+            {driftEvents.map((ev, i) => (
+              <ReferenceLine key={i} x={ev.date} stroke={`${COLORS.drift_alert}66`} strokeDasharray="2 2" />
             ))}
           </ComposedChart>
         </ResponsiveContainer>
       </div>
 
       <p className="text-[10px] text-zinc-600 leading-relaxed">
-        The Page-Hinkley test fires when the cumulative sum of win-rate deviations
-        from the historical mean exceeds the threshold ({data.ph_threshold}). A
-        persistent exceedance suggests the underlying signal → outcome relationship
-        has shifted — consider retraining or reducing position size.
+        The Page-Hinkley statistic accumulates when each session's win rate falls
+        below the historical mean. When it crosses {data.ph_threshold ?? 8}, the
+        signal → outcome relationship may have shifted — consider reducing position
+        size or re-examining the day-type logic for recent sessions.
       </p>
     </div>
   );
@@ -1029,7 +1029,7 @@ function CompositeProfilePanel({ profiles, weeklyProfiles }: { profiles: any; we
     );
   }
 
-  // Weekly profiles bar chart
+  // Weekly profiles bar chart — compute tight domain from actual data
   const weeklyData = weeklyProfiles?.map((w: any) => ({
     week: w.week,
     poc: w.poc,
@@ -1038,6 +1038,11 @@ function CompositeProfilePanel({ profiles, weeklyProfiles }: { profiles: any; we
     sessions: w.sessions,
     range: w.high_price - w.low_price,
   }));
+  const weeklyPrices = weeklyData?.flatMap((w: any) => [w.vah, w.val, w.poc]).filter(Boolean) ?? [];
+  const weeklyMin = weeklyPrices.length ? Math.min(...weeklyPrices) : 0;
+  const weeklyMax = weeklyPrices.length ? Math.max(...weeklyPrices) : 100;
+  const weeklyPad = Math.max((weeklyMax - weeklyMin) * 0.06, 100);
+  const weeklyDomain = [Math.floor(weeklyMin - weeklyPad), Math.ceil(weeklyMax + weeklyPad)];
 
   return (
     <div className="space-y-4">
@@ -1059,10 +1064,10 @@ function CompositeProfilePanel({ profiles, weeklyProfiles }: { profiles: any; we
                 textAnchor="end"
               />
               <YAxis
+                domain={weeklyDomain}
                 tick={{ fontSize: 9, fill: "#71717a" }}
-                width={52}
+                width={56}
                 tickFormatter={(v) => v.toLocaleString()}
-                domain={["dataMin - 200", "dataMax + 200"]}
               />
               <Tooltip
                 contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", fontSize: 11 }}
