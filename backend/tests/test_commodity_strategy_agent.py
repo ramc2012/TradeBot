@@ -448,7 +448,7 @@ def test_commodity_run_once_retains_previous_watchlists_on_transient_scan_gap(mo
     async def fake_build_option_watchlist(self):
         return []
 
-    async def fake_manage_positions(self, adapter, futures_rows, option_rows):
+    async def fake_manage_positions(self, adapter, futures_rows, option_rows, option_quote_map=None):
         return None
 
     class _FakeDescriptor:
@@ -851,6 +851,99 @@ def test_futures_target_hit_arms_trailing_runner_instead_of_full_exit(tmp_path: 
 
     assert position.position_key not in agent._runtime.positions  # type: ignore[attr-defined]
     assert agent.get_orders()[0]["reason"] == "trail_stop"
+
+
+def test_overlay_live_option_quotes_prefers_direct_ltp_for_trade_symbol() -> None:
+    rows = [
+        {
+            "symbol": "MCX:NATURALGAS26MAYFUT",
+            "trade_symbol": "MCX:NATURALGAS26APR250CE",
+            "trade_price": 4.95,
+            "ce_symbol": "MCX:NATURALGAS26APR250CE",
+            "ce_trade_price": 4.95,
+            "pe_symbol": "MCX:NATURALGAS26APR250PE",
+            "pe_trade_price": 3.10,
+            "ce": {"strike": 250.0},
+            "pe": {"strike": 250.0},
+        }
+    ]
+
+    enriched = CommodityStrategyAgent._overlay_live_option_quotes(
+        rows,
+        {"MCX:NATURALGAS26APR250CE": 8.0},
+    )
+
+    assert enriched[0]["trade_price"] == pytest.approx(8.0)
+    assert enriched[0]["trade_price_source"] == "direct_ltp"
+    assert enriched[0]["ce_trade_price"] == pytest.approx(8.0)
+    assert enriched[0]["ce"]["live_ltp"] == pytest.approx(8.0)
+    assert enriched[0]["ce"]["price_source"] == "direct_ltp"
+
+
+def test_option_exit_uses_direct_quote_over_stale_watchlist_price(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    agent = CommodityStrategyAgent()
+    position = commodity_module.CommodityPositionState(
+        position_key="commodity_options:MCX:NATURALGAS26APR250CE",
+        symbol="MCX:NATURALGAS26MAYFUT",
+        live_symbol="MCX:NATURALGAS26APR250CE",
+        underlying="NATURALGAS",
+        strategy_key="commodity_options",
+        strategy_title="Strategy 1 · Options",
+        instrument_type="OPT",
+        action="BUY",
+        qty=11250,
+        lots=9,
+        lot_size=1250,
+        entry_price=6.65,
+        current_price=6.65,
+        stop_price=4.99,
+        target_price=9.50,
+        regime="bullish",
+        signal_reason="option_signal",
+        atr=None,
+        macd_value=0.32,
+        mp_poc=None,
+        mp_vah=None,
+        mp_val=None,
+        entered_at="2026-04-20T09:00:00+05:30",
+        entry_bar_time="2026-04-20T09:00:00+05:30",
+        contract_unit_label="1250 MMBtu",
+        quote_unit_label="Rs / MMBtu",
+        display_name="Natural Gas",
+        initial_qty=11250,
+        peak_price=6.65,
+        expiry="2026-04-29",
+        strike=250.0,
+        option_type="CE",
+    )
+    agent._runtime.positions[position.position_key] = position  # type: ignore[attr-defined]
+
+    option_row = {
+        "symbol": "MCX:NATURALGAS26MAYFUT",
+        "ce_symbol": "MCX:NATURALGAS26APR250CE",
+        "ce_trade_price": 4.95,
+        "pe_symbol": "MCX:NATURALGAS26APR250PE",
+        "pe_trade_price": 3.10,
+        "regime": "bullish",
+        "ce": {"macd": 0.45},
+        "pe": {"macd": -0.35},
+    }
+
+    asyncio.run(
+        agent._manage_positions(
+            object(),
+            [],
+            [option_row],
+            option_quote_map={"MCX:NATURALGAS26APR250CE": 8.0},
+        )
+    )
+
+    assert position.position_key in agent._runtime.positions  # type: ignore[attr-defined]
+    assert position.current_price == pytest.approx(8.0)
+    assert agent.get_orders() == []
 
 
 def test_signal_audit_persists_across_instances(tmp_path: Path, monkeypatch) -> None:

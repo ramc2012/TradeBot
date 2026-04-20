@@ -1729,6 +1729,49 @@ class CommodityStrategyAgent(BaseStrategyAgent):
 
         return stabilized, retained_symbols
 
+    @staticmethod
+    def _overlay_live_option_quotes(
+        rows: list[dict[str, Any]],
+        option_quote_map: dict[str, float],
+    ) -> list[dict[str, Any]]:
+        if not option_quote_map:
+            return rows
+
+        enriched_rows: list[dict[str, Any]] = []
+        for row in rows:
+            enriched = dict(row)
+            ce_symbol = str(enriched.get("ce_symbol") or "")
+            pe_symbol = str(enriched.get("pe_symbol") or "")
+            trade_symbol = str(enriched.get("trade_symbol") or "")
+
+            ce_quote = float(option_quote_map.get(ce_symbol) or 0.0) if ce_symbol else 0.0
+            pe_quote = float(option_quote_map.get(pe_symbol) or 0.0) if pe_symbol else 0.0
+            trade_quote = float(option_quote_map.get(trade_symbol) or 0.0) if trade_symbol else 0.0
+
+            if ce_quote > 0:
+                enriched["ce_trade_price"] = _round_or_none(ce_quote, 2)
+                if isinstance(enriched.get("ce"), dict):
+                    enriched["ce"] = {**dict(enriched["ce"]), "live_ltp": ce_quote, "price_source": "direct_ltp"}
+            elif isinstance(enriched.get("ce"), dict):
+                enriched["ce"] = {**dict(enriched["ce"]), "price_source": "chain_ltp"}
+
+            if pe_quote > 0:
+                enriched["pe_trade_price"] = _round_or_none(pe_quote, 2)
+                if isinstance(enriched.get("pe"), dict):
+                    enriched["pe"] = {**dict(enriched["pe"]), "live_ltp": pe_quote, "price_source": "direct_ltp"}
+            elif isinstance(enriched.get("pe"), dict):
+                enriched["pe"] = {**dict(enriched["pe"]), "price_source": "chain_ltp"}
+
+            if trade_quote > 0:
+                enriched["trade_price"] = _round_or_none(trade_quote, 2)
+                enriched["trade_price_source"] = "direct_ltp"
+            else:
+                enriched["trade_price_source"] = "chain_ltp"
+
+            enriched_rows.append(enriched)
+
+        return enriched_rows
+
     async def _analyze_option_row(self, row: dict[str, Any]) -> Optional[dict[str, Any]]:
         symbol = str(row.get("symbol") or "")
         underlying = str(row.get("underlying") or get_commodity_display_name(symbol))
@@ -1919,6 +1962,25 @@ class CommodityStrategyAgent(BaseStrategyAgent):
 
                 option_rows = self._decorate_option_rows(await self._build_option_watchlist())
                 option_rows, retained_options = self._stabilize_option_watchlist(option_rows)
+                option_symbols_to_quote = sorted(
+                    {
+                        str(symbol).strip()
+                        for row in option_rows
+                        for symbol in (row.get("ce_symbol"), row.get("pe_symbol"))
+                        if str(symbol or "").strip()
+                    }
+                    | {
+                        str(pos.live_symbol).strip()
+                        for pos in self._runtime.positions.values()
+                        if pos.strategy_key == "commodity_options" and str(pos.live_symbol or "").strip()
+                    }
+                )
+                option_quote_map = (
+                    await self._safe_get_ltp(adapter, option_symbols_to_quote)
+                    if option_symbols_to_quote
+                    else {}
+                )
+                option_rows = self._overlay_live_option_quotes(option_rows, option_quote_map)
 
                 latest_prices = {
                     row["symbol"]: float(row["price"])
@@ -1934,7 +1996,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 if latest_prices:
                     self._runtime.portfolio.update_prices(latest_prices)
 
-                await self._manage_positions(adapter, futures_rows, option_rows)
+                await self._manage_positions(adapter, futures_rows, option_rows, option_quote_map=option_quote_map)
                 if self._kill_switch_active:
                     actionable_futures = [row for row in futures_rows if row.get("signal_validation") == "ready"]
                     actionable_options = [row for row in option_rows if row.get("signal_validation") == "ready"]
@@ -2028,6 +2090,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         adapter: BrokerAdapter,
         futures_rows: list[dict[str, Any]],
         option_rows: list[dict[str, Any]],
+        option_quote_map: Optional[dict[str, float]] = None,
     ) -> None:
         futures_map = {str(row["symbol"]): row for row in futures_rows}
         option_map: dict[str, dict[str, Any]] = {}
@@ -2036,12 +2099,14 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 live_symbol = str(row.get(symbol_key) or "")
                 if live_symbol:
                     option_map[live_symbol] = row
+        live_option_quotes = dict(option_quote_map or {})
         missing_option_symbols = [
             pos.live_symbol
             for pos in self._runtime.positions.values()
-            if pos.strategy_key == "commodity_options" and pos.live_symbol not in option_map
+            if pos.strategy_key == "commodity_options" and pos.live_symbol not in live_option_quotes
         ]
-        option_quote_map = await self._safe_get_ltp(adapter, missing_option_symbols) if missing_option_symbols else {}
+        if missing_option_symbols:
+            live_option_quotes.update(await self._safe_get_ltp(adapter, missing_option_symbols))
 
         for position_key, position in list(self._runtime.positions.items()):
             reason: Optional[str] = None
@@ -2153,7 +2218,11 @@ class CommodityStrategyAgent(BaseStrategyAgent):
 
             row = option_map.get(position.live_symbol)
             price_key = "ce_trade_price" if position.option_type == "CE" else "pe_trade_price"
-            current_price = float((row or {}).get(price_key) or option_quote_map.get(position.live_symbol) or position.current_price)
+            current_price = float(
+                live_option_quotes.get(position.live_symbol)
+                or (row or {}).get(price_key)
+                or position.current_price
+            )
             if current_price <= 0:
                 continue
             position.current_price = current_price
