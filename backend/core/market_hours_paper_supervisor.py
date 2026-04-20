@@ -32,6 +32,10 @@ def _next_nse_market_open(now: datetime) -> datetime:
     return next_open
 
 
+def _should_run_post_close_catchup(now: datetime) -> bool:
+    return now.weekday() < 5 and now.time() > time(15, 30)
+
+
 @dataclass
 class RunnerConfig:
     key: str
@@ -220,6 +224,27 @@ class MarketHoursPaperSupervisor:
         async with self._lock:
             now = self._now_fn()
             if not self._market_hours_fn(now) and not force:
+                if _should_run_post_close_catchup(now):
+                    catchup_session_date = now.date()
+                    catchup_ran = False
+                    for runtime in self._runners.values():
+                        if not runtime.config.enabled or runtime.running:
+                            continue
+                        if runtime.last_success_at and runtime.last_success_at.date() >= catchup_session_date:
+                            continue
+                        await self._run_runner(runtime, now=now)
+                        if runtime.last_error is None:
+                            runtime.last_result_meta.setdefault(
+                                "catchup_session_date",
+                                catchup_session_date.isoformat(),
+                            )
+                            runtime.last_message = (
+                                f"{runtime.last_message} Catch-up captured for "
+                                f"{catchup_session_date.isoformat()}."
+                            )
+                        catchup_ran = True
+                    if catchup_ran:
+                        return self.get_status()
                 for runtime in self._runners.values():
                     if runtime.config.enabled and not runtime.running and runtime.last_message is None:
                         runtime.last_message = "Armed for the next market session."

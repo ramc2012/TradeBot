@@ -2513,7 +2513,12 @@ def test_paper_positions_endpoint_returns_open_and_closed_positions(monkeypatch)
     assert payload["closed_positions"][0]["trading_symbol"] == "NIFTY26APR22400PE"
 
 
-def test_mp_dashboard_endpoint_returns_aggregated_structure() -> None:
+def test_mp_dashboard_endpoint_returns_aggregated_structure(monkeypatch) -> None:
+    async def _offline_live_snapshot(*args, **kwargs):
+        raise RuntimeError("live snapshot unavailable")
+
+    monkeypatch.setattr(auction_intelligence_router, "build_live_analysis", _offline_live_snapshot)
+
     app = FastAPI()
     app.include_router(router)
     client = TestClient(app)
@@ -2534,3 +2539,60 @@ def test_mp_dashboard_endpoint_returns_aggregated_structure() -> None:
     if payload["sessions"]:
         assert payload["latest"]["date"] == payload["sessions"][-1]["date"]
         assert isinstance(payload["context"], list)
+
+
+def test_mp_dashboard_appends_live_session_when_packaged_data_is_stale(monkeypatch) -> None:
+    async def _live_snapshot(*args, **kwargs):
+        return {
+            "session_date": "2026-04-20",
+            "analysis": {
+                "market_profile": {
+                    "session_date": "2026-04-20",
+                    "poc": 24426.0,
+                    "vah": 24471.0,
+                    "val": 24341.0,
+                    "open_price": 24391.5,
+                    "high_price": 24473.15,
+                    "low_price": 24242.6,
+                    "close_price": 24435.6,
+                    "initial_balance_high": 24417.35,
+                    "initial_balance_low": 24242.6,
+                    "initial_balance_range": 174.75,
+                    "range_extension_up": 55.8,
+                    "range_extension_down": 0.0,
+                    "sample_count": 312,
+                    "poor_high": False,
+                    "poor_low": True,
+                    "excess_high": 0.0,
+                    "excess_low": 0.0,
+                    "selling_tail": [],
+                    "buying_tail": [],
+                },
+                "agent_decisions": [
+                    {
+                        "agent_name": "swing",
+                        "metadata": {
+                            "buyer_fail_bin": 1,
+                            "seller_fail_bin": 4,
+                        },
+                    }
+                ],
+            },
+        }
+
+    monkeypatch.setattr(auction_intelligence_router, "build_live_analysis", _live_snapshot)
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/auction-intelligence/mp-dashboard",
+        params={"underlying": "NIFTY", "lookback": 5},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["latest"]["date"] == "2026-04-20"
+    assert payload["data_status"]["live_appended"] is True
+    assert payload["data_status"]["source"].endswith("+live_snapshot")

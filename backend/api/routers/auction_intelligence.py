@@ -762,6 +762,148 @@ def _bool(row: dict, key: str) -> bool:
     return str(row.get(key, "")).lower() == "true"
 
 
+def _parse_row_date(value: str | None) -> date | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw[:10])
+    except ValueError:
+        return None
+
+
+def _extract_live_failure_scores(snapshot: dict) -> tuple[float, float]:
+    buyer_fail = 0.0
+    seller_fail = 0.0
+    decisions = snapshot.get("analysis", {}).get("agent_decisions", [])
+    for decision in decisions:
+        metadata = decision.get("metadata", {}) or {}
+        buyer_fail = max(buyer_fail, _flt(metadata, "buyer_fail_bin"))
+        seller_fail = max(seller_fail, _flt(metadata, "seller_fail_bin"))
+    return buyer_fail, seller_fail
+
+
+def _metric_flag(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return float(value) > 0
+    return bool(value)
+
+
+def _build_live_mp_row(snapshot: dict) -> dict | None:
+    analysis = snapshot.get("analysis", {}) or {}
+    profile = analysis.get("market_profile", {}) or {}
+    session_date = str(profile.get("session_date") or snapshot.get("session_date") or "").strip()
+    if not session_date:
+        return None
+
+    open_price = float(profile.get("open_price") or 0.0)
+    high_price = float(profile.get("high_price") or 0.0)
+    low_price = float(profile.get("low_price") or 0.0)
+    close_price = float(profile.get("close_price") or 0.0)
+    initial_balance_high = float(profile.get("initial_balance_high") or 0.0)
+    initial_balance_low = float(profile.get("initial_balance_low") or 0.0)
+    initial_balance_range = float(profile.get("initial_balance_range") or 0.0)
+    buyer_fail, seller_fail = _extract_live_failure_scores(snapshot)
+
+    row = {
+        "date": session_date,
+        "poc": profile.get("poc", 0.0),
+        "vah": profile.get("vah", 0.0),
+        "val": profile.get("val", 0.0),
+        "var": max(float(profile.get("vah") or 0.0) - float(profile.get("val") or 0.0), 0.0),
+        "ibh": initial_balance_high,
+        "ibl": initial_balance_low,
+        "ibr": initial_balance_range,
+        "ib_broken_up": float(profile.get("range_extension_up") or 0.0) > 0.0,
+        "ib_broken_dn": float(profile.get("range_extension_down") or 0.0) > 0.0,
+        "fa_up": False,
+        "fa_dn": False,
+        "session_high": high_price,
+        "session_low": low_price,
+        "open_price": open_price,
+        "close_price": close_price,
+        "total_tpos": profile.get("sample_count", 0),
+        "daily_move": close_price - open_price,
+        "daily_pct": ((close_price - open_price) / open_price * 100.0) if open_price else 0.0,
+        "close_pct_range": ((close_price - low_price) / max(high_price - low_price, 1.0)) if high_price > low_price else 0.5,
+        "day_type": "",
+        "ib_ext_up_fail": False,
+        "ib_ext_dn_fail": False,
+        "ib_ext_up_reversal": False,
+        "ib_ext_dn_reversal": False,
+        "poor_high": bool(profile.get("poor_high")),
+        "poor_low": bool(profile.get("poor_low")),
+        "excess_high": _metric_flag(profile.get("excess_high")),
+        "excess_low": _metric_flag(profile.get("excess_low")),
+        "tail_high_buckets": len(list(profile.get("selling_tail") or [])),
+        "tail_low_buckets": len(list(profile.get("buying_tail") or [])),
+        "buyer_fail_score": buyer_fail,
+        "seller_fail_score": seller_fail,
+        "net_failure": seller_fail - buyer_fail,
+        "next_day_move": "",
+        "next_3d_move": "",
+    }
+    row["day_type"] = _classify_day_type(row)
+    return row
+
+
+async def _load_mp_rows(
+    underlying: str,
+    *,
+    allow_params_fallback: bool = False,
+) -> tuple[list[dict], dict[str, object]]:
+    source = "enriched_mp_with_failures"
+    rows = _safe_csv(_mp_enr_path(underlying))
+    if not rows and allow_params_fallback:
+        rows = _safe_csv(_mp_params_path(underlying))
+        source = "daily_mp_params"
+
+    packaged_latest = rows[-1].get("date") if rows else None
+    status: dict[str, object] = {
+        "source": source,
+        "packaged_latest_date": packaged_latest,
+        "latest_date": packaged_latest,
+        "live_appended": False,
+        "live_latest_date": None,
+        "live_error": None,
+    }
+
+    try:
+        live_snapshot = await build_live_analysis(symbol_code=underlying)
+        live_row = _build_live_mp_row(live_snapshot)
+    except Exception as exc:
+        status["live_error"] = str(exc)
+        return rows, status
+
+    if not live_row:
+        return rows, status
+
+    live_latest = live_row.get("date")
+    status["live_latest_date"] = live_latest
+    packaged_latest_date = _parse_row_date(packaged_latest)
+    live_latest_date = _parse_row_date(live_latest)
+
+    if not rows:
+        rows = [live_row]
+        status["source"] = "live_snapshot"
+        status["live_appended"] = True
+        status["latest_date"] = live_latest
+    elif live_latest_date and (packaged_latest_date is None or live_latest_date > packaged_latest_date):
+        rows = [*rows, live_row]
+        status["source"] = f"{source}+live_snapshot"
+        status["live_appended"] = True
+        status["latest_date"] = live_latest
+
+    if packaged_latest_date and live_latest_date:
+        status["stale_days"] = max((live_latest_date - packaged_latest_date).days, 0)
+    else:
+        status["stale_days"] = None
+
+    return rows, status
+
+
 def _classify_day_type(r: dict) -> str:
     fa_up = str(r.get("fa_up", "")).lower() == "true"
     fa_dn = str(r.get("fa_dn", "")).lower() == "true"
@@ -1129,10 +1271,14 @@ async def mp_data_status() -> list[dict]:
 @router.get("/mp-signals")
 async def mp_signals(underlying: str = "NIFTY", limit: int = 20) -> dict:
     """Recent MP day signals with failure scores and direction for the given underlying."""
-    enr_path = _mp_enr_path(underlying)
-    rows = _safe_csv(enr_path)
+    rows, data_status = await _load_mp_rows(underlying)
     if not rows:
-        return {"underlying": underlying, "signals": [], "message": f"No MP data for {underlying}"}
+        return {
+            "underlying": underlying,
+            "signals": [],
+            "message": f"No MP data for {underlying}",
+            "data_status": data_status,
+        }
 
     signals = [_build_mp_signal_record(row) for row in rows[-limit:]]
 
@@ -1140,6 +1286,7 @@ async def mp_signals(underlying: str = "NIFTY", limit: int = 20) -> dict:
         "underlying": underlying,
         "signals": signals,
         "latest": signals[-1] if signals else None,
+        "data_status": data_status,
     }
 
 
@@ -1150,11 +1297,17 @@ async def mp_open_signal(underlying: str = "NIFTY") -> dict:
     Direction from: day_type + IB extension + failure scores.
     Entry method: wait for price > VWAP after 09:30; VWAP stop with 60-min grace; hard SL -50%.
     """
-    enr_path = _mp_enr_path(underlying)
-    rows = _safe_csv(enr_path)
+    rows, data_status = await _load_mp_rows(underlying)
     if not rows:
-        return {"underlying": underlying, "signals": [], "skip_reason": f"No MP data for {underlying}"}
-    return _build_mp_open_signal_payload(underlying, rows[-1])
+        return {
+            "underlying": underlying,
+            "signals": [],
+            "skip_reason": f"No MP data for {underlying}",
+            "data_status": data_status,
+        }
+    payload = _build_mp_open_signal_payload(underlying, rows[-1])
+    payload["data_status"] = data_status
+    return payload
 
 
 @router.get("/mp-agent-context")
@@ -1163,8 +1316,7 @@ async def mp_agent_context(underlying: str = "NIFTY", limit: int = 10) -> list[d
     Contextual agent reasoning for the MP+Order-Flow strategy.
     Returns structured comments explaining the latest MP structure.
     """
-    enr_path = _mp_enr_path(underlying)
-    rows = _safe_csv(enr_path)
+    rows, _ = await _load_mp_rows(underlying)
     if not rows:
         return [{"time": "", "type": "system", "level": "warning",
                  "message": f"No MP failure data found for {underlying}."}]
@@ -1177,8 +1329,7 @@ async def mp_dashboard(
     lookback: int = Query(30, ge=5, le=120),
 ) -> dict:
     """Aggregated MP structure, failure-pressure history, and next-session bias."""
-    enr_path = _mp_enr_path(underlying)
-    rows = _safe_csv(enr_path)
+    rows, data_status = await _load_mp_rows(underlying)
     if not rows:
         return {
             "underlying": underlying,
@@ -1191,6 +1342,7 @@ async def mp_dashboard(
             "latest": None,
             "open_signal": None,
             "skip_reason": f"No MP data for {underlying}",
+            "data_status": data_status,
             "context": [
                 {
                     "time": "",
@@ -1255,6 +1407,7 @@ async def mp_dashboard(
         "latest": sessions[-1] if sessions else None,
         "open_signal": open_signal_payload["signals"][0] if open_signal_payload["signals"] else None,
         "skip_reason": open_signal_payload["skip_reason"],
+        "data_status": data_status,
         "context": _build_mp_agent_context_payload(underlying, latest_row, limit=6),
     }
 
@@ -1283,11 +1436,7 @@ async def mp_analytics(
     - Concept drift detection (Page-Hinkley on rolling win rate)
     - Orderflow proxy CVD series
     """
-    enr_path = _mp_enr_path(underlying)
-    rows = _safe_csv(enr_path)
-    if not rows:
-        # Fall back to daily_mp_params for lighter requests
-        rows = _safe_csv(_mp_params_path(underlying))
+    rows, data_status = await _load_mp_rows(underlying, allow_params_fallback=True)
     if not rows:
         return {
             "underlying": underlying,
@@ -1299,6 +1448,7 @@ async def mp_analytics(
             "setup_performance": {"total_signals": 0, "cells": [], "calibration": []},
             "concept_drift": {"drift_detected": False, "series": [], "drift_events": [], "current_state": "no_data"},
             "orderflow_proxy": {"series": [], "summary": {}},
+            "data_status": data_status,
         }
 
     result = _mp_analytics_engine.full_analytics(
@@ -1310,6 +1460,7 @@ async def mp_analytics(
     result["underlying"] = underlying
     result["lookback"] = lookback
     result["total_sessions"] = len(rows)
+    result["data_status"] = data_status
     return result
 
 
@@ -1323,10 +1474,9 @@ async def mp_multi_tf_profile(
 
     Designed to power the multi-TF stacked profile panel in the UI.
     """
-    enr_path = _mp_enr_path(underlying)
-    rows = _safe_csv(enr_path) or _safe_csv(_mp_params_path(underlying))
+    rows, data_status = await _load_mp_rows(underlying, allow_params_fallback=True)
     if not rows:
-        return {"underlying": underlying, "profiles": {}, "weekly_profiles": []}
+        return {"underlying": underlying, "profiles": {}, "weekly_profiles": [], "data_status": data_status}
 
     rows_sorted = sorted(rows, key=lambda r: r.get("date", ""))
     profiles = {
@@ -1340,6 +1490,7 @@ async def mp_multi_tf_profile(
         "profiles": profiles,
         "weekly_profiles": weekly[-8:],
         "latest_daily": _build_mp_signal_record(rows_sorted[-1]) if rows_sorted else None,
+        "data_status": data_status,
     }
 
 
@@ -1349,22 +1500,31 @@ async def mp_regime_history(
     lookback: int = Query(60, ge=10, le=250),
 ) -> dict:
     """Day-type sequence, transition matrix, and streak analysis."""
-    rows = _safe_csv(_mp_enr_path(underlying)) or _safe_csv(_mp_params_path(underlying))
+    rows, data_status = await _load_mp_rows(underlying, allow_params_fallback=True)
     if not rows:
-        return {"underlying": underlying, "sessions": [], "distribution": [], "transition_matrix": {}, "streaks": []}
+        return {
+            "underlying": underlying,
+            "sessions": [],
+            "distribution": [],
+            "transition_matrix": {},
+            "streaks": [],
+            "data_status": data_status,
+        }
     result = _mp_analytics_engine.regime_history(rows, lookback=lookback)
     result["underlying"] = underlying
+    result["data_status"] = data_status
     return result
 
 
 @router.get("/mp-setup-performance")
 async def mp_setup_performance(underlying: str = Query("NIFTY")) -> dict:
     """Setup performance matrix with win rates and expectancy by day_type × direction."""
-    rows = _safe_csv(_mp_enr_path(underlying))
+    rows, data_status = await _load_mp_rows(underlying)
     if not rows:
-        return {"underlying": underlying, "total_signals": 0, "cells": [], "calibration": []}
+        return {"underlying": underlying, "total_signals": 0, "cells": [], "calibration": [], "data_status": data_status}
     result = _mp_analytics_engine.setup_performance(rows)
     result["underlying"] = underlying
+    result["data_status"] = data_status
     return result
 
 
@@ -1375,11 +1535,18 @@ async def mp_concept_drift(
     threshold: float = Query(8.0, ge=2.0, le=30.0),
 ) -> dict:
     """Page-Hinkley concept drift detection on rolling signal win rate."""
-    rows = _safe_csv(_mp_enr_path(underlying))
+    rows, data_status = await _load_mp_rows(underlying)
     if not rows:
-        return {"underlying": underlying, "drift_detected": False, "series": [], "current_state": "no_data"}
+        return {
+            "underlying": underlying,
+            "drift_detected": False,
+            "series": [],
+            "current_state": "no_data",
+            "data_status": data_status,
+        }
     result = _mp_analytics_engine.concept_drift(rows, window=window, threshold=threshold)
     result["underlying"] = underlying
+    result["data_status"] = data_status
     return result
 
 
@@ -1389,9 +1556,10 @@ async def mp_orderflow_proxy(
     lookback: int = Query(60, ge=10, le=250),
 ) -> dict:
     """Approximate CVD series derived from daily auction structure."""
-    rows = _safe_csv(_mp_enr_path(underlying)) or _safe_csv(_mp_params_path(underlying))
+    rows, data_status = await _load_mp_rows(underlying, allow_params_fallback=True)
     if not rows:
-        return {"underlying": underlying, "series": [], "summary": {}}
+        return {"underlying": underlying, "series": [], "summary": {}, "data_status": data_status}
     result = _mp_analytics_engine.orderflow_proxy(rows, lookback=lookback)
     result["underlying"] = underlying
+    result["data_status"] = data_status
     return result
