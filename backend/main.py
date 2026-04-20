@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from core.config import settings
+from core.paper_bootstrap import bootstrap_paper_trading_runtime
 from db.redis_client import get_redis, close_redis
 from api.routers import auth, trading, market, analytics, agent, commodity, backtester as backtester_router
 from api.routers import fo_data as fo_data_router
@@ -85,6 +86,10 @@ async def lifespan(app: FastAPI):
 
     await paper_strategy_agent.start()
     await commodity_strategy_agent.start()
+    try:
+        await bootstrap_paper_trading_runtime()
+    except Exception as e:
+        logger.warning(f"Paper bootstrap skipped: {e}")
 
     # Load RL Q-table cache into memory (non-fatal if table doesn't exist yet)
     try:

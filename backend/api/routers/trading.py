@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from api.routers.auth import get_active_adapter
 from brokers.base import OrderRequest
+from core.config import settings
 from live_engine import LiveOrderManager, RiskManager
 from paper_engine import PaperOrderBook, PaperPortfolio
 from paper_engine.strategy_agent import paper_strategy_agent
@@ -42,6 +43,32 @@ async def _get_or_create_paper_session() -> tuple[str, PaperOrderBook, PaperPort
 async def _get_trading_state_snapshot() -> tuple[str, str, Optional[LiveOrderManager]]:
     async with _trading_state_lock:
         return _mode, _active_broker, _live_manager
+
+
+def _mode_payload(mode: str, broker: str, live_manager: Optional[LiveOrderManager]) -> dict[str, object]:
+    return {
+        "mode": mode,
+        "broker": broker,
+        "paper_only": settings.PAPER_TRADING_ONLY,
+        "live_manager_active": live_manager is not None,
+    }
+
+
+async def ensure_paper_trading_mode(*, preferred_broker: Optional[str] = None) -> dict[str, object]:
+    global _mode, _active_broker, _live_manager
+
+    async with _trading_state_lock:
+        previous_live_manager = _live_manager
+        _mode = "paper"
+        if preferred_broker:
+            _active_broker = preferred_broker
+        _live_manager = None
+        payload = _mode_payload(_mode, _active_broker, None)
+
+    if previous_live_manager:
+        await previous_live_manager.stop_reconciliation()
+
+    return payload
 
 
 # ── Pydantic Models ──────────────────────────────────────────────────────────
@@ -83,6 +110,8 @@ async def set_mode(req: SetModeRequest):
     global _mode, _active_broker, _live_manager
     if req.mode not in ("paper", "live"):
         raise HTTPException(400, "mode must be paper or live")
+    if req.mode == "live" and settings.PAPER_TRADING_ONLY:
+        raise HTTPException(403, "Live trading is disabled in this environment. Paper mode only.")
     next_broker = req.broker or _active_broker
     new_live_manager: Optional[LiveOrderManager] = None
     if req.mode == "live":
@@ -105,12 +134,20 @@ async def set_mode(req: SetModeRequest):
     return {"mode": req.mode, "broker": next_broker}
 
 
+@router.get("/mode")
+async def get_mode():
+    mode, active_broker, live_manager = await _get_trading_state_snapshot()
+    return _mode_payload(mode, active_broker, live_manager)
+
+
 @router.post("/orders")
 async def place_order(req: PlaceOrderRequest):
     if paper_strategy_agent.get_status().get("kill_switch_active"):
         raise HTTPException(400, "NSE kill switch is active. Release it before placing new orders.")
 
     mode, _, live_manager = await _get_trading_state_snapshot()
+    if mode == "live" and settings.PAPER_TRADING_ONLY:
+        raise HTTPException(403, "Live trading is disabled in this environment. Paper mode only.")
 
     order_req = OrderRequest(
         symbol=req.symbol,

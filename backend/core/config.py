@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     RESEARCH_SYNC_AUTO_ENABLED: bool = False
     STRATEGY_SPOT_SYNC_ENABLED: bool = False
     NSE_STRATEGY_BYPASS_MARKET_PROFILE_GATE: bool = False
+    PAPER_TRADING_ONLY: bool = False
+    PAPER_RUNTIME_PREWARM_ENABLED: bool = True
 
     # Security
     SECRET_KEY: str = "change-me-to-a-random-secret-key"
