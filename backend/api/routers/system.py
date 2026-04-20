@@ -14,6 +14,7 @@ from analytics.performance import PerformanceAnalytics
 from api.routers.trading import _get_or_create_paper_session, _risk_manager
 from auction_intelligence.config import clone_default_config
 from core.config import settings
+from core.market_hours_paper_supervisor import market_hours_paper_supervisor
 from db.database import AsyncSessionLocal
 from db.redis_client import get_redis
 from fractal_market_profile.service import fmp_service
@@ -397,35 +398,54 @@ async def _auction_service() -> dict[str, Any]:
     summary = await auction_intelligence_summary()
     live_ready = bool(summary.get("live_ready"))
     config = clone_default_config()
+    automation = market_hours_paper_supervisor.get_runner_status("auction_intelligence")
+    auto_enabled = bool(automation.get("enabled") and automation.get("loop_active"))
+    market_open = bool(market_hours_paper_supervisor.get_status().get("market_open"))
+    status = "healthy" if live_ready else "idle"
+    if auto_enabled and automation.get("last_error") and market_open and not automation.get("last_success_at"):
+        status = "degraded"
 
     return _service(
         key="auction_intelligence",
         label="Auction Intelligence",
-        status="healthy" if live_ready else "idle",
+        status=status,
         detail=(
-            "Validation and paper-trading module is broker-ready."
-            if live_ready
-            else "Validation module is available; live readiness depends on broker connectivity."
+            "Automated paper cycle is armed for market hours."
+            if live_ready and auto_enabled
+            else (
+                "Validation module is available; auto paper cycle is not armed."
+                if live_ready
+                else "Validation module is available; live readiness depends on broker connectivity."
+            )
         ),
         meta={
             "live_ready": live_ready,
             "connected_brokers": summary.get("connected_brokers") or [],
             "deployable_first_sleeve": summary.get("deployable_first_sleeve"),
             "validation_gates": summary.get("validation_gates") or [],
-            "symbols": config.get("mvp_scope", {}).get("underlyings") or [],
+            "symbols": [
+                *list(config.get("mvp_scope", {}).get("primary_underlyings") or []),
+                *list(config.get("mvp_scope", {}).get("secondary_underlyings") or []),
+            ],
+            "automation": automation,
         },
     )
 
 
 async def _fractal_market_profile_service() -> dict[str, Any]:
+    automation = market_hours_paper_supervisor.get_runner_status("fractal_market_profile")
     try:
         live_probe = await fmp_service.live_health("NIFTY")
         return _service(
             key="fractal_market_profile",
             label="Fractal Market Profile",
             status="healthy",
-            detail="Live FMP snapshot has recent minute history available.",
-            meta=live_probe,
+            detail=(
+                "Live FMP snapshot has recent minute history and auto paper capture is armed."
+                if automation.get("enabled") and automation.get("loop_active")
+                else "Live FMP snapshot has recent minute history available."
+            ),
+            meta={**live_probe, "automation": automation},
         )
     except RuntimeError as exc:
         return _service(
@@ -433,7 +453,7 @@ async def _fractal_market_profile_service() -> dict[str, Any]:
             label="Fractal Market Profile",
             status="degraded",
             detail=f"Live FMP snapshot unavailable: {exc}",
-            meta={"symbol_code": "NIFTY"},
+            meta={"symbol_code": "NIFTY", "automation": automation},
         )
     except Exception as exc:
         logger.debug(f"[System] Fractal Market Profile health check failed: {exc}")
@@ -442,8 +462,13 @@ async def _fractal_market_profile_service() -> dict[str, Any]:
             label="Fractal Market Profile",
             status="critical",
             detail=f"FMP health check failed: {exc}",
-            meta={"symbol_code": "NIFTY"},
+            meta={"symbol_code": "NIFTY", "automation": automation},
         )
+
+
+@router.get("/automation-status")
+async def automation_status() -> dict[str, Any]:
+    return market_hours_paper_supervisor.get_status()
 
 
 @router.get("/health")

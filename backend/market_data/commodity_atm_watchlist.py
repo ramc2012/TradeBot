@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from loguru import logger
 
 from api.routers.auth import ensure_fyers_session, get_active_adapter
 from brokers.base import BrokerAdapter, OptionChainEntry
+from core.config import settings
 from market_data.commodity_contract_specs import (
     canonicalize_commodity_root,
     extract_commodity_root,
@@ -31,6 +33,15 @@ _MCX_OPTION_ROOT_ALIASES: dict[str, tuple[str, ...]] = {
 # Scan a wider futures ladder so far-month option expiries do not collapse onto
 # the last nearby future we happened to discover.
 _MCX_DISCOVERY_MONTH_OFFSETS = tuple(range(-1, 10))
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _is_rate_limit_error(exc: Exception | str) -> bool:
+    text = str(exc).lower()
+    return "429" in text or "limit reached" in text or "too many requests" in text
 
 
 def _normalize_commodity_symbols(symbols: list[str]) -> list[str]:
@@ -350,6 +361,82 @@ def _build_detail_message(
 class CommodityATMWatchlistService:
     """Build an MCX ATM watchlist from the commodity page's saved symbols."""
 
+    def __init__(self) -> None:
+        self._contract_catalog_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._watchlist_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._fyers_backoff_until: datetime | None = None
+        self._last_rate_limit_error: str | None = None
+
+    def _catalog_cache_key(
+        self,
+        symbols: list[str],
+        selected_option_expiries: dict[str, str],
+        selected_option_lookup_symbols: dict[str, str],
+    ) -> tuple[Any, ...]:
+        return (
+            tuple(symbols),
+            tuple(sorted(selected_option_expiries.items())),
+            tuple(sorted(selected_option_lookup_symbols.items())),
+        )
+
+    def _watchlist_cache_key(
+        self,
+        symbols: list[str],
+        selected_option_expiries: dict[str, str],
+        selected_option_lookup_symbols: dict[str, str],
+        expiry: str | None,
+    ) -> tuple[Any, ...]:
+        return (
+            *self._catalog_cache_key(symbols, selected_option_expiries, selected_option_lookup_symbols),
+            str(expiry or ""),
+        )
+
+    def _in_backoff(self) -> bool:
+        return self._fyers_backoff_until is not None and _utc_now() < self._fyers_backoff_until
+
+    def _mark_rate_limit(self, error: Exception | str) -> None:
+        self._last_rate_limit_error = str(error)
+        self._fyers_backoff_until = _utc_now() + timedelta(
+            seconds=max(int(settings.COMMODITY_FYERS_RATE_LIMIT_BACKOFF_SECONDS), 15)
+        )
+
+    def _clear_rate_limit(self) -> None:
+        self._fyers_backoff_until = None
+        self._last_rate_limit_error = None
+
+    def _cached_payload(
+        self,
+        cache: dict[tuple[Any, ...], dict[str, Any]],
+        key: tuple[Any, ...],
+        *,
+        label: str,
+    ) -> dict[str, Any] | None:
+        cached = cache.get(key)
+        if cached is None:
+            return None
+        payload = deepcopy(cached)
+        detail_parts = [str(payload.get("detail") or "").strip()]
+        if self._last_rate_limit_error:
+            detail_parts.append(
+                f"Reusing the last good {label} while Fyers rate limits cool down. ({self._last_rate_limit_error})"
+            )
+        else:
+            detail_parts.append(f"Reusing the last good {label} while Fyers rate limits cool down.")
+        payload["detail"] = " ".join(part for part in detail_parts if part).strip()
+        payload["cache_reused"] = True
+        payload["timestamp"] = _utc_now().isoformat()
+        if self._fyers_backoff_until is not None:
+            payload["backoff_until"] = self._fyers_backoff_until.isoformat()
+        return payload
+
+    def _store_cache(
+        self,
+        cache: dict[tuple[Any, ...], dict[str, Any]],
+        key: tuple[Any, ...],
+        payload: dict[str, Any],
+    ) -> None:
+        cache[key] = deepcopy(payload)
+
     async def get_contract_catalog(
         self,
         symbols: list[str],
@@ -386,13 +473,25 @@ class CommodityATMWatchlistService:
             for symbol, lookup_symbol in dict(selected_option_lookup_symbols or {}).items()
             if str(symbol).strip() and str(lookup_symbol).strip()
         }
+        cache_key = self._catalog_cache_key(normalized, selected_option_expiries, selected_option_lookup_symbols)
+        if self._in_backoff():
+            cached_payload = self._cached_payload(
+                self._contract_catalog_cache,
+                cache_key,
+                label="commodity contract catalog",
+            )
+            if cached_payload is not None:
+                return cached_payload
         symbol_contracts: list[dict[str, Any] | Exception] = []
+        rate_limit_errors: list[str] = []
         for index, symbol in enumerate(normalized):
             if index:
                 await asyncio.sleep(0.15)
             try:
                 symbol_contracts.append(await self._load_symbol_contracts(adapter, symbol))
             except Exception as exc:
+                if _is_rate_limit_error(exc):
+                    rate_limit_errors.append(str(exc))
                 symbol_contracts.append(exc)
 
         contracts: list[dict[str, Any]] = []
@@ -480,7 +579,7 @@ class CommodityATMWatchlistService:
             chain_failures=[],
             row_count=sum(1 for item in contracts if item["has_options"]),
         )
-        return {
+        payload = {
             "contracts": contracts,
             "summary": {
                 "total_symbols": len(normalized),
@@ -489,8 +588,26 @@ class CommodityATMWatchlistService:
             },
             "source": "fyers",
             "detail": detail,
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": _utc_now().isoformat(),
         }
+        if rate_limit_errors and payload["summary"]["contracts_ready"] == 0:
+            self._mark_rate_limit(rate_limit_errors[-1])
+            cached_payload = self._cached_payload(
+                self._contract_catalog_cache,
+                cache_key,
+                label="commodity contract catalog",
+            )
+            if cached_payload is not None:
+                return cached_payload
+        if payload["summary"]["contracts_ready"] > 0:
+            self._store_cache(self._contract_catalog_cache, cache_key, payload)
+            if rate_limit_errors:
+                self._mark_rate_limit(rate_limit_errors[-1])
+            else:
+                self._clear_rate_limit()
+        elif rate_limit_errors:
+            self._mark_rate_limit(rate_limit_errors[-1])
+        return payload
 
     async def get_expiries(self, symbols: list[str]) -> dict[str, Any]:
         catalog = await self.get_contract_catalog(symbols)
@@ -531,7 +648,36 @@ class CommodityATMWatchlistService:
         if isinstance(selected_option_expiries, str) and expiry is None:
             expiry = selected_option_expiries
             selected_option_expiries = None
-        catalog = await self.get_contract_catalog(symbols, selected_option_expiries, selected_option_lookup_symbols)
+        selected_option_expiries = {
+            str(symbol).strip().upper(): str(selected_expiry).strip()
+            for symbol, selected_expiry in dict(selected_option_expiries or {}).items()
+            if str(symbol).strip() and str(selected_expiry).strip()
+        }
+        selected_option_lookup_symbols = {
+            str(symbol).strip().upper(): str(lookup_symbol).strip().upper()
+            for symbol, lookup_symbol in dict(selected_option_lookup_symbols or {}).items()
+            if str(symbol).strip() and str(lookup_symbol).strip()
+        }
+        normalized_symbols = _normalize_commodity_symbols(symbols)
+        cache_key = self._watchlist_cache_key(
+            normalized_symbols,
+            selected_option_expiries,
+            selected_option_lookup_symbols,
+            expiry,
+        )
+        if self._in_backoff():
+            cached_payload = self._cached_payload(
+                self._watchlist_cache,
+                cache_key,
+                label="commodity ATM watchlist",
+            )
+            if cached_payload is not None:
+                return cached_payload
+        catalog = await self.get_contract_catalog(
+            normalized_symbols,
+            selected_option_expiries,
+            selected_option_lookup_symbols,
+        )
         contracts = list(catalog.get("contracts") or [])
         if not contracts:
             return {
@@ -621,6 +767,7 @@ class CommodityATMWatchlistService:
 
         rows: list[dict[str, Any]] = []
         chain_failures: list[str] = []
+        rate_limit_errors: list[str] = []
         active_lookup_symbols = [
             str(item.get("active_lookup_symbol") or item.get("lookup_symbol") or item.get("symbol") or "")
             for item in selected_contracts
@@ -645,6 +792,8 @@ class CommodityATMWatchlistService:
             except Exception as exc:
                 symbol = str(item["symbol"])
                 chain_failures.append(f"{symbol} ({item['active_expiry']})")
+                if _is_rate_limit_error(exc):
+                    rate_limit_errors.append(str(exc))
                 logger.warning(f"[Commodity ATM] Failed to build {symbol} {item['active_expiry']}: {exc}")
                 continue
             if result:
@@ -682,8 +831,25 @@ class CommodityATMWatchlistService:
                 chain_failures=chain_failures,
                 row_count=len(rows),
             ),
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": _utc_now().isoformat(),
         }
+        if rate_limit_errors and payload["summary"]["total_rows"] == 0:
+            self._mark_rate_limit(rate_limit_errors[-1])
+            cached_payload = self._cached_payload(
+                self._watchlist_cache,
+                cache_key,
+                label="commodity ATM watchlist",
+            )
+            if cached_payload is not None:
+                return cached_payload
+        if payload["summary"]["total_rows"] > 0:
+            self._store_cache(self._watchlist_cache, cache_key, payload)
+            if rate_limit_errors:
+                self._mark_rate_limit(rate_limit_errors[-1])
+            else:
+                self._clear_rate_limit()
+        elif rate_limit_errors:
+            self._mark_rate_limit(rate_limit_errors[-1])
         return payload
 
     async def _get_fyers_adapter(self) -> Optional[BrokerAdapter]:
@@ -717,6 +883,8 @@ class CommodityATMWatchlistService:
             payload = await adapter.get_ltp(remaining_symbols)
         except Exception as exc:
             logger.warning(f"[Commodity ATM] Live MCX quote fetch failed: {exc}")
+            if _is_rate_limit_error(exc):
+                self._mark_rate_limit(exc)
             return quotes
 
         for symbol in remaining_symbols:
@@ -726,6 +894,8 @@ class CommodityATMWatchlistService:
                 value = 0.0
             if value > 0:
                 quotes[symbol] = {"price": value, "source": "fyers"}
+        if quotes:
+            self._clear_rate_limit()
         return quotes
 
     async def _load_symbol_contracts(self, adapter: BrokerAdapter, symbol: str) -> dict[str, Any]:

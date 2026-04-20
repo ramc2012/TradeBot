@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from core.config import settings
+from core.market_hours_paper_supervisor import market_hours_paper_supervisor
 from core.paper_bootstrap import bootstrap_paper_trading_runtime
 from db.redis_client import get_redis, close_redis
 from api.routers import auth, trading, market, analytics, agent, commodity, backtester as backtester_router
@@ -103,10 +104,16 @@ async def lifespan(app: FastAPI):
         logger.info("✓ RL auto-trainer scheduled")
     except Exception as e:
         logger.warning(f"RL auto-trainer start skipped: {e}")
+    try:
+        await market_hours_paper_supervisor.start()
+        logger.info("✓ Market-hours paper supervisor started")
+    except Exception as e:
+        logger.warning(f"Market-hours paper supervisor start skipped: {e}")
 
     yield
 
     # Shutdown
+    await market_hours_paper_supervisor.stop()
     await rl_auto_trainer.stop()
     await paper_strategy_agent.stop()
     await commodity_strategy_agent.stop()

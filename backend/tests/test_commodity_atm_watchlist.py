@@ -207,6 +207,66 @@ def test_contract_catalog_discovers_expiry_specific_mcx_lookup_symbols() -> None
     ]
 
 
+def test_contract_catalog_reuses_last_good_payload_on_rate_limit() -> None:
+    service = CommodityATMWatchlistService()
+    adapter = _FakeCommodityAdapter()
+
+    async def _get_adapter():
+        return adapter
+
+    service._get_fyers_adapter = _get_adapter  # type: ignore[method-assign]
+
+    first = asyncio.run(service.get_contract_catalog(["MCX:GOLD26JUNFUT"]))
+    assert first["summary"]["contracts_ready"] == 1
+
+    class _RateLimitAdapter(_FakeCommodityAdapter):
+        async def get_option_contracts(self, symbol: str) -> list[dict]:
+            raise RuntimeError("Fyers data API error 429: request limit reached")
+
+    rate_adapter = _RateLimitAdapter()
+
+    async def _get_rate_adapter():
+        return rate_adapter
+
+    service._get_fyers_adapter = _get_rate_adapter  # type: ignore[method-assign]
+
+    second = asyncio.run(service.get_contract_catalog(["MCX:GOLD26JUNFUT"]))
+
+    assert second["contracts"] == first["contracts"]
+    assert second["cache_reused"] is True
+    assert "last good commodity contract catalog" in str(second["detail"])
+
+
+def test_watchlist_reuses_last_good_payload_on_rate_limit() -> None:
+    service = CommodityATMWatchlistService()
+    adapter = _FakeCommodityAdapter()
+
+    async def _get_adapter():
+        return adapter
+
+    service._get_fyers_adapter = _get_adapter  # type: ignore[method-assign]
+
+    first = asyncio.run(service.get_watchlist(["MCX:GOLD26JUNFUT"]))
+    assert first["summary"]["total_rows"] == 1
+
+    class _RateLimitAdapter(_FakeCommodityAdapter):
+        async def get_option_chain(self, symbol: str, expiry: str) -> OptionChain:
+            raise RuntimeError("Fyers data API error 429: request limit reached")
+
+    rate_adapter = _RateLimitAdapter()
+
+    async def _get_rate_adapter():
+        return rate_adapter
+
+    service._get_fyers_adapter = _get_rate_adapter  # type: ignore[method-assign]
+
+    second = asyncio.run(service.get_watchlist(["MCX:GOLD26JUNFUT"]))
+
+    assert second["rows"] == first["rows"]
+    assert second["cache_reused"] is True
+    assert "last good commodity ATM watchlist" in str(second["detail"])
+
+
 def test_contract_catalog_scans_far_enough_for_later_mcx_future_rolls() -> None:
     service = CommodityATMWatchlistService()
 

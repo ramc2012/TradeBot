@@ -29,6 +29,7 @@ from api.routers.auth import (
 from auction_intelligence.market_profile.engine import MarketProfileEngine
 from auction_intelligence.schemas import MarketBar
 from brokers.base import BrokerAdapter
+from core.config import settings
 from core.runtime_state import load_runtime_state, save_runtime_state
 from market_data.commodity_atm_watchlist import commodity_atm_watchlist_service
 from market_data.commodity_contract_specs import (
@@ -119,6 +120,11 @@ def _in_commodity_hours(now: Optional[datetime] = None) -> bool:
 
 def _parse_datetime(value: Any) -> Optional[datetime]:
     return _parse_iso_timestamp(value)
+
+
+def _is_rate_limit_error(exc: Exception | str) -> bool:
+    text = str(exc).lower()
+    return "429" in text or "limit reached" in text or "too many requests" in text
 
 
 def _normalize_symbols(symbols: list[str]) -> list[str]:
@@ -718,6 +724,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._last_data_health: dict[str, Any] = {}
         self._commentary: list[CommodityCommentaryEntry] = []
         self._state_synced_at: Optional[datetime] = None
+        self._fyers_ltp_backoff_until: Optional[datetime] = None
         self._apply_saved_state(saved_state)
         self._state_synced_at = saved_updated_at
         self._persist_state()
@@ -1993,12 +2000,20 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         remaining_symbols = [symbol for symbol in symbols if symbol not in quotes]
         if not remaining_symbols:
             return quotes
+        now = datetime.now(IST)
+        if self._fyers_ltp_backoff_until is not None and now < self._fyers_ltp_backoff_until:
+            return quotes
         try:
             payload = await adapter.get_ltp(remaining_symbols)
         except Exception as exc:
+            if _is_rate_limit_error(exc):
+                self._fyers_ltp_backoff_until = now + timedelta(
+                    seconds=max(int(settings.COMMODITY_FYERS_RATE_LIMIT_BACKOFF_SECONDS), 15)
+                )
             logger.warning(f"[CommodityStrategy] LTP fetch failed: {exc}")
             self._append_commentary("warning", f"Live LTP fetch failed. Using candle closes where available. ({exc})")
             return quotes
+        self._fyers_ltp_backoff_until = None
         for symbol in remaining_symbols:
             try:
                 value = float(payload.get(symbol, 0) or 0)

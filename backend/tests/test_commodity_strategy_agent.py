@@ -641,6 +641,34 @@ def test_safe_get_ltp_prefers_upstox_quotes_then_fyers_fallback(monkeypatch, tmp
     assert adapter.requests == [["MCX:CRUDEOIL26MAYFUT"]]
 
 
+def test_safe_get_ltp_backs_off_after_rate_limit(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    async def fake_upstox_quotes(symbols: list[str]) -> dict[str, float]:
+        return {}
+
+    class _Adapter:
+        def __init__(self) -> None:
+            self.requests: list[list[str]] = []
+
+        async def get_ltp(self, symbols: list[str]) -> dict[str, float]:
+            self.requests.append(list(symbols))
+            raise RuntimeError("Fyers data API error 429: request limit reached")
+
+    monkeypatch.setattr(commodity_module, "load_upstox_mcx_quotes", fake_upstox_quotes)
+
+    agent = CommodityStrategyAgent()
+    adapter = _Adapter()
+
+    first = asyncio.run(agent._safe_get_ltp(adapter, ["MCX:GOLD26JUNFUT"]))
+    second = asyncio.run(agent._safe_get_ltp(adapter, ["MCX:GOLD26JUNFUT"]))
+
+    assert first == {}
+    assert second == {}
+    assert adapter.requests == [["MCX:GOLD26JUNFUT"]]
+
+
 def test_analyze_futures_symbol_uses_continuation_signal_when_mp_aligns(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "commodity_strategy.json"
     monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)

@@ -724,9 +724,14 @@ class FractalMarketProfileService:
             for symbol in SUPPORTED_SYMBOLS
             if (cached_report := self._load_cached_replay(symbol)) is not None
         ]
+        from core.market_hours_paper_supervisor import market_hours_paper_supervisor
+
+        automation = market_hours_paper_supervisor.get_runner_status("fractal_market_profile")
         return {
             "description": "Dedicated Fractal Market Profile strategy stack",
             "supported_symbols": list(SUPPORTED_SYMBOLS),
+            "auto_started": bool(automation.get("enabled") and automation.get("loop_active")),
+            "automation": automation,
             "paper_summary": positions["summary"],
             "replay_reports": replay_reports,
         }

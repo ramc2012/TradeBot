@@ -11,6 +11,7 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 
 from auction_intelligence import AuctionIntelligenceService
+from auction_intelligence.automation import build_shadow_records_from_snapshot
 from auction_intelligence.analytics import MPAnalyticsEngine
 from auction_intelligence.config import clone_default_config
 from auction_intelligence.demo import (
@@ -184,112 +185,32 @@ def _journal_matches_symbol(record: dict, symbol: str | None) -> bool:
 
 
 def _shadow_records_from_snapshot(snapshot: dict, options: ShadowCaptureOptions) -> list[dict]:
-    request = snapshot.get("request", {})
-    analysis = snapshot.get("analysis", {})
-    session = request.get("session", {})
-    quote = request.get("quote", {})
-    metadata = request.get("metadata", {})
-    tick_size = float(analysis.get("market_profile", {}).get("tick_size") or 0.5)
-    risk = analysis.get("risk", {})
-    execution_by_agent = {
-        item.get("agent_name"): item for item in analysis.get("execution_plan", []) if item.get("agent_name")
-    }
-    snapshot_time = str(metadata.get("snapshot_time") or session.get("session_date") or "na")
-    snapshot_key = (
-        snapshot_time.replace(":", "")
-        .replace("-", "")
-        .replace("+", "")
-        .replace(".", "")
-        .replace("T", "_")
-    )
-    stale_signal = float(session.get("stale_data_seconds") or 0.0) > float(
-        clone_default_config()["risk"].get("stale_data_seconds", 10)
-    )
-
-    records: list[dict] = []
-    for index, decision in enumerate(analysis.get("agent_decisions", [])):
-        action = str(decision.get("action") or "FLAT")
-        if action == "FLAT" and not options.record_flat_decisions:
-            continue
-        execution = execution_by_agent.get(decision.get("agent_name"))
-        simulated_fill_price = (
-            execution.get("limit_price")
-            if execution and execution.get("limit_price") is not None
-            else decision.get("entry_price")
-        )
-        observed_touch_price = None
-        if action == "LONG":
-            observed_touch_price = quote.get("ask")
-        elif action == "SHORT":
-            observed_touch_price = quote.get("bid")
-        observed_fill_price = observed_touch_price
-        fill_drift_ticks = None
-        if simulated_fill_price is not None and observed_touch_price is not None and tick_size > 0:
-            fill_drift_ticks = round(abs(float(simulated_fill_price) - float(observed_touch_price)) / tick_size, 4)
-        records.append(
-            {
-                "signal_id": f"{session.get('session_date')}:{snapshot_key}:{session.get('symbol')}:{decision.get('agent_name')}:{index}",
-                "session_date": session.get("session_date"),
-                "symbol": session.get("symbol"),
-                "source": metadata.get("history_source", snapshot.get("mode", "shadow")),
-                "snapshot_mode": metadata.get("snapshot_mode"),
-                "agent_name": decision.get("agent_name"),
-                "action": action,
-                "regime_label": analysis.get("regime", {}).get("label"),
-                "setup_name": decision.get("metadata", {}).get("setup_name", decision.get("metadata", {}).get("flat_reason")),
-                "confidence": float(decision.get("confidence") or 0.0),
-                "quantity": int(decision.get("quantity") or 0),
-                "entry_price": decision.get("entry_price"),
-                "stop_price": decision.get("stop_price"),
-                "target_price": decision.get("target_price"),
-                "tick_size": tick_size,
-                "risk_allowed": bool(risk.get("allowed", False)),
-                "kill_switch_active": bool(risk.get("kill_switch", False)),
-                "simulated_fill_price": simulated_fill_price,
-                "observed_touch_price": observed_touch_price,
-                "observed_fill_price": observed_fill_price,
-                "fill_drift_ticks": fill_drift_ticks,
-                "stale_signal": stale_signal,
-                "reconciliation_status": options.reconciliation_status,
-                "mismatch_duration_seconds": options.mismatch_duration_seconds,
-                "kill_switch_tested": options.kill_switch_tested,
-                "kill_switch_passed": options.kill_switch_passed,
-                "dashboard_checked": options.dashboard_checked,
-                "alerts_checked": options.alerts_checked,
-                "manual_override_tested": options.manual_override_tested,
-                "metadata": {
-                    "symbol_code": snapshot.get("symbol_code"),
-                    "request_symbol": session.get("symbol"),
-                    "quote_source": metadata.get("quote_source"),
-                    "history_symbol": metadata.get("history_symbol"),
-                    "risk_reasons": risk.get("reasons", []),
-                    "rationale": decision.get("rationale", []),
-                    "decision_metadata": decision.get("metadata", {}),
-                },
-            }
-        )
-    return records
+    return build_shadow_records_from_snapshot(snapshot, options.model_dump())
 
 
 @router.get("/summary")
 async def summary() -> dict:
     config = clone_default_config()
+    from core.market_hours_paper_supervisor import market_hours_paper_supervisor
+
+    automation = market_hours_paper_supervisor.get_runner_status("auction_intelligence")
     return {
         "module": "auction_intelligence",
         "description": "Separate Market Profile + order-flow strategy stack",
-        "auto_started": False,
+        "auto_started": bool(automation.get("enabled") and automation.get("loop_active")),
+        "automation": automation,
         "mvp_scope": config["mvp_scope"],
         "deployable_first_sleeve": "swing",
         "validation_gates": [
             {"id": "gate_a", "label": "Data and feature engine", "status": "available"},
             {"id": "gate_b", "label": "Rule engine and walk-forward", "status": "available"},
-            {"id": "gate_c", "label": "Shadow mode and paper trading", "status": "available"},
+            {"id": "gate_c", "label": "Shadow mode and auto paper trading", "status": "available"},
             {"id": "gate_d", "label": "Live canary", "status": "planned"},
         ],
         "implementation_plan": [
             "Automate Gate A against broker-backed snapshots and deterministic demo sessions.",
             "Run Gate B walk-forward and setup-level expectancy validation on a deeper BANKNIFTY futures replay set.",
-            "Promote only after shadow-mode reconciliation and paper-trading stability are verified.",
+            "Promote only after shadow-mode reconciliation and automated paper-trading stability are verified.",
         ],
         "demo_symbols": get_available_demo_symbols(),
         "live_symbols": get_available_live_symbols(),
