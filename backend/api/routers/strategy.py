@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -163,6 +163,29 @@ def _find_strategy(agent_status: dict[str, Any], key: str) -> dict[str, Any]:
         if strategy.get("key") == key:
             return strategy
     return {}
+
+
+def _empty_portfolio_stats(underlying: str, source: str) -> dict[str, Any]:
+    return {
+        "underlying": underlying,
+        "strategy": "No portfolio data yet",
+        "total_trades": 0,
+        "wins": 0,
+        "losses": 0,
+        "win_rate": 0,
+        "avg_return": 0.0,
+        "median_return": 0.0,
+        "sharpe_ratio": 0.0,
+        "max_drawdown_pct": 0.0,
+        "catastrophic_trades": 0,
+        "final_equity": 100_000,
+        "final_equity_lakhs": 1.0,
+        "start_capital": 100_000,
+        "total_return_pct": 0.0,
+        "equity_curve": [{"trade": 0, "equity": 100_000, "date": ""}],
+        "monthly": [],
+        "source": source,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -847,14 +870,14 @@ async def get_portfolio_stats(
     # Fallback: CSV backtest portfolio
     tr_path = DATA_ROOT / "staggered_exit" / "trade_results.csv"
     if not tr_path.exists():
-        raise HTTPException(404, "Trade results not found")
+        return _empty_portfolio_stats(underlying, "empty")
 
     rows = _safe_read_csv(tr_path)
     s2 = [r for r in rows
           if r.get("underlying") == underlying and r.get("strategy") == "target_50pct"]
 
     if not s2:
-        raise HTTPException(404, f"No trades for {underlying}")
+        return _empty_portfolio_stats(underlying, "empty")
 
     poc_lookup = {}
     poc_path = DATA_ROOT / "option_mp" / "final_strategy_trades.csv"

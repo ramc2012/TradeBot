@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
+import asyncio
 
 from api.routers import strategy
 
@@ -95,3 +97,38 @@ def test_strategy2_live_signals_use_runtime_state() -> None:
     assert signals[0]["direction"] == "CE"
     assert signals[0]["status"] == "active"
     assert "live CE position open" in signals[0]["instruction"]
+
+
+def test_get_portfolio_stats_returns_empty_payload_when_archive_is_missing(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(strategy, "DATA_ROOT", tmp_path)
+
+    payload = asyncio.run(strategy.get_portfolio_stats(underlying="SENSEX", source="csv"))
+
+    assert payload["source"] == "empty"
+    assert payload["total_trades"] == 0
+    assert payload["equity_curve"] == [{"trade": 0, "equity": 100_000, "date": ""}]
+
+
+def test_get_portfolio_stats_returns_empty_payload_when_underlying_has_no_rows(monkeypatch, tmp_path: Path) -> None:
+    staggered_exit = tmp_path / "staggered_exit"
+    staggered_exit.mkdir(parents=True)
+    (staggered_exit / "trade_results.csv").write_text("underlying,strategy,entry_time,blended_return\n", encoding="utf-8")
+    monkeypatch.setattr(strategy, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(
+        strategy,
+        "_safe_read_csv",
+        lambda _path: [
+            {
+                "underlying": "NIFTY",
+                "strategy": "target_50pct",
+                "entry_time": "2026-04-17T09:30:00+05:30",
+                "blended_return": "1.25",
+            }
+        ],
+    )
+
+    payload = asyncio.run(strategy.get_portfolio_stats(underlying="SENSEX", source="csv"))
+
+    assert payload["source"] == "empty"
+    assert payload["underlying"] == "SENSEX"
+    assert payload["final_equity"] == 100_000
