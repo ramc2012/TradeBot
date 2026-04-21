@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   getBrokerStatus, getCredentialsStatus, saveCredentials, getFyersAuthUrl, getUpstoxAuthUrl, connectUpstox,
@@ -11,6 +11,7 @@ import {
 import { api } from "@/lib/api";
 import { hasBrokerSession, isBrokerReady, type BrokerStatusEntry } from "@/lib/broker-status";
 import { resolveApiBaseUrl } from "@/lib/runtime-url";
+import { useStore } from "@/store";
 import { clsx } from "clsx";
 import {
   CheckCircle2, XCircle, Eye, EyeOff, ExternalLink, RefreshCw,
@@ -168,6 +169,23 @@ function brokerStatusMeta(status?: Partial<BrokerStatusEntry> | null): string | 
   return parts.length ? parts.join(" · ") : null;
 }
 
+function mergeBrokerStatuses(
+  primary?: BrokerStatusEntry[],
+  fallback?: BrokerStatusEntry[],
+): BrokerStatusEntry[] {
+  const merged = new Map<string, BrokerStatusEntry>();
+  for (const status of fallback || []) {
+    merged.set(status.broker, status);
+  }
+  for (const status of primary || []) {
+    merged.set(status.broker, {
+      ...(merged.get(status.broker) || {}),
+      ...status,
+    });
+  }
+  return Array.from(merged.values());
+}
+
 function CredsSavedBadge({ fields }: { fields: Record<string, boolean> }) {
   const total = Object.keys(fields).length;
   const filled = Object.values(fields).filter(Boolean).length;
@@ -188,7 +206,9 @@ function useAllCredsStatus() {
   return useQuery({
     queryKey: ["allCredsStatus"],
     queryFn: () => api.get("/api/auth/all-credentials-status").then(r => r.data),
-    staleTime: 30_000,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
   });
 }
 
@@ -196,8 +216,9 @@ function UpstoxApiBudgetCard() {
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["settingsResearchCacheStatus"],
     queryFn: () => getResearchCacheStatus().then((r) => r.data),
-    refetchInterval: 30000,
-    staleTime: 15000,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
   });
 
   const budget = data?.api_budget;
@@ -570,13 +591,16 @@ function FyersCard({ status, onRefresh }: { status: BrokerStatusEntry | undefine
   const brokerReady = isBrokerReady(status);
   const sessionActive = hasBrokerSession(status);
   const statusMeta = brokerStatusMeta(status);
+  const [expanded, setExpanded] = useState(false);
   const { data: fyersCreds } = useQuery({
     queryKey: ["credentialsStatus", "fyers"],
     queryFn: () => getCredentialsStatus("fyers").then((r) => r.data),
     staleTime: 15000,
+    enabled: expanded,
+    refetchOnWindowFocus: false,
+    retry: false,
   });
 
-  const [expanded, setExpanded] = useState(false);
   const [appId, setAppId] = useState("");
   const [secret, setSecret] = useState("");
   const [authCode, setAuthCode] = useState("");
@@ -1305,18 +1329,27 @@ function ICICIBreezeCard({ status, onRefresh }: { status: BrokerStatusEntry | un
 
 export default function SettingsPage() {
   const qc = useQueryClient();
+  const layoutBrokerStatuses = useStore((state) => state.brokerStatuses);
 
-  const { data: brokerStatuses, refetch: refetchBrokers } = useQuery({
-    queryKey: ["brokerStatus", "validated"],
-    queryFn: () => getBrokerStatus({ forceValidate: true }).then(r => r.data),
-    refetchInterval: 60000,
-    staleTime: 20000,
+  const {
+    data: brokerStatuses,
+    isError: brokerStatusError,
+    refetch: refetchBrokers,
+  } = useQuery({
+    queryKey: ["brokerStatus"],
+    queryFn: () => getBrokerStatus().then(r => r.data),
+    refetchInterval: 120000,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
   });
 
   const { data: riskData } = useQuery({
     queryKey: ["riskStatus"],
     queryFn: () => getRiskStatus().then(r => r.data),
     staleTime: 30000,
+    refetchOnWindowFocus: false,
+    retry: false,
   });
 
   const [maxLoss, setMaxLoss] = useState("");
@@ -1328,12 +1361,23 @@ export default function SettingsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["riskStatus"] }),
   });
 
-  const statusMap = Object.fromEntries((brokerStatuses || []).map((s: any) => [s.broker, s]));
+  const effectiveBrokerStatuses = useMemo(
+    () => mergeBrokerStatuses(brokerStatuses, layoutBrokerStatuses),
+    [brokerStatuses, layoutBrokerStatuses],
+  );
+  const statusMap = Object.fromEntries(effectiveBrokerStatuses.map((s: any) => [s.broker, s]));
+  const showingBrokerFallback = Boolean((brokerStatusError || !brokerStatuses?.length) && layoutBrokerStatuses.length);
 
-  const handleRefresh = useCallback(() => {
-    refetchBrokers();
-    qc.invalidateQueries({ queryKey: ["brokerStatus"] });
+  const handleRefresh = useCallback(async () => {
+    try {
+      const response = await getBrokerStatus({ forceValidate: true });
+      qc.setQueryData(["brokerStatus"], response.data);
+    } catch {
+      await refetchBrokers();
+    }
     qc.invalidateQueries({ queryKey: ["allCredsStatus"] });
+    qc.invalidateQueries({ queryKey: ["riskStatus"] });
+    qc.invalidateQueries({ queryKey: ["settingsResearchCacheStatus"] });
   }, [refetchBrokers, qc]);
 
   return (
@@ -1351,6 +1395,11 @@ export default function SettingsPage() {
         <p className="text-xs text-text-muted">
           API credentials are saved once. Same-day broker sessions are also persisted and auto-restored across refreshes and restarts until the broker expires them.
         </p>
+        {showingBrokerFallback && (
+          <div className="rounded border border-accent-amber/20 bg-accent-amber/5 px-3 py-2 text-xs text-accent-amber">
+            Live broker validation is temporarily unavailable. Showing the last broker state received by the layout bar.
+          </div>
+        )}
         <UpstoxApiBudgetCard />
         <TelegramCard />
         <FyersCard status={statusMap["fyers"]} onRefresh={handleRefresh} />
