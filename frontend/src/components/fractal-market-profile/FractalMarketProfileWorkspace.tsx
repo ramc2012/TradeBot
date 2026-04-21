@@ -1417,9 +1417,9 @@ export default function FractalMarketProfileWorkspace() {
       <section className={sectionChrome("px-6 py-6 md:px-8")}>
         <SectionTitle
           icon={<Fingerprint size={15} className="text-sky-300" />}
-          eyebrow="Separate Strategy Desk"
+          eyebrow="Fractal MP"
           title="Fractal Market Profile"
-          detail="Daily 30-minute TPO and nested hourly 3-minute profile logic now run as an isolated options-buying strategy. The desk tracks live profile migration, order-flow confirmation, paper positions, and replay validation for NIFTY and SENSEX."
+          detail="Daily 30-minute TPO and nested hourly 3-minute profile logic now run as a live paper desk for NIFTY and SENSEX, with profile migration, order flow, paper positions, and replay checks on one surface."
           action={
             <div className="flex flex-wrap items-center gap-2">
               <StatusPill

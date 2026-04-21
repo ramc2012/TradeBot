@@ -331,12 +331,13 @@ class MarketIntelligenceRuntime:
                 ),
                 {"today_start": today_start},
             )
-            watchlist_rows = await session.scalar(
+            watchlist_exists = await session.scalar(
                 text(
                     """
-                    SELECT COUNT(*)::int
+                    SELECT 1
                     FROM atm_option_watchlist_snapshots
                     WHERE time >= :today_start
+                    LIMIT 1
                     """
                 ),
                 {"today_start": today_start},
@@ -368,12 +369,13 @@ class MarketIntelligenceRuntime:
                 (datetime.now(UTC) - _parse_time(watchlist_time)).total_seconds(),
             )
 
-        ready = bool(watchlist_rows) and (
+        watchlist_rows_today = 1 if watchlist_exists is not None else 0
+        ready = bool(watchlist_rows_today) and (
             watchlist_age_seconds is None or watchlist_age_seconds <= 600
         )
         return {
             "ready": ready,
-            "watchlist_rows_today": int(watchlist_rows or 0),
+            "watchlist_rows_today": watchlist_rows_today,
             "latest_watchlist_time": latest_watchlist_iso,
             "watchlist_age_seconds": watchlist_age_seconds,
             "latest_spot_rows": per_symbol,

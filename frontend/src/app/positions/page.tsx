@@ -404,10 +404,10 @@ export default function PositionsPage() {
         <div className="max-w-4xl">
           <div className="flex items-center gap-2 text-lg font-bold font-mono text-text-primary">
             <TrendingUp size={18} className="text-accent-blue" />
-            Global Positions
+            Portfolio Positions
           </div>
-          <p className="mt-2 text-sm leading-6 text-text-secondary">
-            One live book for manual trading, the NSE strategy desk, and the commodity desk. This page normalizes option and futures exposure so the portfolio can be tracked without switching surfaces.
+          <p className="mt-2 max-w-4xl text-sm leading-6 text-text-secondary line-clamp-2">
+            One live book for manual trading, the NSE desk, and the commodity desk. This normalized ledger remains available directly, even though portfolio analytics now carry the primary navigation slot.
           </p>
         </div>
       </section>

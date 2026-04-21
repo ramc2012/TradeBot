@@ -30,13 +30,8 @@ import {
 
 import { StreamStatus } from "@/components/live/StreamStatus";
 import {
-  getCommodityATMWatchlist,
-  getCommodityKillSwitchStatus,
-  getCommodityOrders,
-  getCommodityPositions,
-  getCommodityReports,
-  getCommodityStrategyContracts,
-  getCommodityStrategyStatus,
+  getCommodityOverview,
+  getCommodityWatchlistSnapshot,
   startCommodityStrategyAgent,
   updateCommodityKillSwitch,
   updateCommodityStrategyConfig,
@@ -903,21 +898,12 @@ export default function CommodityPage() {
     reports: CommodityReport[];
   }>({
     queryKey: ["commodityOverview"],
-    queryFn: async () => {
-      const [status, kill_switch_state, orders, positions, reports] = await Promise.all([
-        getCommodityStrategyStatus().then((response) => response.data as CommodityStatus),
-        getCommodityKillSwitchStatus().then((response) => response.data as KillSwitchState),
-        getCommodityOrders(40).then((response) => response.data as CommodityOrder[]),
-        getCommodityPositions().then((response) => response.data as CommodityPosition[]),
-        getCommodityReports(24).then((response) => response.data as CommodityReport[]),
-      ]);
-      return {
-        status,
-        kill_switch_state,
-        orders,
-        positions,
-        reports,
-      };
+    queryFn: async () => (await getCommodityOverview()).data as {
+      status: CommodityStatus;
+      kill_switch_state: KillSwitchState;
+      orders: CommodityOrder[];
+      positions: CommodityPosition[];
+      reports: CommodityReport[];
     },
     streamFactory: (onData, onStatusChange) =>
       createCommodityOverviewSocket(
@@ -943,16 +929,7 @@ export default function CommodityPage() {
 
   const commodityWatchlistQuery = useLiveSnapshotQuery<CommodityWatchlistSnapshot>({
     queryKey: ["commodityWatchlistSnapshot"],
-    queryFn: async () => {
-      const [contract_catalog, atm_watchlist] = await Promise.all([
-        getCommodityStrategyContracts().then((response) => response.data as CommodityContractCatalogPayload),
-        getCommodityATMWatchlist().then((response) => response.data as CommodityATMWatchlistPayload),
-      ]);
-      return {
-        contract_catalog,
-        atm_watchlist,
-      };
-    },
+    queryFn: async () => (await getCommodityWatchlistSnapshot()).data as CommodityWatchlistSnapshot,
     streamFactory: (onData, onStatusChange) =>
       createCommodityWatchlistSocket(
         (data) => onData(data as CommodityWatchlistSnapshot),
@@ -1117,12 +1094,15 @@ export default function CommodityPage() {
       <section className="rounded-[28px] border border-bg-active/60 bg-bg-secondary/30 px-5 py-5">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="max-w-4xl">
-            <div className="flex items-center gap-2 text-lg font-bold font-mono text-text-primary">
+            <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.2em] text-text-muted">
               <Boxes size={18} className="text-accent-amber" />
-              Commodity Strategy Desk
+              Commodity
             </div>
-            <p className="mt-2 text-sm leading-6 text-text-secondary">
-              One desk, two live sleeves: Strategy 2 trades MCX futures on 15-minute MACD with Market Profile confirmation, and Strategy 1 trades liquid CE or PE contracts on 30-minute MACD with a 25% hard stop and a 20% capital budget per trade.
+            <h1 className="mt-2 max-w-3xl text-2xl font-semibold text-text-primary">
+              MCX futures, expiry locks, and ATM options on one paper desk.
+            </h1>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-text-secondary line-clamp-2">
+              The commodity surface now keeps runtime state, watchlists, signals, and setup tighter so the page can stay live without the old request burst.
             </p>
           </div>
 
@@ -1241,9 +1221,9 @@ export default function CommodityPage() {
       <section className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <div className="text-sm font-semibold text-text-primary">Workspace Tabs</div>
+            <div className="text-sm font-semibold text-text-primary">Desk Views</div>
             <div className="mt-1 text-xs text-text-muted">
-              Portfolio stays first, signals are split by futures and options logic, and setup stays separate from the live execution surface.
+              Execution, signal validation, and expiry setup now stay on one desk without repeating the runtime rail.
             </div>
           </div>
           <div className="text-xs text-text-muted">

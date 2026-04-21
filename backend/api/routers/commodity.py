@@ -30,6 +30,17 @@ async def commodity_strategy_status():
     return commodity_strategy_agent.get_status()
 
 
+@router.get("/overview")
+async def commodity_overview():
+    return {
+        "status": commodity_strategy_agent.get_status(),
+        "kill_switch_state": commodity_strategy_agent.get_control_state(),
+        "orders": commodity_strategy_agent.get_orders()[:40],
+        "positions": commodity_strategy_agent.get_positions(),
+        "reports": commodity_strategy_agent.get_reports()[:24],
+    }
+
+
 @router.post("/strategy-agent/start")
 async def start_commodity_strategy_agent():
     return await commodity_strategy_agent.start_loop()
@@ -89,6 +100,41 @@ async def commodity_atm_watchlist(expiry: Optional[str] = Query(None)):
         commodity_strategy_agent.get_selected_option_lookup_symbols(),
         expiry,
     )
+
+
+@router.get("/watchlist-snapshot")
+async def commodity_watchlist_snapshot(
+    expiry: Optional[str] = Query(None),
+    live_refresh: bool = Query(False),
+):
+    await commodity_strategy_agent.ensure_selected_option_setup_locks()
+    symbols = commodity_strategy_agent.get_symbols()
+    selected_option_expiries = commodity_strategy_agent.get_selected_option_expiries()
+    selected_option_lookup_symbols = commodity_strategy_agent.get_selected_option_lookup_symbols()
+    contract_catalog = None if live_refresh else commodity_atm_watchlist_service.get_cached_contract_catalog(
+        symbols,
+        selected_option_expiries,
+        selected_option_lookup_symbols,
+    )
+    atm_watchlist = None if live_refresh else commodity_atm_watchlist_service.get_cached_watchlist(
+        symbols,
+        selected_option_expiries,
+        selected_option_lookup_symbols,
+        expiry,
+    )
+    return {
+        "contract_catalog": contract_catalog or await commodity_atm_watchlist_service.get_contract_catalog(
+            symbols,
+            selected_option_expiries,
+            selected_option_lookup_symbols,
+        ),
+        "atm_watchlist": atm_watchlist or await commodity_atm_watchlist_service.get_watchlist(
+            symbols,
+            selected_option_expiries,
+            selected_option_lookup_symbols,
+            expiry,
+        ),
+    }
 
 
 @router.get("/orders")

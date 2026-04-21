@@ -32,10 +32,10 @@ const NAV_GROUPS = [
     title: "Operate",
     items: [
       { href: "/", label: "Overview", icon: LayoutDashboard },
-      { href: "/positions", label: "Positions", icon: BriefcaseBusiness },
+      { href: "/analytics", label: "Portfolio", icon: BriefcaseBusiness },
       { href: "/trading", label: "Execution", icon: Activity },
       { href: "/market", label: "Market", icon: Globe },
-      { href: "/strategy", label: "NSE Strategy", icon: Crosshair },
+      { href: "/strategy", label: "NSE Desk", icon: Crosshair },
       { href: "/directional-options", label: "Long Premium", icon: Target },
       { href: "/commodity", label: "Commodity", icon: Waves },
     ],
@@ -43,10 +43,9 @@ const NAV_GROUPS = [
   {
     title: "Validate",
     items: [
-      { href: "/analytics", label: "Analytics", icon: BarChart3 },
       { href: "/auction-intelligence", label: "Auction IQ", icon: Layers3 },
       { href: "/fractal-market-profile", label: "Fractal MP", icon: Fingerprint },
-      { href: "/mp-intelligence", label: "MP Intelligence", icon: Brain },
+      { href: "/mp-intelligence", label: "MP Live", icon: Brain },
       { href: "/analysis", label: "Research Monitor", icon: Activity },
       { href: "/backtester", label: "Backtester", icon: FlaskConical },
       { href: "/agent", label: "Agent", icon: Bot },

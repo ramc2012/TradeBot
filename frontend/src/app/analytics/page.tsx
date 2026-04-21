@@ -459,10 +459,10 @@ export default function AnalyticsPage() {
         <div className="max-w-4xl">
           <div className="flex items-center gap-2 text-lg font-bold font-mono text-text-primary">
             <BarChart3 size={18} className="text-accent-blue" />
-            Analytics
+            Portfolio & Analytics
           </div>
-          <p className="mt-2 text-sm leading-6 text-text-secondary">
-            Strategy runtime performance is now first-class here. The strategy desk stays separate from the manual book so live option-system results are visible without being diluted by the generic execution surface.
+          <p className="mt-2 max-w-4xl text-sm leading-6 text-text-secondary line-clamp-2">
+            Live strategy performance, automated books, and the shared portfolio picture sit on one page so you can review paper trading without bouncing between separate analytics and positions menus.
           </p>
         </div>
       </section>

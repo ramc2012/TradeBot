@@ -26,8 +26,13 @@ import {
   YAxis,
 } from "recharts";
 
+import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
-import { API_URL, getDirectionalOptionsWorkspace } from "@/lib/api";
+import {
+  API_URL,
+  getDirectionalOptionsBacktest,
+  getDirectionalOptionsLiveSnapshot,
+} from "@/lib/api";
 
 type CoverageRow = {
   underlying: string;
@@ -167,8 +172,45 @@ type WorkspaceResponse = {
     contract_candidates: ContractCandidate[];
     risk?: RiskSnapshot | null;
     selection_reason: string;
+    data_status?: {
+      execution_ready?: boolean;
+      degraded_reason?: string | null;
+      latest_watchlist_time?: string | null;
+      latest_spot_time?: string | null;
+    };
+    history_source?: string | null;
+    history_symbol?: string | null;
   };
-  backtest: BacktestPayload;
+  paper_positions?: {
+    summary?: {
+      open_count?: number;
+      closed_count?: number;
+      realized_pnl?: number;
+      unrealized_pnl?: number;
+    };
+    open_positions?: Array<{
+      position_id: string;
+      trading_symbol?: string | null;
+      quantity: number;
+      entry_premium: number;
+      latest_premium: number;
+      unrealized_pnl?: number | null;
+      option_type?: string | null;
+      strike?: number | null;
+      expiry?: string | null;
+      status?: string | null;
+    }>;
+  };
+  paper_journal?: {
+    records?: Array<{
+      recorded_at: string;
+      action: string;
+      confidence?: number | null;
+      trading_symbol?: string | null;
+      premium?: number | null;
+      selection_reason?: string | null;
+    }>;
+  };
 };
 
 function formatMoney(value?: number | null, digits = 0) {
@@ -270,23 +312,39 @@ export default function DirectionalOptionsWorkspace() {
   const deferredTimeframe = useDeferredValue(timeframe);
   const deferredLookbackSessions = useDeferredValue(lookbackSessions);
 
-  const workspace = usePersistentSnapshotQuery<WorkspaceResponse>({
-    storageKey: `nomad-curie.directional-options.${deferredUnderlying}.${deferredTimeframe}.${deferredLookbackSessions}`,
-    queryKey: ["directional-options-workspace", deferredUnderlying, deferredTimeframe, deferredLookbackSessions],
+  const liveQuery = useLiveSnapshotQuery<WorkspaceResponse>({
+    storageKey: `nomad-curie.directional-options.live.${deferredUnderlying}.${deferredTimeframe}.${deferredLookbackSessions}`,
+    queryKey: ["directional-options-live", deferredUnderlying, deferredTimeframe, deferredLookbackSessions],
     queryFn: async () => {
-      const response = await getDirectionalOptionsWorkspace(
+      const response = await getDirectionalOptionsLiveSnapshot(
         deferredUnderlying,
         deferredTimeframe,
         Number(deferredLookbackSessions),
       );
       return response.data as WorkspaceResponse;
     },
-    refetchInterval: 60_000,
-    staleTime: 45_000,
+    staleTime: 30_000,
+    refetchInterval: 45_000,
   });
 
-  const data = workspace.data;
-  const summary = data?.backtest.summary;
+  const backtestQuery = usePersistentSnapshotQuery<BacktestPayload>({
+    storageKey: `nomad-curie.directional-options.backtest.${deferredUnderlying}.${deferredTimeframe}.${deferredLookbackSessions}`,
+    queryKey: ["directional-options-backtest", deferredUnderlying, deferredTimeframe, deferredLookbackSessions],
+    queryFn: async () => {
+      const response = await getDirectionalOptionsBacktest(
+        deferredUnderlying,
+        deferredTimeframe,
+        Number(deferredLookbackSessions),
+      );
+      return response.data as BacktestPayload;
+    },
+    refetchInterval: 5 * 60_000,
+    staleTime: 4 * 60_000,
+  });
+
+  const data = liveQuery.data;
+  const summary = backtestQuery.data?.summary;
+  const backtest = backtestQuery.data;
   const snapshot = data?.snapshot;
   const module = data?.module;
   const dashboardUrl = module?.dashboard?.mounted && module.dashboard.url ? `${API_URL}${module.dashboard.url}` : null;
@@ -304,8 +362,8 @@ export default function DirectionalOptionsWorkspace() {
               </div>
               <div>
                 <h1 className="text-2xl font-semibold text-text-primary">{module?.label || "Directional Long Options"}</h1>
-                <p className="mt-1 text-sm text-text-muted">
-                  {module?.description || "Directional long-premium desk for selective CE/PE entries."}
+                <p className="mt-1 max-w-2xl text-sm text-text-muted line-clamp-2">
+                  Live market-intelligence spot history now feeds the paper long-premium desk, while backtest diagnostics stay on a slower lane.
                 </p>
               </div>
             </div>
@@ -358,10 +416,11 @@ export default function DirectionalOptionsWorkspace() {
         <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-text-muted">
           <span className="inline-flex items-center gap-2">
             <Activity size={14} />
-            {workspace.isFetching || isPending ? "Refreshing engine view" : "Snapshot ready"}
+            {liveQuery.isFetching || isPending ? "Refreshing engine view" : "Live desk ready"}
           </span>
           <span>As of {formatTimestamp(snapshot?.as_of)}</span>
-          <span>{workspace.isShowingSnapshot ? "Showing cached snapshot" : "Live API response"}</span>
+          <span>{liveQuery.isShowingSnapshot ? "Showing cached snapshot" : "Using live paper snapshot"}</span>
+          {snapshot?.data_status?.execution_ready === false ? <span className="text-accent-amber">{String(snapshot.data_status.degraded_reason || "data gate blocked").replaceAll("_", " ")}</span> : null}
         </div>
       </section>
 
@@ -371,6 +430,12 @@ export default function DirectionalOptionsWorkspace() {
         <MetricTile label="Max DD" value={formatPct(summary?.max_drawdown_pct)} detail="Largest peak-to-trough drawdown." color="text-accent-red" />
         <MetricTile label="Win Rate" value={formatPct(summary?.win_rate_pct)} detail={`PF ${summary?.profit_factor?.toFixed(2) || "--"}`} color={tone((summary?.win_rate_pct || 0) - 50)} />
         <MetricTile label="Profitable Months" value={formatPct(summary?.percent_profitable_months)} detail={`${summary?.trade_count || 0} trades across ${deferredLookbackSessions} sessions.`} color={tone((summary?.percent_profitable_months || 0) - 50)} />
+        <MetricTile
+          label="Paper Book"
+          value={`${data?.paper_positions?.summary?.open_count ?? 0}`}
+          detail={`Realized ${formatSignedMoney(data?.paper_positions?.summary?.realized_pnl, 0)} · open ${formatSignedMoney(data?.paper_positions?.summary?.unrealized_pnl, 0)}`}
+          color={tone((data?.paper_positions?.summary?.realized_pnl || 0) + (data?.paper_positions?.summary?.unrealized_pnl || 0))}
+        />
       </section>
 
       <section className="grid gap-5 xl:grid-cols-[1.1fr,0.9fr]">
@@ -508,7 +573,7 @@ export default function DirectionalOptionsWorkspace() {
             </div>
             <div className="mt-4 h-64 rounded-2xl border border-bg-border bg-bg-primary/12 p-3">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={data?.backtest.equity_curve || []}>
+                <LineChart data={backtest?.equity_curve || []}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(148, 163, 184, 0.12)" />
                   <XAxis dataKey="time" hide />
                   <YAxis stroke="#94a3b8" />
@@ -518,8 +583,8 @@ export default function DirectionalOptionsWorkspace() {
               </ResponsiveContainer>
             </div>
             <div className="mt-4 grid gap-3 md:grid-cols-2">
-              <MetricTile label="Walk-forward Expectancy" value={formatSignedMoney(data?.backtest.stability.walkforward_expectancy)} detail="Average expectancy across sequential windows." color={tone(data?.backtest.stability.walkforward_expectancy)} />
-              <MetricTile label="Rolling PF" value={data?.backtest.stability.rolling_50_trade_profit_factor?.toFixed(2) || "--"} detail="Latest 50-trade profit factor proxy." color={tone((data?.backtest.stability.rolling_50_trade_profit_factor || 0) - 1)} />
+              <MetricTile label="Walk-forward Expectancy" value={formatSignedMoney(backtest?.stability.walkforward_expectancy)} detail="Average expectancy across sequential windows." color={tone(backtest?.stability.walkforward_expectancy)} />
+              <MetricTile label="Rolling PF" value={backtest?.stability.rolling_50_trade_profit_factor?.toFixed(2) || "--"} detail="Latest 50-trade profit factor proxy." color={tone((backtest?.stability.rolling_50_trade_profit_factor || 0) - 1)} />
             </div>
           </div>
 
@@ -531,13 +596,13 @@ export default function DirectionalOptionsWorkspace() {
             <div className="mt-4 grid gap-4 md:grid-cols-2">
               <div className="h-56 rounded-2xl border border-bg-border bg-bg-primary/12 p-3">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={data?.backtest.monthly || []}>
+                  <BarChart data={backtest?.monthly || []}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(148, 163, 184, 0.12)" />
                     <XAxis dataKey="month" stroke="#94a3b8" />
                     <YAxis stroke="#94a3b8" />
                     <Tooltip formatter={(value: number) => formatMoney(value, 0)} />
                     <Bar dataKey="pnl" radius={[6, 6, 0, 0]}>
-                      {(data?.backtest.monthly || []).map((item) => (
+                      {(backtest?.monthly || []).map((item) => (
                         <Cell key={item.month} fill={item.pnl >= 0 ? "#22c55e" : "#ef4444"} />
                       ))}
                     </Bar>
@@ -546,13 +611,13 @@ export default function DirectionalOptionsWorkspace() {
               </div>
               <div className="h-56 rounded-2xl border border-bg-border bg-bg-primary/12 p-3">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={data?.backtest.regime_breakdown || []} layout="vertical">
+                  <BarChart data={backtest?.regime_breakdown || []} layout="vertical">
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(148, 163, 184, 0.12)" />
                     <XAxis type="number" stroke="#94a3b8" />
                     <YAxis type="category" dataKey="regime" stroke="#94a3b8" width={76} />
                     <Tooltip formatter={(value: number) => value.toFixed(1)} />
                     <Bar dataKey="expectancy" radius={[0, 6, 6, 0]}>
-                      {(data?.backtest.regime_breakdown || []).map((item) => (
+                      {(backtest?.regime_breakdown || []).map((item) => (
                         <Cell key={item.regime} fill={item.expectancy >= 0 ? "#38bdf8" : "#f97316"} />
                       ))}
                     </Bar>
@@ -568,7 +633,7 @@ export default function DirectionalOptionsWorkspace() {
         <div className="rounded-[26px] border border-bg-border bg-bg-secondary/24 p-5">
           <div className="flex items-center gap-2 text-sm font-semibold text-text-primary">
             <ShieldCheck size={16} />
-            Recent Trades
+            Backtest Trades
           </div>
           <div className="mt-4 overflow-x-auto">
             <table className="min-w-full divide-y divide-bg-border text-sm">
@@ -583,8 +648,8 @@ export default function DirectionalOptionsWorkspace() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-bg-border/70 text-text-secondary">
-                {(data?.backtest.recent_trades || []).length > 0 ? (
-                  (data?.backtest.recent_trades || []).map((trade) => (
+                {(backtest?.recent_trades || []).length > 0 ? (
+                  (backtest?.recent_trades || []).map((trade) => (
                     <tr key={`${trade.trading_symbol}-${trade.exit_time}`}>
                       <td className="py-2 pr-4 font-medium text-text-primary">{trade.trading_symbol}</td>
                       <td className={clsx("py-2 pr-4 font-mono", tone(trade.pnl))}>{formatSignedMoney(trade.pnl, 2)}</td>

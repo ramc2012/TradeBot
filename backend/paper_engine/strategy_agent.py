@@ -1461,7 +1461,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                         self._append_commentary("System", message, tone="warning")
                         return await self._status_with_risk_snapshot()
                 else:
-                    broker_snapshot = await get_broker_connection_snapshot(force_validate=True)
+                    broker_snapshot = await get_broker_connection_snapshot(force_validate=False)
                     self._last_data_health = {
                         "broker_snapshot": broker_snapshot,
                         "option_history": option_history_service.get_health_snapshot(),

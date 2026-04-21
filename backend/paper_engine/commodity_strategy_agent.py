@@ -1924,10 +1924,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     self._append_commentary("idle", "Commodity market closed. Agent idle.")
                     return self.get_status(refresh=False)
 
-                await ensure_fyers_session(force_validate=True)
-                await ensure_upstox_session(force_validate=True)
-                fyers_health = await get_fyers_token_health(force=True)
-                upstox_health = await get_upstox_token_health(force=True)
+                await ensure_fyers_session(force_validate=False)
+                await ensure_upstox_session(force_validate=False)
+                fyers_health = await get_fyers_token_health(force=False)
+                upstox_health = await get_upstox_token_health(force=False)
                 self._last_data_health = {
                     "fyers_token_health": fyers_health,
                     "upstox_token_health": upstox_health,

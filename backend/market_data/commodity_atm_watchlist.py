@@ -437,6 +437,68 @@ class CommodityATMWatchlistService:
     ) -> None:
         cache[key] = deepcopy(payload)
 
+    def get_cached_contract_catalog(
+        self,
+        symbols: list[str],
+        selected_option_expiries: Optional[dict[str, str]] = None,
+        selected_option_lookup_symbols: Optional[dict[str, str]] = None,
+    ) -> dict[str, Any] | None:
+        normalized = _normalize_commodity_symbols(symbols)
+        if not normalized:
+            return None
+        cache_key = self._catalog_cache_key(
+            normalized,
+            {
+                str(symbol).strip().upper(): str(expiry).strip()
+                for symbol, expiry in dict(selected_option_expiries or {}).items()
+                if str(symbol).strip() and str(expiry).strip()
+            },
+            {
+                str(symbol).strip().upper(): str(lookup_symbol).strip().upper()
+                for symbol, lookup_symbol in dict(selected_option_lookup_symbols or {}).items()
+                if str(symbol).strip() and str(lookup_symbol).strip()
+            },
+        )
+        cached = self._contract_catalog_cache.get(cache_key)
+        if cached is None:
+            return None
+        payload = deepcopy(cached)
+        payload["cache_reused"] = True
+        payload["timestamp"] = _utc_now().isoformat()
+        return payload
+
+    def get_cached_watchlist(
+        self,
+        symbols: list[str],
+        selected_option_expiries: Optional[dict[str, str]] = None,
+        selected_option_lookup_symbols: Optional[dict[str, str]] = None,
+        expiry: Optional[str] = None,
+    ) -> dict[str, Any] | None:
+        normalized = _normalize_commodity_symbols(symbols)
+        if not normalized:
+            return None
+        cache_key = self._watchlist_cache_key(
+            normalized,
+            {
+                str(symbol).strip().upper(): str(selected_expiry).strip()
+                for symbol, selected_expiry in dict(selected_option_expiries or {}).items()
+                if str(symbol).strip() and str(selected_expiry).strip()
+            },
+            {
+                str(symbol).strip().upper(): str(lookup_symbol).strip().upper()
+                for symbol, lookup_symbol in dict(selected_option_lookup_symbols or {}).items()
+                if str(symbol).strip() and str(lookup_symbol).strip()
+            },
+            expiry,
+        )
+        cached = self._watchlist_cache.get(cache_key)
+        if cached is None:
+            return None
+        payload = deepcopy(cached)
+        payload["cache_reused"] = True
+        payload["timestamp"] = _utc_now().isoformat()
+        return payload
+
     async def get_contract_catalog(
         self,
         symbols: list[str],

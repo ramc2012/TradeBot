@@ -1106,8 +1106,8 @@ export default function MPIntelligenceDashboard() {
     queryKey: ["mp-analytics", underlying, lookback],
     queryFn: () =>
       getMPAnalytics(underlying, lookback).then((r) => r.data),
-    staleTime: 5 * 60 * 1000,
-    refetchInterval: 10 * 60 * 1000,
+    staleTime: 60_000,
+    refetchInterval: 90_000,
   });
 
   const driftState = data?.concept_drift?.current_state;
@@ -1121,20 +1121,23 @@ export default function MPIntelligenceDashboard() {
           : null;
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 p-4 space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-lg font-bold text-zinc-100 flex items-center gap-2">
-            <Brain className="w-5 h-5 text-purple-400" />
-            MP Intelligence
-          </h1>
-          <p className="text-xs text-zinc-500 mt-0.5">
-            Multi-timeframe profiles · Regime history · Setup performance · Concept drift
-          </p>
-        </div>
+    <div className="space-y-4 text-zinc-100">
+      <section className="rounded-[28px] border border-bg-active/60 bg-bg-secondary/30 px-5 py-5">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div className="max-w-3xl">
+            <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.2em] text-text-muted">
+              <Brain className="h-4 w-4 text-accent-blue" />
+              MP Intelligence
+            </div>
+            <h1 className="mt-2 text-2xl font-semibold text-text-primary">
+              Live market-profile structure with drift and setup diagnostics.
+            </h1>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-text-secondary line-clamp-2">
+              Multi-timeframe profiles, regime migration, setup performance, and order-flow proxy stay on a faster refresh so the desk reflects the latest MP state.
+            </p>
+          </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-2 flex-wrap">
           {/* Underlying selector */}
           <div className="flex items-center gap-1">
             {UNDERLYINGS.map((u) => (
@@ -1142,10 +1145,10 @@ export default function MPIntelligenceDashboard() {
                 key={u}
                 onClick={() => setUnderlying(u)}
                 className={clsx(
-                  "px-3 py-1 rounded text-xs font-medium transition-colors",
+                  "rounded-full px-3 py-1.5 text-xs font-semibold transition-colors",
                   underlying === u
-                    ? "bg-blue-600 text-white"
-                    : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700",
+                    ? "border border-accent-blue/35 bg-accent-blue/12 text-accent-blue"
+                    : "border border-bg-border bg-bg-primary/20 text-text-secondary hover:border-bg-active hover:text-text-primary",
                 )}
               >
                 {u}
@@ -1157,7 +1160,7 @@ export default function MPIntelligenceDashboard() {
           <select
             value={lookback}
             onChange={(e) => setLookback(Number(e.target.value))}
-            className="bg-zinc-800 border border-zinc-700 text-zinc-300 text-xs px-2 py-1 rounded"
+            className="rounded-full border border-bg-border bg-bg-primary/20 px-3 py-1.5 text-xs text-text-primary"
           >
             {[30, 45, 60, 90, 120, 180].map((l) => (
               <option key={l} value={l}>
@@ -1169,7 +1172,7 @@ export default function MPIntelligenceDashboard() {
           {/* Drift badge */}
           {driftBadge && (
             <span
-              className="px-2 py-0.5 rounded text-[10px] font-bold"
+              className="rounded-full px-2.5 py-1 text-[10px] font-bold"
               style={{
                 background: `${driftBadge.color}22`,
                 color: driftBadge.color,
@@ -1181,14 +1184,16 @@ export default function MPIntelligenceDashboard() {
           )}
 
           <button
+            type="button"
             onClick={() => refetch()}
             disabled={isFetching}
-            className="p-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors disabled:opacity-50"
+            className="rounded-full border border-bg-border bg-bg-primary/20 px-3 py-1.5 text-xs font-semibold text-text-secondary transition-colors hover:border-bg-active hover:text-text-primary disabled:opacity-50"
           >
-            <RefreshCw className={clsx("w-3.5 h-3.5", isFetching && "animate-spin")} />
+            {isFetching ? "Refreshing…" : "Refresh"}
           </button>
         </div>
-      </div>
+        </div>
+      </section>
 
       {/* Error state */}
       {isError && (

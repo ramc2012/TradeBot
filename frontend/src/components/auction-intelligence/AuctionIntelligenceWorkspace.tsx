@@ -720,12 +720,12 @@ export default function AuctionIntelligenceWorkspace() {
               {dataMode === "live" ? "Broker-backed validation" : "Demo-backed validation"}
             </div>
             <h1 className="max-w-3xl font-mono text-3xl font-semibold leading-tight text-text-primary md:text-4xl">
-              Market Profile structure, order-flow timing, and sleeve decisions in one operator surface.
+              Live MP structure, order-flow timing, and paper decisions on one desk.
             </h1>
-            <p className="max-w-2xl text-sm leading-6 text-text-secondary md:text-base">
+            <p className="max-w-2xl text-sm leading-6 text-text-secondary md:text-base line-clamp-2">
               {dataMode === "live"
-                ? "This workspace replays the latest broker-backed session through the Market Profile and order-flow stack, shows the resulting regime and execution plan, and can write a paper-proposal journal entry on demand."
-                : "This workspace validates the new MP trading system with deterministic scenarios through the same backend analysis stack, shows the resulting regime and execution plan, and can write a paper-proposal journal entry on demand."}
+                ? "The live desk replays the latest broker-backed session through the MP and order-flow stack, then exposes the current regime and paper execution plan."
+                : "The demo desk validates the same MP stack with deterministic scenarios before you move back to live paper flow."}
             </p>
           </div>
 

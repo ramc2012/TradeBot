@@ -156,6 +156,7 @@ export const updateRiskConfig = (config: object) => api.put("/api/trading/risk-c
 
 // ── Commodity ─────────────────────────────────────────────────────────────
 export const getCommodityStrategyStatus = () => api.get("/api/commodity/strategy-agent/status");
+export const getCommodityOverview = () => api.get("/api/commodity/overview");
 export const startCommodityStrategyAgent = () => api.post("/api/commodity/strategy-agent/start");
 export const runCommodityStrategyOnce = (force = true) =>
   api.post("/api/commodity/strategy-agent/run-once", null, { params: { force } });
@@ -177,6 +178,8 @@ export const getCommodityATMWatchlistExpiries = () =>
   api.get("/api/commodity/atm-watchlist/expiries");
 export const getCommodityATMWatchlist = (expiry?: string) =>
   api.get("/api/commodity/atm-watchlist", { params: { expiry } });
+export const getCommodityWatchlistSnapshot = (expiry?: string) =>
+  api.get("/api/commodity/watchlist-snapshot", { params: { expiry } });
 
 // ── Market ────────────────────────────────────────────────────────────────
 export const getOptionChain = (symbol: string, expiry?: string) =>
