@@ -664,6 +664,126 @@ def test_load_persisted_watchlist_rows_falls_back_when_underlying_lot_size_colum
     assert fake_context is not None and fake_context.session.rolled_back is True
 
 
+def test_load_persisted_watchlist_rows_filters_to_requested_underlyings(monkeypatch) -> None:
+    service = ATMWatchlistService()
+    underlyings = [
+        UnderlyingMeta("NIFTY", "INDEX", "NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty 50"),
+    ]
+
+    class _FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class _FakeSession:
+        async def execute(self, _statement, params):
+            assert params["expiry"] == date(2026, 4, 30)
+            assert params["underlyings"] == ["NIFTY"]
+            return _FakeResult(
+                [
+                    SimpleNamespace(
+                        underlying="NIFTY",
+                        kind="INDEX",
+                        expiry=date(2026, 4, 30),
+                        strike=23850.0,
+                        source_broker="fyers",
+                        underlying_price=23842.65,
+                        lot_size=75,
+                        ce_instrument_key="NIFTY-CE",
+                        ce_trading_symbol="NIFTY26APR23850CE",
+                        ce_ltp=240.5,
+                        ce_prev_close=220.0,
+                        ce_change=20.5,
+                        ce_change_pct=9.32,
+                        ce_oi=100,
+                        ce_prev_oi=90,
+                        ce_oi_change=10,
+                        ce_oi_change_pct=11.11,
+                        ce_volume=1000,
+                        ce_iv=0.2247,
+                        ce_macd=1.2,
+                        ce_macd_signal=0.8,
+                        ce_macd_histogram=0.4,
+                        ce_rsi=61.0,
+                        pe_instrument_key="NIFTY-PE",
+                        pe_trading_symbol="NIFTY26APR23850PE",
+                        pe_ltp=180.25,
+                        pe_prev_close=170.0,
+                        pe_change=10.25,
+                        pe_change_pct=6.03,
+                        pe_oi=120,
+                        pe_prev_oi=110,
+                        pe_oi_change=10,
+                        pe_oi_change_pct=9.09,
+                        pe_volume=900,
+                        pe_iv=0.2311,
+                        pe_macd=-0.7,
+                        pe_macd_signal=-0.9,
+                        pe_macd_histogram=0.2,
+                        pe_rsi=48.0,
+                    ),
+                    SimpleNamespace(
+                        underlying="BANKNIFTY",
+                        kind="INDEX",
+                        expiry=date(2026, 4, 30),
+                        strike=55900.0,
+                        source_broker="fyers",
+                        underlying_price=55912.75,
+                        lot_size=30,
+                        ce_instrument_key="BANKNIFTY-CE",
+                        ce_trading_symbol="BANKNIFTY26APR55900CE",
+                        ce_ltp=212.0,
+                        ce_prev_close=198.0,
+                        ce_change=14.0,
+                        ce_change_pct=7.07,
+                        ce_oi=100,
+                        ce_prev_oi=90,
+                        ce_oi_change=10,
+                        ce_oi_change_pct=11.11,
+                        ce_volume=120,
+                        ce_iv=0.201,
+                        ce_macd=1.0,
+                        ce_macd_signal=0.7,
+                        ce_macd_histogram=0.3,
+                        ce_rsi=58.0,
+                        pe_instrument_key="BANKNIFTY-PE",
+                        pe_trading_symbol="BANKNIFTY26APR55900PE",
+                        pe_ltp=188.0,
+                        pe_prev_close=176.0,
+                        pe_change=12.0,
+                        pe_change_pct=6.82,
+                        pe_oi=110,
+                        pe_prev_oi=95,
+                        pe_oi_change=15,
+                        pe_oi_change_pct=15.79,
+                        pe_volume=100,
+                        pe_iv=0.215,
+                        pe_macd=-0.4,
+                        pe_macd_signal=-0.6,
+                        pe_macd_histogram=0.2,
+                        pe_rsi=46.0,
+                    ),
+                ]
+            )
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return _FakeSession()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(atm_watchlist_module, "AsyncSessionLocal", lambda: _FakeSessionContext())
+
+    rows = asyncio.run(service._load_persisted_watchlist_rows("2026-04-30", underlyings))
+
+    assert len(rows) == 1
+    assert rows[0]["underlying"] == "NIFTY"
+    assert rows[0]["lot_size"] == 75
+
+
 def test_build_row_keeps_selected_weekly_for_nse_indices_and_monthly_for_stocks(monkeypatch) -> None:
     service = ATMWatchlistService()
     fyers = _FakeFyersAdapter()

@@ -13,13 +13,12 @@ async function probeApiBaseUrl(candidate: string): Promise<boolean> {
     ? window.setTimeout(() => controller.abort(), API_PROBE_TIMEOUT_MS)
     : null;
   try {
-    const response = await fetch(`${candidate}/api/auth/all-credentials-status`, {
+    const response = await fetch(`${candidate}/health`, {
       method: "GET",
       cache: "no-store",
-      headers: { Accept: "application/json" },
       signal: controller?.signal,
     });
-    return response.ok;
+    return response.ok || response.status === 429;
   } catch {
     return false;
   } finally {

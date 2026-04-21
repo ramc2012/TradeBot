@@ -7,6 +7,14 @@ import pytest
 from api.routers import system
 
 
+@pytest.fixture(autouse=True)
+def _reset_system_route_caches() -> None:
+    system._health_cache["payload"] = None
+    system._health_cache["expires_at"] = 0.0
+    system._overview_cache["payload"] = None
+    system._overview_cache["expires_at"] = 0.0
+
+
 class _FakeResult:
     def scalar_one_or_none(self) -> int:
         return 1
@@ -237,6 +245,35 @@ async def test_system_health_marks_missing_brokers_critical(monkeypatch: pytest.
 
     assert payload["summary"]["status"] == "critical"
     assert any(service["key"] == "brokers" and service["status"] == "critical" for service in payload["services"])
+
+
+@pytest.mark.asyncio
+async def test_system_health_reuses_short_lived_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"postgres": 0}
+    system._health_cache["payload"] = None
+    system._health_cache["expires_at"] = 0.0
+
+    async def _postgres():
+        calls["postgres"] += 1
+        return {"key": "postgres", "label": "Postgres", "status": "healthy", "detail": "ok", "meta": {}}
+
+    monkeypatch.setattr(system, "_postgres_service", _postgres)
+    monkeypatch.setattr(system, "_redis_service", lambda: _async_result({"key": "redis", "label": "Redis", "status": "healthy", "detail": "ok", "meta": {}}))
+    monkeypatch.setattr(system, "_research_sync_service", lambda now_utc: {"key": "research_sync", "label": "Research Sync", "status": "healthy", "detail": "ok", "meta": {}})
+    monkeypatch.setattr(system, "_broker_service", lambda now_utc: _async_result({"key": "brokers", "label": "Brokers", "status": "healthy", "detail": "ok", "meta": {}}))
+    monkeypatch.setattr(system, "_market_data_service", lambda: {"key": "market_data", "label": "Market Data", "status": "healthy", "detail": "ok", "meta": {}})
+    monkeypatch.setattr(system, "_strategy_service", lambda key, label, status: ({"key": key, "label": label, "status": "healthy", "detail": "ok", "meta": {}}, []))
+    monkeypatch.setattr(system, "_auction_service", lambda: _async_result({"key": "auction_intelligence", "label": "Auction Intelligence", "status": "healthy", "detail": "ok", "meta": {}}))
+    monkeypatch.setattr(system, "_fractal_market_profile_service", lambda: _async_result({"key": "fractal_market_profile", "label": "Fractal Market Profile", "status": "healthy", "detail": "ok", "meta": {}}))
+    monkeypatch.setattr(system.paper_strategy_agent, "get_status", lambda: {})
+    monkeypatch.setattr(system.commodity_strategy_agent, "get_status", lambda: {})
+
+    first = await system.system_health()
+    second = await system.system_health()
+
+    assert first["summary"]["status"] == "healthy"
+    assert second["summary"]["status"] == "healthy"
+    assert calls["postgres"] == 1
 
 
 @pytest.mark.asyncio

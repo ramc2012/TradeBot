@@ -260,6 +260,7 @@ class ATMWatchlistService:
                     time
                 FROM atm_option_watchlist_snapshots
                 WHERE expiry = :expiry
+                  AND underlying = ANY(:underlyings)
                 ORDER BY underlying, time DESC
             )
             SELECT
@@ -451,6 +452,7 @@ class ATMWatchlistService:
             "expiries": expiries,
             "default_expiry": default_expiry,
             "monthly_expiry": monthly_expiry_iso,
+            "stock_monthly_expiry": stock_monthly_expiry_iso,
             "source": source,
             "detail": detail,
             # NSE indices/stocks share the same monthly expiry. BSE indices keep
@@ -1349,15 +1351,18 @@ class ATMWatchlistService:
         expiry: str,
         underlyings: list[UnderlyingMeta],
     ) -> list[dict[str, Any]]:
+        if not underlyings:
+            return []
         expiry_date = self._parse_expiry(expiry)
         if expiry_date is None:
             return []
+        underlying_symbols = [meta.symbol for meta in underlyings]
 
         async with AsyncSessionLocal() as session:
             try:
                 result = await session.execute(
                     text(self._persisted_watchlist_query(include_underlying_lot_size=True)),
-                    {"expiry": expiry_date},
+                    {"expiry": expiry_date, "underlyings": underlying_symbols},
                 )
             except ProgrammingError as exc:
                 message = str(exc).lower()
@@ -1370,7 +1375,7 @@ class ATMWatchlistService:
                 await session.rollback()
                 result = await session.execute(
                     text(self._persisted_watchlist_query(include_underlying_lot_size=False)),
-                    {"expiry": expiry_date},
+                    {"expiry": expiry_date, "underlyings": underlying_symbols},
                 )
             rows = result.fetchall()
 
@@ -1378,6 +1383,8 @@ class ATMWatchlistService:
         payload_rows: list[dict[str, Any]] = []
         for row in rows:
             meta = meta_by_symbol.get(str(row.underlying))
+            if meta is None:
+                continue
             fyers_symbol = self._to_fyers_symbol(meta) if meta else None
 
             def _option_payload(prefix: str, option_type: str) -> Optional[dict[str, Any]]:

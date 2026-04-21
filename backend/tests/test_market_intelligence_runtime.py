@@ -11,6 +11,7 @@ from market_data.market_intelligence_runtime import APP_SYMBOLS, IST, MarketInte
 
 
 market_intelligence_module = importlib.import_module("market_data.market_intelligence_runtime")
+atm_watchlist_module = importlib.import_module("market_data.atm_watchlist")
 
 
 class _FakeRedis:
@@ -174,3 +175,55 @@ async def test_refresh_index_option_chains_respects_cooldown(monkeypatch: pytest
     assert payload["source"] == "cached"
     assert payload["requests"] == []
     assert observed == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_nse_watchlists_limits_full_universe_refresh_to_stock_monthly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = MarketIntelligenceRuntime()
+    observed_requests: list[tuple[str | None, tuple[str, ...]]] = []
+
+    async def fake_get_expiries(selected_expiry=None, *, live_refresh=False):
+        assert selected_expiry is None
+        assert live_refresh is True
+        return {
+            "monthly_expiry": "2026-04-28",
+            "stock_monthly_expiry": "2026-04-30",
+            "index_monthlies": {
+                "NIFTY": "2026-04-28",
+                "BANKNIFTY": "2026-04-28",
+                "FINNIFTY": "2026-04-28",
+                "MIDCPNIFTY": "2026-04-28",
+                "SENSEX": "2026-04-24",
+            },
+        }
+
+    async def fake_get_watchlist(expiry=None, symbols=None, *, live_refresh=False):
+        observed_requests.append((expiry, tuple(symbols or ())))
+        return {
+            "build_status": "ready",
+            "summary": {"total_rows": 218 if not symbols else len(symbols)},
+            "detail": None,
+        }
+
+    fake_service = type(
+        "_FakeATMWatchlistService",
+        (),
+        {
+            "get_expiries": staticmethod(fake_get_expiries),
+            "get_watchlist": staticmethod(fake_get_watchlist),
+        },
+    )()
+
+    monkeypatch.setattr(atm_watchlist_module, "atm_watchlist_service", fake_service)
+
+    payload = await runtime.refresh_nse_watchlists()
+
+    assert payload["stock_monthly_expiry"] == "2026-04-30"
+    assert payload["monthly_expiries"] == ["2026-04-24", "2026-04-28"]
+    assert observed_requests == [
+        ("2026-04-30", ()),
+        ("2026-04-24", ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")),
+        ("2026-04-28", ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")),
+    ]

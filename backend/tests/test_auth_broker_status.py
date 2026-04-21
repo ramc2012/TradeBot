@@ -3,8 +3,16 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from api.routers import auth
 from api.routers.auth import format_broker_status_summary
+
+
+@pytest.fixture(autouse=True)
+def _reset_broker_snapshot_cache() -> None:
+    auth._broker_snapshot_cache["result"] = None
+    auth._broker_snapshot_cache["expires_at"] = 0.0
 
 
 def test_format_broker_status_summary_humanizes_upstox_status() -> None:
@@ -157,3 +165,57 @@ def test_broker_status_can_force_validation(monkeypatch) -> None:
     asyncio.run(auth.broker_status(force_validate=True))
 
     assert calls == [True]
+
+
+def test_broker_status_read_path_does_not_persist_active_tokens(monkeypatch) -> None:
+    monkeypatch.setattr(auth, "refresh_persistent_credentials", lambda force=False: None)
+
+    async def fake_snapshot(*, force_validate: bool = False):
+        return {
+            "connected_brokers": ["fyers"],
+            "session_brokers": ["fyers"],
+            "upstox_ready": False,
+            "fyers_ready": True,
+            "upstox_token_health": {},
+            "fyers_token_health": {"status": "valid_session"},
+        }
+
+    def fail_persist() -> None:
+        raise AssertionError("broker_status should not persist tokens on a read")
+
+    monkeypatch.setattr(auth, "get_broker_connection_snapshot", fake_snapshot)
+    monkeypatch.setattr(auth, "_persist_active_session_tokens", fail_persist)
+    monkeypatch.setattr(auth, "_active_brokers", {})
+
+    statuses = asyncio.run(auth.broker_status())
+
+    assert any(item.broker == "fyers" and item.connected for item in statuses)
+
+
+def test_broker_connection_snapshot_reuses_short_lived_cache(monkeypatch) -> None:
+    calls = {"upstox": 0, "fyers": 0}
+    auth._broker_snapshot_cache["result"] = None
+    auth._broker_snapshot_cache["expires_at"] = 0.0
+
+    monkeypatch.setattr(auth, "refresh_persistent_credentials", lambda force=False: None)
+    monkeypatch.setattr(auth, "ensure_upstox_session", lambda force_validate=False: asyncio.sleep(0, result=False))
+    monkeypatch.setattr(auth, "ensure_fyers_session", lambda force_validate=False: asyncio.sleep(0, result=False))
+    monkeypatch.setattr(auth, "get_connected_brokers", lambda: ["fyers"])
+
+    async def _upstox_health(force: bool = False) -> dict:
+        calls["upstox"] += 1
+        return {"valid": False}
+
+    async def _fyers_health(force: bool = False) -> dict:
+        calls["fyers"] += 1
+        return {"valid": True}
+
+    monkeypatch.setattr(auth, "get_upstox_token_health", _upstox_health)
+    monkeypatch.setattr(auth, "get_fyers_token_health", _fyers_health)
+
+    first = asyncio.run(auth.get_broker_connection_snapshot())
+    second = asyncio.run(auth.get_broker_connection_snapshot())
+
+    assert first["connected_brokers"] == ["fyers"]
+    assert second["connected_brokers"] == ["fyers"]
+    assert calls == {"upstox": 1, "fyers": 1}

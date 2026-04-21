@@ -179,7 +179,7 @@ async def ws_layout(websocket: WebSocket):
     await _stream_snapshot(
         websocket,
         channel="layout",
-        interval_seconds=2.0,
+        interval_seconds=5.0,
         payload_factory=payload_factory,
     )
 
@@ -195,7 +195,7 @@ async def ws_system_overview(websocket: WebSocket):
     await _stream_snapshot(
         websocket,
         channel="system_overview",
-        interval_seconds=5.0,
+        interval_seconds=10.0,
         payload_factory=payload_factory,
     )
 
@@ -211,7 +211,7 @@ async def ws_system_health(websocket: WebSocket):
     await _stream_snapshot(
         websocket,
         channel="system_health",
-        interval_seconds=5.0,
+        interval_seconds=15.0,
         payload_factory=payload_factory,
     )
 
@@ -241,7 +241,7 @@ async def ws_strategy_overview(websocket: WebSocket):
     await _stream_snapshot(
         websocket,
         channel="strategy_overview",
-        interval_seconds=3.0,
+        interval_seconds=5.0,
         payload_factory=payload_factory,
     )
 

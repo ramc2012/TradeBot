@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
+from time import monotonic
 from typing import Any
 
 from fastapi import APIRouter
@@ -26,6 +28,12 @@ from paper_engine.strategy_agent import paper_strategy_agent, _in_market_hours
 router = APIRouter(prefix="/api/system", tags=["system"])
 _perf = PerformanceAnalytics()
 IST = timezone(timedelta(hours=5, minutes=30))
+_HEALTH_CACHE_TTL_SECONDS = 5.0
+_OVERVIEW_CACHE_TTL_SECONDS = 5.0
+_health_cache: dict[str, Any] = {"payload": None, "expires_at": 0.0}
+_health_cache_lock = asyncio.Lock()
+_overview_cache: dict[str, Any] = {"payload": None, "expires_at": 0.0}
+_overview_cache_lock = asyncio.Lock()
 
 
 def _service(
@@ -435,25 +443,32 @@ async def _auction_service() -> dict[str, Any]:
 async def _fractal_market_profile_service() -> dict[str, Any]:
     automation = market_hours_paper_supervisor.get_runner_status("fractal_market_profile")
     try:
-        live_probe = await fmp_service.live_health("NIFTY")
+        summary = await fmp_service.summary()
+        auto_started = bool(summary.get("auto_started"))
+        paper_summary = summary.get("paper_summary") or {}
         return _service(
             key="fractal_market_profile",
             label="Fractal Market Profile",
-            status="healthy",
+            status="healthy" if auto_started else "idle",
             detail=(
-                "Live FMP snapshot has recent minute history and auto paper capture is armed."
-                if automation.get("enabled") and automation.get("loop_active")
-                else "Live FMP snapshot has recent minute history available."
+                "Fractal MP paper automation is armed and recent replay summaries are available."
+                if auto_started
+                else "Fractal MP module is loaded, but automation is not armed."
             ),
-            meta={**live_probe, "automation": automation},
+            meta={
+                "supported_symbols": summary.get("supported_symbols") or [],
+                "paper_summary": paper_summary,
+                "replay_report_count": len(summary.get("replay_reports") or []),
+                "automation": automation,
+            },
         )
     except RuntimeError as exc:
         return _service(
             key="fractal_market_profile",
             label="Fractal Market Profile",
             status="degraded",
-            detail=f"Live FMP snapshot unavailable: {exc}",
-            meta={"symbol_code": "NIFTY", "automation": automation},
+            detail=f"Fractal MP summary unavailable: {exc}",
+            meta={"automation": automation},
         )
     except Exception as exc:
         logger.debug(f"[System] Fractal Market Profile health check failed: {exc}")
@@ -462,7 +477,7 @@ async def _fractal_market_profile_service() -> dict[str, Any]:
             label="Fractal Market Profile",
             status="critical",
             detail=f"FMP health check failed: {exc}",
-            meta={"symbol_code": "NIFTY", "automation": automation},
+            meta={"automation": automation},
         )
 
 
@@ -473,132 +488,156 @@ async def automation_status() -> dict[str, Any]:
 
 @router.get("/health")
 async def system_health() -> dict[str, Any]:
-    now_utc = datetime.now(timezone.utc)
+    cached = _health_cache.get("payload")
+    if isinstance(cached, dict) and float(_health_cache.get("expires_at") or 0.0) > monotonic():
+        return cached
 
-    backend_service = _service(
-        key="backend",
-        label="Backend API",
-        status="healthy",
-        detail="FastAPI application is serving requests.",
-        meta={"version": "1.0.0", "generated_at": now_utc.isoformat()},
-    )
+    async with _health_cache_lock:
+        cached = _health_cache.get("payload")
+        if isinstance(cached, dict) and float(_health_cache.get("expires_at") or 0.0) > monotonic():
+            return cached
 
-    postgres_service = await _postgres_service()
-    redis_service = await _redis_service()
-    research_sync_service = _research_sync_service(now_utc)
-    broker_service = await _broker_service(now_utc)
-    market_service = _market_data_service()
-    nse_strategy_service, nse_lanes = _strategy_service(
-        key="nse_strategy",
-        label="NSE Strategy Supervisor",
-        status=paper_strategy_agent.get_status(),
-    )
-    commodity_strategy_service, commodity_lanes = _strategy_service(
-        key="commodity_strategy",
-        label="Commodity Strategy Supervisor",
-        status=commodity_strategy_agent.get_status(),
-    )
-    auction_service = await _auction_service()
-    fractal_market_profile_service = await _fractal_market_profile_service()
+        now_utc = datetime.now(timezone.utc)
 
-    services = [
-        backend_service,
-        postgres_service,
-        redis_service,
-        research_sync_service,
-        broker_service,
-        market_service,
-        nse_strategy_service,
-        commodity_strategy_service,
-        auction_service,
-        fractal_market_profile_service,
-    ]
+        backend_service = _service(
+            key="backend",
+            label="Backend API",
+            status="healthy",
+            detail="FastAPI application is serving requests.",
+            meta={"version": "1.0.0", "generated_at": now_utc.isoformat()},
+        )
 
-    overall = "healthy"
-    counts = {"healthy": 0, "idle": 0, "degraded": 0, "critical": 0}
-    for item in services:
-        state = str(item.get("status") or "critical")
-        bucket = _service_bucket(state)
-        counts[bucket] = counts.get(bucket, 0) + 1
-        overall = _worst_status(overall, state)
+        postgres_service = await _postgres_service()
+        redis_service = await _redis_service()
+        research_sync_service = _research_sync_service(now_utc)
+        broker_service = await _broker_service(now_utc)
+        market_service = _market_data_service()
+        nse_strategy_service, nse_lanes = _strategy_service(
+            key="nse_strategy",
+            label="NSE Strategy Supervisor",
+            status=paper_strategy_agent.get_status(),
+        )
+        commodity_strategy_service, commodity_lanes = _strategy_service(
+            key="commodity_strategy",
+            label="Commodity Strategy Supervisor",
+            status=commodity_strategy_agent.get_status(),
+        )
+        auction_service = await _auction_service()
+        fractal_market_profile_service = await _fractal_market_profile_service()
 
-    return {
-        "generated_at": now_utc.isoformat(),
-        "summary": {
-            "status": overall,
-            "service_counts": counts,
-            "degraded_services": counts.get("degraded", 0),
-            "critical_services": counts.get("critical", 0),
-        },
-        "services": services,
-        "strategy_lanes": nse_lanes + commodity_lanes,
-    }
+        services = [
+            backend_service,
+            postgres_service,
+            redis_service,
+            research_sync_service,
+            broker_service,
+            market_service,
+            nse_strategy_service,
+            commodity_strategy_service,
+            auction_service,
+            fractal_market_profile_service,
+        ]
+
+        overall = "healthy"
+        counts = {"healthy": 0, "idle": 0, "degraded": 0, "critical": 0}
+        for item in services:
+            state = str(item.get("status") or "critical")
+            bucket = _service_bucket(state)
+            counts[bucket] = counts.get(bucket, 0) + 1
+            overall = _worst_status(overall, state)
+
+        payload = {
+            "generated_at": now_utc.isoformat(),
+            "summary": {
+                "status": overall,
+                "service_counts": counts,
+                "degraded_services": counts.get("degraded", 0),
+                "critical_services": counts.get("critical", 0),
+            },
+            "services": services,
+            "strategy_lanes": nse_lanes + commodity_lanes,
+        }
+        _health_cache["payload"] = payload
+        _health_cache["expires_at"] = monotonic() + _HEALTH_CACHE_TTL_SECONDS
+        return payload
 
 
 @router.get("/overview")
 async def system_overview() -> dict[str, Any]:
-    health = await system_health()
-    nse_status = paper_strategy_agent.get_status()
-    commodity_status = commodity_strategy_agent.get_status()
-    manual = await _manual_book_summary()
-    auction = await auction_intelligence_summary()
-    risk = _risk_manager.get_status()
+    cached = _overview_cache.get("payload")
+    if isinstance(cached, dict) and float(_overview_cache.get("expires_at") or 0.0) > monotonic():
+        return cached
 
-    nse_strategies = nse_status.get("strategies") or []
-    commodity_strategies = commodity_status.get("strategies") or []
-    nse_realized = sum(_strategy_metric(item, "realized_pnl", 0.0) for item in nse_strategies)
-    nse_open = sum(_strategy_metric(item, "unrealized_pnl", 0.0) for item in nse_strategies)
-    nse_equity = sum(_strategy_metric(item, "total_equity", 0.0) for item in nse_strategies)
-    commodity_realized = sum(_strategy_metric(item, "realized_pnl", 0.0) for item in commodity_strategies)
-    commodity_open = sum(_strategy_metric(item, "unrealized_pnl", 0.0) for item in commodity_strategies)
-    commodity_equity = sum(_strategy_metric(item, "total_equity", 0.0) for item in commodity_strategies)
+    async with _overview_cache_lock:
+        cached = _overview_cache.get("payload")
+        if isinstance(cached, dict) and float(_overview_cache.get("expires_at") or 0.0) > monotonic():
+            return cached
 
-    return {
-        "generated_at": health["generated_at"],
-        "health": health,
-        "books": {
-            "combined": {
-                "equity": round(nse_equity + commodity_equity, 2),
-                "realized_pnl": round(nse_realized + commodity_realized + float(manual.get("total_pnl") or 0.0), 2),
-                "open_pnl": round(nse_open + commodity_open, 2),
-                "open_positions": int(sum(_strategy_metric(item, "open_positions", 0) for item in nse_strategies))
-                + int(sum(_strategy_metric(item, "open_positions", 0) for item in commodity_strategies)),
-            },
-            "manual": manual,
-            "nse_strategy": {
-                "equity": round(nse_equity, 2),
-                "realized_pnl": round(nse_realized, 2),
-                "open_pnl": round(nse_open, 2),
-                "strategies": nse_strategies,
-                "status": {
-                    "auto_run_enabled": nse_status.get("auto_run_enabled"),
-                    "loop_active": nse_status.get("loop_active"),
-                    "running": nse_status.get("running"),
-                    "last_run_at": nse_status.get("last_run_at"),
+        health = await system_health()
+        nse_status = paper_strategy_agent.get_status()
+        commodity_status = commodity_strategy_agent.get_status()
+        manual = await _manual_book_summary()
+        auction = await auction_intelligence_summary()
+        risk = _risk_manager.get_status()
+
+        nse_strategies = nse_status.get("strategies") or []
+        commodity_strategies = commodity_status.get("strategies") or []
+        nse_realized = sum(_strategy_metric(item, "realized_pnl", 0.0) for item in nse_strategies)
+        nse_open = sum(_strategy_metric(item, "unrealized_pnl", 0.0) for item in nse_strategies)
+        nse_equity = sum(_strategy_metric(item, "total_equity", 0.0) for item in nse_strategies)
+        commodity_realized = sum(_strategy_metric(item, "realized_pnl", 0.0) for item in commodity_strategies)
+        commodity_open = sum(_strategy_metric(item, "unrealized_pnl", 0.0) for item in commodity_strategies)
+        commodity_equity = sum(_strategy_metric(item, "total_equity", 0.0) for item in commodity_strategies)
+
+        payload = {
+            "generated_at": health["generated_at"],
+            "health": health,
+            "books": {
+                "combined": {
+                    "equity": round(nse_equity + commodity_equity, 2),
+                    "realized_pnl": round(nse_realized + commodity_realized + float(manual.get("total_pnl") or 0.0), 2),
+                    "open_pnl": round(nse_open + commodity_open, 2),
+                    "open_positions": int(sum(_strategy_metric(item, "open_positions", 0) for item in nse_strategies))
+                    + int(sum(_strategy_metric(item, "open_positions", 0) for item in commodity_strategies)),
+                },
+                "manual": manual,
+                "nse_strategy": {
+                    "equity": round(nse_equity, 2),
+                    "realized_pnl": round(nse_realized, 2),
+                    "open_pnl": round(nse_open, 2),
+                    "strategies": nse_strategies,
+                    "status": {
+                        "auto_run_enabled": nse_status.get("auto_run_enabled"),
+                        "loop_active": nse_status.get("loop_active"),
+                        "running": nse_status.get("running"),
+                        "last_run_at": nse_status.get("last_run_at"),
+                    },
+                },
+                "commodity_strategy": {
+                    "equity": round(commodity_equity, 2),
+                    "realized_pnl": round(commodity_realized, 2),
+                    "open_pnl": round(commodity_open, 2),
+                    "strategies": commodity_strategies,
+                    "status": {
+                        "auto_run_enabled": commodity_status.get("auto_run_enabled"),
+                        "loop_active": commodity_status.get("loop_active"),
+                        "running": commodity_status.get("running"),
+                        "last_run_at": commodity_status.get("last_run_at"),
+                    },
                 },
             },
-            "commodity_strategy": {
-                "equity": round(commodity_equity, 2),
-                "realized_pnl": round(commodity_realized, 2),
-                "open_pnl": round(commodity_open, 2),
-                "strategies": commodity_strategies,
-                "status": {
-                    "auto_run_enabled": commodity_status.get("auto_run_enabled"),
-                    "loop_active": commodity_status.get("loop_active"),
-                    "running": commodity_status.get("running"),
-                    "last_run_at": commodity_status.get("last_run_at"),
-                },
+            "risk": risk,
+            "auction_intelligence": {
+                "live_ready": bool(auction.get("live_ready")),
+                "connected_brokers": auction.get("connected_brokers") or [],
+                "deployable_first_sleeve": auction.get("deployable_first_sleeve"),
+                "validation_gates": auction.get("validation_gates") or [],
             },
-        },
-        "risk": risk,
-        "auction_intelligence": {
-            "live_ready": bool(auction.get("live_ready")),
-            "connected_brokers": auction.get("connected_brokers") or [],
-            "deployable_first_sleeve": auction.get("deployable_first_sleeve"),
-            "validation_gates": auction.get("validation_gates") or [],
-        },
-        "blockers": [
-            item for item in health.get("services", [])
-            if item.get("status") in {"critical", "degraded"}
-        ],
-    }
+            "blockers": [
+                item for item in health.get("services", [])
+                if item.get("status") in {"critical", "degraded"}
+            ],
+        }
+        _overview_cache["payload"] = payload
+        _overview_cache["expires_at"] = monotonic() + _OVERVIEW_CACHE_TTL_SECONDS
+        return payload

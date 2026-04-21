@@ -206,9 +206,11 @@ function useAllCredsStatus() {
   return useQuery({
     queryKey: ["allCredsStatus"],
     queryFn: () => api.get("/api/auth/all-credentials-status").then(r => r.data),
-    staleTime: 60_000,
+    staleTime: 300_000,
+    gcTime: 900_000,
     refetchOnWindowFocus: false,
-    retry: false,
+    retry: 2,
+    retryDelay: (attempt) => Math.min(1000 * (attempt + 1), 3000),
   });
 }
 

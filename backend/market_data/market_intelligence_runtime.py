@@ -180,7 +180,8 @@ class MarketIntelligenceRuntime:
 
         now = datetime.now(IST)
         expiry_payload = await atm_watchlist_service.get_expiries(None, live_refresh=True)
-        monthly_expiries = sorted(
+        stock_monthly_expiry = str(expiry_payload.get("stock_monthly_expiry") or "").strip()
+        index_expiries = sorted(
             {
                 str(expiry)
                 for expiry in dict(expiry_payload.get("index_monthlies") or {}).values()
@@ -192,8 +193,13 @@ class MarketIntelligenceRuntime:
         ).total_seconds() >= max(int(settings.MARKET_INTELLIGENCE_FULL_WATCHLIST_REFRESH_MINUTES), 1) * 60
         watchlist_requests: list[tuple[str | None, list[str] | None]] = []
         if full_refresh_due:
-            watchlist_requests.extend((expiry, None) for expiry in monthly_expiries)
-        watchlist_requests.append((None, list(NSE_INDEX_SCOPE)))
+            full_universe_expiry = stock_monthly_expiry or str(expiry_payload.get("monthly_expiry") or "").strip()
+            if full_universe_expiry:
+                watchlist_requests.append((full_universe_expiry, None))
+        for expiry in index_expiries:
+            watchlist_requests.append((expiry, list(NSE_INDEX_SCOPE)))
+        if not index_expiries:
+            watchlist_requests.append((None, list(NSE_INDEX_SCOPE)))
         payloads = await asyncio.gather(
             *(
                 atm_watchlist_service.get_watchlist(
@@ -233,7 +239,8 @@ class MarketIntelligenceRuntime:
             self._last_full_watchlist_refresh_at = now
 
         return {
-            "monthly_expiries": monthly_expiries,
+            "monthly_expiries": index_expiries,
+            "stock_monthly_expiry": stock_monthly_expiry or None,
             "full_refresh_due": full_refresh_due,
             "requests": results,
         }

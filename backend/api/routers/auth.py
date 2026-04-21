@@ -73,6 +73,12 @@ _CREDENTIAL_STORE_DB_KEY = "broker_credentials"
 _CREDENTIAL_REFRESH_TTL_SECONDS = 15.0
 _credentials_db_checked_at_monotonic = 0.0
 _credentials_db_updated_at: datetime | None = None
+_BROKER_SNAPSHOT_CACHE_TTL_SECONDS = 5.0
+_broker_snapshot_cache: dict[str, Any] = {
+    "expires_at": 0.0,
+    "result": None,
+}
+_broker_snapshot_lock = asyncio.Lock()
 _SENSITIVE_CREDENTIAL_FIELDS = {
     "fyers": {"app_id", "secret", "redirect_uri", "access_token", "refresh_token"},
     "upstox": {"api_key", "secret", "redirect_uri", "access_token", "refresh_token"},
@@ -788,34 +794,49 @@ async def get_fyers_token_health(force: bool = False) -> dict:
 
 async def get_broker_connection_snapshot(force_validate: bool = False) -> dict[str, Any]:
     """Return a compact broker connection snapshot for UI and Telegram usage."""
-    refresh_persistent_credentials(force=force_validate)
-    await ensure_upstox_session(force_validate=force_validate)
-    await ensure_fyers_session(force_validate=force_validate)
+    if not force_validate:
+        cached = _broker_snapshot_cache.get("result")
+        if isinstance(cached, dict) and float(_broker_snapshot_cache.get("expires_at") or 0.0) > monotonic():
+            return dict(cached)
 
-    session_brokers = get_connected_brokers()
-    upstox_health = await get_upstox_token_health(force=force_validate)
-    fyers_health = await get_fyers_token_health(force=force_validate)
-    upstox_ready = "upstox" in session_brokers and bool(upstox_health.get("valid"))
-    fyers_ready = "fyers" in session_brokers and bool(fyers_health.get("valid"))
+    async with _broker_snapshot_lock:
+        if not force_validate:
+            cached = _broker_snapshot_cache.get("result")
+            if isinstance(cached, dict) and float(_broker_snapshot_cache.get("expires_at") or 0.0) > monotonic():
+                return dict(cached)
 
-    connected: list[str] = []
-    if fyers_ready:
-        connected.append("fyers")
-    if upstox_ready:
-        connected.append("upstox")
-    for broker in session_brokers:
-        if broker not in {"fyers", "upstox"} and broker not in connected:
-            connected.append(broker)
+        refresh_persistent_credentials(force=force_validate)
+        await ensure_upstox_session(force_validate=force_validate)
+        await ensure_fyers_session(force_validate=force_validate)
 
-    return {
-        "connected_brokers": connected,
-        "session_brokers": session_brokers,
-        "upstox_ready": upstox_ready,
-        "fyers_ready": fyers_ready,
-        "broker_ready": upstox_ready or fyers_ready,
-        "upstox_token_health": upstox_health,
-        "fyers_token_health": fyers_health,
-    }
+        session_brokers = get_connected_brokers()
+        upstox_health = await get_upstox_token_health(force=force_validate)
+        fyers_health = await get_fyers_token_health(force=force_validate)
+        upstox_ready = "upstox" in session_brokers and bool(upstox_health.get("valid"))
+        fyers_ready = "fyers" in session_brokers and bool(fyers_health.get("valid"))
+
+        connected: list[str] = []
+        if fyers_ready:
+            connected.append("fyers")
+        if upstox_ready:
+            connected.append("upstox")
+        for broker in session_brokers:
+            if broker not in {"fyers", "upstox"} and broker not in connected:
+                connected.append(broker)
+
+        result = {
+            "connected_brokers": connected,
+            "session_brokers": session_brokers,
+            "upstox_ready": upstox_ready,
+            "fyers_ready": fyers_ready,
+            "broker_ready": upstox_ready or fyers_ready,
+            "upstox_token_health": upstox_health,
+            "fyers_token_health": fyers_health,
+        }
+        if not force_validate:
+            _broker_snapshot_cache["result"] = dict(result)
+            _broker_snapshot_cache["expires_at"] = monotonic() + _BROKER_SNAPSHOT_CACHE_TTL_SECONDS
+        return result
 
 
 def format_broker_status_summary(snapshot: dict[str, Any]) -> str:
@@ -1328,7 +1349,6 @@ async def disconnect_broker(broker: str):
 async def broker_status(force_validate: bool = Query(False)):
     refresh_persistent_credentials(force=False)
     snapshot = await get_broker_connection_snapshot(force_validate=force_validate)
-    _persist_active_session_tokens()
     ready_brokers = set(snapshot.get("connected_brokers") or [])
     session_brokers = set(snapshot.get("session_brokers") or [])
     upstox_health = snapshot.get("upstox_token_health") or {}
