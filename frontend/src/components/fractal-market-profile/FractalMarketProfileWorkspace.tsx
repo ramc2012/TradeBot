@@ -8,7 +8,7 @@ import {
   useState,
   useTransition,
 } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import {
   Activity,
@@ -37,6 +37,7 @@ import {
 } from "recharts";
 
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
+import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
 import {
   getFractalMarketProfileLiveSnapshot,
   getFractalMarketProfilePaperJournal,
@@ -1334,9 +1335,12 @@ export default function FractalMarketProfileWorkspace() {
   const [isPending, startTransition] = useTransition();
   const deferredSymbol = useDeferredValue(symbol);
 
-  const summaryQuery = useQuery<SummaryResponse>({
+  const summaryQuery = usePersistentSnapshotQuery<SummaryResponse>({
     queryKey: ["fmp-summary"],
+    storageKey: "nomad-curie.fmp.summary",
     queryFn: () => getFractalMarketProfileSummary().then((response) => response.data),
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   });
 
   const liveQuery = useLiveSnapshotQuery<LiveSnapshotResponse>({
@@ -1351,16 +1355,22 @@ export default function FractalMarketProfileWorkspace() {
       ),
   });
 
-  const positionsQuery = useQuery<PaperPositionsResponse>({
+  const positionsQuery = usePersistentSnapshotQuery<PaperPositionsResponse>({
     queryKey: ["fmp-paper-positions", deferredSymbol],
+    storageKey: `nomad-curie.fmp.positions.${deferredSymbol.toLowerCase()}`,
     queryFn: () =>
       getFractalMarketProfilePaperPositions(deferredSymbol, "all", 30).then((response) => response.data),
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   });
 
-  const journalQuery = useQuery<PaperJournalResponse>({
+  const journalQuery = usePersistentSnapshotQuery<PaperJournalResponse>({
     queryKey: ["fmp-paper-journal", deferredSymbol],
+    storageKey: `nomad-curie.fmp.journal.${deferredSymbol.toLowerCase()}`,
     queryFn: () =>
       getFractalMarketProfilePaperJournal(deferredSymbol, 30).then((response) => response.data),
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   });
 
   const writeLedgerMutation = useMutation({
@@ -1411,6 +1421,17 @@ export default function FractalMarketProfileWorkspace() {
   const openPositions = positions?.open_positions ?? [];
   const closedPositions = positions?.closed_positions ?? [];
   const journalRecords = journal?.records ?? [];
+  const liveSurfaceFailed = liveQuery.isError && !live;
+  const summarySurfaceFailed = summaryQuery.isError && !summaryQuery.data;
+  const positionsSurfaceFailed = positionsQuery.isError && !positions;
+  const journalSurfaceFailed = journalQuery.isError && !journal;
+  const surfaceFailure = liveSurfaceFailed || summarySurfaceFailed || positionsSurfaceFailed || journalSurfaceFailed;
+  const snapshotFallbackActive = !surfaceFailure && (
+    liveQuery.isShowingSnapshot
+    || summaryQuery.isShowingSnapshot
+    || positionsQuery.isShowingSnapshot
+    || journalQuery.isShowingSnapshot
+  );
 
   return (
     <div className="mx-auto max-w-[1660px] space-y-6 pb-10">
@@ -1982,7 +2003,7 @@ export default function FractalMarketProfileWorkspace() {
         </div>
       </section>
 
-      {(liveQuery.isError || summaryQuery.isError || positionsQuery.isError || journalQuery.isError) ? (
+      {surfaceFailure ? (
         <section className="rounded-[28px] border border-rose-400/20 bg-rose-400/8 px-5 py-4 text-sm text-rose-100">
           <div className="flex items-start gap-3">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -1990,6 +2011,20 @@ export default function FractalMarketProfileWorkspace() {
               <div className="font-semibold">One or more FMP surfaces failed to load.</div>
               <div className="mt-1 text-rose-100/80">
                 The page is still usable with the latest cached snapshot where available, but one of the live, replay, or ledger queries returned an error.
+              </div>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {snapshotFallbackActive ? (
+        <section className="rounded-[28px] border border-amber-400/20 bg-amber-400/8 px-5 py-4 text-sm text-amber-100">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <div>
+              <div className="font-semibold">Showing the last saved FMP snapshot.</div>
+              <div className="mt-1 text-amber-100/80">
+                A live refresh missed the latest window, but the desk is still rendering the last valid paper snapshot until the backend catches up.
               </div>
             </div>
           </div>

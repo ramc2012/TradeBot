@@ -559,6 +559,7 @@ export default function AuctionIntelligenceWorkspace() {
           deferredMode === "live" ? 45 : 14,
         )
     ).data,
+    enabled: gateAQuery.isFetched,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
   });
@@ -573,7 +574,7 @@ export default function AuctionIntelligenceWorkspace() {
     queryFn: async () => (
       await getAuctionIntelligenceGateCValidation(validationSymbol, 30, 500)
     ).data,
-    enabled: deferredMode === "live",
+    enabled: deferredMode === "live" && gateBQuery.isFetched,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
   });
@@ -588,38 +589,49 @@ export default function AuctionIntelligenceWorkspace() {
     queryFn: async () => (
       await getAuctionIntelligenceCanaryReadiness(validationSymbol)
     ).data,
-    enabled: deferredMode === "live",
+    enabled: deferredMode === "live" && gateCQuery.isFetched,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
   });
 
   // ── MP Signal layer queries ─────────────────────────────────────────────
-  const mpDataStatusQuery = useQuery({
+  const mpDataStatusQuery = usePersistentSnapshotQuery({
     queryKey: ["auction-intelligence", "mp-data-status"],
+    storageKey: "auction-intelligence:mp-data-status",
     queryFn: async () => (await getAuctionIntelligenceMPDataStatus()).data,
     staleTime: 120_000,
     refetchInterval: 120_000,
+    refetchOnWindowFocus: false,
   });
 
-  const mpSignalsQuery = useQuery({
+  const mpSignalsQuery = usePersistentSnapshotQuery({
     queryKey: ["auction-intelligence", "mp-signals", mpUnderlying],
+    storageKey: `auction-intelligence:mp-signals:${mpUnderlying}`,
     queryFn: async () => (await getAuctionIntelligenceMPSignals(mpUnderlying)).data,
     staleTime: 60_000,
     refetchInterval: 60_000,
+    refetchOnWindowFocus: false,
+    enabled: Boolean(mpDataStatusQuery.data),
   });
 
-  const mpOpenSignalQuery = useQuery({
+  const mpOpenSignalQuery = usePersistentSnapshotQuery({
     queryKey: ["auction-intelligence", "mp-open-signal", mpUnderlying],
+    storageKey: `auction-intelligence:mp-open-signal:${mpUnderlying}`,
     queryFn: async () => (await getAuctionIntelligenceMPOpenSignal(mpUnderlying)).data,
     staleTime: 30_000,
     refetchInterval: 30_000,
+    refetchOnWindowFocus: false,
+    enabled: mpSignalsQuery.isFetched,
   });
 
-  const mpAgentContextQuery = useQuery({
+  const mpAgentContextQuery = usePersistentSnapshotQuery({
     queryKey: ["auction-intelligence", "mp-agent-context", mpUnderlying],
+    storageKey: `auction-intelligence:mp-agent-context:${mpUnderlying}`,
     queryFn: async () => (await getAuctionIntelligenceMPAgentContext(mpUnderlying)).data,
     staleTime: 60_000,
     refetchInterval: 60_000,
+    refetchOnWindowFocus: false,
+    enabled: mpOpenSignalQuery.isFetched,
   });
 
   const paperProposal = useMutation({
@@ -674,6 +686,23 @@ export default function AuctionIntelligenceWorkspace() {
   const gateC = gateCQuery.data;
   const canaryReadiness = canaryReadinessQuery.data;
   const liveReady = Boolean(summary?.live_ready);
+  const validationFailure = validationQuery.isError && !payload
+    ? validationQuery.error
+    : paperProposal.isError
+      ? paperProposal.error
+      : shadowBackfill.isError
+        ? shadowBackfill.error
+        : null;
+  const auxiliaryFailure = !validationFailure && (
+    gateAQuery.isError
+    || gateBQuery.isError
+    || gateCQuery.isError
+    || canaryReadinessQuery.isError
+    || mpDataStatusQuery.isError
+    || mpSignalsQuery.isError
+    || mpOpenSignalQuery.isError
+    || mpAgentContextQuery.isError
+  );
 
   const symbols = dataMode === "live"
     ? summary?.live_symbols ?? ["NIFTY", "BANKNIFTY"]
@@ -840,28 +869,28 @@ export default function AuctionIntelligenceWorkspace() {
         </div>
       </section>
 
-      {(validationQuery.isError
-        || paperProposal.isError
-        || gateAQuery.isError
-        || gateBQuery.isError
-        || gateCQuery.isError
-        || shadowBackfill.isError
-        || canaryReadinessQuery.isError) && (
+      {validationFailure && (
         <section className={sectionChrome("px-5 py-4")}>
           <div className="flex items-start gap-3 text-sm text-accent-red">
             <AlertCircle size={18} className="mt-0.5 shrink-0" />
             <div>
               <div className="font-semibold text-text-primary">Validation call failed</div>
               <div className="mt-1 text-text-secondary">
-                {String(
-                  validationQuery.error
-                  ?? paperProposal.error
-                  ?? gateAQuery.error
-                  ?? gateBQuery.error
-                  ?? gateCQuery.error
-                  ?? shadowBackfill.error
-                  ?? canaryReadinessQuery.error,
-                )}
+                {String(validationFailure)}
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {auxiliaryFailure && (
+        <section className={sectionChrome("px-5 py-4")}>
+          <div className="flex items-start gap-3 text-sm text-accent-amber">
+            <AlertCircle size={18} className="mt-0.5 shrink-0" />
+            <div>
+              <div className="font-semibold text-text-primary">Deep validation is catching up</div>
+              <div className="mt-1 text-text-secondary">
+                The core live snapshot is available, but one or more slower MP or gate checks missed this refresh window. Cached panels stay visible until the next successful response lands.
               </div>
             </div>
           </div>

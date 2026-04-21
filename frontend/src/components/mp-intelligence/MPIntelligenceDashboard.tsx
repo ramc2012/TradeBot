@@ -1,7 +1,6 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import {
   Activity,
@@ -37,6 +36,7 @@ import {
 } from "recharts";
 
 import { getMPAnalytics } from "@/lib/api";
+import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
 
 // ─── Colour palette ───────────────────────────────────────────────────────────
 
@@ -1102,12 +1102,21 @@ export default function MPIntelligenceDashboard() {
   const [lookback, setLookback] = useState(60);
   const [activeTab, setActiveTab] = useState<Tab>("migration");
 
-  const { data, isLoading, isError, refetch, isFetching } = useQuery({
+  const {
+    data,
+    isLoading,
+    isError,
+    isFetching,
+    refetch,
+    isShowingSnapshot,
+  } = usePersistentSnapshotQuery({
     queryKey: ["mp-analytics", underlying, lookback],
+    storageKey: `mp-intelligence:${underlying}:${lookback}`,
     queryFn: () =>
       getMPAnalytics(underlying, lookback).then((r) => r.data),
     staleTime: 60_000,
     refetchInterval: 90_000,
+    refetchOnWindowFocus: false,
   });
 
   const driftState = data?.concept_drift?.current_state;
@@ -1196,14 +1205,20 @@ export default function MPIntelligenceDashboard() {
       </section>
 
       {/* Error state */}
-      {isError && (
+      {isError && !data && (
         <div className="bg-red-950/30 border border-red-800 rounded-lg p-4 text-sm text-red-400">
           Failed to load MP analytics. Ensure the backend is running and data exists for {underlying}.
         </div>
       )}
 
+      {isShowingSnapshot && (
+        <div className="rounded-lg border border-amber-400/25 bg-amber-400/10 p-4 text-sm text-amber-100">
+          Live refresh missed the last window. Showing the last saved MP analytics snapshot for {underlying} until the backend responds again.
+        </div>
+      )}
+
       {/* Loading skeleton */}
-      {isLoading && (
+      {isLoading && !data && (
         <div className="space-y-3">
           {[200, 160, 160].map((h, i) => (
             <div
