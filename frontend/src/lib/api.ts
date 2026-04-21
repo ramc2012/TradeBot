@@ -5,17 +5,27 @@ export const API_URL = resolveApiBaseUrl();
 
 let reachableApiBaseUrl: string | null = null;
 let reachableApiBaseUrlPromise: Promise<string> | null = null;
+const API_PROBE_TIMEOUT_MS = 2500;
 
 async function probeApiBaseUrl(candidate: string): Promise<boolean> {
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timeoutId = controller
+    ? window.setTimeout(() => controller.abort(), API_PROBE_TIMEOUT_MS)
+    : null;
   try {
     const response = await fetch(`${candidate}/api/auth/all-credentials-status`, {
       method: "GET",
       cache: "no-store",
       headers: { Accept: "application/json" },
+      signal: controller?.signal,
     });
     return response.ok;
   } catch {
     return false;
+  } finally {
+    if (timeoutId != null) {
+      window.clearTimeout(timeoutId);
+    }
   }
 }
 
