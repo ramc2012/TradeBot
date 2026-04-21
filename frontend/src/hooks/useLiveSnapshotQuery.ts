@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   useQuery,
   useQueryClient,
@@ -87,11 +87,16 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
 }: LiveSnapshotQueryOptions<TData, TError>): LiveSnapshotQueryResult<TData, TError> {
   const queryClient = useQueryClient();
   const queryKeyHash = useMemo(() => JSON.stringify(queryKey), [queryKey]);
+  const streamFactoryRef = useRef(streamFactory);
   const [snapshot, setSnapshot] = useState<SnapshotEnvelope<TData> | null>(() => loadSnapshot<TData>(storageKey));
   const [isVisible, setIsVisible] = useState(() =>
     typeof document === "undefined" ? true : document.visibilityState === "visible",
   );
   const [isStreamConnected, setIsStreamConnected] = useState(false);
+
+  useEffect(() => {
+    streamFactoryRef.current = streamFactory;
+  }, [streamFactory]);
 
   const query = useQuery<TData, TError, TData, QueryKey>({
     ...options,
@@ -124,7 +129,8 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
   }, [query.data, query.dataUpdatedAt, query.isSuccess, storageKey]);
 
   useEffect(() => {
-    if (!streamFactory || options.enabled === false) {
+    const activeStreamFactory = streamFactoryRef.current;
+    if (!activeStreamFactory || options.enabled === false) {
       setIsStreamConnected(false);
       return undefined;
     }
@@ -134,7 +140,7 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
       return undefined;
     }
 
-    const socket = streamFactory((nextData) => {
+    const socket = activeStreamFactory((nextData) => {
       queryClient.setQueryData(queryKey, nextData);
       if (storageKey) {
         const nextSnapshot = {
@@ -150,7 +156,7 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
       setIsStreamConnected(false);
       socket.close();
     };
-  }, [isVisible, options.enabled, queryClient, queryKeyHash, storageKey, streamFactory, streamWhenHidden]);
+  }, [isVisible, options.enabled, queryClient, queryKeyHash, storageKey, streamWhenHidden]);
 
   const effectiveData = query.data ?? snapshot?.data;
   const isShowingSnapshot = Boolean(snapshot?.data) && query.isError;
