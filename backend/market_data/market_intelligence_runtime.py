@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import gzip
+import json
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -12,9 +13,11 @@ from loguru import logger
 from sqlalchemy import text
 
 from api.routers.auth import ensure_fyers_session, ensure_upstox_session, get_active_adapter
+from db.redis_client import get_redis
 from core.config import settings
 from db.database import AsyncSessionLocal
-from market_data.option_chain import option_chain_service
+from market_data.option_chain import OC_TTL, option_chain_service
+from market_data.symbols import to_broker_symbol, to_fyers_symbol
 
 
 UTC = timezone.utc
@@ -236,54 +239,61 @@ class MarketIntelligenceRuntime:
         }
 
     async def refresh_index_option_chains(self) -> dict[str, Any]:
+        now = datetime.now(IST)
+        cooldown_seconds = max(int(settings.MARKET_INTELLIGENCE_REFRESH_INTERVAL_SECONDS), 30)
+        if self._last_chain_refresh_at is not None:
+            elapsed = (now - self._last_chain_refresh_at).total_seconds()
+            if elapsed < cooldown_seconds:
+                return {
+                    "status": "cooldown",
+                    "source": "cached",
+                    "requests": [],
+                    "last_refresh_at": self._last_chain_refresh_at.isoformat(),
+                    "cooldown_seconds": cooldown_seconds,
+                }
+
         fyers_adapter = get_active_adapter("fyers")
-        if fyers_adapter is None and await ensure_fyers_session(force_validate=True):
+        if fyers_adapter is None and await ensure_fyers_session(force_validate=False):
             fyers_adapter = get_active_adapter("fyers")
         upstox_adapter = get_active_adapter("upstox")
-        if upstox_adapter is None:
-            await ensure_upstox_session(force_validate=False)
+        if upstox_adapter is None and await ensure_upstox_session(force_validate=False):
             upstox_adapter = get_active_adapter("upstox")
 
-        broker = fyers_adapter or upstox_adapter
-        if broker is None:
+        if fyers_adapter is None and upstox_adapter is None:
             return {
                 "status": "offline",
                 "source": "none",
                 "requests": [],
             }
 
-        option_chain_service.set_broker(broker)
         requests = await self._load_chain_refresh_candidates()
         results: list[dict[str, Any]] = []
         for symbol_code, expiry_iso in requests:
-            app_symbol = APP_SYMBOLS.get(symbol_code)
-            if not app_symbol:
-                continue
-            try:
-                await option_chain_service._refresh(app_symbol, expiry_iso)
-                results.append(
-                    {
-                        "symbol_code": symbol_code,
-                        "expiry": expiry_iso,
-                        "status": "refreshed",
-                    }
+            result = await self._refresh_cached_index_option_chain(
+                symbol_code,
+                expiry_iso,
+                upstox_adapter=upstox_adapter,
+                fyers_adapter=fyers_adapter,
+            )
+            if result.get("status") == "error":
+                logger.warning(
+                    "[MarketIntelligence] Option-chain refresh failed for "
+                    f"{symbol_code} {expiry_iso}: {result.get('detail')}"
                 )
-            except Exception as exc:
-                logger.warning(f"[MarketIntelligence] Option-chain refresh failed for {symbol_code} {expiry_iso}: {exc}")
-                results.append(
-                    {
-                        "symbol_code": symbol_code,
-                        "expiry": expiry_iso,
-                        "status": "error",
-                        "detail": str(exc),
-                    }
-                )
+            results.append(result)
             await asyncio.sleep(0.1)
 
         self._last_chain_refresh_at = datetime.now(IST)
         return {
             "status": "ok",
-            "source": getattr(broker, "broker_name", "unknown"),
+            "source": "+".join(
+                [
+                    name
+                    for name, adapter in (("upstox", upstox_adapter), ("fyers", fyers_adapter))
+                    if adapter is not None
+                ]
+            ) or "none",
+            "last_refresh_at": self._last_chain_refresh_at.isoformat(),
             "requests": results,
         }
 
@@ -454,6 +464,108 @@ class MarketIntelligenceRuntime:
             )
             await session.commit()
         return len(payload)
+
+    async def _refresh_cached_index_option_chain(
+        self,
+        symbol_code: str,
+        expiry_iso: str,
+        *,
+        upstox_adapter: Any | None,
+        fyers_adapter: Any | None,
+    ) -> dict[str, Any]:
+        app_symbol = APP_SYMBOLS.get(symbol_code)
+        if not app_symbol:
+            return {
+                "symbol_code": symbol_code,
+                "expiry": expiry_iso,
+                "status": "skipped",
+                "detail": "unknown app symbol",
+            }
+
+        errors: list[str] = []
+        for source, adapter, lookup_symbol in (
+            ("upstox", upstox_adapter, to_broker_symbol(app_symbol)),
+            ("fyers", fyers_adapter, to_fyers_symbol(app_symbol)),
+        ):
+            if adapter is None:
+                continue
+            try:
+                chain = await adapter.get_option_chain(lookup_symbol, expiry_iso)
+            except Exception as exc:
+                errors.append(f"{source}: {exc}")
+                continue
+            if not getattr(chain, "entries", None):
+                errors.append(f"{source}: empty chain")
+                continue
+            await self._cache_option_chain_payload(
+                app_symbol=app_symbol,
+                expiry_iso=expiry_iso,
+                chain=chain,
+                source=source,
+            )
+            return {
+                "symbol_code": symbol_code,
+                "expiry": expiry_iso,
+                "status": "refreshed",
+                "source": source,
+            }
+
+        return {
+            "symbol_code": symbol_code,
+            "expiry": expiry_iso,
+            "status": "error",
+            "detail": " | ".join(errors) if errors else "no broker available",
+        }
+
+    async def _cache_option_chain_payload(
+        self,
+        *,
+        app_symbol: str,
+        expiry_iso: str,
+        chain: Any,
+        source: str,
+    ) -> None:
+        analytics = option_chain_service._calculate_analytics(chain)
+        payload = {
+            "symbol": app_symbol,
+            "expiry": expiry_iso,
+            "spot_price": float(chain.spot_price or 0.0),
+            "timestamp": datetime.now(UTC).isoformat(),
+            "source": source,
+            "entries": [
+                {
+                    "strike": entry.strike,
+                    "option_type": entry.option_type,
+                    "ltp": entry.ltp,
+                    "oi": entry.oi,
+                    "volume": entry.volume,
+                    "bid": entry.bid,
+                    "ask": entry.ask,
+                    "iv": entry.iv,
+                    "delta": entry.delta,
+                    "gamma": entry.gamma,
+                    "theta": entry.theta,
+                    "vega": entry.vega,
+                    "prev_oi": entry.prev_oi,
+                    "prev_close": entry.prev_close,
+                    "oi_change": round(float(entry.oi) - float(entry.prev_oi or 0.0), 2),
+                    "oi_change_pct": round(
+                        ((float(entry.oi) - float(entry.prev_oi or 0.0)) / float(entry.prev_oi or 1.0)) * 100.0,
+                        2,
+                    ) if entry.prev_oi else None,
+                    "ltp_change": round(float(entry.ltp) - float(entry.prev_close or 0.0), 2),
+                    "ltp_change_pct": round(
+                        ((float(entry.ltp) - float(entry.prev_close or 0.0)) / float(entry.prev_close or 1.0)) * 100.0,
+                        2,
+                    ) if entry.prev_close else None,
+                    "instrument_key": entry.instrument_key,
+                }
+                for entry in chain.entries
+            ],
+            **analytics,
+        }
+        redis = await get_redis()
+        await redis.set(f"oc:{app_symbol}:{expiry_iso}", json.dumps(payload), ex=OC_TTL)
 
 
 market_intelligence_runtime = MarketIntelligenceRuntime()

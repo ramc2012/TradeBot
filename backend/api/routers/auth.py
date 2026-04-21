@@ -169,6 +169,14 @@ def _database_url_for_credentials() -> Optional[str]:
     )
 
 
+def _connect_credentials_db(db_url: str) -> psycopg2.extensions.connection:
+    return psycopg2.connect(
+        db_url,
+        connect_timeout=3,
+        options="-c statement_timeout=3000",
+    )
+
+
 def _save_credentials_to_database(creds: dict) -> None:
     """Persist broker credentials to Postgres for durable cloud storage."""
     db_url = _database_url_for_credentials()
@@ -176,7 +184,7 @@ def _save_credentials_to_database(creds: dict) -> None:
         return
     conn = None
     try:
-        conn = psycopg2.connect(db_url)
+        conn = _connect_credentials_db(db_url)
         conn.autocommit = False
         with conn.cursor() as cur:
             cur.execute(
@@ -221,7 +229,7 @@ def _load_credentials_payload_from_database() -> tuple[dict, datetime | None]:
         return {}, None
     conn = None
     try:
-        conn = psycopg2.connect(db_url)
+        conn = _connect_credentials_db(db_url)
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -1318,7 +1326,7 @@ async def disconnect_broker(broker: str):
 
 @router.get("/broker-status")
 async def broker_status(force_validate: bool = Query(False)):
-    refresh_persistent_credentials(force=True)
+    refresh_persistent_credentials(force=False)
     snapshot = await get_broker_connection_snapshot(force_validate=force_validate)
     _persist_active_session_tokens()
     ready_brokers = set(snapshot.get("connected_brokers") or [])

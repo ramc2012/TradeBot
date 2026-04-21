@@ -289,6 +289,33 @@ def test_ensure_fyers_session_refreshes_durable_credentials_before_restore(monke
     assert auth._active_brokers["fyers"]["token"].access_token == "LIVE_TOKEN"
 
 
+def test_broker_status_avoids_forcing_credential_refresh_on_normal_poll(monkeypatch) -> None:
+    forced_flags: list[bool] = []
+
+    def fake_refresh(*, force: bool = False) -> None:
+        forced_flags.append(force)
+
+    async def fake_snapshot(force_validate: bool = False) -> dict:
+        return {
+            "connected_brokers": [],
+            "session_brokers": [],
+            "upstox_ready": False,
+            "fyers_ready": False,
+            "upstox_token_health": {},
+            "fyers_token_health": {},
+        }
+
+    monkeypatch.setattr(auth, "refresh_persistent_credentials", fake_refresh)
+    monkeypatch.setattr(auth, "get_broker_connection_snapshot", fake_snapshot)
+    monkeypatch.setattr(auth, "_persist_active_session_tokens", lambda: None)
+    auth._active_brokers = {}
+
+    payload = asyncio.run(auth.broker_status())
+
+    assert len(payload) == len(auth.BROKER_MAP)
+    assert forced_flags == [False]
+
+
 def test_websocket_token_is_required_and_verifiable() -> None:
     payload = asyncio.run(auth.websocket_token())
 
