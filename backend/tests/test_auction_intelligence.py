@@ -21,6 +21,7 @@ from auction_intelligence.live import (
     _build_quote_history_from_ticks,
     _build_trade_prints_from_ticks,
     _build_quote_from_snapshot,
+    build_live_analysis,
     _fetch_recent_minute_rows,
     _group_rows_by_session,
     _load_portfolio_snapshot,
@@ -813,6 +814,59 @@ def test_option_mapper_relaxed_fallback_allows_paper_trade_when_primary_filters_
     assert len(plans) == 1
     assert plans[0].premium == 620.0
     assert any("relaxed paper-trade fallback" in reason for reason in plans[0].rationale)
+
+
+def test_option_mapper_can_fall_back_to_local_atm_watchlist_chain(monkeypatch) -> None:
+    config = clone_default_config()
+    mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])
+
+    async def _fake_cached_chain(symbol: str, expiry: str):
+        return None
+
+    async def _fake_watchlist(*, expiry=None, symbols=None, live_refresh=False):
+        return {
+            "rows": [
+                {
+                    "underlying": "NIFTY",
+                    "expiry": "2026-04-16",
+                    "spot_price": 22498.0,
+                    "atm_strike": 22500.0,
+                    "ce": {
+                        "strike": 22500.0,
+                        "ltp": 82.0,
+                        "oi": 24000,
+                        "volume": 20000,
+                        "delta": 0.59,
+                        "instrument_key": "CE22500",
+                    },
+                    "pe": {
+                        "strike": 22500.0,
+                        "ltp": 79.0,
+                        "oi": 18000,
+                        "volume": 16000,
+                        "delta": -0.41,
+                        "instrument_key": "PE22500",
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr("auction_intelligence.options.mapper.option_chain_service.get_cached", _fake_cached_chain)
+    monkeypatch.setattr("auction_intelligence.options.mapper.atm_watchlist_service.get_watchlist", _fake_watchlist)
+    monkeypatch.setattr("auction_intelligence.options.mapper.settings.PAPER_TRADING_ONLY", True)
+
+    chain = asyncio.run(
+        mapper._load_chain(
+            app_symbol="NSE:NIFTY50-INDEX",
+            expiry=date(2026, 4, 16),
+            upstox_adapter=None,
+            fyers_adapter=None,
+        )
+    )
+
+    assert chain is not None
+    assert chain.spot_price == 22498.0
+    assert {entry.option_type for entry in chain.entries} == {"CE", "PE"}
 
 
 def test_service_ntm_volx_boosts_aligned_signal() -> None:
@@ -1778,6 +1832,87 @@ def test_live_snapshot_rejects_unknown_symbol_with_client_error() -> None:
     assert "Unsupported live symbol" in response.json()["detail"]
 
 
+def test_build_live_analysis_blocks_live_execution_when_tick_order_flow_is_missing(monkeypatch) -> None:
+    ist = timezone(timedelta(hours=5, minutes=30))
+    fixed_now = datetime(2026, 4, 20, 11, 30, tzinfo=ist)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return fixed_now.replace(tzinfo=None)
+            return fixed_now.astimezone(tz)
+
+    def _minute_rows(session_start_utc: datetime, *, count: int, base: float) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        for index in range(count):
+            open_price = base + (index * 0.8)
+            close_price = open_price + (0.6 if index % 2 == 0 else -0.2)
+            candle_time = session_start_utc + timedelta(minutes=index)
+            rows.append(
+                {
+                    "time": candle_time.isoformat(),
+                    "open": round(open_price, 2),
+                    "high": round(max(open_price, close_price) + 0.4, 2),
+                    "low": round(min(open_price, close_price) - 0.4, 2),
+                    "close": round(close_price, 2),
+                    "volume": 1200 + index,
+                }
+            )
+        return rows
+
+    prior_rows = _minute_rows(datetime(2026, 4, 17, 3, 45, tzinfo=timezone.utc), count=220, base=24100.0)
+    current_rows = _minute_rows(datetime(2026, 4, 20, 3, 45, tzinfo=timezone.utc), count=136, base=24220.0)
+
+    async def _fake_recent_rows(symbol_code: str, *, lookback_days: int = 7, allow_live_broker_refresh: bool = True):
+        assert symbol_code == "NIFTY"
+        return prior_rows + current_rows, "timescaledb_spot_1minute", "NSE:NIFTY50-INDEX"
+
+    async def _fake_tick_rows(*_args, **_kwargs):
+        return []
+
+    async def _fake_portfolio_snapshot(*_args, **_kwargs):
+        return {}
+
+    async def _fake_analyze_with_options(self, **kwargs):
+        return AnalysisBundle(
+            config_scope={"instrument_type": "options_buy"},
+            market_profile=_make_profile_snapshot(symbol="NIFTY INDEX", session_date="2026-04-20"),
+            prior_market_profile=_make_profile_snapshot(symbol="NIFTY INDEX", session_date="2026-04-17"),
+            order_flow=_make_order_flow_snapshot(),
+            regime=RegimeAssessment(
+                label="no_trade",
+                confidence=0.0,
+                allowed_directions=["FLAT"],
+                reasons=["tick_order_flow_unavailable"],
+            ),
+            agent_decisions=[],
+            risk=RiskDecision(
+                allowed=False,
+                kill_switch=True,
+                max_size_multiplier=0.0,
+                reasons=["Broker connectivity unavailable."],
+            ),
+            execution_plan=[],
+            ntm_volx=None,
+        )
+
+    monkeypatch.setattr("auction_intelligence.live.datetime", _FixedDateTime)
+    monkeypatch.setattr("auction_intelligence.live._fetch_recent_minute_rows", _fake_recent_rows)
+    monkeypatch.setattr("auction_intelligence.live._fetch_recent_tick_rows", _fake_tick_rows)
+    monkeypatch.setattr("auction_intelligence.live._load_portfolio_snapshot", _fake_portfolio_snapshot)
+    monkeypatch.setattr("auction_intelligence.live.market_data_router.get_latest_tick", lambda _symbol: None)
+    monkeypatch.setattr(AuctionIntelligenceService, "analyze_with_options", _fake_analyze_with_options)
+
+    payload = asyncio.run(build_live_analysis("NIFTY"))
+
+    assert payload["data_status"]["execution_ready"] is False
+    assert payload["data_status"]["order_flow_source"] == "bar_inference"
+    assert payload["data_status"]["degraded_reason"] == "tick_order_flow_unavailable"
+    assert payload["request"]["session"]["broker_connected"] is False
+    assert payload["request"]["session"]["stale_data_seconds"] > clone_default_config()["risk"]["stale_data_seconds"]
+
+
 def test_fetch_recent_minute_rows_prefers_broker_history_when_persisted_rows_are_incomplete(monkeypatch) -> None:
     class _FakeResult:
         def mappings(self):
@@ -1849,6 +1984,71 @@ def test_fetch_recent_minute_rows_prefers_broker_history_when_persisted_rows_are
     assert len(rows) == 750
     assert source == "fyers_continuous_futures"
     assert history_symbol.startswith("NSE:NIFTY")
+
+
+def test_fetch_recent_minute_rows_skips_broker_history_when_live_refresh_is_disabled(monkeypatch) -> None:
+    class _FakeResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "time": datetime(2026, 4, 11, 9, 15),
+                    "open": 24100.0,
+                    "high": 24110.0,
+                    "low": 24095.0,
+                    "close": 24105.0,
+                    "volume": 1200,
+                },
+                {
+                    "time": datetime(2026, 4, 11, 9, 16),
+                    "open": 24105.0,
+                    "high": 24115.0,
+                    "low": 24100.0,
+                    "close": 24112.0,
+                    "volume": 900,
+                },
+            ]
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, *_args, **_kwargs):
+            return _FakeResult()
+
+    broker_calls = {"count": 0}
+
+    class _FakeFyers:
+        async def get_historical_candles(self, *_args, **_kwargs):
+            broker_calls["count"] += 1
+            return []
+
+    monkeypatch.setattr("auction_intelligence.live.AsyncSessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(
+        "auction_intelligence.live.get_active_adapter",
+        lambda broker=None: _FakeFyers() if broker == "fyers" else None,
+    )
+    monkeypatch.setattr("auction_intelligence.live.ensure_fyers_session", AsyncMock(return_value=False))
+    monkeypatch.setattr("auction_intelligence.live.ensure_upstox_session", AsyncMock(return_value=False))
+    monkeypatch.setattr("auction_intelligence.live.get_broker_token", lambda _broker: "")
+
+    rows, source, history_symbol = asyncio.run(
+        _fetch_recent_minute_rows(
+            "NIFTY",
+            lookback_days=7,
+            allow_live_broker_refresh=False,
+        )
+    )
+
+    assert len(rows) == 2
+    assert source == "timescaledb_spot_1minute"
+    assert history_symbol == "NSE:NIFTY50-INDEX"
+    assert broker_calls["count"] == 0
 
 
 def test_gate_a_validator_passes_on_consistent_session() -> None:

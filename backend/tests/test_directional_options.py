@@ -4,10 +4,14 @@ from pathlib import Path
 import sys
 import types
 
+import pandas as pd
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from directional_options.config import clone_default_config
 from directional_options.dashboard import mount_directional_options_dashboard
+from directional_options.paper import DirectionalOptionsPaperStore
 from directional_options.regime import RegimeClassifier
 from directional_options.risk import DirectionalOptionsRiskEngine
 from directional_options.schemas import ContractCandidate, DashboardMountState, DirectionalSignal, RegimeSnapshot
@@ -209,3 +213,243 @@ def test_dash_mount_primes_workspace_cache_with_mounted_state(monkeypatch) -> No
     assert app.mounts
     assert payload["module"]["dashboard"]["mounted"] is True
     assert payload["module"]["dashboard"]["url"] == "/directional-options/dashboard/"
+
+
+def test_live_snapshot_selector_scores_local_watchlist_candidate() -> None:
+    service = DirectionalOptionsService()
+    regime = RegimeSnapshot(
+        label="trend",
+        trade_allowed=True,
+        confidence=0.8,
+        reasons=["trend confirmed"],
+        preferred_expiry_kind="weekly",
+        delta_target_min=0.35,
+        delta_target_max=0.55,
+        exit_profile="balanced",
+    )
+    signal = DirectionalSignal(
+        direction="CE",
+        confidence=0.74,
+        expected_move=82.0,
+        expected_horizon_bars=8,
+        expected_horizon_hours=0.67,
+        direction_score=0.74,
+        expected_iv_change=0.003,
+        sleeve="intraday_breakout",
+        thesis="bullish test signal",
+        regime="trend",
+    )
+    selection = service.selector.select_from_live_snapshots(
+        underlying="NIFTY",
+        timestamp=pd.Timestamp("2026-04-21T09:45:00Z"),
+        spot_price=22500.0,
+        row={
+            "rv_annualized": 0.22,
+        },
+        signal=signal,
+        regime=regime,
+        timeframe="5minute",
+        snapshot_rows=[
+            {
+                "time": "2026-04-21T09:45:00Z",
+                "underlying": "NIFTY",
+                "expiry": "2026-04-30",
+                "expiry_kind": "weekly",
+                "strike": 22500.0,
+                "option_type": "CE",
+                "instrument_key": "NSE_FO|NIFTY22500CE",
+                "trading_symbol": "NIFTY 22500 CE",
+                "underlying_price": 22500.0,
+                "ltp": 132.0,
+                "volume": 6400.0,
+                "oi": 245000.0,
+                "iv": 0.21,
+                "lot_size": 75,
+                "tick_size": 0.05,
+            }
+        ],
+    )
+
+    assert selection["best"] is not None
+    assert selection["best"].price_source == "local_watchlist"
+    assert selection["best"].instrument_key == "NSE_FO|NIFTY22500CE"
+
+
+@pytest.mark.asyncio
+async def test_directional_options_paper_store_tracks_open_and_closed_positions(tmp_path: Path) -> None:
+    store = DirectionalOptionsPaperStore(tmp_path / "directional-paper")
+    open_payload = {
+        "selection": {
+            "underlying": "NIFTY",
+            "timeframe": "5minute",
+            "lookback_sessions": 16,
+        },
+        "snapshot": {
+            "as_of": "2026-04-21T09:45:00+00:00",
+            "underlying": "NIFTY",
+            "timeframe": "5minute",
+            "spot_price": 22512.5,
+            "signal": {
+                "direction": "CE",
+                "confidence": 0.71,
+                "expected_move": 118.0,
+                "expected_horizon_bars": 8,
+            },
+            "regime": {"label": "trend"},
+            "selected_contract": {
+                "trading_symbol": "NIFTY 22500 CE",
+                "instrument_key": "NSE_FO|NIFTY22500CE",
+                "option_type": "CE",
+                "expiry": "2026-04-30",
+                "expiry_kind": "weekly",
+                "strike": 22500.0,
+                "option_price": 132.0,
+                "expected_pnl": 18.0,
+                "price_source": "local_watchlist",
+            },
+            "risk": {
+                "approved": True,
+                "quantity_lots": 1,
+                "quantity_units": 75,
+            },
+            "selection_reason": "Local weekly CE cleared the hurdle.",
+            "data_status": {"execution_ready": True},
+        },
+    }
+    first_summary = await store.sync_snapshot(open_payload)
+    positions = await store.list_positions(symbol="NIFTY", status="open", limit=10)
+
+    assert first_summary["open_positions"] == 1
+    assert positions["open_positions"][0]["trading_symbol"] == "NIFTY 22500 CE"
+
+    flat_payload = {
+        "selection": {
+            "underlying": "NIFTY",
+            "timeframe": "5minute",
+            "lookback_sessions": 16,
+        },
+        "snapshot": {
+            "as_of": "2026-04-21T10:05:00+00:00",
+            "underlying": "NIFTY",
+            "timeframe": "5minute",
+            "spot_price": 22586.0,
+            "signal": None,
+            "regime": {"label": "chop"},
+            "selected_contract": None,
+            "risk": {"approved": False},
+            "selection_reason": "Regime is not tradeable.",
+            "data_status": {"execution_ready": True},
+        },
+    }
+    closed_summary = await store.sync_snapshot(
+        flat_payload,
+        position_marks={
+            positions["open_positions"][0]["position_id"]: {
+                "premium": 146.0,
+                "spot": 22586.0,
+                "mark_time": "2026-04-21T10:05:00+00:00",
+                "price_source": "local_watchlist",
+            }
+        },
+    )
+    closed_positions = await store.list_positions(symbol="NIFTY", status="closed", limit=10)
+
+    assert closed_summary["open_positions"] == 0
+    assert closed_summary["closed_positions"] == 1
+    assert closed_positions["closed_positions"][0]["realized_pnl"] == pytest.approx((146.0 - 132.0) * 75)
+
+
+@pytest.mark.asyncio
+async def test_directional_options_live_snapshot_uses_local_market_intelligence(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = clone_default_config()
+    config["paper_trading"]["journal_root"] = tmp_path / "directional-paper"
+    service = DirectionalOptionsService(config)
+
+    live_spot = pd.DataFrame(
+        {
+            "time": pd.to_datetime(["2026-04-21T09:35:00Z", "2026-04-21T09:40:00Z", "2026-04-21T09:45:00Z"]),
+            "open": [22470.0, 22490.0, 22520.0],
+            "high": [22495.0, 22518.0, 22542.0],
+            "low": [22455.0, 22482.0, 22508.0],
+            "close": [22492.0, 22516.0, 22538.0],
+            "volume": [1000.0, 1200.0, 1400.0],
+            "oi": [0.0, 0.0, 0.0],
+        }
+    )
+    feature_frame = pd.DataFrame(
+        [
+            {
+                "time": pd.Timestamp("2026-04-21T09:45:00Z"),
+                "open": 22510.0,
+                "high": 22540.0,
+                "low": 22505.0,
+                "close": 22538.0,
+                "volume": 1400.0,
+                "oi": 0.0,
+                "adx": 28.0,
+                "plus_di": 31.0,
+                "minus_di": 12.0,
+                "atr": 68.0,
+                "ema_spread_pct": 0.0032,
+                "breakout_up": 0.42,
+                "breakout_down": -0.12,
+                "rv_annualized": 0.22,
+                "rv_percentile": 0.41,
+                "range_expansion": 1.2,
+                "momentum_3": 0.004,
+                "momentum_8": 0.008,
+                "range_pct": 0.0016,
+                "session_progress": 0.2,
+                "ema_fast": 22520.0,
+                "ema_slow": 22460.0,
+            }
+        ]
+    )
+
+    async def fake_load_live_spot_frame(underlying: str, lookback_days: int = 10):
+        return live_spot, "timescaledb_spot_1minute", f"{underlying}-history"
+
+    async def fake_list_live_contract_snapshots(**kwargs):
+        return [
+            {
+                "time": "2026-04-21T09:45:00Z",
+                "underlying": "NIFTY",
+                "expiry": "2026-04-30",
+                "expiry_kind": "weekly",
+                "strike": 22500.0,
+                "option_type": "CE",
+                "instrument_key": "NSE_FO|NIFTY22500CE",
+                "trading_symbol": "NIFTY 22500 CE",
+                "underlying_price": 22538.0,
+                "ltp": 128.0,
+                "volume": 8600.0,
+                "oi": 280000.0,
+                "iv": 0.2,
+                "lot_size": 75,
+                "tick_size": 0.05,
+            }
+        ]
+
+    async def fake_strategy_health():
+        return {
+            "watchlist_rows_today": 420,
+            "latest_watchlist_time": "2026-04-21T09:45:00+00:00",
+            "watchlist_age_seconds": 15.0,
+            "latest_spot_rows": {
+                "NIFTY": "2026-04-21T09:45:00+00:00",
+            },
+        }
+
+    monkeypatch.setattr(service.store, "load_live_spot_frame", fake_load_live_spot_frame)
+    monkeypatch.setattr(service.feature_engine, "build_frame", lambda *_args, **_kwargs: feature_frame)
+    monkeypatch.setattr(service.store, "list_live_contract_snapshots", fake_list_live_contract_snapshots)
+    monkeypatch.setattr(
+        "directional_options.service.market_intelligence_runtime.get_strategy_health",
+        fake_strategy_health,
+    )
+
+    payload = await service.live_snapshot("NIFTY", "5minute", 4)
+
+    assert payload["snapshot"]["data_status"]["execution_ready"] is True
+    assert payload["snapshot"]["selected_contract"]["trading_symbol"] == "NIFTY 22500 CE"
+    assert payload["snapshot"]["selected_contract"]["price_source"] == "local_watchlist"

@@ -80,7 +80,7 @@ from api.routers.auth import (
     get_broker_connection_snapshot,
 )
 from db.database import AsyncSessionLocal
-from market_data import atm_watchlist_service, market_profile_builder, option_history_service
+from market_data import atm_watchlist_service, market_intelligence_runtime, market_profile_builder, option_history_service
 from market_data.fo_universe_bootstrap import ensure_fo_underlying_catalog
 from paper_engine import strategy_agent_state as strategy_state_module
 from paper_engine.base_strategy_agent import (
@@ -950,6 +950,15 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         )
 
     @staticmethod
+    def _local_data_failure_message(health: dict[str, Any]) -> str:
+        latest_watchlist_time = str(health.get("latest_watchlist_time") or "none")
+        watchlist_rows = int(health.get("watchlist_rows_today") or 0)
+        return (
+            "Shared market-intelligence data is not ready for the paper scan. "
+            f"Watchlist rows today={watchlist_rows}, latest watchlist time={latest_watchlist_time}."
+        )
+
+    @staticmethod
     def _option_history_warning(health: dict[str, Any]) -> Optional[str]:
         if int(health.get("failure_count", 0)) <= 0:
             return None
@@ -1428,33 +1437,59 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     self._append_commentary("System", "Market closed. Agent idle.", tone="idle")
                     return await self._status_with_risk_snapshot()
 
-                broker_snapshot = await get_broker_connection_snapshot(force_validate=True)
-                self._last_data_health = {
-                    "broker_snapshot": broker_snapshot,
-                    "option_history": option_history_service.get_health_snapshot(),
-                }
-                if not broker_snapshot.get("broker_ready"):
-                    message = self._broker_failure_message(broker_snapshot)
-                    self._last_error = message
-                    self._last_message = message
-                    for lane in self._lane_agents():
-                        lane.on_broker_unavailable(started_at, broker_snapshot, message)
-                    self._append_commentary("System", message, tone="error")
-                    return await self._status_with_risk_snapshot()
+                local_only_mode = settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY
+                broker_snapshot: dict[str, Any] | None = None
+                market_intelligence_health: dict[str, Any] | None = None
+                if local_only_mode:
+                    market_intelligence_health = await market_intelligence_runtime.get_strategy_health()
+                    self._last_data_health = {
+                        "market_intelligence": market_intelligence_health,
+                        "option_history": option_history_service.get_health_snapshot(),
+                    }
+                    if not market_intelligence_health.get("ready"):
+                        message = self._local_data_failure_message(market_intelligence_health)
+                        self._last_error = message
+                        self._last_message = message
+                        for lane in self._lane_agents():
+                            lane.runtime.last_message = message
+                            lane.runtime.meta = {
+                                **(lane.runtime.meta or {}),
+                                "mode": "local_data_unavailable",
+                                "updated_at": started_at.isoformat(),
+                                "market_intelligence": market_intelligence_health,
+                            }
+                        self._append_commentary("System", message, tone="warning")
+                        return await self._status_with_risk_snapshot()
+                else:
+                    broker_snapshot = await get_broker_connection_snapshot(force_validate=True)
+                    self._last_data_health = {
+                        "broker_snapshot": broker_snapshot,
+                        "option_history": option_history_service.get_health_snapshot(),
+                    }
+                    if not broker_snapshot.get("broker_ready"):
+                        message = self._broker_failure_message(broker_snapshot)
+                        self._last_error = message
+                        self._last_message = message
+                        for lane in self._lane_agents():
+                            lane.on_broker_unavailable(started_at, broker_snapshot, message)
+                        self._append_commentary("System", message, tone="error")
+                        return await self._status_with_risk_snapshot()
 
                 for lane in self._lane_agents():
                     lane.mark_scan_started(started_at)
 
-                universe_bootstrap = await ensure_fo_underlying_catalog()
-                if universe_bootstrap.get("status") in {"partial", "skipped_no_upstox"}:
-                    self._append_commentary(
-                        "Strategy 1",
-                        (
-                            "F&O universe bootstrap is incomplete. "
-                            f"Catalog rows with keys: {((universe_bootstrap.get('counts_after') or {}).get('keyed_rows') or 0)}."
-                        ),
-                        tone="warning",
-                    )
+                universe_bootstrap = {"status": "ready", "counts_after": {}}
+                if not local_only_mode:
+                    universe_bootstrap = await ensure_fo_underlying_catalog()
+                    if universe_bootstrap.get("status") in {"partial", "skipped_no_upstox"}:
+                        self._append_commentary(
+                            "Strategy 1",
+                            (
+                                "F&O universe bootstrap is incomplete. "
+                                f"Catalog rows with keys: {((universe_bootstrap.get('counts_after') or {}).get('keyed_rows') or 0)}."
+                            ),
+                            tone="warning",
+                        )
 
                 # 1. Get trading windows
                 self._active_windows = await get_all_active_windows(as_of=started_at.date())
@@ -1486,7 +1521,10 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 # Also include the broker's default (nearest weekly) expiry in
                 # case the monthly expiry isn't directly available in the live chain.
                 monthly_expiries = list(self._last_candidate_expiries)
-                expiry_scope = await atm_watchlist_service.get_expiries(self._last_expiry)
+                expiry_scope = await atm_watchlist_service.get_expiries(
+                    self._last_expiry,
+                    live_refresh=not local_only_mode,
+                )
                 native_index_expiries = sorted(
                     {
                         str(expiry)
@@ -1494,12 +1532,39 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                         if underlying in STRATEGY2_UNDERLYINGS and str(expiry or "").strip()
                     }
                 )
-                expiries_to_fetch: list[Optional[str]] = []
-                for candidate in [*monthly_expiries, *native_index_expiries, None]:
-                    if candidate not in expiries_to_fetch:
-                        expiries_to_fetch.append(candidate)
+                watchlist_requests: list[tuple[Optional[str], Optional[list[str]]]] = []
+                seen_requests: set[tuple[Optional[str], tuple[str, ...]]] = set()
+
+                def _append_watchlist_request(
+                    candidate_expiry: Optional[str],
+                    candidate_symbols: Optional[list[str]] = None,
+                ) -> None:
+                    request_key = (
+                        candidate_expiry,
+                        tuple(sorted(str(symbol) for symbol in (candidate_symbols or []))),
+                    )
+                    if request_key in seen_requests:
+                        return
+                    seen_requests.add(request_key)
+                    watchlist_requests.append((candidate_expiry, candidate_symbols))
+
+                for candidate in monthly_expiries:
+                    _append_watchlist_request(candidate)
+                for candidate in native_index_expiries:
+                    if candidate not in monthly_expiries:
+                        _append_watchlist_request(candidate, list(STRATEGY2_UNDERLYINGS))
+                _append_watchlist_request(None, list(STRATEGY2_UNDERLYINGS))
                 watchlists = await asyncio.gather(
-                    *(atm_watchlist_service.get_watchlist(exp) for exp in expiries_to_fetch),
+                    *(
+                        atm_watchlist_service.get_watchlist(expiry=request_expiry, symbols=request_symbols)
+                        if local_only_mode
+                        else atm_watchlist_service.get_watchlist(
+                            expiry=request_expiry,
+                            symbols=request_symbols,
+                            live_refresh=True,
+                        )
+                        for request_expiry, request_symbols in watchlist_requests
+                    ),
                     return_exceptions=True,
                 )
                 # Merge rows: monthly-expiry rows first, broker-default rows as fallback.
@@ -1572,7 +1637,8 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 s2_pos = len(self._strategy2.positions)
                 option_history_health = option_history_service.get_health_snapshot()
                 self._last_data_health = {
-                    "broker_snapshot": broker_snapshot,
+                    **({"broker_snapshot": broker_snapshot} if broker_snapshot is not None else {}),
+                    **({"market_intelligence": market_intelligence_health} if market_intelligence_health is not None else {}),
                     "option_history": option_history_health,
                 }
                 self._last_message = (
@@ -1676,6 +1742,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             instrument_key=side.get("instrument_key"),
             interval=interval,
             limit=limit,
+            allow_broker_refresh=not (settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY),
         )
 
     async def _run_strategy2(
@@ -2193,22 +2260,17 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             return cached[1], cached[2]
 
         from_date = started_at.date() - timedelta(days=5)
-        to_date = started_at.date()
-
         rows: list[dict[str, Any]] = []
         source = "none"
-        spot_key = self._INDEX_SPOT_KEYS.get(underlying)
-        if spot_key:
-            rows = await option_history_service._fetch_broker_candles(
-                instrument_key=spot_key,
-                from_date=from_date,
-                to_date=to_date,
-                interval="1minute",
-            )
-            if rows:
-                source = "upstox"
+        local_only_mode = settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY
 
-        if not rows:
+        if local_only_mode:
+            rows, source, _ = await market_intelligence_runtime.load_local_spot_rows(
+                underlying,
+                lookback_days=5,
+            )
+        else:
+            to_date = started_at.date()
             fyers_adapter = get_active_adapter("fyers")
             if fyers_adapter is None and await ensure_fyers_session(force_validate=True):
                 fyers_adapter = get_active_adapter("fyers")
@@ -2226,6 +2288,18 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                         source = "fyers"
                 except Exception as exc:
                     logger.debug(f"[Strategy2] Fyers spot history failed for {underlying}: {exc}")
+
+            if not rows:
+                spot_key = self._INDEX_SPOT_KEYS.get(underlying)
+                if spot_key:
+                    rows = await option_history_service._fetch_broker_candles(
+                        instrument_key=spot_key,
+                        from_date=from_date,
+                        to_date=to_date,
+                        interval="1minute",
+                    )
+                    if rows:
+                        source = "upstox"
 
         if rows:
             self._strategy2_spot_cache[underlying] = (started_at, rows, source)
@@ -2277,6 +2351,8 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
 
     async def _maybe_sync_spot_candles(self) -> None:
         """Periodically sync spot candles from broker to DB during market hours."""
+        if settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY:
+            return
         if not settings.STRATEGY_SPOT_SYNC_ENABLED:
             return
         self._scan_count += 1

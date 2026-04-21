@@ -106,6 +106,8 @@ class ContractCandidate:
     contract_score: float
     selection_reason: str
     selected: bool = False
+    instrument_key: Optional[str] = None
+    price_source: str = "runtime_dataset"
 
 
 @dataclass(frozen=True)

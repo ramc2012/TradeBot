@@ -10,10 +10,13 @@ from sqlalchemy import text
 
 from analysis.macd_engine import compute_ema
 from api.routers.auth import ensure_fyers_session, ensure_upstox_session, get_active_adapter
+from core.config import settings
 from auction_intelligence.options.ntm_volx import NTMVolXAnalyzer
 from auction_intelligence.schemas import AgentDecision, ExecutionInstruction, NTMVolXSnapshot, SessionContext
 from brokers.base import BrokerAdapter, OptionChain, OptionChainEntry
 from db.database import AsyncSessionLocal
+from market_data.atm_watchlist import atm_watchlist_service
+from market_data.option_chain import option_chain_service
 from market_data.option_history import option_history_service
 from market_data.symbols import DISPLAY_NAMES, to_broker_symbol, to_fyers_symbol
 
@@ -255,6 +258,8 @@ class OptionStrategyMapper:
         )
 
     async def _get_option_adapters(self) -> tuple[Optional[BrokerAdapter], Optional[BrokerAdapter]]:
+        if settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY:
+            return None, None
         upstox_adapter = get_active_adapter("upstox")
         fyers_adapter = get_active_adapter("fyers")
         if upstox_adapter is None and await ensure_upstox_session():
@@ -373,6 +378,48 @@ class OptionStrategyMapper:
         if cached is not None:
             return cached
 
+        try:
+            cached_payload = await option_chain_service.get_cached(app_symbol, expiry_iso)
+        except Exception as exc:
+            logger.debug(f"[AuctionIQ] Local option-chain cache lookup failed for {app_symbol} {expiry_iso}: {exc}")
+            cached_payload = None
+        if cached_payload:
+            chain = OptionChain(
+                symbol=str(cached_payload.get("symbol") or app_symbol),
+                expiry=expiry_iso,
+                spot_price=float(cached_payload.get("spot_price") or 0.0),
+                entries=[
+                    OptionChainEntry(
+                        strike=float(item.get("strike") or 0.0),
+                        option_type=str(item.get("option_type") or "").upper(),
+                        ltp=float(item.get("ltp") or 0.0),
+                        oi=int(item.get("oi") or 0),
+                        volume=int(item.get("volume") or 0),
+                        bid=float(item.get("bid") or 0.0),
+                        ask=float(item.get("ask") or 0.0),
+                        iv=float(item["iv"]) if item.get("iv") is not None else None,
+                        delta=float(item["delta"]) if item.get("delta") is not None else None,
+                        gamma=float(item["gamma"]) if item.get("gamma") is not None else None,
+                        theta=float(item["theta"]) if item.get("theta") is not None else None,
+                        vega=float(item["vega"]) if item.get("vega") is not None else None,
+                        prev_oi=float(item["prev_oi"]) if item.get("prev_oi") is not None else None,
+                        prev_close=float(item["prev_close"]) if item.get("prev_close") is not None else None,
+                        instrument_key=str(item.get("instrument_key") or "").strip() or None,
+                    )
+                    for item in list(cached_payload.get("entries") or [])
+                ],
+            )
+            if chain.entries:
+                self._chain_cache[cache_key] = chain
+                return chain
+
+        if settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY:
+            fallback_chain = await self._load_local_atm_watchlist_chain(app_symbol, expiry_iso)
+            if fallback_chain is not None:
+                self._chain_cache[cache_key] = fallback_chain
+                return fallback_chain
+            return None
+
         if upstox_adapter is not None:
             try:
                 chain = await upstox_adapter.get_option_chain(broker_symbol, expiry_iso)
@@ -391,6 +438,65 @@ class OptionStrategyMapper:
             except Exception as exc:
                 logger.debug(f"[AuctionIQ] Fyers option chain failed for {fyers_symbol} {expiry_iso}: {exc}")
         return None
+
+    async def _load_local_atm_watchlist_chain(
+        self,
+        app_symbol: str,
+        expiry_iso: str,
+    ) -> Optional[OptionChain]:
+        underlying = str(DISPLAY_NAMES.get(app_symbol) or "").upper().strip()
+        if not underlying:
+            return None
+        payload = await atm_watchlist_service.get_watchlist(
+            expiry=expiry_iso,
+            symbols=[underlying],
+            live_refresh=False,
+        )
+        row = next(
+            (
+                item
+                for item in list(payload.get("rows") or [])
+                if str(item.get("underlying") or "").upper() == underlying
+            ),
+            None,
+        )
+        if row is None:
+            return None
+
+        entries: list[OptionChainEntry] = []
+        for side_key, option_type in (("ce", "CE"), ("pe", "PE")):
+            side = row.get(side_key) or {}
+            ltp = float(side.get("ltp") or 0.0)
+            if ltp <= 0:
+                continue
+            entries.append(
+                OptionChainEntry(
+                    strike=float(side.get("strike") or row.get("atm_strike") or 0.0),
+                    option_type=option_type,
+                    ltp=ltp,
+                    oi=int(side.get("oi") or 0),
+                    volume=int(side.get("volume") or 0),
+                    bid=float(side.get("bid") or ltp),
+                    ask=float(side.get("ask") or ltp),
+                    iv=float(side["iv"]) if side.get("iv") is not None else None,
+                    delta=float(side["delta"]) if side.get("delta") is not None else None,
+                    gamma=float(side["gamma"]) if side.get("gamma") is not None else None,
+                    theta=float(side["theta"]) if side.get("theta") is not None else None,
+                    vega=float(side["vega"]) if side.get("vega") is not None else None,
+                    prev_oi=float(side["prev_oi"]) if side.get("prev_oi") is not None else None,
+                    prev_close=float(side["prev_close"]) if side.get("prev_close") is not None else None,
+                    instrument_key=str(side.get("instrument_key") or "").strip() or None,
+                )
+            )
+
+        if not entries:
+            return None
+        return OptionChain(
+            symbol=app_symbol,
+            expiry=expiry_iso,
+            spot_price=float(row.get("spot_price") or 0.0),
+            entries=entries,
+        )
 
     async def _load_contract_rows(
         self,
@@ -791,6 +897,7 @@ class OptionStrategyMapper:
             instrument_key=instrument_key,
             interval=str(self.config.get("history_interval", "5minute")),
             limit=int(self.config.get("history_limit", 60)),
+            allow_broker_refresh=not (settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY),
         )
         closes = [float(item["close"]) for item in candles if item.get("close") is not None]
         ma20 = compute_ema(closes, 20)[-1] if len(closes) >= 20 else None

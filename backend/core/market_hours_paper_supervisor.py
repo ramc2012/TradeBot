@@ -127,8 +127,15 @@ class MarketHoursPaperSupervisor:
 
     def _default_runners(self) -> list[RunnerConfig]:
         from auction_intelligence.automation import run_market_hours_cycle as run_auction_market_cycle
+        from directional_options.service import DirectionalOptionsService
         from fractal_market_profile.config import SUPPORTED_SYMBOLS
         from fractal_market_profile.service import fmp_service
+        from market_data.market_intelligence_runtime import market_intelligence_runtime
+
+        directional_service = DirectionalOptionsService()
+
+        async def _market_intelligence_runner() -> dict[str, Any]:
+            return await market_intelligence_runtime.refresh_nse_runtime()
 
         async def _auction_runner() -> dict[str, Any]:
             return await run_auction_market_cycle()
@@ -162,7 +169,51 @@ class MarketHoursPaperSupervisor:
                 "results": results,
             }
 
+        async def _directional_runner() -> dict[str, Any]:
+            results: list[dict[str, Any]] = []
+            failures: dict[str, str] = {}
+            default_timeframe = str(directional_service.config["default_timeframe"])
+            lookback_sessions = int(directional_service.config["backtest"]["lookback_sessions"])
+            for underlying in list(directional_service.config["universe"]):
+                try:
+                    snapshot = await directional_service.record_paper_snapshot(
+                        underlying,
+                        default_timeframe,
+                        lookback_sessions,
+                    )
+                    current_snapshot = dict(snapshot.get("snapshot") or {})
+                    results.append(
+                        {
+                            "underlying": underlying,
+                            "as_of": current_snapshot.get("as_of"),
+                            "direction": (current_snapshot.get("signal") or {}).get("direction"),
+                            "approved": bool((current_snapshot.get("risk") or {}).get("approved")),
+                            "execution_ready": bool((current_snapshot.get("data_status") or {}).get("execution_ready")),
+                            "trading_symbol": (current_snapshot.get("selected_contract") or {}).get("trading_symbol"),
+                        }
+                    )
+                except Exception as exc:
+                    failures[underlying] = str(exc)
+            if not results and failures:
+                joined = "; ".join(f"{symbol}: {detail}" for symbol, detail in failures.items())
+                raise RuntimeError(f"Directional options paper cycle failed: {joined}")
+            return {
+                "symbols_requested": list(directional_service.config["universe"]),
+                "symbols_completed": [item.get("underlying") for item in results],
+                "result_count": len(results),
+                "failure_count": len(failures),
+                "failures": failures,
+                "results": results,
+            }
+
         return [
+            RunnerConfig(
+                key="market_intelligence",
+                label="Market Intelligence Refresh",
+                interval_seconds=settings.MARKET_INTELLIGENCE_REFRESH_INTERVAL_SECONDS,
+                callback=_market_intelligence_runner,
+                enabled=settings.MARKET_INTELLIGENCE_AUTO_ENABLED,
+            ),
             RunnerConfig(
                 key="auction_intelligence",
                 label="Auction Intelligence Paper Cycle",
@@ -176,6 +227,13 @@ class MarketHoursPaperSupervisor:
                 interval_seconds=settings.FRACTAL_MARKET_PROFILE_AUTO_INTERVAL_SECONDS,
                 callback=_fmp_runner,
                 enabled=settings.FRACTAL_MARKET_PROFILE_AUTO_ENABLED,
+            ),
+            RunnerConfig(
+                key="directional_options",
+                label="Directional Options Paper Cycle",
+                interval_seconds=settings.DIRECTIONAL_OPTIONS_AUTO_INTERVAL_SECONDS,
+                callback=_directional_runner,
+                enabled=settings.DIRECTIONAL_OPTIONS_AUTO_ENABLED,
             ),
         ]
 

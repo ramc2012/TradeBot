@@ -7,7 +7,6 @@ from loguru import logger
 
 from core.config import settings
 
-
 async def bootstrap_paper_trading_runtime() -> dict[str, Any]:
     if not settings.PAPER_TRADING_ONLY:
         return {
@@ -18,7 +17,6 @@ async def bootstrap_paper_trading_runtime() -> dict[str, Any]:
 
     from api.routers.auth import get_broker_connection_snapshot
     from api.routers.trading import ensure_paper_trading_mode
-    from market_data import atm_watchlist_service
     from market_data.commodity_atm_watchlist import commodity_atm_watchlist_service
     from paper_engine.commodity_strategy_agent import commodity_strategy_agent
     from paper_engine.strategy_agent import paper_strategy_agent
@@ -48,7 +46,7 @@ async def bootstrap_paper_trading_runtime() -> dict[str, Any]:
 
     prewarm_tasks: list[asyncio.Task[None]] = []
     if settings.PAPER_RUNTIME_PREWARM_ENABLED and broker_snapshot.get("broker_ready"):
-        prewarm_tasks.append(asyncio.create_task(_prewarm_nse_watchlists(atm_watchlist_service)))
+        prewarm_tasks.append(asyncio.create_task(_prewarm_market_intelligence_runtime()))
         if commodity_strategy_agent.get_symbols():
             prewarm_tasks.append(
                 asyncio.create_task(
@@ -81,24 +79,17 @@ async def bootstrap_paper_trading_runtime() -> dict[str, Any]:
     return payload
 
 
-async def _prewarm_nse_watchlists(atm_watchlist_service) -> None:
+async def _prewarm_market_intelligence_runtime() -> None:
     try:
-        expiry_payload = await asyncio.wait_for(atm_watchlist_service.get_expiries(None), timeout=30)
-        monthly_expiries = sorted(
-            {
-                str(expiry)
-                for expiry in dict(expiry_payload.get("index_monthlies") or {}).values()
-                if str(expiry or "").strip()
-            }
+        from market_data.market_intelligence_runtime import market_intelligence_runtime
+
+        payload = await asyncio.wait_for(market_intelligence_runtime.refresh_nse_runtime(), timeout=90)
+        logger.info(
+            "[Paper Bootstrap] Market intelligence prewarm finished "
+            f"(spot_rows={payload.get('spot_gap_fill', {}).get('stored_total', 0)})"
         )
-        expiries = [*monthly_expiries, None]
-        await asyncio.gather(
-            *(asyncio.wait_for(atm_watchlist_service.get_watchlist(expiry), timeout=45) for expiry in expiries),
-            return_exceptions=True,
-        )
-        logger.info(f"[Paper Bootstrap] NSE watchlist prewarm finished for expiries={monthly_expiries}")
     except Exception as exc:
-        logger.warning(f"[Paper Bootstrap] NSE watchlist prewarm failed: {exc}")
+        logger.warning(f"[Paper Bootstrap] Market intelligence prewarm failed: {exc}")
 
 
 async def _prewarm_commodity_watchlists(*, commodity_strategy_agent, commodity_atm_watchlist_service) -> None:

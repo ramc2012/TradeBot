@@ -467,6 +467,7 @@ class OptionHistoryService:
         instrument_key: Optional[str] = None,
         interval: str = "30minute",
         limit: int = 80,
+        allow_broker_refresh: bool = True,
     ) -> list[dict[str, Any]]:
         async with AsyncSessionLocal() as session:
             merged: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
@@ -535,8 +536,23 @@ class OptionHistoryService:
                     },
                 )
 
+            if len(merged) < limit:
+                snapshot_rows = await self._load_snapshot_candles(
+                    session=session,
+                    underlying=underlying,
+                    expiry=expiry,
+                    strike=strike,
+                    option_type=option_type,
+                    instrument_key=instrument_key,
+                    interval=interval,
+                    limit=limit,
+                )
+                for row in snapshot_rows:
+                    time_key = _normalize_time(row.get("time"))
+                    merged[time_key] = row
+
         needs_live_refresh = instrument_key and self._latest_row_is_stale_for_today(list(merged.values()), interval)
-        if instrument_key and (len(merged) < 35 or needs_live_refresh):
+        if allow_broker_refresh and instrument_key and (len(merged) < 35 or needs_live_refresh):
             # Fetch back 90 days regardless of expiry month — ensures weekly
             # contracts (listed only 1-2 weeks before expiry) still get enough
             # history to warm up the MACD signal line (needs ≥34 bars).
@@ -591,6 +607,93 @@ class OptionHistoryService:
         candles = list(merged.values())
         candles.sort(key=lambda row: row["time"])
         return candles[-limit:]
+
+    async def _load_snapshot_candles(
+        self,
+        *,
+        session,
+        underlying: str,
+        expiry: date,
+        strike: float,
+        option_type: str,
+        instrument_key: Optional[str],
+        interval: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        sample_limit = max(limit * 12, 180)
+        rows: list[dict[str, Any]] = []
+
+        async def _query_snapshot_rows(query: str, params: dict[str, Any]) -> None:
+            nonlocal rows
+            result = await session.execute(text(query), params)
+            rows = [
+                {
+                    "time": _normalize_time(row.time),
+                    "open": float(row.ltp) if row.ltp is not None else None,
+                    "high": float(row.ltp) if row.ltp is not None else None,
+                    "low": float(row.ltp) if row.ltp is not None else None,
+                    "close": float(row.ltp) if row.ltp is not None else None,
+                    "volume": int(row.volume) if row.volume is not None else 0,
+                    "oi": int(row.oi) if row.oi is not None else None,
+                    "iv": float(row.iv) if row.iv is not None else None,
+                    "delta": None,
+                    "gamma": None,
+                    "theta": None,
+                    "vega": None,
+                    "underlying_price": float(row.underlying_price)
+                    if row.underlying_price is not None
+                    else None,
+                }
+                for row in reversed(result.fetchall())
+                if row.ltp is not None
+            ]
+
+        if instrument_key:
+            await _query_snapshot_rows(
+                """
+                SELECT time, ltp, volume, oi, iv, underlying_price
+                FROM atm_option_watchlist_snapshots
+                WHERE instrument_key = :instrument_key
+                ORDER BY time DESC
+                LIMIT :limit
+                """,
+                {
+                    "instrument_key": instrument_key,
+                    "limit": sample_limit,
+                },
+            )
+
+        if not rows:
+            await _query_snapshot_rows(
+                """
+                SELECT time, ltp, volume, oi, iv, underlying_price
+                FROM atm_option_watchlist_snapshots
+                WHERE underlying = :underlying
+                  AND expiry = :expiry
+                  AND strike = :strike
+                  AND option_type = :option_type
+                ORDER BY time DESC
+                LIMIT :limit
+                """,
+                {
+                    "underlying": underlying,
+                    "expiry": expiry,
+                    "strike": strike,
+                    "option_type": option_type,
+                    "limit": sample_limit,
+                },
+            )
+
+        if not rows:
+            return []
+
+        try:
+            aggregate_minutes = interval_minutes(interval)
+        except KeyError:
+            aggregate_minutes = 1
+        if aggregate_minutes > 1:
+            rows = self._aggregate_rows(rows, aggregate_minutes)
+        return rows[-limit:]
 
     async def _persist_broker_candles(
         self,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
@@ -101,6 +102,112 @@ async def test_live_order_flow_falls_back_to_bar_proxy_when_ticks_are_missing() 
 
 
 @pytest.mark.asyncio
+async def test_live_signal_blocks_actionable_entries_when_tick_order_flow_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = FractalMarketProfileService()
+
+    async def _fake_option_selection(*_args, **_kwargs):
+        return {
+            "option_type": "CE",
+            "premium": 210.0,
+            "strike": 22500.0,
+            "expiry": "2026-04-28",
+            "pcr_oi": 1.4,
+            "oi_change": 12.0,
+            "iv_rank": 28.0,
+        }
+
+    monkeypatch.setattr(service, "_live_option_selection", _fake_option_selection)
+    monkeypatch.setattr(
+        fmp_service_module.sector_tracker,
+        "_get_india_vix",
+        lambda: asyncio.sleep(0, result={"price": 15.0}),
+    )
+
+    analysis = {
+        "daily_profile": {
+            "shape": "Elongated",
+            "direction_bias": "bullish",
+            "day_type": "TREND_UP",
+            "tick_size": 5.0,
+            "initial_balance_range": 70.0,
+            "daily_ib_ratio": 1.1,
+            "vah": 22590.0,
+            "val": 22480.0,
+            "poc": 22520.0,
+            "single_prints": [22570.0],
+            "high_price": 22630.0,
+            "low_price": 22420.0,
+        },
+        "prior_daily_profile": {
+            "vah": 22490.0,
+            "val": 22420.0,
+            "high_price": 22510.0,
+            "low_price": 22380.0,
+            "single_prints": [22470.0],
+        },
+        "current_hour_profile": _profile(
+            hour_number=2,
+            shape="Elongated",
+            direction_bias="bullish",
+            close_price=22605.0,
+            vah=22595.0,
+            val=22530.0,
+            poc=22570.0,
+            ib_high=22540.0,
+            ib_low=22500.0,
+            score=2,
+            step=1,
+        ),
+        "hourly_profiles": [
+            _profile(
+                hour_number=1,
+                shape="P-shape",
+                direction_bias="bullish",
+                close_price=22532.0,
+                vah=22528.0,
+                val=22488.0,
+                poc=22498.0,
+                ib_high=22520.0,
+                ib_low=22480.0,
+                score=0,
+                step=0,
+            ),
+            _profile(
+                hour_number=2,
+                shape="Elongated",
+                direction_bias="bullish",
+                close_price=22605.0,
+                vah=22595.0,
+                val=22530.0,
+                poc=22570.0,
+                ib_high=22540.0,
+                ib_low=22500.0,
+                score=2,
+                step=1,
+            ),
+        ],
+        "data_status": {
+            "execution_ready": False,
+            "order_flow_source": "bar_proxy",
+            "degraded_reason": "tick_order_flow_unavailable",
+        },
+    }
+    order_flow = {
+        "delta": 420.0,
+        "timing_confidence": 0.72,
+        "execution_aggression": "PASSIVE",
+        "source": "bar_proxy",
+    }
+
+    signal = await service._build_live_signal("NIFTY", analysis, order_flow)
+
+    assert signal["action"] == "LONG"
+    assert signal["actionable"] is False
+    assert any("tick/order-flow data is not ready" in item for item in signal["filters"])
+    assert any("bar_proxy" in item for item in signal["metadata"]["advisories"])
+
+
+@pytest.mark.asyncio
 async def test_load_live_rows_reuses_shared_broker_history_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     service = FractalMarketProfileService()
     first_session = _minute_rows(datetime(2026, 4, 2, 3, 45, tzinfo=timezone.utc), count=220)
@@ -111,9 +218,15 @@ async def test_load_live_rows_reuses_shared_broker_history_fallback(monkeypatch:
     )
     expected_rows = first_session + second_session
 
-    async def _fake_recent_rows(symbol_code: str, *, lookback_days: int = 7):
+    async def _fake_recent_rows(
+        symbol_code: str,
+        *,
+        lookback_days: int = 7,
+        allow_live_broker_refresh: bool = True,
+    ):
         assert symbol_code == "NIFTY"
         assert lookback_days == 10
+        assert allow_live_broker_refresh is True
         return expected_rows, "fyers_spot_index", "NSE:NIFTY50-INDEX"
 
     monkeypatch.setattr(auction_live, "_fetch_recent_minute_rows", _fake_recent_rows)
@@ -123,6 +236,56 @@ async def test_load_live_rows_reuses_shared_broker_history_fallback(monkeypatch:
     assert rows == expected_rows
     assert source == "fyers_spot_index"
     assert history_symbol == "NSE:NIFTY50-INDEX"
+
+
+@pytest.mark.asyncio
+async def test_live_option_selection_uses_symbol_scoped_watchlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = FractalMarketProfileService()
+    captured: dict[str, list[str] | None] = {"symbols": None}
+
+    async def _fake_watchlist(*, expiry=None, symbols=None):
+        captured["symbols"] = symbols
+        return {
+            "rows": [
+                {
+                    "underlying": "NIFTY",
+                    "expiry": "2026-04-28",
+                    "ce": {
+                        "instrument_key": "NIFTY-CE",
+                        "trading_symbol": "NIFTY26APRCE",
+                        "ltp": 210.0,
+                    },
+                    "pe": {
+                        "instrument_key": "NIFTY-PE",
+                        "trading_symbol": "NIFTY26APRPE",
+                        "ltp": 198.0,
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr(fmp_service_module.atm_watchlist_service, "get_watchlist", _fake_watchlist)
+    monkeypatch.setattr(
+        fmp_service_module.option_chain_service,
+        "get_cached",
+        lambda symbol, expiry: asyncio.sleep(0, result={"pcr_oi": 1.02}),
+    )
+    monkeypatch.setattr(
+        fmp_service_module.sector_tracker,
+        "get_iv_rank",
+        lambda symbol: asyncio.sleep(0, result={"iv_rank": 32.0}),
+    )
+
+    selection = await service._live_option_selection(
+        "NIFTY",
+        direction="LONG",
+        horizon="intraday",
+        confidence=0.84,
+    )
+
+    assert captured["symbols"] == ["NIFTY"]
+    assert selection is not None
+    assert selection["option_type"] == "CE"
 
 
 def test_fmp_group_rows_by_session_keeps_partial_live_session_when_requested(monkeypatch: pytest.MonkeyPatch) -> None:

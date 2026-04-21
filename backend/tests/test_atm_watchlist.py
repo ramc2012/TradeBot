@@ -113,7 +113,9 @@ def test_get_broker_expiries_prefers_live_fyers_ladder_when_upstox_is_offline(mo
     expiries = asyncio.run(service._get_broker_expiries_for_symbol(meta, None, _FakeFyersAdapter()))
 
     assert expiries == ["2026-04-23", "2026-05-26"]
-    assert redis._values["atm_watchlist:sym_expiries:v2:NIFTY"] == json.dumps(expiries)
+    assert redis._values["atm_watchlist:sym_expiries:v2:NIFTY"] == json.dumps(
+        {"expiries": expiries, "source": "fyers"}
+    )
 
 
 def test_build_row_uses_saved_contract_metadata_when_upstox_is_offline(monkeypatch) -> None:
@@ -264,7 +266,7 @@ def test_get_expiries_reports_catalog_fallback_when_saved_ladder_is_used(monkeyp
     async def fake_ensure_fyers_session(*args, **kwargs) -> bool:
         return False
 
-    async def fake_broker_expiries(meta: UnderlyingMeta, *args, **kwargs) -> list[str]:
+    async def fake_broker_expiries(meta: UnderlyingMeta, *args, **kwargs) -> tuple[list[str], str]:
         ladders = {
             "NIFTY": ["2026-04-30", "2026-05-28"],
             "BANKNIFTY": ["2026-04-29", "2026-05-27"],
@@ -272,7 +274,7 @@ def test_get_expiries_reports_catalog_fallback_when_saved_ladder_is_used(monkeyp
             "MIDCPNIFTY": ["2026-04-27", "2026-05-25"],
             "SENSEX": ["2026-04-24", "2026-05-29"],
         }
-        return ladders[meta.symbol]
+        return ladders[meta.symbol], "catalog"
 
     async def fake_load_persisted(symbol: str) -> list[str]:
         ladders = {
@@ -290,9 +292,9 @@ def test_get_expiries_reports_catalog_fallback_when_saved_ladder_is_used(monkeyp
     monkeypatch.setattr(service, "_load_underlyings", fake_load_underlyings)
     monkeypatch.setattr(service, "_load_persisted_expiries_for_symbol", fake_load_persisted)
     monkeypatch.setattr(service, "_get_upstox_adapter", fake_get_upstox_adapter)
-    monkeypatch.setattr(service, "_get_broker_expiries_for_symbol", fake_broker_expiries)
+    monkeypatch.setattr(service, "_get_broker_expiry_snapshot_for_symbol", fake_broker_expiries)
 
-    payload = asyncio.run(service.get_expiries())
+    payload = asyncio.run(service.get_expiries(live_refresh=False))
 
     assert payload["source"] == "catalog"
     assert payload["default_expiry"] == "2026-04-28"
@@ -345,7 +347,7 @@ def test_get_expiries_prefers_live_fyers_ladders_over_saved_catalog_when_upstox_
     monkeypatch.setattr(service, "_load_persisted_expiries_for_symbol", fake_load_persisted)
     monkeypatch.setattr(service, "_get_upstox_adapter", fake_get_upstox_adapter)
 
-    payload = asyncio.run(service.get_expiries())
+    payload = asyncio.run(service.get_expiries(live_refresh=True))
 
     assert payload["source"] == "fyers"
     assert payload["default_expiry"] == "2026-04-28"
@@ -381,7 +383,7 @@ def test_get_expiries_uses_common_nse_monthlies_even_when_live_ladders_are_stale
     monkeypatch.setattr(service, "_load_persisted_expiries_for_symbol", lambda symbol: _async_payload([]))
     monkeypatch.setattr(service, "_get_upstox_adapter", lambda: _async_payload(_UniformUpstoxAdapter()))
 
-    payload = asyncio.run(service.get_expiries())
+    payload = asyncio.run(service.get_expiries(live_refresh=True))
 
     assert payload["source"] == "upstox"
     assert payload["expiries"] == ["2026-04-21", "2026-04-28", "2026-05-26"]
@@ -398,7 +400,7 @@ def test_get_watchlist_returns_building_payload_on_first_load(monkeypatch) -> No
     redis = _FakeRedis()
     scheduled = []
 
-    async def fake_get_expiries(_expiry: str | None = None) -> dict[str, str]:
+    async def fake_get_expiries(_expiry: str | None = None, *, live_refresh: bool = False) -> dict[str, str]:
         return {"default_expiry": "2026-04-28"}
 
     async def fake_load_underlyings() -> list[UnderlyingMeta]:
@@ -437,7 +439,7 @@ def test_get_watchlist_returns_building_payload_on_first_load(monkeypatch) -> No
     monkeypatch.setattr(service, "_load_persisted_watchlist_rows", lambda expiry, underlyings: _async_payload([]))
     monkeypatch.setattr(service, "_build_row", fake_build_row)
 
-    payload = asyncio.run(service.get_watchlist("2026-04-28"))
+    payload = asyncio.run(service.get_watchlist("2026-04-28", live_refresh=True))
 
     assert payload["build_status"] == "building"
     assert payload["summary"]["total_rows"] == 2
@@ -449,7 +451,7 @@ def test_get_watchlist_returns_building_payload_on_first_load(monkeypatch) -> No
 def test_get_watchlist_returns_cached_building_payload_without_rebuild(monkeypatch) -> None:
     service = ATMWatchlistService()
     redis = _FakeRedis()
-    cache_key = f"atm_watchlist:{atm_watchlist_module.WATCHLIST_CACHE_VERSION}:2026-04-28"
+    cache_key = f"atm_watchlist:{atm_watchlist_module.WATCHLIST_CACHE_VERSION}:local:2026-04-28:all"
     cached_payload = {
         "expiry": "2026-04-28",
         "rows": [{"underlying": "NIFTY", "kind": "INDEX"}],
@@ -462,7 +464,7 @@ def test_get_watchlist_returns_cached_building_payload_without_rebuild(monkeypat
     redis._values[cache_key] = json.dumps(cached_payload)
 
     monkeypatch.setattr(atm_watchlist_module, "get_redis", lambda: _fake_get_redis(redis))
-    monkeypatch.setattr(service, "get_expiries", lambda _expiry=None: _async_payload({"default_expiry": "2026-04-28"}))
+    monkeypatch.setattr(service, "get_expiries", lambda _expiry=None, live_refresh=False: _async_payload({"default_expiry": "2026-04-28"}))
 
     payload = asyncio.run(service.get_watchlist("2026-04-28"))
 
@@ -470,11 +472,51 @@ def test_get_watchlist_returns_cached_building_payload_without_rebuild(monkeypat
     assert redis._values[cache_key] == json.dumps(cached_payload)
 
 
+def test_get_watchlist_filters_scoped_rows_from_full_cache(monkeypatch) -> None:
+    service = ATMWatchlistService()
+    redis = _FakeRedis()
+    full_cache_key = f"atm_watchlist:{atm_watchlist_module.WATCHLIST_CACHE_VERSION}:live:2026-04-28:all"
+    cached_payload = {
+        "expiry": "2026-04-28",
+        "rows": [
+            {
+                "underlying": "NIFTY",
+                "kind": "INDEX",
+                "live_source": "fyers",
+                "ce": {"option_type": "CE"},
+                "pe": {"option_type": "PE"},
+            },
+            {
+                "underlying": "RELIANCE",
+                "kind": "STOCK",
+                "live_source": "upstox",
+                "ce": {"option_type": "CE"},
+                "pe": None,
+            },
+        ],
+        "summary": {"total_rows": 2, "ce_ready": 2, "pe_ready": 1},
+        "source": "snapshot",
+        "detail": None,
+        "build_status": "ready",
+        "timestamp": "2026-04-11T10:00:00+00:00",
+    }
+    redis._values[full_cache_key] = json.dumps(cached_payload)
+
+    monkeypatch.setattr(atm_watchlist_module, "get_redis", lambda: _fake_get_redis(redis))
+    monkeypatch.setattr(service, "get_expiries", lambda _expiry=None, live_refresh=False: _async_payload({"default_expiry": "2026-04-28"}))
+
+    payload = asyncio.run(service.get_watchlist("2026-04-28", ["NIFTY"]))
+
+    assert [row["underlying"] for row in payload["rows"]] == ["NIFTY"]
+    assert payload["summary"]["total_rows"] == 1
+    assert payload["summary"]["fyers_rows"] == 1
+
+
 def test_get_watchlist_uses_persisted_snapshot_board_when_brokers_are_offline(monkeypatch) -> None:
     service = ATMWatchlistService()
     redis = _FakeRedis()
 
-    async def fake_get_expiries(_expiry: str | None = None) -> dict:
+    async def fake_get_expiries(_expiry: str | None = None, *, live_refresh: bool = False) -> dict:
         return {"default_expiry": "2026-04-28"}
 
     async def fake_load_underlyings() -> list[UnderlyingMeta]:

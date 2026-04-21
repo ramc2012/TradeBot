@@ -243,6 +243,92 @@ def test_option_history_can_aggregate_one_minute_rows_to_three_minute() -> None:
     assert aggregated[0]["volume"] == 15
 
 
+def test_option_history_load_candles_uses_watchlist_snapshots_when_broker_refresh_is_disabled(monkeypatch) -> None:
+    service = OptionHistoryService()
+
+    class _EmptyResult:
+        def fetchall(self):
+            return []
+
+    class _SnapshotResult:
+        def fetchall(self):
+            return [
+                type(
+                    "Row",
+                    (),
+                    {
+                        "time": "2026-04-10T09:15:00+05:30",
+                        "ltp": 101.0,
+                        "volume": 10,
+                        "oi": 200,
+                        "iv": 0.21,
+                        "underlying_price": 22510.0,
+                    },
+                )(),
+                type(
+                    "Row",
+                    (),
+                    {
+                        "time": "2026-04-10T09:16:00+05:30",
+                        "ltp": 103.0,
+                        "volume": 15,
+                        "oi": 220,
+                        "iv": 0.22,
+                        "underlying_price": 22518.0,
+                    },
+                )(),
+                type(
+                    "Row",
+                    (),
+                    {
+                        "time": "2026-04-10T09:17:00+05:30",
+                        "ltp": 104.5,
+                        "volume": 20,
+                        "oi": 240,
+                        "iv": 0.23,
+                        "underlying_price": 22524.0,
+                    },
+                )(),
+            ]
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        async def execute(self, statement, params):
+            sql = str(statement)
+            if "FROM option_premium_candles" in sql:
+                return _EmptyResult()
+            if "FROM atm_option_watchlist_snapshots" in sql:
+                assert params["instrument_key"] == "NIFTY-CE"
+                return _SnapshotResult()
+            raise AssertionError(sql)
+
+    monkeypatch.setattr(option_history_module, "AsyncSessionLocal", lambda: _FakeSession())
+
+    candles = asyncio.run(
+        service.load_candles(
+            underlying="NIFTY",
+            expiry=date(2026, 4, 10),
+            strike=22500.0,
+            option_type="CE",
+            instrument_key="NIFTY-CE",
+            interval="3minute",
+            limit=5,
+            allow_broker_refresh=False,
+        )
+    )
+
+    assert len(candles) == 1
+    assert candles[0]["open"] == 101.0
+    assert candles[0]["close"] == 104.5
+    assert candles[0]["volume"] == 45
+    assert candles[0]["oi"] == 240
+
+
 def test_option_history_upstox_ssl_errors_degrade_to_empty_rows(monkeypatch) -> None:
     service = OptionHistoryService()
     service.reset_health()

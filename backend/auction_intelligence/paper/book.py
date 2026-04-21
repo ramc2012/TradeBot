@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
+from core.config import settings
 from auction_intelligence.paper.journal import resolve_journal_root
 from auction_intelligence.schemas import AnalysisBundle, PaperPositionRecord
 from market_data.option_history import option_history_service
@@ -306,6 +307,7 @@ class PaperPositionBook:
                     instrument_key=str(instrument_key) if instrument_key else None,
                     interval="1minute",
                     limit=1,
+                    allow_broker_refresh=not (settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY),
                 )
                 if candles and candles[-1].get("close") is not None:
                     return round(float(candles[-1]["close"]), 2)

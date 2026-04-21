@@ -29,8 +29,12 @@ This package adds an isolated long-premium engine to Nomad Curie without reusing
 - `GET /api/directional-options/summary`
 - `GET /api/directional-options/workspace`
 - `GET /api/directional-options/backtest`
+- `GET /api/directional-options/live-snapshot`
+- `POST /api/directional-options/paper-proposal`
+- `GET /api/directional-options/paper-journal`
+- `GET /api/directional-options/paper-positions`
 
 ## Notes
 
-- The module runs only on persisted research/runtime data; it does not interfere with live strategy agents.
+- Research/backtest endpoints run on persisted runtime data. Live paper-trading endpoints consume shared market-intelligence spot history plus locally persisted ATM watchlist snapshots, and they do not call brokers directly from the strategy path.
 - The Dash surface is feature-gated. If `dash` is not installed, the API still works and the frontend shows the mount status cleanly.

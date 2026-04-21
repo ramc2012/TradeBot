@@ -153,6 +153,75 @@ class OptionSelectionEngine:
             "reason": selected.selection_reason,
         }
 
+    def select_from_live_snapshots(
+        self,
+        *,
+        underlying: str,
+        timestamp: pd.Timestamp,
+        spot_price: float,
+        row,
+        signal: DirectionalSignal,
+        regime: RegimeSnapshot,
+        timeframe: str,
+        snapshot_rows: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not snapshot_rows:
+            return {"best": None, "candidates": [], "reason": "No local watchlist contracts were available for this timestamp."}
+
+        selector_cfg = self.config
+        expiry_preference = regime.preferred_expiry_kind
+        ordered = sorted(
+            snapshot_rows,
+            key=lambda item: (
+                0 if str(item.get("expiry_kind") or "") == expiry_preference else 1,
+                abs(float(item.get("strike") or 0.0) - spot_price),
+                str(item.get("expiry") or ""),
+            ),
+        )[: int(selector_cfg["max_candidates"]) * 3]
+
+        candidates: list[ContractCandidate] = []
+        horizon_years = max(
+            (signal.expected_horizon_bars * timeframe_minutes(timeframe)) / (252.0 * 375.0),
+            1.0 / (252.0 * 375.0),
+        )
+        sigma = min(
+            max(
+                float(row.get("rv_annualized", 0.22)) * float(selector_cfg["sigma_multiplier"]),
+                float(selector_cfg["sigma_floor"]),
+            ),
+            float(selector_cfg["sigma_ceiling"]),
+        )
+        risk_free_rate = float(selector_cfg["risk_free_rate"])
+        delta_mid = (regime.delta_target_min + regime.delta_target_max) / 2.0
+
+        for snapshot in ordered:
+            candidate = self._score_snapshot_contract(
+                snapshot=snapshot,
+                timestamp=timestamp,
+                spot_price=spot_price,
+                default_sigma=sigma,
+                signal=signal,
+                horizon_years=horizon_years,
+                risk_free_rate=risk_free_rate,
+                delta_mid=delta_mid,
+            )
+            if candidate is None:
+                continue
+            candidates.append(candidate)
+
+        if not candidates:
+            return {"best": None, "candidates": [], "reason": "All local watchlist contracts failed liquidity or edge hurdles."}
+
+        candidates = sorted(candidates, key=lambda item: item.contract_score, reverse=True)
+        best = candidates[0]
+        selected = ContractCandidate(**{**asdict(best), "selected": True})
+        rest = [selected, *candidates[1: int(selector_cfg["max_candidates"])]]
+        return {
+            "best": selected,
+            "candidates": rest,
+            "reason": selected.selection_reason,
+        }
+
     def _score_contract(
         self,
         *,
@@ -277,4 +346,132 @@ class OptionSelectionEngine:
             expected_pnl=round(expected_pnl, 2),
             contract_score=round(score, 2),
             selection_reason=selection_reason,
+        )
+
+    def _score_snapshot_contract(
+        self,
+        *,
+        snapshot: dict[str, Any],
+        timestamp: pd.Timestamp,
+        spot_price: float,
+        default_sigma: float,
+        signal: DirectionalSignal,
+        horizon_years: float,
+        risk_free_rate: float,
+        delta_mid: float,
+    ) -> Optional[ContractCandidate]:
+        option_price = float(snapshot.get("ltp") or 0.0)
+        volume = float(snapshot.get("volume") or 0.0)
+        oi = float(snapshot.get("oi") or 0.0)
+        strike = float(snapshot.get("strike") or 0.0)
+        if option_price <= 0.0 or strike <= 0.0:
+            return None
+
+        expiry_dt = pd.Timestamp(snapshot.get("expiry"))
+        days_to_expiry = max((expiry_dt.date() - timestamp.date()).days + (1.0 - float(timestamp.hour / 24.0)), 0.25)
+        time_to_expiry_years = max(days_to_expiry / 365.0, 1.0 / 3650.0)
+        sigma = min(
+            max(float(snapshot.get("iv") or default_sigma or 0.0), float(self.config["sigma_floor"])),
+            float(self.config["sigma_ceiling"]),
+        )
+        delta, gamma, theta, vega = _black_scholes_greeks(
+            spot=spot_price,
+            strike=strike,
+            time_to_expiry_years=time_to_expiry_years,
+            sigma=sigma,
+            risk_free_rate=risk_free_rate,
+            option_type=str(snapshot.get("option_type") or signal.direction),
+        )
+        delta_abs = abs(delta)
+        moneyness_pct = abs(strike - spot_price) / max(spot_price, 1.0)
+        spread_pct = min(
+            float(self.config["fallback_spread_pct"]),
+            max(
+                0.01,
+                0.04 + (120.0 / max(volume, 120.0)) + (1_500.0 / max(oi, 1_500.0)) * 0.01 + moneyness_pct * 0.85,
+            ),
+        )
+        slippage_pct = spread_pct * 0.28
+        liquidity_score = max(
+            0.0,
+            min(
+                1.0,
+                0.45
+                + min(volume / 2_000.0, 0.35)
+                + min(oi / 20_000.0, 0.35)
+                - min(spread_pct / 0.15, 0.4),
+            ),
+        )
+        if (
+            volume < float(self.config["min_volume"])
+            or oi < float(self.config["min_oi"])
+            or spread_pct > float(self.config["max_spread_pct"])
+        ):
+            return None
+
+        iv_value_score = max(0.0, min(1.0, 1.1 - sigma / 0.6 - moneyness_pct * 2.0))
+        delta_fit = max(0.0, 1.0 - abs(delta_abs - delta_mid) / 0.35)
+        theta_penalty = abs(theta) * horizon_years / max(option_price, 1.0)
+        spread_cost = option_price * spread_pct
+        slippage_cost = option_price * slippage_pct
+        fees = 2.0 * 0.45
+        expected_pnl = (
+            (delta * signal.expected_move)
+            + (0.5 * gamma * (signal.expected_move ** 2))
+            + (vega * signal.expected_iv_change)
+            - (abs(theta) * horizon_years)
+            - spread_cost
+            - slippage_cost
+            - fees
+        )
+
+        weights = self.config["score_weights"]
+        score = (
+            (weights["direction"] * signal.confidence * delta_fit)
+            + (weights["expected_pnl"] * max(-1.0, min(expected_pnl / max(option_price, 1.0), 2.0)))
+            + (weights["liquidity"] * liquidity_score)
+            + (weights["iv_value"] * iv_value_score)
+            - (weights["theta_penalty"] * theta_penalty)
+            - (weights["slippage_penalty"] * (spread_pct + slippage_pct))
+        )
+
+        trading_symbol = str(snapshot.get("trading_symbol") or snapshot.get("instrument_key") or "")
+        option_type = str(snapshot.get("option_type") or signal.direction)
+        selection_reason = (
+            f"Local {snapshot.get('expiry_kind') or 'weekly'} {option_type} with {delta_abs:.2f} delta, "
+            f"{liquidity_score:.0%} liquidity score, and {expected_pnl:.2f} expected PnL."
+        )
+        return ContractCandidate(
+            trading_symbol=trading_symbol or f"{snapshot.get('underlying')} {strike:.0f} {option_type}",
+            file_path=f"live:{snapshot.get('instrument_key') or trading_symbol or strike}",
+            option_type=option_type,
+            expiry=str(snapshot.get("expiry") or ""),
+            expiry_kind=str(snapshot.get("expiry_kind") or "weekly"),
+            strike=strike,
+            lot_size=int(snapshot.get("lot_size") or 1),
+            tick_size=float(snapshot.get("tick_size") or 0.05),
+            option_price=round(option_price, 2),
+            volume=round(volume, 2),
+            oi=round(oi, 2),
+            days_to_expiry=round(days_to_expiry, 2),
+            moneyness_pct=round(moneyness_pct, 4),
+            implied_vol=round(sigma, 4),
+            delta=round(delta, 4),
+            gamma=round(gamma, 6),
+            theta=round(theta, 4),
+            vega=round(vega, 4),
+            delta_bucket=_delta_bucket(delta_abs),
+            liquidity_score=round(liquidity_score, 4),
+            iv_value_score=round(iv_value_score, 4),
+            theta_penalty=round(theta_penalty, 4),
+            spread_pct=round(spread_pct, 4),
+            slippage_pct=round(slippage_pct, 4),
+            spread_cost=round(spread_cost, 2),
+            slippage_cost=round(slippage_cost, 2),
+            fees=round(fees, 2),
+            expected_pnl=round(expected_pnl, 2),
+            contract_score=round(score, 2),
+            selection_reason=selection_reason,
+            instrument_key=str(snapshot.get("instrument_key") or "") or None,
+            price_source="local_watchlist",
         )

@@ -6,6 +6,7 @@ import {
   getIciciLoginUrl, connectIciciBreeze, connectFivepaisa,
   disconnectBroker, getRiskStatus, updateRiskConfig, getResearchCacheStatus,
   getTelegramSettings, saveTelegramSettings, discoverTelegramChats, sendTelegramTest,
+  describeApiError,
 } from "@/lib/api";
 import { api } from "@/lib/api";
 import { hasBrokerSession, isBrokerReady, type BrokerStatusEntry } from "@/lib/broker-status";
@@ -616,7 +617,7 @@ function FyersCard({ status, onRefresh }: { status: BrokerStatusEntry | undefine
       setMsg("✓ Credentials saved");
       qc.invalidateQueries({ queryKey: ["allCredsStatus"] });
       qc.invalidateQueries({ queryKey: ["credentialsStatus", "fyers"] });
-    } catch (e: any) { setMsg(e?.response?.data?.detail || "Failed to save"); }
+    } catch (e: any) { setMsg(describeApiError(e, "Failed to save Fyers credentials")); }
     finally { setSaving(false); }
   };
 
@@ -624,7 +625,7 @@ function FyersCard({ status, onRefresh }: { status: BrokerStatusEntry | undefine
     try {
       const r = await getFyersAuthUrl();
       window.open(r.data.auth_url, "_blank", "width=600,height=700");
-    } catch (e: any) { setMsg(e?.response?.data?.detail || "Save credentials first"); }
+    } catch (e: any) { setMsg(describeApiError(e, "Save credentials first")); }
   };
 
   const handleConnect = async () => {
@@ -634,7 +635,7 @@ function FyersCard({ status, onRefresh }: { status: BrokerStatusEntry | undefine
       const { connectBroker } = await import("@/lib/api");
       await connectBroker("fyers", { auth_code: authCode });
       setMsg("✓ Connected!"); setExpanded(false); onRefresh();
-    } catch (e: any) { setMsg(e?.response?.data?.detail || "Connection failed"); }
+    } catch (e: any) { setMsg(describeApiError(e, "Fyers connection failed")); }
     finally { setSaving(false); }
   };
 
@@ -777,7 +778,7 @@ function UpstoxCard({ status, onRefresh }: { status: BrokerStatusEntry | undefin
       await saveCredentials("upstox", { api_key: apiKey, secret, redirect_uri: UPSTOX_REDIRECT });
       setMsg("✓ Credentials saved");
       qc.invalidateQueries({ queryKey: ["allCredsStatus"] });
-    } catch (e: any) { setMsg(e?.response?.data?.detail || "Failed"); }
+    } catch (e: any) { setMsg(describeApiError(e, "Failed to save Upstox credentials")); }
     finally { setSaving(false); }
   };
 
@@ -788,7 +789,7 @@ function UpstoxCard({ status, onRefresh }: { status: BrokerStatusEntry | undefin
       window.open(r.data.auth_url, "_blank");
       setMsg("Login page opened. After login, Google will open — copy the code= value from the URL and paste in Step 3.");
     } catch (e: any) {
-      setMsg(e?.response?.data?.detail || "Save credentials first");
+      setMsg(describeApiError(e, "Save credentials first"));
     } finally { setSaving(false); }
   };
 
@@ -807,7 +808,7 @@ function UpstoxCard({ status, onRefresh }: { status: BrokerStatusEntry | undefin
         typeof rawDetail === "string" ? rawDetail :
         Array.isArray(rawDetail) ? JSON.stringify(rawDetail) :
         resp?.data ? JSON.stringify(resp.data).slice(0, 200) :
-        e?.message || "Connection failed — check backend logs";
+        describeApiError(e, "Connection failed — check backend logs");
       const d = detail.toLowerCase();
       if (d.includes("udapi100068") || d.includes("redirect_uri")) {
         setMsg("Redirect URI mismatch — set your Upstox app Redirect URL to https://www.google.com");

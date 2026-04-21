@@ -8,6 +8,7 @@ from analysis.macd_engine import compute_ema, compute_macd
 from agent.macd_quadrant import check_macd_death_signal
 from agent.strategy_config import EXIT, FIRST_PULLBACK_IGNORE_BARS, MACD_FAST, MACD_MIN_BARS, MACD_SIGNAL, MACD_SLOW, OPTION_ENTRY_MA_FAST, REGIME_DEAD
 from analytics.technicals import latest_macd_rsi
+from core.config import settings
 from market_data import option_history_service
 from paper_engine.base_strategy_agent import _now_ist, _round_or_none
 from paper_engine.strategy_agent_state import StrategyEvent, StrategyPosition, StrategyRuntime
@@ -40,6 +41,7 @@ class StrategyExitMixin:
                 instrument_key=pos.instrument_key,
                 interval="30minute",
                 limit=80,
+                allow_broker_refresh=not (settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY),
             )
             closes = [float(c["close"]) for c in candles if c.get("close")] if candles else []
 

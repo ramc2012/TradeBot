@@ -216,7 +216,7 @@ class StrategyEntryMixin:
             underlying,
             session_rows,
             "day",
-            "1minute" if spot_source in {"upstox", "fyers"} else "30minute",
+            "30minute" if spot_source == "spot_store" else "1minute",
         )
         if not profile:
             return {

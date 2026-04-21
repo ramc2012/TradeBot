@@ -7,6 +7,7 @@ from agent import window_calculator as window_calculator_module
 from paper_engine.order_book import PaperOrderBook
 from paper_engine.portfolio import PaperPortfolio
 import paper_engine.strategy_agent as strategy_agent_module
+import paper_engine.strategy_agent_entries as strategy_entries_module
 from paper_engine.strategy_agent import (
     PHASE_TRAILING,
     PaperStrategyAgent,
@@ -185,7 +186,12 @@ def test_run_once_uses_next_strategy1_window_instead_of_idling(monkeypatch) -> N
             }
         ]
 
-    async def fake_watchlist(expiry: str | None = None):
+    async def fake_watchlist(
+        expiry: str | None = None,
+        symbols: list[str] | None = None,
+        *,
+        live_refresh: bool = False,
+    ):
         if expiry == "2026-05-26":
             return {
                 "rows": [
@@ -202,7 +208,7 @@ def test_run_once_uses_next_strategy1_window_instead_of_idling(monkeypatch) -> N
             }
         return {"rows": [], "detail": None}
 
-    async def fake_expiries(_expiry: str | None = None):
+    async def fake_expiries(_expiry: str | None = None, *, live_refresh: bool = False):
         return {
             "default_expiry": "2026-05-26",
             "index_monthlies": {
@@ -274,6 +280,7 @@ def test_run_once_uses_next_strategy1_window_instead_of_idling(monkeypatch) -> N
 def test_run_once_includes_native_strategy2_index_expiry_rows(monkeypatch) -> None:
     agent = PaperStrategyAgent()
     captured: dict[str, list[str]] = {}
+    requested_watchlists: list[tuple[str | None, tuple[str, ...]]] = []
 
     async def fake_snapshot(*, force_validate: bool = False):
         return {
@@ -300,7 +307,7 @@ def test_run_once_includes_native_strategy2_index_expiry_rows(monkeypatch) -> No
             }
         ]
 
-    async def fake_expiries(_expiry: str | None = None):
+    async def fake_expiries(_expiry: str | None = None, *, live_refresh: bool = False):
         return {
             "default_expiry": "2026-04-28",
             "index_monthlies": {
@@ -312,7 +319,13 @@ def test_run_once_includes_native_strategy2_index_expiry_rows(monkeypatch) -> No
             },
         }
 
-    async def fake_watchlist(expiry: str | None = None):
+    async def fake_watchlist(
+        expiry: str | None = None,
+        symbols: list[str] | None = None,
+        *,
+        live_refresh: bool = False,
+    ):
+        requested_watchlists.append((expiry, tuple(symbols or [])))
         if expiry == "2026-04-24":
             return {
                 "rows": [
@@ -390,6 +403,9 @@ def test_run_once_includes_native_strategy2_index_expiry_rows(monkeypatch) -> No
     assert "SENSEX" in captured["underlyings"]
     assert status["strategy_agents"][1]["mode"] == "live_scan"
     assert status["strategy_agents"][1]["signals"] == 5
+    assert ("2026-04-28", ()) in requested_watchlists
+    assert ("2026-04-24", strategy_agent_module.STRATEGY2_UNDERLYINGS) in requested_watchlists
+    assert (None, strategy_agent_module.STRATEGY2_UNDERLYINGS) in requested_watchlists
 
 
 def test_get_status_exposes_next_scan_and_runtime_timestamps() -> None:
@@ -413,6 +429,32 @@ def test_get_status_exposes_next_scan_and_runtime_timestamps() -> None:
     assert status["strategies"][1]["last_message"] == "Scanned 5 indices."
 
 
+def test_strategy2_spot_rows_prefer_fyers_history_before_upstox(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    started_at = datetime(2026, 4, 20, 10, 0, tzinfo=strategy_agent_module.IST)
+    upstox_calls = {"count": 0}
+
+    class _FakeFyersAdapter:
+        async def get_historical_candles(self, symbol: str, resolution: str, date_from: str, date_to: str):
+            assert symbol == strategy_agent_module.STRATEGY2_FYERS_SYMBOLS["NIFTY"]
+            assert resolution == "1"
+            return [{"time": started_at.isoformat(), "close": 24310.0}]
+
+    async def fake_fetch_broker_candles(**kwargs):
+        upstox_calls["count"] += 1
+        return [{"time": started_at.isoformat(), "close": 24295.0}]
+
+    monkeypatch.setattr(strategy_agent_module, "get_active_adapter", lambda broker: _FakeFyersAdapter() if broker == "fyers" else None)
+    monkeypatch.setattr(strategy_agent_module, "ensure_fyers_session", lambda **kwargs: asyncio.sleep(0, result=False))
+    monkeypatch.setattr(strategy_agent_module.option_history_service, "_fetch_broker_candles", fake_fetch_broker_candles)
+
+    rows, source = asyncio.run(agent._load_strategy2_spot_rows("NIFTY", started_at))
+
+    assert source == "fyers"
+    assert len(rows) == 1
+    assert upstox_calls["count"] == 0
+
+
 def test_strategy1_market_profile_gate_can_be_bypassed(monkeypatch) -> None:
     agent = PaperStrategyAgent()
 
@@ -433,6 +475,8 @@ def test_strategy1_scan_entries_uses_snapshot_macd_cross(monkeypatch) -> None:
     runtime.positions.clear()
     runtime.processed_signals.clear()
     opened: list[dict] = []
+
+    monkeypatch.setattr(strategy_entries_module, "_now_ist", lambda: datetime(2026, 4, 16, 12, 0, tzinfo=strategy_agent_module.IST))
 
     async def fake_snapshot_state(_rows):
         return {
@@ -607,6 +651,19 @@ def test_latest_session_rows_use_most_recent_trading_day() -> None:
 def test_strategy_agent_persists_and_restores_runtime_state(monkeypatch, tmp_path) -> None:
     state_file = tmp_path / "nse_strategy_state.json"
     monkeypatch.setattr(strategy_agent_module, "_NSE_STRATEGY_STATE_FILE", state_file)
+    persisted: dict[str, object] = {}
+
+    def fake_save_state(payload: dict[str, object]):
+        persisted["payload"] = payload
+        state_file.write_text("{}")
+        return None
+
+    def fake_load_state():
+        return persisted.get("payload", {}), None
+
+    monkeypatch.setattr(strategy_agent_module, "_save_strategy_state", fake_save_state)
+    monkeypatch.setattr(strategy_agent_module, "_load_saved_strategy_state", fake_load_state)
+    monkeypatch.setattr(strategy_agent_module, "_load_saved_strategy_state_from_database", lambda: (None, None))
 
     agent = PaperStrategyAgent()
     agent._last_run_at = "2026-04-09T15:20:00+05:30"
@@ -797,6 +854,37 @@ def test_run_once_stops_when_no_valid_broker_session_is_available(monkeypatch) -
     assert "No valid NSE broker session is available" in status["last_message"]
     assert status["data_health"]["broker_snapshot"]["broker_ready"] is False
     assert status["strategies"][0]["last_message"] == status["last_message"]
+
+
+def test_run_once_uses_market_intelligence_health_when_paper_only(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    broker_calls = {"count": 0}
+
+    async def fake_broker_snapshot(*, force_validate: bool = False):
+        broker_calls["count"] += 1
+        return {"broker_ready": True}
+
+    async def fake_market_intelligence_health():
+        return {
+            "ready": False,
+            "watchlist_rows_today": 0,
+            "latest_watchlist_time": None,
+        }
+
+    monkeypatch.setattr(strategy_agent_module.settings, "PAPER_TRADING_ONLY", True)
+    monkeypatch.setattr(strategy_agent_module, "_in_market_hours", lambda _: True)
+    monkeypatch.setattr(strategy_agent_module, "get_broker_connection_snapshot", fake_broker_snapshot)
+    monkeypatch.setattr(
+        strategy_agent_module.market_intelligence_runtime,
+        "get_strategy_health",
+        fake_market_intelligence_health,
+    )
+
+    status = asyncio.run(agent.run_once(force=False))
+
+    assert broker_calls["count"] == 0
+    assert "Shared market-intelligence data is not ready" in status["last_message"]
+    assert status["data_health"]["market_intelligence"]["ready"] is False
 
 
 def test_manage_exits_ignores_first_ma20_pullback(monkeypatch) -> None:

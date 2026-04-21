@@ -21,6 +21,7 @@ from auction_intelligence.market_profile import MarketProfileEngine
 from auction_intelligence.order_flow import OrderFlowEngine
 from auction_intelligence.schemas import DepthLevel, DepthSnapshot, MarketBar, QuoteSnapshot, TradePrint
 from brokers.base import Tick
+from core.config import settings
 from db.database import AsyncSessionLocal
 from fractal_market_profile.config import (
     FORCE_EXIT_TIME,
@@ -41,7 +42,7 @@ from fractal_market_profile.config import (
 )
 from fractal_market_profile.paper import FMPPaperStore
 from fractal_market_profile.schemas import FMPOptionSelection, FMPReplayTrade
-from market_data import atm_watchlist_service, data_router as market_data_router, option_chain_service
+from market_data import atm_watchlist_service, data_router as market_data_router, market_intelligence_runtime, option_chain_service
 
 
 UTC = timezone.utc
@@ -512,6 +513,7 @@ class FractalMarketProfileService:
         analysis["generated_at"] = _utc_now().isoformat()
         analysis["paper_positions"] = await self.paper.list_positions(symbol=normalized, status="all", limit=8)
         analysis["paper_journal"] = await self.paper.list_journal(symbol=normalized, limit=8)
+        analysis["data_status"] = dict(analysis.get("data_status") or {})
         return analysis
 
     async def live_health(self, symbol_code: str = "NIFTY") -> dict[str, Any]:
@@ -834,6 +836,7 @@ class FractalMarketProfileService:
         )
         order_flow = await self._build_live_order_flow(symbol_code, current_rows)
         analysis["order_flow"] = order_flow
+        analysis["data_status"] = self._build_live_data_status(current_rows, order_flow)
         analysis["current_signal"] = await self._build_live_signal(symbol_code, analysis, order_flow)
         await self._persist_hourly_profiles(symbol_code, analysis["session"]["session_date"], analysis["hourly_profiles"])
         return analysis
@@ -969,6 +972,16 @@ class FractalMarketProfileService:
         filters = list(signal.get("filters") or [])
         rationale = list(signal.get("rationale") or [])
         advisories = list(signal.get("metadata", {}).get("advisories") or [])
+        data_status = dict(analysis.get("data_status") or {})
+        if data_status and not bool(data_status.get("execution_ready", True)):
+            reason = str(data_status.get("degraded_reason") or "live_order_flow_unavailable").replace("_", " ")
+            filters.append(
+                "Live tick/order-flow data is not ready for paper entries; "
+                f"current snapshot is degraded ({reason})."
+            )
+            advisories.append(
+                f"Order-flow source is {data_status.get('order_flow_source') or 'unknown'}."
+            )
         option_selection = await self._live_option_selection(
             symbol_code,
             direction=str(signal["action"]),
@@ -1059,7 +1072,7 @@ class FractalMarketProfileService:
         horizon: str,
         confidence: float,
     ) -> dict[str, Any] | None:
-        watchlist = await atm_watchlist_service.get_watchlist()
+        watchlist = await atm_watchlist_service.get_watchlist(symbols=[symbol_code])
         row = next(
             (item for item in watchlist.get("rows", []) if str(item.get("underlying") or "").upper() == symbol_code.upper()),
             None,
@@ -1072,7 +1085,10 @@ class FractalMarketProfileService:
         if not option_payload:
             return None
 
-        chain = await option_chain_service.get_cached(symbol_code, str(row.get("expiry")))
+        chain = await option_chain_service.get_cached(
+            INDEX_APP_SYMBOLS.get(symbol_code, symbol_code),
+            str(row.get("expiry")),
+        )
         pcr_oi = float(chain.get("pcr_oi")) if chain and chain.get("pcr_oi") is not None else None
         iv_payload = await sector_tracker.get_iv_rank(symbol_code)
         iv_rank = float(iv_payload.get("iv_rank") or 0.0) if isinstance(iv_payload, dict) else None
@@ -1459,6 +1475,41 @@ class FractalMarketProfileService:
         payload["source"] = "bar_proxy"
         return payload
 
+    def _build_live_data_status(
+        self,
+        current_rows: list[dict[str, Any]],
+        order_flow: dict[str, Any],
+    ) -> dict[str, Any]:
+        latest_row_time = _to_ist(current_rows[-1]["time"]).astimezone(timezone.utc) if current_rows else None
+        minute_history_age_seconds = (
+            max(0.0, (datetime.now(timezone.utc) - latest_row_time).total_seconds())
+            if latest_row_time is not None
+            else None
+        )
+        order_flow_source = str(order_flow.get("source") or "unknown")
+        tick_ready = order_flow_source == "market_ticks"
+        minute_history_ready = bool(current_rows) and (
+            minute_history_age_seconds is None or minute_history_age_seconds <= 180.0
+        )
+        execution_ready = bool(minute_history_ready and tick_ready)
+        degraded_reason = None
+        if not minute_history_ready:
+            degraded_reason = "minute_history_stale_or_missing"
+        elif not tick_ready:
+            degraded_reason = "tick_order_flow_unavailable"
+        return {
+            "minute_history_ready": bool(minute_history_ready),
+            "minute_history_age_seconds": (
+                round(float(minute_history_age_seconds), 3)
+                if minute_history_age_seconds is not None
+                else None
+            ),
+            "order_flow_source": order_flow_source,
+            "tick_ready": bool(tick_ready),
+            "execution_ready": execution_ready,
+            "degraded_reason": degraded_reason,
+        }
+
     async def _recent_quote_history(self, app_symbol: str, *, snapshot_end: datetime, tick_size: float) -> list[dict[str, Any]]:
         from_time = max(snapshot_end - timedelta(minutes=20), datetime.combine(snapshot_end.astimezone(IST).date(), SESSION_OPEN, tzinfo=IST).astimezone(timezone.utc))
         async with AsyncSessionLocal() as session:
@@ -1738,11 +1789,23 @@ class FractalMarketProfileService:
         return round(max(lot_based, atr_based, 0.5), 2)
 
     async def _load_live_rows(self, symbol_code: str) -> tuple[list[dict[str, Any]], str, str]:
+        if settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY:
+            rows, source, history_symbol = await market_intelligence_runtime.load_local_spot_rows(
+                symbol_code,
+                lookback_days=10,
+            )
+            if rows:
+                return rows, source, history_symbol
+
         # Reuse the broker-aware minute-history fallback already hardened for Auction IQ.
         try:
             from auction_intelligence.live import _fetch_recent_minute_rows as _fetch_shared_recent_minute_rows
 
-            rows, source, history_symbol = await _fetch_shared_recent_minute_rows(symbol_code, lookback_days=10)
+            rows, source, history_symbol = await _fetch_shared_recent_minute_rows(
+                symbol_code,
+                lookback_days=10,
+                allow_live_broker_refresh=True,
+            )
             if rows:
                 return rows, source, history_symbol
         except Exception:

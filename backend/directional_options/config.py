@@ -85,6 +85,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "mark_to_market_every_bar": True,
         "max_trades_per_day": 2,
     },
+    "paper_trading": {
+        "journal_root": RUNTIME_ROOT / "paper",
+        "live_lookback_days": 10,
+        "stale_watchlist_seconds": 300,
+    },
 }
 
 

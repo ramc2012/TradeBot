@@ -28,6 +28,7 @@ from auction_intelligence.schemas import (
     TradePrint,
 )
 from brokers.base import Tick
+from core.config import settings
 from db.database import AsyncSessionLocal
 from market_data import data_router as market_data_router
 from market_data.symbols import to_broker_symbol, to_fyers_symbol
@@ -157,7 +158,10 @@ async def build_live_analysis(symbol_code: str = "NIFTY") -> dict[str, Any]:
     if normalized_symbol not in SYMBOL_MAP:
         raise ValueError(f"Unsupported live symbol: {symbol_code}")
 
-    recent_rows, history_source, history_symbol = await _fetch_recent_minute_rows(normalized_symbol)
+    recent_rows, history_source, history_symbol = await _fetch_recent_minute_rows(
+        normalized_symbol,
+        allow_live_broker_refresh=not (settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY),
+    )
     if not recent_rows:
         raise RuntimeError("No local or broker minute data returned for the requested symbol.")
 
@@ -191,7 +195,11 @@ async def build_shadow_backfill_snapshots(
     if normalized_symbol not in SYMBOL_MAP:
         raise ValueError(f"Unsupported live symbol: {symbol_code}")
 
-    recent_rows, history_source, history_symbol = await _fetch_recent_minute_rows(normalized_symbol, lookback_days=lookback_days)
+    recent_rows, history_source, history_symbol = await _fetch_recent_minute_rows(
+        normalized_symbol,
+        lookback_days=lookback_days,
+        allow_live_broker_refresh=not (settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY),
+    )
     if not recent_rows:
         raise RuntimeError("No local or broker minute data returned for the requested symbol.")
 
@@ -292,6 +300,19 @@ async def _build_analysis_from_session_rows(
     quote_source = str(order_flow_inputs["quote_source"])
     order_flow_source = str(order_flow_inputs["order_flow_source"])
     stale_data_seconds = float(order_flow_inputs["stale_data_seconds"])
+    data_status = _build_live_data_status(
+        current_rows=current_rows,
+        snapshot_mode=snapshot_mode,
+        quote_source=quote_source,
+        order_flow_source=order_flow_source,
+        quote_history_payload=quote_history_payload,
+        trades_payload=trades_payload,
+        stale_data_seconds=stale_data_seconds,
+    )
+    if snapshot_mode == "live_session" and not bool(data_status["execution_ready"]):
+        stale_limit = float(DEFAULT_CONFIG.get("risk", {}).get("stale_data_seconds", 10))
+        stale_data_seconds = max(stale_data_seconds, stale_limit + 1.0)
+        data_status["effective_stale_data_seconds"] = round(stale_data_seconds, 3)
     portfolio_payload = portfolio_payload or await _load_portfolio_snapshot(session_symbol=session_symbol)
 
     request = {
@@ -310,7 +331,9 @@ async def _build_analysis_from_session_rows(
                     // 60
                 ),
             ),
-            "broker_connected": True,
+            "broker_connected": bool(
+                data_status["execution_ready"] if snapshot_mode == "live_session" else True
+            ),
         },
         "portfolio": portfolio_payload,
         "quote": {
@@ -339,6 +362,7 @@ async def _build_analysis_from_session_rows(
             "snapshot_mode": snapshot_mode,
             "snapshot_time": snapshot_time_local.isoformat(),
             "instrument_proxy": config["instrument_proxy"] if is_futures_source else "spot_index_proxy",
+            "data_status": data_status,
         },
     }
 
@@ -366,11 +390,17 @@ async def _build_analysis_from_session_rows(
         "available_symbols": available_live_symbols(),
         "available_scenarios": [],
         "request": request,
+        "data_status": data_status,
         "analysis": jsonable_encoder(asdict(bundle)),
     }
 
 
-async def _fetch_recent_minute_rows(symbol_code: str, *, lookback_days: int = 7) -> tuple[list[dict[str, Any]], str, str]:
+async def _fetch_recent_minute_rows(
+    symbol_code: str,
+    *,
+    lookback_days: int = 7,
+    allow_live_broker_refresh: bool = True,
+) -> tuple[list[dict[str, Any]], str, str]:
     today = datetime.now(IST).date()
     from_date = today - timedelta(days=lookback_days)
     futures_symbol = _fyers_continuous_futures_symbol(symbol_code, today)
@@ -399,76 +429,77 @@ async def _fetch_recent_minute_rows(symbol_code: str, *, lookback_days: int = 7)
     if selected is not None:
         return selected
 
-    fyers = get_active_adapter("fyers")
-    if fyers is None and await ensure_fyers_session():
+    if allow_live_broker_refresh:
         fyers = get_active_adapter("fyers")
-    get_history = getattr(fyers, "get_historical_candles", None) if fyers else None
-    if callable(get_history):
-        try:
-            rows = await _fetch_chunked_fyers_history(
-                get_history,
-                futures_symbol,
-                "1",
-                from_date,
-                today,
-                chunk_days=4,
-                cont_flag=1,
-            )
-            selected = _choose_source(rows, "fyers_continuous_futures", futures_symbol)
-            if selected is not None:
-                return selected
-        except Exception:
-            pass
-        try:
-            rows = await _fetch_chunked_fyers_history(
-                get_history,
-                fyers_symbol,
-                "1",
-                from_date,
-                today,
-                chunk_days=4,
-                cont_flag=1,
-            )
-            selected = _choose_source(rows, "fyers_spot_index", fyers_symbol)
-            if selected is not None:
-                return selected
-        except Exception:
-            pass
+        if fyers is None and await ensure_fyers_session():
+            fyers = get_active_adapter("fyers")
+        get_history = getattr(fyers, "get_historical_candles", None) if fyers else None
+        if callable(get_history):
+            try:
+                rows = await _fetch_chunked_fyers_history(
+                    get_history,
+                    futures_symbol,
+                    "1",
+                    from_date,
+                    today,
+                    chunk_days=4,
+                    cont_flag=1,
+                )
+                selected = _choose_source(rows, "fyers_continuous_futures", futures_symbol)
+                if selected is not None:
+                    return selected
+            except Exception:
+                pass
+            try:
+                rows = await _fetch_chunked_fyers_history(
+                    get_history,
+                    fyers_symbol,
+                    "1",
+                    from_date,
+                    today,
+                    chunk_days=4,
+                    cont_flag=1,
+                )
+                selected = _choose_source(rows, "fyers_spot_index", fyers_symbol)
+                if selected is not None:
+                    return selected
+            except Exception:
+                pass
 
-    upstox = get_active_adapter("upstox")
-    if upstox is None:
-        await ensure_upstox_session()
-    token = get_broker_token("upstox")
-    if token:
-        encoded_key = quote(upstox_symbol, safe="")
-        url = (
-            "https://api.upstox.com/v2/historical-candle/"
-            f"{encoded_key}/1minute/{today.isoformat()}/{from_date.isoformat()}"
-        )
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                url,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Accept": "application/json",
-                },
+        upstox = get_active_adapter("upstox")
+        if upstox is None:
+            await ensure_upstox_session()
+        token = get_broker_token("upstox")
+        if token:
+            encoded_key = quote(upstox_symbol, safe="")
+            url = (
+                "https://api.upstox.com/v2/historical-candle/"
+                f"{encoded_key}/1minute/{today.isoformat()}/{from_date.isoformat()}"
             )
-        if response.status_code == 200:
-            candles = response.json().get("data", {}).get("candles", [])
-            rows = [
-                {
-                    "time": str(candle[0]),
-                    "open": float(candle[1]),
-                    "high": float(candle[2]),
-                    "low": float(candle[3]),
-                    "close": float(candle[4]),
-                    "volume": int(candle[5] or 0),
-                }
-                for candle in reversed(candles)
-            ]
-            selected = _choose_source(rows, "upstox_spot_index", upstox_symbol)
-            if selected is not None:
-                return selected
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    },
+                )
+            if response.status_code == 200:
+                candles = response.json().get("data", {}).get("candles", [])
+                rows = [
+                    {
+                        "time": str(candle[0]),
+                        "open": float(candle[1]),
+                        "high": float(candle[2]),
+                        "low": float(candle[3]),
+                        "close": float(candle[4]),
+                        "volume": int(candle[5] or 0),
+                    }
+                    for candle in reversed(candles)
+                ]
+                selected = _choose_source(rows, "upstox_spot_index", upstox_symbol)
+                if selected is not None:
+                    return selected
 
     # ── CSV fallback: use locally downloaded 1-min spot data ─────────────────
     try:
@@ -574,7 +605,11 @@ async def build_live_validation_series(
     if normalized_symbol not in SYMBOL_MAP:
         raise ValueError(f"Unsupported live symbol: {symbol_code}")
 
-    rows, history_source, _ = await _fetch_recent_minute_rows(normalized_symbol, lookback_days=lookback_days)
+    rows, history_source, _ = await _fetch_recent_minute_rows(
+        normalized_symbol,
+        lookback_days=lookback_days,
+        allow_live_broker_refresh=not (settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY),
+    )
     sessions = _group_rows_by_session(rows)
     session_dates = sorted(sessions.keys())[-max_sessions:]
 
@@ -1084,7 +1119,10 @@ def _build_quote_from_snapshot(
             "last_price": latest_close,
         },
         "historical_bar_inference",
-        0.0,
+        max(
+            0.0,
+            (datetime.now(timezone.utc) - latest_time.astimezone(timezone.utc)).total_seconds(),
+        ) if snapshot_mode == "live_session" else 0.0,
     )
 
 
@@ -1103,6 +1141,73 @@ def _build_depth_from_quote(quote: dict[str, Any], *, tick_size: float) -> dict[
             {"price": round(ask + (tick_size * level), 2), "quantity": round(ask_size * (1 - (0.18 * level)), 2)}
             for level in range(3)
         ],
+    }
+
+
+def _build_live_data_status(
+    *,
+    current_rows: list[dict[str, Any]],
+    snapshot_mode: str,
+    quote_source: str,
+    order_flow_source: str,
+    quote_history_payload: list[dict[str, Any]],
+    trades_payload: list[dict[str, Any]],
+    stale_data_seconds: float,
+) -> dict[str, Any]:
+    live_mode = snapshot_mode == "live_session"
+    latest_bar_time = _row_time(current_rows[-1]).astimezone(timezone.utc) if current_rows else None
+    minute_history_age_seconds = (
+        max(0.0, (datetime.now(timezone.utc) - latest_bar_time).total_seconds())
+        if latest_bar_time is not None
+        else None
+    )
+    stale_limit = float(DEFAULT_CONFIG.get("risk", {}).get("stale_data_seconds", 10))
+    minute_history_ready = bool(current_rows)
+    if live_mode and minute_history_age_seconds is not None:
+        minute_history_ready = minute_history_age_seconds <= 180.0
+    tick_ready = (not live_mode) or (
+        order_flow_source == "tick_reconstruction"
+        and len(quote_history_payload) >= 4
+        and len(trades_payload) >= 1
+    )
+    quote_ready = (not live_mode) or quote_source in {
+        "market_ticks",
+        "websocket_tick",
+        "rest_quote",
+    }
+    execution_ready = (
+        minute_history_ready
+        and tick_ready
+        and quote_ready
+        and float(stale_data_seconds) <= stale_limit
+    )
+    degraded_reason = None
+    if not minute_history_ready:
+        degraded_reason = "minute_history_stale_or_missing"
+    elif not tick_ready:
+        degraded_reason = "tick_order_flow_unavailable"
+    elif not quote_ready:
+        degraded_reason = "live_quote_unavailable"
+    elif float(stale_data_seconds) > stale_limit:
+        degraded_reason = "live_quote_stale"
+    return {
+        "live_mode": live_mode,
+        "snapshot_mode": snapshot_mode,
+        "minute_history_ready": bool(minute_history_ready),
+        "minute_history_age_seconds": (
+            round(float(minute_history_age_seconds), 3)
+            if minute_history_age_seconds is not None
+            else None
+        ),
+        "quote_source": quote_source,
+        "order_flow_source": order_flow_source,
+        "tick_history_count": len(quote_history_payload) if order_flow_source == "tick_reconstruction" else 0,
+        "trade_print_count": len(trades_payload),
+        "stale_data_seconds": round(float(stale_data_seconds), 3),
+        "tick_ready": bool(tick_ready),
+        "quote_ready": bool(quote_ready),
+        "execution_ready": bool(execution_ready),
+        "degraded_reason": degraded_reason,
     }
 
 

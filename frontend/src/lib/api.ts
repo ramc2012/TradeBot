@@ -1,13 +1,94 @@
 import axios from "axios";
-import { resolveApiBaseUrl } from "./runtime-url";
+import { resolveApiBaseUrl, resolveApiBaseUrlCandidates } from "./runtime-url";
 
 export const API_URL = resolveApiBaseUrl();
+
+let reachableApiBaseUrl: string | null = null;
+let reachableApiBaseUrlPromise: Promise<string> | null = null;
+
+async function probeApiBaseUrl(candidate: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${candidate}/api/auth/all-credentials-status`, {
+      method: "GET",
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function getReachableApiBaseUrl(): Promise<string> {
+  if (reachableApiBaseUrl) {
+    return reachableApiBaseUrl;
+  }
+  if (typeof window === "undefined") {
+    reachableApiBaseUrl = API_URL;
+    return reachableApiBaseUrl;
+  }
+  if (reachableApiBaseUrlPromise) {
+    return reachableApiBaseUrlPromise;
+  }
+  const candidates = resolveApiBaseUrlCandidates();
+  reachableApiBaseUrlPromise = (async () => {
+    for (const candidate of candidates) {
+      if (candidates.length === 1 || await probeApiBaseUrl(candidate)) {
+        reachableApiBaseUrl = candidate;
+        return candidate;
+      }
+    }
+    reachableApiBaseUrl = candidates[0] || API_URL;
+    return reachableApiBaseUrl;
+  })();
+  return reachableApiBaseUrlPromise;
+}
+
+function currentApiTarget(): string {
+  return reachableApiBaseUrl || API_URL;
+}
+
+export function describeApiError(error: any, fallback = "Request failed"): string {
+  const rawDetail = error?.response?.data?.detail;
+  if (typeof rawDetail === "string" && rawDetail.trim()) {
+    return rawDetail;
+  }
+  if (Array.isArray(rawDetail) && rawDetail.length > 0) {
+    return JSON.stringify(rawDetail);
+  }
+  if (error?.response?.data && typeof error.response.data === "object") {
+    const serialized = JSON.stringify(error.response.data);
+    if (serialized && serialized !== "{}") {
+      return serialized;
+    }
+  }
+  if (!error?.response) {
+    return `Network error reaching ${currentApiTarget()}. Refresh the page and confirm the backend is reachable.`;
+  }
+  return error?.message || fallback;
+}
 
 export const api = axios.create({
   baseURL: API_URL,
   headers: { "Content-Type": "application/json" },
   timeout: 30000,
 });
+
+api.interceptors.request.use(async (config) => {
+  config.baseURL = await getReachableApiBaseUrl();
+  return config;
+});
+
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    if (typeof window !== "undefined" && !error?.response) {
+      reachableApiBaseUrl = null;
+      reachableApiBaseUrlPromise = null;
+    }
+    return Promise.reject(error);
+  },
+);
 
 // ── Auth & Credentials ────────────────────────────────────────────────────
 export const connectBroker = (broker: string, credentials: Record<string, string>) =>
@@ -175,6 +256,26 @@ export const getDirectionalOptionsBacktest = (
   api.get("/api/directional-options/backtest", {
     params: { underlying, timeframe, lookback_sessions: lookbackSessions },
   });
+export const getDirectionalOptionsLiveSnapshot = (
+  underlying = "NIFTY",
+  timeframe = "5minute",
+  lookbackSessions = 16,
+) =>
+  api.get("/api/directional-options/live-snapshot", {
+    params: { underlying, timeframe, lookback_sessions: lookbackSessions },
+  });
+export const runDirectionalOptionsPaperProposal = (
+  underlying = "NIFTY",
+  timeframe = "5minute",
+  lookbackSessions = 16,
+) =>
+  api.post("/api/directional-options/paper-proposal", null, {
+    params: { underlying, timeframe, lookback_sessions: lookbackSessions },
+  });
+export const getDirectionalOptionsPaperJournal = (symbol?: string, limit = 50) =>
+  api.get("/api/directional-options/paper-journal", { params: { symbol, limit } });
+export const getDirectionalOptionsPaperPositions = (symbol?: string, status = "all", limit = 50) =>
+  api.get("/api/directional-options/paper-positions", { params: { symbol, status, limit } });
 
 // ── Auction Intelligence ─────────────────────────────────────────────────
 export const getAuctionIntelligenceSummary = () =>
