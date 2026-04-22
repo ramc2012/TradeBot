@@ -507,7 +507,8 @@ export default function AuctionIntelligenceWorkspace() {
         ? (await getAuctionIntelligenceLiveSnapshot(deferredSymbol)).data
         : (await getAuctionIntelligenceDemoScenario(deferredSymbol, deferredScenario)).data
     ),
-    staleTime: 60_000,
+    staleTime: 15_000,
+    refetchInterval: deferredMode === "live" ? 20_000 : 60_000,
     refetchOnWindowFocus: false,
   });
   const payload = validationQuery.data;

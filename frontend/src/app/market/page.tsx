@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
 import { clsx } from "clsx";
 import {
   Activity,
@@ -37,7 +38,7 @@ import {
   type MarketIndexSymbol,
   getMarketIndexLabel,
 } from "@/lib/marketSymbols";
-import { useTickSymbol } from "@/store";
+import { useStore, useTickSymbol } from "@/store";
 
 type ChainEntry = {
   strike: number;
@@ -806,6 +807,7 @@ const BROKER_LABEL: Record<string, string> = {
 const TRADING_BROKERS = ["fyers", "upstox"];
 
 function BrokerHealthBanner() {
+  const layoutBrokerStatuses = useStore((state) => state.brokerStatuses);
   const statusQuery = useQuery<BrokerStatusEntry[]>({
     queryKey: ["brokerHealthBanner"],
     queryFn: () => getBrokerStatus().then((r) => r.data),
@@ -813,12 +815,21 @@ function BrokerHealthBanner() {
     staleTime: 20_000,
   });
 
-  const entries = statusQuery.data ?? [];
+  const entries = statusQuery.data?.length ? statusQuery.data : layoutBrokerStatuses;
   const trading = entries.filter((e) => TRADING_BROKERS.includes(e.broker));
   const disconnected = trading.filter((e) => !isBrokerReady(e));
   const connected = trading.filter((e) => isBrokerReady(e));
+  const isResolving = !entries.length && (statusQuery.isLoading || statusQuery.isFetching);
 
-  if (statusQuery.isLoading) return null;
+  if (isResolving) {
+    return (
+      <div className="flex items-center gap-2 rounded-xl border border-accent-amber/20 bg-accent-amber/8 px-3 py-2 text-xs text-accent-amber">
+        <WifiOff size={13} className="shrink-0" />
+        <span className="font-medium">Checking broker sessions…</span>
+        <span className="text-text-muted">using the live shell feed to hydrate market desks</span>
+      </div>
+    );
+  }
 
   if (disconnected.length === 0 && connected.length > 0) {
     return (
@@ -890,12 +901,14 @@ export default function MarketPage() {
   const [watchlistExpiry, setWatchlistExpiry] = useState("");
   const selectedTick = useTickSymbol(symbol);
 
-  const expiriesQuery = useQuery<ExpiryPayload>({
+  const expiriesQuery = usePersistentSnapshotQuery<ExpiryPayload>({
+    storageKey: `market:expiries:${symbol}`,
     queryKey: ["optionExpiries", symbol],
     queryFn: () => getOptionExpiries(symbol).then((response) => response.data),
     enabled: workspace === "options",
     staleTime: 60000,
     refetchInterval: 60000,
+    refetchOnWindowFocus: false,
   });
 
   useEffect(() => {
@@ -907,20 +920,30 @@ export default function MarketPage() {
     }
   }, [expiry, expiriesQuery.data]);
 
-  const chainQuery = useQuery<OptionChainPayload>({
-    queryKey: ["optionChain", symbol, expiry],
+  const chainQuery = usePersistentSnapshotQuery<OptionChainPayload>({
+    storageKey: `market:option-chain:${symbol}:${expiry || "auto"}`,
+    queryKey: ["optionChain", symbol, expiry || "auto"],
     queryFn: () => getOptionChain(symbol, expiry || undefined).then((response) => response.data),
-    enabled: workspace === "options" && Boolean(expiry),
+    enabled: workspace === "options",
     refetchInterval: 15000,
     staleTime: 5000,
+    refetchOnWindowFocus: false,
   });
 
-  const profileQuery = useQuery<MarketProfilePayload>({
+  useEffect(() => {
+    const resolvedExpiry = chainQuery.data?.expiry;
+    if (!resolvedExpiry) return;
+    setExpiry((current) => current || resolvedExpiry);
+  }, [chainQuery.data?.expiry]);
+
+  const profileQuery = usePersistentSnapshotQuery<MarketProfilePayload>({
+    storageKey: `market:profile:${symbol}:${profileTimeframe}`,
     queryKey: ["marketProfile", symbol, profileTimeframe],
     queryFn: () => getMarketProfile(symbol, profileTimeframe).then((response) => response.data),
     enabled: workspace === "options",
     refetchInterval: 30000,
     staleTime: 5000,
+    refetchOnWindowFocus: false,
   });
 
   const sectorQuery = useQuery<SectorRotationPayload>({

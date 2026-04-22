@@ -73,6 +73,10 @@ export function usePersistentSnapshotQuery<TData, TError = Error>({
 }: PersistentSnapshotQueryOptions<TData, TError>): PersistentSnapshotQueryResult<TData, TError> {
   const [snapshot, setSnapshot] = useState<SnapshotEnvelope<TData> | null>(() => loadSnapshot<TData>(storageKey));
 
+  useEffect(() => {
+    setSnapshot(loadSnapshot<TData>(storageKey));
+  }, [storageKey]);
+
   const query = useQuery<TData, TError, TData, QueryKey>({
     ...options,
     queryKey,

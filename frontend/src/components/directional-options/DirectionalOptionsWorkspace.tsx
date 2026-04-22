@@ -322,8 +322,8 @@ export default function DirectionalOptionsWorkspace() {
       const response = await getDirectionalOptionsSummary();
       return response.data as ModuleSummary;
     },
-    staleTime: 60_000,
-    refetchInterval: 120_000,
+    staleTime: 15_000,
+    refetchInterval: 30_000,
     refetchOnWindowFocus: false,
   });
 
@@ -338,8 +338,8 @@ export default function DirectionalOptionsWorkspace() {
       );
       return response.data as WorkspaceResponse;
     },
-    staleTime: 60_000,
-    refetchInterval: 90_000,
+    staleTime: 10_000,
+    refetchInterval: 20_000,
     refetchOnWindowFocus: false,
   });
 
@@ -367,8 +367,11 @@ export default function DirectionalOptionsWorkspace() {
   const module = data?.module || summaryQuery.data;
   const dashboardUrl = module?.dashboard?.mounted && module.dashboard.url ? `${API_URL}${module.dashboard.url}` : null;
   const candidateBars = snapshot?.contract_candidates?.slice(0, 6) ?? [];
+  const hasDashboardState = Boolean(module?.dashboard);
   const dashboardStatusBusy = !dashboardUrl && (
-    liveQuery.isShowingSnapshot
+    !hasDashboardState
+    || (!liveQuery.data && !summaryQuery.data)
+    || liveQuery.isShowingSnapshot
     || summaryQuery.isShowingSnapshot
     || liveQuery.isError
     || summaryQuery.isError

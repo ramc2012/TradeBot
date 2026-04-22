@@ -24,7 +24,7 @@ type LayoutSnapshot = {
 };
 
 export default function BrokerStatusBar() {
-  const { mode, activeBroker, portfolio, setPortfolio, setBrokerStatuses } = useStore();
+  const { mode, portfolio, brokerStatuses: storeBrokerStatuses, setPortfolio, setBrokerStatuses } = useStore();
 
   const layoutQuery = useLiveSnapshotQuery<LayoutSnapshot>({
     queryKey: ["layoutSnapshot"],
@@ -42,19 +42,23 @@ export default function BrokerStatusBar() {
 
   const statusData = layoutQuery.data?.broker_status;
   const portfolioData = layoutQuery.data?.portfolio_summary;
+  const effectiveStatuses = statusData?.length ? statusData : storeBrokerStatuses.length ? storeBrokerStatuses : undefined;
+  const effectivePortfolio = portfolioData ?? portfolio;
 
   useEffect(() => {
-    if (statusData) setBrokerStatuses(statusData);
+    if (statusData?.length) setBrokerStatuses(statusData);
   }, [statusData, setBrokerStatuses]);
 
   useEffect(() => {
     if (portfolioData) setPortfolio(portfolioData);
   }, [portfolioData, setPortfolio]);
 
-  const connectedBroker = statusData?.find((status) => isBrokerReady(status));
-  const dayPnl = portfolio?.day_pnl ?? 0;
+  const connectedBroker = effectiveStatuses?.find((status) => isBrokerReady(status));
+  const dayPnl = effectivePortfolio?.day_pnl ?? 0;
   const showingSnapshot = layoutQuery.isShowingSnapshot;
   const statusMessage = showingSnapshot ? "last layout state" : null;
+  const isLoadingFreshState = !effectiveStatuses?.length && (layoutQuery.isLoading || layoutQuery.isFetching);
+  const hasAnyBrokerState = Boolean(effectiveStatuses?.length);
 
   return (
     <div className="h-8 bg-bg-secondary border-b border-bg-border flex items-center px-4 gap-6 text-xs font-mono shrink-0">
@@ -76,8 +80,12 @@ export default function BrokerStatusBar() {
           <span className="text-text-primary">
             <span className="text-accent-green">●</span> {connectedBroker.broker.toUpperCase()} — {connectedBroker.name}
           </span>
+        ) : isLoadingFreshState ? (
+          <span className="text-accent-amber">◌ Connecting broker state…</span>
+        ) : hasAnyBrokerState ? (
+          <span className="text-accent-amber">◌ Broker session not ready</span>
         ) : (
-          <span className="text-text-muted">⚪ No broker connected</span>
+          <span className="text-text-muted">◌ Awaiting broker state…</span>
         )}
       </span>
 
@@ -88,10 +96,10 @@ export default function BrokerStatusBar() {
       <span className="flex-1" />
 
       {/* Day P&L */}
-      {portfolio && (
+      {effectivePortfolio && (
         <>
           <span className="text-text-muted">Equity:</span>
-          <span className="text-text-primary">₹{portfolio.total_equity.toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span>
+          <span className="text-text-primary">₹{effectivePortfolio.total_equity.toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span>
           <span className="text-text-muted">Day P&L:</span>
           <span className={dayPnl >= 0 ? "text-accent-green" : "text-accent-red"}>
             {dayPnl >= 0 ? "+" : ""}₹{dayPnl.toLocaleString("en-IN", { maximumFractionDigits: 0 })}

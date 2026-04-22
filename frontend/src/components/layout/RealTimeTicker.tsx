@@ -2,13 +2,38 @@
 
 import { memo, useEffect, useRef } from "react";
 import { clsx } from "clsx";
-import { useQuery } from "@tanstack/react-query";
 
 import { getLTP } from "@/lib/api";
 import { createTickSocket } from "@/lib/websocket";
 import { MARKET_INDEX_SYMBOLS, getMarketIndexLabel } from "@/lib/marketSymbols";
+import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
 import type { Tick } from "@/store";
 import { useTickStore, useTickSymbol } from "@/store";
+
+const HEADER_TICK_STORAGE_KEY = "nomad-curie.header-ticks.v1";
+const HEADER_LTP_STORAGE_KEY = "nomad-curie.header-ltp.v1";
+
+type TickSnapshot = Record<string, Tick>;
+
+function loadTickSnapshot(): TickSnapshot {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(HEADER_TICK_STORAGE_KEY);
+    if (!raw) return {};
+    return JSON.parse(raw) as TickSnapshot;
+  } catch {
+    return {};
+  }
+}
+
+function persistTickSnapshot(snapshot: TickSnapshot) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(HEADER_TICK_STORAGE_KEY, JSON.stringify(snapshot));
+  } catch {
+    // Ignore storage write failures; live ticks still flow through the store.
+  }
+}
 
 function formatChangePct(ltp?: number, close?: number) {
   if (!ltp || !close) return "--";
@@ -57,16 +82,37 @@ const TickerItem = memo(function TickerItem({ symbol }: { symbol: string }) {
 export default function RealTimeTicker() {
   const updateTick = useTickStore((state) => state.updateTick);
   const socketsRef = useRef<Array<{ close: () => void }>>([]);
+  const persistedTicksRef = useRef<TickSnapshot>({});
+  const lastPersistAtRef = useRef(0);
 
-  const ltpQuery = useQuery<Record<string, number>>({
+  const ltpQuery = usePersistentSnapshotQuery<Record<string, number>>({
+    storageKey: HEADER_LTP_STORAGE_KEY,
     queryKey: ["headerIndexLtp"],
     queryFn: () => getLTP([...MARKET_INDEX_SYMBOLS]).then((response) => response.data),
-    staleTime: Infinity,
+    staleTime: 15_000,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: false,
   });
 
   useEffect(() => {
+    const persistedTicks = loadTickSnapshot();
+    persistedTicksRef.current = persistedTicks;
+    Object.values(persistedTicks).forEach((tick) => updateTick(tick));
+
     socketsRef.current = MARKET_INDEX_SYMBOLS.map((symbol) =>
-      createTickSocket(symbol, (data: unknown) => updateTick(data as Tick))
+      createTickSocket(symbol, (data: unknown) => {
+        const tick = data as Tick;
+        updateTick(tick);
+        persistedTicksRef.current = {
+          ...persistedTicksRef.current,
+          [tick.symbol]: tick,
+        };
+        const now = Date.now();
+        if (now - lastPersistAtRef.current >= 5_000) {
+          lastPersistAtRef.current = now;
+          persistTickSnapshot(persistedTicksRef.current);
+        }
+      })
     );
 
     return () => {
@@ -82,18 +128,25 @@ export default function RealTimeTicker() {
     Object.entries(payload).forEach(([symbol, ltp]) => {
       if (!Number.isFinite(ltp) || ltp <= 0) return;
       const existing = useTickStore.getState().getTick(symbol);
-      updateTick({
+      const nextTick = {
         symbol,
         ltp,
-        open: existing?.open ?? 0,
+        open: existing?.open ?? ltp,
         high: existing?.high ? Math.max(existing.high, ltp) : ltp,
         low: existing?.low ? Math.min(existing.low, ltp) : ltp,
         volume: existing?.volume ?? 0,
         oi: existing?.oi ?? 0,
-        close: existing?.close ?? existing?.open ?? 0,
+        close: existing?.close ?? existing?.open ?? ltp,
         timestamp: new Date().toISOString(),
-      });
+      } satisfies Tick;
+      updateTick(nextTick);
+      persistedTicksRef.current = {
+        ...persistedTicksRef.current,
+        [symbol]: nextTick,
+      };
     });
+
+    persistTickSnapshot(persistedTicksRef.current);
   }, [ltpQuery.data, updateTick]);
 
   return (
