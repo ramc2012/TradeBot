@@ -8,6 +8,7 @@ from urllib.parse import quote
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import text
 
 from market_data import (
     atm_watchlist_service,
@@ -15,6 +16,8 @@ from market_data import (
     market_profile_builder,
     option_chain_service,
 )
+from db.database import AsyncSessionLocal
+from market_data.market_intelligence_runtime import APP_SYMBOLS
 from market_data.symbols import to_app_symbol, to_broker_symbol, to_fyers_symbol
 from analytics.greeks import bs_greeks, implied_volatility
 from analytics.sector import sector_tracker
@@ -28,6 +31,7 @@ from api.routers.auth import (
 router = APIRouter(prefix="/api/market", tags=["market"])
 
 _PROFILE_TIMEFRAMES = {"day", "week", "month", "daily", "hourly"}
+_INDEX_UNDERLYING_BY_APP_SYMBOL = {app_symbol: symbol_code for symbol_code, app_symbol in APP_SYMBOLS.items()}
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,28 @@ async def _resolve_option_expiry(adapter, broker_symbol: str, requested_expiry: 
         if expiry >= today:
             return expiry
     return expiries[0]
+
+
+async def _local_option_expiries(app_symbol: str) -> list[str]:
+    underlying = _INDEX_UNDERLYING_BY_APP_SYMBOL.get(app_symbol)
+    if not underlying:
+        return []
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT DISTINCT expiry
+                FROM fo_contract_catalog
+                WHERE underlying = :underlying
+                  AND expiry >= CURRENT_DATE
+                ORDER BY expiry ASC
+                LIMIT 12
+                """
+            ),
+            {"underlying": underlying},
+        )
+        rows = result.fetchall()
+    return [row.expiry.isoformat() for row in rows if getattr(row, "expiry", None) is not None]
 
 
 def _normalize_profile_timeframe(timeframe: str) -> str:
@@ -214,6 +240,13 @@ def _merge_rows(primary: list[dict], secondary: list[dict]) -> list[dict]:
 async def get_option_chain(symbol: str, expiry: Optional[str] = Query(None)):
     """Get full option chain with PCR, max pain, greeks."""
     market_symbol = _resolve_market_symbol(symbol)
+    local_expiries = await _local_option_expiries(market_symbol.app_symbol)
+    expiry = expiry or (local_expiries[0] if local_expiries else None)
+    if expiry:
+        cached = await option_chain_service.get_cached(market_symbol.app_symbol, expiry)
+        if cached and cached.get("entries"):
+            return cached
+
     adapter, source = await _get_market_adapter()
     adapter_symbol = _market_symbol_for_adapter(adapter, market_symbol) if adapter else market_symbol.broker_symbol
     expiry = await _resolve_option_expiry(adapter, adapter_symbol, expiry) if adapter else expiry
@@ -222,7 +255,7 @@ async def get_option_chain(symbol: str, expiry: Optional[str] = Query(None)):
         expiry = TradingAgent._next_expiry()
 
     cached = await option_chain_service.get_cached(market_symbol.app_symbol, expiry)
-    if cached and cached.get("source") == source:
+    if cached and cached.get("entries"):
         return cached
 
     if adapter:
@@ -429,17 +462,37 @@ async def get_greeks(
 async def get_expiries(symbol: str):
     """Get available expiry dates for a symbol."""
     market_symbol = _resolve_market_symbol(symbol)
+    local_expiries = await _local_option_expiries(market_symbol.app_symbol)
+    if local_expiries:
+        return {
+            "symbol": market_symbol.app_symbol,
+            "expiries": local_expiries,
+            "default_expiry": local_expiries[0],
+            "count": len(local_expiries),
+            "source": "catalog",
+        }
     adapter, source = await _get_market_adapter()
     if not adapter:
-        return {"symbol": market_symbol.app_symbol, "expiries": [], "default_expiry": None, "source": "none"}
+        return {
+            "symbol": market_symbol.app_symbol,
+            "expiries": local_expiries,
+            "default_expiry": local_expiries[0] if local_expiries else None,
+            "source": "catalog" if local_expiries else "none",
+        }
     try:
         get_contracts = getattr(adapter, "get_option_contracts", None)
         if not callable(get_contracts):
-            return {"symbol": market_symbol.app_symbol, "expiries": [], "default_expiry": None, "source": source}
+            return {
+                "symbol": market_symbol.app_symbol,
+                "expiries": local_expiries,
+                "default_expiry": local_expiries[0] if local_expiries else None,
+                "source": "catalog" if local_expiries else source,
+            }
 
         adapter_symbol = _market_symbol_for_adapter(adapter, market_symbol)
         contracts = await get_contracts(adapter_symbol)
         expiries = sorted({row.get("expiry") for row in contracts if row.get("expiry")})
+        expiries = sorted({*expiries, *local_expiries})
         default_expiry = (
             await _resolve_option_expiry(
                 adapter,
@@ -449,6 +502,8 @@ async def get_expiries(symbol: str):
             if expiries
             else None
         )
+        if not default_expiry and expiries:
+            default_expiry = expiries[0]
         return {
             "symbol": market_symbol.app_symbol,
             "expiries": expiries,
@@ -457,4 +512,9 @@ async def get_expiries(symbol: str):
             "source": source,
         }
     except Exception:
-        return {"symbol": market_symbol.app_symbol, "expiries": [], "default_expiry": None, "source": source}
+        return {
+            "symbol": market_symbol.app_symbol,
+            "expiries": local_expiries,
+            "default_expiry": local_expiries[0] if local_expiries else None,
+            "source": "catalog" if local_expiries else source,
+        }

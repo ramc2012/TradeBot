@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import gzip
 import json
@@ -8,6 +9,7 @@ import re
 from dataclasses import asdict
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from time import monotonic
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -486,35 +488,55 @@ class FractalMarketProfileService:
                 "volatility_burst_threshold": 1.5,
             }
         )
+        self._live_cache_ttl_seconds = 30.0
+        self._summary_cache_ttl_seconds = 60.0
+        self._live_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._live_locks: dict[str, asyncio.Lock] = {}
+        self._summary_cache: dict[str, Any] = {"payload": None, "expires_at": 0.0}
 
     async def live_snapshot(self, symbol_code: str = "NIFTY") -> dict[str, Any]:
         normalized = self._normalize_symbol(symbol_code)
-        rows, history_source, history_symbol = await self._load_live_rows(normalized)
-        sessions = _group_rows_by_session(rows, allow_partial_live_session=True)
-        if not sessions:
-            raise RuntimeError(f"No spot history available for {normalized}.")
+        cached = self._live_cache.get(normalized)
+        if cached and cached[0] > monotonic():
+            return jsonable_encoder(cached[1])
 
-        session_dates = sorted(sessions)
-        current_date = session_dates[-1]
-        current_rows = sessions[current_date]
-        prior_rows = sessions[session_dates[-2]] if len(session_dates) >= 2 else current_rows
-        session_lookup = {key: sessions[key] for key in session_dates}
-        analysis = await self._analyze_session(
-            normalized,
-            current_rows=current_rows,
-            prior_rows=prior_rows,
-            session_lookup=session_lookup,
-            live_mode=True,
-        )
-        analysis["symbol_code"] = normalized
-        analysis["history_source"] = history_source
-        analysis["history_symbol"] = history_symbol
-        analysis["supported_symbols"] = list(SUPPORTED_SYMBOLS)
-        analysis["generated_at"] = _utc_now().isoformat()
-        analysis["paper_positions"] = await self.paper.list_positions(symbol=normalized, status="all", limit=8)
-        analysis["paper_journal"] = await self.paper.list_journal(symbol=normalized, limit=8)
-        analysis["data_status"] = dict(analysis.get("data_status") or {})
-        return analysis
+        lock = self._live_locks.setdefault(normalized, asyncio.Lock())
+        async with lock:
+            cached = self._live_cache.get(normalized)
+            if cached and cached[0] > monotonic():
+                return jsonable_encoder(cached[1])
+
+            rows, history_source, history_symbol = await self._load_live_rows(normalized)
+            sessions = _group_rows_by_session(rows, allow_partial_live_session=True)
+            if not sessions:
+                raise RuntimeError(f"No spot history available for {normalized}.")
+
+            session_dates = sorted(sessions)
+            current_date = session_dates[-1]
+            current_rows = sessions[current_date]
+            prior_rows = sessions[session_dates[-2]] if len(session_dates) >= 2 else current_rows
+            session_lookup = {key: sessions[key] for key in session_dates}
+            analysis = await self._analyze_session(
+                normalized,
+                current_rows=current_rows,
+                prior_rows=prior_rows,
+                session_lookup=session_lookup,
+                live_mode=True,
+            )
+            analysis["symbol_code"] = normalized
+            analysis["history_source"] = history_source
+            analysis["history_symbol"] = history_symbol
+            analysis["supported_symbols"] = list(SUPPORTED_SYMBOLS)
+            analysis["generated_at"] = _utc_now().isoformat()
+            analysis["paper_positions"] = await self.paper.list_positions(symbol=normalized, status="all", limit=8)
+            analysis["paper_journal"] = await self.paper.list_journal(symbol=normalized, limit=8)
+            analysis["data_status"] = dict(analysis.get("data_status") or {})
+            encoded_payload = jsonable_encoder(analysis)
+            self._live_cache[normalized] = (
+                monotonic() + self._live_cache_ttl_seconds,
+                encoded_payload,
+            )
+            return jsonable_encoder(encoded_payload)
 
     async def live_health(self, symbol_code: str = "NIFTY") -> dict[str, Any]:
         normalized = self._normalize_symbol(symbol_code)
@@ -720,6 +742,10 @@ class FractalMarketProfileService:
         }
 
     async def summary(self) -> dict[str, Any]:
+        cached_payload = self._summary_cache.get("payload")
+        if cached_payload is not None and float(self._summary_cache.get("expires_at") or 0.0) > monotonic():
+            return jsonable_encoder(cached_payload)
+
         positions = await self.paper.list_positions(status="all", limit=10)
         replay_reports = [
             cached_report
@@ -729,7 +755,7 @@ class FractalMarketProfileService:
         from core.market_hours_paper_supervisor import market_hours_paper_supervisor
 
         automation = market_hours_paper_supervisor.get_runner_status("fractal_market_profile")
-        return {
+        payload = {
             "description": "Dedicated Fractal Market Profile strategy stack",
             "supported_symbols": list(SUPPORTED_SYMBOLS),
             "auto_started": bool(automation.get("enabled") and automation.get("loop_active")),
@@ -737,6 +763,12 @@ class FractalMarketProfileService:
             "paper_summary": positions["summary"],
             "replay_reports": replay_reports,
         }
+        encoded_payload = jsonable_encoder(payload)
+        self._summary_cache = {
+            "payload": encoded_payload,
+            "expires_at": monotonic() + self._summary_cache_ttl_seconds,
+        }
+        return jsonable_encoder(encoded_payload)
 
     async def paper_journal(self, symbol: str | None = None, limit: int = 50) -> dict[str, Any]:
         return await self.paper.list_journal(symbol=symbol, limit=limit)

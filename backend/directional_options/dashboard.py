@@ -32,6 +32,8 @@ def mount_directional_options_dashboard(app, service) -> dict[str, object]:
         url="/directional-options/dashboard/",
         reason="Dash workspace mounted successfully.",
     )
+    if hasattr(service, "_summary_cache"):
+        service._summary_cache = {"payload": None, "expires_at": 0.0}
     service.workspace.cache_clear()
 
     dash_app = Dash(__name__, requests_pathname_prefix="/directional-options/dashboard/")

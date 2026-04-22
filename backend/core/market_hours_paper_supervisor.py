@@ -127,12 +127,12 @@ class MarketHoursPaperSupervisor:
 
     def _default_runners(self) -> list[RunnerConfig]:
         from auction_intelligence.automation import run_market_hours_cycle as run_auction_market_cycle
-        from directional_options.service import DirectionalOptionsService
+        from directional_options.service import directional_options_service
         from fractal_market_profile.config import SUPPORTED_SYMBOLS
         from fractal_market_profile.service import fmp_service
         from market_data.market_intelligence_runtime import market_intelligence_runtime
 
-        directional_service = DirectionalOptionsService()
+        directional_service = directional_options_service
 
         async def _market_intelligence_runner() -> dict[str, Any]:
             return await market_intelligence_runtime.refresh_nse_runtime()
@@ -285,12 +285,16 @@ class MarketHoursPaperSupervisor:
                 if _should_run_post_close_catchup(now):
                     catchup_session_date = now.date()
                     catchup_ran = False
+                    due_runners: list[RunnerRuntime] = []
                     for runtime in self._runners.values():
                         if not runtime.config.enabled or runtime.running:
                             continue
                         if runtime.last_success_at and runtime.last_success_at.date() >= catchup_session_date:
                             continue
-                        await self._run_runner(runtime, now=now)
+                        due_runners.append(runtime)
+                    if due_runners:
+                        await self._run_due_runners(due_runners, now=now)
+                    for runtime in due_runners:
                         if runtime.last_error is None:
                             runtime.last_result_meta.setdefault(
                                 "catchup_session_date",
@@ -308,11 +312,33 @@ class MarketHoursPaperSupervisor:
                         runtime.last_message = "Armed for the next market session."
                 return self.get_status()
 
-            for runtime in self._runners.values():
-                if force or runtime.is_due(now):
-                    await self._run_runner(runtime, now=now)
+            due_runners = [
+                runtime
+                for runtime in self._runners.values()
+                if force or runtime.is_due(now)
+            ]
+            if due_runners:
+                await self._run_due_runners(due_runners, now=now)
 
         return self.get_status()
+
+    async def _run_due_runners(self, due_runners: list[RunnerRuntime], *, now: datetime) -> None:
+        market_intelligence_runner = next(
+            (runtime for runtime in due_runners if runtime.config.key == "market_intelligence"),
+            None,
+        )
+        if market_intelligence_runner is not None:
+            await self._run_runner(market_intelligence_runner, now=now)
+
+        trailing_runners = [
+            runtime
+            for runtime in due_runners
+            if runtime is not market_intelligence_runner
+        ]
+        if trailing_runners:
+            await asyncio.gather(
+                *(self._run_runner(runtime, now=now) for runtime in trailing_runners)
+            )
 
     async def _run_runner(self, runtime: RunnerRuntime, *, now: datetime) -> None:
         runtime.running = True

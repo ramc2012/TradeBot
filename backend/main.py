@@ -19,7 +19,8 @@ from api.routers import auction_intelligence as auction_intelligence_router
 from api.routers import directional_options as directional_options_router
 from api.routers import fractal_market_profile as fractal_market_profile_router
 from api.routers import system as system_router
-from directional_options import DirectionalOptionsService, mount_directional_options_dashboard
+from directional_options import mount_directional_options_dashboard
+from directional_options.service import directional_options_service
 from api.websockets.ticks import (
     ws_commodity_overview,
     ws_commodity_watchlist,
@@ -130,7 +131,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
-mount_directional_options_dashboard(app, DirectionalOptionsService())
+mount_directional_options_dashboard(app, directional_options_service)
 
 # ── CORS ─────────────────────────────────────────────────────────────────────
 app.add_middleware(

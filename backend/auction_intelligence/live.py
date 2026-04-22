@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
 from datetime import date, datetime, time, timedelta, timezone
+from time import monotonic
 from typing import Any, Optional
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -39,6 +41,9 @@ SESSION_OPEN = time(9, 15)
 SESSION_CLOSE = time(15, 30)
 DEFAULT_CONFIG = clone_default_config()
 CONTRACT_SPECS = DEFAULT_CONFIG.get("contract_specs", {})
+_LIVE_ANALYSIS_CACHE_TTL_SECONDS = 30.0
+_LIVE_ANALYSIS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_LIVE_ANALYSIS_LOCKS: dict[str, asyncio.Lock] = {}
 SYMBOL_MAP = {
     "NIFTY": {
         "app_symbol": "NSE:NIFTY50-INDEX",
@@ -158,28 +163,44 @@ async def build_live_analysis(symbol_code: str = "NIFTY") -> dict[str, Any]:
     if normalized_symbol not in SYMBOL_MAP:
         raise ValueError(f"Unsupported live symbol: {symbol_code}")
 
-    recent_rows, history_source, history_symbol = await _fetch_recent_minute_rows(
-        normalized_symbol,
-        allow_live_broker_refresh=not (settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY),
-    )
-    if not recent_rows:
-        raise RuntimeError("No local or broker minute data returned for the requested symbol.")
+    cached = _LIVE_ANALYSIS_CACHE.get(normalized_symbol)
+    if cached and cached[0] > monotonic():
+        return jsonable_encoder(cached[1])
 
-    sessions = _group_rows_by_session(recent_rows, allow_partial_live_session=True)
-    session_dates = sorted(sessions.keys())
-    if len(session_dates) < 2:
-        raise RuntimeError("At least two completed sessions are required for live validation.")
+    lock = _LIVE_ANALYSIS_LOCKS.setdefault(normalized_symbol, asyncio.Lock())
+    async with lock:
+        cached = _LIVE_ANALYSIS_CACHE.get(normalized_symbol)
+        if cached and cached[0] > monotonic():
+            return jsonable_encoder(cached[1])
 
-    latest_session_date = session_dates[-1]
-    prior_session_date = session_dates[-2]
-    return await _build_analysis_from_session_rows(
-        normalized_symbol,
-        current_session_rows=sessions[latest_session_date],
-        prior_session_rows=sessions[prior_session_date],
-        history_source=history_source,
-        history_symbol=history_symbol,
-        snapshot_cutoff=None,
-    )
+        recent_rows, history_source, history_symbol = await _fetch_recent_minute_rows(
+            normalized_symbol,
+            allow_live_broker_refresh=not (settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY),
+        )
+        if not recent_rows:
+            raise RuntimeError("No local or broker minute data returned for the requested symbol.")
+
+        sessions = _group_rows_by_session(recent_rows, allow_partial_live_session=True)
+        session_dates = sorted(sessions.keys())
+        if len(session_dates) < 2:
+            raise RuntimeError("At least two completed sessions are required for live validation.")
+
+        latest_session_date = session_dates[-1]
+        prior_session_date = session_dates[-2]
+        payload = await _build_analysis_from_session_rows(
+            normalized_symbol,
+            current_session_rows=sessions[latest_session_date],
+            prior_session_rows=sessions[prior_session_date],
+            history_source=history_source,
+            history_symbol=history_symbol,
+            snapshot_cutoff=None,
+        )
+        encoded_payload = jsonable_encoder(payload)
+        _LIVE_ANALYSIS_CACHE[normalized_symbol] = (
+            monotonic() + _LIVE_ANALYSIS_CACHE_TTL_SECONDS,
+            encoded_payload,
+        )
+        return jsonable_encoder(encoded_payload)
 
 
 async def build_shadow_backfill_snapshots(

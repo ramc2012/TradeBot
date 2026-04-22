@@ -364,10 +364,14 @@ async def test_directional_options_live_snapshot_uses_local_market_intelligence(
     config = clone_default_config()
     config["paper_trading"]["journal_root"] = tmp_path / "directional-paper"
     service = DirectionalOptionsService(config)
+    as_of = pd.Timestamp.now(tz="UTC").floor("5min")
+    t0 = as_of - pd.Timedelta(minutes=10)
+    t1 = as_of - pd.Timedelta(minutes=5)
+    t2 = as_of
 
     live_spot = pd.DataFrame(
         {
-            "time": pd.to_datetime(["2026-04-21T09:35:00Z", "2026-04-21T09:40:00Z", "2026-04-21T09:45:00Z"]),
+            "time": pd.to_datetime([t0, t1, t2], utc=True),
             "open": [22470.0, 22490.0, 22520.0],
             "high": [22495.0, 22518.0, 22542.0],
             "low": [22455.0, 22482.0, 22508.0],
@@ -379,7 +383,7 @@ async def test_directional_options_live_snapshot_uses_local_market_intelligence(
     feature_frame = pd.DataFrame(
         [
             {
-                "time": pd.Timestamp("2026-04-21T09:45:00Z"),
+                "time": t2,
                 "open": 22510.0,
                 "high": 22540.0,
                 "low": 22505.0,
@@ -412,7 +416,7 @@ async def test_directional_options_live_snapshot_uses_local_market_intelligence(
     async def fake_list_live_contract_snapshots(**kwargs):
         return [
             {
-                "time": "2026-04-21T09:45:00Z",
+                "time": t2.isoformat(),
                 "underlying": "NIFTY",
                 "expiry": "2026-04-30",
                 "expiry_kind": "weekly",
@@ -433,10 +437,10 @@ async def test_directional_options_live_snapshot_uses_local_market_intelligence(
     async def fake_strategy_health():
         return {
             "watchlist_rows_today": 420,
-            "latest_watchlist_time": "2026-04-21T09:45:00+00:00",
+            "latest_watchlist_time": t2.isoformat(),
             "watchlist_age_seconds": 15.0,
             "latest_spot_rows": {
-                "NIFTY": "2026-04-21T09:45:00+00:00",
+                "NIFTY": t2.isoformat(),
             },
         }
 

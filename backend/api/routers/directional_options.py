@@ -5,11 +5,11 @@ import asyncio
 
 from fastapi import APIRouter, Query
 
-from directional_options.service import DirectionalOptionsService
+from directional_options.service import directional_options_service
 
 
 router = APIRouter(prefix="/api/directional-options", tags=["directional-options"])
-_service = DirectionalOptionsService()
+_service = directional_options_service
 
 
 @router.get("/summary")

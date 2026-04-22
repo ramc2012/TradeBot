@@ -413,3 +413,6 @@ class DirectionalOptionsService:
             "execution_ready": execution_ready,
             "degraded_reason": degraded_reason,
         }
+
+
+directional_options_service = DirectionalOptionsService()
