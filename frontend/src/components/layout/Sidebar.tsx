@@ -13,14 +13,12 @@ import {
   ChevronLeft,
   ChevronRight,
   Crosshair,
-  Database,
   FlaskConical,
   Fingerprint,
   Globe,
   LayoutDashboard,
   Layers3,
   Settings,
-  Shield,
   Target,
   Waves,
 } from "lucide-react";
@@ -46,17 +44,14 @@ const NAV_GROUPS = [
       { href: "/auction-intelligence", label: "Auction IQ", icon: Layers3 },
       { href: "/fractal-market-profile", label: "Fractal MP", icon: Fingerprint },
       { href: "/mp-intelligence", label: "MP Live", icon: Brain },
-      { href: "/analysis", label: "Research Monitor", icon: Activity },
-      { href: "/backtester", label: "Backtester", icon: FlaskConical },
+      { href: "/analysis", label: "Research", icon: FlaskConical, matchers: ["/analysis", "/backtester", "/data"] },
       { href: "/agent", label: "Agent", icon: Bot },
     ],
   },
   {
     title: "System",
     items: [
-      { href: "/health", label: "Health", icon: Shield },
-      { href: "/data", label: "F&O Data", icon: Database },
-      { href: "/settings", label: "Settings", icon: Settings },
+      { href: "/settings", label: "Settings", icon: Settings, matchers: ["/settings", "/health"] },
     ],
   },
 ];
@@ -84,7 +79,7 @@ export default function Sidebar() {
   return (
     <nav
       className={clsx(
-        "shrink-0 overflow-y-auto border-r border-bg-border bg-bg-secondary/60 px-3 py-4 transition-[width] duration-200",
+        "relative z-20 h-full shrink-0 overflow-y-auto border-r border-bg-border bg-bg-secondary/70 px-3 py-4 backdrop-blur-sm transition-[width] duration-200",
         collapsed ? "w-[78px]" : "w-[236px]",
       )}
     >
@@ -115,8 +110,13 @@ export default function Sidebar() {
               </div>
             )}
             <div className={clsx("mt-2 space-y-1", collapsed ? "mt-0" : "")}>
-              {group.items.map(({ href, label, icon: Icon }) => {
-                const active = pathname === href || (href !== "/" && pathname.startsWith(href));
+              {group.items.map(({ href, label, icon: Icon, matchers }) => {
+                const activeMatchers = matchers || [href];
+                const active = activeMatchers.some((matcher) =>
+                  matcher === "/"
+                    ? pathname === "/"
+                    : pathname === matcher || pathname.startsWith(`${matcher}/`) || pathname.startsWith(matcher),
+                );
                 return (
                   <Link
                     key={href}

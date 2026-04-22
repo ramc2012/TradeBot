@@ -13,6 +13,7 @@ import {
   getResearchCacheStatus, getLatestValidationReport, getLatestGreeksSyncReport, API_URL,
 } from "@/lib/api";
 import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
+import PageTabs from "@/components/layout/PageTabs";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -250,6 +251,12 @@ interface GreeksSyncReportPayload {
     chain_summary_csv_url?: string;
   };
 }
+
+const RESEARCH_TABS = [
+  { href: "/analysis", label: "Research Monitor" },
+  { href: "/backtester", label: "Backtester" },
+  { href: "/data", label: "F&O Data" },
+];
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -1808,14 +1815,17 @@ export default function AnalysisPage() {
 
   return (
     <div className="h-full overflow-y-auto p-6 space-y-5">
-      <div className="space-y-1">
-        <h1 className="text-lg font-semibold text-text-primary flex items-center gap-2">
-          <Activity size={18} className="text-accent-green" />
-          MACD Options Backtest
-        </h1>
-        <p className="text-xs text-text-muted">
-          Zero-line crossover on 30-min ATM CE/PE candles · NSE F&O monthly expiries · Uses connected Upstox session
-        </p>
+      <div className="space-y-3">
+        <div className="space-y-1">
+          <h1 className="flex items-center gap-2 text-lg font-semibold text-text-primary">
+            <Activity size={18} className="text-accent-green" />
+            Research Monitor
+          </h1>
+          <p className="text-xs text-text-muted">
+            Validation reports, research cache coverage, and MACD option-study jobs.
+          </p>
+        </div>
+        <PageTabs tabs={RESEARCH_TABS} />
       </div>
 
       <BrokerStatusCard />

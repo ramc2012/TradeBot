@@ -5,6 +5,7 @@ import {
   runBacktestBreeze, runBacktestJson, runWalkForward,
   getBacktesterDefaultConfig, getBrokerStatus,
 } from "@/lib/api";
+import PageTabs from "@/components/layout/PageTabs";
 import { clsx } from "clsx";
 import {
   FlaskConical, Play, TrendingUp, TrendingDown, BarChart3,
@@ -41,6 +42,12 @@ interface BacktestReport {
     exit_breakdown: Record<string, number>;
   }>;
 }
+
+const RESEARCH_TABS = [
+  { href: "/analysis", label: "Research Monitor" },
+  { href: "/backtester", label: "Backtester" },
+  { href: "/data", label: "F&O Data" },
+];
 
 // ── Metric Card ───────────────────────────────────────────────────────────────
 
@@ -294,12 +301,15 @@ export default function BacktesterPage() {
 
   return (
     <div className="max-w-5xl space-y-4">
-      <div className="flex items-center gap-3">
-        <FlaskConical size={18} className="text-accent-blue" />
-        <h1 className="text-lg font-bold font-mono text-text-primary">Options MACD Backtester</h1>
-        <span className="text-xs text-text-muted bg-bg-secondary px-2 py-0.5 rounded">
-          MACD on ATM premium · zero-line cross
-        </span>
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <FlaskConical size={18} className="text-accent-blue" />
+          <h1 className="text-lg font-bold font-mono text-text-primary">Options MACD Backtester</h1>
+          <span className="rounded bg-bg-secondary px-2 py-0.5 text-xs text-text-muted">
+            MACD on ATM premium · zero-line cross
+          </span>
+        </div>
+        <PageTabs tabs={RESEARCH_TABS} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

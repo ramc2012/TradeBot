@@ -38,7 +38,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 title="The workspace content failed to render."
                 detail="A component crashed while rendering this workspace. Retry the section without restarting the whole app shell."
               >
-                <main className="min-w-0 flex-1 overflow-y-auto px-3 py-3 lg:px-4">
+                <main className="relative z-0 min-w-0 flex-1 overflow-y-auto px-3 py-3 lg:px-4">
                   {children}
                 </main>
               </AppErrorBoundary>

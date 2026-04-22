@@ -1,24 +1,12 @@
 "use client";
 
-import Link from "next/link";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import {
-  Activity,
-  ArrowUpRight,
-  BarChart3,
-  Bot,
-  BriefcaseBusiness,
-  CandlestickChart,
-  Crosshair,
-  Database,
-  Fingerprint,
-  Globe,
   Layers3,
-  Settings,
   Shield,
-  Target,
-  Waves,
+  X,
 } from "lucide-react";
 
 import type { StrategyAgentStatus } from "@/components/trading/StrategyAgentMonitor";
@@ -99,42 +87,6 @@ type SystemOverview = {
   blockers: Array<{ key: string; label: string; status: string; detail: string }>;
 };
 
-const WORKSPACE_GROUPS = [
-  {
-    title: "Operate",
-    description: "Execution, positions, market context, and active strategy desks.",
-    links: [
-      { href: "/positions", label: "Positions", icon: BriefcaseBusiness, detail: "Combined manual and strategy exposure." },
-      { href: "/trading", label: "Execution", icon: Activity, detail: "Orders, approvals, and broker mode." },
-      { href: "/strategy", label: "NSE Strategy", icon: Crosshair, detail: "Strategy 1 and Strategy 2 supervisor." },
-      { href: "/directional-options", label: "Long Premium", icon: Target, detail: "Directional long-option research, contract scoring, and walk-forward diagnostics." },
-      { href: "/commodity", label: "Commodity", icon: Waves, detail: "MCX options and futures desk." },
-      { href: "/market", label: "Market", icon: Globe, detail: "Watchlists, chains, and live market context." },
-    ],
-  },
-  {
-    title: "Results and Validation",
-    description: "Portfolio analytics, validation, and research workflows.",
-    links: [
-      { href: "/analytics", label: "Analytics", icon: BarChart3, detail: "App-wide and strategy-wise results." },
-      { href: "/auction-intelligence", label: "Auction IQ", icon: Layers3, detail: "MP validation, gates, and paper promotion." },
-      { href: "/fractal-market-profile", label: "Fractal MP", icon: Fingerprint, detail: "Dedicated fractal profile options desk with ledger and replays." },
-      { href: "/analysis", label: "Research Monitor", icon: Activity, detail: "Research cache and validation jobs." },
-      { href: "/backtester", label: "Backtester", icon: CandlestickChart, detail: "Walk-forward and scenario testing." },
-      { href: "/agent", label: "Agent", icon: Bot, detail: "Proposal and reasoning surface." },
-    ],
-  },
-  {
-    title: "System",
-    description: "Runtime health, catalogs, and configuration.",
-    links: [
-      { href: "/health", label: "Health", icon: Shield, detail: "Deployed service health and lane status." },
-      { href: "/data", label: "F&O Data", icon: Database, detail: "Catalog and raw-data inspection." },
-      { href: "/settings", label: "Settings", icon: Settings, detail: "Broker connectivity and system config." },
-    ],
-  },
-];
-
 function formatMoney(value?: number | null, digits = 0) {
   if (value == null || Number.isNaN(value)) return "--";
   return `₹${value.toLocaleString("en-IN", {
@@ -157,6 +109,24 @@ function tone(value?: number | null) {
   if (value > 0) return "text-accent-green";
   if (value < 0) return "text-accent-red";
   return "text-text-secondary";
+}
+
+function serviceStateTone(status?: string | null) {
+  if (status === "healthy" || status === "active" || status === "ready") {
+    return "border-accent-green/30 bg-accent-green/10 text-accent-green";
+  }
+  if (status === "degraded" || status === "warning" || status === "stale") {
+    return "border-accent-amber/30 bg-accent-amber/10 text-accent-amber";
+  }
+  if (status === "critical" || status === "error") {
+    return "border-accent-red/30 bg-accent-red/10 text-accent-red";
+  }
+  return "border-bg-border bg-bg-secondary/28 text-text-secondary";
+}
+
+function isLaneRunning(status?: string | null) {
+  const normalized = String(status || "").toLowerCase();
+  return normalized !== "" && !["idle", "paused", "stopped", "critical", "error"].includes(normalized);
 }
 
 function formatTimestamp(value?: string | null) {
@@ -240,42 +210,9 @@ function LaneCard({
   );
 }
 
-function WorkspaceGroup({
-  title,
-  description,
-  links,
-}: (typeof WORKSPACE_GROUPS)[number]) {
-  return (
-    <section className="rounded-[24px] border border-bg-border bg-bg-secondary/16 p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="text-sm font-semibold text-text-primary">{title}</div>
-          <div className="mt-1 text-xs text-text-muted">{description}</div>
-        </div>
-      </div>
-      <div className="mt-4 divide-y divide-bg-border/60">
-        {links.map(({ href, label, icon: Icon, detail }) => (
-          <Link
-            key={href}
-            href={href}
-            className="group grid grid-cols-[auto,1fr,auto] items-center gap-3 py-3 transition-colors hover:text-text-primary"
-          >
-            <div className="rounded-xl border border-accent-blue/15 bg-accent-blue/10 p-2 text-accent-blue">
-              <Icon size={15} />
-            </div>
-            <div className="min-w-0">
-              <div className="text-sm font-semibold text-text-primary">{label}</div>
-              <div className="truncate text-[11px] leading-5 text-text-muted">{detail}</div>
-            </div>
-            <ArrowUpRight size={15} className="text-text-muted transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:text-accent-blue" />
-          </Link>
-        ))}
-      </div>
-    </section>
-  );
-}
 
 export default function HomePage() {
+  const [showAttention, setShowAttention] = useState(false);
   const overviewQuery = useLiveSnapshotQuery<SystemOverview>({
     queryKey: ["systemOverview"],
     queryFn: () => getSystemOverview().then((response) => response.data as SystemOverview),
@@ -305,6 +242,9 @@ export default function HomePage() {
   const topBlockers = overview?.blockers || [];
   const blockerCount = topBlockers.length;
   const generatedAt = overview?.generated_at;
+  const configuredStrategies = nseStrategies.length + commodityStrategies.length;
+  const runningStrategies = (health?.strategy_lanes || []).filter((lane) => isLaneRunning(lane.status)).length;
+  const overallServiceState = health?.summary.status || "idle";
 
   return (
     <div className="mx-auto max-w-[1680px] space-y-6 pb-10">
@@ -334,12 +274,20 @@ export default function HomePage() {
             <MetricTile label="App Equity" value={formatMoney(totalEquity)} detail="Combined books" color={tone(totalOpenPnl + totalRealized)} />
             <MetricTile label="Open Positions" value={String(totalOpenPositions)} detail="Manual and strategy lanes" />
             <MetricTile label="Realized P&L" value={formatSigned(totalRealized)} detail={`Manual trades ${manual?.total_trades || 0}`} color={tone(totalRealized)} />
-            <MetricTile
-              label="Service State"
-              value={health?.summary.status || "loading"}
-              detail={`${health?.summary.critical_services || 0} critical · ${health?.summary.degraded_services || 0} degraded`}
-              color={health?.summary.status === "healthy" ? "text-accent-green" : "text-accent-amber"}
-            />
+            <button
+              type="button"
+              onClick={() => setShowAttention(true)}
+              className={clsx(
+                "rounded-2xl border px-4 py-3 text-left transition-colors hover:border-bg-active",
+                serviceStateTone(overallServiceState),
+              )}
+            >
+              <div className="text-[11px] uppercase tracking-[0.16em] text-current/80">Service State</div>
+              <div className="mt-1.5 font-mono text-base font-semibold uppercase xl:text-lg">{overallServiceState}</div>
+              <div className="mt-1 text-[11px] text-current/80">
+                {health?.summary.critical_services || 0} critical · {health?.summary.degraded_services || 0} degraded · click for operator attention
+              </div>
+            </button>
           </div>
         </div>
       </section>
@@ -347,7 +295,12 @@ export default function HomePage() {
       <section className="grid gap-4 lg:grid-cols-2 xl:grid-cols-4">
         <MetricTile label="NSE Strategy P&L" value={formatSigned(nseRealized + nseOpenPnl)} detail={`${nseTrades} closed trades · ${nseOpenPositions} open`} color={tone(nseRealized + nseOpenPnl)} />
         <MetricTile label="Commodity Strategy P&L" value={formatSigned(commodityRealized + commodityOpenPnl)} detail={`${commodityTrades} closed trades · ${commodityOpenPositions} open`} color={tone(commodityRealized + commodityOpenPnl)} />
-        <MetricTile label="Manual Book" value={formatSigned(manual?.total_pnl)} detail={`Win rate ${manual?.win_rate != null ? `${(manual.win_rate * 100).toFixed(1)}%` : "--"}`} color={tone(manual?.total_pnl)} />
+        <MetricTile
+          label="Strategies"
+          value={`${runningStrategies}/${configuredStrategies || 0}`}
+          detail={`${configuredStrategies || 0} configured · ${(health?.strategy_lanes || []).length} monitored`}
+          color={runningStrategies > 0 ? "text-accent-green" : "text-accent-amber"}
+        />
         <MetricTile
           label="Auction IQ"
           value={auctionSummary?.live_ready ? "ready" : "validation"}
@@ -356,100 +309,142 @@ export default function HomePage() {
         />
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-[1.2fr,0.8fr]">
-        <div className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <div className="text-sm font-semibold text-text-primary">Strategy Lanes</div>
-              <div className="mt-1 text-xs text-text-muted">Attribution, cadence, and open risk by lane.</div>
-            </div>
-            <div className="text-xs text-text-muted">{(health?.strategy_lanes || []).length} lanes</div>
+      <section className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-text-primary">Strategy Lanes</div>
+            <div className="mt-1 text-xs text-text-muted">Attribution, cadence, and open risk by lane.</div>
           </div>
-          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {nseStrategies.map((strategy) => (
-              <LaneCard
-                key={strategy.key}
-                label={strategy.label}
-                timeframe={strategy.agent?.timeframe || null}
-                scope={strategy.agent?.scope || null}
-                openPositions={strategy.summary.open_positions}
-                realized={strategy.summary.realized_pnl}
-                unrealized={strategy.summary.unrealized_pnl}
-                totalTrades={strategy.summary.total_trades}
-                lastRunAt={strategy.last_scan_at || overview?.books.nse_strategy.status?.last_run_at}
-              />
-            ))}
-            {commodityStrategies.map((strategy) => (
-              <LaneCard
-                key={strategy.key}
-                label={strategy.label}
-                timeframe={strategy.agent?.timeframe || null}
-                scope={strategy.agent?.scope || null}
-                openPositions={strategy.summary?.open_positions}
-                realized={strategy.summary?.realized_pnl}
-                unrealized={strategy.summary?.unrealized_pnl}
-                totalTrades={strategy.summary?.total_trades}
-                lastRunAt={overview?.books.commodity_strategy.status?.last_run_at}
-              />
-            ))}
-          </div>
+          <div className="text-xs text-text-muted">{(health?.strategy_lanes || []).length} lanes</div>
         </div>
-
-        <div className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <div className="text-sm font-semibold text-text-primary">Operator Attention</div>
-              <div className="mt-1 text-xs text-text-muted">Current blockers and degraded dependencies.</div>
-            </div>
-          </div>
-          <div className="mt-4 space-y-3">
-            {topBlockers.length ? (
-              topBlockers.map((service) => (
-                <div key={service.key} className="rounded-2xl border border-bg-border bg-bg-primary/25 p-3.5">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="text-sm font-semibold text-text-primary">{service.label}</div>
-                      <div className="mt-1 text-xs leading-5 text-text-muted">{service.detail}</div>
-                    </div>
-                    <span
-                      className={clsx(
-                        "rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
-                        service.status === "critical"
-                          ? "border-accent-red/30 bg-accent-red/10 text-accent-red"
-                          : "border-accent-amber/30 bg-accent-amber/10 text-accent-amber",
-                      )}
-                    >
-                      {service.status}
-                    </span>
-                  </div>
-                </div>
-              ))
-            ) : (
-              <div className="rounded-2xl border border-bg-border bg-bg-primary/25 p-4 text-sm text-text-secondary">
-                No degraded or critical services are reported. Use <Link href="/health" className="text-accent-blue">/health</Link> for full service detail.
-              </div>
-            )}
-          </div>
+        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {nseStrategies.map((strategy) => (
+            <LaneCard
+              key={strategy.key}
+              label={strategy.label}
+              timeframe={strategy.agent?.timeframe || null}
+              scope={strategy.agent?.scope || null}
+              openPositions={strategy.summary.open_positions}
+              realized={strategy.summary.realized_pnl}
+              unrealized={strategy.summary.unrealized_pnl}
+              totalTrades={strategy.summary.total_trades}
+              lastRunAt={strategy.last_scan_at || overview?.books.nse_strategy.status?.last_run_at}
+            />
+          ))}
+          {commodityStrategies.map((strategy) => (
+            <LaneCard
+              key={strategy.key}
+              label={strategy.label}
+              timeframe={strategy.agent?.timeframe || null}
+              scope={strategy.agent?.scope || null}
+              openPositions={strategy.summary?.open_positions}
+              realized={strategy.summary?.realized_pnl}
+              unrealized={strategy.summary?.unrealized_pnl}
+              totalTrades={strategy.summary?.total_trades}
+              lastRunAt={overview?.books.commodity_strategy.status?.last_run_at}
+            />
+          ))}
         </div>
       </section>
 
       {health ? (
         <section className="rounded-[24px] border border-bg-border bg-bg-secondary/18 p-4">
-          <div className="mb-4 flex items-start justify-between gap-3">
+          <div className="flex items-start justify-between gap-3">
             <div>
               <div className="text-sm font-semibold text-text-primary">Service Health Snapshot</div>
-              <div className="mt-1 text-xs text-text-muted">Full detail on <Link href="/health" className="text-accent-blue">/health</Link>.</div>
+              <div className="mt-1 text-xs text-text-muted">Live service summary for the paper runtime and shared data plane.</div>
             </div>
+            <button
+              type="button"
+              onClick={() => setShowAttention(true)}
+              className={clsx(
+                "rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                serviceStateTone(overallServiceState),
+              )}
+            >
+              {overallServiceState}
+            </button>
           </div>
+          <div className="mt-4">
           <SystemHealthBoard health={health} compact includeLanes={false} />
+          </div>
         </section>
       ) : null}
 
-      <div className="grid gap-4 xl:grid-cols-3">
-        {WORKSPACE_GROUPS.map((group) => (
-          <WorkspaceGroup key={group.title} {...group} />
-        ))}
-      </div>
+      {showAttention ? (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-bg-primary/78 px-4 py-8 backdrop-blur-sm">
+          <div className="max-h-[86vh] w-full max-w-[1120px] overflow-y-auto rounded-[28px] border border-bg-active bg-[linear-gradient(180deg,rgba(15,23,36,0.98),rgba(7,10,21,0.99))] p-5 shadow-[0_30px_90px_rgba(0,0,0,0.45)]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-[11px] uppercase tracking-[0.2em] text-text-muted">Operator Attention</div>
+                <div className="mt-2 text-2xl font-semibold text-text-primary">Service State</div>
+                <div className="mt-1 text-sm text-text-muted">
+                  Review blockers and the current runtime state without leaving the dashboard.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAttention(false)}
+                className="rounded-xl border border-bg-border bg-bg-secondary/30 p-2 text-text-secondary transition-colors hover:border-bg-active hover:text-text-primary"
+                aria-label="Close operator attention"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              <span
+                className={clsx(
+                  "rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                  serviceStateTone(overallServiceState),
+                )}
+              >
+                {overallServiceState}
+              </span>
+              <span className="rounded-full border border-bg-border bg-bg-primary/35 px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] text-text-muted">
+                {health?.summary.critical_services || 0} critical
+              </span>
+              <span className="rounded-full border border-bg-border bg-bg-primary/35 px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] text-text-muted">
+                {health?.summary.degraded_services || 0} degraded
+              </span>
+            </div>
+
+            <div className="mt-5 grid gap-4 xl:grid-cols-[0.88fr,1.12fr]">
+              <div className="space-y-3">
+                <div className="text-sm font-semibold text-text-primary">Current blockers</div>
+                {topBlockers.length ? (
+                  topBlockers.map((service) => (
+                    <div key={service.key} className="rounded-2xl border border-bg-border bg-bg-secondary/24 p-3.5">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-semibold text-text-primary">{service.label}</div>
+                          <div className="mt-1 text-xs leading-5 text-text-muted">{service.detail}</div>
+                        </div>
+                        <span
+                          className={clsx(
+                            "rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                            service.status === "critical"
+                              ? "border-accent-red/30 bg-accent-red/10 text-accent-red"
+                              : "border-accent-amber/30 bg-accent-amber/10 text-accent-amber",
+                          )}
+                        >
+                          {service.status}
+                        </span>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="rounded-2xl border border-bg-border bg-bg-secondary/24 p-4 text-sm text-text-secondary">
+                    No degraded or critical services are currently reported.
+                  </div>
+                )}
+              </div>
+
+              {health ? <SystemHealthBoard health={health} compact includeLanes={false} /> : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -11,6 +11,7 @@ import {
 import { api } from "@/lib/api";
 import { hasBrokerSession, isBrokerReady, type BrokerStatusEntry } from "@/lib/broker-status";
 import { resolveApiBaseUrl } from "@/lib/runtime-url";
+import PageTabs from "@/components/layout/PageTabs";
 import { useStore } from "@/store";
 import { clsx } from "clsx";
 import {
@@ -18,6 +19,11 @@ import {
   ChevronDown, ChevronUp, Loader2, Plug, Unplug, AlertCircle, Save,
   Copy, Info, Send,
 } from "lucide-react";
+
+const SETTINGS_TABS = [
+  { href: "/settings", label: "Settings" },
+  { href: "/health", label: "Health" },
+];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1384,11 +1390,14 @@ export default function SettingsPage() {
 
   return (
     <div className="max-w-2xl space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-lg font-bold font-mono text-text-primary">Settings</h1>
-        <button onClick={handleRefresh} className="text-text-muted hover:text-text-primary p-1 rounded" title="Refresh">
-          <RefreshCw size={14} />
-        </button>
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h1 className="text-lg font-bold font-mono text-text-primary">Settings</h1>
+          <button onClick={handleRefresh} className="text-text-muted hover:text-text-primary p-1 rounded" title="Refresh">
+            <RefreshCw size={14} />
+          </button>
+        </div>
+        <PageTabs tabs={SETTINGS_TABS} />
       </div>
 
       {/* Broker Connections */}

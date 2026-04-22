@@ -6,9 +6,15 @@ import {
   SystemHealthBoard,
   type SystemHealthResponse,
 } from "@/components/system/SystemHealthBoard";
+import PageTabs from "@/components/layout/PageTabs";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import { getSystemHealth } from "@/lib/api";
 import { createSystemHealthSocket } from "@/lib/websocket";
+
+const SETTINGS_TABS = [
+  { href: "/settings", label: "Settings" },
+  { href: "/health", label: "Health" },
+];
 
 export default function HealthPage() {
   const healthQuery = useLiveSnapshotQuery<SystemHealthResponse>({
@@ -25,7 +31,7 @@ export default function HealthPage() {
   return (
     <div className="mx-auto max-w-[1680px] space-y-6 pb-10">
       <section className="rounded-[28px] border border-bg-active/60 bg-bg-secondary/30 px-5 py-4">
-        <div className="max-w-4xl">
+        <div className="max-w-4xl space-y-3">
           <div className="flex items-center gap-2 text-lg font-bold font-mono text-text-primary">
             <Shield size={18} className="text-accent-blue" />
             System Health
@@ -33,6 +39,7 @@ export default function HealthPage() {
           <p className="mt-1.5 text-sm leading-6 text-text-secondary">
             Runtime health for core services, market data, strategy supervisors, and validation.
           </p>
+          <PageTabs tabs={SETTINGS_TABS} />
         </div>
       </section>
 

@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import PageTabs from "@/components/layout/PageTabs";
 import { clsx } from "clsx";
 import {
   Database, Download, RefreshCw, CheckCircle2, XCircle, Loader2,
@@ -94,6 +95,12 @@ interface IndexAnalyticsStatsRow {
   earliest: string | null;
   latest: string | null;
 }
+
+const RESEARCH_TABS = [
+  { href: "/analysis", label: "Research Monitor" },
+  { href: "/backtester", label: "Backtester" },
+  { href: "/data", label: "F&O Data" },
+];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -812,15 +819,18 @@ export default function DataPage() {
 
   return (
     <div className="max-w-6xl space-y-6">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Database size={18} className="text-accent-blue" />
-          <h1 className="text-lg font-bold font-mono text-text-primary">Data Collection</h1>
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Database size={18} className="text-accent-blue" />
+            <h1 className="text-lg font-bold font-mono text-text-primary">F&amp;O Data</h1>
+          </div>
+          <button onClick={() => { refetchStats(); refetchTasks(); refetchIndexStats(); refetchIndexTasks(); }}
+            className="text-text-muted hover:text-text-primary p-1 rounded" title="Refresh">
+            <RefreshCw size={14} />
+          </button>
         </div>
-        <button onClick={() => { refetchStats(); refetchTasks(); refetchIndexStats(); refetchIndexTasks(); }}
-          className="text-text-muted hover:text-text-primary p-1 rounded" title="Refresh">
-          <RefreshCw size={14} />
-        </button>
+        <PageTabs tabs={RESEARCH_TABS} />
       </div>
 
       {activeIndexTaskId && (
