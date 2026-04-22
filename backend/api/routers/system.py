@@ -284,13 +284,29 @@ def _market_data_service() -> dict[str, Any]:
     status = data_router.get_status()
     mode = status.get("mode")
     subscribed = int(status.get("subscribed_symbol_count") or 0)
+    ws_connected = bool(status.get("ws_connected"))
+    last_tick_age_seconds = status.get("last_tick_age_seconds")
+    now_ist = datetime.now(timezone.utc).astimezone(IST)
+    market_open = _in_market_hours(now_ist)
 
     if mode == "mock":
         service_status = "healthy"
         detail = f"Mock market feed active for {subscribed} symbols."
-    elif mode == "broker" and subscribed > 0:
+    elif mode == "broker" and subscribed > 0 and not market_open:
+        service_status = "healthy"
+        detail = f"Broker feed subscribed for {subscribed} symbols; waiting for market hours."
+    elif mode == "broker" and subscribed > 0 and ws_connected:
         service_status = "healthy"
         detail = f"Broker feed subscribed for {subscribed} symbols."
+    elif mode == "broker" and subscribed > 0:
+        service_status = "degraded"
+        if last_tick_age_seconds is None:
+            detail = "Broker feed is subscribed, but no fresh ticks have been observed yet."
+        else:
+            detail = (
+                "Broker feed is subscribed, but the latest tick is stale "
+                f"({last_tick_age_seconds:.0f}s ago)."
+            )
     elif mode == "broker":
         service_status = "degraded"
         detail = "Broker selected, but no live symbol subscriptions are active."

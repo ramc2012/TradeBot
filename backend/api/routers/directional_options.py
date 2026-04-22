@@ -1,6 +1,8 @@
 """API surface for the directional long-options module."""
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Query
 
 from directional_options.service import DirectionalOptionsService
@@ -12,7 +14,7 @@ _service = DirectionalOptionsService()
 
 @router.get("/summary")
 async def summary() -> dict[str, object]:
-    return _service.summary()
+    return await asyncio.to_thread(_service.summary)
 
 
 @router.get("/workspace")
@@ -21,7 +23,7 @@ async def workspace(
     timeframe: str = Query("5minute"),
     lookback_sessions: int = Query(16, ge=4, le=90),
 ) -> dict[str, object]:
-    return _service.workspace(underlying, timeframe, lookback_sessions)
+    return await asyncio.to_thread(_service.workspace, underlying, timeframe, lookback_sessions)
 
 
 @router.get("/live-snapshot")
@@ -65,4 +67,5 @@ async def backtest(
     timeframe: str = Query("5minute"),
     lookback_sessions: int = Query(16, ge=4, le=90),
 ) -> dict[str, object]:
-    return _service.workspace(underlying, timeframe, lookback_sessions)["backtest"]
+    payload = await asyncio.to_thread(_service.workspace, underlying, timeframe, lookback_sessions)
+    return payload["backtest"]

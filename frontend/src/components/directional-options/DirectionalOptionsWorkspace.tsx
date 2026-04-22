@@ -32,6 +32,7 @@ import {
   API_URL,
   getDirectionalOptionsBacktest,
   getDirectionalOptionsLiveSnapshot,
+  getDirectionalOptionsSummary,
 } from "@/lib/api";
 
 type CoverageRow = {
@@ -308,12 +309,26 @@ export default function DirectionalOptionsWorkspace() {
   const [underlying, setUnderlying] = useState("NIFTY");
   const [timeframe, setTimeframe] = useState("5minute");
   const [lookbackSessions, setLookbackSessions] = useState("16");
+  const [loadDiagnostics, setLoadDiagnostics] = useState(false);
+  const [showDashboardEmbed, setShowDashboardEmbed] = useState(false);
   const deferredUnderlying = useDeferredValue(underlying);
   const deferredTimeframe = useDeferredValue(timeframe);
   const deferredLookbackSessions = useDeferredValue(lookbackSessions);
 
+  const summaryQuery = usePersistentSnapshotQuery<ModuleSummary>({
+    storageKey: "nomad-curie.directional-options.summary.v2",
+    queryKey: ["directional-options-summary"],
+    queryFn: async () => {
+      const response = await getDirectionalOptionsSummary();
+      return response.data as ModuleSummary;
+    },
+    staleTime: 60_000,
+    refetchInterval: 120_000,
+    refetchOnWindowFocus: false,
+  });
+
   const liveQuery = useLiveSnapshotQuery<WorkspaceResponse>({
-    storageKey: `nomad-curie.directional-options.live.${deferredUnderlying}.${deferredTimeframe}.${deferredLookbackSessions}`,
+    storageKey: `nomad-curie.directional-options.live.v2.${deferredUnderlying}.${deferredTimeframe}.${deferredLookbackSessions}`,
     queryKey: ["directional-options-live", deferredUnderlying, deferredTimeframe, deferredLookbackSessions],
     queryFn: async () => {
       const response = await getDirectionalOptionsLiveSnapshot(
@@ -323,12 +338,13 @@ export default function DirectionalOptionsWorkspace() {
       );
       return response.data as WorkspaceResponse;
     },
-    staleTime: 30_000,
-    refetchInterval: 45_000,
+    staleTime: 60_000,
+    refetchInterval: 90_000,
+    refetchOnWindowFocus: false,
   });
 
   const backtestQuery = usePersistentSnapshotQuery<BacktestPayload>({
-    storageKey: `nomad-curie.directional-options.backtest.${deferredUnderlying}.${deferredTimeframe}.${deferredLookbackSessions}`,
+    storageKey: `nomad-curie.directional-options.backtest.v2.${deferredUnderlying}.${deferredTimeframe}.${deferredLookbackSessions}`,
     queryKey: ["directional-options-backtest", deferredUnderlying, deferredTimeframe, deferredLookbackSessions],
     queryFn: async () => {
       const response = await getDirectionalOptionsBacktest(
@@ -338,17 +354,29 @@ export default function DirectionalOptionsWorkspace() {
       );
       return response.data as BacktestPayload;
     },
+    enabled: loadDiagnostics,
     refetchInterval: 5 * 60_000,
     staleTime: 4 * 60_000,
+    refetchOnWindowFocus: false,
   });
 
   const data = liveQuery.data;
   const summary = backtestQuery.data?.summary;
   const backtest = backtestQuery.data;
   const snapshot = data?.snapshot;
-  const module = data?.module;
+  const module = data?.module || summaryQuery.data;
   const dashboardUrl = module?.dashboard?.mounted && module.dashboard.url ? `${API_URL}${module.dashboard.url}` : null;
   const candidateBars = snapshot?.contract_candidates?.slice(0, 6) ?? [];
+  const dashboardStatusBusy = !dashboardUrl && (
+    liveQuery.isShowingSnapshot
+    || summaryQuery.isShowingSnapshot
+    || liveQuery.isError
+    || summaryQuery.isError
+  );
+  const dashboardBadgeLabel = dashboardUrl ? "approved" : dashboardStatusBusy ? "pending" : "rejected";
+  const dashboardReason = dashboardStatusBusy
+    ? "Dashboard status is waiting for a fresh backend response."
+    : (module?.dashboard?.reason || "Dashboard mount state unavailable.");
 
   return (
     <div className="space-y-5">
@@ -567,8 +595,23 @@ export default function DirectionalOptionsWorkspace() {
                 </div>
                 <div className="mt-1 text-xs text-text-muted">Bounded event-driven simulation over the selected lookback.</div>
               </div>
-              <div className={clsx("font-mono text-sm font-semibold", tone(summary?.total_pnl))}>
-                {formatSignedMoney(summary?.total_pnl)}
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (loadDiagnostics) {
+                      void backtestQuery.refetch();
+                      return;
+                    }
+                    setLoadDiagnostics(true);
+                  }}
+                  className="rounded-2xl border border-bg-border bg-bg-primary/20 px-3 py-2 text-xs font-semibold text-text-secondary transition-colors hover:border-accent-blue/35 hover:text-text-primary"
+                >
+                  {loadDiagnostics ? (backtestQuery.isFetching ? "Refreshing diagnostics" : "Refresh diagnostics") : "Load diagnostics"}
+                </button>
+                <div className={clsx("font-mono text-sm font-semibold", tone(summary?.total_pnl))}>
+                  {formatSignedMoney(summary?.total_pnl)}
+                </div>
               </div>
             </div>
             <div className="mt-4 h-64 rounded-2xl border border-bg-border bg-bg-primary/12 p-3">
@@ -682,24 +725,44 @@ export default function DirectionalOptionsWorkspace() {
                 Optional embedded Dash board mounted from the backend when the dependency is installed.
               </div>
             </div>
-            <StatusBadge label={module?.dashboard?.mounted ? "approved" : "rejected"} />
+            <StatusBadge label={dashboardBadgeLabel} />
           </div>
           <div className="mt-4 rounded-2xl border border-bg-border bg-bg-primary/16 p-4 text-sm text-text-secondary">
-            {module?.dashboard?.reason || "Dashboard mount state unavailable."}
+            {dashboardReason}
           </div>
           {dashboardUrl ? (
             <div className="mt-4 space-y-3">
-              <a
-                href={dashboardUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-2 rounded-2xl border border-accent-blue/30 bg-accent-blue/10 px-4 py-2 text-sm font-semibold text-accent-blue transition-colors hover:border-accent-blue/45"
-              >
-                Open Dash Workspace
-                <ArrowUpRight size={15} />
-              </a>
-              <div className="overflow-hidden rounded-2xl border border-bg-border bg-bg-primary/12">
-                <iframe title="Directional options Dash" src={dashboardUrl} className="h-[480px] w-full bg-white" />
+              <div className="flex flex-wrap gap-3">
+                <a
+                  href={dashboardUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-2 rounded-2xl border border-accent-blue/30 bg-accent-blue/10 px-4 py-2 text-sm font-semibold text-accent-blue transition-colors hover:border-accent-blue/45"
+                >
+                  Open Dash Workspace
+                  <ArrowUpRight size={15} />
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setShowDashboardEmbed((current) => !current)}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-bg-border bg-bg-primary/20 px-4 py-2 text-sm font-semibold text-text-secondary transition-colors hover:border-accent-blue/30 hover:text-text-primary"
+                >
+                  {showDashboardEmbed ? "Hide embedded dashboard" : "Load embedded dashboard"}
+                </button>
+              </div>
+              {showDashboardEmbed ? (
+                <div className="overflow-hidden rounded-2xl border border-bg-border bg-bg-primary/12">
+                  <iframe title="Directional options Dash" src={dashboardUrl} className="h-[480px] w-full bg-white" />
+                </div>
+              ) : null}
+            </div>
+          ) : dashboardStatusBusy ? (
+            <div className="mt-4 rounded-2xl border border-accent-amber/30 bg-accent-amber/10 p-4 text-sm text-accent-amber">
+              <div className="flex items-start gap-3">
+                <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+                <div>
+                  Dashboard mount status is waiting for a fresh backend response. The current directional snapshot is running from cached data or a busy API window.
+                </div>
               </div>
             </div>
           ) : (

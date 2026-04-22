@@ -691,11 +691,19 @@ class ATMWatchlistService:
             payload_status = "ready"
             background_targets = pending
             if loaded_from_persisted and not partial_cache:
-                background_targets = underlyings
-                detail_msg = (
-                    (detail_msg + " " if detail_msg else "")
-                    + "Showing the last saved ATM watchlist while live refresh updates in background."
-                )
+                if scope_symbols:
+                    background_targets = underlyings
+                    detail_msg = (
+                        (detail_msg + " " if detail_msg else "")
+                        + "Showing the last saved ATM watchlist while live refresh updates in background."
+                    )
+                else:
+                    background_targets = []
+                    detail_msg = (
+                        (detail_msg + " " if detail_msg else "")
+                        + "Showing the last saved full-universe ATM watchlist. "
+                        + "Background live refresh is deferred to avoid a cold-start broker stampede."
+                    )
             elif pending:
                 payload_status = "building"
                 detail_msg = (

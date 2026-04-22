@@ -137,6 +137,12 @@ class DataRouter:
             if tick.timestamp is not None
         ]
         last_tick_at = max(last_tick_times) if last_tick_times else None
+        last_tick_age_seconds = None
+        if last_tick_at is not None:
+            last_tick_age_seconds = max(
+                0.0,
+                (datetime.now(timezone.utc) - last_tick_at).total_seconds(),
+            )
         callback_count = sum(len(callbacks) for callbacks in self._callbacks.values())
 
         if mock_running:
@@ -153,9 +159,13 @@ class DataRouter:
             "subscribed_symbol_count": len(self._subscribed_symbols),
             "tick_buffer_size": len(self._tick_buffer),
             "callback_count": callback_count,
-            "ws_connected": bool(self._ws_client),
+            "ws_connected": bool(self._ws_client) and (
+                last_tick_age_seconds is None or last_tick_age_seconds <= 30.0
+            ),
+            "ws_client_present": bool(self._ws_client),
             "mock_running": mock_running,
             "last_tick_at": last_tick_at.isoformat() if last_tick_at else None,
+            "last_tick_age_seconds": last_tick_age_seconds,
         }
 
     # ── Mock tick feed for testing ───────────────────────────────────────────

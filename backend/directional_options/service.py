@@ -1,8 +1,10 @@
 """Service orchestrator for the directional long-options module."""
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
 from functools import lru_cache
+from time import monotonic
 from typing import Any, Optional
 
 import pandas as pd
@@ -40,14 +42,23 @@ class DirectionalOptionsService:
             risk=self.risk,
             config=self.config,
         )
+        self._summary_cache: dict[str, Any] = {"payload": None, "expires_at": 0.0}
+        self._live_cache_ttl_seconds = 30.0
+        self._summary_cache_ttl_seconds = 60.0
+        self._live_cache: dict[tuple[str, str, int], tuple[float, dict[str, object]]] = {}
+        self._live_locks: dict[tuple[str, str, int], asyncio.Lock] = {}
 
     def summary(self) -> dict[str, object]:
+        cached_payload = self._summary_cache.get("payload")
+        if cached_payload is not None and float(self._summary_cache.get("expires_at") or 0.0) > monotonic():
+            return cached_payload
+
         from core.market_hours_paper_supervisor import market_hours_paper_supervisor
         from directional_options.dashboard import get_dashboard_mount_state
 
         available = [item for item in self.config["universe"] if item in self.store.available_underlyings()]
         automation = market_hours_paper_supervisor.get_runner_status("directional_options")
-        return {
+        payload = {
             "key": "directional_long_options",
             "label": self.config["label"],
             "description": self.config["description"],
@@ -58,6 +69,11 @@ class DirectionalOptionsService:
             "automation": automation,
             "coverage": [self.store.coverage_summary(underlying) for underlying in available],
         }
+        self._summary_cache = {
+            "payload": payload,
+            "expires_at": monotonic() + self._summary_cache_ttl_seconds,
+        }
+        return payload
 
     @lru_cache(maxsize=24)
     def workspace(
@@ -100,37 +116,50 @@ class DirectionalOptionsService:
         timeframe: str,
         lookback_sessions: int,
     ) -> dict[str, object]:
-        summary = self.summary()
-        lookback_days = max(int(self.config["paper_trading"]["live_lookback_days"]), lookback_sessions)
-        spot, history_source, history_symbol = await self.store.load_live_spot_frame(
-            underlying,
-            lookback_days=lookback_days,
-        )
-        feature_frame = self.feature_engine.build_frame(
-            spot,
-            timeframe,
-            lookback_sessions=lookback_sessions,
-        )
-        strategy_health = await market_intelligence_runtime.get_strategy_health()
-        snapshot = await self._live_snapshot(
-            underlying=underlying,
-            timeframe=timeframe,
-            feature_frame=feature_frame,
-            strategy_health=strategy_health,
-            history_source=history_source,
-            history_symbol=history_symbol,
-        )
-        return {
-            "module": summary,
-            "selection": {
-                "underlying": underlying,
-                "timeframe": timeframe,
-                "lookback_sessions": lookback_sessions,
-            },
-            "snapshot": snapshot,
-            "paper_positions": await self.paper.list_positions(symbol=underlying, status="all", limit=8),
-            "paper_journal": await self.paper.list_journal(symbol=underlying, limit=8),
-        }
+        cache_key = (underlying, timeframe, lookback_sessions)
+        cached = self._live_cache.get(cache_key)
+        if cached and cached[0] > monotonic():
+            return cached[1]
+
+        lock = self._live_locks.setdefault(cache_key, asyncio.Lock())
+        async with lock:
+            cached = self._live_cache.get(cache_key)
+            if cached and cached[0] > monotonic():
+                return cached[1]
+
+            summary = self.summary()
+            lookback_days = max(int(self.config["paper_trading"]["live_lookback_days"]), lookback_sessions)
+            spot, history_source, history_symbol = await self.store.load_live_spot_frame(
+                underlying,
+                lookback_days=lookback_days,
+            )
+            feature_frame = self.feature_engine.build_frame(
+                spot,
+                timeframe,
+                lookback_sessions=lookback_sessions,
+            )
+            strategy_health = await market_intelligence_runtime.get_strategy_health()
+            snapshot = await self._live_snapshot(
+                underlying=underlying,
+                timeframe=timeframe,
+                feature_frame=feature_frame,
+                strategy_health=strategy_health,
+                history_source=history_source,
+                history_symbol=history_symbol,
+            )
+            payload = {
+                "module": summary,
+                "selection": {
+                    "underlying": underlying,
+                    "timeframe": timeframe,
+                    "lookback_sessions": lookback_sessions,
+                },
+                "snapshot": snapshot,
+                "paper_positions": await self.paper.list_positions(symbol=underlying, status="all", limit=8),
+                "paper_journal": await self.paper.list_journal(symbol=underlying, limit=8),
+            }
+            self._live_cache[cache_key] = (monotonic() + self._live_cache_ttl_seconds, payload)
+            return payload
 
     async def record_paper_snapshot(
         self,
