@@ -942,18 +942,32 @@ export default function CommodityPage() {
 
   const contractCatalogData = commodityWatchlistQuery.data?.contract_catalog;
   const commodityATMWatchlistData = commodityWatchlistQuery.data?.atm_watchlist;
+  const config = status?.config;
+  const summary = status?.summary;
+  const configSymbols = Array.isArray(config?.symbols) ? config.symbols : [];
+  const selectedOptionExpiries = config?.selected_option_expiries ?? {};
+  const lotsPerTrade = config?.lots_per_trade ?? 1;
+  const optionCapitalFraction = config?.option_capital_fraction ?? 0.2;
+  const optionHardStopPct = config?.option_hard_stop_pct ?? 25;
+  const trackedSymbolsCount = summary?.tracked_symbols ?? 0;
+  const openPositionsCount = summary?.open_positions ?? 0;
+  const readyFuturesCount = summary?.ready_futures_signals ?? 0;
+  const readyOptionsCount = summary?.ready_option_signals ?? 0;
+  const totalEquity = summary?.total_equity;
+  const realizedPnl = summary?.realized_pnl;
+  const unrealizedPnl = summary?.unrealized_pnl;
 
   useEffect(() => {
     if (hasEditedSymbols) {
       return;
     }
-    const nextSymbols = status?.config.symbols?.length
-      ? status.config.symbols.join("\n")
+    const nextSymbols = configSymbols.length
+      ? configSymbols.join("\n")
       : EXAMPLE_SYMBOLS.join("\n");
     startTransition(() => {
       setDraftSymbols(nextSymbols);
     });
-  }, [hasEditedSymbols, status?.config.symbols]);
+  }, [configSymbols, hasEditedSymbols]);
 
   useEffect(() => {
     if (hasEditedContractExpiries) {
@@ -1016,15 +1030,33 @@ export default function CommodityPage() {
     },
   });
 
-  const commentary = useMemo(() => status?.commentary ?? [], [status?.commentary]);
-  const positionRows = useMemo(() => positions ?? status?.positions ?? [], [positions, status?.positions]);
-  const tradeHistoryRows = useMemo(() => status?.trade_history ?? [], [status?.trade_history]);
-  const orderRows = useMemo(() => orders ?? status?.orders ?? [], [orders, status?.orders]);
-  const reportRows = useMemo(() => reports ?? status?.reports ?? [], [reports, status?.reports]);
-  const strategies = useMemo(() => status?.strategies ?? [], [status?.strategies]);
+  const commentary = useMemo(() => (Array.isArray(status?.commentary) ? status.commentary : []), [status?.commentary]);
+  const positionRows = useMemo(
+    () => (Array.isArray(positions) ? positions : Array.isArray(status?.positions) ? status.positions : []),
+    [positions, status?.positions],
+  );
+  const tradeHistoryRows = useMemo(
+    () => (Array.isArray(status?.trade_history) ? status.trade_history : []),
+    [status?.trade_history],
+  );
+  const orderRows = useMemo(
+    () => (Array.isArray(orders) ? orders : Array.isArray(status?.orders) ? status.orders : []),
+    [orders, status?.orders],
+  );
+  const reportRows = useMemo(
+    () => (Array.isArray(reports) ? reports : Array.isArray(status?.reports) ? status.reports : []),
+    [reports, status?.reports],
+  );
+  const strategies = useMemo(() => (Array.isArray(status?.strategies) ? status.strategies : []), [status?.strategies]);
   const contractCatalog = useMemo(() => contractCatalogData?.contracts ?? [], [contractCatalogData?.contracts]);
-  const futuresRows = useMemo(() => status?.futures_watchlist ?? status?.watchlist ?? [], [status?.futures_watchlist, status?.watchlist]);
-  const strategyOptionRows = useMemo(() => status?.option_watchlist ?? [], [status?.option_watchlist]);
+  const futuresRows = useMemo(
+    () => (Array.isArray(status?.futures_watchlist) ? status.futures_watchlist : Array.isArray(status?.watchlist) ? status.watchlist : []),
+    [status?.futures_watchlist, status?.watchlist],
+  );
+  const strategyOptionRows = useMemo(
+    () => (Array.isArray(status?.option_watchlist) ? status.option_watchlist : []),
+    [status?.option_watchlist],
+  );
   const liveOptionRows = useMemo(() => commodityATMWatchlistData?.rows ?? [], [commodityATMWatchlistData?.rows]);
   const optionRows = useMemo(() => {
     if (!liveOptionRows.length) {
@@ -1061,7 +1093,7 @@ export default function CommodityPage() {
   const killSwitchActive = killSwitchState?.kill_switch_active ?? status?.kill_switch_active ?? false;
   const loopActive = status?.loop_active ?? killSwitchState?.loop_active ?? false;
   const startRequired = status?.start_required ?? killSwitchState?.start_required ?? false;
-  const selectedExpiryCount = Object.keys(status?.config.selected_option_expiries || {}).length;
+  const selectedExpiryCount = Object.keys(selectedOptionExpiries).length;
   const saveError = saveConfigMutation.error as { response?: { data?: { detail?: string } } } | null;
   const fyersHealth = status?.data_health?.fyers_token_health;
   const optionHistoryHealth = status?.data_health?.option_history;
@@ -1148,9 +1180,9 @@ export default function CommodityPage() {
                 title: "Strategy 2 · Futures",
                 status: "idle",
                 instrument: "MCX futures",
-                tracked_symbols: status?.summary.tracked_symbols ?? 0,
-                open_positions: status?.summary.open_positions ?? 0,
-                lots_per_trade: status?.config.lots_per_trade ?? 1,
+                tracked_symbols: trackedSymbolsCount,
+                open_positions: openPositionsCount,
+                lots_per_trade: lotsPerTrade,
                 broker: "fyers",
                 notes: "The futures paper engine is waiting for symbols, a start action, or a live market session.",
               }
@@ -1163,7 +1195,7 @@ export default function CommodityPage() {
                 title: "Strategy 1 · Options",
                 status: "monitoring",
                 instrument: "MCX ATM CE/PE",
-                tracked_symbols: status?.summary.tracked_symbols ?? 0,
+                tracked_symbols: trackedSymbolsCount,
                 configured_contracts: selectedExpiryCount,
                 broker: "fyers",
                 notes: "The options sleeve picks the nearest liquid CE or PE contract and waits for its own 30-minute MACD zero-cross before entering.",
@@ -1196,8 +1228,8 @@ export default function CommodityPage() {
             <div className="mt-4 space-y-2 text-xs text-text-secondary">
               <div>Last scan: <span className="font-mono text-text-primary">{formatTimestamp(status?.last_run_at)}</span></div>
               <div>Cadence: <span className="font-mono text-text-primary">{status?.scan_interval_seconds ?? 30}s</span></div>
-              <div>Futures size: <span className="font-mono text-text-primary">{status?.config.lots_per_trade ?? 1} lot</span></div>
-              <div>Options budget: <span className="font-mono text-text-primary">{Math.round((status?.config.option_capital_fraction ?? 0.2) * 100)}%</span></div>
+              <div>Futures size: <span className="font-mono text-text-primary">{lotsPerTrade} lot</span></div>
+              <div>Options budget: <span className="font-mono text-text-primary">{Math.round(optionCapitalFraction * 100)}%</span></div>
             </div>
             {fyersHealth?.message || optionHistoryLatestFailure ? (
               <div className="mt-4 rounded-2xl border border-bg-border bg-bg-primary/40 px-3 py-3 text-xs text-text-secondary">
@@ -1285,13 +1317,13 @@ export default function CommodityPage() {
         />
 
         <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
-          <MetricTile label="Tracked Symbols" value={`${status?.summary.tracked_symbols ?? 0}`} />
-          <MetricTile label="Futures Ready" value={`${status?.summary.ready_futures_signals ?? actionableFutures.length}`} tone={actionableFutures.length ? "text-accent-green" : undefined} />
-          <MetricTile label="Options Ready" value={`${status?.summary.ready_option_signals ?? actionableOptions.length}`} tone={actionableOptions.length ? "text-accent-green" : undefined} />
-          <MetricTile label="Open Positions" value={`${status?.summary.open_positions ?? 0}`} />
-          <MetricTile label="Equity" value={status?.summary.total_equity != null ? status.summary.total_equity.toFixed(2) : "--"} />
-          <MetricTile label="Realized P&L" value={formatSigned(status?.summary.realized_pnl, 2)} tone={(status?.summary.realized_pnl || 0) >= 0 ? "text-accent-green" : "text-accent-red"} />
-          <MetricTile label="Unrealized P&L" value={formatSigned(status?.summary.unrealized_pnl, 2)} tone={(status?.summary.unrealized_pnl || 0) >= 0 ? "text-accent-green" : "text-accent-red"} detail={`Futures ${actionableFutures.length} · Options ${actionableOptions.length}`} />
+          <MetricTile label="Tracked Symbols" value={`${trackedSymbolsCount}`} />
+          <MetricTile label="Futures Ready" value={`${readyFuturesCount || actionableFutures.length}`} tone={actionableFutures.length ? "text-accent-green" : undefined} />
+          <MetricTile label="Options Ready" value={`${readyOptionsCount || actionableOptions.length}`} tone={actionableOptions.length ? "text-accent-green" : undefined} />
+          <MetricTile label="Open Positions" value={`${openPositionsCount}`} />
+          <MetricTile label="Equity" value={totalEquity != null ? totalEquity.toFixed(2) : "--"} />
+          <MetricTile label="Realized P&L" value={formatSigned(realizedPnl, 2)} tone={(realizedPnl || 0) >= 0 ? "text-accent-green" : "text-accent-red"} />
+          <MetricTile label="Unrealized P&L" value={formatSigned(unrealizedPnl, 2)} tone={(unrealizedPnl || 0) >= 0 ? "text-accent-green" : "text-accent-red"} detail={`Futures ${actionableFutures.length} · Options ${actionableOptions.length}`} />
         </div>
 
         <div className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
@@ -1589,7 +1621,7 @@ export default function CommodityPage() {
           <MetricTile
             label="Options Open"
             value={`${positionRows.filter((position) => position.strategy_key === "commodity_options").length}`}
-            detail={`${Math.round((status?.config.option_capital_fraction ?? 0.2) * 100)}% budget · ${status?.config.option_hard_stop_pct ?? 25}% stop`}
+            detail={`${Math.round(optionCapitalFraction * 100)}% budget · ${optionHardStopPct}% stop`}
           />
         </div>
 
@@ -1754,7 +1786,7 @@ export default function CommodityPage() {
                           capital {row.capital_per_trade != null ? row.capital_per_trade.toFixed(2) : "--"}
                         </div>
                         <div className="mt-1 text-[11px] text-text-muted">
-                          stop {status?.config.option_hard_stop_pct ?? 25}% · budget {Math.round((status?.config.option_capital_fraction ?? 0.2) * 100)}%
+                          stop {optionHardStopPct}% · budget {Math.round(optionCapitalFraction * 100)}%
                         </div>
                       </td>
                       <td className="py-3 pr-3">
@@ -1827,7 +1859,7 @@ export default function CommodityPage() {
                 type="button"
                 onClick={() => {
                   setHasEditedSymbols(false);
-                  setDraftSymbols((status?.config.symbols?.length ? status.config.symbols : EXAMPLE_SYMBOLS).join("\n"));
+                  setDraftSymbols((configSymbols.length ? configSymbols : EXAMPLE_SYMBOLS).join("\n"));
                 }}
                 className="inline-flex items-center gap-2 rounded-full border border-bg-border px-4 py-2 text-xs font-semibold text-text-secondary transition-colors hover:border-accent-blue hover:text-accent-blue"
               >
@@ -1854,7 +1886,7 @@ export default function CommodityPage() {
             />
 
             <div className="mt-6 grid gap-3 sm:grid-cols-3">
-              <MetricTile label="Tracked" value={`${status?.summary.tracked_symbols ?? 0}`} />
+              <MetricTile label="Tracked" value={`${trackedSymbolsCount}`} />
               <MetricTile label="Contracts Ready" value={`${contractCatalogData?.summary.contracts_ready ?? 0}`} />
               <MetricTile label="Expiry Map" value={`${selectedExpiryCount}`} />
             </div>
