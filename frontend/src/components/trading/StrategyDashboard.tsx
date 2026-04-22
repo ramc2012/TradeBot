@@ -271,7 +271,11 @@ function LaneSelector({
 
 const PositionsTable = memo(function PositionsTable({ positions }: { positions: StrategyPosition[] }) {
   if (!positions.length) {
-    return <div className="rounded-xl border border-dashed border-bg-border p-6 text-sm text-text-muted">No open positions in this lane.</div>;
+    return (
+      <div className="flex min-h-[160px] items-center justify-center rounded-xl border border-dashed border-bg-border text-sm text-text-muted">
+        No open positions in this lane.
+      </div>
+    );
   }
 
   return (
@@ -321,7 +325,11 @@ const PositionsTable = memo(function PositionsTable({ positions }: { positions: 
 
 const TradeHistoryTable = memo(function TradeHistoryTable({ trades }: { trades: TradeRecord[] }) {
   if (!trades.length) {
-    return <div className="rounded-xl border border-dashed border-bg-border p-6 text-sm text-text-muted">No closed trades in this lane yet.</div>;
+    return (
+      <div className="flex min-h-[160px] items-center justify-center rounded-xl border border-dashed border-bg-border text-sm text-text-muted">
+        No closed trades in this lane yet.
+      </div>
+    );
   }
 
   return (
@@ -376,7 +384,11 @@ const CommentaryFeed = memo(function CommentaryFeed({
   items: Array<{ time: string; scope: string; tone: string; message: string }>;
 }) {
   if (!items.length) {
-    return <div className="rounded-xl border border-dashed border-bg-border p-6 text-sm text-text-muted">No commentary in this runtime yet.</div>;
+    return (
+      <div className="flex min-h-[160px] items-center justify-center rounded-xl border border-dashed border-bg-border text-sm text-text-muted">
+        No commentary in this runtime yet.
+      </div>
+    );
   }
 
   return (
@@ -397,7 +409,11 @@ const CommentaryFeed = memo(function CommentaryFeed({
 const RegimeTable = memo(function RegimeTable({ regimes }: { regimes: Record<string, string> }) {
   const entries = Object.entries(regimes || {});
   if (!entries.length) {
-    return <div className="rounded-xl border border-dashed border-bg-border p-6 text-sm text-text-muted">No regime states reported yet.</div>;
+    return (
+      <div className="flex min-h-[160px] items-center justify-center rounded-xl border border-dashed border-bg-border text-sm text-text-muted">
+        No regime states reported yet.
+      </div>
+    );
   }
 
   return (
@@ -433,7 +449,11 @@ const EquityCurve = memo(function EquityCurve({
 }) {
   const curve = curves.find((entry) => entry.key === laneKey)?.equity_curve ?? [];
   if (curve.length < 2) {
-    return <div className="rounded-xl border border-dashed border-bg-border p-6 text-sm text-text-muted">Equity curve will appear after a few scans.</div>;
+    return (
+      <div className="flex min-h-[160px] items-center justify-center rounded-xl border border-dashed border-bg-border text-sm text-text-muted">
+        Equity curve will appear after a few scans.
+      </div>
+    );
   }
 
   const chartData = curve.map((point, index) => ({
@@ -766,7 +786,7 @@ export default function StrategyDashboard() {
                 </table>
               </div>
             ) : (
-              <div className="mt-4 rounded-xl border border-dashed border-bg-border p-5 text-sm text-text-muted">
+              <div className="mt-4 flex min-h-[140px] items-center justify-center rounded-xl border border-dashed border-bg-border text-sm text-text-muted">
                 No open orders in the blotter.
               </div>
             )}

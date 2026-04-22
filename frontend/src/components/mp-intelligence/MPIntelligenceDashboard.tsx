@@ -70,7 +70,7 @@ const DAY_TYPE_COLOR: Record<string, string> = {
   UNKNOWN: COLORS.unknown,
 };
 
-const UNDERLYINGS = ["NIFTY", "BANKNIFTY", "SENSEX"];
+const UNDERLYINGS = ["NIFTY", "BANKNIFTY"];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -154,7 +154,9 @@ function StatCard({
 function ValueMigrationPanel({ data }: { data: any }) {
   if (!data?.sessions?.length)
     return (
-      <p className="text-xs text-zinc-500">No value migration data available.</p>
+      <div className="flex min-h-[200px] items-center justify-center rounded-lg border border-dashed border-zinc-800">
+        <p className="text-xs text-zinc-500">No value migration data available.</p>
+      </div>
     );
 
   const sessions = data.sessions;
@@ -330,7 +332,11 @@ function ValueMigrationPanel({ data }: { data: any }) {
 
 function RegimeHistoryPanel({ data }: { data: any }) {
   if (!data?.sessions?.length)
-    return <p className="text-xs text-zinc-500">No regime data available.</p>;
+    return (
+      <div className="flex min-h-[200px] items-center justify-center rounded-lg border border-dashed border-zinc-800">
+        <p className="text-xs text-zinc-500">No regime data available.</p>
+      </div>
+    );
 
   const sessions: any[] = data.sessions;
   const distribution: any[] = data.distribution ?? [];
@@ -467,7 +473,11 @@ function RegimeHistoryPanel({ data }: { data: any }) {
 
 function SetupPerformancePanel({ data }: { data: any }) {
   if (!data?.cells?.length)
-    return <p className="text-xs text-zinc-500">No setup performance data (need forward outcomes).</p>;
+    return (
+      <div className="flex min-h-[200px] items-center justify-center rounded-lg border border-dashed border-zinc-800">
+        <p className="text-xs text-zinc-500">No setup performance data — forward outcomes required.</p>
+      </div>
+    );
 
   const cells: any[] = data.cells ?? [];
   const calibration: any[] = data.calibration ?? [];
@@ -664,7 +674,11 @@ function SetupPerformancePanel({ data }: { data: any }) {
 
 function OrderflowPanel({ data }: { data: any }) {
   if (!data?.series?.length)
-    return <p className="text-xs text-zinc-500">No orderflow data available.</p>;
+    return (
+      <div className="flex min-h-[200px] items-center justify-center rounded-lg border border-dashed border-zinc-800">
+        <p className="text-xs text-zinc-500">No orderflow data available.</p>
+      </div>
+    );
 
   const series: any[] = data.series;
   const divergences: any[] = data.divergences ?? [];
@@ -790,11 +804,13 @@ function OrderflowPanel({ data }: { data: any }) {
 function ConceptDriftPanel({ data }: { data: any }) {
   if (!data?.series?.length)
     return (
-      <p className="text-xs text-zinc-500">
-        {data?.current_state === "insufficient_data"
-          ? "Need more sessions with directional signals for drift analysis."
-          : "No drift data available."}
-      </p>
+      <div className="flex min-h-[200px] items-center justify-center rounded-lg border border-dashed border-zinc-800">
+        <p className="text-xs text-zinc-500">
+          {data?.current_state === "insufficient_data"
+            ? "Need more sessions with directional signals for drift analysis."
+            : "No drift data available."}
+        </p>
+      </div>
     );
 
   const series: any[] = data.series;
@@ -946,7 +962,11 @@ function ConceptDriftPanel({ data }: { data: any }) {
 
 function CompositeProfilePanel({ profiles, weeklyProfiles }: { profiles: any; weeklyProfiles: any[] }) {
   if (!profiles || Object.keys(profiles).length === 0)
-    return <p className="text-xs text-zinc-500">No composite profile data.</p>;
+    return (
+      <div className="flex min-h-[200px] items-center justify-center rounded-lg border border-dashed border-zinc-800">
+        <p className="text-xs text-zinc-500">No composite profile data.</p>
+      </div>
+    );
 
   const p20 = profiles["composite_20d"];
   const p60 = profiles["composite_60d"];
@@ -1147,8 +1167,8 @@ export default function MPIntelligenceDashboard() {
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-          {/* Underlying selector */}
-          <div className="flex items-center gap-1">
+            {/* Underlying selector */}
+            <div className="flex items-center gap-1">
             {UNDERLYINGS.map((u) => (
               <button
                 key={u}
@@ -1169,7 +1189,7 @@ export default function MPIntelligenceDashboard() {
           <select
             value={lookback}
             onChange={(e) => setLookback(Number(e.target.value))}
-            className="rounded-full border border-bg-border bg-bg-primary/20 px-3 py-1.5 text-xs text-text-primary"
+            className="cursor-pointer appearance-none rounded-full border border-bg-border bg-bg-primary/20 px-3 py-1.5 text-xs font-semibold text-text-primary transition-colors hover:border-bg-active hover:text-text-primary"
           >
             {[30, 45, 60, 90, 120, 180].map((l) => (
               <option key={l} value={l}>
@@ -1196,8 +1216,10 @@ export default function MPIntelligenceDashboard() {
             type="button"
             onClick={() => refetch()}
             disabled={isFetching}
-            className="rounded-full border border-bg-border bg-bg-primary/20 px-3 py-1.5 text-xs font-semibold text-text-secondary transition-colors hover:border-bg-active hover:text-text-primary disabled:opacity-50"
+            aria-label="Refresh MP analytics data"
+            className="flex items-center gap-1.5 rounded-full border border-bg-border bg-bg-primary/20 px-3 py-1.5 text-xs font-semibold text-text-secondary transition-colors hover:border-bg-active hover:text-text-primary disabled:opacity-50"
           >
+            <RefreshCw className={clsx("h-3 w-3", isFetching && "animate-spin")} />
             {isFetching ? "Refreshing…" : "Refresh"}
           </button>
         </div>
@@ -1278,7 +1300,7 @@ export default function MPIntelligenceDashboard() {
       {/* Tabs */}
       {data && (
         <div className="space-y-4">
-          <div className="flex gap-1 flex-wrap border-b border-zinc-800 pb-0">
+          <div className="flex gap-1 flex-wrap border-b border-zinc-800">
             {TABS.map(({ id, label, icon: Icon }) => (
               <button
                 key={id}
@@ -1286,7 +1308,7 @@ export default function MPIntelligenceDashboard() {
                 className={clsx(
                   "flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-t transition-colors",
                   activeTab === id
-                    ? "bg-zinc-800 text-zinc-100 border-b-2 border-blue-500"
+                    ? "-mb-px bg-zinc-800 text-zinc-100 border border-zinc-700 border-b-2 border-b-blue-500"
                     : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50",
                 )}
               >

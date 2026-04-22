@@ -10,8 +10,8 @@ import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
 import type { Tick } from "@/store";
 import { useTickStore, useTickSymbol } from "@/store";
 
-const HEADER_TICK_STORAGE_KEY = "nomad-curie.header-ticks.v1";
-const HEADER_LTP_STORAGE_KEY = "nomad-curie.header-ltp.v1";
+const HEADER_TICK_STORAGE_KEY = "nomad-curie.header-ticks.v2";
+const HEADER_LTP_STORAGE_KEY = "nomad-curie.header-ltp.v2";
 
 type TickSnapshot = Record<string, Tick>;
 
@@ -20,7 +20,14 @@ function loadTickSnapshot(): TickSnapshot {
   try {
     const raw = window.localStorage.getItem(HEADER_TICK_STORAGE_KEY);
     if (!raw) return {};
-    return JSON.parse(raw) as TickSnapshot;
+    const parsed = JSON.parse(raw) as TickSnapshot;
+    const sanitizedEntries = Object.entries(parsed || {}).filter(([, tick]) => {
+      if (!tick || typeof tick.symbol !== "string") return false;
+      return [tick.ltp, tick.open, tick.high, tick.low, tick.close].every(
+        (value) => typeof value === "number" && Number.isFinite(value),
+      );
+    });
+    return Object.fromEntries(sanitizedEntries) as TickSnapshot;
   } catch {
     return {};
   }
@@ -36,10 +43,16 @@ function persistTickSnapshot(snapshot: TickSnapshot) {
 }
 
 function formatChangePct(ltp?: number, close?: number) {
-  if (!ltp || !close) return "--";
-  const pct = ((ltp - close) / close) * 100;
+  if (!Number.isFinite(ltp) || !Number.isFinite(close) || !close) return "--";
+  const safeLtp = Number(ltp);
+  const safeClose = Number(close);
+  const pct = ((safeLtp - safeClose) / safeClose) * 100;
   const prefix = pct > 0 ? "+" : "";
   return `${prefix}${pct.toFixed(2)}%`;
+}
+
+function formatTickValue(value?: number, digits = 2) {
+  return Number.isFinite(value) ? value!.toFixed(digits) : "--";
 }
 
 const TickerItem = memo(function TickerItem({ symbol }: { symbol: string }) {
@@ -55,7 +68,7 @@ const TickerItem = memo(function TickerItem({ symbol }: { symbol: string }) {
           </div>
           <div className="mt-1 flex items-baseline gap-2">
             <span className="font-mono text-[17px] font-semibold text-text-primary">
-              {tick ? tick.ltp.toFixed(2) : "--"}
+              {formatTickValue(tick?.ltp, 2)}
             </span>
             <span
               className={clsx(
@@ -67,12 +80,21 @@ const TickerItem = memo(function TickerItem({ symbol }: { symbol: string }) {
                     : "text-accent-red",
               )}
             >
-              {tick ? formatChangePct(tick.ltp, tick.close) : "Waiting"}
+              {tick ? (
+              formatChangePct(tick.ltp, tick.close)
+            ) : (
+              <span className="inline-flex items-center gap-1 text-text-muted">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-text-muted" />
+                Live
+              </span>
+            )}
             </span>
           </div>
         </div>
         <div className="min-w-[82px] text-right text-[10px] text-text-muted">
-          {tick && tick.high > 0 && tick.low > 0 ? `H ${tick.high.toFixed(0)} · L ${tick.low.toFixed(0)}` : "Live feed"}
+          {tick && Number.isFinite(tick.high) && Number.isFinite(tick.low) && tick.high > 0 && tick.low > 0
+            ? `H ${formatTickValue(tick.high, 0)} · L ${formatTickValue(tick.low, 0)}`
+            : <span className="animate-pulse text-text-muted/50">connecting…</span>}
         </div>
       </div>
     </div>

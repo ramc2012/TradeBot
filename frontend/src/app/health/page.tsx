@@ -75,8 +75,8 @@ export default function HealthPage() {
       {health ? (
         <SystemHealthBoard health={health} />
       ) : (
-        <div className="rounded-[24px] border border-dashed border-bg-active bg-bg-secondary/15 p-8 text-sm text-text-muted">
-          Loading deployed service health.
+        <div className="flex min-h-[280px] items-center justify-center rounded-[24px] border border-dashed border-bg-active bg-bg-secondary/15 text-sm text-text-muted">
+          <span className="animate-pulse">Loading deployed service health…</span>
         </div>
       )}
     </div>
