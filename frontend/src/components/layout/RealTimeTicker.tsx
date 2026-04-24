@@ -10,8 +10,8 @@ import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
 import type { Tick } from "@/store";
 import { useTickStore, useTickSymbol } from "@/store";
 
-const HEADER_TICK_STORAGE_KEY = "nomad-curie.header-ticks.v2";
-const HEADER_LTP_STORAGE_KEY = "nomad-curie.header-ltp.v2";
+const HEADER_TICK_STORAGE_KEY = "nomad-curie.header-ticks.v4";
+const HEADER_LTP_STORAGE_KEY = "nomad-curie.header-ltp.v4";
 
 type TickSnapshot = Record<string, Tick>;
 

@@ -414,10 +414,70 @@ const EXAMPLE_SYMBOLS = [
   "MCX:NATURALGAS26MAYFUT",
 ];
 
+function safeArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value.filter((entry) => entry != null) as T[]) : [];
+}
+
+function safeStringArray(value: unknown): string[] {
+  return safeArray<unknown>(value).filter((entry): entry is string => typeof entry === "string");
+}
+
+function safeExpiryMappings(
+  value: unknown,
+): Array<{ expiry: string; lookup_symbol: string }> {
+  return safeArray<unknown>(value).flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const mapping = entry as { expiry?: unknown; lookup_symbol?: unknown };
+    if (typeof mapping.expiry !== "string" || typeof mapping.lookup_symbol !== "string") {
+      return [];
+    }
+    return [{ expiry: mapping.expiry, lookup_symbol: mapping.lookup_symbol }];
+  });
+}
+
+function normalizeCommodityContract(
+  contract: CommodityContractCatalogPayload["contracts"][number],
+): CommodityContractCatalogPayload["contracts"][number] {
+  return {
+    ...contract,
+    expiries: safeStringArray(contract?.expiries),
+    expiry_mappings: safeExpiryMappings(contract?.expiry_mappings),
+  };
+}
+
+function normalizeCommodityOptionRow(row: CommodityOptionRow): CommodityOptionRow {
+  return {
+    ...row,
+    available_expiries: safeStringArray(row?.available_expiries),
+    expiry_mappings: safeExpiryMappings(row?.expiry_mappings),
+  };
+}
+
+function normalizeCommodityOverviewData(
+  value:
+    | {
+        status?: CommodityStatus;
+        kill_switch_state?: KillSwitchState;
+        orders?: CommodityOrder[];
+        positions?: CommodityPosition[];
+        reports?: CommodityReport[];
+      }
+    | undefined,
+) {
+  return {
+    status: value?.status,
+    kill_switch_state: value?.kill_switch_state,
+    orders: safeArray<CommodityOrder>(value?.orders),
+    positions: safeArray<CommodityPosition>(value?.positions),
+    reports: safeArray<CommodityReport>(value?.reports),
+  };
+}
+
 function formatSigned(value?: number | null, digits = 2, suffix = "") {
-  if (value == null || Number.isNaN(value)) return "--";
-  const prefix = value > 0 ? "+" : "";
-  return `${prefix}${value.toFixed(digits)}${suffix}`;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "--";
+  const prefix = numeric > 0 ? "+" : "";
+  return `${prefix}${numeric.toFixed(digits)}${suffix}`;
 }
 
 function formatTimestamp(value?: string | null) {
@@ -428,41 +488,52 @@ function formatTimestamp(value?: string | null) {
 }
 
 function formatCompact(value?: number | null) {
-  if (value == null || Number.isNaN(value)) return "--";
-  if (Math.abs(value) >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (Math.abs(value) >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
-  return `${Math.round(value)}`;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "--";
+  if (Math.abs(numeric) >= 1_000_000) return `${(numeric / 1_000_000).toFixed(1)}M`;
+  if (Math.abs(numeric) >= 1_000) return `${(numeric / 1_000).toFixed(1)}k`;
+  return `${Math.round(numeric)}`;
 }
 
 function formatIv(value?: number | null) {
-  if (value == null || Number.isNaN(value)) return "--";
-  const normalized = value > 5 ? value : value * 100;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "--";
+  const normalized = numeric > 5 ? numeric : numeric * 100;
   return `${normalized.toFixed(1)}%`;
 }
 
 function formatIndicator(value?: number | null, digits = 2) {
-  if (value == null || Number.isNaN(value)) return "--";
-  const prefix = value > 0 ? "+" : "";
-  return `${prefix}${value.toFixed(digits)}`;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "--";
+  const prefix = numeric > 0 ? "+" : "";
+  return `${prefix}${numeric.toFixed(digits)}`;
 }
 
 function valueTone(value?: number | null) {
-  if (value == null || Number.isNaN(value)) return "text-text-muted";
-  if (value > 0) return "text-accent-green";
-  if (value < 0) return "text-accent-red";
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "text-text-muted";
+  if (numeric > 0) return "text-accent-green";
+  if (numeric < 0) return "text-accent-red";
   return "text-text-secondary";
 }
 
 function macdTone(value?: number | null) {
-  if (value == null || Number.isNaN(value)) return "text-text-muted";
-  return value >= 0 ? "text-accent-green" : "text-accent-red";
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "text-text-muted";
+  return numeric >= 0 ? "text-accent-green" : "text-accent-red";
 }
 
 function rsiTone(value?: number | null) {
-  if (value == null || Number.isNaN(value)) return "text-text-muted";
-  if (value >= 70) return "text-accent-red";
-  if (value <= 30) return "text-accent-green";
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "text-text-muted";
+  if (numeric >= 70) return "text-accent-red";
+  if (numeric <= 30) return "text-accent-green";
   return "text-text-secondary";
+}
+
+function formatFixed(value?: number | string | null, digits = 2) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric.toFixed(digits) : "--";
 }
 
 function toneBadge(tone: string) {
@@ -830,7 +901,7 @@ function ATMOptionCell({
     <div className="grid grid-cols-5 gap-x-3 gap-y-2 rounded-2xl border border-bg-border bg-bg-secondary/20 px-3 py-3 text-[11px]">
       <div>
         <div className="text-text-muted">LTP</div>
-        <div className={clsx("font-mono font-semibold", ltpTone)}>{option.ltp.toFixed(2)}</div>
+        <div className={clsx("font-mono font-semibold", ltpTone)}>{formatFixed(option.ltp, 2)}</div>
       </div>
       <div>
         <div className="text-text-muted">Chg</div>
@@ -874,7 +945,7 @@ function ATMOptionCell({
         {modeLabel ? <StatusBadge label={modeLabel} tone={option.is_liquid ? "ready" : "warning"} /> : null}
         {option.zero_cross ? <StatusBadge label={prettifyToken(option.zero_cross)} tone={option.zero_cross.includes("fresh") ? "ready" : "idle"} /> : null}
         <div className="text-text-muted">
-          strike {option.strike} · {option.distance_steps != null ? `${option.distance_steps.toFixed(1)} step` : "--"} from ATM
+          strike {option.strike} · {option.distance_steps != null ? `${formatFixed(option.distance_steps, 1)} step` : "--"} from ATM
         </div>
       </div>
     </div>
@@ -917,15 +988,19 @@ export default function CommodityPage() {
           }),
         onStatusChange,
       ),
-    storageKey: "commodityOverviewSnapshot",
+    storageKey: "commodityOverviewSnapshot:v4",
     staleTime: 10_000,
   });
 
-  const status = commodityOverviewQuery.data?.status;
-  const killSwitchState = commodityOverviewQuery.data?.kill_switch_state;
-  const orders = commodityOverviewQuery.data?.orders;
-  const positions = commodityOverviewQuery.data?.positions;
-  const reports = commodityOverviewQuery.data?.reports;
+  const normalizedOverview = useMemo(
+    () => normalizeCommodityOverviewData(commodityOverviewQuery.data),
+    [commodityOverviewQuery.data],
+  );
+  const status = normalizedOverview.status;
+  const killSwitchState = normalizedOverview.kill_switch_state;
+  const orders = normalizedOverview.orders;
+  const positions = normalizedOverview.positions;
+  const reports = normalizedOverview.reports;
 
   const commodityWatchlistQuery = useLiveSnapshotQuery<CommodityWatchlistSnapshot>({
     queryKey: ["commodityWatchlistSnapshot"],
@@ -935,13 +1010,18 @@ export default function CommodityPage() {
         (data) => onData(data as CommodityWatchlistSnapshot),
         onStatusChange,
       ),
-    storageKey: "commodityWatchlistSnapshot",
+    storageKey: "commodityWatchlistSnapshot:v4",
     staleTime: 15_000,
     retry: 1,
   });
 
   const contractCatalogData = commodityWatchlistQuery.data?.contract_catalog;
   const commodityATMWatchlistData = commodityWatchlistQuery.data?.atm_watchlist;
+  const contractCatalogSummary = contractCatalogData?.summary ?? {
+    total_symbols: 0,
+    contracts_ready: 0,
+    active_selections: 0,
+  };
   const config = status?.config;
   const summary = status?.summary;
   const configSymbols = Array.isArray(config?.symbols) ? config.symbols : [];
@@ -1030,34 +1110,46 @@ export default function CommodityPage() {
     },
   });
 
-  const commentary = useMemo(() => (Array.isArray(status?.commentary) ? status.commentary : []), [status?.commentary]);
+  const commentary = useMemo(
+    () => safeArray<CommodityStatus["commentary"][number]>(status?.commentary),
+    [status?.commentary],
+  );
   const positionRows = useMemo(
-    () => (Array.isArray(positions) ? positions : Array.isArray(status?.positions) ? status.positions : []),
+    () => (positions.length ? positions : safeArray<CommodityPosition>(status?.positions)),
     [positions, status?.positions],
   );
   const tradeHistoryRows = useMemo(
-    () => (Array.isArray(status?.trade_history) ? status.trade_history : []),
+    () => safeArray<CommodityTrade>(status?.trade_history),
     [status?.trade_history],
   );
   const orderRows = useMemo(
-    () => (Array.isArray(orders) ? orders : Array.isArray(status?.orders) ? status.orders : []),
+    () => (orders.length ? orders : safeArray<CommodityOrder>(status?.orders)),
     [orders, status?.orders],
   );
   const reportRows = useMemo(
-    () => (Array.isArray(reports) ? reports : Array.isArray(status?.reports) ? status.reports : []),
+    () => (reports.length ? reports : safeArray<CommodityReport>(status?.reports)),
     [reports, status?.reports],
   );
-  const strategies = useMemo(() => (Array.isArray(status?.strategies) ? status.strategies : []), [status?.strategies]);
-  const contractCatalog = useMemo(() => contractCatalogData?.contracts ?? [], [contractCatalogData?.contracts]);
+  const strategies = useMemo(() => safeArray<CommodityStrategyLane>(status?.strategies), [status?.strategies]);
+  const contractCatalog = useMemo(
+    () => safeArray<CommodityContractCatalogPayload["contracts"][number]>(contractCatalogData?.contracts).map(normalizeCommodityContract),
+    [contractCatalogData?.contracts],
+  );
   const futuresRows = useMemo(
-    () => (Array.isArray(status?.futures_watchlist) ? status.futures_watchlist : Array.isArray(status?.watchlist) ? status.watchlist : []),
+    () => {
+      const directRows = safeArray<CommodityWatchRow>(status?.futures_watchlist);
+      return directRows.length ? directRows : safeArray<CommodityWatchRow>(status?.watchlist);
+    },
     [status?.futures_watchlist, status?.watchlist],
   );
   const strategyOptionRows = useMemo(
-    () => (Array.isArray(status?.option_watchlist) ? status.option_watchlist : []),
+    () => safeArray<CommodityOptionRow>(status?.option_watchlist).map(normalizeCommodityOptionRow),
     [status?.option_watchlist],
   );
-  const liveOptionRows = useMemo(() => commodityATMWatchlistData?.rows ?? [], [commodityATMWatchlistData?.rows]);
+  const liveOptionRows = useMemo(
+    () => safeArray<CommodityOptionRow>(commodityATMWatchlistData?.rows).map(normalizeCommodityOptionRow),
+    [commodityATMWatchlistData?.rows],
+  );
   const optionRows = useMemo(() => {
     if (!liveOptionRows.length) {
       return strategyOptionRows;
@@ -1321,7 +1413,7 @@ export default function CommodityPage() {
           <MetricTile label="Futures Ready" value={`${readyFuturesCount || actionableFutures.length}`} tone={actionableFutures.length ? "text-accent-green" : undefined} />
           <MetricTile label="Options Ready" value={`${readyOptionsCount || actionableOptions.length}`} tone={actionableOptions.length ? "text-accent-green" : undefined} />
           <MetricTile label="Open Positions" value={`${openPositionsCount}`} />
-          <MetricTile label="Equity" value={totalEquity != null ? totalEquity.toFixed(2) : "--"} />
+          <MetricTile label="Equity" value={formatFixed(totalEquity, 2)} />
           <MetricTile label="Realized P&L" value={formatSigned(realizedPnl, 2)} tone={(realizedPnl || 0) >= 0 ? "text-accent-green" : "text-accent-red"} />
           <MetricTile label="Unrealized P&L" value={formatSigned(unrealizedPnl, 2)} tone={(unrealizedPnl || 0) >= 0 ? "text-accent-green" : "text-accent-red"} detail={`Futures ${actionableFutures.length} · Options ${actionableOptions.length}`} />
         </div>
@@ -1374,10 +1466,10 @@ export default function CommodityPage() {
                       </td>
                       <td className="py-3 pr-3 font-mono text-text-primary">{position.lots}</td>
                       <td className="py-3 pr-3 font-mono text-text-primary">{position.qty}</td>
-                      <td className="py-3 pr-3 font-mono text-text-primary">{position.entry_price.toFixed(2)}</td>
-                      <td className="py-3 pr-3 font-mono text-text-primary">{position.current_price.toFixed(2)}</td>
+                      <td className="py-3 pr-3 font-mono text-text-primary">{formatFixed(position.entry_price, 2)}</td>
+                      <td className="py-3 pr-3 font-mono text-text-primary">{formatFixed(position.current_price, 2)}</td>
                       <td className="py-3 pr-3 font-mono text-text-secondary">
-                        {position.stop_price.toFixed(2)} / {position.target_price != null ? position.target_price.toFixed(2) : "--"}
+                        {formatFixed(position.stop_price, 2)} / {position.target_price != null ? formatFixed(position.target_price, 2) : "--"}
                         {position.target_reached ? <div className="mt-1 text-[11px] text-accent-green">runner active</div> : null}
                       </td>
                       <td className="py-3 pr-3 text-text-muted">
@@ -1450,11 +1542,11 @@ export default function CommodityPage() {
                       </td>
                       <td className="py-3 pr-3 font-mono text-text-primary">{row.qty}</td>
                       <td className="py-3 pr-3 font-mono text-text-secondary">
-                        <div>{row.entryPrice != null ? row.entryPrice.toFixed(2) : "--"}</div>
+                        <div>{formatFixed(row.entryPrice, 2)}</div>
                         <div className="mt-1 text-[11px] text-text-muted">{formatTimestamp(row.entryTime)}</div>
                       </td>
                       <td className="py-3 pr-3 font-mono text-text-secondary">
-                        <div>{row.lastPrice != null ? row.lastPrice.toFixed(2) : "--"}</div>
+                        <div>{formatFixed(row.lastPrice, 2)}</div>
                         <div className="mt-1 text-[11px] text-text-muted">{formatTimestamp(row.lastTime)}</div>
                       </td>
                       <td className="py-3 pr-3 text-text-muted">{prettifyToken(row.signalReason)}</td>
@@ -1551,7 +1643,7 @@ export default function CommodityPage() {
                         <td className="py-3 pr-3 font-mono text-text-primary">
                           {order.lots || "--"} / {order.qty}
                         </td>
-                        <td className="py-3 pr-3 font-mono text-text-primary">{order.fill_price?.toFixed(2) || "--"}</td>
+                        <td className="py-3 pr-3 font-mono text-text-primary">{formatFixed(order.fill_price, 2)}</td>
                         <td className="py-3 text-text-muted">{prettifyToken(order.reason)}</td>
                       </tr>
                     ))
@@ -1583,7 +1675,7 @@ export default function CommodityPage() {
                     <YAxis tick={{ fill: "#4a5568", fontSize: 10 }} tickFormatter={(value: number) => formatCompact(value)} />
                     <Tooltip
                       contentStyle={{ background: "#0f1724", border: "1px solid #1e2d45", borderRadius: "6px" }}
-                      formatter={(value: number, key: string) => [value.toFixed(2), key === "total_equity" ? "Equity" : key === "realized_pnl" ? "Realized" : "Unrealized"]}
+                      formatter={(value: number, key: string) => [formatFixed(value, 2), key === "total_equity" ? "Equity" : key === "realized_pnl" ? "Realized" : "Unrealized"]}
                       labelFormatter={(value: string) => formatTimestamp(value)}
                     />
                     <ReferenceLine y={reportRows[0]?.total_equity || 0} stroke="#4a5568" strokeDasharray="3 3" />
@@ -1658,7 +1750,7 @@ export default function CommodityPage() {
                         <div className="mt-1 text-[11px] text-text-muted">{row.strategy_title || "Strategy 2 · Futures"}</div>
                       </td>
                       <td className="py-3 pr-3">
-                        <div className="font-mono text-text-primary">{row.price != null ? row.price.toFixed(2) : "--"}</div>
+                        <div className="font-mono text-text-primary">{formatFixed(row.price, 2)}</div>
                         <div className={clsx("mt-1 text-[11px]", valueTone(row.change_pct))}>{formatSigned(row.change_pct, 2, "%")}</div>
                       </td>
                       <td className="py-3 pr-3">
@@ -1696,7 +1788,7 @@ export default function CommodityPage() {
                       </td>
                       <td className="py-3 pr-3 font-mono text-text-secondary">
                         <div>{row.lots_per_trade ?? "--"} lot · {row.default_qty ?? "--"} qty</div>
-                        <div className="mt-1 text-[11px] text-text-muted">margin {row.required_margin != null ? row.required_margin.toFixed(2) : "--"}</div>
+                        <div className="mt-1 text-[11px] text-text-muted">margin {formatFixed(row.required_margin, 2)}</div>
                       </td>
                       <td className="py-3 pr-3">
                         <StatusBadge label={prettifyToken(row.signal_validation)} tone={row.signal_validation || "idle"} />
@@ -1767,14 +1859,14 @@ export default function CommodityPage() {
                       <td className="py-3 pr-3 font-mono text-text-secondary">
                         <div>{row.trade_bar_time ? formatTimestamp(row.trade_bar_time) : "--"}</div>
                         <div className="mt-1 text-[11px] text-text-muted">
-                          spot {row.spot_price.toFixed(2)} · lot {row.lot_size ?? "--"}
+                          spot {formatFixed(row.spot_price, 2)} · lot {row.lot_size ?? "--"}
                         </div>
                         <div className="mt-1 text-[11px] text-text-muted">{row.contract_unit_label || "--"} · {row.quote_unit_label || "--"}</div>
                       </td>
                       <td className="py-3 pr-3">
                         <div className="font-mono text-text-primary">{row.trade_symbol || "--"}</div>
                         <div className="mt-1 font-mono text-[11px] text-text-muted">
-                          {row.signal_side || "--"} {row.trade_strike ?? "--"} @ {row.trade_price != null ? row.trade_price.toFixed(2) : "--"}
+                          {row.signal_side || "--"} {row.trade_strike ?? "--"} @ {formatFixed(row.trade_price, 2)}
                         </div>
                         <div className="mt-1 text-[11px] text-text-muted">
                           {row.is_trade_contract_liquid ? "liquidity pass" : "liquidity pending"}
@@ -1783,7 +1875,7 @@ export default function CommodityPage() {
                       <td className="py-3 pr-3 font-mono text-text-secondary">
                         <div>{row.lots_affordable ?? 0} lots affordable</div>
                         <div className="mt-1 text-[11px] text-text-muted">
-                          capital {row.capital_per_trade != null ? row.capital_per_trade.toFixed(2) : "--"}
+                          capital {formatFixed(row.capital_per_trade, 2)}
                         </div>
                         <div className="mt-1 text-[11px] text-text-muted">
                           stop {optionHardStopPct}% · budget {Math.round(optionCapitalFraction * 100)}%
@@ -1887,7 +1979,7 @@ export default function CommodityPage() {
 
             <div className="mt-6 grid gap-3 sm:grid-cols-3">
               <MetricTile label="Tracked" value={`${trackedSymbolsCount}`} />
-              <MetricTile label="Contracts Ready" value={`${contractCatalogData?.summary.contracts_ready ?? 0}`} />
+              <MetricTile label="Contracts Ready" value={`${contractCatalogSummary.contracts_ready}`} />
               <MetricTile label="Expiry Map" value={`${selectedExpiryCount}`} />
             </div>
           </div>

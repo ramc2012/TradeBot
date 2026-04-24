@@ -38,8 +38,11 @@ function loadSnapshot<TData>(storageKey: string): SnapshotEnvelope<TData> | null
   try {
     const raw = window.localStorage.getItem(storageKey);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as SnapshotEnvelope<TData>;
-    if (!parsed?.savedAt) return null;
+    const parsed = JSON.parse(raw) as SnapshotEnvelope<TData> | null;
+    if (!parsed || typeof parsed !== "object" || !parsed.savedAt || !("data" in parsed)) {
+      window.localStorage.removeItem(storageKey);
+      return null;
+    }
 
     // Invalidate snapshots older than 4 hours to prevent showing stale data
     const savedTime = new Date(parsed.savedAt).getTime();

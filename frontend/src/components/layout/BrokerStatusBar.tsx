@@ -23,6 +23,45 @@ type LayoutSnapshot = {
   };
 };
 
+function normalizeBrokerStatuses(value: unknown): LayoutSnapshot["broker_status"] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is LayoutSnapshot["broker_status"][number] => (
+    !!entry && typeof entry === "object"
+  ));
+}
+
+function normalizePortfolioSummary(value: unknown): LayoutSnapshot["portfolio_summary"] | null {
+  if (!value || typeof value !== "object") return null;
+  const summary = value as Partial<LayoutSnapshot["portfolio_summary"]>;
+  return {
+    total_equity: Number(summary.total_equity ?? 0),
+    available_capital: Number(summary.available_capital ?? 0),
+    unrealized_pnl: Number(summary.unrealized_pnl ?? 0),
+    realized_pnl: Number(summary.realized_pnl ?? 0),
+    day_pnl: Number(summary.day_pnl ?? 0),
+    win_rate: Number(summary.win_rate ?? 0),
+    sharpe_ratio: Number(summary.sharpe_ratio ?? 0),
+    max_drawdown: Number(summary.max_drawdown ?? 0),
+  };
+}
+
+function normalizeLayoutSnapshot(value: LayoutSnapshot | undefined): LayoutSnapshot | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  return {
+    broker_status: normalizeBrokerStatuses(value.broker_status),
+    portfolio_summary: normalizePortfolioSummary(value.portfolio_summary) ?? {
+      total_equity: 0,
+      available_capital: 0,
+      unrealized_pnl: 0,
+      realized_pnl: 0,
+      day_pnl: 0,
+      win_rate: 0,
+      sharpe_ratio: 0,
+      max_drawdown: 0,
+    },
+  };
+}
+
 export default function BrokerStatusBar() {
   const { mode, portfolio, brokerStatuses: storeBrokerStatuses, setPortfolio, setBrokerStatuses } = useStore();
 
@@ -37,11 +76,12 @@ export default function BrokerStatusBar() {
     },
     streamFactory: (onData, onStatusChange) =>
       createLayoutSocket((data) => onData(data as LayoutSnapshot), onStatusChange),
-    storageKey: "layout:snapshot",
+    storageKey: "layout:snapshot:v4",
   });
 
-  const statusData = Array.isArray(layoutQuery.data?.broker_status) ? layoutQuery.data.broker_status : undefined;
-  const portfolioData = layoutQuery.data?.portfolio_summary ?? undefined;
+  const layoutData = normalizeLayoutSnapshot(layoutQuery.data);
+  const statusData = layoutData?.broker_status.length ? layoutData.broker_status : undefined;
+  const portfolioData = layoutData?.portfolio_summary ?? undefined;
   const effectiveStatuses = statusData?.length ? statusData : storeBrokerStatuses.length ? storeBrokerStatuses : undefined;
   const effectivePortfolio = portfolioData ?? portfolio ?? null;
   const totalEquity = Number(effectivePortfolio?.total_equity ?? 0);

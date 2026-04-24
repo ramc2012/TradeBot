@@ -52,8 +52,11 @@ function loadSnapshot<TData>(storageKey?: string): SnapshotEnvelope<TData> | nul
   try {
     const raw = window.localStorage.getItem(storageKey);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as SnapshotEnvelope<TData>;
-    if (!parsed?.savedAt) return null;
+    const parsed = JSON.parse(raw) as SnapshotEnvelope<TData> | null;
+    if (!parsed || typeof parsed !== "object" || !parsed.savedAt || !("data" in parsed)) {
+      window.localStorage.removeItem(storageKey);
+      return null;
+    }
 
     const savedTime = new Date(parsed.savedAt).getTime();
     const fourHoursMs = 4 * 60 * 60 * 1000;
