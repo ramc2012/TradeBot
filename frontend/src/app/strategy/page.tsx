@@ -80,6 +80,7 @@ type StrategyPortfolioRow = {
   strategyLabel: string;
   underlying: string;
   contract: string;
+  expiry?: string | null;
   qty: number;
   entryTime?: string | null;
   entryPrice?: number | null;
@@ -128,6 +129,37 @@ function pnlTone(value?: number | null) {
   if (value > 0) return "text-accent-green";
   if (value < 0) return "text-accent-red";
   return "text-text-secondary";
+}
+
+function computeDTE(expiry?: string | null): number | null {
+  if (!expiry) return null;
+  const parsed = new Date(expiry);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return Math.ceil((parsed.getTime() - Date.now()) / 86_400_000);
+}
+
+function dteTone(dte?: number | null) {
+  if (dte == null) return "text-text-muted";
+  if (dte <= 2) return "text-accent-red";
+  if (dte <= 7) return "text-accent-amber";
+  return "text-text-muted";
+}
+
+function formatHeldFor(enteredAt?: string | null): string {
+  if (!enteredAt) return "--";
+  const parsed = new Date(enteredAt);
+  if (Number.isNaN(parsed.getTime())) return "--";
+  const diffMs = Date.now() - parsed.getTime();
+  if (diffMs < 0) return "--";
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 1) return "<1m";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remMin = minutes % 60;
+  if (hours < 24) return remMin ? `${hours}h ${remMin}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  const remHours = hours % 24;
+  return remHours ? `${days}d ${remHours}h` : `${days}d`;
 }
 
 function freshnessTone(value?: string | null) {
@@ -323,6 +355,7 @@ function buildStrategyPortfolioRows(
         strategyLabel: strategy.label,
         underlying: position.underlying,
         contract: strategyContractLabel(position.option_type, position.strike, position.expiry),
+        expiry: position.expiry,
         qty: position.qty,
         entryTime: position.entered_at,
         entryPrice: position.entry_price,
@@ -344,6 +377,7 @@ function buildStrategyPortfolioRows(
         strategyLabel: strategy.label,
         underlying: strategyUnderlyingFromSymbol(trade.symbol),
         contract: strategyContractLabel(trade.option_type, trade.strike, trade.expiry),
+        expiry: trade.expiry,
         qty: trade.qty,
         entryTime: trade.entry_time,
         entryPrice: trade.entry_price,
@@ -601,7 +635,15 @@ export default function StrategyPage() {
                         <div className="font-mono text-text-primary">
                           {position.option_type} {position.strike}
                         </div>
-                        <div className="mt-1 text-[11px] text-text-muted">{position.expiry || "--"}</div>
+                        <div className="mt-1 flex items-center gap-2 text-[11px] text-text-muted">
+                          <span>{position.expiry || "--"}</span>
+                          {(() => {
+                            const dte = computeDTE(position.expiry);
+                            return dte != null ? (
+                              <span className={clsx("font-mono font-semibold", dteTone(dte))}>· {dte}d</span>
+                            ) : null;
+                          })()}
+                        </div>
                       </td>
                       <td className="py-3 pr-3">
                         <StatusBadge label={prettify(position.phase)} tone={position.phase || "idle"} />
@@ -615,7 +657,11 @@ export default function StrategyPage() {
                       </td>
                       <td className="py-3 pr-3 text-text-muted">
                         {prettify(position.signal_reason)}
-                        <div className="mt-1 text-[11px] text-text-muted">{formatTimestamp(position.price_updated_at || position.entered_at)}</div>
+                        <div className="mt-1 flex items-center gap-2 text-[11px] text-text-muted">
+                          <span className="font-mono text-text-secondary">{formatHeldFor(position.entered_at)}</span>
+                          <span>·</span>
+                          <span>{formatTimestamp(position.price_updated_at || position.entered_at)}</span>
+                        </div>
                       </td>
                       <td className={clsx("py-3 font-mono font-semibold", pnlTone(position.unrealized_pnl))}>
                         {formatSigned(position.unrealized_pnl, 0)}
@@ -669,7 +715,15 @@ export default function StrategyPage() {
                         />
                       </td>
                       <td className="py-3 pr-3 font-medium text-text-primary">{row.underlying}</td>
-                      <td className="py-3 pr-3 font-mono text-text-secondary">{row.contract}</td>
+                      <td className="py-3 pr-3 font-mono text-text-secondary">
+                        <div>{row.contract}</div>
+                        {(() => {
+                          const dte = computeDTE(row.expiry);
+                          return row.status === "open" && dte != null ? (
+                            <div className={clsx("mt-1 text-[11px] font-semibold", dteTone(dte))}>{dte}d to expiry</div>
+                          ) : null;
+                        })()}
+                      </td>
                       <td className="py-3 pr-3">
                         <StatusBadge label={row.statusLabel} tone={row.status === "open" ? "ready" : "idle"} />
                       </td>
@@ -1080,7 +1134,15 @@ export default function StrategyPage() {
                     <tr key={row.id} className="border-b border-bg-border/40">
                       <td className="py-2 pr-3 text-text-muted">{row.strategyLabel}</td>
                       <td className="py-2 pr-3 text-text-primary">{row.underlying}</td>
-                      <td className="py-2 pr-3 text-text-secondary">{row.contract}</td>
+                      <td className="py-2 pr-3 text-text-secondary">
+                        <div>{row.contract}</div>
+                        {(() => {
+                          const dte = computeDTE(row.expiry);
+                          return row.status === "open" && dte != null ? (
+                            <div className={clsx("mt-1 text-[11px] font-semibold", dteTone(dte))}>{dte}d to expiry</div>
+                          ) : null;
+                        })()}
+                      </td>
                       <td className="py-2 pr-3">
                         <StatusBadge label={row.statusLabel} tone={row.status === "open" ? "ready" : "idle"} />
                       </td>

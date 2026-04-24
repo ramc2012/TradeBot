@@ -44,6 +44,11 @@ type CommodityStatus = {
     strike?: number | null;
     option_type?: "CE" | "PE" | null;
     entered_at: string;
+    stop_price?: number | null;
+    target_price?: number | null;
+    target_reached?: boolean | null;
+    peak_price?: number | null;
+    signal_reason?: string | null;
   }>;
 };
 
@@ -79,6 +84,17 @@ type GlobalPositionRow = {
   unrealizedPnl: number;
   returnPct?: number | null;
   updatedAt?: string | null;
+  expiry?: string | null;
+  dte?: number | null;
+  phase?: string | null;
+  trailingStop?: number | null;
+  stopPrice?: number | null;
+  targetPrice?: number | null;
+  targetReached?: boolean | null;
+  peakPrice?: number | null;
+  entryIvPct?: number | null;
+  signalReason?: string | null;
+  enteredAt?: string | null;
 };
 
 function formatNumber(value?: number | null, digits = 2) {
@@ -110,6 +126,46 @@ function formatTimestamp(value?: string | null) {
     minute: "2-digit",
     hour12: false,
   });
+}
+
+function computeDTE(expiry?: string | null): number | null {
+  if (!expiry) return null;
+  const parsed = new Date(expiry);
+  if (Number.isNaN(parsed.getTime())) return null;
+  const diffMs = parsed.getTime() - Date.now();
+  return Math.ceil(diffMs / 86_400_000);
+}
+
+function formatHeldFor(enteredAt?: string | null): string {
+  if (!enteredAt) return "--";
+  const parsed = new Date(enteredAt);
+  if (Number.isNaN(parsed.getTime())) return "--";
+  const diffMs = Date.now() - parsed.getTime();
+  if (diffMs < 0) return "--";
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 1) return "<1m";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remMin = minutes % 60;
+  if (hours < 24) return remMin ? `${hours}h ${remMin}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  const remHours = hours % 24;
+  return remHours ? `${days}d ${remHours}h` : `${days}d`;
+}
+
+function phaseBadge(phase?: string | null): { label: string; tone: string } | null {
+  if (!phase) return null;
+  const normalized = phase.toLowerCase();
+  if (normalized === "phase1") return { label: "P1", tone: "border-accent-blue/30 bg-accent-blue/10 text-accent-blue" };
+  if (normalized === "phase2") return { label: "P2", tone: "border-accent-amber/30 bg-accent-amber/10 text-accent-amber" };
+  if (normalized === "trailing") return { label: "Trail", tone: "border-accent-green/30 bg-accent-green/10 text-accent-green" };
+  if (normalized === "exited") return { label: "Exit", tone: "border-bg-border bg-bg-secondary/30 text-text-muted" };
+  return { label: phase.slice(0, 6), tone: "border-bg-border bg-bg-secondary/30 text-text-secondary" };
+}
+
+function prettifyReason(reason?: string | null): string {
+  if (!reason) return "";
+  return reason.replaceAll("_", " ");
 }
 
 function pnlTone(value?: number | null) {
@@ -173,7 +229,7 @@ function ScopeButton({
 const PositionsLedgerTable = memo(function PositionsLedgerTable({ rows }: { rows: GlobalPositionRow[] }) {
   return (
     <div className="mt-4 overflow-x-auto">
-      <table className="w-full min-w-[1520px] text-left text-xs">
+      <table className="w-full min-w-[1760px] text-left text-xs">
         <thead>
           <tr className="border-b border-bg-border text-text-muted">
             <th className="pb-2 pr-3">Desk</th>
@@ -181,57 +237,150 @@ const PositionsLedgerTable = memo(function PositionsLedgerTable({ rows }: { rows
             <th className="pb-2 pr-3">Venue</th>
             <th className="pb-2 pr-3">Underlying</th>
             <th className="pb-2 pr-3">Contract</th>
+            <th className="pb-2 pr-3">Phase</th>
             <th className="pb-2 pr-3">Side</th>
             <th className="pb-2 pr-3">Qty / Lots</th>
             <th className="pb-2 pr-3">Entry</th>
             <th className="pb-2 pr-3">Last</th>
+            <th className="pb-2 pr-3">Risk</th>
             <th className="pb-2 pr-3">Open P&amp;L</th>
-            <th className="pb-2">Updated</th>
+            <th className="pb-2 pr-3">Reason</th>
+            <th className="pb-2">Age</th>
           </tr>
         </thead>
         <tbody>
           {rows.length ? (
-            rows.map((row) => (
-              <tr key={row.id} className="border-b border-bg-border/40 align-top">
-                <td className="py-3 pr-3">
-                  <div className="font-medium text-text-primary">{row.desk}</div>
-                  <div className="mt-1 text-[11px] text-text-muted">{row.source}</div>
-                </td>
-                <td className="py-3 pr-3 text-text-secondary">{row.strategy}</td>
-                <td className="py-3 pr-3">
-                  <span className={clsx(
-                    "inline-flex rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em]",
-                    row.venue === "MCX"
-                      ? "border-accent-amber/30 bg-accent-amber/10 text-accent-amber"
-                      : "border-accent-blue/30 bg-accent-blue/10 text-accent-blue",
-                  )}>
-                    {row.venue}
-                  </span>
-                </td>
-                <td className="py-3 pr-3 font-medium text-text-primary">{row.underlying}</td>
-                <td className="py-3 pr-3">
-                  <div className="font-mono text-text-primary">{row.contract}</div>
-                  <div className="mt-1 text-[11px] text-text-muted">{row.symbol}</div>
-                </td>
-                <td className={clsx("py-3 pr-3 font-semibold", row.action === "BUY" ? "text-accent-green" : "text-accent-red")}>
-                  {row.action}
-                </td>
-                <td className="py-3 pr-3 font-mono text-text-secondary">
-                  <div>{row.qty}</div>
-                  {row.lots ? <div className="mt-1 text-[11px] text-text-muted">{row.lots} lot · {row.lotSize || "--"} size</div> : null}
-                </td>
-                <td className="py-3 pr-3 font-mono text-text-primary">{formatNumber(row.entryPrice)}</td>
-                <td className="py-3 pr-3 font-mono text-text-primary">{formatNumber(row.currentPrice)}</td>
-                <td className={clsx("py-3 pr-3 font-mono font-semibold", pnlTone(row.unrealizedPnl))}>
-                  {formatSigned(row.unrealizedPnl, 0)}
-                  {row.returnPct != null ? <div className="mt-1 text-[11px] text-text-muted">{formatSigned(row.returnPct, 1, "%")}</div> : null}
-                </td>
-                <td className="py-3 text-text-muted">{formatTimestamp(row.updatedAt)}</td>
-              </tr>
-            ))
+            rows.map((row) => {
+              const badge = phaseBadge(row.phase);
+              const dteTone =
+                row.dte == null
+                  ? "text-text-muted"
+                  : row.dte <= 2
+                    ? "text-accent-red"
+                    : row.dte <= 7
+                      ? "text-accent-amber"
+                      : "text-text-muted";
+              const heldFor = formatHeldFor(row.enteredAt || row.updatedAt);
+              const reason = prettifyReason(row.signalReason);
+              const hasRisk =
+                row.trailingStop != null ||
+                row.stopPrice != null ||
+                row.targetPrice != null ||
+                row.entryIvPct != null;
+              return (
+                <tr key={row.id} className="border-b border-bg-border/40 align-top">
+                  <td className="py-3 pr-3">
+                    <div className="font-medium text-text-primary">{row.desk}</div>
+                    <div className="mt-1 text-[11px] text-text-muted">{row.source}</div>
+                  </td>
+                  <td className="py-3 pr-3 text-text-secondary">{row.strategy}</td>
+                  <td className="py-3 pr-3">
+                    <span className={clsx(
+                      "inline-flex rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em]",
+                      row.venue === "MCX"
+                        ? "border-accent-amber/30 bg-accent-amber/10 text-accent-amber"
+                        : "border-accent-blue/30 bg-accent-blue/10 text-accent-blue",
+                    )}>
+                      {row.venue}
+                    </span>
+                  </td>
+                  <td className="py-3 pr-3 font-medium text-text-primary">{row.underlying}</td>
+                  <td className="py-3 pr-3">
+                    <div className="font-mono text-text-primary">{row.contract}</div>
+                    <div className="mt-1 flex items-center gap-2 text-[11px] text-text-muted">
+                      <span>{row.symbol}</span>
+                      {row.dte != null ? (
+                        <span className={clsx("font-mono font-semibold", dteTone)}>
+                          · {row.dte}d
+                        </span>
+                      ) : null}
+                    </div>
+                  </td>
+                  <td className="py-3 pr-3">
+                    {badge ? (
+                      <span className={clsx(
+                        "inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em]",
+                        badge.tone,
+                      )}>
+                        {badge.label}
+                      </span>
+                    ) : (
+                      <span className="text-[11px] text-text-muted">--</span>
+                    )}
+                  </td>
+                  <td className={clsx("py-3 pr-3 font-semibold", row.action === "BUY" ? "text-accent-green" : "text-accent-red")}>
+                    {row.action}
+                  </td>
+                  <td className="py-3 pr-3 font-mono text-text-secondary">
+                    <div>{row.qty}</div>
+                    {row.lots ? <div className="mt-1 text-[11px] text-text-muted">{row.lots} lot · {row.lotSize || "--"} size</div> : null}
+                  </td>
+                  <td className="py-3 pr-3 font-mono text-text-primary">{formatNumber(row.entryPrice)}</td>
+                  <td className="py-3 pr-3 font-mono text-text-primary">{formatNumber(row.currentPrice)}</td>
+                  <td className="py-3 pr-3 font-mono text-[11px] leading-5">
+                    {hasRisk ? (
+                      <div className="space-y-0.5">
+                        {row.trailingStop != null ? (
+                          <div>
+                            <span className="text-text-muted">Trail </span>
+                            <span className="text-accent-red">{formatNumber(row.trailingStop)}</span>
+                          </div>
+                        ) : null}
+                        {row.stopPrice != null ? (
+                          <div>
+                            <span className="text-text-muted">Stop </span>
+                            <span className="text-accent-red">{formatNumber(row.stopPrice)}</span>
+                          </div>
+                        ) : null}
+                        {row.targetPrice != null ? (
+                          <div>
+                            <span className="text-text-muted">Tgt </span>
+                            <span className={clsx(row.targetReached ? "text-accent-green" : "text-accent-blue")}>
+                              {formatNumber(row.targetPrice)}
+                              {row.targetReached ? " ✓" : ""}
+                            </span>
+                          </div>
+                        ) : null}
+                        {row.entryIvPct != null ? (
+                          <div>
+                            <span className="text-text-muted">IV </span>
+                            <span className="text-text-secondary">{formatNumber(row.entryIvPct, 1)}%</span>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <span className="text-text-muted">--</span>
+                    )}
+                  </td>
+                  <td className={clsx("py-3 pr-3 font-mono font-semibold", pnlTone(row.unrealizedPnl))}>
+                    {formatSigned(row.unrealizedPnl, 0)}
+                    {row.returnPct != null ? <div className="mt-1 text-[11px] text-text-muted">{formatSigned(row.returnPct, 1, "%")}</div> : null}
+                    {row.peakPrice != null && row.currentPrice != null && row.peakPrice > 0 ? (
+                      <div
+                        className="mt-0.5 text-[10px] font-normal text-text-muted"
+                        title={`Peak ${formatNumber(row.peakPrice)}`}
+                      >
+                        pk {formatNumber(row.peakPrice)}
+                      </div>
+                    ) : null}
+                  </td>
+                  <td className="py-3 pr-3 text-[11px] text-text-secondary max-w-[180px]">
+                    {reason ? (
+                      <span title={reason}>{reason}</span>
+                    ) : (
+                      <span className="text-text-muted">--</span>
+                    )}
+                  </td>
+                  <td className="py-3 text-[11px] text-text-muted">
+                    <div className="font-mono text-text-secondary">{heldFor}</div>
+                    <div className="mt-0.5 text-[10px]">{formatTimestamp(row.updatedAt)}</div>
+                  </td>
+                </tr>
+              );
+            })
           ) : (
             <tr>
-              <td colSpan={11} className="py-10 text-center text-sm text-text-muted">
+              <td colSpan={14} className="py-10 text-center text-sm text-text-muted">
                 No positions match the current filters.
               </td>
             </tr>
@@ -304,6 +453,8 @@ export default function PositionsPage() {
         currentPrice: position.ltp,
         unrealizedPnl: position.unrealized_pnl || 0,
         updatedAt: null,
+        expiry: position.expiry || null,
+        dte: computeDTE(position.expiry),
       };
     });
 
@@ -327,6 +478,14 @@ export default function PositionsPage() {
         unrealizedPnl: position.unrealized_pnl || 0,
         returnPct: position.return_pct,
         updatedAt: position.price_updated_at || position.entered_at,
+        expiry: position.expiry || null,
+        dte: computeDTE(position.expiry),
+        phase: position.phase || null,
+        trailingStop: position.trailing_stop ?? null,
+        peakPrice: position.peak_price ?? null,
+        entryIvPct: position.entry_iv_pct ?? null,
+        signalReason: position.signal_reason || null,
+        enteredAt: position.entered_at || null,
       })),
     );
 
@@ -354,6 +513,14 @@ export default function PositionsPage() {
         unrealizedPnl: position.unrealized_pnl || 0,
         returnPct: position.return_pct,
         updatedAt: position.entered_at,
+        expiry: position.expiry || null,
+        dte: computeDTE(position.expiry),
+        stopPrice: position.stop_price ?? null,
+        targetPrice: position.target_price ?? null,
+        targetReached: position.target_reached ?? null,
+        peakPrice: position.peak_price ?? null,
+        signalReason: position.signal_reason || null,
+        enteredAt: position.entered_at || null,
       };
     });
 

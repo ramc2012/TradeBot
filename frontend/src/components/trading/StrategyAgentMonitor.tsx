@@ -96,6 +96,10 @@ export type StrategyAgentStatus = {
       current_price: number;
       phase?: string | null;
       trailing_stop?: number | null;
+      peak_price?: number | null;
+      entry_iv_pct?: number | null;
+      spot_setup?: string | null;
+      regime?: string | null;
       latest_rsi?: number | null;
       signal_reason: string;
       entered_at?: string | null;

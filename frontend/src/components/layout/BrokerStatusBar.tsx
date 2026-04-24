@@ -1,5 +1,5 @@
 "use client";
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { getBrokerStatus, getPortfolioSummary } from "@/lib/api";
 import { isBrokerReady, type BrokerStatusEntry } from "@/lib/broker-status";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
@@ -23,25 +23,55 @@ type LayoutSnapshot = {
   };
 };
 
+function asFiniteNumber(value: unknown, fallback = 0): number {
+  const next = Number(value);
+  return Number.isFinite(next) ? next : fallback;
+}
+
+function asStringOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function normalizeBrokerStatus(entry: unknown): LayoutSnapshot["broker_status"][number] | null {
+  if (!entry || typeof entry !== "object") return null;
+  const status = entry as Partial<BrokerStatusEntry>;
+  if (typeof status.broker !== "string" || !status.broker.trim()) return null;
+
+  return {
+    broker: status.broker as BrokerName,
+    connected: Boolean(status.connected),
+    ready: typeof status.ready === "boolean" ? status.ready : undefined,
+    session_active: typeof status.session_active === "boolean" ? status.session_active : undefined,
+    state: asStringOrNull(status.state),
+    detail: asStringOrNull(status.detail),
+    source: asStringOrNull(status.source),
+    checked_at: asStringOrNull(status.checked_at),
+    needs_reconnect: Boolean(status.needs_reconnect),
+    user_id: asStringOrNull(status.user_id),
+    name: asStringOrNull(status.name),
+    connected_at: asStringOrNull(status.connected_at),
+  };
+}
+
 function normalizeBrokerStatuses(value: unknown): LayoutSnapshot["broker_status"] {
   if (!Array.isArray(value)) return [];
-  return value.filter((entry): entry is LayoutSnapshot["broker_status"][number] => (
-    !!entry && typeof entry === "object"
-  ));
+  return value
+    .map(normalizeBrokerStatus)
+    .filter((entry): entry is LayoutSnapshot["broker_status"][number] => entry !== null);
 }
 
 function normalizePortfolioSummary(value: unknown): LayoutSnapshot["portfolio_summary"] | null {
   if (!value || typeof value !== "object") return null;
   const summary = value as Partial<LayoutSnapshot["portfolio_summary"]>;
   return {
-    total_equity: Number(summary.total_equity ?? 0),
-    available_capital: Number(summary.available_capital ?? 0),
-    unrealized_pnl: Number(summary.unrealized_pnl ?? 0),
-    realized_pnl: Number(summary.realized_pnl ?? 0),
-    day_pnl: Number(summary.day_pnl ?? 0),
-    win_rate: Number(summary.win_rate ?? 0),
-    sharpe_ratio: Number(summary.sharpe_ratio ?? 0),
-    max_drawdown: Number(summary.max_drawdown ?? 0),
+    total_equity: asFiniteNumber(summary.total_equity),
+    available_capital: asFiniteNumber(summary.available_capital),
+    unrealized_pnl: asFiniteNumber(summary.unrealized_pnl),
+    realized_pnl: asFiniteNumber(summary.realized_pnl),
+    day_pnl: asFiniteNumber(summary.day_pnl),
+    win_rate: asFiniteNumber(summary.win_rate),
+    sharpe_ratio: asFiniteNumber(summary.sharpe_ratio),
+    max_drawdown: asFiniteNumber(summary.max_drawdown),
   };
 }
 
@@ -62,6 +92,30 @@ function normalizeLayoutSnapshot(value: LayoutSnapshot | undefined): LayoutSnaps
   };
 }
 
+function brokerStatusesMatch(
+  current: LayoutSnapshot["broker_status"],
+  next: LayoutSnapshot["broker_status"],
+): boolean {
+  if (current.length !== next.length) return false;
+  return next.every((status, index) => {
+    const existing = current[index];
+    return (
+      existing?.broker === status.broker &&
+      existing.connected === status.connected &&
+      existing.ready === status.ready &&
+      existing.session_active === status.session_active &&
+      existing.state === status.state &&
+      existing.detail === status.detail &&
+      existing.source === status.source &&
+      existing.checked_at === status.checked_at &&
+      existing.needs_reconnect === status.needs_reconnect &&
+      existing.user_id === status.user_id &&
+      existing.name === status.name &&
+      existing.connected_at === status.connected_at
+    );
+  });
+}
+
 export default function BrokerStatusBar() {
   const { mode, portfolio, brokerStatuses: storeBrokerStatuses, setPortfolio, setBrokerStatuses } = useStore();
 
@@ -79,7 +133,7 @@ export default function BrokerStatusBar() {
     storageKey: "layout:snapshot:v4",
   });
 
-  const layoutData = normalizeLayoutSnapshot(layoutQuery.data);
+  const layoutData = useMemo(() => normalizeLayoutSnapshot(layoutQuery.data), [layoutQuery.data]);
   const statusData = layoutData?.broker_status.length ? layoutData.broker_status : undefined;
   const portfolioData = layoutData?.portfolio_summary ?? undefined;
   const effectiveStatuses = statusData?.length ? statusData : storeBrokerStatuses.length ? storeBrokerStatuses : undefined;
@@ -89,14 +143,27 @@ export default function BrokerStatusBar() {
   const hasPortfolio = effectivePortfolio != null && Number.isFinite(totalEquity);
 
   useEffect(() => {
-    if (statusData?.length) setBrokerStatuses(statusData);
-  }, [statusData, setBrokerStatuses]);
+    if (!statusData?.length || brokerStatusesMatch(storeBrokerStatuses, statusData)) return;
+    setBrokerStatuses(statusData);
+  }, [statusData, storeBrokerStatuses, setBrokerStatuses]);
 
   useEffect(() => {
-    if (portfolioData && Number.isFinite(Number(portfolioData.total_equity ?? 0))) {
-      setPortfolio(portfolioData);
+    if (!portfolioData || !Number.isFinite(Number(portfolioData.total_equity ?? 0))) return;
+    if (
+      portfolio &&
+      portfolio.total_equity === portfolioData.total_equity &&
+      portfolio.available_capital === portfolioData.available_capital &&
+      portfolio.unrealized_pnl === portfolioData.unrealized_pnl &&
+      portfolio.realized_pnl === portfolioData.realized_pnl &&
+      portfolio.day_pnl === portfolioData.day_pnl &&
+      portfolio.win_rate === portfolioData.win_rate &&
+      portfolio.sharpe_ratio === portfolioData.sharpe_ratio &&
+      portfolio.max_drawdown === portfolioData.max_drawdown
+    ) {
+      return;
     }
-  }, [portfolioData, setPortfolio]);
+    setPortfolio(portfolioData);
+  }, [portfolioData, portfolio, setPortfolio]);
 
   const connectedBroker = effectiveStatuses?.find((status) => isBrokerReady(status));
   const connectedBrokerLabel = connectedBroker?.broker ? String(connectedBroker.broker).toUpperCase() : "BROKER";

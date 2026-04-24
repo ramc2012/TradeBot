@@ -15,18 +15,41 @@ const HEADER_LTP_STORAGE_KEY = "nomad-curie.header-ltp.v4";
 
 type TickSnapshot = Record<string, Tick>;
 
+function asFiniteNumber(value: unknown): number | null {
+  const next = Number(value);
+  return Number.isFinite(next) ? next : null;
+}
+
+function normalizeTick(value: unknown): Tick | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Partial<Record<keyof Tick, unknown>>;
+  if (typeof raw.symbol !== "string" || !raw.symbol.trim()) return null;
+
+  const ltp = asFiniteNumber(raw.ltp);
+  if (ltp == null) return null;
+
+  return {
+    symbol: raw.symbol,
+    ltp,
+    open: asFiniteNumber(raw.open) ?? ltp,
+    high: asFiniteNumber(raw.high) ?? ltp,
+    low: asFiniteNumber(raw.low) ?? ltp,
+    close: asFiniteNumber(raw.close) ?? ltp,
+    volume: asFiniteNumber(raw.volume) ?? 0,
+    oi: asFiniteNumber(raw.oi) ?? 0,
+    timestamp: typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString(),
+  };
+}
+
 function loadTickSnapshot(): TickSnapshot {
   if (typeof window === "undefined") return {};
   try {
     const raw = window.localStorage.getItem(HEADER_TICK_STORAGE_KEY);
     if (!raw) return {};
-    const parsed = JSON.parse(raw) as TickSnapshot;
-    const sanitizedEntries = Object.entries(parsed || {}).filter(([, tick]) => {
-      if (!tick || typeof tick.symbol !== "string") return false;
-      return [tick.ltp, tick.open, tick.high, tick.low, tick.close].every(
-        (value) => typeof value === "number" && Number.isFinite(value),
-      );
-    });
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const sanitizedEntries = Object.entries(parsed || {})
+      .map(([symbol, tick]) => [symbol, normalizeTick(tick)] as const)
+      .filter((entry): entry is readonly [string, Tick] => entry[1] !== null);
     return Object.fromEntries(sanitizedEntries) as TickSnapshot;
   } catch {
     return {};
@@ -123,7 +146,8 @@ export default function RealTimeTicker() {
 
     socketsRef.current = MARKET_INDEX_SYMBOLS.map((symbol) =>
       createTickSocket(symbol, (data: unknown) => {
-        const tick = data as Tick;
+        const tick = normalizeTick(data);
+        if (!tick) return;
         updateTick(tick);
         persistedTicksRef.current = {
           ...persistedTicksRef.current,
@@ -145,10 +169,11 @@ export default function RealTimeTicker() {
 
   useEffect(() => {
     const payload = ltpQuery.data;
-    if (!payload) return;
+    if (!payload || typeof payload !== "object") return;
 
-    Object.entries(payload).forEach(([symbol, ltp]) => {
-      if (!Number.isFinite(ltp) || ltp <= 0) return;
+    Object.entries(payload).forEach(([symbol, rawLtp]) => {
+      const ltp = asFiniteNumber(rawLtp);
+      if (ltp == null || ltp <= 0) return;
       const existing = useTickStore.getState().getTick(symbol);
       const nextTick = {
         symbol,
