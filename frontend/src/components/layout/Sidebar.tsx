@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { clsx } from "clsx";
 import { useEffect, useState } from "react";
@@ -118,10 +117,11 @@ export default function Sidebar() {
                     : pathname === matcher || pathname.startsWith(`${matcher}/`) || pathname.startsWith(matcher),
                 );
                 return (
-                  <Link
+                  <a
                     key={href}
                     href={href}
                     title={label}
+                    data-shell-nav="true"
                     className={clsx(
                       "group relative flex rounded-xl text-sm transition-colors",
                       collapsed ? "justify-center px-0 py-2.5" : "items-center gap-3 px-3 py-2.5",
@@ -150,7 +150,7 @@ export default function Sidebar() {
                         {label}
                       </span>
                     )}
-                  </Link>
+                  </a>
                 );
               })}
             </div>

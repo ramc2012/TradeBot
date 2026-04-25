@@ -12,334 +12,955 @@
       "MCX:CRUDEOIL26MAYFUT": "2026-05-14",
       "MCX:NATURALGAS26MAYFUT": "2026-04-23"
     },
-    "selected_option_lookup_symbols": {},
+    "selected_option_lookup_symbols": {
+      "MCX:GOLD26JUNFUT": "MCX:GOLD26JUNFUT",
+      "MCX:SILVERM26JUNFUT": "MCX:SILVERM26AUGFUT",
+      "MCX:CRUDEOIL26MAYFUT": "MCX:CRUDEOIL26MAYFUT",
+      "MCX:NATURALGAS26MAYFUT": "MCX:NATURALGAS26JUNFUT"
+    },
     "lots_per_trade": 1
   },
   "control": {
     "kill_switch_active": false,
     "start_required": false,
-    "last_run_at": "2026-04-13T23:11:00.685299+05:30",
+    "last_run_at": "2026-04-24T22:02:49.570374+05:30",
     "last_error": null,
     "last_message": "Waiting for MCX market hours."
   },
   "runtime": {
     "watchlist": [
       {
-        "atr": 278.035,
-        "macd": 77.2008,
-        "price": 152225.0,
-        "mp_poc": 151849.0,
-        "mp_vah": 151957.0,
-        "mp_val": 151470.0,
-        "reason": "no_cross",
-        "regime": "bullish",
-        "signal": null,
         "symbol": "MCX:GOLD26JUNFUT",
-        "bar_time": "2026-04-13T17:30:00Z",
-        "lot_size": 10,
-        "bias_side": null,
-        "mp_ib_low": 151457.0,
-        "mp_reason": "mp_trend_up",
-        "mp_status": "ready",
-        "change_pct": 0.03,
-        "mp_ib_high": 151999.0,
-        "mp_periods": 57,
-        "raw_signal": null,
         "underlying": "GOLD",
-        "default_qty": 10,
-        "macd_signal": 10.685,
-        "mp_day_type": "trend_up",
         "display_name": "Gold",
-        "mp_direction": "BUY",
-        "execution_lane": "paper_futures",
-        "lots_per_trade": 1,
-        "macd_histogram": 66.5158,
-        "previous_close": 152176.0,
-        "strategy_title": "Strategy 2 \u00b7 Futures",
-        "mp_session_date": "2026-04-13",
-        "required_margin": 228337.5,
-        "quote_unit_label": "Rs / 10 gm",
-        "signal_validation": "waiting_cross",
-        "contract_unit_label": "100 gm contract",
-        "signal_validation_detail": "Waiting for a fresh 15-minute MACD cross."
-      },
-      {
-        "atr": 852.1815,
-        "macd": 607.1282,
-        "price": 248786.0,
-        "mp_poc": 246395.0,
-        "mp_vah": 246877.0,
-        "mp_val": 245288.0,
-        "reason": "no_cross",
-        "regime": "bullish",
-        "signal": null,
-        "symbol": "MCX:SILVERM26JUNFUT",
-        "bar_time": "2026-04-13T17:30:00Z",
-        "lot_size": 5,
-        "bias_side": null,
-        "mp_ib_low": 245386.0,
-        "mp_reason": "mp_trend_up",
-        "mp_status": "ready",
+        "price": 152808.0,
+        "previous_close": 152775.0,
         "change_pct": 0.02,
-        "mp_ib_high": 248119.0,
-        "mp_periods": 57,
-        "raw_signal": null,
-        "underlying": "SILVERM",
-        "default_qty": 5,
-        "macd_signal": 236.117,
-        "mp_day_type": "trend_up",
-        "display_name": "Silver Mini",
-        "mp_direction": "BUY",
-        "execution_lane": "paper_futures",
-        "lots_per_trade": 1,
-        "macd_histogram": 371.0112,
-        "previous_close": 248725.0,
-        "strategy_title": "Strategy 2 \u00b7 Futures",
-        "mp_session_date": "2026-04-13",
-        "required_margin": 186589.5,
-        "quote_unit_label": "Rs / kg",
-        "signal_validation": "waiting_cross",
-        "contract_unit_label": "5 kg contract",
-        "signal_validation_detail": "Waiting for a fresh 15-minute MACD cross."
-      },
-      {
-        "atr": 67.4307,
-        "macd": -51.4026,
-        "price": 8760.0,
-        "mp_poc": 8992.0,
-        "mp_vah": 9065.0,
-        "mp_val": 8865.0,
-        "reason": "no_cross",
-        "regime": "bearish",
         "signal": null,
-        "symbol": "MCX:CRUDEOIL26MAYFUT",
-        "bar_time": "2026-04-13T17:30:00Z",
-        "lot_size": 100,
-        "bias_side": null,
-        "mp_ib_low": 8624.0,
-        "mp_reason": "holding_below_poc",
-        "mp_status": "ready",
-        "change_pct": 0.07,
-        "mp_ib_high": 9075.0,
-        "mp_periods": 57,
         "raw_signal": null,
-        "underlying": "CRUDEOIL",
-        "default_qty": 100,
-        "macd_signal": -30.0733,
-        "mp_day_type": "balance_below_poc",
-        "display_name": "Crude Oil",
-        "mp_direction": "SELL",
-        "execution_lane": "paper_futures",
-        "lots_per_trade": 1,
-        "macd_histogram": -21.3293,
-        "previous_close": 8754.0,
-        "strategy_title": "Strategy 2 \u00b7 Futures",
-        "mp_session_date": "2026-04-13",
-        "required_margin": 131400.0,
-        "quote_unit_label": "Rs / barrel",
-        "signal_validation": "waiting_cross",
-        "contract_unit_label": "100 barrel contract",
-        "signal_validation_detail": "Waiting for a fresh 15-minute MACD cross."
-      },
-      {
-        "atr": 1.1271,
-        "macd": -1.2514,
-        "price": 265.0,
-        "mp_poc": 267.8,
-        "mp_vah": 271.1,
-        "mp_val": 266.1,
+        "continuation_signal": null,
+        "continuation_reason": null,
+        "recent_cross_signal": null,
+        "recent_cross_bars_ago": null,
         "reason": "no_cross",
-        "regime": "bearish",
-        "signal": null,
-        "symbol": "MCX:NATURALGAS26MAYFUT",
-        "bar_time": "2026-04-13T17:30:00Z",
-        "lot_size": 1250,
-        "bias_side": null,
-        "mp_ib_low": 267.5,
-        "mp_reason": "mp_balanced",
+        "entry_style": null,
+        "signal_validation_detail": "Waiting for a closed 15-minute MACD cross or a continuation breakout.",
+        "regime": "bullish",
+        "macd": 240.0447,
+        "macd_signal": 240.0939,
+        "macd_histogram": -0.0492,
+        "atr": 220.7138,
+        "bar_time": "2026-04-24T21:45:00+05:30",
         "mp_status": "ready",
-        "change_pct": -0.04,
-        "mp_ib_high": 268.9,
-        "mp_periods": 57,
-        "raw_signal": null,
-        "underlying": "NATURALGAS",
-        "default_qty": 1250,
-        "macd_signal": -1.0313,
-        "mp_day_type": "balance",
-        "display_name": "Natural Gas",
         "mp_direction": null,
-        "execution_lane": "paper_futures",
+        "mp_day_type": "balance",
+        "mp_reason": "mp_balanced",
+        "mp_poc": 151569.0,
+        "mp_vah": 152462.0,
+        "mp_val": 151154.0,
+        "mp_ib_high": 151457.0,
+        "mp_ib_low": 150756.0,
+        "mp_periods": 52,
+        "mp_session_date": "2026-04-24",
+        "lot_size": 10,
         "lots_per_trade": 1,
-        "macd_histogram": -0.2201,
-        "previous_close": 265.1,
+        "default_qty": 10,
+        "contract_unit_label": "100 gm contract",
+        "quote_unit_label": "Rs / 10 gm",
         "strategy_title": "Strategy 2 \u00b7 Futures",
-        "mp_session_date": "2026-04-13",
-        "required_margin": 49687.5,
-        "quote_unit_label": "Rs / MMBtu",
         "signal_validation": "waiting_cross",
+        "execution_lane": "paper_futures",
+        "required_margin": 229212.0,
+        "bias_side": null
+      },
+      {
+        "symbol": "MCX:SILVERM26JUNFUT",
+        "underlying": "SILVERM",
+        "display_name": "Silver Mini",
+        "price": 252662.0,
+        "previous_close": 252107.0,
+        "change_pct": 0.22,
+        "signal": null,
+        "raw_signal": null,
+        "continuation_signal": null,
+        "continuation_reason": null,
+        "recent_cross_signal": null,
+        "recent_cross_bars_ago": null,
+        "reason": "no_cross",
+        "entry_style": null,
+        "signal_validation_detail": "Waiting for a closed 15-minute MACD cross or a continuation breakout.",
+        "regime": "bullish",
+        "macd": 624.4832,
+        "macd_signal": 643.3257,
+        "macd_histogram": -18.8425,
+        "atr": 1054.8855,
+        "bar_time": "2026-04-24T21:45:00+05:30",
+        "mp_status": "ready",
+        "mp_direction": "BUY",
+        "mp_day_type": "balance_above_poc",
+        "mp_reason": "holding_above_poc",
+        "mp_poc": 252054.0,
+        "mp_vah": 253256.0,
+        "mp_val": 248536.0,
+        "mp_ib_high": 249497.0,
+        "mp_ib_low": 247922.0,
+        "mp_periods": 52,
+        "mp_session_date": "2026-04-24",
+        "lot_size": 5,
+        "lots_per_trade": 1,
+        "default_qty": 5,
+        "contract_unit_label": "5 kg contract",
+        "quote_unit_label": "Rs / kg",
+        "strategy_title": "Strategy 2 \u00b7 Futures",
+        "signal_validation": "waiting_cross",
+        "execution_lane": "paper_futures",
+        "required_margin": 189496.5,
+        "bias_side": null
+      },
+      {
+        "symbol": "MCX:CRUDEOIL26MAYFUT",
+        "underlying": "CRUDEOIL",
+        "display_name": "Crude Oil",
+        "price": 8853.0,
+        "previous_close": 8858.0,
+        "change_pct": -0.06,
+        "signal": null,
+        "raw_signal": null,
+        "continuation_signal": null,
+        "continuation_reason": null,
+        "recent_cross_signal": null,
+        "recent_cross_bars_ago": null,
+        "reason": "no_cross",
+        "entry_style": null,
+        "signal_validation_detail": "Waiting for a closed 15-minute MACD cross or a continuation breakout.",
+        "regime": "bearish",
+        "macd": -49.8843,
+        "macd_signal": -38.173,
+        "macd_histogram": -11.7113,
+        "atr": 78.8392,
+        "bar_time": "2026-04-24T21:45:00+05:30",
+        "mp_status": "ready",
+        "mp_direction": null,
+        "mp_day_type": "balance",
+        "mp_reason": "mp_balanced",
+        "mp_poc": 8985.0,
+        "mp_vah": 9139.0,
+        "mp_val": 8884.0,
+        "mp_ib_high": 9139.0,
+        "mp_ib_low": 9083.0,
+        "mp_periods": 52,
+        "mp_session_date": "2026-04-24",
+        "lot_size": 100,
+        "lots_per_trade": 1,
+        "default_qty": 100,
+        "contract_unit_label": "100 barrel contract",
+        "quote_unit_label": "Rs / barrel",
+        "strategy_title": "Strategy 2 \u00b7 Futures",
+        "signal_validation": "waiting_cross",
+        "execution_lane": "paper_futures",
+        "required_margin": 132795.0,
+        "bias_side": null
+      },
+      {
+        "symbol": "MCX:NATURALGAS26MAYFUT",
+        "underlying": "NATURALGAS",
+        "display_name": "Natural Gas",
+        "price": 253.8,
+        "previous_close": 253.1,
+        "change_pct": 0.28,
+        "signal": null,
+        "raw_signal": null,
+        "continuation_signal": null,
+        "continuation_reason": null,
+        "recent_cross_signal": null,
+        "recent_cross_bars_ago": null,
+        "reason": "no_cross",
+        "entry_style": null,
+        "signal_validation_detail": "Waiting for a closed 15-minute MACD cross or a continuation breakout.",
+        "regime": "bearish",
+        "macd": -1.2374,
+        "macd_signal": -1.166,
+        "macd_histogram": -0.0714,
+        "atr": 1.1688,
+        "bar_time": "2026-04-24T21:45:00+05:30",
+        "mp_status": "ready",
+        "mp_direction": null,
+        "mp_day_type": "balance",
+        "mp_reason": "mp_balanced",
+        "mp_poc": 258.6,
+        "mp_vah": 259.9,
+        "mp_val": 255.0,
+        "mp_ib_high": 258.9,
+        "mp_ib_low": 258.2,
+        "mp_periods": 52,
+        "mp_session_date": "2026-04-24",
+        "lot_size": 1250,
+        "lots_per_trade": 1,
+        "default_qty": 1250,
         "contract_unit_label": "1250 MMBtu contract",
-        "signal_validation_detail": "Waiting for a fresh 15-minute MACD cross."
+        "quote_unit_label": "Rs / MMBtu",
+        "strategy_title": "Strategy 2 \u00b7 Futures",
+        "signal_validation": "waiting_cross",
+        "execution_lane": "paper_futures",
+        "required_margin": 47587.5,
+        "bias_side": null
       }
     ],
     "futures_watchlist": [
       {
-        "atr": 278.035,
-        "macd": 77.2008,
-        "price": 152225.0,
-        "mp_poc": 151849.0,
-        "mp_vah": 151957.0,
-        "mp_val": 151470.0,
-        "reason": "no_cross",
-        "regime": "bullish",
-        "signal": null,
         "symbol": "MCX:GOLD26JUNFUT",
-        "bar_time": "2026-04-13T17:30:00Z",
-        "lot_size": 10,
-        "bias_side": null,
-        "mp_ib_low": 151457.0,
-        "mp_reason": "mp_trend_up",
-        "mp_status": "ready",
-        "change_pct": 0.03,
-        "mp_ib_high": 151999.0,
-        "mp_periods": 57,
-        "raw_signal": null,
         "underlying": "GOLD",
-        "default_qty": 10,
-        "macd_signal": 10.685,
-        "mp_day_type": "trend_up",
         "display_name": "Gold",
-        "mp_direction": "BUY",
-        "execution_lane": "paper_futures",
-        "lots_per_trade": 1,
-        "macd_histogram": 66.5158,
-        "previous_close": 152176.0,
-        "strategy_title": "Strategy 2 \u00b7 Futures",
-        "mp_session_date": "2026-04-13",
-        "required_margin": 228337.5,
-        "quote_unit_label": "Rs / 10 gm",
-        "signal_validation": "waiting_cross",
-        "contract_unit_label": "100 gm contract",
-        "signal_validation_detail": "Waiting for a fresh 15-minute MACD cross."
-      },
-      {
-        "atr": 852.1815,
-        "macd": 607.1282,
-        "price": 248786.0,
-        "mp_poc": 246395.0,
-        "mp_vah": 246877.0,
-        "mp_val": 245288.0,
-        "reason": "no_cross",
-        "regime": "bullish",
-        "signal": null,
-        "symbol": "MCX:SILVERM26JUNFUT",
-        "bar_time": "2026-04-13T17:30:00Z",
-        "lot_size": 5,
-        "bias_side": null,
-        "mp_ib_low": 245386.0,
-        "mp_reason": "mp_trend_up",
-        "mp_status": "ready",
+        "price": 152808.0,
+        "previous_close": 152775.0,
         "change_pct": 0.02,
-        "mp_ib_high": 248119.0,
-        "mp_periods": 57,
-        "raw_signal": null,
-        "underlying": "SILVERM",
-        "default_qty": 5,
-        "macd_signal": 236.117,
-        "mp_day_type": "trend_up",
-        "display_name": "Silver Mini",
-        "mp_direction": "BUY",
-        "execution_lane": "paper_futures",
-        "lots_per_trade": 1,
-        "macd_histogram": 371.0112,
-        "previous_close": 248725.0,
-        "strategy_title": "Strategy 2 \u00b7 Futures",
-        "mp_session_date": "2026-04-13",
-        "required_margin": 186589.5,
-        "quote_unit_label": "Rs / kg",
-        "signal_validation": "waiting_cross",
-        "contract_unit_label": "5 kg contract",
-        "signal_validation_detail": "Waiting for a fresh 15-minute MACD cross."
-      },
-      {
-        "atr": 67.4307,
-        "macd": -51.4026,
-        "price": 8760.0,
-        "mp_poc": 8992.0,
-        "mp_vah": 9065.0,
-        "mp_val": 8865.0,
-        "reason": "no_cross",
-        "regime": "bearish",
         "signal": null,
-        "symbol": "MCX:CRUDEOIL26MAYFUT",
-        "bar_time": "2026-04-13T17:30:00Z",
-        "lot_size": 100,
-        "bias_side": null,
-        "mp_ib_low": 8624.0,
-        "mp_reason": "holding_below_poc",
-        "mp_status": "ready",
-        "change_pct": 0.07,
-        "mp_ib_high": 9075.0,
-        "mp_periods": 57,
         "raw_signal": null,
-        "underlying": "CRUDEOIL",
-        "default_qty": 100,
-        "macd_signal": -30.0733,
-        "mp_day_type": "balance_below_poc",
-        "display_name": "Crude Oil",
-        "mp_direction": "SELL",
-        "execution_lane": "paper_futures",
-        "lots_per_trade": 1,
-        "macd_histogram": -21.3293,
-        "previous_close": 8754.0,
-        "strategy_title": "Strategy 2 \u00b7 Futures",
-        "mp_session_date": "2026-04-13",
-        "required_margin": 131400.0,
-        "quote_unit_label": "Rs / barrel",
-        "signal_validation": "waiting_cross",
-        "contract_unit_label": "100 barrel contract",
-        "signal_validation_detail": "Waiting for a fresh 15-minute MACD cross."
-      },
-      {
-        "atr": 1.1271,
-        "macd": -1.2514,
-        "price": 265.0,
-        "mp_poc": 267.8,
-        "mp_vah": 271.1,
-        "mp_val": 266.1,
+        "continuation_signal": null,
+        "continuation_reason": null,
+        "recent_cross_signal": null,
+        "recent_cross_bars_ago": null,
         "reason": "no_cross",
-        "regime": "bearish",
-        "signal": null,
-        "symbol": "MCX:NATURALGAS26MAYFUT",
-        "bar_time": "2026-04-13T17:30:00Z",
-        "lot_size": 1250,
-        "bias_side": null,
-        "mp_ib_low": 267.5,
-        "mp_reason": "mp_balanced",
+        "entry_style": null,
+        "signal_validation_detail": "Waiting for a closed 15-minute MACD cross or a continuation breakout.",
+        "regime": "bullish",
+        "macd": 240.0447,
+        "macd_signal": 240.0939,
+        "macd_histogram": -0.0492,
+        "atr": 220.7138,
+        "bar_time": "2026-04-24T21:45:00+05:30",
         "mp_status": "ready",
-        "change_pct": -0.04,
-        "mp_ib_high": 268.9,
-        "mp_periods": 57,
-        "raw_signal": null,
-        "underlying": "NATURALGAS",
-        "default_qty": 1250,
-        "macd_signal": -1.0313,
-        "mp_day_type": "balance",
-        "display_name": "Natural Gas",
         "mp_direction": null,
-        "execution_lane": "paper_futures",
+        "mp_day_type": "balance",
+        "mp_reason": "mp_balanced",
+        "mp_poc": 151569.0,
+        "mp_vah": 152462.0,
+        "mp_val": 151154.0,
+        "mp_ib_high": 151457.0,
+        "mp_ib_low": 150756.0,
+        "mp_periods": 52,
+        "mp_session_date": "2026-04-24",
+        "lot_size": 10,
         "lots_per_trade": 1,
-        "macd_histogram": -0.2201,
-        "previous_close": 265.1,
+        "default_qty": 10,
+        "contract_unit_label": "100 gm contract",
+        "quote_unit_label": "Rs / 10 gm",
         "strategy_title": "Strategy 2 \u00b7 Futures",
-        "mp_session_date": "2026-04-13",
-        "required_margin": 49687.5,
-        "quote_unit_label": "Rs / MMBtu",
         "signal_validation": "waiting_cross",
+        "execution_lane": "paper_futures",
+        "required_margin": 229212.0,
+        "bias_side": null
+      },
+      {
+        "symbol": "MCX:SILVERM26JUNFUT",
+        "underlying": "SILVERM",
+        "display_name": "Silver Mini",
+        "price": 252662.0,
+        "previous_close": 252107.0,
+        "change_pct": 0.22,
+        "signal": null,
+        "raw_signal": null,
+        "continuation_signal": null,
+        "continuation_reason": null,
+        "recent_cross_signal": null,
+        "recent_cross_bars_ago": null,
+        "reason": "no_cross",
+        "entry_style": null,
+        "signal_validation_detail": "Waiting for a closed 15-minute MACD cross or a continuation breakout.",
+        "regime": "bullish",
+        "macd": 624.4832,
+        "macd_signal": 643.3257,
+        "macd_histogram": -18.8425,
+        "atr": 1054.8855,
+        "bar_time": "2026-04-24T21:45:00+05:30",
+        "mp_status": "ready",
+        "mp_direction": "BUY",
+        "mp_day_type": "balance_above_poc",
+        "mp_reason": "holding_above_poc",
+        "mp_poc": 252054.0,
+        "mp_vah": 253256.0,
+        "mp_val": 248536.0,
+        "mp_ib_high": 249497.0,
+        "mp_ib_low": 247922.0,
+        "mp_periods": 52,
+        "mp_session_date": "2026-04-24",
+        "lot_size": 5,
+        "lots_per_trade": 1,
+        "default_qty": 5,
+        "contract_unit_label": "5 kg contract",
+        "quote_unit_label": "Rs / kg",
+        "strategy_title": "Strategy 2 \u00b7 Futures",
+        "signal_validation": "waiting_cross",
+        "execution_lane": "paper_futures",
+        "required_margin": 189496.5,
+        "bias_side": null
+      },
+      {
+        "symbol": "MCX:CRUDEOIL26MAYFUT",
+        "underlying": "CRUDEOIL",
+        "display_name": "Crude Oil",
+        "price": 8853.0,
+        "previous_close": 8858.0,
+        "change_pct": -0.06,
+        "signal": null,
+        "raw_signal": null,
+        "continuation_signal": null,
+        "continuation_reason": null,
+        "recent_cross_signal": null,
+        "recent_cross_bars_ago": null,
+        "reason": "no_cross",
+        "entry_style": null,
+        "signal_validation_detail": "Waiting for a closed 15-minute MACD cross or a continuation breakout.",
+        "regime": "bearish",
+        "macd": -49.8843,
+        "macd_signal": -38.173,
+        "macd_histogram": -11.7113,
+        "atr": 78.8392,
+        "bar_time": "2026-04-24T21:45:00+05:30",
+        "mp_status": "ready",
+        "mp_direction": null,
+        "mp_day_type": "balance",
+        "mp_reason": "mp_balanced",
+        "mp_poc": 8985.0,
+        "mp_vah": 9139.0,
+        "mp_val": 8884.0,
+        "mp_ib_high": 9139.0,
+        "mp_ib_low": 9083.0,
+        "mp_periods": 52,
+        "mp_session_date": "2026-04-24",
+        "lot_size": 100,
+        "lots_per_trade": 1,
+        "default_qty": 100,
+        "contract_unit_label": "100 barrel contract",
+        "quote_unit_label": "Rs / barrel",
+        "strategy_title": "Strategy 2 \u00b7 Futures",
+        "signal_validation": "waiting_cross",
+        "execution_lane": "paper_futures",
+        "required_margin": 132795.0,
+        "bias_side": null
+      },
+      {
+        "symbol": "MCX:NATURALGAS26MAYFUT",
+        "underlying": "NATURALGAS",
+        "display_name": "Natural Gas",
+        "price": 253.8,
+        "previous_close": 253.1,
+        "change_pct": 0.28,
+        "signal": null,
+        "raw_signal": null,
+        "continuation_signal": null,
+        "continuation_reason": null,
+        "recent_cross_signal": null,
+        "recent_cross_bars_ago": null,
+        "reason": "no_cross",
+        "entry_style": null,
+        "signal_validation_detail": "Waiting for a closed 15-minute MACD cross or a continuation breakout.",
+        "regime": "bearish",
+        "macd": -1.2374,
+        "macd_signal": -1.166,
+        "macd_histogram": -0.0714,
+        "atr": 1.1688,
+        "bar_time": "2026-04-24T21:45:00+05:30",
+        "mp_status": "ready",
+        "mp_direction": null,
+        "mp_day_type": "balance",
+        "mp_reason": "mp_balanced",
+        "mp_poc": 258.6,
+        "mp_vah": 259.9,
+        "mp_val": 255.0,
+        "mp_ib_high": 258.9,
+        "mp_ib_low": 258.2,
+        "mp_periods": 52,
+        "mp_session_date": "2026-04-24",
+        "lot_size": 1250,
+        "lots_per_trade": 1,
+        "default_qty": 1250,
         "contract_unit_label": "1250 MMBtu contract",
-        "signal_validation_detail": "Waiting for a fresh 15-minute MACD cross."
+        "quote_unit_label": "Rs / MMBtu",
+        "strategy_title": "Strategy 2 \u00b7 Futures",
+        "signal_validation": "waiting_cross",
+        "execution_lane": "paper_futures",
+        "required_margin": 47587.5,
+        "bias_side": null
       }
     ],
-    "option_watchlist": [],
+    "option_watchlist": [
+      {
+        "underlying": "GOLD",
+        "symbol": "MCX:GOLD26JUNFUT",
+        "kind": "MCX",
+        "spot_price": 152829.0,
+        "expiry": "2026-04-30",
+        "atm_strike": 152800.0,
+        "live_source": "upstox",
+        "fyers_symbol": "MCX:GOLD26JUNFUT",
+        "lot_size": 10,
+        "contract_unit_label": "100 gm contract",
+        "quote_unit_label": "Rs / 10 gm",
+        "strategy_title": "Strategy 1 \u00b7 Options",
+        "contract_notes": "Gold options are monitored off the saved expiry ladder; futures execution uses one 100 gm lot with prices quoted per 10 gm.",
+        "selection_policy": "pinned_until_expiry",
+        "ce": {
+          "strike": 153000.0,
+          "option_type": "CE",
+          "instrument_key": "MCX:GOLD26APR153000CE",
+          "trading_symbol": "MCX:GOLD26APR153000CE",
+          "ltp": 1575.5,
+          "prev_close": 1464.5,
+          "change": 111.0,
+          "change_pct": 7.58,
+          "oi": 49,
+          "prev_oi": 33.0,
+          "oi_change": 16.0,
+          "oi_change_pct": 48.48,
+          "volume": 117,
+          "iv": 0.202,
+          "delta": 0.5044,
+          "gamma": 0.000101,
+          "theta": -145.0477,
+          "vega": 78.1661,
+          "macd": 44.0208,
+          "macd_signal": 3.2984,
+          "macd_histogram": 40.7224,
+          "rsi": 53.52,
+          "selection_mode": "nearest_liquid",
+          "liquidity_score": 169.87,
+          "distance_steps": 2.0,
+          "distance_from_atm": 200.0,
+          "is_liquid": true,
+          "bar_time": "2026-04-24T15:30:00+00:00",
+          "zero_cross": "above_zero",
+          "live_ltp": 1575.5,
+          "price_source": "direct_ltp"
+        },
+        "pe": {
+          "strike": 153000.0,
+          "option_type": "PE",
+          "instrument_key": "MCX:GOLD26APR153000PE",
+          "trading_symbol": "MCX:GOLD26APR153000PE",
+          "ltp": 1852.5,
+          "prev_close": 2306.5,
+          "change": -454.0,
+          "change_pct": -19.68,
+          "oi": 28,
+          "prev_oi": 32.0,
+          "oi_change": -4.0,
+          "oi_change_pct": -12.5,
+          "volume": 35,
+          "iv": 0.2365,
+          "delta": -0.494607,
+          "gamma": 8.6e-05,
+          "theta": -140.2546,
+          "vega": 78.1637,
+          "macd": -150.5447,
+          "macd_signal": -85.9849,
+          "macd_histogram": -64.5598,
+          "rsi": 38.85,
+          "selection_mode": "nearest_liquid",
+          "liquidity_score": 82.87,
+          "distance_steps": 2.0,
+          "distance_from_atm": 200.0,
+          "is_liquid": true,
+          "bar_time": "2026-04-24T15:30:00+00:00",
+          "zero_cross": "below_zero",
+          "live_ltp": 1852.5,
+          "price_source": "direct_ltp"
+        },
+        "selected_expiry": "2026-04-30",
+        "suggested_expiry": "2026-04-30",
+        "active_expiry": "2026-04-30",
+        "available_expiries": [
+          "2026-04-30",
+          "2026-05-27",
+          "2026-06-30",
+          "2026-07-29",
+          "2026-08-31",
+          "2026-09-25",
+          "2026-10-30",
+          "2026-11-27",
+          "2026-12-31",
+          "2027-01-29",
+          "2027-02-26",
+          "2027-03-29"
+        ],
+        "lookup_symbol": "MCX:GOLD26JUNFUT",
+        "expiry_mappings": [
+          {
+            "expiry": "2026-04-30",
+            "lookup_symbol": "MCX:GOLD26JUNFUT"
+          },
+          {
+            "expiry": "2026-05-27",
+            "lookup_symbol": "MCX:GOLD26JUNFUT"
+          },
+          {
+            "expiry": "2026-06-30",
+            "lookup_symbol": "MCX:GOLD26JUNFUT"
+          },
+          {
+            "expiry": "2026-07-29",
+            "lookup_symbol": "MCX:GOLD26AUGFUT"
+          },
+          {
+            "expiry": "2026-08-31",
+            "lookup_symbol": "MCX:GOLD26AUGFUT"
+          },
+          {
+            "expiry": "2026-09-25",
+            "lookup_symbol": "MCX:GOLD26OCTFUT"
+          },
+          {
+            "expiry": "2026-10-30",
+            "lookup_symbol": "MCX:GOLD26OCTFUT"
+          },
+          {
+            "expiry": "2026-11-27",
+            "lookup_symbol": "MCX:GOLD26DECFUT"
+          },
+          {
+            "expiry": "2026-12-31",
+            "lookup_symbol": "MCX:GOLD26DECFUT"
+          },
+          {
+            "expiry": "2027-01-29",
+            "lookup_symbol": "MCX:GOLD27FEBFUT"
+          },
+          {
+            "expiry": "2027-02-26",
+            "lookup_symbol": "MCX:GOLD27FEBFUT"
+          },
+          {
+            "expiry": "2027-03-29",
+            "lookup_symbol": "MCX:GOLD27FEBFUT"
+          }
+        ],
+        "selected_lookup_symbol": "MCX:GOLD26JUNFUT",
+        "selection_locked": true,
+        "display_name": "Gold",
+        "regime": "bullish",
+        "signal_side": null,
+        "signal_reason": "waiting_cross",
+        "trade_symbol": "",
+        "trade_strike": null,
+        "trade_price": 0.0,
+        "trade_bar_time": null,
+        "ce_symbol": "MCX:GOLD26APR153000CE",
+        "pe_symbol": "MCX:GOLD26APR153000PE",
+        "ce_trade_price": 1575.5,
+        "pe_trade_price": 1852.5,
+        "capital_per_trade": 188868.33,
+        "lots_affordable": 0,
+        "is_trade_contract_liquid": false,
+        "signal_validation": "trend_aligned",
+        "signal_validation_detail": "The MACD quadrant is aligned, but a fresh zero-cross has not fired yet.",
+        "trade_price_source": "chain_ltp"
+      },
+      {
+        "underlying": "SILVERM",
+        "symbol": "MCX:SILVERM26JUNFUT",
+        "kind": "MCX",
+        "spot_price": 252629.0,
+        "expiry": "2026-05-26",
+        "atm_strike": 250250.0,
+        "live_source": "upstox",
+        "fyers_symbol": "MCX:SILVERM26JUNFUT",
+        "lot_size": 5,
+        "contract_unit_label": "5 kg contract",
+        "quote_unit_label": "Rs / kg",
+        "strategy_title": "Strategy 1 \u00b7 Options",
+        "contract_notes": "Silver Mini options and futures share the same saved root; one futures lot is 5 kg.",
+        "selection_policy": "exchange_ladder",
+        "ce": {
+          "strike": 250000.0,
+          "option_type": "CE",
+          "instrument_key": "MCX:SILVERM26MAY250000CE",
+          "trading_symbol": "MCX:SILVERM26MAY250000CE",
+          "ltp": 13649.5,
+          "prev_close": 12949.5,
+          "change": 700.0,
+          "change_pct": 5.41,
+          "oi": 2344,
+          "prev_oi": 2243.0,
+          "oi_change": 101.0,
+          "oi_change_pct": 4.5,
+          "volume": 6271,
+          "iv": 0.3891,
+          "delta": 0.578426,
+          "gamma": 1.3e-05,
+          "theta": -201.5,
+          "vega": 292.6308,
+          "macd": 72.7673,
+          "macd_signal": -51.1034,
+          "macd_histogram": 123.8707,
+          "rsi": 56.2,
+          "selection_mode": "nearest_liquid",
+          "liquidity_score": 7140.76,
+          "distance_steps": 1.0,
+          "distance_from_atm": 250.0,
+          "is_liquid": true,
+          "bar_time": "2026-04-24T15:30:00+00:00",
+          "zero_cross": "above_zero",
+          "live_ltp": 13649.5,
+          "price_source": "direct_ltp"
+        },
+        "pe": {
+          "strike": 250000.0,
+          "option_type": "PE",
+          "instrument_key": "MCX:SILVERM26MAY250000PE",
+          "trading_symbol": "MCX:SILVERM26MAY250000PE",
+          "ltp": 10978.0,
+          "prev_close": 13293.0,
+          "change": -2315.0,
+          "change_pct": -17.42,
+          "oi": 2071,
+          "prev_oi": 1987.0,
+          "oi_change": 84.0,
+          "oi_change_pct": 4.23,
+          "volume": 4323,
+          "iv": 0.4361,
+          "delta": -0.424771,
+          "gamma": 1.2e-05,
+          "theta": -178.6733,
+          "vega": 293.0942,
+          "macd": -392.5251,
+          "macd_signal": -167.4369,
+          "macd_histogram": -225.0882,
+          "rsi": 38.82,
+          "selection_mode": "nearest_liquid",
+          "liquidity_score": 5097.23,
+          "distance_steps": 1.0,
+          "distance_from_atm": 250.0,
+          "is_liquid": true,
+          "bar_time": "2026-04-24T15:30:00+00:00",
+          "zero_cross": "below_zero",
+          "live_ltp": 10978.0,
+          "price_source": "direct_ltp"
+        },
+        "selected_expiry": null,
+        "suggested_expiry": "2026-05-26",
+        "active_expiry": "2026-05-26",
+        "available_expiries": [
+          "2026-05-26",
+          "2026-06-19",
+          "2026-07-28",
+          "2026-08-24",
+          "2026-09-24",
+          "2026-10-27",
+          "2026-11-23",
+          "2026-12-28",
+          "2027-01-25",
+          "2027-02-19"
+        ],
+        "lookup_symbol": "MCX:SILVERM26JUNFUT",
+        "expiry_mappings": [
+          {
+            "expiry": "2026-05-26",
+            "lookup_symbol": "MCX:SILVERM26JUNFUT"
+          },
+          {
+            "expiry": "2026-06-19",
+            "lookup_symbol": "MCX:SILVERM26JUNFUT"
+          },
+          {
+            "expiry": "2026-07-28",
+            "lookup_symbol": "MCX:SILVERM26AUGFUT"
+          },
+          {
+            "expiry": "2026-08-24",
+            "lookup_symbol": "MCX:SILVERM26AUGFUT"
+          },
+          {
+            "expiry": "2026-09-24",
+            "lookup_symbol": "MCX:SILVERM26NOVFUT"
+          },
+          {
+            "expiry": "2026-10-27",
+            "lookup_symbol": "MCX:SILVERM26NOVFUT"
+          },
+          {
+            "expiry": "2026-11-23",
+            "lookup_symbol": "MCX:SILVERM26NOVFUT"
+          },
+          {
+            "expiry": "2026-12-28",
+            "lookup_symbol": "MCX:SILVERM27FEBFUT"
+          },
+          {
+            "expiry": "2027-01-25",
+            "lookup_symbol": "MCX:SILVERM27FEBFUT"
+          },
+          {
+            "expiry": "2027-02-19",
+            "lookup_symbol": "MCX:SILVERM27FEBFUT"
+          }
+        ],
+        "selected_lookup_symbol": null,
+        "selection_locked": false,
+        "display_name": "Silver Mini",
+        "regime": "bullish",
+        "signal_side": null,
+        "signal_reason": "waiting_cross",
+        "trade_symbol": "",
+        "trade_strike": null,
+        "trade_price": 0.0,
+        "trade_bar_time": null,
+        "ce_symbol": "MCX:SILVERM26MAY250000CE",
+        "pe_symbol": "MCX:SILVERM26MAY250000PE",
+        "ce_trade_price": 13649.5,
+        "pe_trade_price": 10978.0,
+        "capital_per_trade": 188868.33,
+        "lots_affordable": 0,
+        "is_trade_contract_liquid": false,
+        "signal_validation": "trend_aligned",
+        "signal_validation_detail": "The MACD quadrant is aligned, but a fresh zero-cross has not fired yet.",
+        "trade_price_source": "chain_ltp"
+      },
+      {
+        "underlying": "CRUDEOIL",
+        "symbol": "MCX:CRUDEOIL26MAYFUT",
+        "kind": "MCX",
+        "spot_price": 8864.0,
+        "expiry": "2026-05-14",
+        "atm_strike": 8850.0,
+        "live_source": "upstox",
+        "fyers_symbol": "MCX:CRUDEOIL26MAYFUT",
+        "lot_size": 100,
+        "contract_unit_label": "100 barrel contract",
+        "quote_unit_label": "Rs / barrel",
+        "strategy_title": "Strategy 1 \u00b7 Options",
+        "contract_notes": "Crude Oil options align with the saved expiry ladder; one futures lot is 100 barrels.",
+        "selection_policy": "pinned_until_expiry",
+        "ce": {
+          "strike": 8850.0,
+          "option_type": "CE",
+          "instrument_key": "MCX:CRUDEOIL26MAY8850CE",
+          "trading_symbol": "MCX:CRUDEOIL26MAY8850CE",
+          "ltp": 740.1,
+          "prev_close": 948.9,
+          "change": -208.8,
+          "change_pct": -22.0,
+          "oi": 208,
+          "prev_oi": 59.0,
+          "oi_change": 149.0,
+          "oi_change_pct": 252.54,
+          "volume": 1709,
+          "iv": 0.8701,
+          "delta": 0.550563,
+          "gamma": 0.000219,
+          "theta": -18.5981,
+          "vega": 8.2111,
+          "macd": -13.6401,
+          "macd_signal": 4.198,
+          "macd_histogram": -17.8382,
+          "rsi": 38.98,
+          "selection_mode": "atm",
+          "liquidity_score": 1830.72,
+          "distance_steps": 0.0,
+          "distance_from_atm": 0.0,
+          "is_liquid": true,
+          "bar_time": "2026-04-24T15:30:00+00:00",
+          "zero_cross": "below_zero",
+          "live_ltp": 740.1,
+          "price_source": "direct_ltp"
+        },
+        "pe": {
+          "strike": 8850.0,
+          "option_type": "PE",
+          "instrument_key": "MCX:CRUDEOIL26MAY8850PE",
+          "trading_symbol": "MCX:CRUDEOIL26MAY8850PE",
+          "ltp": 730.8,
+          "prev_close": 631.9,
+          "change": 98.9,
+          "change_pct": 15.65,
+          "oi": 447,
+          "prev_oi": 219.0,
+          "oi_change": 228.0,
+          "oi_change_pct": 104.11,
+          "volume": 3728,
+          "iv": 0.9141,
+          "delta": -0.447879,
+          "gamma": 0.000209,
+          "theta": -17.9185,
+          "vega": 8.2069,
+          "macd": -2.4878,
+          "macd_signal": -12.9677,
+          "macd_histogram": 10.4799,
+          "rsi": 59.36,
+          "selection_mode": "atm",
+          "liquidity_score": 3934.09,
+          "distance_steps": 0.0,
+          "distance_from_atm": 0.0,
+          "is_liquid": true,
+          "bar_time": "2026-04-24T15:30:00+00:00",
+          "zero_cross": "below_zero",
+          "live_ltp": 730.0,
+          "price_source": "direct_ltp"
+        },
+        "selected_expiry": "2026-05-14",
+        "suggested_expiry": "2026-05-14",
+        "active_expiry": "2026-05-14",
+        "available_expiries": [
+          "2026-05-14",
+          "2026-06-16",
+          "2026-07-16"
+        ],
+        "lookup_symbol": "MCX:CRUDEOIL26MAYFUT",
+        "expiry_mappings": [
+          {
+            "expiry": "2026-05-14",
+            "lookup_symbol": "MCX:CRUDEOIL26MAYFUT"
+          },
+          {
+            "expiry": "2026-06-16",
+            "lookup_symbol": "MCX:CRUDEOIL26JUNFUT"
+          },
+          {
+            "expiry": "2026-07-16",
+            "lookup_symbol": "MCX:CRUDEOIL26JULFUT"
+          }
+        ],
+        "selected_lookup_symbol": "MCX:CRUDEOIL26MAYFUT",
+        "selection_locked": true,
+        "display_name": "Crude Oil",
+        "regime": "dead_zone",
+        "signal_side": null,
+        "signal_reason": "waiting_cross",
+        "trade_symbol": "",
+        "trade_strike": null,
+        "trade_price": 0.0,
+        "trade_bar_time": null,
+        "ce_symbol": "MCX:CRUDEOIL26MAY8850CE",
+        "pe_symbol": "MCX:CRUDEOIL26MAY8850PE",
+        "ce_trade_price": 740.1,
+        "pe_trade_price": 730.0,
+        "capital_per_trade": 188868.33,
+        "lots_affordable": 0,
+        "is_trade_contract_liquid": false,
+        "signal_validation": "dead_zone",
+        "signal_validation_detail": "Both CE and PE MACD are below zero. Strategy 1 skips the dead zone.",
+        "trade_price_source": "chain_ltp"
+      },
+      {
+        "underlying": "NATURALGAS",
+        "symbol": "MCX:NATURALGAS26MAYFUT",
+        "kind": "MCX",
+        "spot_price": 254.0,
+        "expiry": "2026-05-22",
+        "atm_strike": 255.0,
+        "live_source": "upstox",
+        "fyers_symbol": "MCX:NATURALGAS26MAYFUT",
+        "lot_size": 1250,
+        "contract_unit_label": "1250 MMBtu contract",
+        "quote_unit_label": "Rs / MMBtu",
+        "strategy_title": "Strategy 1 \u00b7 Options",
+        "contract_notes": "Natural Gas options and futures use the same root; one futures lot is 1250 MMBtu.",
+        "selection_policy": "exchange_ladder",
+        "ce": {
+          "strike": 255.0,
+          "option_type": "CE",
+          "instrument_key": "MCX:NATURALGAS26MAY255CE",
+          "trading_symbol": "MCX:NATURALGAS26MAY255CE",
+          "ltp": 13.8,
+          "prev_close": 16.75,
+          "change": -2.95,
+          "change_pct": -17.61,
+          "oi": 3247,
+          "prev_oi": 759.0,
+          "oi_change": 2488.0,
+          "oi_change_pct": 327.8,
+          "volume": 20395,
+          "iv": 0.4894,
+          "delta": 0.528966,
+          "gamma": 0.011561,
+          "theta": -0.266,
+          "vega": 0.2798,
+          "macd": -1.2484,
+          "macd_signal": -1.4337,
+          "macd_histogram": 0.1853,
+          "rsi": 27.7,
+          "selection_mode": "atm",
+          "liquidity_score": 21580.73,
+          "distance_steps": 0.0,
+          "distance_from_atm": 0.0,
+          "is_liquid": true,
+          "bar_time": "2026-04-24T09:30:00+00:00",
+          "zero_cross": "below_zero",
+          "live_ltp": 13.8,
+          "price_source": "direct_ltp"
+        },
+        "pe": {
+          "strike": 255.0,
+          "option_type": "PE",
+          "instrument_key": "MCX:NATURALGAS26MAY255PE",
+          "trading_symbol": "MCX:NATURALGAS26MAY255PE",
+          "ltp": 14.7,
+          "prev_close": 11.9,
+          "change": 2.8,
+          "change_pct": 23.53,
+          "oi": 2325,
+          "prev_oi": 540.0,
+          "oi_change": 1785.0,
+          "oi_change_pct": 330.56,
+          "volume": 21048,
+          "iv": 0.5276,
+          "delta": -0.469071,
+          "gamma": 0.01072,
+          "theta": -0.2397,
+          "vega": 0.2797,
+          "macd": 0.8415,
+          "macd_signal": 0.8805,
+          "macd_histogram": -0.0389,
+          "rsi": 72.23,
+          "selection_mode": "atm",
+          "liquidity_score": 21910.39,
+          "distance_steps": 0.0,
+          "distance_from_atm": 0.0,
+          "is_liquid": true,
+          "bar_time": "2026-04-24T09:30:00+00:00",
+          "zero_cross": "above_zero",
+          "live_ltp": 14.7,
+          "price_source": "direct_ltp"
+        },
+        "selected_expiry": null,
+        "suggested_expiry": "2026-05-22",
+        "active_expiry": "2026-05-22",
+        "available_expiries": [
+          "2026-05-22",
+          "2026-06-23"
+        ],
+        "lookup_symbol": "MCX:NATURALGAS26MAYFUT",
+        "expiry_mappings": [
+          {
+            "expiry": "2026-05-22",
+            "lookup_symbol": "MCX:NATURALGAS26MAYFUT"
+          },
+          {
+            "expiry": "2026-06-23",
+            "lookup_symbol": "MCX:NATURALGAS26JUNFUT"
+          }
+        ],
+        "selected_lookup_symbol": null,
+        "selection_locked": false,
+        "display_name": "Natural Gas",
+        "regime": "bearish",
+        "signal_side": null,
+        "signal_reason": "waiting_cross",
+        "trade_symbol": "",
+        "trade_strike": null,
+        "trade_price": 0.0,
+        "trade_bar_time": null,
+        "ce_symbol": "MCX:NATURALGAS26MAY255CE",
+        "pe_symbol": "MCX:NATURALGAS26MAY255PE",
+        "ce_trade_price": 13.8,
+        "pe_trade_price": 14.7,
+        "capital_per_trade": 188868.33,
+        "lots_affordable": 0,
+        "is_trade_contract_liquid": false,
+        "signal_validation": "trend_aligned",
+        "signal_validation_detail": "The MACD quadrant is aligned, but a fresh zero-cross has not fired yet.",
+        "trade_price_source": "chain_ltp"
+      }
+    ],
     "positions": [],
     "orders": [
       {
@@ -1380,16 +2001,7 @@
     ],
     "reports": [
       {
-        "time": "2026-04-13T23:12:50.696713+05:30",
-        "total_equity": 944341.65,
-        "realized_pnl": -79407.48,
-        "unrealized_pnl": 0.0,
-        "open_positions": 0,
-        "tracked_symbols": 4,
-        "last_message": "Scanned 4 futures rows and 0 option rows. 0 open positions."
-      },
-      {
-        "time": "2026-04-13T22:59:13.648927+05:30",
+        "time": "2026-04-24T22:03:22.419477+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1398,7 +2010,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:58:39.317841+05:30",
+        "time": "2026-04-24T22:02:19.498789+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1407,7 +2019,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:57:54.652599+05:30",
+        "time": "2026-04-24T22:01:14.373543+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1416,7 +2028,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:57:20.564542+05:30",
+        "time": "2026-04-24T22:00:07.048893+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1425,7 +2037,16 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:56:45.770997+05:30",
+        "time": "2026-04-24T21:58:55.580236+05:30",
+        "total_equity": 944341.65,
+        "realized_pnl": -79407.48,
+        "unrealized_pnl": 0.0,
+        "open_positions": 0,
+        "tracked_symbols": 4,
+        "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 8 failure(s), latest '[Errno -2] Name or service not known'."
+      },
+      {
+        "time": "2026-04-24T21:57:54.787233+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1434,7 +2055,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:56:10.668999+05:30",
+        "time": "2026-04-24T21:54:57.044612+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1443,7 +2064,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:55:36.785319+05:30",
+        "time": "2026-04-24T21:54:03.211628+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1452,7 +2073,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:55:02.728344+05:30",
+        "time": "2026-04-24T21:53:11.892158+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1461,7 +2082,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:54:28.679248+05:30",
+        "time": "2026-04-24T21:52:17.251363+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1470,7 +2091,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:53:53.982966+05:30",
+        "time": "2026-04-24T21:51:24.579073+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1479,7 +2100,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:53:19.916827+05:30",
+        "time": "2026-04-24T21:50:31.746379+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1488,7 +2109,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:52:45.815415+05:30",
+        "time": "2026-04-24T21:49:36.916944+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1497,7 +2118,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:52:11.242967+05:30",
+        "time": "2026-04-24T21:48:45.050230+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1506,7 +2127,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:51:36.782201+05:30",
+        "time": "2026-04-24T21:47:45.432242+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1515,7 +2136,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:51:01.605641+05:30",
+        "time": "2026-04-24T21:46:51.816683+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1524,7 +2145,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:50:27.394787+05:30",
+        "time": "2026-04-24T21:45:55.841762+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1533,7 +2154,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:49:52.867537+05:30",
+        "time": "2026-04-24T21:45:02.335596+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1542,7 +2163,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:49:18.673761+05:30",
+        "time": "2026-04-24T21:44:10.425015+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1551,7 +2172,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:48:43.405834+05:30",
+        "time": "2026-04-24T21:43:18.143926+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1560,7 +2181,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:48:08.464760+05:30",
+        "time": "2026-04-24T21:42:25.107309+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1569,7 +2190,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:47:34.245713+05:30",
+        "time": "2026-04-24T21:41:33.593942+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1578,7 +2199,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:46:59.381913+05:30",
+        "time": "2026-04-24T21:40:41.027060+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1587,7 +2208,16 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:46:20.940107+05:30",
+        "time": "2026-04-24T21:39:49.858320+05:30",
+        "total_equity": 944341.65,
+        "realized_pnl": -79407.48,
+        "unrealized_pnl": 0.0,
+        "open_positions": 0,
+        "tracked_symbols": 4,
+        "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Reused the last good snapshot for retained 1 option rows."
+      },
+      {
+        "time": "2026-04-24T21:38:58.738148+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1596,7 +2226,16 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:45:46.645823+05:30",
+        "time": "2026-04-24T21:38:04.818590+05:30",
+        "total_equity": 944341.65,
+        "realized_pnl": -79407.48,
+        "unrealized_pnl": 0.0,
+        "open_positions": 0,
+        "tracked_symbols": 4,
+        "last_message": "Scanned 4 futures rows and 3 option rows. 0 open positions."
+      },
+      {
+        "time": "2026-04-24T21:37:12.419875+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1605,7 +2244,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:45:09.796291+05:30",
+        "time": "2026-04-24T21:36:18.138723+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1614,7 +2253,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:43:29.138705+05:30",
+        "time": "2026-04-24T21:35:23.228307+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1623,7 +2262,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:42:20.430688+05:30",
+        "time": "2026-04-24T21:34:01.250531+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1632,7 +2271,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:41:28.660887+05:30",
+        "time": "2026-04-24T21:32:33.254318+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1641,7 +2280,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:40:53.875267+05:30",
+        "time": "2026-04-24T21:31:12.797796+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1650,7 +2289,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:40:19.202575+05:30",
+        "time": "2026-04-24T21:29:52.415926+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1659,7 +2298,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:38:54.562817+05:30",
+        "time": "2026-04-24T21:28:57.082152+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1668,7 +2307,7 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:38:18.912033+05:30",
+        "time": "2026-04-24T21:28:02.546974+05:30",
         "total_equity": 944341.65,
         "realized_pnl": -79407.48,
         "unrealized_pnl": 0.0,
@@ -1677,469 +2316,451 @@
         "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:37:44.099666+05:30",
-        "total_equity": 720291.05,
-        "realized_pnl": -74877.88,
-        "unrealized_pnl": -980.55,
-        "open_positions": 1,
+        "time": "2026-04-24T21:27:10.141356+05:30",
+        "total_equity": 944341.65,
+        "realized_pnl": -79407.48,
+        "unrealized_pnl": 0.0,
+        "open_positions": 0,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:37:09.223476+05:30",
-        "total_equity": 720291.05,
-        "realized_pnl": -74877.88,
-        "unrealized_pnl": -980.55,
-        "open_positions": 1,
+        "time": "2026-04-24T21:26:19.092468+05:30",
+        "total_equity": 944341.65,
+        "realized_pnl": -79407.48,
+        "unrealized_pnl": 0.0,
+        "open_positions": 0,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:36:35.069883+05:30",
-        "total_equity": 720291.05,
-        "realized_pnl": -74877.88,
-        "unrealized_pnl": -980.55,
-        "open_positions": 1,
+        "time": "2026-04-24T21:25:24.377109+05:30",
+        "total_equity": 944341.65,
+        "realized_pnl": -79407.48,
+        "unrealized_pnl": 0.0,
+        "open_positions": 0,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:36:01.033738+05:30",
-        "total_equity": 720291.05,
-        "realized_pnl": -74877.88,
-        "unrealized_pnl": -980.55,
-        "open_positions": 1,
+        "time": "2026-04-24T21:24:31.820029+05:30",
+        "total_equity": 944341.65,
+        "realized_pnl": -79407.48,
+        "unrealized_pnl": 0.0,
+        "open_positions": 0,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:35:26.816215+05:30",
-        "total_equity": 719961.05,
-        "realized_pnl": -74877.88,
-        "unrealized_pnl": -1310.55,
-        "open_positions": 1,
+        "time": "2026-04-24T21:23:38.983952+05:30",
+        "total_equity": 944341.65,
+        "realized_pnl": -79407.48,
+        "unrealized_pnl": 0.0,
+        "open_positions": 0,
         "tracked_symbols": 4,
-        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
-      },
-      {
-        "time": "2026-04-13T22:34:58.209903+05:30",
-        "total_equity": 720351.05,
-        "realized_pnl": -74877.88,
-        "unrealized_pnl": -920.55,
-        "open_positions": 1,
-        "tracked_symbols": 4,
-        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
-      },
-      {
-        "time": "2026-04-13T22:34:20.833032+05:30",
-        "total_equity": 720351.05,
-        "realized_pnl": -74877.88,
-        "unrealized_pnl": -920.55,
-        "open_positions": 1,
-        "tracked_symbols": 4,
-        "last_message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
+        "last_message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       }
     ],
     "commentary": [
       {
-        "time": "2026-04-17T23:30:14.202012+05:30",
+        "time": "2026-04-25T08:24:20.145083+05:30",
         "tone": "idle",
         "message": "Commodity market closed. Agent idle."
       },
       {
-        "time": "2026-04-17T09:00:25.441761+05:30",
+        "time": "2026-04-25T08:23:49.336861+05:30",
         "tone": "error",
         "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
       },
       {
-        "time": "2026-04-16T23:30:09.225126+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Agent idle."
-      },
-      {
-        "time": "2026-04-14T09:23:49.214017+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-04-13T23:34:24.048415+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Agent idle."
-      },
-      {
-        "time": "2026-04-13T23:13:24.724393+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-04-13T23:12:50.696475+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 0 option rows. 0 open positions."
-      },
-      {
-        "time": "2026-04-13T22:59:47.695312+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-04-13T22:45:09.796206+05:30",
+        "time": "2026-04-24T22:00:07.048020+05:30",
         "tone": "success",
         "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-13T22:45:07.565533+05:30",
-        "tone": "success",
-        "message": "Saved 4 commodity option expiry selections."
-      },
-      {
-        "time": "2026-04-13T22:43:29.138483+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
-      },
-      {
-        "time": "2026-04-13T22:42:55.081672+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-04-13T22:38:18.911665+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
-      },
-      {
-        "time": "2026-04-13T22:38:18.911572+05:30",
-        "tone": "trade",
-        "message": "EXIT Gold SELL @151809.00 (stop_loss) | 1 lot"
-      },
-      {
-        "time": "2026-04-13T22:25:43.453113+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
-      },
-      {
-        "time": "2026-04-13T22:25:08.718376+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-04-13T22:15:08.505112+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
-      },
-      {
-        "time": "2026-04-13T22:15:08.505078+05:30",
-        "tone": "trade",
-        "message": "ENTRY Gold BUY @152186.05 | 1 lot | MP trend_up | stop 151887.88"
-      },
-      {
-        "time": "2026-04-13T22:06:27.419926+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
-      },
-      {
-        "time": "2026-04-13T22:05:16.525723+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-04-13T22:04:41.692225+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
-      },
-      {
-        "time": "2026-04-13T22:04:41.692179+05:30",
-        "tone": "trade",
-        "message": "EXIT Silver Mini SELL @249274.00 (target_hit) | 1 lot"
-      },
-      {
-        "time": "2026-04-13T22:03:32.750167+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-04-13T22:00:41.341583+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
-      },
-      {
-        "time": "2026-04-13T22:00:07.362583+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 3 option rows. 1 open positions."
-      },
-      {
-        "time": "2026-04-13T22:00:07.362495+05:30",
-        "tone": "trade",
-        "message": "ENTRY Silver Mini BUY @247824.85 | 1 lot | MP balance_above_poc | stop 247000.75"
-      },
-      {
-        "time": "2026-04-13T21:54:07.428305+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
-      },
-      {
-        "time": "2026-04-13T21:53:33.303943+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-04-13T21:38:58.327752+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
-      },
-      {
-        "time": "2026-04-13T21:06:04.971163+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-04-13T20:34:09.351587+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
-      },
-      {
-        "time": "2026-04-13T20:33:33.658462+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-04-13T20:21:55.836040+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
-      },
-      {
-        "time": "2026-04-13T20:21:55.835999+05:30",
-        "tone": "trade",
-        "message": "EXIT Natural Gas BUY @267.70 (stop_loss) | 1 lot"
-      },
-      {
-        "time": "2026-04-13T09:00:07.618980+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-04-11T21:23:54.895152+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Agent idle."
-      },
-      {
-        "time": "2026-04-11T21:23:47.494682+05:30",
+        "time": "2026-04-24T21:58:55.576993+05:30",
         "tone": "warning",
-        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions. Commodity history warnings detected: fyers: 1 failure(s), latest 'Fyers data API error 429: request limit reached'."
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 8 failure(s), latest '[Errno -2] Name or service not known'."
       },
       {
-        "time": "2026-04-11T21:23:47.494674+05:30",
+        "time": "2026-04-24T21:58:55.576955+05:30",
         "tone": "warning",
-        "message": "Commodity history warnings detected: fyers: 1 failure(s), latest 'Fyers data API error 429: request limit reached'."
+        "message": "Commodity history warnings detected: upstox: 8 failure(s), latest '[Errno -2] Name or service not known'."
       },
       {
-        "time": "2026-04-11T21:23:05.069257+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Agent idle."
-      },
-      {
-        "time": "2026-04-11T21:22:56.856413+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
-      },
-      {
-        "time": "2026-04-10T23:37:10.194399+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Agent idle."
-      },
-      {
-        "time": "2026-04-10T23:03:48.002531+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
-      },
-      {
-        "time": "2026-04-10T23:03:48.002486+05:30",
-        "tone": "trade",
-        "message": "ENTRY Natural Gas SELL @264.77 | 1 lot | MP balance_below_poc | stop 265.69"
-      },
-      {
-        "time": "2026-04-10T23:00:35.446530+05:30",
+        "time": "2026-04-24T21:40:41.025973+05:30",
         "tone": "success",
         "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-10T23:00:35.446448+05:30",
-        "tone": "trade",
-        "message": "EXIT Gold SELL @152575.00 (mp_gate_flip) | 1 lot"
-      },
-      {
-        "time": "2026-04-10T22:56:55.362237+05:30",
+        "time": "2026-04-24T21:39:49.857485+05:30",
         "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Reused the last good snapshot for retained 1 option rows."
       },
       {
-        "time": "2026-04-10T22:56:55.362185+05:30",
-        "tone": "trade",
-        "message": "ENTRY Gold BUY @152804.36 | 1 lot | MP balance_above_poc | stop 152561.00"
-      },
-      {
-        "time": "2026-04-10T22:52:00.475721+05:30",
+        "time": "2026-04-24T21:38:58.737335+05:30",
         "tone": "success",
         "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-10T22:52:00.475371+05:30",
-        "tone": "trade",
-        "message": "EXIT Gold BUY @152725.00 (macd_reversal) | 1 lot"
-      },
-      {
-        "time": "2026-04-10T22:31:14.164400+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
-      },
-      {
-        "time": "2026-04-10T22:31:14.164264+05:30",
-        "tone": "trade",
-        "message": "EXIT Natural Gas SELL @265.60 (mp_gate_flip) | 1 lot"
-      },
-      {
-        "time": "2026-04-10T22:28:00.013261+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 2 open positions."
-      },
-      {
-        "time": "2026-04-10T22:27:53.962321+05:30",
-        "tone": "warning",
-        "message": "Live LTP fetch failed. Using candle closes where available. ()"
-      },
-      {
-        "time": "2026-04-10T22:18:09.796539+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 2 open positions."
-      },
-      {
-        "time": "2026-04-10T22:18:09.796403+05:30",
-        "tone": "trade",
-        "message": "ENTRY Gold SELL @152430.75 | 1 lot | MP balance_below_poc | stop 152781.61"
-      },
-      {
-        "time": "2026-04-10T22:00:38.838277+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
-      },
-      {
-        "time": "2026-04-10T22:00:38.838229+05:30",
-        "tone": "trade",
-        "message": "ENTRY Natural Gas BUY @266.23 | 1 lot | MP balance_above_poc | stop 265.20"
-      },
-      {
-        "time": "2026-04-10T21:40:52.803104+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
-      },
-      {
-        "time": "2026-04-10T21:11:49.600879+05:30",
+        "time": "2026-04-24T21:38:04.817771+05:30",
         "tone": "success",
         "message": "Scanned 4 futures rows and 3 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-10T17:49:49.512676+05:30",
+        "time": "2026-04-24T21:12:58.018058+05:30",
         "tone": "success",
         "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-10T17:49:49.512454+05:30",
-        "tone": "trade",
-        "message": "EXIT Gold SELL @152557.00 (stop_loss) | 1 lot"
+        "time": "2026-04-24T15:43:44.903998+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
       },
       {
-        "time": "2026-04-10T17:49:49.512204+05:30",
-        "tone": "trade",
-        "message": "EXIT Crude Oil CE @395.80 (hard_stop) | 3 lot"
-      },
-      {
-        "time": "2026-04-10T17:28:18.096933+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 2 open positions."
-      },
-      {
-        "time": "2026-04-10T17:28:18.096718+05:30",
-        "tone": "trade",
-        "message": "ENTRY Gold BUY @152826.38 | 1 lot | MP balance_above_poc | stop 152561.00"
-      },
-      {
-        "time": "2026-04-10T15:22:17.647292+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
-      },
-      {
-        "time": "2026-04-10T15:21:43.526113+05:30",
-        "tone": "success",
-        "message": "Scanned 0 futures rows and 0 option rows. 1 open positions."
-      },
-      {
-        "time": "2026-04-10T15:21:43.525359+05:30",
+        "time": "2026-04-24T15:43:14.755940+05:30",
         "tone": "warning",
-        "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
+        "message": "Scanned 4 futures rows and 2 option rows. 0 open positions. Reused the last good snapshot for retained 4 futures rows, retained 2 option rows. Commodity history warnings detected: upstox: 8 failure(s), latest '[Errno -2] Name or service not known'; fyers: 8 failure(s), latest '[Errno -2] Name or service not known'."
       },
       {
-        "time": "2026-04-10T15:21:42.478817+05:30",
+        "time": "2026-04-24T15:43:14.755929+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: upstox: 8 failure(s), latest '[Errno -2] Name or service not known'; fyers: 8 failure(s), latest '[Errno -2] Name or service not known'."
+      },
+      {
+        "time": "2026-04-24T15:43:14.751847+05:30",
+        "tone": "warning",
+        "message": "Live LTP fetch failed. Using candle closes where available. ([Errno -2] Name or service not known)"
+      },
+      {
+        "time": "2026-04-24T15:43:09.113403+05:30",
         "tone": "warning",
         "message": "MCX:NATURALGAS26MAYFUT: no futures candles returned by broker."
       },
       {
-        "time": "2026-04-10T15:21:42.200973+05:30",
+        "time": "2026-04-24T15:43:09.048263+05:30",
         "tone": "warning",
         "message": "MCX:CRUDEOIL26MAYFUT: no futures candles returned by broker."
       },
       {
-        "time": "2026-04-10T15:21:41.998665+05:30",
+        "time": "2026-04-24T15:43:08.993139+05:30",
         "tone": "warning",
         "message": "MCX:SILVERM26JUNFUT: no futures candles returned by broker."
       },
       {
-        "time": "2026-04-10T15:21:41.748452+05:30",
+        "time": "2026-04-24T15:43:08.928015+05:30",
         "tone": "warning",
         "message": "MCX:GOLD26JUNFUT: no futures candles returned by broker."
       },
       {
-        "time": "2026-04-10T15:21:41.399926+05:30",
+        "time": "2026-04-24T15:43:08.808851+05:30",
         "tone": "warning",
-        "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
+        "message": "Live LTP fetch failed. Using candle closes where available. ()"
       },
       {
-        "time": "2026-04-10T15:14:21.441385+05:30",
+        "time": "2026-04-24T15:33:58.322221+05:30",
         "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 1 open positions."
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-10T15:13:47.666041+05:30",
+        "time": "2026-04-24T15:29:33.464610+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-04-24T15:28:42.771941+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 2 option rows. 0 open positions. Reused the last good snapshot for retained 2 option rows. Commodity history warnings detected: upstox: 15 failure(s), latest '[Errno -2] Name or service not known'."
+      },
+      {
+        "time": "2026-04-24T15:28:42.771917+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: upstox: 15 failure(s), latest '[Errno -2] Name or service not known'."
+      },
+      {
+        "time": "2026-04-24T15:28:42.766014+05:30",
+        "tone": "warning",
+        "message": "Live LTP fetch failed. Using candle closes where available. ([Errno -2] Name or service not known)"
+      },
+      {
+        "time": "2026-04-24T15:17:29.082219+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 4 failure(s), latest 'loaded 0 rows'."
+      },
+      {
+        "time": "2026-04-24T15:17:29.082200+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: upstox: 4 failure(s), latest 'loaded 0 rows'."
+      },
+      {
+        "time": "2026-04-24T15:08:31.656276+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 5 failure(s), latest 'loaded 352 rows'."
+      },
+      {
+        "time": "2026-04-24T15:08:31.656256+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: upstox: 5 failure(s), latest 'loaded 352 rows'."
+      },
+      {
+        "time": "2026-04-24T15:00:09.810381+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 4 failure(s), latest 'loaded 344 rows'."
+      },
+      {
+        "time": "2026-04-24T15:00:09.810333+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: upstox: 4 failure(s), latest 'loaded 344 rows'."
+      },
+      {
+        "time": "2026-04-24T14:50:44.149917+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 3 failure(s), latest 'loaded 350 rows'."
+      },
+      {
+        "time": "2026-04-24T14:50:44.149878+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: upstox: 3 failure(s), latest 'loaded 350 rows'."
+      },
+      {
+        "time": "2026-04-24T14:41:22.760824+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 6 failure(s), latest 'loaded 325 rows'."
+      },
+      {
+        "time": "2026-04-24T14:41:22.760791+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: upstox: 6 failure(s), latest 'loaded 325 rows'."
+      },
+      {
+        "time": "2026-04-24T14:33:35.949462+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 3 failure(s), latest 'loaded 0 rows'."
+      },
+      {
+        "time": "2026-04-24T14:33:35.949178+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: upstox: 3 failure(s), latest 'loaded 0 rows'."
+      },
+      {
+        "time": "2026-04-24T14:17:51.550610+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 2 failure(s), latest 'fetch failed'."
+      },
+      {
+        "time": "2026-04-24T14:17:51.550588+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: upstox: 2 failure(s), latest 'fetch failed'."
+      },
+      {
+        "time": "2026-04-24T14:09:16.956258+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 2 failure(s), latest 'loaded 293 rows'."
+      },
+      {
+        "time": "2026-04-24T14:09:16.956229+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: upstox: 2 failure(s), latest 'loaded 293 rows'."
+      },
+      {
+        "time": "2026-04-24T14:01:29.311907+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 1 failure(s), latest 'loaded 297 rows'."
+      },
+      {
+        "time": "2026-04-24T14:01:29.311879+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: upstox: 1 failure(s), latest 'loaded 297 rows'."
+      },
+      {
+        "time": "2026-04-24T13:52:46.208415+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: fyers: 3 failure(s), latest 'Fyers data API error 429: request limit reached'; upstox: 3 failure(s), latest 'loaded 277 rows'."
+      },
+      {
+        "time": "2026-04-24T13:52:46.208401+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: fyers: 3 failure(s), latest 'Fyers data API error 429: request limit reached'; upstox: 3 failure(s), latest 'loaded 277 rows'."
+      },
+      {
+        "time": "2026-04-24T13:52:46.207841+05:30",
+        "tone": "warning",
+        "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
+      },
+      {
+        "time": "2026-04-24T13:43:25.051836+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 2 failure(s), latest 'loaded 279 rows'; fyers: 1 failure(s), latest 'loaded 0 rows'."
+      },
+      {
+        "time": "2026-04-24T13:43:25.051786+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: upstox: 2 failure(s), latest 'loaded 279 rows'; fyers: 1 failure(s), latest 'loaded 0 rows'."
+      },
+      {
+        "time": "2026-04-24T13:34:58.018114+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 3 failure(s), latest 'loaded 9 rows'."
+      },
+      {
+        "time": "2026-04-24T13:34:58.018104+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: upstox: 3 failure(s), latest 'loaded 9 rows'."
+      },
+      {
+        "time": "2026-04-24T13:25:50.287655+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 3 failure(s), latest 'loaded 250 rows'; fyers: 1 failure(s), latest '[SSL] record layer failure (_ssl.c:1016)'."
+      },
+      {
+        "time": "2026-04-24T13:25:50.287586+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: upstox: 3 failure(s), latest 'loaded 250 rows'; fyers: 1 failure(s), latest '[SSL] record layer failure (_ssl.c:1016)'."
+      },
+      {
+        "time": "2026-04-24T13:16:30.794350+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 3 failure(s), latest 'fetch failed'."
+      },
+      {
+        "time": "2026-04-24T13:16:30.794303+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: upstox: 3 failure(s), latest 'fetch failed'."
+      },
+      {
+        "time": "2026-04-24T13:07:06.979376+05:30",
         "tone": "success",
-        "message": "Scanned 0 futures rows and 0 option rows. 1 open positions."
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-10T15:13:47.665699+05:30",
+        "time": "2026-04-24T12:56:23.482130+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 2 failure(s), latest 'loaded 235 rows'."
+      },
+      {
+        "time": "2026-04-24T12:56:23.482030+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: upstox: 2 failure(s), latest 'loaded 235 rows'."
+      },
+      {
+        "time": "2026-04-24T12:44:52.687392+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
+      },
+      {
+        "time": "2026-04-24T12:44:15.367468+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: fyers: 2 failure(s), latest 'Fyers data API error 429: request limit reached'."
+      },
+      {
+        "time": "2026-04-24T12:44:15.367453+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: fyers: 2 failure(s), latest 'Fyers data API error 429: request limit reached'."
+      },
+      {
+        "time": "2026-04-24T12:44:15.366713+05:30",
         "tone": "warning",
         "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
       },
       {
-        "time": "2026-04-10T15:13:46.704097+05:30",
-        "tone": "warning",
-        "message": "MCX:NATURALGAS26MAYFUT: no futures candles returned by broker."
+        "time": "2026-04-24T12:13:00.333851+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-10T15:13:46.493842+05:30",
+        "time": "2026-04-24T12:12:10.208264+05:30",
         "tone": "warning",
-        "message": "MCX:CRUDEOIL26MAYFUT: no futures candles returned by broker."
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: fyers: 1 failure(s), latest '[SSL] record layer failure (_ssl.c:1016)'."
       },
       {
-        "time": "2026-04-10T15:13:46.236426+05:30",
+        "time": "2026-04-24T12:12:10.208145+05:30",
         "tone": "warning",
-        "message": "MCX:SILVERM26JUNFUT: no futures candles returned by broker."
+        "message": "Commodity history warnings detected: fyers: 1 failure(s), latest '[SSL] record layer failure (_ssl.c:1016)'."
       },
       {
-        "time": "2026-04-10T15:13:46.067280+05:30",
-        "tone": "warning",
-        "message": "MCX:GOLD26JUNFUT: no futures candles returned by broker."
+        "time": "2026-04-24T12:09:34.898378+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
       },
       {
-        "time": "2026-04-10T15:13:45.845672+05:30",
+        "time": "2026-04-24T12:08:03.439194+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-04-24T11:59:30.112862+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
+      },
+      {
+        "time": "2026-04-24T11:58:40.889152+05:30",
         "tone": "warning",
-        "message": "Live LTP fetch failed. Using candle closes where available. (Fyers data API error 429: request limit reached)"
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: fyers: 2 failure(s), latest '[SSL] record layer failure (_ssl.c:1016)'."
+      },
+      {
+        "time": "2026-04-24T11:58:40.889129+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: fyers: 2 failure(s), latest '[SSL] record layer failure (_ssl.c:1016)'."
+      },
+      {
+        "time": "2026-04-24T11:56:41.653621+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 2 option rows. 0 open positions. Reused the last good snapshot for retained 1 option rows."
+      },
+      {
+        "time": "2026-04-24T11:55:53.113041+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: fyers: 2 failure(s), latest 'loaded 0 rows'."
+      },
+      {
+        "time": "2026-04-24T11:55:53.113003+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: fyers: 2 failure(s), latest 'loaded 0 rows'."
+      },
+      {
+        "time": "2026-04-24T11:55:00.630556+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
+      },
+      {
+        "time": "2026-04-24T11:54:10.073906+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 1 failure(s), latest 'loaded 173 rows'."
+      },
+      {
+        "time": "2026-04-24T11:54:10.073852+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: upstox: 1 failure(s), latest 'loaded 173 rows'."
+      },
+      {
+        "time": "2026-04-24T11:52:44.278112+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 3 option rows. 0 open positions."
+      },
+      {
+        "time": "2026-04-24T11:52:10.083841+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 3 option rows. 0 open positions. Commodity history warnings detected: fyers: 1 failure(s), latest 'loaded 0 rows'."
+      },
+      {
+        "time": "2026-04-24T11:52:10.083805+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: fyers: 1 failure(s), latest 'loaded 0 rows'."
+      },
+      {
+        "time": "2026-04-24T11:51:19.435539+05:30",
+        "tone": "success",
+        "message": "Scanned 4 futures rows and 3 option rows. 0 open positions."
+      },
+      {
+        "time": "2026-04-24T11:50:41.557724+05:30",
+        "tone": "warning",
+        "message": "Scanned 4 futures rows and 1 option rows. 0 open positions. Commodity history warnings detected: fyers: 3 failure(s), latest 'loaded 0 rows'."
+      },
+      {
+        "time": "2026-04-24T11:50:41.557649+05:30",
+        "tone": "warning",
+        "message": "Commodity history warnings detected: fyers: 3 failure(s), latest 'loaded 0 rows'."
       }
     ],
     "processed_signals": {

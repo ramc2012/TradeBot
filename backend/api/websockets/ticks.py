@@ -328,14 +328,10 @@ async def ws_commodity_watchlist(websocket: WebSocket):
 
     async def payload_factory():
         from api.routers.commodity import (
-            commodity_atm_watchlist,
-            commodity_strategy_contracts,
+            commodity_watchlist_snapshot,
         )
 
-        return {
-            "contract_catalog": await commodity_strategy_contracts(),
-            "atm_watchlist": await commodity_atm_watchlist(),
-        }
+        return await commodity_watchlist_snapshot()
 
     await _stream_snapshot(
         websocket,

@@ -989,6 +989,8 @@ export default function CommodityPage() {
         onStatusChange,
       ),
     storageKey: "commodityOverviewSnapshot:v4",
+    preferStream: false,
+    refetchInterval: 15_000,
     staleTime: 10_000,
   });
 
@@ -1011,6 +1013,8 @@ export default function CommodityPage() {
         onStatusChange,
       ),
     storageKey: "commodityWatchlistSnapshot:v4",
+    preferStream: false,
+    refetchInterval: 20_000,
     staleTime: 15_000,
     retry: 1,
   });

@@ -70,7 +70,7 @@ const DAY_TYPE_COLOR: Record<string, string> = {
   UNKNOWN: COLORS.unknown,
 };
 
-const UNDERLYINGS = ["NIFTY", "BANKNIFTY"];
+const UNDERLYINGS = ["NIFTY", "BANKNIFTY", "CRUDEOIL"];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -969,7 +969,7 @@ function CompositeProfilePanel({ profiles, weeklyProfiles }: { profiles: any; we
     );
 
   const p20 = profiles["composite_20d"];
-  const p60 = profiles["composite_60d"];
+  const p50 = profiles["composite_50d"] ?? profiles["composite_60d"];
 
   function ProfileCard({ p, label }: { p: any; label: string }) {
     if (!p) return null;
@@ -1068,7 +1068,7 @@ function CompositeProfilePanel({ profiles, weeklyProfiles }: { profiles: any; we
     <div className="space-y-4">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <ProfileCard p={p20} label="Composite 20D" />
-        <ProfileCard p={p60} label="Composite 60D" />
+        <ProfileCard p={p50} label="Composite 50D" />
       </div>
 
       {weeklyData?.length > 0 && (
@@ -1327,7 +1327,7 @@ export default function MPIntelligenceDashboard() {
                 <SectionHeader
                   icon={Layers3}
                   title="Multi-Timeframe Profile Stack"
-                  sub="Composite 20D / 60D + weekly aggregates"
+                  sub="Composite 20D / 50D + weekly aggregates"
                 />
                 <CompositeProfilePanel
                   profiles={data.profiles}

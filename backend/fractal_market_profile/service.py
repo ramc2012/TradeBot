@@ -734,7 +734,10 @@ class FractalMarketProfileService:
     async def replay_suite(self, *, force: bool = False) -> dict[str, Any]:
         reports = []
         for symbol in SUPPORTED_SYMBOLS:
-            reports.append(await self.replay_report(symbol, force=force))
+            try:
+                reports.append(await self.replay_report(symbol, force=force))
+            except Exception:
+                continue
         return {
             "generated_at": _utc_now().isoformat(),
             "symbols": list(SUPPORTED_SYMBOLS),
@@ -860,16 +863,51 @@ class FractalMarketProfileService:
         session_lookup: dict[date, list[dict[str, Any]]],
         live_mode: bool,
     ) -> dict[str, Any]:
-        analysis = self._analyze_session_sync(
+        analysis = await asyncio.to_thread(
+            self._analyze_session_sync,
             symbol_code,
             current_rows=current_rows,
             prior_rows=prior_rows,
             session_lookup=session_lookup,
         )
-        order_flow = await self._build_live_order_flow(symbol_code, current_rows)
+        try:
+            order_flow = await asyncio.wait_for(self._build_live_order_flow(symbol_code, current_rows), timeout=3.0)
+        except Exception as exc:
+            logger.warning(f"[FMP] Live order-flow build timed out/degraded for {symbol_code}: {exc}")
+            order_flow = self._build_bar_order_flow(current_rows)
+            order_flow["source"] = "bar_proxy_timeout"
+            order_flow["degraded_reason"] = "live_order_flow_timeout"
         analysis["order_flow"] = order_flow
         analysis["data_status"] = self._build_live_data_status(current_rows, order_flow)
-        analysis["current_signal"] = await self._build_live_signal(symbol_code, analysis, order_flow)
+        try:
+            analysis["current_signal"] = await asyncio.wait_for(
+                self._build_live_signal(symbol_code, analysis, order_flow),
+                timeout=4.0,
+            )
+        except Exception as exc:
+            logger.warning(f"[FMP] Live signal build timed out/degraded for {symbol_code}: {exc}")
+            signal = dict(analysis.get("current_signal") or {})
+            if not signal:
+                signal = self._build_signal(
+                    symbol_code,
+                    current_rows=current_rows,
+                    daily_profile=analysis["daily_profile"],
+                    prior_daily_profile=analysis["prior_daily_profile"],
+                    current_hour_profile=analysis["current_hour_profile"],
+                    hourly_profiles=analysis["hourly_profiles"],
+                    order_flow=order_flow,
+                    historical_options=True,
+            )
+            signal["actionable"] = False
+            filters = list(signal.get("filters") or [])
+            filters.append("Live option/order-flow confirmation timed out.")
+            metadata = dict(signal.get("metadata") or {})
+            advisories = list(metadata.get("advisories") or [])
+            advisories.append("Snapshot is using a bounded bar-proxy fallback.")
+            metadata["advisories"] = advisories
+            signal["filters"] = filters
+            signal["metadata"] = metadata
+            analysis["current_signal"] = signal
         await self._persist_hourly_profiles(symbol_code, analysis["session"]["session_date"], analysis["hourly_profiles"])
         return analysis
 
@@ -1014,12 +1052,18 @@ class FractalMarketProfileService:
             advisories.append(
                 f"Order-flow source is {data_status.get('order_flow_source') or 'unknown'}."
             )
-        option_selection = await self._live_option_selection(
-            symbol_code,
-            direction=str(signal["action"]),
-            horizon=str(signal["horizon"]),
-            confidence=float(signal["confidence"]),
-        )
+        try:
+            option_selection = await asyncio.wait_for(
+                self._live_option_selection(
+                    symbol_code,
+                    direction=str(signal["action"]),
+                    horizon=str(signal["horizon"]),
+                    confidence=float(signal["confidence"]),
+                ),
+                timeout=3.0,
+            )
+        except Exception:
+            option_selection = None
         if option_selection is None:
             filters.append("Live option context is unavailable for this underlying.")
         else:
@@ -1039,7 +1083,7 @@ class FractalMarketProfileService:
                 rationale.append("Live ATM options flow is aligned with the FMP thesis.")
 
         try:
-            vix_payload = await sector_tracker._get_india_vix()
+            vix_payload = await asyncio.wait_for(sector_tracker._get_india_vix(), timeout=2.0)
             india_vix = float(vix_payload.get("price") or 0.0)
         except Exception:
             india_vix = 0.0
@@ -1821,6 +1865,20 @@ class FractalMarketProfileService:
         return round(max(lot_based, atr_based, 0.5), 2)
 
     async def _load_live_rows(self, symbol_code: str) -> tuple[list[dict[str, Any]], str, str]:
+        if symbol_code.upper() == "CRUDEOIL":
+            try:
+                from market_data.commodity_runtime_history import load_commodity_history_rows
+
+                rows, history_symbol = await load_commodity_history_rows(
+                    symbol_code,
+                    interval="1minute",
+                    lookback_days=10,
+                )
+                if rows:
+                    return rows, "commodity_broker_history", history_symbol
+            except Exception:
+                pass
+
         if settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY:
             rows, source, history_symbol = await market_intelligence_runtime.load_local_spot_rows(
                 symbol_code,

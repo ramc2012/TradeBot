@@ -11,7 +11,7 @@ from core.config import settings
 from core.market_hours_paper_supervisor import market_hours_paper_supervisor
 from core.paper_bootstrap import bootstrap_paper_trading_runtime
 from db.redis_client import get_redis, close_redis
-from api.routers import auth, trading, market, analytics, agent, commodity, backtester as backtester_router
+from api.routers import auth, trading, market, analytics, agent, commodity, rag, backtester as backtester_router
 from api.routers import fo_data as fo_data_router
 from api.routers import analysis as analysis_router
 from api.routers import strategy as strategy_router
@@ -74,17 +74,15 @@ async def lifespan(app: FastAPI):
     market_data_router.register_global_callback(live_candle_store.on_tick)
     await live_candle_store.start()
 
-    # Prefer the real broker feed when a session exists; fall back to mock only otherwise.
+    # Prefer the real broker feed when a session exists. Without a broker, keep
+    # the shared header feed idle so the UI falls back to stored spot closes
+    # instead of publishing synthetic 100-based index ticks.
     if adapter:
         market_data_router.set_broker(adapter)
         await market_data_router.subscribe(list(LIVE_INDEX_APP_SYMBOLS))
     else:
-        asyncio.create_task(
-            market_data_router.start_mock_feed(
-                list(LIVE_INDEX_APP_SYMBOLS),
-                interval_secs=1.0,
-            )
-        )
+        await market_data_router.stop_mock_feed()
+        await market_data_router.unsubscribe()
 
     await paper_strategy_agent.start()
     await commodity_strategy_agent.start()
@@ -149,6 +147,7 @@ app.include_router(trading.router)
 app.include_router(market.router)
 app.include_router(analytics.router)
 app.include_router(agent.router)
+app.include_router(rag.router)
 app.include_router(commodity.router)
 app.include_router(backtester_router.router)
 app.include_router(fo_data_router.router)

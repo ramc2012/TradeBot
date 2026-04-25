@@ -139,6 +139,21 @@ class DirectionalOptionsDataStore:
         *,
         lookback_days: int = 10,
     ) -> tuple[pd.DataFrame, str, str]:
+        if underlying.upper() == "CRUDEOIL":
+            try:
+                from market_data.commodity_runtime_history import load_commodity_history_rows
+
+                rows, history_symbol = await load_commodity_history_rows(
+                    underlying,
+                    interval="1minute",
+                    lookback_days=lookback_days,
+                )
+                frame = _frame_from_rows(rows)
+                if not frame.empty:
+                    return frame, "commodity_broker_history", history_symbol
+            except Exception:
+                pass
+
         rows, source, history_symbol = await market_intelligence_runtime.load_local_spot_rows(
             underlying,
             lookback_days=max(int(lookback_days), 1),

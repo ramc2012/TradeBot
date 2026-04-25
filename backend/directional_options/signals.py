@@ -63,6 +63,25 @@ class DirectionalSignalEngine:
             atr * (float(self.config["expected_move_atr_multiplier"]) + confidence * 0.3),
             close * abs(ema_spread) * (float(self.config["expected_move_trend_multiplier"]) + range_expansion * 0.2),
         )
+        expected_move_pct = expected_move / max(close, 1.0)
+        p_up = confidence if direction == "CE" else 1.0 - confidence
+        jump_score = min(
+            1.0,
+            max(breakout_up, breakout_down, 0.0) * 0.45
+            + max(range_expansion - 1.0, 0.0) * 0.28
+            + max(rv_pct - 0.55, 0.0) * 0.32,
+        )
+        timing_precision = min(
+            1.0,
+            0.35
+            + regime.confidence * 0.34
+            + (0.18 if regime.label == "breakout" else 0.08 if regime.label == "trend" else 0.0)
+            + max(range_expansion - 1.0, 0.0) * 0.12,
+        )
+        p_move_gt_1sigma = min(0.95, max(0.0, 0.18 + confidence * 0.32 + jump_score * 0.22))
+        p_move_gt_2sigma = min(0.65, max(0.0, 0.04 + jump_score * 0.22 + max(confidence - 0.65, 0.0) * 0.35))
+        tail_probability = p_move_gt_2sigma if jump_score >= 0.45 else p_move_gt_1sigma
+        model_uncertainty = max(0.03, min(0.45, (1.0 - confidence) * 0.55 + max(rv_pct - 0.7, 0.0) * 0.18))
 
         hours = (horizon_bars * timeframe_minutes(timeframe)) / 60.0
         thesis = (
@@ -81,4 +100,12 @@ class DirectionalSignalEngine:
             sleeve=sleeve,
             thesis=thesis,
             regime=regime.label,
+            expected_move_pct=round(expected_move_pct, 5),
+            p_up=round(p_up, 4),
+            p_move_gt_1sigma=round(p_move_gt_1sigma, 4),
+            p_move_gt_2sigma=round(p_move_gt_2sigma, 4),
+            jump_score=round(jump_score, 4),
+            timing_precision=round(timing_precision, 4),
+            tail_probability=round(tail_probability, 4),
+            model_uncertainty=round(model_uncertainty, 4),
         )

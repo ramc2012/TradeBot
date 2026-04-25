@@ -220,6 +220,13 @@ export const getAgentLog = (limit = 50) => api.get("/api/agent/agent-log", { par
 export const chatWithAgent = (message: string) => api.post("/api/agent/chat", { message });
 export const getRulesStatus = () => api.get("/api/agent/rules-status");
 
+// ── Shared RAG / Agent Memory ─────────────────────────────────────────────
+export const getRAGHealth = () => api.get("/api/rag/health");
+export const searchRAG = (payload: object) => api.post("/api/rag/search", payload);
+export const runRAGContextGate = (payload: object) => api.post("/api/rag/context-gate", payload);
+export const addRAGDocument = (payload: object) => api.post("/api/rag/documents", payload);
+export const addRAGTradeCase = (payload: object) => api.post("/api/rag/trade-cases", payload);
+
 // ── MACD Analysis ─────────────────────────────────────────────────────────
 export const startMacdBacktest = (payload: object) =>
   api.post("/api/analysis/macd-backtest/start", payload);

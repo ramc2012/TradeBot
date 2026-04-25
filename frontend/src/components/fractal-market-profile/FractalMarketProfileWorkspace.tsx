@@ -14,7 +14,6 @@ import {
   Activity,
   AlertTriangle,
   ArrowUpRight,
-  CandlestickChart,
   Fingerprint,
   Layers3,
   Loader2,
@@ -412,6 +411,25 @@ type OrderFlowChartRow = {
   cumulativeDelta: number;
 };
 
+type TerminalDisplayMode = "letters" | "heatmap" | "volume";
+type TerminalViewMode = "split" | "fractal" | "composite";
+
+type PriceDomain = {
+  min: number;
+  max: number;
+  step: number;
+  tick: number;
+};
+
+type TerminalProfileColumn = {
+  id: string;
+  label: string;
+  subLabel: string;
+  profile: FMPProfile;
+  bars: FMPBar[];
+  isLive?: boolean;
+};
+
 function formatPrice(value?: number | null, digits = 2) {
   if (value == null || Number.isNaN(value)) return "—";
   return value.toLocaleString("en-IN", {
@@ -500,7 +518,7 @@ function formatShapeLabel(value?: string | null) {
 
 function sectionChrome(className?: string) {
   return clsx(
-    "overflow-hidden rounded-[30px] border border-white/10 bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.12),transparent_38%),linear-gradient(180deg,rgba(9,15,28,0.96),rgba(6,10,20,0.98))] shadow-[0_35px_90px_-60px_rgba(15,23,42,0.96)]",
+    "overflow-hidden rounded-sm border border-[#2a2a2a] bg-black shadow-none",
     className,
   );
 }
@@ -532,6 +550,133 @@ function replayTone(report?: ReplayReport | null) {
 function normalize(value: number, min: number, max: number) {
   if (!Number.isFinite(value) || !Number.isFinite(min) || !Number.isFinite(max) || max <= min) return 50;
   return ((max - value) / (max - min)) * 100;
+}
+
+function clampPercent(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(Math.max(value, 0), 100);
+}
+
+function normalizePriceTop(value: number, domain: PriceDomain) {
+  return clampPercent(normalize(value, domain.min, domain.max));
+}
+
+function priceToTopPx(value: number, domain: PriceDomain, rowHeight: number) {
+  return ((domain.max - value) / domain.tick) * rowHeight;
+}
+
+function buildPriceDomain(profiles: Array<FMPProfile | null | undefined>): PriceDomain {
+  const validProfiles = profiles.filter(Boolean) as FMPProfile[];
+  const values = validProfiles.flatMap((profile) => [
+    profile.high_price,
+    profile.low_price,
+    profile.poc,
+    profile.vah,
+    profile.val,
+    profile.initial_balance_high,
+    profile.initial_balance_low,
+    ...profile.single_prints,
+    ...profile.tpo_rows.map((row) => row.price),
+  ]).filter((value) => Number.isFinite(value) && value > 0);
+
+  if (!values.length) {
+    return { min: 0, max: 100, step: 25, tick: 5 };
+  }
+
+  const rawMin = Math.min(...values);
+  const rawMax = Math.max(...values);
+  const rawRange = Math.max(rawMax - rawMin, 1);
+  const profileTick = validProfiles.find((profile) => Number(profile.tick_size) > 0)?.tick_size ?? 5;
+  const tick =
+    profileTick <= 50
+      ? profileTick
+      : rawRange > 1600
+        ? 50
+        : rawRange > 500
+          ? 25
+          : 5;
+  const pad = Math.max((rawMax - rawMin) * 0.08, tick * 4);
+  const min = Math.floor((rawMin - pad) / tick) * tick;
+  const max = Math.ceil((rawMax + pad) / tick) * tick;
+  const rowCount = Math.max(Math.round((max - min) / tick), 1);
+  const stepMultiplier = Math.max(1, Math.ceil(rowCount / 30));
+
+  return {
+    min,
+    max,
+    step: tick * stepMultiplier,
+    tick,
+  };
+}
+
+function buildPriceRows(domain: PriceDomain) {
+  const rows: number[] = [];
+  for (let price = domain.max; price >= domain.min; price -= domain.step) {
+    rows.push(Number(price.toFixed(4)));
+  }
+  return rows;
+}
+
+function getProfileRows(profile?: FMPProfile | null) {
+  return [...(profile?.tpo_rows ?? [])].sort((left, right) => right.price - left.price);
+}
+
+function parseProfileTime(value?: string | null) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.getTime();
+}
+
+function buildVolumeByPrice(profile: FMPProfile, bars: FMPBar[]) {
+  const start = parseProfileTime(profile.window_start);
+  const end = parseProfileTime(profile.window_end);
+  const domain = buildPriceDomain([profile]);
+  const tick = domain.tick;
+  const selectedBars = bars.filter((bar) => {
+    if (!start && !end) return true;
+    const ts = parseProfileTime(bar.time);
+    if (ts == null) return false;
+    return (start == null || ts >= start) && (end == null || ts <= end);
+  });
+  const sourceBars = selectedBars.length ? selectedBars : bars;
+  const hasVolume = sourceBars.some((bar) => Number(bar.volume || 0) > 0);
+  const volumeByPrice = new Map<number, number>();
+
+  for (const bar of sourceBars) {
+    const low = Math.floor(Number(bar.low) / tick) * tick;
+    const high = Math.ceil(Number(bar.high) / tick) * tick;
+    if (!Number.isFinite(low) || !Number.isFinite(high) || high < low) continue;
+    const levelCount = Math.max(Math.round((high - low) / tick) + 1, 1);
+    const volumeShare = (hasVolume ? Number(bar.volume || 0) : 1) / levelCount;
+    for (let price = low; price <= high; price += tick) {
+      const rounded = Number(price.toFixed(4));
+      volumeByPrice.set(rounded, (volumeByPrice.get(rounded) ?? 0) + volumeShare);
+    }
+  }
+
+  return volumeByPrice;
+}
+
+function relationToValue(price?: number | null, profile?: FMPProfile | null) {
+  if (price == null || !profile) return "—";
+  if (price > profile.vah) return "ABOVE VA";
+  if (price < profile.val) return "BELOW VA";
+  return "INSIDE VA";
+}
+
+function relationToPriorValue(price?: number | null, profile?: FMPProfile | null) {
+  if (price == null || !profile) return "—";
+  if (price > profile.vah) return "ABOVE yVA";
+  if (price < profile.val) return "BELOW yVA";
+  return "WITHIN yVA";
+}
+
+function terminalTone(value?: number | null) {
+  if (value == null || Number.isNaN(value)) return "text-[#d8d8d8]";
+  if (value > 0) return "text-[#4ec97a]";
+  if (value < 0) return "text-[#e75a6b]";
+  return "text-[#d8d8d8]";
 }
 
 function buildOrderFlowRows(orderFlow?: FMPOrderFlow | null): OrderFlowChartRow[] {
@@ -599,14 +744,14 @@ const SectionTitle = memo(function SectionTitle({
   return (
     <div className="flex flex-wrap items-start justify-between gap-4">
       <div>
-        <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-          <span className="flex h-7 w-7 items-center justify-center rounded-full border border-white/10 bg-white/6">
+        <div className="flex items-center gap-2 font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-[#888]">
+          <span className="flex h-6 w-6 items-center justify-center rounded-sm border border-[#2a2a2a] bg-[#0a0a0a]">
             {icon}
           </span>
           <span>{eyebrow}</span>
         </div>
-        <div className="mt-3 text-xl font-semibold tracking-tight text-slate-50 md:text-2xl">{title}</div>
-        <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">{detail}</p>
+        <div className="mt-2 font-mono text-lg font-semibold uppercase tracking-[0.08em] text-[#f5f5f5] md:text-xl">{title}</div>
+        <p className="mt-2 max-w-3xl text-xs leading-5 text-[#888]">{detail}</p>
       </div>
       {action ? <div className="flex items-center gap-2">{action}</div> : null}
     </div>
@@ -621,7 +766,7 @@ const StatusPill = memo(function StatusPill({
   className?: string;
 }) {
   return (
-    <span className={clsx("rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em]", className)}>
+    <span className={clsx("rounded-sm border px-2 py-1 font-mono text-[10px] font-semibold uppercase tracking-[0.16em]", className)}>
       {label}
     </span>
   );
@@ -639,10 +784,10 @@ const MetricTile = memo(function MetricTile({
   tone?: string;
 }) {
   return (
-    <div className="rounded-[24px] border border-white/8 bg-white/[0.04] px-4 py-4">
-      <div className="text-[11px] uppercase tracking-[0.18em] text-slate-400">{label}</div>
-      <div className={clsx("mt-2 font-mono text-lg font-semibold text-slate-50", tone)}>{value}</div>
-      <div className="mt-1.5 line-clamp-2 text-xs leading-5 text-slate-400">{detail}</div>
+    <div className="rounded-sm border border-[#2a2a2a] bg-[#050505] px-3 py-3">
+      <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-[#777]">{label}</div>
+      <div className={clsx("mt-2 font-mono text-base font-semibold text-[#f5f5f5]", tone)}>{value}</div>
+      <div className="mt-1.5 line-clamp-2 text-[11px] leading-5 text-[#888]">{detail}</div>
     </div>
   );
 });
@@ -657,10 +802,10 @@ const MetricRow = memo(function MetricRow({
   hint: string;
 }) {
   return (
-    <div className="rounded-[22px] border border-white/8 bg-white/[0.04] px-4 py-3">
-      <div className="text-[11px] uppercase tracking-[0.16em] text-slate-400">{label}</div>
-      <div className="mt-1.5 font-mono text-base font-semibold text-slate-50">{value}</div>
-      <div className="mt-1 text-xs leading-5 text-slate-400">{hint}</div>
+    <div className="rounded-sm border border-[#2a2a2a] bg-[#050505] px-3 py-3">
+      <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-[#777]">{label}</div>
+      <div className="mt-1.5 font-mono text-sm font-semibold text-[#f5f5f5]">{value}</div>
+      <div className="mt-1 text-[11px] leading-5 text-[#888]">{hint}</div>
     </div>
   );
 });
@@ -1158,6 +1303,540 @@ const TpoDistributionPanel = memo(function TpoDistributionPanel({
   );
 });
 
+const TerminalReadout = memo(function TerminalReadout({
+  label,
+  value,
+  hot,
+}: {
+  label: string;
+  value: string | number;
+  hot?: boolean;
+}) {
+  return (
+    <div className="border-l border-[#2a2a2a] px-2 py-1">
+      <div className="text-[8px] uppercase tracking-[0.18em] text-[#555]">{label}</div>
+      <div className={clsx("mt-0.5 whitespace-nowrap text-[11px] font-semibold text-[#f5f5f5]", hot ? "text-[#ffb02e]" : "")}>
+        {value}
+      </div>
+    </div>
+  );
+});
+
+const TerminalButton = memo(function TerminalButton({
+  active,
+  children,
+  onClick,
+}: {
+  active: boolean;
+  children: ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={clsx(
+        "h-6 border-r border-[#2a2a2a] px-2 text-[10px] font-semibold uppercase tracking-[0.12em] transition",
+        active ? "bg-[#ffb02e] text-black" : "bg-transparent text-[#999] hover:bg-[#161616] hover:text-[#f5f5f5]",
+      )}
+    >
+      {children}
+    </button>
+  );
+});
+
+const TerminalAxis = memo(function TerminalAxis({
+  domain,
+  rowHeight,
+  height,
+  livePrice,
+}: {
+  domain: PriceDomain;
+  rowHeight: number;
+  height: number;
+  livePrice?: number | null;
+}) {
+  const priceRows = useMemo(() => buildPriceRows(domain), [domain]);
+
+  return (
+    <div className="sticky left-0 z-20 shrink-0 border-r border-[#2a2a2a] bg-black" style={{ width: 64, height }}>
+      <div className="sticky top-0 z-10 flex h-8 items-center justify-end border-b border-[#2a2a2a] bg-black px-2 text-[8px] uppercase tracking-[0.2em] text-[#555]">
+        Price
+      </div>
+      <div className="relative" style={{ height: height - 32 }}>
+        {priceRows.map((price) => {
+          const isMajor = Math.round(price) % 25 === 0;
+          const isLive = livePrice != null && Math.abs(price - livePrice) <= domain.step / 2;
+          return (
+            <div
+              key={price}
+              className={clsx(
+                "absolute left-0 right-0 flex items-center justify-end border-t px-2 text-[9px]",
+                isMajor ? "border-[#1a1a1a] text-[#888]" : "border-transparent text-[#555]",
+                isLive ? "bg-[#ffb02e] font-bold text-black" : "",
+              )}
+              style={{ top: priceToTopPx(price, domain, rowHeight), height: rowHeight * Math.max(domain.step / domain.tick, 1) }}
+            >
+              {isMajor || isLive ? formatPrice(price, 0) : ""}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+});
+
+const TerminalReferenceLines = memo(function TerminalReferenceLines({
+  domain,
+  rowHeight,
+  height,
+  priorProfile,
+  livePrice,
+}: {
+  domain: PriceDomain;
+  rowHeight: number;
+  height: number;
+  priorProfile?: FMPProfile | null;
+  livePrice?: number | null;
+}) {
+  const references = [
+    priorProfile ? { label: `yPOC ${formatPrice(priorProfile.poc, 0)}`, value: priorProfile.poc, className: "border-[#ffd357] text-[#ffd357]" } : null,
+    priorProfile ? { label: `yVAH ${formatPrice(priorProfile.vah, 0)}`, value: priorProfile.vah, className: "border-[#c98a1f] text-[#ffb02e]" } : null,
+    priorProfile ? { label: `yVAL ${formatPrice(priorProfile.val, 0)}`, value: priorProfile.val, className: "border-[#c98a1f] text-[#ffb02e]" } : null,
+    livePrice != null ? { label: `LIVE ${formatPrice(livePrice, 0)}`, value: livePrice, className: "border-[#ffb02e] text-black bg-[#ffb02e]" } : null,
+  ].filter(Boolean) as Array<{ label: string; value: number; className: string }>;
+
+  return (
+    <div className="pointer-events-none absolute inset-x-0 top-8 z-10" style={{ height: height - 32 }}>
+      {references.map((ref) => (
+        <div
+          key={ref.label}
+          className={clsx("absolute left-0 right-0 border-t border-dashed opacity-75", ref.className)}
+          style={{ top: priceToTopPx(ref.value, domain, rowHeight) }}
+        >
+          <span className={clsx("absolute right-2 top-[-9px] border border-current bg-black px-1 text-[8px] font-semibold uppercase tracking-[0.08em]", ref.className)}>
+            {ref.label}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+});
+
+const TerminalProfileTile = memo(function TerminalProfileTile({
+  column,
+  domain,
+  rowHeight,
+  height,
+  displayMode,
+}: {
+  column: TerminalProfileColumn;
+  domain: PriceDomain;
+  rowHeight: number;
+  height: number;
+  displayMode: TerminalDisplayMode;
+}) {
+  const rows = useMemo(() => getProfileRows(column.profile), [column.profile]);
+  const volumeByPrice = useMemo(() => buildVolumeByPrice(column.profile, column.bars), [column.bars, column.profile]);
+  const maxCount = Math.max(...rows.map((row) => row.count), 1);
+  const maxVolume = Math.max(...rows.map((row) => volumeByPrice.get(row.price) ?? 0), 1);
+
+  return (
+    <div className="flex w-[104px] shrink-0 flex-col border-r border-[#1a1a1a] bg-black last:border-r-0">
+      <div className={clsx("sticky top-0 z-10 h-8 border-b border-[#2a2a2a] bg-black px-1 py-1", column.isLive ? "border-b-[#ffb02e]" : "")}>
+        <div className={clsx("truncate text-[10px] font-bold uppercase tracking-[0.14em]", column.isLive ? "text-[#ffb02e]" : "text-[#d8d8d8]")}>
+          {column.label}
+        </div>
+        <div className="truncate text-[8px] uppercase tracking-[0.12em] text-[#666]">{column.subLabel}</div>
+      </div>
+      <div className={clsx("relative", column.isLive ? "bg-[#ffb02e]/[0.03]" : "")} style={{ height: height - 32 }}>
+        <div
+          className="absolute inset-x-0 border-t border-[#ffd357]/70"
+          style={{ top: priceToTopPx(column.profile.poc, domain, rowHeight) }}
+        />
+        <div
+          className="absolute inset-x-0 border-t border-dashed border-[#c98a1f]/60"
+          style={{ top: priceToTopPx(column.profile.vah, domain, rowHeight) }}
+        />
+        <div
+          className="absolute inset-x-0 border-t border-dashed border-[#c98a1f]/60"
+          style={{ top: priceToTopPx(column.profile.val, domain, rowHeight) }}
+        />
+        {rows.map((row) => {
+          const isPoc = row.price === column.profile.poc;
+          const inValue = row.price <= column.profile.vah && row.price >= column.profile.val;
+          const isSingle = row.count === 1 || column.profile.single_prints.includes(row.price);
+          const rowTop = priceToTopPx(row.price, domain, rowHeight);
+          const countWidth = Math.max((row.count / maxCount) * 94, 8);
+          const volume = volumeByPrice.get(row.price) ?? 0;
+          const volumeWidth = Math.max((volume / maxVolume) * 94, 6);
+
+          return (
+            <div
+              key={`${column.id}:${row.price}`}
+              className="absolute left-0 right-0 flex items-center px-1"
+              style={{ top: rowTop, height: rowHeight }}
+              title={`${formatPrice(row.price, 0)} · ${row.count} TPO · ${formatCompact(volume)} vol`}
+            >
+              {displayMode === "letters" ? (
+                <div className="flex min-w-0 items-center overflow-hidden">
+                  {(row.letters || String(row.count)).slice(0, 12).split("").map((letter, index) => (
+                    <span
+                      key={`${row.price}:${letter}:${index}`}
+                      className={clsx(
+                        "inline-block w-[7px] text-center text-[8px] font-semibold leading-none",
+                        isPoc ? "text-[#ffd357]" : isSingle ? "text-[#ff7e3a]" : inValue ? "text-[#ffb02e]/80" : "text-[#777]",
+                      )}
+                    >
+                      {letter}
+                    </span>
+                  ))}
+                </div>
+              ) : displayMode === "heatmap" ? (
+                <div
+                  className={clsx("h-[80%]", isPoc ? "bg-[#ffd357]" : isSingle ? "bg-[#ff7e3a]" : inValue ? "bg-[#ffb02e]" : "bg-[#788291]")}
+                  style={{ width: `${countWidth}%`, opacity: isPoc || isSingle ? 0.95 : Math.max(row.count / maxCount, 0.22) }}
+                />
+              ) : (
+                <div
+                  className={clsx("h-[72%]", isPoc ? "bg-[#6cc4d4]" : inValue ? "bg-[#c98a1f]" : "bg-[#383838]")}
+                  style={{ width: `${volumeWidth}%` }}
+                />
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+});
+
+const TerminalProfileGrid = memo(function TerminalProfileGrid({
+  columns,
+  domain,
+  displayMode,
+  showRefs,
+  priorProfile,
+  livePrice,
+  title,
+}: {
+  columns: TerminalProfileColumn[];
+  domain: PriceDomain;
+  displayMode: TerminalDisplayMode;
+  showRefs: boolean;
+  priorProfile?: FMPProfile | null;
+  livePrice?: number | null;
+  title: string;
+}) {
+  const rowHeight = displayMode === "letters" ? 9 : 8;
+  const height = Math.max(((domain.max - domain.min) / domain.tick) * rowHeight + 32, 420);
+
+  if (!columns.length) {
+    return (
+      <div className="flex h-[420px] items-center justify-center border border-[#2a2a2a] bg-black text-[11px] uppercase tracking-[0.16em] text-[#777]">
+        {title}: waiting for profile rows
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-0 border border-[#2a2a2a] bg-black">
+      <div className="flex h-7 items-center justify-between border-b border-[#2a2a2a] bg-[#0a0a0a] px-2">
+        <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#ffb02e]">{title}</div>
+        <div className="text-[9px] uppercase tracking-[0.14em] text-[#666]">{columns.length} profiles · {displayMode}</div>
+      </div>
+      <div className="relative h-[520px] overflow-auto">
+        <div className="flex min-w-max">
+          <TerminalAxis domain={domain} rowHeight={rowHeight} height={height} livePrice={livePrice} />
+          <div className="relative flex" style={{ height }}>
+            {showRefs ? (
+              <TerminalReferenceLines
+                domain={domain}
+                rowHeight={rowHeight}
+                height={height}
+                priorProfile={priorProfile}
+                livePrice={livePrice}
+              />
+            ) : null}
+            {columns.map((column) => (
+              <TerminalProfileTile
+                key={column.id}
+                column={column}
+                domain={domain}
+                rowHeight={rowHeight}
+                height={height}
+                displayMode={displayMode}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+const TerminalTelemetryPanel = memo(function TerminalTelemetryPanel({
+  live,
+}: {
+  live?: LiveSnapshotResponse;
+}) {
+  const profile = live?.daily_profile;
+  const prior = live?.prior_daily_profile;
+  const signal = live?.current_signal;
+  const price = live?.session.last_price ?? signal?.latest_close ?? profile?.close_price;
+  const orderFlow = live?.order_flow;
+  const rows = [
+    { label: "DAY TYPE", value: formatShapeLabel(profile?.shape).toUpperCase(), hot: profile?.shape === "trend" },
+    { label: "DIRECTION", value: profile?.direction_bias?.toUpperCase() ?? "—", hot: profile?.direction_bias === "bullish" || profile?.direction_bias === "bearish" },
+    { label: "PRICE vs VA", value: relationToValue(price, profile), hot: relationToValue(price, profile) !== "INSIDE VA" },
+    { label: "PRICE vs yVA", value: relationToPriorValue(price, prior), hot: relationToPriorValue(price, prior) !== "WITHIN yVA" },
+    { label: "TPO POC", value: formatPrice(profile?.poc, 0) },
+    { label: "VAH / VAL", value: profile ? `${formatPrice(profile.vah, 0)} / ${formatPrice(profile.val, 0)}` : "—" },
+    { label: "IB RANGE", value: formatPrice(profile?.initial_balance_range, 0), hot: Boolean(live?.filters.wide_daily_ib) },
+    { label: "SINGLE PRINTS", value: String(profile?.single_prints.length ?? 0), hot: Boolean((profile?.single_prints.length ?? 0) > 0) },
+    { label: "POOR EXTREMES", value: `${profile?.poor_high ? "PH" : "—"} / ${profile?.poor_low ? "PL" : "—"}`, hot: Boolean(profile?.poor_high || profile?.poor_low) },
+    { label: "MIGRATION", value: formatSignedNumber(signal?.value_migration_score, 0), hot: Math.abs(signal?.value_migration_score ?? 0) >= 2 },
+    { label: "FLOW ALIGN", value: formatPercent(signal?.metadata?.order_flow_alignment, 0), hot: (signal?.metadata?.order_flow_alignment ?? 0) >= 0.6 },
+    { label: "QUEUE PRESS", value: formatSignedNumber(orderFlow?.queue_pressure, 2), hot: Math.abs(orderFlow?.queue_pressure ?? 0) > 0.35 },
+    { label: "TOXICITY", value: formatPercent(orderFlow?.toxicity_score, 0), hot: (orderFlow?.toxicity_score ?? 0) >= 0.55 },
+  ];
+
+  return (
+    <div className="border border-[#2a2a2a] bg-black">
+      <div className="border-b border-[#2a2a2a] bg-[#0a0a0a] px-2 py-2 text-[10px] font-bold uppercase tracking-[0.18em] text-[#ffb02e]">
+        Structural Telemetry
+      </div>
+      <div className="divide-y divide-[#1a1a1a] px-2 py-1">
+        {rows.map((row) => (
+          <div key={row.label} className="grid min-w-0 grid-cols-[112px_minmax(0,1fr)] items-center gap-2 py-1.5">
+            <span className="min-w-0 truncate text-[9px] uppercase tracking-[0.14em] text-[#777]">{row.label}</span>
+            <span className={clsx("min-w-0 truncate text-right text-[11px] font-semibold text-[#d8d8d8]", row.hot ? "text-[#ffb02e]" : "")}>
+              {row.value}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+});
+
+const AgentFeatureTape = memo(function AgentFeatureTape({
+  live,
+}: {
+  live?: LiveSnapshotResponse;
+}) {
+  const profile = live?.daily_profile;
+  const prior = live?.prior_daily_profile;
+  const signal = live?.current_signal;
+  const orderFlow = live?.order_flow;
+  const price = live?.session.last_price ?? signal?.latest_close ?? profile?.close_price;
+  const rows = [
+    { key: "symbol", value: live?.symbol_code ?? "—", source: "session" },
+    { key: "last_price", value: formatPrice(price, 2), source: "session" },
+    { key: "auction_shape", value: profile?.shape ?? "—", source: "daily_profile" },
+    { key: "direction_bias", value: profile?.direction_bias ?? "—", source: "daily_profile" },
+    { key: "price_vs_value", value: relationToValue(price, profile), source: "derived" },
+    { key: "price_vs_prior_value", value: relationToPriorValue(price, prior), source: "derived" },
+    { key: "tpo_poc", value: formatPrice(profile?.poc, 2), source: "daily_profile" },
+    { key: "value_area", value: profile ? `${formatPrice(profile.val, 2)}..${formatPrice(profile.vah, 2)}` : "—", source: "daily_profile" },
+    { key: "ib_range", value: formatPrice(profile?.initial_balance_range, 2), source: "daily_profile" },
+    { key: "single_print_count", value: String(profile?.single_prints.length ?? 0), source: "daily_profile" },
+    { key: "poor_high_low", value: `${profile?.poor_high ? 1 : 0}/${profile?.poor_low ? 1 : 0}`, source: "daily_profile" },
+    { key: "migration_score", value: formatSignedNumber(signal?.value_migration_score, 0), source: "signal" },
+    { key: "signal_action", value: signal?.action ?? "FLAT", source: "signal" },
+    { key: "signal_confidence", value: formatPercent(signal?.confidence, 0), source: "signal" },
+    { key: "flow_alignment", value: formatPercent(signal?.metadata?.order_flow_alignment, 0), source: "signal" },
+    { key: "book_pressure", value: formatSignedNumber(orderFlow?.book_pressure, 2), source: "order_flow" },
+    { key: "trade_imbalance", value: formatRawPercent((orderFlow?.trade_imbalance ?? 0) * 100, 1), source: "order_flow" },
+    { key: "option_contract", value: signal?.options?.trading_symbol ?? "—", source: "options" },
+  ];
+
+  return (
+    <div className="border border-[#2a2a2a] bg-black">
+      <div className="flex items-center justify-between border-b border-[#2a2a2a] bg-[#0a0a0a] px-2 py-2">
+        <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#ffb02e]">Agent Feature Tape</div>
+        <div className="text-[9px] uppercase tracking-[0.14em] text-[#666]">canonical keys</div>
+      </div>
+      <div className="max-h-[258px] overflow-auto">
+        <table className="w-full table-fixed text-left text-[10px]">
+          <thead className="sticky top-0 bg-black text-[#666]">
+            <tr className="border-b border-[#1a1a1a]">
+              <th className="w-[42%] px-2 py-1.5 font-medium uppercase tracking-[0.14em]">Key</th>
+              <th className="w-[34%] px-2 py-1.5 text-right font-medium uppercase tracking-[0.14em]">Value</th>
+              <th className="w-[24%] px-2 py-1.5 text-right font-medium uppercase tracking-[0.14em]">Source</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-[#1a1a1a]">
+            {rows.map((row) => (
+              <tr key={row.key}>
+                <td className="truncate px-2 py-1.5 text-[#888]" title={row.key}>{row.key}</td>
+                <td className="truncate px-2 py-1.5 text-right font-semibold text-[#f5f5f5]" title={String(row.value)}>{row.value}</td>
+                <td className="truncate px-2 py-1.5 text-right text-[#666]" title={row.source}>{row.source}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+});
+
+const TerminalMarketProfileWorkbench = memo(function TerminalMarketProfileWorkbench({
+  live,
+  symbol,
+}: {
+  live?: LiveSnapshotResponse;
+  symbol: string;
+}) {
+  const [displayMode, setDisplayMode] = useState<TerminalDisplayMode>("letters");
+  const [viewMode, setViewMode] = useState<TerminalViewMode>("split");
+  const [showRefs, setShowRefs] = useState(true);
+  const dailyProfile = live?.daily_profile;
+  const priorProfile = live?.prior_daily_profile;
+  const currentHourProfile = live?.current_hour_profile;
+  const hourlyProfiles = live?.hourly_profiles ?? [];
+  const livePrice = live?.session.last_price ?? live?.current_signal.latest_close ?? dailyProfile?.close_price;
+  const profilesForDomain = [priorProfile, dailyProfile, currentHourProfile, ...hourlyProfiles];
+  const domain = useMemo(() => buildPriceDomain(profilesForDomain), [currentHourProfile, dailyProfile, hourlyProfiles, priorProfile]);
+
+  const fractalColumns = useMemo<TerminalProfileColumn[]>(
+    () =>
+      hourlyProfiles.map((profile) => ({
+        id: `h-${profile.hour_number ?? profile.window_start ?? profile.scope}`,
+        label: `H${profile.hour_number ?? "?"}`,
+        subLabel: `${formatShapeLabel(profile.shape)} · ${formatSignedNumber(profile.value_migration_score, 0)}`,
+        profile,
+        bars: live?.intraday_bars_3m ?? [],
+        isLive: profile.hour_number === live?.session.current_hour,
+      })),
+    [hourlyProfiles, live?.intraday_bars_3m, live?.session.current_hour],
+  );
+
+  const compositeColumns = useMemo<TerminalProfileColumn[]>(
+    () =>
+      [
+        priorProfile
+          ? {
+              id: "prior-daily",
+              label: "PRIOR",
+              subLabel: `${formatShapeLabel(priorProfile.shape)} · yDAY`,
+              profile: priorProfile,
+              bars: [],
+            }
+          : null,
+        dailyProfile
+          ? {
+              id: "daily",
+              label: "TODAY",
+              subLabel: `${formatShapeLabel(dailyProfile.shape)} · LIVE`,
+              profile: dailyProfile,
+              bars: live?.intraday_bars_30m ?? live?.intraday_bars_3m ?? [],
+              isLive: true,
+            }
+          : null,
+      ].filter(Boolean) as TerminalProfileColumn[],
+    [dailyProfile, live?.intraday_bars_30m, live?.intraday_bars_3m, priorProfile],
+  );
+
+  const changeFromPrior = livePrice != null && priorProfile ? livePrice - priorProfile.close_price : null;
+
+  return (
+    <section className="overflow-hidden rounded-sm border border-[#2a2a2a] bg-black font-mono text-[#d8d8d8]">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#2a2a2a] bg-[#0a0a0a] px-3 py-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-bold uppercase tracking-[0.2em] text-[#ffb02e]">Nomad Curie</span>
+          <span className="text-[#555]">|</span>
+          <span className="uppercase tracking-[0.16em] text-[#999]">FMP</span>
+          <span className="text-[#555]">|</span>
+          <span className="text-sm font-bold uppercase tracking-[0.16em] text-[#f5f5f5]">{symbol}</span>
+          <span className="text-base font-bold text-[#ffc555]">{formatPrice(livePrice, 2)}</span>
+          <span className={clsx("text-[11px] font-semibold", terminalTone(changeFromPrior))}>
+            {formatSignedNumber(changeFromPrior, 2)}
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-[#777]">
+          <span>Generated {formatDateTime(live?.generated_at)}</span>
+          <span className="text-[#555]">|</span>
+          <span>{live?.session.minutes_to_close ?? "—"}m close</span>
+          <span className="text-[#555]">|</span>
+          <span className="text-[#4ec97a]">● LIVE</span>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 border-b border-[#2a2a2a] bg-black px-2 py-1">
+        <div className="flex overflow-hidden border border-[#2a2a2a]">
+          {(["split", "fractal", "composite"] as TerminalViewMode[]).map((mode) => (
+            <TerminalButton key={mode} active={viewMode === mode} onClick={() => setViewMode(mode)}>
+              {mode}
+            </TerminalButton>
+          ))}
+        </div>
+        <div className="flex overflow-hidden border border-[#2a2a2a]">
+          {(["letters", "heatmap", "volume"] as TerminalDisplayMode[]).map((mode) => (
+            <TerminalButton key={mode} active={displayMode === mode} onClick={() => setDisplayMode(mode)}>
+              {mode}
+            </TerminalButton>
+          ))}
+        </div>
+        <div className="flex overflow-hidden border border-[#2a2a2a]">
+          <TerminalButton active={showRefs} onClick={() => setShowRefs(!showRefs)}>
+            y-levels
+          </TerminalButton>
+        </div>
+        <div className="ml-auto flex min-w-0 overflow-x-auto">
+          <TerminalReadout label="Day" value={formatShapeLabel(dailyProfile?.shape).toUpperCase()} hot={dailyProfile?.shape === "trend"} />
+          <TerminalReadout label="Bias" value={dailyProfile?.direction_bias?.toUpperCase() ?? "—"} />
+          <TerminalReadout label="POC" value={formatPrice(dailyProfile?.poc, 0)} />
+          <TerminalReadout label="VAH" value={formatPrice(dailyProfile?.vah, 0)} />
+          <TerminalReadout label="VAL" value={formatPrice(dailyProfile?.val, 0)} />
+          <TerminalReadout label="IB" value={formatPrice(dailyProfile?.initial_balance_range, 0)} hot={live?.filters.wide_daily_ib} />
+          <TerminalReadout label="SP" value={dailyProfile?.single_prints.length ?? 0} hot={(dailyProfile?.single_prints.length ?? 0) > 0} />
+        </div>
+      </div>
+
+      <div className="grid gap-px bg-[#2a2a2a] xl:grid-cols-[minmax(0,1fr)_340px]">
+        <div className="grid min-w-0 gap-px bg-[#2a2a2a]">
+          {(viewMode === "split" || viewMode === "fractal") ? (
+            <TerminalProfileGrid
+              columns={fractalColumns}
+              domain={domain}
+              displayMode={displayMode}
+              showRefs={showRefs}
+              priorProfile={priorProfile}
+              livePrice={livePrice}
+              title="Fractal Hourly TPO"
+            />
+          ) : null}
+          {(viewMode === "split" || viewMode === "composite") ? (
+            <TerminalProfileGrid
+              columns={compositeColumns}
+              domain={domain}
+              displayMode={displayMode}
+              showRefs={showRefs}
+              priorProfile={priorProfile}
+              livePrice={livePrice}
+              title="Composite Daily Profile"
+            />
+          ) : null}
+        </div>
+        <div className="grid content-start gap-px bg-[#2a2a2a]">
+          <TerminalTelemetryPanel live={live} />
+          <AgentFeatureTape live={live} />
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 border-t border-[#2a2a2a] bg-[#0a0a0a] px-3 py-1.5 text-[9px] uppercase tracking-[0.14em] text-[#666]">
+        <span>feed: {live?.order_flow.source ?? "snapshot"}</span>
+        <span>|</span>
+        <span>profile: 30m daily / 3m fractal</span>
+        <span>|</span>
+        <span>va: 70% tpo</span>
+        <span className="ml-auto">agent contract: profile + signal + order_flow + options</span>
+      </div>
+    </section>
+  );
+});
+
 const OrderFlowPanel = memo(function OrderFlowPanel({
   orderFlow,
 }: OrderFlowPanelProps) {
@@ -1332,6 +2011,7 @@ const OrderFlowPanel = memo(function OrderFlowPanel({
 export default function FractalMarketProfileWorkspace() {
   const queryClient = useQueryClient();
   const [symbol, setSymbol] = useState("NIFTY");
+  const [paperBookTab, setPaperBookTab] = useState<"positions" | "ledger">("positions");
   const [isPending, startTransition] = useTransition();
   const deferredSymbol = useDeferredValue(symbol);
 
@@ -1347,6 +2027,10 @@ export default function FractalMarketProfileWorkspace() {
     queryKey: ["fmp-live", deferredSymbol],
     queryFn: () => getFractalMarketProfileLiveSnapshot(deferredSymbol).then((response) => response.data),
     storageKey: `nomad-curie.fmp.live.${deferredSymbol.toLowerCase()}`,
+    preferStream: false,
+    refetchInterval: 20_000,
+    staleTime: 10_000,
+    refetchOnWindowFocus: false,
     streamFactory: (onData, onStatusChange) =>
       createFractalMarketProfileSocket(
         deferredSymbol,
@@ -1440,7 +2124,7 @@ export default function FractalMarketProfileWorkspace() {
           icon={<Fingerprint size={15} className="text-sky-300" />}
           eyebrow="Fractal MP"
           title="Fractal Market Profile"
-          detail="Daily 30-minute TPO and nested hourly 3-minute profile logic now run as a live paper desk for NIFTY and SENSEX, with profile migration, order flow, paper positions, and replay checks on one surface."
+          detail="Daily 30-minute TPO and nested hourly 3-minute profile logic now run as a live paper desk for index futures plus CRUDEOIL testing, with profile migration, order flow, paper positions, and replay checks on one surface."
           action={
             <div className="flex flex-wrap items-center gap-2">
               <StatusPill
@@ -1479,7 +2163,7 @@ export default function FractalMarketProfileWorkspace() {
 
         <div className="mt-6 flex flex-wrap items-center justify-between gap-4">
           <div className="flex flex-wrap gap-2">
-            {(summaryQuery.data?.supported_symbols ?? ["NIFTY", "SENSEX"]).map((candidate) => (
+            {(summaryQuery.data?.supported_symbols ?? ["NIFTY", "SENSEX", "CRUDEOIL"]).map((candidate) => (
               <button
                 key={candidate}
                 type="button"
@@ -1540,58 +2224,7 @@ export default function FractalMarketProfileWorkspace() {
         />
       </section>
 
-      <section className="grid gap-6 xl:grid-cols-[1.12fr_0.88fr]">
-        <div className={sectionChrome("p-5")}>
-          <SectionTitle
-            icon={<Layers3 size={14} className="text-sky-300" />}
-            eyebrow="Market Profile"
-            title={`${deferredSymbol} day structure`}
-            detail="The strip panel scales every completed hourly profile against the same price ladder, with daily value references carried across the session. This is the operator view for the nested fractal auction."
-            action={
-              live?.daily_profile ? (
-                <StatusPill
-                  label={`${live.daily_profile.shape} · ${live.daily_profile.direction_bias}`}
-                  className="border-sky-300/25 bg-sky-400/10 text-sky-200"
-                />
-              ) : null
-            }
-          />
-          <div className="mt-5">
-            <ProfileStripPanel
-              dailyProfile={live?.daily_profile}
-              hourlyProfiles={live?.hourly_profiles ?? []}
-              currentHour={live?.session.current_hour}
-            />
-          </div>
-        </div>
-
-        <div className={sectionChrome("p-5")}>
-          <SectionTitle
-            icon={<CandlestickChart size={14} className="text-amber-300" />}
-            eyebrow="Execution Context"
-            title="Intraday trigger map"
-            detail="Confirmed 3-minute closes drive entries. The chart keeps the daily value ladder, live trigger, stop, and target on the same axis so option execution can stay tied to the underlying auction."
-          />
-          <div className="mt-5">
-            <PriceStructurePanel
-              bars={live?.intraday_bars_3m ?? []}
-              dailyProfile={live?.daily_profile}
-              signal={live?.current_signal}
-            />
-          </div>
-        </div>
-      </section>
-
-      <section className="grid gap-6 xl:grid-cols-[1.02fr_0.98fr]">
-        <ValueMigrationPanel
-          dailyProfile={live?.daily_profile}
-          hourlyProfiles={live?.hourly_profiles ?? []}
-        />
-        <TpoDistributionPanel
-          dailyProfile={live?.daily_profile}
-          currentHourProfile={live?.current_hour_profile}
-        />
-      </section>
+      <TerminalMarketProfileWorkbench live={live} symbol={deferredSymbol} />
 
       <section className="grid gap-6 xl:grid-cols-[0.92fr_1.08fr]">
         <OrderFlowPanel orderFlow={live?.order_flow} />
@@ -1736,75 +2369,183 @@ export default function FractalMarketProfileWorkspace() {
             />
           </div>
 
-          <div className="mt-5 grid gap-4 xl:grid-cols-2">
-            <div className="rounded-[26px] border border-white/8 bg-black/20 p-4">
-              <div className="mb-3 text-sm font-semibold text-slate-100">Open positions</div>
-              <div className="space-y-2">
-                {openPositions.length ? (
-                  openPositions.map((position) => (
-                    <div key={position.position_id} className="rounded-[20px] border border-white/8 bg-white/[0.04] px-3 py-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="text-sm font-semibold text-slate-100">
-                            {position.action} {position.option_type} {formatPrice(position.strike)} {position.expiry}
-                          </div>
-                          <div className="mt-1 text-[11px] uppercase tracking-[0.16em] text-slate-400">
-                            {position.setup_name.replaceAll("_", " ")} · {position.horizon}
-                          </div>
-                        </div>
-                        <div className={clsx("font-mono text-sm font-semibold", toneClass(position.unrealized_pnl))}>
-                          {formatSignedCurrency(position.unrealized_pnl)}
-                        </div>
-                      </div>
-                      <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                        <MetricRow label="Premium" value={`${formatCurrency(position.entry_premium, 2)} → ${formatCurrency(position.latest_premium, 2)}`} hint={`Qty ${position.quantity}`} />
-                        <MetricRow label="Risk" value={`${formatPrice(position.stop_level)} / ${formatPrice(position.target_level)}`} hint={`${position.daily_shape} · ${position.hourly_shape}`} />
-                        <MetricRow label="Opened" value={formatDateTime(position.opened_at)} hint={`Confidence ${formatPercent(position.confidence, 0)}`} />
-                      </div>
-                    </div>
-                  ))
-                ) : (
-                  <div className="rounded-[20px] border border-dashed border-white/10 px-3 py-8 text-center text-sm text-slate-400">
-                    No open FMP paper positions for {deferredSymbol}.
-                  </div>
+          <div className="mt-5 flex flex-wrap items-center gap-2 rounded-full border border-white/8 bg-black/20 p-1">
+            {[
+              { key: "positions", label: "Positions" },
+              { key: "ledger", label: "Ledger tape" },
+            ].map((tab) => (
+              <button
+                key={tab.key}
+                type="button"
+                onClick={() => setPaperBookTab(tab.key as "positions" | "ledger")}
+                className={clsx(
+                  "rounded-full px-4 py-2 text-sm font-semibold transition",
+                  paperBookTab === tab.key
+                    ? "bg-sky-400/16 text-sky-100 shadow-[0_0_0_1px_rgba(125,211,252,0.2)]"
+                    : "text-slate-400 hover:bg-white/6 hover:text-slate-100",
                 )}
-              </div>
-            </div>
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
 
-            <div className="rounded-[26px] border border-white/8 bg-black/20 p-4">
-              <div className="mb-3 text-sm font-semibold text-slate-100">Ledger tape</div>
-              <div className="space-y-2">
-                {journalRecords.length ? (
-                  journalRecords.map((record, index) => (
-                    <div key={`${record.recorded_at}-${index}`} className="rounded-[20px] border border-white/8 bg-white/[0.04] px-3 py-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="text-sm font-semibold text-slate-100">
-                            {(record.action ?? "FLAT")} · {(record.setup_name ?? "no setup").replaceAll("_", " ")}
+          {paperBookTab === "positions" ? (
+            <>
+              <div className="mt-4 rounded-[26px] border border-white/8 bg-black/20 p-4">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-slate-100">Open positions</div>
+                  <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">
+                    {openPositions.length} open · {closedPositions.length} closed
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  {openPositions.length ? (
+                    openPositions.map((position) => (
+                      <div key={position.position_id} className="rounded-[20px] border border-white/8 bg-white/[0.04] px-3 py-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-semibold text-slate-100">
+                              {position.action} {position.option_type} {formatPrice(position.strike)} {position.expiry}
+                            </div>
+                            <div className="mt-1 text-[11px] uppercase tracking-[0.16em] text-slate-400">
+                              {position.setup_name.replaceAll("_", " ")} · {position.horizon}
+                            </div>
                           </div>
-                          <div className="mt-1 text-[11px] uppercase tracking-[0.16em] text-slate-400">
-                            {formatDateTime(record.recorded_at)} · hour {record.hourly_number ?? "—"}
+                          <div className={clsx("font-mono text-sm font-semibold", toneClass(position.unrealized_pnl))}>
+                            {formatSignedCurrency(position.unrealized_pnl)}
                           </div>
                         </div>
-                        <StatusPill
-                          label={record.actionable ? "actionable" : "logged"}
-                          className={record.actionable ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-200" : "border-white/10 bg-white/6 text-slate-300"}
-                        />
+                        <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                          <MetricRow label="Premium" value={`${formatCurrency(position.entry_premium, 2)} -> ${formatCurrency(position.latest_premium, 2)}`} hint={`Qty ${position.quantity}`} />
+                          <MetricRow label="Risk" value={`${formatPrice(position.stop_level)} / ${formatPrice(position.target_level)}`} hint={`${position.daily_shape} · ${position.hourly_shape}`} />
+                          <MetricRow label="Opened" value={formatDateTime(position.opened_at)} hint={`Confidence ${formatPercent(position.confidence, 0)}`} />
+                        </div>
                       </div>
-                      <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                        <MetricRow
-                          label="Trigger ladder"
-                          value={`${formatPrice(record.entry_trigger)} · ${formatPrice(record.stop_level)} · ${formatPrice(record.target_level)}`}
-                          hint={`${record.daily_shape ?? "—"} daily · ${record.hourly_shape ?? "—"} hourly`}
-                        />
-                        <MetricRow
-                          label="Contract"
-                          value={record.options?.option_type ? `${record.options.option_type} ${formatPrice(record.options.strike)} ${record.options.expiry ?? ""}` : "No option"}
-                          hint={record.options?.selection_reason ?? "No mapped option on this packet."}
-                        />
-                      </div>
+                    ))
+                  ) : (
+                    <div className="rounded-[20px] border border-dashed border-white/10 px-3 py-8 text-center text-sm text-slate-400">
+                      No open FMP paper positions for {deferredSymbol}.
                     </div>
-                  ))
+                  )}
+                </div>
+              </div>
+
+              <div className="mt-4 rounded-[26px] border border-white/8 bg-black/20 p-4">
+                <div className="mb-3 text-sm font-semibold text-slate-100">Recently closed</div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-left text-sm">
+                    <thead className="text-[11px] uppercase tracking-[0.16em] text-slate-500">
+                      <tr>
+                        <th className="pb-3 font-medium">Contract</th>
+                        <th className="pb-3 font-medium">Setup</th>
+                        <th className="pb-3 font-medium">Opened</th>
+                        <th className="pb-3 font-medium">Closed</th>
+                        <th className="pb-3 font-medium">P&L</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/8">
+                      {closedPositions.length ? (
+                        closedPositions.slice(0, 10).map((position) => (
+                          <tr key={position.position_id} className="text-slate-300">
+                            <td className="py-3">
+                              {position.option_type} {formatPrice(position.strike)} {position.expiry}
+                            </td>
+                            <td className="py-3">{position.setup_name.replaceAll("_", " ")}</td>
+                            <td className="py-3">{formatDateTime(position.opened_at)}</td>
+                            <td className="py-3">{formatDateTime(position.closed_at)}</td>
+                            <td className={clsx("py-3 font-mono font-semibold", toneClass(position.realized_pnl))}>
+                              {formatSignedCurrency(position.realized_pnl)}
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={5} className="py-6 text-center text-slate-400">
+                            No closed FMP positions yet.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="mt-4 rounded-[26px] border border-white/8 bg-black/20 p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div className="text-sm font-semibold text-slate-100">Ledger tape</div>
+                <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">
+                  horizontal rail · {journalRecords.length} records
+                </div>
+              </div>
+              <div className="-mx-1 overflow-x-auto px-1 pb-3 [scrollbar-width:thin]">
+                {journalRecords.length ? (
+                  <div className="flex w-max min-w-full snap-x gap-3">
+                    {journalRecords.map((record, index) => {
+                      const triggerValue = Number(record.entry_trigger ?? 0);
+                      const stopValue = Number(record.stop_level ?? 0);
+                      const targetValue = Number(record.target_level ?? 0);
+                      const ladderLow = Math.min(triggerValue || stopValue || targetValue || 0, stopValue || triggerValue || targetValue || 0, targetValue || triggerValue || stopValue || 0);
+                      const ladderHigh = Math.max(triggerValue || stopValue || targetValue || 0, stopValue || triggerValue || targetValue || 0, targetValue || triggerValue || stopValue || 0);
+                      const ladderSpan = Math.max(ladderHigh - ladderLow, 1);
+                      const triggerPct = ((triggerValue - ladderLow) / ladderSpan) * 100;
+                      const stopPct = ((stopValue - ladderLow) / ladderSpan) * 100;
+                      const targetPct = ((targetValue - ladderLow) / ladderSpan) * 100;
+
+                      return (
+                        <div key={`${record.recorded_at}-${index}`} className="w-[340px] shrink-0 snap-start rounded-[20px] border border-white/8 bg-white/[0.04] px-3 py-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <div className="text-sm font-semibold text-slate-100">
+                                {(record.action ?? "FLAT")} · {(record.setup_name ?? "no setup").replaceAll("_", " ")}
+                              </div>
+                              <div className="mt-1 text-[11px] uppercase tracking-[0.16em] text-slate-400">
+                                {formatDateTime(record.recorded_at)} · hour {record.hourly_number ?? "—"}
+                              </div>
+                            </div>
+                            <StatusPill
+                              label={record.actionable ? "actionable" : "logged"}
+                              className={record.actionable ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-200" : "border-white/10 bg-white/6 text-slate-300"}
+                            />
+                          </div>
+                          <div className="mt-3 rounded-2xl border border-white/8 bg-black/24 p-3">
+                            <div className="relative h-2 rounded-full bg-white/8">
+                              <div
+                                className="absolute top-1/2 h-4 w-1 -translate-y-1/2 rounded-full bg-rose-300"
+                                style={{ left: `${Math.min(Math.max(stopPct, 0), 100)}%` }}
+                              />
+                              <div
+                                className="absolute top-1/2 h-5 w-1 -translate-y-1/2 rounded-full bg-sky-300"
+                                style={{ left: `${Math.min(Math.max(triggerPct, 0), 100)}%` }}
+                              />
+                              <div
+                                className="absolute top-1/2 h-4 w-1 -translate-y-1/2 rounded-full bg-emerald-300"
+                                style={{ left: `${Math.min(Math.max(targetPct, 0), 100)}%` }}
+                              />
+                            </div>
+                            <div className="mt-2 grid grid-cols-3 gap-2 text-[10px] uppercase tracking-[0.12em] text-slate-500">
+                              <span>Stop</span>
+                              <span className="text-center">Entry</span>
+                              <span className="text-right">Target</span>
+                            </div>
+                          </div>
+                          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                            <MetricRow
+                              label="Trigger ladder"
+                              value={`${formatPrice(record.entry_trigger)} · ${formatPrice(record.stop_level)} · ${formatPrice(record.target_level)}`}
+                              hint={`${record.daily_shape ?? "—"} daily · ${record.hourly_shape ?? "—"} hourly`}
+                            />
+                            <MetricRow
+                              label="Contract"
+                              value={record.options?.option_type ? `${record.options.option_type} ${formatPrice(record.options.strike)} ${record.options.expiry ?? ""}` : "No option"}
+                              hint={record.options?.selection_reason ?? "No mapped option on this packet."}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 ) : (
                   <div className="rounded-[20px] border border-dashed border-white/10 px-3 py-8 text-center text-sm text-slate-400">
                     No persisted FMP journal entries for {deferredSymbol}.
@@ -1812,54 +2553,14 @@ export default function FractalMarketProfileWorkspace() {
                 )}
               </div>
             </div>
-          </div>
-
-          <div className="mt-4 rounded-[26px] border border-white/8 bg-black/20 p-4">
-            <div className="mb-3 text-sm font-semibold text-slate-100">Recently closed</div>
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-left text-sm">
-                <thead className="text-[11px] uppercase tracking-[0.16em] text-slate-500">
-                  <tr>
-                    <th className="pb-3 font-medium">Contract</th>
-                    <th className="pb-3 font-medium">Setup</th>
-                    <th className="pb-3 font-medium">Opened</th>
-                    <th className="pb-3 font-medium">Closed</th>
-                    <th className="pb-3 font-medium">P&L</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/8">
-                  {closedPositions.length ? (
-                    closedPositions.slice(0, 10).map((position) => (
-                      <tr key={position.position_id} className="text-slate-300">
-                        <td className="py-3">
-                          {position.option_type} {formatPrice(position.strike)} {position.expiry}
-                        </td>
-                        <td className="py-3">{position.setup_name.replaceAll("_", " ")}</td>
-                        <td className="py-3">{formatDateTime(position.opened_at)}</td>
-                        <td className="py-3">{formatDateTime(position.closed_at)}</td>
-                        <td className={clsx("py-3 font-mono font-semibold", toneClass(position.realized_pnl))}>
-                          {formatSignedCurrency(position.realized_pnl)}
-                        </td>
-                      </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td colSpan={5} className="py-6 text-center text-slate-400">
-                        No closed FMP positions yet.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
+          )}
         </div>
 
         <div className={sectionChrome("p-5")}>
           <SectionTitle
             icon={<Activity size={14} className="text-emerald-300" />}
             eyebrow="Replay Validation"
-            title="NIFTY and SENSEX results"
+            title="Index and crude results"
             detail="This panel shows the cached replay suite on local minute history. It keeps the strategy isolated from Auction IQ, with dedicated metrics and trade logs per index."
             action={
               summaryQuery.isFetching || replayRefreshMutation.isPending ? (

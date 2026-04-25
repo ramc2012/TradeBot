@@ -61,6 +61,63 @@ def _black_scholes_greeks(
     return delta, gamma, theta, vega
 
 
+def _black_scholes_price(
+    *,
+    spot: float,
+    strike: float,
+    time_to_expiry_years: float,
+    sigma: float,
+    risk_free_rate: float,
+    option_type: str,
+) -> float:
+    if spot <= 0.0 or strike <= 0.0 or time_to_expiry_years <= 0.0 or sigma <= 0.0:
+        return max(spot - strike, 0.0) if option_type == "CE" else max(strike - spot, 0.0)
+
+    sqrt_t = math.sqrt(time_to_expiry_years)
+    sigma_sqrt_t = sigma * sqrt_t
+    d1 = (math.log(spot / strike) + (risk_free_rate + 0.5 * sigma * sigma) * time_to_expiry_years) / sigma_sqrt_t
+    d2 = d1 - sigma_sqrt_t
+    discount = math.exp(-risk_free_rate * time_to_expiry_years)
+    if option_type == "CE":
+        return (spot * _norm_cdf(d1)) - (strike * discount * _norm_cdf(d2))
+    return (strike * discount * _norm_cdf(-d2)) - (spot * _norm_cdf(-d1))
+
+
+def _risk_neutral_tail(
+    *,
+    spot: float,
+    strike: float,
+    time_to_expiry_years: float,
+    sigma: float,
+    risk_free_rate: float,
+    option_type: str,
+) -> float:
+    if spot <= 0.0 or strike <= 0.0 or time_to_expiry_years <= 0.0 or sigma <= 0.0:
+        return 0.0
+    sigma_sqrt_t = sigma * math.sqrt(time_to_expiry_years)
+    d1 = (math.log(spot / strike) + (risk_free_rate + 0.5 * sigma * sigma) * time_to_expiry_years) / sigma_sqrt_t
+    d2 = d1 - sigma_sqrt_t
+    return _norm_cdf(d2) if option_type == "CE" else _norm_cdf(-d2)
+
+
+def _normal_tail(mean: float, stdev: float, threshold: float, option_type: str) -> float:
+    if stdev <= 0.0:
+        if option_type == "CE":
+            return 1.0 if mean > threshold else 0.0
+        return 1.0 if mean < threshold else 0.0
+    z = (threshold - mean) / stdev
+    return 1.0 - _norm_cdf(z) if option_type == "CE" else _norm_cdf(z)
+
+
+def _normal_expected_payoff(mean: float, stdev: float, strike: float, option_type: str) -> float:
+    if stdev <= 0.0:
+        return max(mean - strike, 0.0) if option_type == "CE" else max(strike - mean, 0.0)
+    d = (mean - strike) / stdev
+    if option_type == "CE":
+        return max(0.0, (mean - strike) * _norm_cdf(d) + stdev * _norm_pdf(d))
+    return max(0.0, (strike - mean) * _norm_cdf(-d) + stdev * _norm_pdf(d))
+
+
 def _delta_bucket(delta_abs: float) -> str:
     if delta_abs < 0.25:
         return "lottery"
@@ -74,7 +131,7 @@ def _delta_bucket(delta_abs: float) -> str:
 
 
 class OptionSelectionEngine:
-    """Choose the contract whose expected convexity clears carry and friction."""
+    """Distributional strike-expiry optimizer for outright long CE/PE trades."""
 
     def __init__(self, store: DirectionalOptionsDataStore, config: dict[str, Any]):
         self.store = store
@@ -122,6 +179,7 @@ class OptionSelectionEngine:
         )
         risk_free_rate = float(selector_cfg["risk_free_rate"])
         delta_mid = (regime.delta_target_min + regime.delta_target_max) / 2.0
+        atm_iv = sigma
 
         for meta in contracts:
             candidate = self._score_contract(
@@ -135,6 +193,7 @@ class OptionSelectionEngine:
                 horizon_years=horizon_years,
                 risk_free_rate=risk_free_rate,
                 delta_mid=delta_mid,
+                atm_iv=atm_iv,
             )
             if candidate is None:
                 continue
@@ -193,6 +252,7 @@ class OptionSelectionEngine:
         )
         risk_free_rate = float(selector_cfg["risk_free_rate"])
         delta_mid = (regime.delta_target_min + regime.delta_target_max) / 2.0
+        atm_iv = self._estimate_snapshot_atm_iv(snapshot_rows, spot_price, sigma)
 
         for snapshot in ordered:
             candidate = self._score_snapshot_contract(
@@ -204,6 +264,7 @@ class OptionSelectionEngine:
                 horizon_years=horizon_years,
                 risk_free_rate=risk_free_rate,
                 delta_mid=delta_mid,
+                atm_iv=atm_iv,
             )
             if candidate is None:
                 continue
@@ -235,6 +296,7 @@ class OptionSelectionEngine:
         horizon_years: float,
         risk_free_rate: float,
         delta_mid: float,
+        atm_iv: float,
     ) -> Optional[ContractCandidate]:
         bar = self.store.latest_contract_bar(meta, timestamp)
         if bar is None:
@@ -290,8 +352,9 @@ class OptionSelectionEngine:
         spread_cost = option_price * spread_pct
         slippage_cost = option_price * slippage_pct
         fees = 2.0 * 0.45
-        expected_pnl = (
-            (delta * signal.expected_move)
+        signed_move = signal.expected_move if meta.option_type == "CE" else -signal.expected_move
+        greek_expected_pnl = (
+            (delta * signed_move)
             + (0.5 * gamma * (signal.expected_move ** 2))
             + (vega * signal.expected_iv_change)
             - (abs(theta) * horizon_years)
@@ -299,6 +362,26 @@ class OptionSelectionEngine:
             - slippage_cost
             - fees
         )
+        distributional = self._distributional_metrics(
+            underlying=meta.underlying,
+            option_type=meta.option_type,
+            spot_price=spot_price,
+            strike=meta.strike,
+            option_price=option_price,
+            sigma=sigma,
+            atm_iv=atm_iv,
+            time_to_expiry_years=time_to_expiry_years,
+            horizon_years=horizon_years,
+            risk_free_rate=risk_free_rate,
+            spread_cost=spread_cost,
+            slippage_cost=slippage_cost,
+            fees=fees,
+            theta=theta,
+            delta_abs=delta_abs,
+            liquidity_score=liquidity_score,
+            signal=signal,
+        )
+        expected_pnl = distributional["trading_edge"]
 
         weights = self.config["score_weights"]
         score = (
@@ -306,13 +389,19 @@ class OptionSelectionEngine:
             + (weights["expected_pnl"] * max(-1.0, min(expected_pnl / max(option_price, 1.0), 2.0)))
             + (weights["liquidity"] * liquidity_score)
             + (weights["iv_value"] * iv_value_score)
+            + (weights.get("tail_edge", 0.0) * distributional["tail_edge"])
+            + (weights.get("timing_fit", 0.0) * distributional["timing_fit"])
             - (weights["theta_penalty"] * theta_penalty)
             - (weights["slippage_penalty"] * (spread_pct + slippage_pct))
+            - (weights.get("skew_tax", 0.0) * distributional["skew_tax"])
+            - (weights.get("model_uncertainty", 0.0) * distributional["model_uncertainty"])
         )
+        score += max(-12.0, min(greek_expected_pnl / max(option_price, 1.0), 1.0) * 6.0)
 
         selection_reason = (
             f"{meta.expiry_kind} {meta.option_type} with {delta_abs:.2f} delta, "
-            f"{liquidity_score:.0%} liquidity score, and {expected_pnl:.2f} expected PnL."
+            f"{distributional['tail_edge']:+.2f} p-minus-q tail gap, "
+            f"{distributional['timing_fit']:.0%} timing fit, and {expected_pnl:.2f} net trading edge."
         )
 
         return ContractCandidate(
@@ -346,6 +435,25 @@ class OptionSelectionEngine:
             expected_pnl=round(expected_pnl, 2),
             contract_score=round(score, 2),
             selection_reason=selection_reason,
+            q_price=round(option_price, 2),
+            p_terminal_edge=round(distributional["terminal_edge"], 2),
+            p_trading_edge=round(distributional["trading_edge"], 2),
+            p_tail=round(distributional["p_tail"], 4),
+            q_tail=round(distributional["q_tail"], 4),
+            p_minus_q_tail=round(distributional["tail_edge"], 4),
+            expected_return_on_premium=round(distributional["return_on_premium"], 4),
+            probability_of_profit=round(distributional["probability_of_profit"], 4),
+            probability_of_50pct_loss=round(distributional["probability_of_50pct_loss"], 4),
+            probability_of_total_loss=round(distributional["probability_of_total_loss"], 4),
+            timing_fit=round(distributional["timing_fit"], 4),
+            skew_tax=round(distributional["skew_tax"], 4),
+            model_confidence=round(signal.confidence, 4),
+            model_error_buffer=round(distributional["model_error_buffer"], 2),
+            theta_cost=round(abs(theta) * horizon_years, 2),
+            iv_tail_edge_bonus=round(distributional["iv_tail_edge_bonus"], 4),
+            expiry_score=round(distributional["expiry_score"], 4),
+            utility=round(score, 2),
+            rejection_reasons=distributional["rejection_reasons"],
         )
 
     def _score_snapshot_contract(
@@ -359,6 +467,7 @@ class OptionSelectionEngine:
         horizon_years: float,
         risk_free_rate: float,
         delta_mid: float,
+        atm_iv: float,
     ) -> Optional[ContractCandidate]:
         option_price = float(snapshot.get("ltp") or 0.0)
         volume = float(snapshot.get("volume") or 0.0)
@@ -415,8 +524,10 @@ class OptionSelectionEngine:
         spread_cost = option_price * spread_pct
         slippage_cost = option_price * slippage_pct
         fees = 2.0 * 0.45
-        expected_pnl = (
-            (delta * signal.expected_move)
+        option_type = str(snapshot.get("option_type") or signal.direction)
+        signed_move = signal.expected_move if option_type == "CE" else -signal.expected_move
+        greek_expected_pnl = (
+            (delta * signed_move)
             + (0.5 * gamma * (signal.expected_move ** 2))
             + (vega * signal.expected_iv_change)
             - (abs(theta) * horizon_years)
@@ -424,6 +535,26 @@ class OptionSelectionEngine:
             - slippage_cost
             - fees
         )
+        distributional = self._distributional_metrics(
+            underlying=str(snapshot.get("underlying") or ""),
+            option_type=option_type,
+            spot_price=spot_price,
+            strike=strike,
+            option_price=option_price,
+            sigma=sigma,
+            atm_iv=atm_iv,
+            time_to_expiry_years=time_to_expiry_years,
+            horizon_years=horizon_years,
+            risk_free_rate=risk_free_rate,
+            spread_cost=spread_cost,
+            slippage_cost=slippage_cost,
+            fees=fees,
+            theta=theta,
+            delta_abs=delta_abs,
+            liquidity_score=liquidity_score,
+            signal=signal,
+        )
+        expected_pnl = distributional["trading_edge"]
 
         weights = self.config["score_weights"]
         score = (
@@ -431,15 +562,20 @@ class OptionSelectionEngine:
             + (weights["expected_pnl"] * max(-1.0, min(expected_pnl / max(option_price, 1.0), 2.0)))
             + (weights["liquidity"] * liquidity_score)
             + (weights["iv_value"] * iv_value_score)
+            + (weights.get("tail_edge", 0.0) * distributional["tail_edge"])
+            + (weights.get("timing_fit", 0.0) * distributional["timing_fit"])
             - (weights["theta_penalty"] * theta_penalty)
             - (weights["slippage_penalty"] * (spread_pct + slippage_pct))
+            - (weights.get("skew_tax", 0.0) * distributional["skew_tax"])
+            - (weights.get("model_uncertainty", 0.0) * distributional["model_uncertainty"])
         )
+        score += max(-12.0, min(greek_expected_pnl / max(option_price, 1.0), 1.0) * 6.0)
 
         trading_symbol = str(snapshot.get("trading_symbol") or snapshot.get("instrument_key") or "")
-        option_type = str(snapshot.get("option_type") or signal.direction)
         selection_reason = (
             f"Local {snapshot.get('expiry_kind') or 'weekly'} {option_type} with {delta_abs:.2f} delta, "
-            f"{liquidity_score:.0%} liquidity score, and {expected_pnl:.2f} expected PnL."
+            f"{distributional['tail_edge']:+.2f} p-minus-q tail gap, "
+            f"{distributional['timing_fit']:.0%} timing fit, and {expected_pnl:.2f} net trading edge."
         )
         return ContractCandidate(
             trading_symbol=trading_symbol or f"{snapshot.get('underlying')} {strike:.0f} {option_type}",
@@ -472,6 +608,159 @@ class OptionSelectionEngine:
             expected_pnl=round(expected_pnl, 2),
             contract_score=round(score, 2),
             selection_reason=selection_reason,
+            q_price=round(option_price, 2),
+            p_terminal_edge=round(distributional["terminal_edge"], 2),
+            p_trading_edge=round(distributional["trading_edge"], 2),
+            p_tail=round(distributional["p_tail"], 4),
+            q_tail=round(distributional["q_tail"], 4),
+            p_minus_q_tail=round(distributional["tail_edge"], 4),
+            expected_return_on_premium=round(distributional["return_on_premium"], 4),
+            probability_of_profit=round(distributional["probability_of_profit"], 4),
+            probability_of_50pct_loss=round(distributional["probability_of_50pct_loss"], 4),
+            probability_of_total_loss=round(distributional["probability_of_total_loss"], 4),
+            timing_fit=round(distributional["timing_fit"], 4),
+            skew_tax=round(distributional["skew_tax"], 4),
+            model_confidence=round(signal.confidence, 4),
+            model_error_buffer=round(distributional["model_error_buffer"], 2),
+            theta_cost=round(abs(theta) * horizon_years, 2),
+            iv_tail_edge_bonus=round(distributional["iv_tail_edge_bonus"], 4),
+            expiry_score=round(distributional["expiry_score"], 4),
+            utility=round(score, 2),
+            rejection_reasons=distributional["rejection_reasons"],
             instrument_key=str(snapshot.get("instrument_key") or "") or None,
             price_source="local_watchlist",
         )
+
+    def _estimate_snapshot_atm_iv(self, snapshot_rows: list[dict[str, Any]], spot_price: float, fallback: float) -> float:
+        valid = [
+            (abs(float(row.get("strike") or 0.0) - spot_price), float(row.get("iv") or 0.0))
+            for row in snapshot_rows
+            if float(row.get("iv") or 0.0) > 0.0 and float(row.get("strike") or 0.0) > 0.0
+        ]
+        if not valid:
+            return fallback
+        valid.sort(key=lambda item: item[0])
+        return valid[0][1]
+
+    def _distributional_metrics(
+        self,
+        *,
+        underlying: str,
+        option_type: str,
+        spot_price: float,
+        strike: float,
+        option_price: float,
+        sigma: float,
+        atm_iv: float,
+        time_to_expiry_years: float,
+        horizon_years: float,
+        risk_free_rate: float,
+        spread_cost: float,
+        slippage_cost: float,
+        fees: float,
+        theta: float,
+        delta_abs: float,
+        liquidity_score: float,
+        signal: DirectionalSignal,
+    ) -> dict[str, Any]:
+        optimizer_cfg = self.config.get("distributional_optimizer", {})
+        signed_move = signal.expected_move if option_type == "CE" else -signal.expected_move
+        horizon_stdev = max(
+            spot_price * sigma * math.sqrt(max(horizon_years, 1.0 / (252.0 * 375.0))),
+            signal.expected_move * (0.42 + signal.model_uncertainty),
+            spot_price * 0.0015,
+        )
+        terminal_stdev = max(
+            spot_price * sigma * math.sqrt(max(time_to_expiry_years, horizon_years)),
+            horizon_stdev,
+        )
+        horizon_mean = spot_price + signed_move
+        terminal_mean = spot_price + signed_move * min(1.35, max(0.65, math.sqrt(time_to_expiry_years / max(horizon_years, 1e-6)) * 0.55))
+        discount = math.exp(-risk_free_rate * time_to_expiry_years)
+        round_trip_costs = spread_cost + slippage_cost + fees
+        model_error_buffer = option_price * (
+            float(optimizer_cfg.get("model_error_base_pct", 0.035)) + signal.model_uncertainty * 0.18
+        )
+
+        terminal_payoff = _normal_expected_payoff(terminal_mean, terminal_stdev, strike, option_type)
+        terminal_edge = (discount * terminal_payoff) - option_price - round_trip_costs - model_error_buffer
+        remaining_years = max(time_to_expiry_years - horizon_years, 1.0 / 3650.0)
+        future_iv = min(
+            float(self.config["sigma_ceiling"]),
+            max(float(self.config["sigma_floor"]), sigma + signal.expected_iv_change),
+        )
+        future_option_value = _black_scholes_price(
+            spot=max(horizon_mean, 1.0),
+            strike=strike,
+            time_to_expiry_years=remaining_years,
+            sigma=future_iv,
+            risk_free_rate=risk_free_rate,
+            option_type=option_type,
+        )
+        trading_edge = future_option_value - option_price - round_trip_costs - model_error_buffer
+        p_tail = _normal_tail(terminal_mean, terminal_stdev, strike, option_type)
+        q_tail = _risk_neutral_tail(
+            spot=spot_price,
+            strike=strike,
+            time_to_expiry_years=time_to_expiry_years,
+            sigma=sigma,
+            risk_free_rate=risk_free_rate,
+            option_type=option_type,
+        )
+        tail_edge = p_tail - q_tail
+        profit_threshold = strike + option_price + round_trip_costs if option_type == "CE" else strike - option_price - round_trip_costs
+        probability_of_profit = _normal_tail(terminal_mean, terminal_stdev, profit_threshold, option_type)
+        half_loss_threshold = strike + (option_price * 0.5) if option_type == "CE" else strike - (option_price * 0.5)
+        probability_of_50pct_loss = 1.0 - _normal_tail(terminal_mean, terminal_stdev, half_loss_threshold, option_type)
+        probability_of_total_loss = 1.0 - p_tail
+
+        horizon_days = max(horizon_years * 365.0, 0.05)
+        dte_days = max(time_to_expiry_years * 365.0, 0.25)
+        life_ratio = min(1.0, max(0.0, (dte_days - horizon_days) / max(dte_days, 1.0)))
+        timing_fit = min(1.0, max(0.0, signal.timing_precision * 0.65 + life_ratio * 0.35))
+        theta_cost = abs(theta) * horizon_years
+        theta_penalty = theta_cost / max(option_price, 1.0)
+        iv_richness = max(0.0, sigma - max(atm_iv, 0.01))
+        index_put_tax = float(optimizer_cfg.get("index_put_skew_tax", 0.035)) if option_type == "PE" and underlying.upper() in {"NIFTY", "BANKNIFTY", "SENSEX"} else 0.0
+        skew_tax = max(0.0, iv_richness * 0.75 + index_put_tax + max(0.0, 0.35 - delta_abs) * 0.18)
+        weekly_tax = float(optimizer_cfg.get("event_variance_premium", 0.025)) if dte_days <= float(self.config.get("preferred_weekly_days", 8)) and timing_fit < 0.62 else 0.0
+        skew_tax += weekly_tax
+        iv_tail_edge_bonus = max(0.0, tail_edge) * max(0.0, 1.0 - skew_tax) + max(signal.expected_iv_change, 0.0) * 2.0
+        expiry_score = max(0.0, min(1.0, timing_fit + min(delta_abs, 0.7) * 0.15 + liquidity_score * 0.15 - theta_penalty - weekly_tax))
+        return_on_premium = trading_edge / max(option_price, 1.0)
+
+        rejection_reasons: list[str] = []
+        if trading_edge <= option_price * float(optimizer_cfg.get("min_net_edge_pct", 0.025)):
+            rejection_reasons.append("net trading edge below hurdle")
+        if probability_of_profit < float(optimizer_cfg.get("min_probability_of_profit", 0.38)):
+            rejection_reasons.append("probability of profit below minimum")
+        if liquidity_score < float(optimizer_cfg.get("min_liquidity_score", 0.35)):
+            rejection_reasons.append("liquidity score below minimum")
+        if timing_fit < float(optimizer_cfg.get("min_timing_fit", 0.28)):
+            rejection_reasons.append("timing fit below minimum")
+        if skew_tax > float(optimizer_cfg.get("max_skew_tax", 0.22)):
+            rejection_reasons.append("skew tax too high")
+        if delta_abs < 0.35 and (
+            signal.jump_score < float(optimizer_cfg.get("otm_jump_threshold", 0.42))
+            or signal.timing_precision < float(optimizer_cfg.get("otm_timing_threshold", 0.58))
+        ):
+            rejection_reasons.append("OTM option requires stronger jump score and timing precision")
+
+        return {
+            "terminal_edge": terminal_edge,
+            "trading_edge": trading_edge,
+            "p_tail": max(0.0, min(1.0, p_tail)),
+            "q_tail": max(0.0, min(1.0, q_tail)),
+            "tail_edge": tail_edge,
+            "return_on_premium": return_on_premium,
+            "probability_of_profit": max(0.0, min(1.0, probability_of_profit)),
+            "probability_of_50pct_loss": max(0.0, min(1.0, probability_of_50pct_loss)),
+            "probability_of_total_loss": max(0.0, min(1.0, probability_of_total_loss)),
+            "timing_fit": timing_fit,
+            "skew_tax": skew_tax,
+            "model_uncertainty": signal.model_uncertainty,
+            "model_error_buffer": model_error_buffer,
+            "iv_tail_edge_bonus": iv_tail_edge_bonus,
+            "expiry_score": expiry_score,
+            "rejection_reasons": rejection_reasons,
+        }

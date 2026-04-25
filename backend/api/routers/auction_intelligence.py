@@ -1,6 +1,7 @@
 """Isolated API for the Market Profile + order-flow strategy module."""
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from dataclasses import asdict
 from datetime import date, datetime, time
@@ -41,6 +42,7 @@ from auction_intelligence.schemas import (
     SessionContext,
     TradePrint,
 )
+from agentic_rag import ContextGateRequest, rag_service
 from api.routers.auth import get_connected_brokers
 
 
@@ -188,6 +190,58 @@ def _shadow_records_from_snapshot(snapshot: dict, options: ShadowCaptureOptions)
     return build_shadow_records_from_snapshot(snapshot, options.model_dump())
 
 
+async def _safe_context_gate(request: ContextGateRequest) -> dict:
+    try:
+        result = await asyncio.to_thread(rag_service.context_gate, request)
+        return result.model_dump()
+    except Exception as exc:
+        return {
+            "decision": "warn",
+            "confidence": 0.0,
+            "summary": f"RAG context unavailable: {exc}",
+            "reason_codes": ["rag_unavailable"],
+            "case_stats": {"matched_cases": 0, "resolved_cases": 0},
+            "retrievals": [],
+            "audit_bundle": {},
+        }
+
+
+async def _build_live_rag_context(snapshot: dict) -> dict:
+    request_payload = snapshot.get("request") or {}
+    analysis = snapshot.get("analysis") or {}
+    session = request_payload.get("session") or {}
+    decisions = analysis.get("agent_decisions") or []
+    actionable = [row for row in decisions if str(row.get("action") or "FLAT").upper() != "FLAT"]
+    primary_decision = max(actionable, key=lambda row: float(row.get("confidence") or 0.0), default={})
+    order_flow = analysis.get("order_flow") or {}
+    market_profile = analysis.get("market_profile") or {}
+    regime = analysis.get("regime") or {}
+    allowed_directions = regime.get("allowed_directions") or [None]
+    symbol = str(session.get("symbol") or snapshot.get("symbol_code") or "").upper()
+    underlying = str(snapshot.get("symbol_code") or symbol.replace(" FUT", "") or "NIFTY").upper()
+    return await _safe_context_gate(
+        ContextGateRequest(
+            strategy_key="auction_intelligence",
+            underlying=underlying,
+            symbol=symbol,
+            signal_direction=primary_decision.get("action") or allowed_directions[0],
+            setup_name=primary_decision.get("agent_name") or regime.get("label"),
+            regime=regime.get("label"),
+            event_tags=["live_snapshot", "market_profile", "orderflow"],
+            numeric_context={
+                "last_price": session.get("last_price"),
+                "poc": market_profile.get("poc"),
+                "vah": market_profile.get("vah"),
+                "val": market_profile.get("val"),
+                "timing_confidence": order_flow.get("timing_confidence"),
+                "queue_pressure": order_flow.get("queue_pressure"),
+                "toxicity_score": order_flow.get("toxicity_score") or order_flow.get("adverse_selection_risk"),
+            },
+            hard_risk_passed=bool((analysis.get("risk") or {}).get("allowed", True)),
+        )
+    )
+
+
 @router.get("/summary")
 async def summary() -> dict:
     config = clone_default_config()
@@ -256,7 +310,9 @@ async def demo_scenario(symbol: str = "NIFTY", scenario: str = "acceptance_up") 
 @router.get("/live-snapshot")
 async def live_snapshot(symbol: str = "NIFTY") -> dict:
     try:
-        return await build_live_analysis(symbol_code=symbol)
+        snapshot = await build_live_analysis(symbol_code=symbol)
+        snapshot["rag_context"] = await _build_live_rag_context(snapshot)
+        return snapshot
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -714,7 +770,14 @@ _BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
 _MP_DATA_ROOT = _BACKEND_ROOT / "mp_data"
 _DATA_ROOT = _BACKEND_ROOT / "runtime" / "index_analytics_data"
 
-_SUPPORTED_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "SENSEX")
+_SUPPORTED_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "SENSEX", "CRUDEOIL")
+_MP_PRICE_BANDS: dict[str, tuple[float, float]] = {
+    "NIFTY": (10_000.0, 50_000.0),
+    "BANKNIFTY": (20_000.0, 100_000.0),
+    "FINNIFTY": (10_000.0, 60_000.0),
+    "MIDCPNIFTY": (5_000.0, 40_000.0),
+    "SENSEX": (30_000.0, 150_000.0),
+}
 
 
 def _mp_enr_path(underlying: str) -> Path:
@@ -726,8 +789,11 @@ def _mp_enr_path(underlying: str) -> Path:
     sub = _DATA_ROOT / "market_profile" / f"underlying={underlying}" / "enriched_mp_with_failures.csv"
     if sub.exists():
         return sub
-    # Legacy root-level file (SENSEX only)
-    return _DATA_ROOT / "market_profile" / "enriched_mp_with_failures.csv"
+    # Legacy root-level file is SENSEX only; other symbols should surface as
+    # live-only or no-data instead of borrowing the wrong packaged profile.
+    if underlying.upper() == "SENSEX":
+        return _DATA_ROOT / "market_profile" / "enriched_mp_with_failures.csv"
+    return sub
 
 
 def _mp_params_path(underlying: str) -> Path:
@@ -737,7 +803,9 @@ def _mp_params_path(underlying: str) -> Path:
     sub = _DATA_ROOT / "market_profile" / f"underlying={underlying}" / "daily_mp_params.csv"
     if sub.exists():
         return sub
-    return _DATA_ROOT / "market_profile" / "daily_mp_params.csv"
+    if underlying.upper() == "SENSEX":
+        return _DATA_ROOT / "market_profile" / "daily_mp_params.csv"
+    return sub
 
 
 def _spot_path(underlying: str) -> Path:
@@ -770,6 +838,35 @@ def _parse_row_date(value: str | None) -> date | None:
         return date.fromisoformat(raw[:10])
     except ValueError:
         return None
+
+
+def _price_in_underlying_band(underlying: str, value: object, *, required: bool = True) -> bool:
+    band = _MP_PRICE_BANDS.get(underlying.upper())
+    try:
+        price = float(value or 0.0)
+    except (TypeError, ValueError):
+        return not required
+    if price <= 0:
+        return not required
+    if not band:
+        return True
+    return band[0] <= price <= band[1]
+
+
+def _plausible_mp_row(underlying: str, row: dict | None) -> bool:
+    if not row:
+        return False
+    required_keys = ("open_price", "close_price", "session_high", "session_low", "poc", "vah", "val")
+    if not all(_price_in_underlying_band(underlying, row.get(key), required=True) for key in required_keys):
+        return False
+    high = _flt(row, "session_high")
+    low = _flt(row, "session_low")
+    close = _flt(row, "close_price")
+    vah = _flt(row, "vah")
+    val = _flt(row, "val")
+    if high < low or not (low <= close <= high):
+        return False
+    return vah >= val
 
 
 def _extract_live_failure_scores(snapshot: dict) -> tuple[float, float]:
@@ -849,6 +946,58 @@ def _build_live_mp_row(snapshot: dict) -> dict | None:
     return row
 
 
+def _build_live_mp_row_from_fmp(snapshot: dict, profile_key: str = "daily_profile") -> dict | None:
+    profile = snapshot.get(profile_key, {}) or {}
+    session_date = str(profile.get("session_date") or snapshot.get("session", {}).get("session_date") or "").strip()
+    if not session_date:
+        return None
+
+    open_price = float(profile.get("open_price") or 0.0)
+    high_price = float(profile.get("high_price") or 0.0)
+    low_price = float(profile.get("low_price") or 0.0)
+    close_price = float(profile.get("close_price") or snapshot.get("session", {}).get("last_price") or 0.0)
+    initial_balance_high = float(profile.get("initial_balance_high") or 0.0)
+    initial_balance_low = float(profile.get("initial_balance_low") or 0.0)
+    initial_balance_range = float(profile.get("initial_balance_range") or 0.0)
+    return {
+        "date": session_date,
+        "poc": profile.get("poc", 0.0),
+        "vah": profile.get("vah", 0.0),
+        "val": profile.get("val", 0.0),
+        "var": max(float(profile.get("vah") or 0.0) - float(profile.get("val") or 0.0), 0.0),
+        "ibh": initial_balance_high,
+        "ibl": initial_balance_low,
+        "ibr": initial_balance_range,
+        "ib_broken_up": float(profile.get("range_extension_up") or 0.0) > 0.0,
+        "ib_broken_dn": float(profile.get("range_extension_down") or 0.0) > 0.0,
+        "fa_up": False,
+        "fa_dn": False,
+        "session_high": high_price,
+        "session_low": low_price,
+        "open_price": open_price,
+        "close_price": close_price,
+        "total_tpos": profile.get("sample_count", 0),
+        "daily_move": close_price - open_price,
+        "daily_pct": ((close_price - open_price) / open_price * 100.0) if open_price else 0.0,
+        "close_pct_range": ((close_price - low_price) / max(high_price - low_price, 1.0)) if high_price > low_price else 0.5,
+        "day_type": profile.get("day_type") or "",
+        "ib_ext_up_fail": False,
+        "ib_ext_dn_fail": False,
+        "ib_ext_up_reversal": False,
+        "ib_ext_dn_reversal": False,
+        "poor_high": bool(profile.get("poor_high")),
+        "poor_low": bool(profile.get("poor_low")),
+        "excess_high": _metric_flag(profile.get("excess_high")),
+        "excess_low": _metric_flag(profile.get("excess_low")),
+        "buyer_fail": 0.0,
+        "seller_fail": 0.0,
+        "buyer_fail_score": 0.0,
+        "seller_fail_score": 0.0,
+        "net_failure": 0.0,
+        "range_factor": float(profile.get("daily_ib_ratio") or 0.0),
+    }
+
+
 async def _load_mp_rows(
     underlying: str,
     *,
@@ -867,37 +1016,83 @@ async def _load_mp_rows(
         "latest_date": packaged_latest,
         "live_appended": False,
         "live_latest_date": None,
+        "live_rejected": False,
+        "live_bridge": None,
         "live_error": None,
     }
 
+    candidate_rows: list[tuple[str, dict]] = []
+    rejected_sources: list[str] = []
+
     try:
-        live_snapshot = await build_live_analysis(symbol_code=underlying)
+        live_snapshot = await asyncio.wait_for(build_live_analysis(symbol_code=underlying), timeout=4.0)
         live_row = _build_live_mp_row(live_snapshot)
+        if _plausible_mp_row(underlying, live_row):
+            candidate_rows.append(("live_snapshot", live_row))
+        elif live_row:
+            rejected_sources.append("live_snapshot")
     except Exception as exc:
         status["live_error"] = str(exc)
+
+    try:
+        from fractal_market_profile.service import fmp_service
+
+        fmp_snapshot = await asyncio.wait_for(fmp_service.live_snapshot(underlying), timeout=6.0)
+        for profile_key in ("prior_daily_profile", "daily_profile"):
+            fmp_row = _build_live_mp_row_from_fmp(fmp_snapshot, profile_key=profile_key)
+            if _plausible_mp_row(underlying, fmp_row):
+                candidate_rows.append((f"fractal_market_profile:{profile_key}", fmp_row))
+            elif fmp_row:
+                rejected_sources.append(f"fractal_market_profile:{profile_key}")
+    except Exception as exc:
+        if not status["live_error"]:
+            status["live_error"] = str(exc)
+
+    if rejected_sources:
+        status["live_rejected"] = True
+        status["live_rejected_sources"] = rejected_sources
+
+    if not candidate_rows:
+        packaged_latest_date = _parse_row_date(packaged_latest)
+        status["stale_days"] = None
+        if packaged_latest_date:
+            status["stale_days"] = max((date.today() - packaged_latest_date).days, 0)
         return rows, status
 
-    if not live_row:
-        return rows, status
-
-    live_latest = live_row.get("date")
-    status["live_latest_date"] = live_latest
     packaged_latest_date = _parse_row_date(packaged_latest)
-    live_latest_date = _parse_row_date(live_latest)
+    existing_dates = {_parse_row_date(row.get("date")) for row in rows}
+    appended_sources: list[str] = []
+    latest_candidate_date: date | None = None
 
-    if not rows:
-        rows = [live_row]
-        status["source"] = "live_snapshot"
-        status["live_appended"] = True
-        status["latest_date"] = live_latest
-    elif live_latest_date and (packaged_latest_date is None or live_latest_date > packaged_latest_date):
-        rows = [*rows, live_row]
-        status["source"] = f"{source}+live_snapshot"
-        status["live_appended"] = True
-        status["latest_date"] = live_latest
+    for source_name, candidate in sorted(
+        candidate_rows,
+        key=lambda item: str(item[1].get("date", "")),
+    ):
+        candidate_date = _parse_row_date(candidate.get("date"))
+        if not candidate_date:
+            continue
+        latest_candidate_date = max(latest_candidate_date, candidate_date) if latest_candidate_date else candidate_date
+        if candidate_date in existing_dates:
+            continue
+        if packaged_latest_date is not None and candidate_date <= packaged_latest_date:
+            continue
+        rows = [*rows, candidate]
+        existing_dates.add(candidate_date)
+        appended_sources.append(source_name)
+        status["latest_date"] = candidate.get("date")
 
-    if packaged_latest_date and live_latest_date:
-        status["stale_days"] = max((live_latest_date - packaged_latest_date).days, 0)
+    if appended_sources:
+        source_suffix = "live_snapshot" if appended_sources == ["live_snapshot"] else "live_bridge"
+        status["source"] = f"{source}+{source_suffix}"
+        status["live_appended"] = True
+        status["live_bridge"] = appended_sources
+        status["live_latest_date"] = rows[-1].get("date")
+    elif latest_candidate_date:
+        status["live_latest_date"] = latest_candidate_date.isoformat()
+
+    final_latest_date = _parse_row_date(str(status.get("latest_date") or ""))
+    if packaged_latest_date and final_latest_date:
+        status["stale_days"] = max((final_latest_date - packaged_latest_date).days, 0)
     else:
         status["stale_days"] = None
 
@@ -1082,6 +1277,55 @@ def _build_mp_open_signal_payload(underlying: str, latest: dict) -> dict:
         "signals": signals,
         "skip_reason": reason if not direction else None,
     }
+
+
+async def _build_mp_rag_context(
+    underlying: str,
+    latest: dict,
+    *,
+    open_signal_payload: dict | None = None,
+    orderflow_proxy: dict | None = None,
+) -> dict:
+    signal_record = _build_mp_signal_record(latest)
+    open_signal = (open_signal_payload or {}).get("signals", [{}])
+    primary_signal = open_signal[0] if open_signal else {}
+    direction = primary_signal.get("direction") or signal_record.get("direction")
+    setup_name = primary_signal.get("reason") or signal_record.get("day_type")
+    orderflow_summary = (orderflow_proxy or {}).get("summary") or {}
+    return await _safe_context_gate(
+        ContextGateRequest(
+            strategy_key="auction_intelligence",
+            underlying=underlying.upper(),
+            symbol=f"{underlying.upper()} FUT",
+            signal_direction=direction,
+            setup_name=setup_name,
+            regime=signal_record.get("day_type"),
+            event_tags=[
+                "mp_composite",
+                "orderflow_proxy",
+                "options_flow_proxy",
+                "context_gate",
+            ],
+            numeric_context={
+                "date": signal_record.get("date"),
+                "close": signal_record.get("close"),
+                "poc": signal_record.get("poc"),
+                "vah": signal_record.get("vah"),
+                "val": signal_record.get("val"),
+                "daily_move": signal_record.get("daily_move"),
+                "buyer_fail": signal_record.get("buyer_fail"),
+                "seller_fail": signal_record.get("seller_fail"),
+                "net_failure": signal_record.get("net_failure"),
+                "close_location": signal_record.get("close_location"),
+                "range_factor": signal_record.get("range_factor"),
+                "current_cvd": (orderflow_proxy or {}).get("current_cvd"),
+                "cvd_divergences": len((orderflow_proxy or {}).get("divergences") or []),
+                "total_bull_days": orderflow_summary.get("total_bull_days"),
+                "total_bear_days": orderflow_summary.get("total_bear_days"),
+            },
+            hard_risk_passed=True,
+        )
+    )
 
 
 def _build_mp_agent_context_payload(underlying: str, latest: dict, *, limit: int = 10) -> list[dict]:
@@ -1307,6 +1551,11 @@ async def mp_open_signal(underlying: str = "NIFTY") -> dict:
         }
     payload = _build_mp_open_signal_payload(underlying, rows[-1])
     payload["data_status"] = data_status
+    payload["rag_context"] = await _build_mp_rag_context(
+        underlying,
+        rows[-1],
+        open_signal_payload=payload,
+    )
     return payload
 
 
@@ -1356,6 +1605,11 @@ async def mp_dashboard(
     sessions = [_build_mp_signal_record(row) for row in rows[-lookback:]]
     latest_row = rows[-1]
     open_signal_payload = _build_mp_open_signal_payload(underlying, latest_row)
+    rag_context = await _build_mp_rag_context(
+        underlying,
+        latest_row,
+        open_signal_payload=open_signal_payload,
+    )
 
     day_type_distribution = [
         {"day_type": day_type, "count": count}
@@ -1409,6 +1663,7 @@ async def mp_dashboard(
         "skip_reason": open_signal_payload["skip_reason"],
         "data_status": data_status,
         "context": _build_mp_agent_context_payload(underlying, latest_row, limit=6),
+        "rag_context": rag_context,
     }
 
 
@@ -1424,11 +1679,11 @@ async def mp_analytics(
     underlying: str = Query("NIFTY"),
     lookback: int = Query(60, ge=10, le=250),
     composite_20d: bool = Query(True),
-    composite_60d: bool = Query(True),
+    composite_50d: bool = Query(True),
 ) -> dict:
     """
     Full MP Intelligence bundle:
-    - Composite (20d / 60d) multi-timeframe profiles
+    - Composite (20d / 50d) multi-timeframe profiles
     - Weekly profile aggregates
     - Value migration trend (POC shift, VA center, VA width over time)
     - Regime history (day-type sequence, transition matrix, streaks)
@@ -1451,11 +1706,12 @@ async def mp_analytics(
             "data_status": data_status,
         }
 
-    result = _mp_analytics_engine.full_analytics(
+    result = await asyncio.to_thread(
+        _mp_analytics_engine.full_analytics,
         rows=rows,
         lookback=lookback,
         composite_20d=composite_20d,
-        composite_60d=composite_60d,
+        composite_50d=composite_50d,
     )
     result["underlying"] = underlying
     result["lookback"] = lookback
@@ -1469,7 +1725,7 @@ async def mp_multi_tf_profile(
     underlying: str = Query("NIFTY"),
 ) -> dict:
     """
-    Multi-timeframe profile snapshot: composite_20d, composite_60d, weekly,
+    Multi-timeframe profile snapshot: composite_20d, composite_50d, weekly,
     plus today's daily profile from FMP if available.
 
     Designed to power the multi-TF stacked profile panel in the UI.
@@ -1481,7 +1737,7 @@ async def mp_multi_tf_profile(
     rows_sorted = sorted(rows, key=lambda r: r.get("date", ""))
     profiles = {
         "composite_20d": _mp_analytics_engine.build_composite_profile(rows_sorted, lookback=20, label="Composite 20D"),
-        "composite_60d": _mp_analytics_engine.build_composite_profile(rows_sorted, lookback=60, label="Composite 60D"),
+        "composite_50d": _mp_analytics_engine.build_composite_profile(rows_sorted, lookback=50, label="Composite 50D"),
     }
     weekly = _mp_analytics_engine.build_weekly_profiles(rows_sorted)
 
@@ -1562,4 +1818,10 @@ async def mp_orderflow_proxy(
     result = _mp_analytics_engine.orderflow_proxy(rows, lookback=lookback)
     result["underlying"] = underlying
     result["data_status"] = data_status
+    result["rag_context"] = await _build_mp_rag_context(
+        underlying,
+        rows[-1],
+        open_signal_payload=_build_mp_open_signal_payload(underlying, rows[-1]),
+        orderflow_proxy=result,
+    )
     return result

@@ -32,6 +32,13 @@ router = APIRouter(prefix="/api/market", tags=["market"])
 
 _PROFILE_TIMEFRAMES = {"day", "week", "month", "daily", "hourly"}
 _INDEX_UNDERLYING_BY_APP_SYMBOL = {app_symbol: symbol_code for symbol_code, app_symbol in APP_SYMBOLS.items()}
+_INDEX_PRICE_BANDS: dict[str, tuple[float, float]] = {
+    "NIFTY": (10_000.0, 50_000.0),
+    "BANKNIFTY": (20_000.0, 100_000.0),
+    "FINNIFTY": (10_000.0, 60_000.0),
+    "MIDCPNIFTY": (5_000.0, 40_000.0),
+    "SENSEX": (30_000.0, 150_000.0),
+}
 
 
 @dataclass(frozen=True)
@@ -129,6 +136,55 @@ def _normalize_profile_timeframe(timeframe: str) -> str:
             detail="Unsupported timeframe. Use one of: day, week, month, daily, hourly.",
         )
     return "day" if normalized == "daily" else normalized
+
+
+def _is_valid_index_price(app_symbol: str, value: float | int | None) -> bool:
+    try:
+        price = float(value or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if price <= 0:
+        return False
+    underlying = _INDEX_UNDERLYING_BY_APP_SYMBOL.get(app_symbol)
+    band = _INDEX_PRICE_BANDS.get(str(underlying or "").upper())
+    if not band:
+        return True
+    low, high = band
+    return low <= price <= high
+
+
+async def _latest_local_spot_close(app_symbol: str) -> float:
+    underlying = _INDEX_UNDERLYING_BY_APP_SYMBOL.get(app_symbol)
+    band = _INDEX_PRICE_BANDS.get(str(underlying or "").upper())
+    if not underlying or not band:
+        return 0.0
+
+    low, high = band
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT close
+                FROM underlying_spot_candles
+                WHERE underlying = :underlying
+                  AND close IS NOT NULL
+                  AND close BETWEEN :low AND :high
+                ORDER BY time DESC
+                LIMIT 1
+                """
+            ),
+            {"underlying": underlying, "low": low, "high": high},
+        )
+        row = result.first()
+    return float(getattr(row, "close", 0.0) or 0.0) if row else 0.0
+
+
+async def _best_index_ltp(app_symbol: str, *candidates: float | int | None) -> float:
+    for candidate in candidates:
+        if _is_valid_index_price(app_symbol, candidate):
+            return float(candidate or 0.0)
+    local_close = await _latest_local_spot_close(app_symbol)
+    return local_close if _is_valid_index_price(app_symbol, local_close) else 0.0
 
 
 async def _fetch_fyers_historical_rows(
@@ -403,8 +459,13 @@ async def get_ltp(req: LTPRequest):
     market_symbols = [_resolve_market_symbol(symbol) for symbol in req.symbols]
     adapter, source = await _get_market_adapter()
     if not adapter:
-        # Return cached from data_router
-        return {item.app_symbol: data_router.get_ltp(item.app_symbol) for item in market_symbols}
+        return {
+            item.app_symbol: await _best_index_ltp(
+                item.app_symbol,
+                data_router.get_ltp(item.app_symbol),
+            )
+            for item in market_symbols
+        }
     try:
         mapped = {
             item.app_symbol: _market_symbol_for_adapter(adapter, item)
@@ -412,11 +473,21 @@ async def get_ltp(req: LTPRequest):
         }
         live = await adapter.get_ltp(list(mapped.values()))
         return {
-            app_symbol: float(live.get(adapter_symbol, 0.0) or data_router.get_ltp(app_symbol))
+            app_symbol: await _best_index_ltp(
+                app_symbol,
+                live.get(adapter_symbol, 0.0),
+                data_router.get_ltp(app_symbol),
+            )
             for app_symbol, adapter_symbol in mapped.items()
         }
     except Exception:
-        return {item.app_symbol: data_router.get_ltp(item.app_symbol) for item in market_symbols}
+        return {
+            item.app_symbol: await _best_index_ltp(
+                item.app_symbol,
+                data_router.get_ltp(item.app_symbol),
+            )
+            for item in market_symbols
+        }
 
 
 @router.get("/greeks/{symbol}/{strike}/{expiry}/{option_type}")

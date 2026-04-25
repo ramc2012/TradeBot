@@ -1,299 +1,342 @@
 {
-  "last_run_at": "2026-04-13T15:25:00+05:30",
+  "last_run_at": "2026-04-24T15:28:38.664572+05:30",
   "last_error": null,
-  "last_message": "Market closed. Showing last live strategy state from 2026-04-13T15:25:00+05:30.",
-  "last_expiry": "2026-04-28",
+  "last_message": "Market closed. Showing last live strategy state from 2026-04-24T15:28:38.664572+05:30.",
+  "last_expiry": "2026-05-26",
   "last_candidate_expiries": [
-    "2026-04-28"
+    "2026-05-26"
   ],
   "commentary": [
     {
-      "time": "2026-04-19T07:28:28.502166+05:30",
+      "time": "2026-04-24T15:30:03.876180+05:30",
       "scope": "System",
       "tone": "idle",
       "message": "Market closed. Agent idle."
     },
     {
-      "time": "2026-04-19T07:28:28.493193+05:30",
+      "time": "2026-04-24T15:28:38.664806+05:30",
       "scope": "System",
-      "tone": "info",
-      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 2 trend-aligned lanes from 2026-04-13."
-    },
-    {
-      "time": "2026-04-18T23:05:19.537036+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-18T23:05:19.520266+05:30",
-      "scope": "System",
-      "tone": "info",
-      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 2 trend-aligned lanes from 2026-04-13."
-    },
-    {
-      "time": "2026-04-17T15:30:58.884254+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-17T09:27:49.148882+05:30",
-      "scope": "System",
-      "tone": "error",
-      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
-    },
-    {
-      "time": "2026-04-17T09:09:59.170401+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-17T09:09:59.157425+05:30",
-      "scope": "System",
-      "tone": "info",
-      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 2 trend-aligned lanes from 2026-04-13."
-    },
-    {
-      "time": "2026-04-16T22:43:46.000006+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-16T22:43:45.986039+05:30",
-      "scope": "System",
-      "tone": "info",
-      "message": "Recovered 2 open Strategy 1 positions from 2026-04-09; 36 Strategy 1 raw signals; Strategy 2 replay found 0 entry-ready and 2 trend-aligned lanes from 2026-04-13."
-    },
-    {
-      "time": "2026-04-16T12:13:26.107084+05:30",
-      "scope": "System",
-      "tone": "error",
-      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
-    },
-    {
-      "time": "2026-04-16T12:13:26.095518+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-16T12:13:26.088717+05:30",
-      "scope": "System",
-      "tone": "success",
-      "message": "Scan complete. 6 rows, S1=2, S2=0."
-    },
-    {
-      "time": "2026-04-16T12:13:26.085717+05:30",
-      "scope": "System",
-      "tone": "success",
-      "message": "Scan complete. 1 rows, S1=2, S2=0."
-    },
-    {
-      "time": "2026-04-16T12:13:26.085625+05:30",
-      "scope": "Strategy 1",
       "tone": "warning",
-      "message": "Current monthly window is exhausted for 1 underlyings. Rolling scan to the next expiry: AUROPHARMA"
+      "message": "Option history warnings detected: upstox: 15 failure(s), latest '[Errno -2] Name or service not known'."
     },
     {
-      "time": "2026-04-16T12:11:06.299887+05:30",
+      "time": "2026-04-24T15:28:38.664759+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Scan complete. 170 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-04-24T15:19:22.304483+05:30",
       "scope": "System",
       "tone": "error",
       "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
     },
     {
-      "time": "2026-04-16T12:11:06.288064+05:30",
+      "time": "2026-04-24T15:17:12.644543+05:30",
       "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
+      "tone": "warning",
+      "message": "Option history warnings detected: upstox: 4 failure(s), latest 'loaded 0 rows'."
     },
     {
-      "time": "2026-04-16T12:11:06.276116+05:30",
+      "time": "2026-04-24T15:17:12.644486+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Scan complete. 170 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-04-24T15:08:17.690009+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Option history warnings detected: upstox: 5 failure(s), latest 'loaded 352 rows'."
+    },
+    {
+      "time": "2026-04-24T15:08:17.689987+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Scan complete. 170 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-04-24T14:59:53.994049+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Option history warnings detected: upstox: 4 failure(s), latest 'loaded 344 rows'."
+    },
+    {
+      "time": "2026-04-24T14:59:53.994039+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Scan complete. 170 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-04-24T14:50:29.632049+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Option history warnings detected: upstox: 3 failure(s), latest 'loaded 350 rows'."
+    },
+    {
+      "time": "2026-04-24T14:50:29.632037+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Scan complete. 170 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-04-24T14:41:09.387054+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Option history warnings detected: upstox: 6 failure(s), latest 'loaded 325 rows'."
+    },
+    {
+      "time": "2026-04-24T14:41:09.387041+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Scan complete. 170 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-04-24T14:33:22.279113+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Option history warnings detected: upstox: 3 failure(s), latest 'loaded 0 rows'."
+    },
+    {
+      "time": "2026-04-24T14:33:22.279086+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Scan complete. 170 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-04-24T14:17:38.372548+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Option history warnings detected: upstox: 2 failure(s), latest 'fetch failed'."
+    },
+    {
+      "time": "2026-04-24T14:17:38.372499+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Scan complete. 170 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-04-24T14:09:03.926614+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Option history warnings detected: upstox: 2 failure(s), latest 'loaded 293 rows'."
+    },
+    {
+      "time": "2026-04-24T14:09:03.926596+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Scan complete. 170 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-04-24T14:01:15.415588+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Option history warnings detected: upstox: 1 failure(s), latest 'loaded 297 rows'."
+    },
+    {
+      "time": "2026-04-24T14:01:15.415563+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Scan complete. 170 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-04-24T13:52:32.960860+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Option history warnings detected: fyers: 1 failure(s), latest 'Fyers data API error 429: request limit reached'; upstox: 3 failure(s), latest 'loaded 277 rows'."
+    },
+    {
+      "time": "2026-04-24T13:52:32.959829+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Scan complete. 170 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-04-24T13:43:08.051060+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Option history warnings detected: upstox: 2 failure(s), latest 'loaded 279 rows'; fyers: 1 failure(s), latest 'loaded 1728 rows'."
+    },
+    {
+      "time": "2026-04-24T13:43:08.051024+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Scan complete. 170 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-04-24T13:34:41.260348+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Option history warnings detected: upstox: 3 failure(s), latest 'loaded 9 rows'."
+    },
+    {
+      "time": "2026-04-24T13:34:41.260342+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Scan complete. 170 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-04-24T13:25:35.463401+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Option history warnings detected: upstox: 3 failure(s), latest 'loaded 250 rows'."
+    },
+    {
+      "time": "2026-04-24T13:25:35.463390+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Scan complete. 170 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-04-24T13:16:17.311335+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Option history warnings detected: upstox: 3 failure(s), latest 'fetch failed'."
+    },
+    {
+      "time": "2026-04-24T13:06:47.243315+05:30",
       "scope": "System",
       "tone": "success",
-      "message": "Scan complete. 6 rows, S1=2, S2=0."
+      "message": "Scan complete. 170 rows, S1=2, S2=0."
     },
     {
-      "time": "2026-04-16T12:11:06.158867+05:30",
+      "time": "2026-04-24T12:55:52.873583+05:30",
       "scope": "System",
       "tone": "error",
-      "message": "Error: Error connecting to localhost:6383. Multiple exceptions: [Errno 61] Connect call failed ('::1', 6383, 0, 0), [Errno 61] Connect call failed ('127.0.0.1', 6383)."
+      "message": "Error: "
     },
     {
-      "time": "2026-04-16T12:11:06.157673+05:30",
-      "scope": "Strategy 1",
-      "tone": "warning",
-      "message": "Current monthly window is exhausted for 1 underlyings. Rolling scan to the next expiry: AUROPHARMA"
-    },
-    {
-      "time": "2026-04-16T12:04:37.293552+05:30",
-      "scope": "System",
-      "tone": "error",
-      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
-    },
-    {
-      "time": "2026-04-16T12:04:37.283728+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-16T12:04:37.277111+05:30",
+      "time": "2026-04-24T12:23:27.429503+05:30",
       "scope": "System",
       "tone": "success",
-      "message": "Scan complete. 1 rows, S1=2, S2=0."
+      "message": "Scan complete. 170 rows, S1=2, S2=0."
     },
     {
-      "time": "2026-04-16T12:04:37.277018+05:30",
-      "scope": "Strategy 1",
+      "time": "2026-04-24T12:22:19.873986+05:30",
+      "scope": "System",
       "tone": "warning",
-      "message": "Current monthly window is exhausted for 1 underlyings. Rolling scan to the next expiry: AUROPHARMA"
+      "message": "Option history warnings detected: upstox: 1 failure(s), latest '[SSL] record layer failure (_ssl.c:1016)'."
     },
     {
-      "time": "2026-04-16T12:04:16.290105+05:30",
-      "scope": "System",
-      "tone": "error",
-      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
-    },
-    {
-      "time": "2026-04-16T12:04:16.277747+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-16T12:04:16.270508+05:30",
+      "time": "2026-04-24T12:12:28.966067+05:30",
       "scope": "System",
       "tone": "success",
-      "message": "Scan complete. 1 rows, S1=2, S2=0."
+      "message": "Scan complete. 170 rows, S1=2, S2=0."
     },
     {
-      "time": "2026-04-16T12:04:16.270428+05:30",
-      "scope": "Strategy 1",
-      "tone": "warning",
-      "message": "Current monthly window is exhausted for 1 underlyings. Rolling scan to the next expiry: AUROPHARMA"
-    },
-    {
-      "time": "2026-04-16T12:03:26.590878+05:30",
-      "scope": "System",
-      "tone": "error",
-      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
-    },
-    {
-      "time": "2026-04-16T12:03:26.581091+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-16T12:03:26.530643+05:30",
+      "time": "2026-04-24T11:57:51.297134+05:30",
       "scope": "System",
       "tone": "success",
-      "message": "Scan complete. 1 rows, S1=2, S2=0."
+      "message": "Scan complete. 171 rows, S1=2, S2=0."
     },
     {
-      "time": "2026-04-16T12:03:26.530558+05:30",
-      "scope": "Strategy 1",
-      "tone": "warning",
-      "message": "Current monthly window is exhausted for 1 underlyings. Rolling scan to the next expiry: AUROPHARMA"
-    },
-    {
-      "time": "2026-04-16T12:02:54.816082+05:30",
-      "scope": "System",
-      "tone": "error",
-      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
-    },
-    {
-      "time": "2026-04-16T12:02:54.806234+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-16T12:02:54.753793+05:30",
+      "time": "2026-04-24T11:56:49.476412+05:30",
       "scope": "System",
       "tone": "success",
-      "message": "Scan complete. 1 rows, S1=2, S2=0."
+      "message": "Scan complete. 168 rows, S1=2, S2=0."
     },
     {
-      "time": "2026-04-16T12:02:54.753711+05:30",
-      "scope": "Strategy 1",
-      "tone": "warning",
-      "message": "Current monthly window is exhausted for 1 underlyings. Rolling scan to the next expiry: AUROPHARMA"
-    },
-    {
-      "time": "2026-04-16T12:02:15.630241+05:30",
-      "scope": "System",
-      "tone": "error",
-      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
-    },
-    {
-      "time": "2026-04-16T12:02:15.618116+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-04-16T12:02:15.612367+05:30",
+      "time": "2026-04-24T11:55:48.251136+05:30",
       "scope": "System",
       "tone": "success",
-      "message": "Scan complete. 1 rows, S1=2, S2=0."
+      "message": "Scan complete. 142 rows, S1=2, S2=0."
     },
     {
-      "time": "2026-04-16T12:02:15.612284+05:30",
-      "scope": "Strategy 1",
-      "tone": "warning",
-      "message": "Current monthly window is exhausted for 1 underlyings. Rolling scan to the next expiry: AUROPHARMA"
+      "time": "2026-04-24T11:54:45.480202+05:30",
+      "scope": "System",
+      "tone": "success",
+      "message": "Scan complete. 122 rows, S1=2, S2=0."
     }
   ],
   "strategies": {
     "macd_strategy": {
       "entries": 2,
       "exits": 0,
-      "last_scan_at": "2026-04-09T14:59:07.612330+05:30",
-      "last_message": "Recovered 2 open Strategy 1 positions from 2026-04-09.",
-      "processed_signals": {},
-      "signal_lane": [],
+      "last_scan_at": "2026-04-24T15:24:07.801100+05:30",
+      "last_message": "Scanned 170 instruments across 2 expiries. 2 open positions. Option history warnings detected: upstox: 15 failure(s), latest '[Errno -2] Name or service not known'.",
+      "processed_signals": {
+        "AUROPHARMA:CE": "2026-04-09T14:15:00+05:30"
+      },
+      "signal_lane": [
+        {
+          "status": "active",
+          "underlying": "AUROPHARMA"
+        }
+      ],
       "meta": {
         "mode": "market_closed",
-        "updated_at": "2026-04-19T23:48:10.030808+05:30",
+        "updated_at": "2026-04-25T08:59:53.789842+05:30",
         "market_state": "closed",
         "scan_interval": "30minute",
-        "watchlist_rows": 6,
+        "watchlist_rows": 170,
         "broker_snapshot": {
+          "connected_brokers": [],
+          "session_brokers": [
+            "fyers",
+            "upstox"
+          ],
+          "upstox_ready": false,
           "fyers_ready": false,
           "broker_ready": false,
-          "upstox_ready": false,
-          "session_brokers": [],
-          "connected_brokers": [],
-          "fyers_token_health": {
-            "valid": false,
-            "source": "saved_credentials",
-            "status": "expired_reconnect_required",
-            "message": "Saved Fyers access token is invalid. Reconnect Fyers in Settings.",
-            "connected": false,
-            "checked_at": "2026-04-17T09:59:58.768752+00:00",
-            "has_saved_token": true,
-            "needs_reconnect": true
-          },
           "upstox_token_health": {
+            "connected": true,
+            "source": "active_session",
             "valid": false,
-            "source": "saved_credentials",
             "status": "expired_reconnect_required",
-            "message": "Saved Upstox access token is invalid. Upstox does not provide refresh tokens for this flow, so reconnect Upstox in Settings.",
-            "connected": false,
-            "checked_at": "2026-04-17T09:59:58.614870+00:00",
-            "expires_at_ist": "2026-04-18T03:30:00+05:30",
+            "checked_at": "2026-04-24T09:48:33.606194+00:00",
             "has_saved_token": true,
-            "needs_reconnect": true
+            "needs_reconnect": true,
+            "message": "Saved Upstox access token is invalid. Upstox does not provide refresh tokens for this flow, so reconnect Upstox in Settings.",
+            "expires_at_ist": "2026-04-25T03:30:00+05:30"
+          },
+          "fyers_token_health": {
+            "connected": true,
+            "source": "active_session",
+            "valid": false,
+            "status": "expired_reconnect_required",
+            "checked_at": "2026-04-24T09:48:33.962896+00:00",
+            "has_saved_token": true,
+            "needs_reconnect": true,
+            "message": "Saved Fyers access token is invalid. Reconnect Fyers in Settings."
           }
+        },
+        "market_intelligence": {
+          "ready": false,
+          "watchlist_rows_today": 0,
+          "latest_watchlist_time": null
         },
         "recovered_trading_day": "2026-04-09",
         "historical_signal_count": 36
       },
       "recent_events": [
+        {
+          "time": "2026-04-24T11:54:44.208482+05:30",
+          "event": "exit",
+          "symbol": "OPT:LUPIN:2026-04-30:2300:CE",
+          "underlying": "LUPIN",
+          "option_type": "CE",
+          "strike": 2300.0,
+          "price": 131.65,
+          "qty": 1250,
+          "reason": "target_50pct",
+          "signal_strength": null,
+          "pnl": 95340.41,
+          "phase": "phase1"
+        },
+        {
+          "time": "2026-04-24T11:51:37.238989+05:30",
+          "event": "exit",
+          "symbol": "OPT:AUROPHARMA:2026-04-30:1340:CE",
+          "underlying": "AUROPHARMA",
+          "option_type": "CE",
+          "strike": 1340.0,
+          "price": 67.0,
+          "qty": 1250,
+          "reason": "target_50pct",
+          "signal_strength": null,
+          "pnl": 34913.09,
+          "phase": "phase1"
+        },
         {
           "time": "2026-04-09T14:18:28.200836+05:30",
           "event": "entry",
@@ -333,30 +376,111 @@
           "option_type": "CE",
           "instrument_key": null,
           "trading_symbol": null,
-          "qty": 2500,
+          "qty": 1250,
           "initial_qty": 2500,
           "entry_price": 39.069525,
-          "current_price": 41.0,
-          "peak_price": 41.0,
+          "current_price": 67.0,
+          "peak_price": 67.0,
           "entry_bar_time": "2026-04-09T14:18:28.200836+05:30",
           "entered_at": "2026-04-09T14:18:28.200836+05:30",
           "signal_reason": "macd_zero_cross",
           "signal_strength": null,
-          "latest_rsi": null,
-          "phase": "phase1",
+          "latest_rsi": 39.73,
+          "phase": "phase2",
           "trailing_stop": null,
           "entry_iv_pct": null,
           "spot_setup": null,
           "regime": null,
-          "option_ma20": null,
+          "option_ma20": 37.81,
           "option_ma50": null,
-          "above_option_ma20": false,
+          "above_option_ma20": true,
           "above_option_ma50": false,
           "first_pullback_ignored_at": null,
           "window_end": null,
           "lot_size": null,
-          "price_updated_at": null,
-          "macd_line": null
+          "price_updated_at": "2026-04-24T15:28:35.730336+05:30",
+          "macd_line": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            -1.2090317001619795,
+            -1.2672521135931234,
+            -0.7838948635623311,
+            -0.40424009657452586,
+            -0.1819551355832303,
+            -0.037635520725856964,
+            0.09181871337295178,
+            0.03265244420964564,
+            -0.014075002504732481,
+            -0.1023762783920148,
+            -0.21027754835051837,
+            -0.2325901952029028,
+            -0.23146659720743656,
+            -0.10430176576133476,
+            -0.05533442755415052,
+            0.03152413574269275,
+            0.09921646726309774,
+            0.15112109774474192,
+            0.19006494102529103,
+            0.2184105169171744,
+            0.23812958045733978,
+            0.250865261801259,
+            0.11439475274818989,
+            0.5206996843704559,
+            0.5578821842526267,
+            0.4290891891830668,
+            0.5187346866165186,
+            0.3636850371798559,
+            0.3218235165422456,
+            0.3611420001846639,
+            0.627147740928045,
+            0.7606035464571548,
+            0.9322785673536629,
+            0.9684082439266746,
+            0.9856789792026674,
+            0.9560685412655872,
+            0.7943387845768157,
+            0.5947574790847341,
+            0.5951452599204572,
+            0.4809744869579049,
+            -0.1364638620806531,
+            -0.20783050178800977,
+            -0.5844530200568769,
+            -0.7571976936856828,
+            -0.8679555126975771,
+            -0.988714994684706,
+            -1.0042534492936,
+            -0.9172336806903871,
+            -0.7947283499535089,
+            -0.8532244201744348,
+            -0.9691033991774418,
+            -1.3360273468387476,
+            -1.52052870358947,
+            -1.6477530861880183,
+            -1.7286524960736287
+          ]
         },
         {
           "signal_id": "05f08027-5d8f-5c0c-ab0a-4b1373b32bee",
@@ -367,38 +491,77 @@
           "option_type": "CE",
           "instrument_key": null,
           "trading_symbol": null,
-          "qty": 2500,
+          "qty": 1250,
           "initial_qty": 2500,
           "entry_price": 55.377675,
-          "current_price": 57.55,
-          "peak_price": 57.55,
+          "current_price": 131.65,
+          "peak_price": 131.65,
           "entry_bar_time": "2026-04-09T14:59:07.612330+05:30",
           "entered_at": "2026-04-09T14:59:07.612330+05:30",
           "signal_reason": "macd_zero_cross",
           "signal_strength": null,
-          "latest_rsi": null,
-          "phase": "phase1",
-          "trailing_stop": null,
+          "latest_rsi": 45.51,
+          "phase": "trailing",
+          "trailing_stop": 105.32,
           "entry_iv_pct": null,
           "spot_setup": null,
           "regime": null,
-          "option_ma20": null,
+          "option_ma20": 59.02,
           "option_ma50": null,
-          "above_option_ma20": false,
+          "above_option_ma20": true,
           "above_option_ma50": false,
           "first_pullback_ignored_at": null,
           "window_end": null,
           "lot_size": null,
-          "price_updated_at": null,
+          "price_updated_at": "2026-04-24T15:28:35.730336+05:30",
           "macd_line": null
         }
       ],
       "portfolio": {
         "initial_capital": 1000000.0,
-        "available_capital": 1000000.0,
-        "peak_equity": 1019257.0,
-        "trade_history": [],
-        "daily_pnl": {},
+        "available_capital": 1378317.6875,
+        "peak_equity": 1508571.1875,
+        "trade_history": [
+          {
+            "symbol": "OPT:AUROPHARMA:2026-04-30:1340:CE",
+            "action": "BUY",
+            "qty": 1250,
+            "entry_price": 39.069525,
+            "exit_price": 66.9665,
+            "pnl": 34871.21875,
+            "entry_time": "2026-04-09T14:18:28.200836+05:30",
+            "exit_time": "2026-04-24T06:21:37.238426",
+            "instrument_type": "CE",
+            "expiry": "2026-04-30",
+            "strike": 1340.0,
+            "option_type": "CE",
+            "signal_id": null,
+            "setup_type": null,
+            "entry_iv_pct": null,
+            "regime": null
+          },
+          {
+            "symbol": "OPT:LUPIN:2026-04-30:2300:CE",
+            "action": "BUY",
+            "qty": 1250,
+            "entry_price": 55.377675,
+            "exit_price": 131.58417500000002,
+            "pnl": 95258.125,
+            "entry_time": "2026-04-09T14:59:07.612330+05:30",
+            "exit_time": "2026-04-24T06:24:44.208172",
+            "instrument_type": "CE",
+            "expiry": "2026-04-30",
+            "strike": 2300.0,
+            "option_type": "CE",
+            "signal_id": null,
+            "setup_type": null,
+            "entry_iv_pct": null,
+            "regime": null
+          }
+        ],
+        "daily_pnl": {
+          "2026-04-24": 130129.34375
+        },
         "equity_curve": [
           {
             "time": "2026-04-09T08:48:29.204817+05:30",
@@ -1531,6 +1694,290 @@
           {
             "time": "2026-04-11T16:00:58.738330+05:30",
             "equity": 1017632.0
+          },
+          {
+            "time": "2026-04-24T06:20:36.721889",
+            "equity": 1002757.0
+          },
+          {
+            "time": "2026-04-24T06:21:37.238866",
+            "equity": 1127048.25
+          },
+          {
+            "time": "2026-04-24T06:21:40.903045",
+            "equity": 1167673.25
+          },
+          {
+            "time": "2026-04-24T06:22:41.728098",
+            "equity": 1167673.25
+          },
+          {
+            "time": "2026-04-24T06:23:44.110635",
+            "equity": 1167673.25
+          },
+          {
+            "time": "2026-04-24T06:24:44.208406",
+            "equity": 1420321.1875
+          },
+          {
+            "time": "2026-04-24T06:24:45.480227",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:25:48.251288",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:26:49.476478",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:27:51.297217",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:28:51.929087",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:29:54.145732",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:30:57.576990",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:31:59.803827",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:33:00.962938",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:34:03.572473",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:35:04.927149",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:36:12.984605",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:37:16.465233",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:38:20.637439",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:39:22.066746",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:40:23.924776",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:41:25.692352",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:42:28.966147",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:43:30.135661",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:44:32.312266",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:45:34.673478",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:46:42.297551",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:47:44.775804",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:48:49.735792",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:50:05.365119",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:51:11.444284",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:52:19.874034",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:53:27.429596",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:54:28.988423",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:55:31.943143",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:56:32.649855",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:57:36.001336",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:58:38.072116",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:59:40.433498",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:00:42.282892",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:01:44.009419",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:02:45.518248",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:03:50.848265",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:04:57.420001",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:06:00.477533",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:07:02.746321",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:08:08.541489",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:09:11.116275",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:10:13.903316",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:11:15.828645",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:12:22.814489",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:13:24.953854",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:14:30.442450",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:17:12.490858",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:36:47.243559",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:46:17.311511",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:55:35.463435",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T08:04:41.260361",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T08:13:08.051132",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T08:22:32.960972",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T08:31:15.415624",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T08:39:03.926708",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T08:47:38.372598",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T09:03:22.279211",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T09:11:09.387080",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T09:20:29.632067",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T09:29:53.994073",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T09:38:17.690042",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T09:47:12.644690",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T09:58:38.664849",
+            "equity": 1508571.1875
           }
         ]
       }
@@ -1538,52 +1985,128 @@
     "index_mp_strategy": {
       "entries": 0,
       "exits": 0,
-      "last_scan_at": "2026-04-13T15:25:00+05:30",
-      "last_message": "Recovered Strategy 2 from 2026-04-13: 0 entry-ready, 2 trend-aligned.",
+      "last_scan_at": "2026-04-24T15:24:07.801100+05:30",
+      "last_message": "Scanned 5 indices. 0 aligned lanes, 0 open positions. Option history warnings detected: upstox: 15 failure(s), latest '[Errno -2] Name or service not known'.",
       "processed_signals": {},
       "signal_lane": [
         {
           "strategy": "Strategy 2",
-          "source": "historical_replay",
+          "source": "live_scan",
+          "underlying": "BANKNIFTY",
+          "signal_date": "2026-04-24",
+          "trade_date": "live scan",
+          "as_of": "2026-04-24T15:24:07.801100+05:30",
+          "direction": null,
+          "reason": "spot_warmup",
+          "strength": "standby",
+          "status": "waiting",
+          "freshness": "missing",
+          "instruction": "BANKNIFTY: 0 spot bars loaded for latest available session. Waiting for intraday Market Profile warm-up."
+        },
+        {
+          "strategy": "Strategy 2",
+          "source": "live_scan",
+          "underlying": "FINNIFTY",
+          "signal_date": "2026-04-24",
+          "trade_date": "live scan",
+          "as_of": "2026-04-24T15:24:07.801100+05:30",
+          "direction": null,
+          "reason": "spot_warmup",
+          "strength": "standby",
+          "status": "waiting",
+          "freshness": "missing",
+          "instruction": "FINNIFTY: 0 spot bars loaded for latest available session. Waiting for intraday Market Profile warm-up."
+        },
+        {
+          "strategy": "Strategy 2",
+          "source": "live_scan",
+          "underlying": "MIDCPNIFTY",
+          "signal_date": "2026-04-24",
+          "trade_date": "live scan",
+          "as_of": "2026-04-24T15:24:07.801100+05:30",
+          "direction": null,
+          "reason": "spot_warmup",
+          "strength": "standby",
+          "status": "waiting",
+          "freshness": "missing",
+          "instruction": "MIDCPNIFTY: 0 spot bars loaded for latest available session. Waiting for intraday Market Profile warm-up."
+        },
+        {
+          "strategy": "Strategy 2",
+          "source": "live_scan",
           "underlying": "NIFTY",
-          "signal_date": "2026-04-13",
-          "trade_date": "historical replay",
-          "as_of": "2026-04-13T22:00:00+05:30",
-          "direction": "PE",
-          "reason": "holding_below_poc",
-          "strength": "monitoring",
-          "status": "trend-aligned",
-          "freshness": "session-close",
-          "instruction": "NIFTY: MP balance_below_poc gate is aligned; waiting for the next fresh trigger.",
-          "mp_day_type": "balance_below_poc",
-          "spot_price": 23818.9,
-          "poc": 23841.0,
-          "vah": 23904.5,
-          "val": 23718.0,
-          "option_last_bar_time": "2026-04-13T15:25:00+05:30",
-          "spot_last_time": "2026-04-13T15:29:00+05:30",
-          "spot_source": "historical",
-          "spot_session_date": "2026-04-13"
+          "signal_date": "2026-04-24",
+          "trade_date": "live scan",
+          "as_of": "2026-04-24T15:24:07.801100+05:30",
+          "direction": null,
+          "reason": "spot_warmup",
+          "strength": "standby",
+          "status": "waiting",
+          "freshness": "missing",
+          "instruction": "NIFTY: 0 spot bars loaded for latest available session. Waiting for intraday Market Profile warm-up."
+        },
+        {
+          "strategy": "Strategy 2",
+          "source": "live_scan",
+          "underlying": "SENSEX",
+          "signal_date": "2026-04-24",
+          "trade_date": "live scan",
+          "as_of": "2026-04-24T15:24:07.801100+05:30",
+          "direction": null,
+          "reason": "spot_warmup",
+          "strength": "standby",
+          "status": "waiting",
+          "freshness": "missing",
+          "instruction": "SENSEX: 0 spot bars loaded for latest available session. Waiting for intraday Market Profile warm-up."
         }
       ],
       "meta": {
         "mode": "market_closed",
         "scan_interval": "5minute",
-        "watchlist_rows": 1,
-        "updated_at": "2026-04-19T23:48:10.030808+05:30",
+        "watchlist_rows": 5,
+        "updated_at": "2026-04-25T08:59:53.789842+05:30",
         "pipeline": [
           {
+            "name": "Strategy 2 BANKNIFTY",
+            "status": "missing",
+            "rows": 0,
+            "last_date": "\u2014",
+            "detail": "none spot rows warming up (latest available session)",
+            "freshness": "missing"
+          },
+          {
+            "name": "Strategy 2 FINNIFTY",
+            "status": "missing",
+            "rows": 0,
+            "last_date": "\u2014",
+            "detail": "none spot rows warming up (latest available session)",
+            "freshness": "missing"
+          },
+          {
+            "name": "Strategy 2 MIDCPNIFTY",
+            "status": "missing",
+            "rows": 0,
+            "last_date": "\u2014",
+            "detail": "none spot rows warming up (latest available session)",
+            "freshness": "missing"
+          },
+          {
             "name": "Strategy 2 NIFTY",
-            "status": "ok",
-            "rows": 375,
-            "last_date": "2026-04-13T15:25:00+05:30",
-            "detail": "Historical replay \u00b7 MP balance_below_poc \u00b7 trend-aligned",
-            "freshness": "session-close"
+            "status": "missing",
+            "rows": 0,
+            "last_date": "\u2014",
+            "detail": "none spot rows warming up (latest available session)",
+            "freshness": "missing"
+          },
+          {
+            "name": "Strategy 2 SENSEX",
+            "status": "missing",
+            "rows": 0,
+            "last_date": "\u2014",
+            "detail": "none spot rows warming up (latest available session)",
+            "freshness": "missing"
           }
         ],
-        "recovered_trading_day": "2026-04-13",
-        "entry_ready_count": 0,
-        "trend_aligned_count": 2,
         "market_state": "closed"
       },
       "recent_events": [],
@@ -2565,6 +3088,282 @@
           },
           {
             "time": "2026-04-11T16:00:58.742608+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:20:36.723463",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:21:40.905493",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:22:41.729779",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:23:44.115647",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:24:45.481681",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:25:48.268109",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:26:49.478400",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:27:51.299896",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:28:51.932649",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:29:54.148738",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:30:57.581992",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:31:59.806435",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:33:00.966692",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:34:03.575450",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:35:04.928969",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:36:12.988114",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:37:16.482324",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:38:20.639896",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:39:22.068378",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:40:23.934990",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:41:25.694097",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:42:28.968866",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:43:30.138229",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:44:32.314608",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:45:35.068215",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:46:42.301556",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:47:44.780119",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:48:49.819657",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:50:06.134043",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:51:11.481997",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:52:19.877725",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:53:27.493584",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:54:28.992624",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:55:31.948581",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:56:32.651978",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:57:36.004287",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:58:38.075698",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:59:40.447354",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:00:42.285908",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:01:44.011501",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:02:45.520486",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:03:50.853298",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:04:57.450402",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:06:00.548526",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:07:02.748736",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:08:08.550368",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:09:11.123867",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:10:13.906799",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:11:15.837326",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:12:22.817427",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:13:24.956222",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:14:30.446869",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:17:12.524807",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:36:47.289145",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:46:17.319961",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:55:35.469968",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T08:04:41.277105",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T08:13:08.069846",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T08:22:33.030303",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T08:31:15.419621",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T08:39:03.934616",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T08:47:38.378205",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T09:03:22.289962",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T09:11:09.389589",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T09:20:29.634356",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T09:29:54.020150",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T09:38:17.694636",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T09:47:12.665715",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T09:58:38.669040",
             "equity": 1000000.0
           }
         ]

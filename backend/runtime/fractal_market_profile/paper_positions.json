@@ -1,12 +1,13 @@
 {
-  "last_synced_at": "2026-04-11T19:17:49.119537+00:00",
-  "open_positions": [
+  "last_synced_at": "2026-04-24T10:00:04.377835+00:00",
+  "open_positions": [],
+  "closed_positions": [
     {
       "position_id": "4e94ae066d2142ab972a2f6dd1ea83f5",
-      "status": "open",
+      "status": "closed",
       "opened_at": "2026-04-11T19:17:49.119537+00:00",
-      "updated_at": "2026-04-11T19:17:49.119537+00:00",
-      "closed_at": null,
+      "updated_at": "2026-04-24T05:57:41.687380+00:00",
+      "closed_at": "2026-04-24T05:57:41.687380+00:00",
       "underlying": "NIFTY",
       "setup_name": "hourly_ib_breakout_call",
       "action": "LONG",
@@ -20,15 +21,15 @@
       "lot_size": 65,
       "entry_premium": 412.9,
       "latest_premium": 412.9,
-      "exit_premium": null,
+      "exit_premium": 412.9,
       "realized_pnl": 0.0,
       "unrealized_pnl": 0.0,
       "stop_level": 22673.15,
       "target_level": 22864.19,
       "confidence": 0.68,
       "daily_shape": "Elongated",
-      "hourly_shape": "Elongated"
+      "hourly_shape": "Elongated",
+      "close_reason": "flat_snapshot"
     }
-  ],
-  "closed_positions": []
+  ]
 }

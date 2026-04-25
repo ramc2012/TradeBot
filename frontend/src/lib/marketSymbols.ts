@@ -27,6 +27,14 @@ export const MARKET_INDEX_LABELS: Record<MarketIndexSymbol, string> = {
   "BSE:SENSEX-INDEX": "SENSEX",
 };
 
+export const MARKET_INDEX_PRICE_BANDS: Record<MarketIndexSymbol, readonly [number, number]> = {
+  "NSE:NIFTY50-INDEX": [10_000, 50_000],
+  "NSE:BANKNIFTY-INDEX": [20_000, 100_000],
+  "NSE:FINNIFTY-INDEX": [10_000, 60_000],
+  "NSE:MIDCPNIFTY-INDEX": [5_000, 40_000],
+  "BSE:SENSEX-INDEX": [30_000, 150_000],
+};
+
 export const MARKET_SYMBOL_LABELS: Record<string, string> = {
   ...MARKET_INDEX_LABELS,
   "NSE:NIFTYBANK-INDEX": "NIFTY BANK",

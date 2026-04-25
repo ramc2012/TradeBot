@@ -1,6 +1,6 @@
 "use client";
 
-import { useDeferredValue, useState, useTransition } from "react";
+import { useDeferredValue, useMemo, useState, useTransition } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import {
@@ -25,6 +25,8 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
+  Area,
+  ComposedChart,
   Line,
   LineChart,
   ReferenceLine,
@@ -49,8 +51,11 @@ import {
   getAuctionIntelligenceMPSignals,
   getAuctionIntelligenceMPOpenSignal,
   getAuctionIntelligenceMPAgentContext,
+  getMPMultiTFProfile,
+  getMPOrderflowProxy,
 } from "@/lib/api";
 import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
+import { useTickSymbol } from "@/store";
 
 type DemoScenarioOption = {
   id: string;
@@ -282,6 +287,102 @@ type SummaryResponse = {
 
 type DataMode = "live" | "demo";
 
+type MPCompositeProfile = {
+  scope?: string;
+  lookback_sessions?: number;
+  session_start?: string;
+  session_end?: string;
+  high_price?: number;
+  low_price?: number;
+  poc?: number;
+  vah?: number;
+  val?: number;
+  weighted_poc?: number;
+  weighted_vah?: number;
+  weighted_val?: number;
+  tick_size?: number;
+  va_width?: number;
+  tpo_rows?: { price: number; count: number; letters?: string }[];
+};
+
+type MPMultiTFResponse = {
+  underlying: string;
+  profiles: Record<string, MPCompositeProfile>;
+  weekly_profiles: unknown[];
+  latest_daily?: Record<string, any> | null;
+  data_status?: unknown;
+};
+
+type MPOrderflowProxyResponse = {
+  underlying: string;
+  current_cvd?: number;
+  series: {
+    date: string;
+    cvd: number;
+    daily_delta: number;
+    close_vs_poc: string;
+    close_vs_va: string;
+    poc: number;
+    vah: number;
+    val: number;
+    close: number;
+    close_location: number;
+    buyer_fail: number;
+    seller_fail: number;
+  }[];
+  divergences?: {
+    date: string;
+    type: string;
+    price_change: number;
+    cvd_change: number;
+  }[];
+  summary?: {
+    total_bull_days?: number;
+    total_bear_days?: number;
+    net_cvd?: number;
+    divergences_count?: number;
+  };
+  rag_context?: RAGContextResponse;
+};
+
+type RAGContextResponse = {
+  decision: "allow" | "warn" | "block" | string;
+  confidence?: number;
+  summary?: string;
+  reason_codes?: string[];
+  case_stats?: {
+    matched_cases?: number;
+    resolved_cases?: number;
+    wins?: number;
+    losses?: number;
+    win_rate?: number | null;
+    expectancy?: number | null;
+  };
+  retrievals?: {
+    id: string;
+    collection: string;
+    title: string;
+    source: string;
+    score: number;
+  }[];
+};
+
+type WhaleFlowCandidate = {
+  id: string;
+  side: "CALL" | "PUT";
+  strike: number;
+  premium: number;
+  volume: number;
+  oiChange: number;
+  distancePct: number;
+  pressure: number;
+  volOiRatio: number;
+  confidence: number;
+  alertType: string;
+  direction: "BULLISH" | "BEARISH";
+  flags: string[];
+};
+
 type DefaultConfigResponse = {
   risk: {
     max_daily_loss: number;
@@ -389,8 +490,21 @@ const FALLBACK_SCENARIOS: DemoScenarioOption[] = [
   { id: "balance", label: "Rotational balance session" },
 ];
 
+const AUCTION_INDEX_TICK_SYMBOLS: Record<string, string> = {
+  NIFTY: "NSE:NIFTY50-INDEX",
+  BANKNIFTY: "NSE:BANKNIFTY-INDEX",
+  FINNIFTY: "NSE:FINNIFTY-INDEX",
+  MIDCPNIFTY: "NSE:MIDCPNIFTY-INDEX",
+  SENSEX: "BSE:SENSEX-INDEX",
+};
+
+function finiteNumber(value: unknown): number | null {
+  const next = Number(value);
+  return Number.isFinite(next) ? next : null;
+}
+
 function formatPrice(value: number | null | undefined, digits = 2) {
-  if (value === null || value === undefined) return "—";
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
   return value.toLocaleString("en-IN", { maximumFractionDigits: digits });
 }
 
@@ -413,9 +527,148 @@ function formatSigned(value: number | null | undefined, digits = 2) {
   return `${prefix}${value.toFixed(digits)}`;
 }
 
+function formatRawPct(value: number | null | undefined, digits = 0) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  const prefix = value > 0 ? "+" : "";
+  return `${prefix}${value.toFixed(digits)}%`;
+}
+
+function terminalTone(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "text-[#d8d8d8]";
+  if (value > 0) return "text-[#4ec97a]";
+  if (value < 0) return "text-[#e75a6b]";
+  return "text-[#d8d8d8]";
+}
+
+function profileRelation(price: number | null | undefined, profile?: MPCompositeProfile | null) {
+  if (price == null || !profile?.vah || !profile?.val) return "—";
+  if (price > profile.vah) return "ABOVE VA";
+  if (price < profile.val) return "BELOW VA";
+  return "INSIDE VA";
+}
+
+function buildCompositeDomain(profiles: Array<MPCompositeProfile | null | undefined>) {
+  const values = profiles.flatMap((profile) => [
+    profile?.high_price,
+    profile?.low_price,
+    profile?.poc,
+    profile?.vah,
+    profile?.val,
+    ...(profile?.tpo_rows ?? []).map((row) => row.price),
+  ]).filter((value): value is number => Number.isFinite(value));
+  if (!values.length) return { min: 0, max: 100, tick: 5 };
+  const minRaw = Math.min(...values);
+  const maxRaw = Math.max(...values);
+  const range = Math.max(maxRaw - minRaw, 1);
+  const tick = range > 1600 ? 50 : range > 500 ? 25 : 5;
+  const pad = Math.max(range * 0.06, tick * 4);
+  return {
+    min: Math.floor((minRaw - pad) / tick) * tick,
+    max: Math.ceil((maxRaw + pad) / tick) * tick,
+    tick,
+  };
+}
+
+function priceTopPct(price: number, domain: { min: number; max: number }) {
+  const range = Math.max(domain.max - domain.min, 1);
+  return Math.min(Math.max(((domain.max - price) / range) * 100, 0), 100);
+}
+
+function buildWhaleFlowCandidates(analysis?: AnalysisResponse): WhaleFlowCandidate[] {
+  const ntm = analysis?.ntm_volx;
+  const levels = ntm?.pressure_ladder ?? [];
+  if (!ntm || !levels.length) return [];
+
+  const sideRows = levels.flatMap((level) => [
+    {
+      side: "CALL" as const,
+      strike: level.strike,
+      premium: Number(level.call_notional || 0),
+      volume: Number(level.call_volume || 0),
+      oiChange: Number(level.call_oi_change || 0),
+      distancePct: Number(level.distance_from_spot_pct || 0),
+      pressure: Number(level.call_pressure || 0),
+      netPressure: Number(level.net_pressure || 0),
+    },
+    {
+      side: "PUT" as const,
+      strike: level.strike,
+      premium: Number(level.put_notional || 0),
+      volume: Number(level.put_volume || 0),
+      oiChange: Number(level.put_oi_change || 0),
+      distancePct: Number(level.distance_from_spot_pct || 0),
+      pressure: Number(level.put_pressure || 0),
+      netPressure: Number(level.net_pressure || 0),
+    },
+  ]).filter((row) => row.premium > 0 || row.volume > 0 || row.pressure > 0);
+
+  if (!sideRows.length) return [];
+
+  const maxPremium = Math.max(...sideRows.map((row) => row.premium), 1);
+  const maxPressure = Math.max(...sideRows.map((row) => row.pressure), 1);
+  const avgVolume = sideRows.reduce((sum, row) => sum + row.volume, 0) / Math.max(sideRows.length, 1);
+  const dynamicPremiumFloor = Math.max(100_000, maxPremium * 0.42);
+
+  return sideRows.map((row) => {
+    const volOiRatio = row.volume / Math.max(row.oiChange || 1, 1);
+    const premiumShare = row.premium / maxPremium;
+    const pressureShare = row.pressure / maxPressure;
+    const nearAtm = Math.abs(row.distancePct) <= 1.25;
+    const highPremium = row.premium >= dynamicPremiumFloor;
+    const openingProxy = row.oiChange > 0 && row.volume >= row.oiChange * 0.65;
+    const sizeVsOiProxy = row.volume > Math.max(row.oiChange, 1) * 1.2;
+    const clusteredVolume = row.volume >= Math.max(avgVolume * 1.4, 1);
+    const direction: WhaleFlowCandidate["direction"] = row.side === "CALL" ? "BULLISH" : "BEARISH";
+    const aligned = row.side === "CALL" ? row.netPressure > 0 : row.netPressure < 0;
+    const flags = [
+      highPremium ? "premium block" : null,
+      sizeVsOiProxy ? "volume > OI-change" : null,
+      openingProxy ? "opening-flow proxy" : null,
+      clusteredVolume ? "strike cluster" : null,
+      nearAtm ? "near ATM" : null,
+      aligned ? "directional pressure" : null,
+    ].filter(Boolean) as string[];
+    const confidence = Math.min(
+      99,
+      Math.round(
+        18
+          + premiumShare * 30
+          + pressureShare * 22
+          + Math.min(volOiRatio, 3) * 7
+          + (nearAtm ? 8 : 0)
+          + (openingProxy ? 8 : 0)
+          + (aligned ? 6 : 0),
+      ),
+    );
+    const alertType =
+      highPremium && sizeVsOiProxy
+        ? "WHALE OPENING"
+        : highPremium
+          ? "BLOCK PREMIUM"
+          : clusteredVolume && aligned
+            ? "PRESSURE CLUSTER"
+            : "WATCH";
+    return {
+      id: `${row.side}-${row.strike}`,
+      side: row.side,
+      strike: row.strike,
+      premium: row.premium,
+      volume: row.volume,
+      oiChange: row.oiChange,
+      distancePct: row.distancePct,
+      pressure: row.pressure,
+      volOiRatio,
+      confidence,
+      alertType,
+      direction,
+      flags,
+    };
+  }).sort((left, right) => right.confidence - left.confidence || right.premium - left.premium).slice(0, 10);
+}
+
 function sectionChrome(extra?: string) {
   return clsx(
-    "rounded-3xl border border-bg-border bg-[linear-gradient(180deg,rgba(12,18,31,0.92),rgba(8,11,24,0.98))]",
+    "rounded-sm border border-[#2a2a2a] bg-black",
     extra,
   );
 }
@@ -471,6 +724,398 @@ function ActionPill({ label, className }: { label: string; className: string }) 
   );
 }
 
+function TerminalReadout({
+  label,
+  value,
+  hot,
+}: {
+  label: string;
+  value: string | number;
+  hot?: boolean;
+}) {
+  return (
+    <div className="border-l border-[#2a2a2a] px-3 py-1">
+      <div className="text-[8px] uppercase tracking-[0.18em] text-[#666]">{label}</div>
+      <div className={clsx("truncate text-[11px] font-bold uppercase text-[#f5f5f5]", hot ? "text-[#ffb02e]" : "")}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function CompositeTerminalProfile({
+  profile,
+  label,
+  livePrice,
+  domain,
+}: {
+  profile?: MPCompositeProfile | null;
+  label: string;
+  livePrice?: number | null;
+  domain: { min: number; max: number; tick: number };
+}) {
+  if (!profile?.tpo_rows?.length) {
+    return (
+      <div className="flex min-h-[280px] items-center justify-center border border-[#2a2a2a] bg-black text-[10px] uppercase tracking-[0.16em] text-[#777]">
+        {label}: no profile
+      </div>
+    );
+  }
+
+  const rows = [...profile.tpo_rows].sort((left, right) => right.price - left.price);
+  const maxCount = Math.max(...rows.map((row) => Number(row.count || 0)), 1);
+  const height = 330;
+
+  return (
+    <div className="border border-[#2a2a2a] bg-black">
+      <div className="flex items-center justify-between border-b border-[#2a2a2a] bg-[#0a0a0a] px-2 py-2">
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#ffb02e]">{label}</div>
+          <div className="mt-0.5 text-[9px] uppercase tracking-[0.12em] text-[#666]">
+            {profile.session_start ?? "—"} → {profile.session_end ?? "—"} · {profile.lookback_sessions ?? "—"} sessions
+          </div>
+        </div>
+        <div className="text-right text-[10px] uppercase tracking-[0.12em] text-[#888]">
+          <div>POC <span className="text-[#ffd357]">{formatPrice(profile.poc, 0)}</span></div>
+          <div>VA <span className="text-[#ffb02e]">{formatPrice(profile.val, 0)}-{formatPrice(profile.vah, 0)}</span></div>
+        </div>
+      </div>
+      <div className="relative grid grid-cols-[58px_minmax(0,1fr)]" style={{ height }}>
+        <div className="relative border-r border-[#2a2a2a] bg-[#050505]">
+          {Array.from({ length: Math.floor((domain.max - domain.min) / domain.tick) + 1 }).map((_, index) => {
+            const price = domain.max - index * domain.tick;
+            const major = price % (domain.tick * 4) === 0;
+            return (
+              <div
+                key={price}
+                className={clsx("absolute right-1 text-[8px]", major ? "text-[#777]" : "text-[#444]")}
+                style={{ top: `${priceTopPct(price, domain)}%`, transform: "translateY(-50%)" }}
+              >
+                {major ? formatPrice(price, 0) : ""}
+              </div>
+            );
+          })}
+          {livePrice != null ? (
+            <div
+              className="absolute left-0 right-0 bg-[#ffb02e] px-1 text-right text-[8px] font-bold text-black"
+              style={{ top: `${priceTopPct(livePrice, domain)}%`, transform: "translateY(-50%)" }}
+            >
+              {formatPrice(livePrice, 0)}
+            </div>
+          ) : null}
+        </div>
+        <div className="relative overflow-hidden bg-black">
+          <div
+            className="absolute left-0 right-0 border-t border-[#ffd357]/80"
+            style={{ top: `${priceTopPct(profile.poc ?? 0, domain)}%` }}
+          />
+          <div
+            className="absolute left-0 right-0 border-t border-dashed border-[#c98a1f]/70"
+            style={{ top: `${priceTopPct(profile.vah ?? 0, domain)}%` }}
+          />
+          <div
+            className="absolute left-0 right-0 border-t border-dashed border-[#c98a1f]/70"
+            style={{ top: `${priceTopPct(profile.val ?? 0, domain)}%` }}
+          />
+          {livePrice != null ? (
+            <div
+              className="absolute left-0 right-0 border-t border-[#ffb02e]/80"
+              style={{ top: `${priceTopPct(livePrice, domain)}%` }}
+            />
+          ) : null}
+          {rows.map((row) => {
+            const isPoc = Math.abs(row.price - Number(profile.poc ?? 0)) <= Number(profile.tick_size ?? domain.tick);
+            const inValue = row.price <= Number(profile.vah ?? -Infinity) && row.price >= Number(profile.val ?? Infinity);
+            const width = Math.max((Number(row.count || 0) / maxCount) * 96, 4);
+            return (
+              <div
+                key={`${label}-${row.price}`}
+                className="absolute left-1 right-1 flex items-center"
+                style={{ top: `${priceTopPct(row.price, domain)}%`, transform: "translateY(-50%)" }}
+              >
+                <div
+                  className={clsx("h-[5px]", isPoc ? "bg-[#ffd357]" : inValue ? "bg-[#ffb02e]/75" : "bg-[#565f6b]/70")}
+                  style={{ width: `${width}%` }}
+                  title={`${formatPrice(row.price, 0)} · ${row.count} weighted TPO`}
+                />
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OrderFlowTerminalCharts({
+  orderflowProxy,
+  analysis,
+}: {
+  orderflowProxy?: MPOrderflowProxyResponse;
+  analysis?: AnalysisResponse;
+}) {
+  const series = orderflowProxy?.series ?? [];
+  const chartData = series.slice(-50).map((row) => ({
+    ...row,
+    label: row.date.slice(5),
+  }));
+  const current = analysis?.order_flow;
+  const pressureRows = [
+    { label: "top imbalance", value: current?.top_imbalance ?? 0 },
+    { label: "depth imbalance", value: current?.depth_imbalance ?? 0 },
+    { label: "queue pressure", value: current?.queue_pressure ?? 0 },
+    { label: "trade imbalance", value: (current as any)?.trade_imbalance ?? 0 },
+    { label: "toxicity", value: current?.adverse_selection_risk ?? 0 },
+    { label: "timing", value: current?.timing_confidence ?? 0 },
+  ];
+
+  return (
+    <div className="border border-[#2a2a2a] bg-black">
+      <div className="flex items-center justify-between border-b border-[#2a2a2a] bg-[#0a0a0a] px-2 py-2">
+        <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#ffb02e]">Orderflow Tape</div>
+        <div className="text-[9px] uppercase tracking-[0.14em] text-[#666]">
+          CVD proxy · {formatSigned(orderflowProxy?.current_cvd, 2)}
+        </div>
+      </div>
+      <div className="grid gap-px bg-[#2a2a2a] lg:grid-cols-[minmax(0,1fr)_240px]">
+        <div className="h-[250px] bg-black p-2">
+          {chartData.length ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={chartData} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
+                <CartesianGrid stroke="#1a1a1a" vertical={false} />
+                <XAxis dataKey="label" tick={{ fill: "#666", fontSize: 9 }} axisLine={false} tickLine={false} />
+                <YAxis yAxisId="cvd" tick={{ fill: "#777", fontSize: 9 }} axisLine={false} tickLine={false} width={42} />
+                <YAxis yAxisId="delta" orientation="right" tick={{ fill: "#777", fontSize: 9 }} axisLine={false} tickLine={false} width={36} />
+                <Tooltip contentStyle={{ background: "#050505", border: "1px solid #2a2a2a", borderRadius: 2, color: "#d8d8d8" }} />
+                <ReferenceLine yAxisId="cvd" y={0} stroke="#383838" />
+                <Bar yAxisId="delta" dataKey="daily_delta" name="Daily delta" barSize={5}>
+                  {chartData.map((row) => (
+                    <Cell key={row.date} fill={row.daily_delta >= 0 ? "#4ec97a" : "#e75a6b"} />
+                  ))}
+                </Bar>
+                <Area yAxisId="cvd" type="monotone" dataKey="cvd" name="CVD proxy" stroke="#ffb02e" fill="rgba(255,176,46,0.10)" strokeWidth={2} dot={false} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="flex h-full items-center justify-center text-[10px] uppercase tracking-[0.16em] text-[#777]">
+              waiting for orderflow proxy
+            </div>
+          )}
+        </div>
+        <div className="bg-black p-3">
+          <div className="grid gap-2">
+            {pressureRows.map((row) => {
+              const width = Math.min(Math.abs(row.value) * 100, 100);
+              return (
+                <div key={row.label}>
+                  <div className="mb-1 flex items-center justify-between text-[9px] uppercase tracking-[0.12em] text-[#777]">
+                    <span>{row.label}</span>
+                    <span className={terminalTone(row.value)}>{formatRawPct(row.value * 100, 0)}</span>
+                  </div>
+                  <div className="h-2 bg-[#111]">
+                    <div
+                      className={clsx("h-full", row.value >= 0 ? "bg-[#4ec97a]" : "bg-[#e75a6b]")}
+                      style={{ width: `${Math.max(width, 2)}%` }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="mt-3 border-t border-[#1a1a1a] pt-2 text-[10px] leading-5 text-[#888]">
+            Divergences: <span className="text-[#ffb02e]">{orderflowProxy?.divergences?.length ?? 0}</span>
+            <br />
+            Bull/Bear days: <span className="text-[#4ec97a]">{orderflowProxy?.summary?.total_bull_days ?? "—"}</span>
+            {" / "}
+            <span className="text-[#e75a6b]">{orderflowProxy?.summary?.total_bear_days ?? "—"}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WhaleFlowPanel({ candidates }: { candidates: WhaleFlowCandidate[] }) {
+  return (
+    <div className="border border-[#2a2a2a] bg-black">
+      <div className="flex items-center justify-between border-b border-[#2a2a2a] bg-[#0a0a0a] px-2 py-2">
+        <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#ffb02e]">Options Whale Flow</div>
+        <div className="text-[9px] uppercase tracking-[0.14em] text-[#666]">UW-style proxy</div>
+      </div>
+      <div className="max-h-[310px] overflow-auto">
+        {candidates.length ? (
+          <table className="w-full table-fixed text-left font-mono text-[10px]">
+            <thead className="sticky top-0 bg-black text-[#666]">
+              <tr className="border-b border-[#1a1a1a]">
+                <th className="w-[21%] px-2 py-1.5 font-medium uppercase tracking-[0.12em]">Type</th>
+                <th className="w-[18%] px-2 py-1.5 text-right font-medium uppercase tracking-[0.12em]">Strike</th>
+                <th className="w-[22%] px-2 py-1.5 text-right font-medium uppercase tracking-[0.12em]">Premium</th>
+                <th className="w-[17%] px-2 py-1.5 text-right font-medium uppercase tracking-[0.12em]">Vol/OI</th>
+                <th className="w-[22%] px-2 py-1.5 text-right font-medium uppercase tracking-[0.12em]">Score</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#1a1a1a]">
+              {candidates.map((candidate) => (
+                <tr key={candidate.id}>
+                  <td className={clsx("px-2 py-1.5 font-bold", candidate.direction === "BULLISH" ? "text-[#4ec97a]" : "text-[#e75a6b]")}>
+                    {candidate.side}
+                  </td>
+                  <td className="px-2 py-1.5 text-right text-[#f5f5f5]">{formatPrice(candidate.strike, 0)}</td>
+                  <td className="px-2 py-1.5 text-right text-[#f5f5f5]">{formatCompact(candidate.premium)}</td>
+                  <td className="px-2 py-1.5 text-right text-[#ffb02e]">{candidate.volOiRatio.toFixed(1)}x</td>
+                  <td className="px-2 py-1.5 text-right text-[#f5f5f5]">{candidate.confidence}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <div className="px-3 py-8 text-center text-[10px] uppercase tracking-[0.16em] text-[#777]">
+            no options flow candidate
+          </div>
+        )}
+      </div>
+      <div className="border-t border-[#1a1a1a] px-2 py-2 text-[10px] leading-5 text-[#888]">
+        Flags combine premium blocks, volume versus OI-change, near-ATM pressure, and directional NTM VolX. Raw NBBO sweep side is not available yet.
+      </div>
+    </div>
+  );
+}
+
+function RagContextPanel({ context }: { context?: RAGContextResponse }) {
+  const decision = String(context?.decision ?? "warmup").toUpperCase();
+  const caseStats = context?.case_stats ?? {};
+  const tone = decision === "BLOCK" ? "text-[#e75a6b]" : decision === "WARN" ? "text-[#ffb02e]" : "text-[#4ec97a]";
+  const retrievals = context?.retrievals ?? [];
+  return (
+    <div className="border border-[#2a2a2a] bg-black">
+      <div className="flex items-center justify-between border-b border-[#2a2a2a] bg-[#0a0a0a] px-2 py-2">
+        <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#ffb02e]">RAG Memory Gate</div>
+        <div className={clsx("text-[9px] font-bold uppercase tracking-[0.14em]", tone)}>
+          {decision} · {formatRawPct((context?.confidence ?? 0) * 100, 0)}
+        </div>
+      </div>
+      <div className="grid gap-px bg-[#1a1a1a] sm:grid-cols-3">
+        <div className="bg-black px-3 py-2">
+          <div className="text-[8px] uppercase tracking-[0.16em] text-[#666]">cases</div>
+          <div className="mt-1 text-sm font-bold text-[#f5f5f5]">{caseStats.matched_cases ?? 0}</div>
+        </div>
+        <div className="bg-black px-3 py-2">
+          <div className="text-[8px] uppercase tracking-[0.16em] text-[#666]">win rate</div>
+          <div className="mt-1 text-sm font-bold text-[#f5f5f5]">{caseStats.win_rate != null ? formatRawPct(caseStats.win_rate * 100, 0) : "—"}</div>
+        </div>
+        <div className="bg-black px-3 py-2">
+          <div className="text-[8px] uppercase tracking-[0.16em] text-[#666]">expectancy</div>
+          <div className={clsx("mt-1 text-sm font-bold", terminalTone(caseStats.expectancy ?? 0))}>{formatSigned(caseStats.expectancy, 0)}</div>
+        </div>
+      </div>
+      <div className="px-3 py-2 text-[10px] leading-5 text-[#888]">
+        {context?.summary ?? "Waiting for retrieved cases and playbooks."}
+      </div>
+      <div className="border-t border-[#1a1a1a] px-3 py-2">
+        <div className="mb-1 text-[8px] uppercase tracking-[0.16em] text-[#666]">evidence</div>
+        {retrievals.length ? (
+          <div className="space-y-1">
+            {retrievals.slice(0, 3).map((hit) => (
+              <div key={hit.id} className="flex gap-2 text-[9px] text-[#888]">
+                <span className="min-w-[72px] uppercase text-[#666]">{hit.collection}</span>
+                <span className="truncate text-[#d8d8d8]">{hit.title}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-[9px] uppercase tracking-[0.12em] text-[#666]">no retrievals yet</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AuctionTerminalWorkbench({
+  symbol,
+  payload,
+  analysis,
+  multiTf,
+  orderflowProxy,
+  whaleCandidates,
+  canonicalLastPrice,
+  canonicalPrevClose,
+}: {
+  symbol: string;
+  payload?: WorkspacePayload;
+  analysis?: AnalysisResponse;
+  multiTf?: MPMultiTFResponse;
+  orderflowProxy?: MPOrderflowProxyResponse;
+  whaleCandidates: WhaleFlowCandidate[];
+  canonicalLastPrice?: number | null;
+  canonicalPrevClose?: number | null;
+}) {
+  const profile20 = multiTf?.profiles?.composite_20d;
+  const profile50 = multiTf?.profiles?.composite_50d ?? multiTf?.profiles?.composite_60d;
+  const livePrice = finiteNumber(canonicalLastPrice)
+    ?? finiteNumber(payload?.request.session.last_price)
+    ?? finiteNumber(analysis?.market_profile.close_price)
+    ?? finiteNumber(multiTf?.latest_daily?.close);
+  const domain = useMemo(() => buildCompositeDomain([profile20, profile50]), [profile20, profile50]);
+  const latest = multiTf?.latest_daily;
+  const ragContext = orderflowProxy?.rag_context;
+  const ragDecision = String(ragContext?.decision ?? "—").toUpperCase();
+  const change = livePrice != null && canonicalPrevClose
+    ? livePrice - canonicalPrevClose
+    : typeof latest?.daily_move === "number"
+      ? Number(latest.daily_move)
+      : null;
+  const priceSource = canonicalLastPrice != null ? "canonical index ltp" : "profile fallback";
+
+  return (
+    <section className="overflow-hidden rounded-sm border border-[#2a2a2a] bg-black font-mono text-[#d8d8d8]">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#2a2a2a] bg-[#0a0a0a] px-3 py-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-bold uppercase tracking-[0.2em] text-[#ffb02e]">Nomad Curie</span>
+          <span className="text-[#555]">|</span>
+          <span className="uppercase tracking-[0.16em] text-[#999]">Auction IQ</span>
+          <span className="text-[#555]">|</span>
+          <span className="text-sm font-bold uppercase tracking-[0.16em] text-[#f5f5f5]">{symbol}</span>
+          <span className="text-base font-bold text-[#ffc555]">{formatPrice(livePrice, 2)}</span>
+          <span className={clsx("text-[11px] font-semibold", terminalTone(change))}>{formatSigned(change, 2)}</span>
+        </div>
+        <div className="text-[10px] uppercase tracking-[0.14em] text-[#777]">
+          Composite 20D / 50D · MP + orderflow + options-flow proxy
+        </div>
+      </div>
+
+      <div className="flex min-w-0 overflow-x-auto border-b border-[#2a2a2a] bg-black">
+        <TerminalReadout label="Day" value={String(latest?.day_type ?? analysis?.regime.label ?? "—").toUpperCase()} hot />
+        <TerminalReadout label="POC" value={formatPrice(latest?.poc ?? analysis?.market_profile.poc, 0)} />
+        <TerminalReadout label="20D rel" value={profileRelation(livePrice, profile20)} />
+        <TerminalReadout label="50D rel" value={profileRelation(livePrice, profile50)} />
+        <TerminalReadout label="CVD" value={formatSigned(orderflowProxy?.current_cvd, 2)} hot={Math.abs(orderflowProxy?.current_cvd ?? 0) >= 2} />
+        <TerminalReadout label="Whales" value={whaleCandidates.length} hot={whaleCandidates.length > 0} />
+        <TerminalReadout label="VXR" value={analysis?.ntm_volx ? analysis.ntm_volx.vxr.toFixed(2) : "—"} hot={(analysis?.ntm_volx?.vxr ?? 0) >= 1.5} />
+        <TerminalReadout label="RAG" value={ragDecision} hot={ragDecision === "WARN" || ragDecision === "BLOCK"} />
+      </div>
+
+      <div className="grid gap-px bg-[#2a2a2a] 2xl:grid-cols-[minmax(0,1.25fr)_minmax(420px,0.75fr)]">
+        <div className="grid min-w-0 gap-px bg-[#2a2a2a] lg:grid-cols-2">
+          <CompositeTerminalProfile profile={profile20} label="Composite 20D" livePrice={livePrice} domain={domain} />
+          <CompositeTerminalProfile profile={profile50} label="Composite 50D" livePrice={livePrice} domain={domain} />
+        </div>
+        <div className="grid min-w-0 gap-px bg-[#2a2a2a]">
+          <OrderFlowTerminalCharts orderflowProxy={orderflowProxy} analysis={analysis} />
+          <RagContextPanel context={ragContext} />
+          <WhaleFlowPanel candidates={whaleCandidates} />
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 border-t border-[#2a2a2a] bg-[#0a0a0a] px-3 py-1.5 text-[9px] uppercase tracking-[0.14em] text-[#666]">
+        <span>strategy agent tape: profile relation + cvd divergence + whale proxy</span>
+        <span>|</span>
+        <span>source: mp analytics / ntm volx / current order flow / {priceSource}</span>
+        <span className="ml-auto">not a buy signal</span>
+      </div>
+    </section>
+  );
+}
+
 export default function AuctionIntelligenceWorkspace() {
   const [dataMode, setDataMode] = useState<DataMode>("live");
   const [symbol, setSymbol] = useState("NIFTY");
@@ -494,6 +1139,10 @@ export default function AuctionIntelligenceWorkspace() {
     staleTime: 60_000,
   });
 
+  const summary = summaryQuery.data;
+  const liveReady = Boolean(summary?.live_ready);
+  const liveSnapshotEnabled = deferredMode !== "live" || liveReady;
+
   const validationQuery = usePersistentSnapshotQuery<WorkspacePayload>({
     queryKey: [
       "auction-intelligence",
@@ -510,6 +1159,7 @@ export default function AuctionIntelligenceWorkspace() {
     staleTime: 15_000,
     refetchInterval: deferredMode === "live" ? 20_000 : 60_000,
     refetchOnWindowFocus: false,
+    enabled: liveSnapshotEnabled,
   });
   const payload = validationQuery.data;
 
@@ -635,6 +1285,26 @@ export default function AuctionIntelligenceWorkspace() {
     enabled: mpOpenSignalQuery.isFetched,
   });
 
+  const mpMultiTfQuery = usePersistentSnapshotQuery<MPMultiTFResponse>({
+    queryKey: ["auction-intelligence", "mp-multi-tf-profile", mpUnderlying],
+    storageKey: `auction-intelligence:mp-multi-tf-profile:${mpUnderlying}:20-50`,
+    queryFn: async () => (await getMPMultiTFProfile(mpUnderlying)).data,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: false,
+    enabled: Boolean(mpDataStatusQuery.data),
+  });
+
+  const mpOrderflowProxyQuery = usePersistentSnapshotQuery<MPOrderflowProxyResponse>({
+    queryKey: ["auction-intelligence", "mp-orderflow-proxy", mpUnderlying, 60],
+    storageKey: `auction-intelligence:mp-orderflow-proxy:${mpUnderlying}:60`,
+    queryFn: async () => (await getMPOrderflowProxy(mpUnderlying, 60)).data,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: false,
+    enabled: Boolean(mpDataStatusQuery.data),
+  });
+
   const paperProposal = useMutation({
     mutationFn: async () => {
       if (!validationQuery.data) throw new Error("No validation payload loaded");
@@ -678,15 +1348,19 @@ export default function AuctionIntelligenceWorkspace() {
     },
   });
 
-  const summary = summaryQuery.data;
   const config = configQuery.data;
   const request = payload?.request;
   const analysis = payload?.analysis;
+  const mpTickSymbol = AUCTION_INDEX_TICK_SYMBOLS[mpUnderlying];
+  const mpTick = useTickSymbol(mpTickSymbol ?? "");
+  const canonicalLastPrice = finiteNumber(mpTick?.ltp);
+  const canonicalPrevClose = finiteNumber(mpTick?.close);
+  const whaleCandidates = useMemo(() => buildWhaleFlowCandidates(analysis), [analysis]);
   const gateA = gateAQuery.data;
   const gateB = gateBQuery.data;
   const gateC = gateCQuery.data;
   const canaryReadiness = canaryReadinessQuery.data;
-  const liveReady = Boolean(summary?.live_ready);
+  const liveSnapshotUnavailable = deferredMode === "live" && summaryQuery.isSuccess && !liveReady && !payload;
   const validationFailure = validationQuery.isError && !payload
     ? validationQuery.error
     : paperProposal.isError
@@ -703,6 +1377,8 @@ export default function AuctionIntelligenceWorkspace() {
     || mpSignalsQuery.isError
     || mpOpenSignalQuery.isError
     || mpAgentContextQuery.isError
+    || mpMultiTfQuery.isError
+    || mpOrderflowProxyQuery.isError
   );
 
   const symbols = dataMode === "live"
@@ -734,25 +1410,19 @@ export default function AuctionIntelligenceWorkspace() {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 pb-8">
-      <section
-        className={sectionChrome("overflow-hidden px-6 py-6 md:px-8")}
-        style={{
-          backgroundImage:
-            "radial-gradient(circle at top left, rgba(0, 212, 163, 0.14), transparent 28%), radial-gradient(circle at top right, rgba(59, 130, 246, 0.14), transparent 22%), linear-gradient(180deg, rgba(13, 17, 23, 0.92), rgba(8, 11, 24, 0.98))",
-        }}
-      >
-        <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
-          <div className="max-w-3xl space-y-3">
-            <div className="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.22em] text-text-muted">
+      <section className={sectionChrome("overflow-hidden px-4 py-4 md:px-5")}>
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+          <div className="max-w-3xl space-y-2">
+            <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] uppercase tracking-[0.22em] text-[#777]">
               <Layers3 size={13} className="text-accent-green" />
               Auction Intelligence
               <span className="text-white/30">/</span>
               {dataMode === "live" ? "Broker-backed validation" : "Demo-backed validation"}
             </div>
-            <h1 className="max-w-3xl font-mono text-3xl font-semibold leading-tight text-text-primary md:text-4xl">
-              Live MP structure, order-flow timing, and paper decisions on one desk.
+            <h1 className="max-w-3xl font-mono text-2xl font-semibold uppercase leading-tight tracking-[0.06em] text-[#f5f5f5] md:text-3xl">
+              Live MP structure, order-flow timing, and paper decisions.
             </h1>
-            <p className="max-w-2xl text-sm leading-6 text-text-secondary md:text-base line-clamp-2">
+            <p className="max-w-2xl text-xs leading-5 text-[#888] line-clamp-2">
               {dataMode === "live"
                 ? "The live desk replays the latest broker-backed session through the MP and order-flow stack, then exposes the current regime and paper execution plan."
                 : "The demo desk validates the same MP stack with deterministic scenarios before you move back to live paper flow."}
@@ -765,7 +1435,7 @@ export default function AuctionIntelligenceWorkspace() {
                 type="button"
                 onClick={() => startTransition(() => setDataMode("live"))}
                 className={clsx(
-                  "inline-flex items-center justify-center gap-2 rounded-2xl border px-4 py-3 text-sm font-medium transition-colors",
+                  "inline-flex items-center justify-center gap-2 rounded-sm border px-3 py-2 font-mono text-xs font-medium uppercase tracking-[0.08em] transition-colors",
                   dataMode === "live"
                     ? "border-accent-green/35 bg-accent-green/12 text-accent-green"
                     : "border-bg-border bg-white/5 text-text-secondary hover:border-accent-blue/30 hover:text-text-primary",
@@ -777,7 +1447,7 @@ export default function AuctionIntelligenceWorkspace() {
                 type="button"
                 onClick={() => startTransition(() => setDataMode("demo"))}
                 className={clsx(
-                  "inline-flex items-center justify-center gap-2 rounded-2xl border px-4 py-3 text-sm font-medium transition-colors",
+                  "inline-flex items-center justify-center gap-2 rounded-sm border px-3 py-2 font-mono text-xs font-medium uppercase tracking-[0.08em] transition-colors",
                   dataMode === "demo"
                     ? "border-accent-blue/35 bg-accent-blue/12 text-accent-blue"
                     : "border-bg-border bg-white/5 text-text-secondary hover:border-accent-blue/30 hover:text-text-primary",
@@ -793,7 +1463,7 @@ export default function AuctionIntelligenceWorkspace() {
               <select
                 value={symbol}
                 onChange={(event) => startTransition(() => setSymbol(event.target.value))}
-                className="w-full rounded-2xl border border-bg-border bg-bg-secondary px-4 py-3 text-sm text-text-primary outline-none transition-colors focus:border-accent-blue"
+                className="w-full rounded-sm border border-[#2a2a2a] bg-[#050505] px-3 py-2 font-mono text-xs text-text-primary outline-none transition-colors focus:border-accent-blue"
               >
                 {symbols.map((option) => (
                   <option key={option} value={option}>
@@ -808,7 +1478,7 @@ export default function AuctionIntelligenceWorkspace() {
                 <select
                   value={scenario}
                   onChange={(event) => startTransition(() => setScenario(event.target.value))}
-                  className="w-full rounded-2xl border border-bg-border bg-bg-secondary px-4 py-3 text-sm text-text-primary outline-none transition-colors focus:border-accent-blue"
+                  className="w-full rounded-sm border border-[#2a2a2a] bg-[#050505] px-3 py-2 font-mono text-xs text-text-primary outline-none transition-colors focus:border-accent-blue"
                 >
                   {scenarios.map((option) => (
                     <option key={option.id} value={option.id}>
@@ -818,7 +1488,7 @@ export default function AuctionIntelligenceWorkspace() {
                 </select>
               </label>
             ) : (
-              <div className="rounded-2xl border border-bg-border bg-black/15 px-4 py-3">
+              <div className="rounded-sm border border-[#2a2a2a] bg-[#050505] px-3 py-2">
                 <div className="text-[11px] uppercase tracking-[0.18em] text-text-muted">Connected brokers</div>
                 <div className="mt-2 text-sm text-text-primary">
                   {summary?.connected_brokers?.length
@@ -834,8 +1504,9 @@ export default function AuctionIntelligenceWorkspace() {
             <div className="grid gap-3 sm:grid-cols-2">
             <button
               type="button"
+              disabled={dataMode === "live" && !liveReady}
               onClick={() => validationQuery.refetch()}
-              className="inline-flex items-center justify-center gap-2 rounded-2xl border border-bg-border bg-white/5 px-4 py-3 text-sm font-medium text-text-primary transition-colors hover:border-accent-blue/30 hover:bg-accent-blue/10"
+              className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#2a2a2a] bg-[#050505] px-3 py-2 font-mono text-xs font-medium text-text-primary transition-colors hover:border-accent-blue/30 hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {validationQuery.isFetching || isPending ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
               {dataMode === "live" ? "Refresh Live Snapshot" : "Refresh Validation"}
@@ -854,7 +1525,7 @@ export default function AuctionIntelligenceWorkspace() {
                 }
                 paperProposal.mutate();
               }}
-              className="inline-flex items-center justify-center gap-2 rounded-2xl border border-accent-green/30 bg-accent-green/12 px-4 py-3 text-sm font-medium text-accent-green transition-colors hover:bg-accent-green/18 disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex items-center justify-center gap-2 rounded-sm border border-accent-green/30 bg-accent-green/12 px-3 py-2 font-mono text-xs font-medium text-accent-green transition-colors hover:bg-accent-green/18 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {dataMode === "live" ? (
                 shadowBackfill.isPending ? <Loader2 size={16} className="animate-spin" /> : <ArrowRight size={16} />
@@ -869,6 +1540,20 @@ export default function AuctionIntelligenceWorkspace() {
           </div>
         </div>
       </section>
+
+      {liveSnapshotUnavailable && (
+        <section className={sectionChrome("px-5 py-4")}>
+          <div className="flex items-start gap-3 text-sm text-accent-amber">
+            <AlertCircle size={18} className="mt-0.5 shrink-0" />
+            <div>
+              <div className="font-semibold text-text-primary">Live broker snapshot waiting</div>
+              <div className="mt-1 text-text-secondary">
+                No broker session is connected, so the broker-backed validation call is paused.
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
 
       {validationFailure && (
         <section className={sectionChrome("px-5 py-4")}>
@@ -925,6 +1610,17 @@ export default function AuctionIntelligenceWorkspace() {
           </div>
         </section>
       )}
+
+      <AuctionTerminalWorkbench
+        symbol={mpUnderlying}
+        payload={payload}
+        analysis={analysis}
+        multiTf={mpMultiTfQuery.data}
+        orderflowProxy={mpOrderflowProxyQuery.data}
+        whaleCandidates={whaleCandidates}
+        canonicalLastPrice={canonicalLastPrice}
+        canonicalPrevClose={canonicalPrevClose}
+      />
 
       <section className="grid gap-6 xl:grid-cols-[1.35fr_0.65fr]">
         <div className={sectionChrome("p-5")}>

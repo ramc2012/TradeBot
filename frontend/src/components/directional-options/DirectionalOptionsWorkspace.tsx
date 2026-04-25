@@ -90,6 +90,15 @@ type DirectionalSignal = {
   expected_horizon_hours: number;
   sleeve: string;
   thesis: string;
+  expected_move_pct?: number;
+  p_up?: number;
+  p_move_gt_1sigma?: number;
+  p_move_gt_2sigma?: number;
+  jump_score?: number;
+  timing_precision?: number;
+  expected_iv_change?: number;
+  tail_probability?: number;
+  model_uncertainty?: number;
 };
 
 type ContractCandidate = {
@@ -108,6 +117,25 @@ type ContractCandidate = {
   contract_score: number;
   selection_reason: string;
   selected: boolean;
+  q_price?: number;
+  p_terminal_edge?: number;
+  p_trading_edge?: number;
+  p_tail?: number;
+  q_tail?: number;
+  p_minus_q_tail?: number;
+  expected_return_on_premium?: number;
+  probability_of_profit?: number;
+  probability_of_50pct_loss?: number;
+  probability_of_total_loss?: number;
+  timing_fit?: number;
+  skew_tax?: number;
+  model_confidence?: number;
+  model_error_buffer?: number;
+  theta_cost?: number;
+  iv_tail_edge_bonus?: number;
+  expiry_score?: number;
+  utility?: number;
+  rejection_reasons?: string[];
 };
 
 type RiskSnapshot = {
@@ -239,6 +267,12 @@ function formatPct(value?: number | null, digits = 1) {
 function formatNumber(value?: number | null, digits = 1) {
   if (value == null || Number.isNaN(value)) return "--";
   return value.toFixed(digits);
+}
+
+function formatSignedNumber(value?: number | null, digits = 2) {
+  if (value == null || Number.isNaN(value)) return "--";
+  const prefix = value > 0 ? "+" : "";
+  return `${prefix}${value.toFixed(digits)}`;
 }
 
 function formatTimestamp(value?: string | null) {
@@ -407,7 +441,7 @@ export default function DirectionalOptionsWorkspace() {
                 value={underlying}
                 onChange={(event) => startTransition(() => setUnderlying(event.target.value))}
               >
-                {(module?.underlyings || ["NIFTY", "BANKNIFTY", "SENSEX"]).map((item) => (
+                {(module?.underlyings || ["NIFTY", "BANKNIFTY", "SENSEX", "CRUDEOIL"]).map((item) => (
                   <option key={item} value={item} className="bg-bg-card text-text-primary">
                     {item}
                   </option>
@@ -507,9 +541,21 @@ export default function DirectionalOptionsWorkspace() {
                   <span className="font-mono text-text-primary">{snapshot?.signal?.expected_move?.toFixed(1) || "--"} pts</span>
                 </div>
                 <div className="flex items-center justify-between">
+                  <span>P Up / Tail</span>
+                  <span className="font-mono text-text-primary">
+                    {snapshot?.signal ? `${formatPct((snapshot.signal.p_up || 0) * 100, 1)} / ${formatPct((snapshot.signal.tail_probability || 0) * 100, 1)}` : "--"}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
                   <span>Horizon</span>
                   <span className="font-mono text-text-primary">
                     {snapshot?.signal ? `${snapshot.signal.expected_horizon_bars} bars / ${snapshot.signal.expected_horizon_hours}h` : "--"}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Timing / IV</span>
+                  <span className="font-mono text-text-primary">
+                    {snapshot?.signal ? `${formatPct((snapshot.signal.timing_precision || 0) * 100, 1)} / ${formatSignedNumber((snapshot.signal.expected_iv_change || 0) * 100, 2)} vol pts` : "--"}
                   </span>
                 </div>
               </div>
@@ -537,9 +583,27 @@ export default function DirectionalOptionsWorkspace() {
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span>Expected PnL</span>
+                  <span>Trading Edge</span>
                   <span className={clsx("font-mono", tone(snapshot?.selected_contract?.expected_pnl))}>
                     {formatSignedMoney(snapshot?.selected_contract?.expected_pnl, 2)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>P Tail - Q Tail</span>
+                  <span className={clsx("font-mono", tone(snapshot?.selected_contract?.p_minus_q_tail))}>
+                    {formatSignedNumber(snapshot?.selected_contract?.p_minus_q_tail, 3)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>PoP / Timing</span>
+                  <span className="font-mono text-text-primary">
+                    {snapshot?.selected_contract ? `${formatPct((snapshot.selected_contract.probability_of_profit || 0) * 100, 1)} / ${formatPct((snapshot.selected_contract.timing_fit || 0) * 100, 1)}` : "--"}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Skew / Theta Tax</span>
+                  <span className="font-mono text-text-primary">
+                    {snapshot?.selected_contract ? `${formatPct((snapshot.selected_contract.skew_tax || 0) * 100, 1)} / ${formatMoney(snapshot.selected_contract.theta_cost, 2)}` : "--"}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
@@ -553,6 +617,11 @@ export default function DirectionalOptionsWorkspace() {
               </div>
               <div className="mt-4 rounded-2xl border border-bg-border bg-bg-secondary/35 p-3 text-sm text-text-secondary">
                 {snapshot?.selected_contract?.selection_reason || (snapshot?.risk?.reasons?.[0] || "No approval or candidate yet.")}
+                {snapshot?.selected_contract?.rejection_reasons?.length ? (
+                  <div className="mt-2 text-xs text-accent-amber">
+                    Watch: {snapshot.selected_contract.rejection_reasons.join(" · ")}
+                  </div>
+                ) : null}
               </div>
             </div>
           </div>
@@ -570,15 +639,15 @@ export default function DirectionalOptionsWorkspace() {
                   <YAxis stroke="#94a3b8" />
                   <Tooltip
                     formatter={(value: number, name: string) =>
-                      name === "contract_score" ? value.toFixed(1) : `₹${value.toFixed(2)}`
+                      name === "contract_score" || name === "p_minus_q_tail" ? value.toFixed(3) : `₹${value.toFixed(2)}`
                     }
                     labelFormatter={(label) => `Strike ${label}`}
                   />
-                  <Bar dataKey="expected_pnl" name="expected_pnl" radius={[6, 6, 0, 0]}>
+                  <Bar dataKey="p_trading_edge" name="p_trading_edge" radius={[6, 6, 0, 0]}>
                     {candidateBars.map((entry) => (
                       <Cell
                         key={entry.trading_symbol}
-                        fill={entry.selected ? "#22c55e" : entry.expected_pnl >= 0 ? "#38bdf8" : "#ef4444"}
+                        fill={entry.selected ? "#22c55e" : (entry.p_trading_edge ?? entry.expected_pnl) >= 0 ? "#38bdf8" : "#ef4444"}
                       />
                     ))}
                   </Bar>

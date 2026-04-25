@@ -1,6 +1,7 @@
 """Commodity strategy routes for Fyers-first MCX paper trading."""
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, Query
@@ -10,6 +11,76 @@ from market_data.commodity_atm_watchlist import commodity_atm_watchlist_service
 from paper_engine.commodity_strategy_agent import commodity_strategy_agent
 
 router = APIRouter(prefix="/api/commodity", tags=["commodity"])
+
+
+def _degraded_contract_catalog(detail: str) -> dict[str, object]:
+    return {
+        "source": "degraded",
+        "build_status": "degraded",
+        "detail": detail,
+        "rows": [],
+        "summary": {
+            "total_symbols": 0,
+            "contracts_ready": 0,
+            "active_selections": 0,
+        },
+    }
+
+
+def _degraded_atm_watchlist(detail: str) -> dict[str, object]:
+    return {
+        "source": "degraded",
+        "build_status": "degraded",
+        "detail": detail,
+        "rows": [],
+        "summary": {
+            "total_rows": 0,
+            "ce_ready": 0,
+            "pe_ready": 0,
+        },
+    }
+
+
+async def _bounded_contract_catalog(
+    symbols: list[str],
+    selected_option_expiries: dict[str, str],
+    selected_option_lookup_symbols: dict[str, str],
+    *,
+    timeout: float = 4.0,
+) -> dict[str, object]:
+    try:
+        return await asyncio.wait_for(
+            commodity_atm_watchlist_service.get_contract_catalog(
+                symbols,
+                selected_option_expiries,
+                selected_option_lookup_symbols,
+            ),
+            timeout=timeout,
+        )
+    except Exception as exc:
+        return _degraded_contract_catalog(f"Commodity contract catalog refresh timed out or failed: {exc}")
+
+
+async def _bounded_atm_watchlist(
+    symbols: list[str],
+    selected_option_expiries: dict[str, str],
+    selected_option_lookup_symbols: dict[str, str],
+    expiry: Optional[str],
+    *,
+    timeout: float = 4.0,
+) -> dict[str, object]:
+    try:
+        return await asyncio.wait_for(
+            commodity_atm_watchlist_service.get_watchlist(
+                symbols,
+                selected_option_expiries,
+                selected_option_lookup_symbols,
+                expiry,
+            ),
+            timeout=timeout,
+        )
+    except Exception as exc:
+        return _degraded_atm_watchlist(f"Commodity ATM watchlist refresh timed out or failed: {exc}")
 
 
 class CommodityConfigRequest(BaseModel):
@@ -62,7 +133,7 @@ async def update_commodity_strategy_config(body: CommodityConfigRequest):
 @router.get("/strategy-agent/contracts")
 async def commodity_strategy_contracts():
     await commodity_strategy_agent.ensure_selected_option_setup_locks()
-    return await commodity_atm_watchlist_service.get_contract_catalog(
+    return await _bounded_contract_catalog(
         commodity_strategy_agent.get_symbols(),
         commodity_strategy_agent.get_selected_option_expiries(),
         commodity_strategy_agent.get_selected_option_lookup_symbols(),
@@ -94,7 +165,7 @@ async def commodity_atm_watchlist_expiries():
 @router.get("/atm-watchlist")
 async def commodity_atm_watchlist(expiry: Optional[str] = Query(None)):
     await commodity_strategy_agent.ensure_selected_option_setup_locks()
-    return await commodity_atm_watchlist_service.get_watchlist(
+    return await _bounded_atm_watchlist(
         commodity_strategy_agent.get_symbols(),
         commodity_strategy_agent.get_selected_option_expiries(),
         commodity_strategy_agent.get_selected_option_lookup_symbols(),
@@ -123,12 +194,12 @@ async def commodity_watchlist_snapshot(
         expiry,
     )
     return {
-        "contract_catalog": contract_catalog or await commodity_atm_watchlist_service.get_contract_catalog(
+        "contract_catalog": contract_catalog or await _bounded_contract_catalog(
             symbols,
             selected_option_expiries,
             selected_option_lookup_symbols,
         ),
-        "atm_watchlist": atm_watchlist or await commodity_atm_watchlist_service.get_watchlist(
+        "atm_watchlist": atm_watchlist or await _bounded_atm_watchlist(
             symbols,
             selected_option_expiries,
             selected_option_lookup_symbols,

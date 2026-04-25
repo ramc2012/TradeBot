@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict
 from functools import lru_cache
+from pathlib import Path
 from time import monotonic
 from typing import Any, Optional
 
@@ -56,7 +57,13 @@ class DirectionalOptionsService:
         from core.market_hours_paper_supervisor import market_hours_paper_supervisor
         from directional_options.dashboard import get_dashboard_mount_state
 
-        available = [item for item in self.config["universe"] if item in self.store.available_underlyings()]
+        data_underlyings = set(self.store.available_underlyings())
+        runtime_root_exists = Path(self.config["data_root"]).exists()
+        available = [
+            item
+            for item in self.config["universe"]
+            if item in data_underlyings or (item == "CRUDEOIL" and runtime_root_exists)
+        ]
         automation = market_hours_paper_supervisor.get_runner_status("directional_options")
         payload = {
             "key": "directional_long_options",
@@ -129,16 +136,30 @@ class DirectionalOptionsService:
 
             summary = self.summary()
             lookback_days = max(int(self.config["paper_trading"]["live_lookback_days"]), lookback_sessions)
-            spot, history_source, history_symbol = await self.store.load_live_spot_frame(
-                underlying,
-                lookback_days=lookback_days,
+            spot, history_source, history_symbol = await asyncio.wait_for(
+                self.store.load_live_spot_frame(
+                    underlying,
+                    lookback_days=lookback_days,
+                ),
+                timeout=8.0,
             )
-            feature_frame = self.feature_engine.build_frame(
+            feature_frame = await asyncio.to_thread(
+                self.feature_engine.build_frame,
                 spot,
                 timeframe,
                 lookback_sessions=lookback_sessions,
             )
-            strategy_health = await market_intelligence_runtime.get_strategy_health()
+            try:
+                strategy_health = await asyncio.wait_for(market_intelligence_runtime.get_strategy_health(), timeout=3.0)
+            except Exception as exc:
+                strategy_health = {
+                    "ready": False,
+                    "watchlist_rows_today": 0,
+                    "latest_watchlist_time": None,
+                    "watchlist_age_seconds": None,
+                    "latest_spot_rows": {},
+                    "error": str(exc),
+                }
             snapshot = await self._live_snapshot(
                 underlying=underlying,
                 timeframe=timeframe,
@@ -317,13 +338,22 @@ class DirectionalOptionsService:
                 .replace("_", " ")
             )
         elif signal is not None:
-            snapshot_rows = await self.store.list_live_contract_snapshots(
-                underlying=underlying,
-                option_type=signal.direction,
-                spot_price=spot_price,
-                as_of=timestamp,
-                max_days_to_expiry=float(self.config["selector"]["max_days_to_expiry"]),
-            )
+            option_snapshot_lookup_failed = False
+            try:
+                snapshot_rows = await asyncio.wait_for(
+                    self.store.list_live_contract_snapshots(
+                        underlying=underlying,
+                        option_type=signal.direction,
+                        spot_price=spot_price,
+                        as_of=timestamp,
+                        max_days_to_expiry=float(self.config["selector"]["max_days_to_expiry"]),
+                    ),
+                    timeout=4.0,
+                )
+            except Exception as exc:
+                option_snapshot_lookup_failed = True
+                selection_reason = f"Live option snapshot lookup timed out or failed: {exc}"
+                snapshot_rows = []
             selection = self.selector.select_from_live_snapshots(
                 underlying=underlying,
                 timestamp=timestamp,
@@ -334,7 +364,8 @@ class DirectionalOptionsService:
                 timeframe=timeframe,
                 snapshot_rows=snapshot_rows,
             )
-            selection_reason = selection["reason"]
+            if not option_snapshot_lookup_failed:
+                selection_reason = selection["reason"]
             candidate = selection["best"]
             candidates_payload = [asdict(item) for item in selection["candidates"]]
             if candidate is not None:

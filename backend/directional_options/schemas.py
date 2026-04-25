@@ -71,6 +71,14 @@ class DirectionalSignal:
     sleeve: str
     thesis: str
     regime: str
+    expected_move_pct: float = 0.0
+    p_up: float = 0.5
+    p_move_gt_1sigma: float = 0.0
+    p_move_gt_2sigma: float = 0.0
+    jump_score: float = 0.0
+    timing_precision: float = 0.0
+    tail_probability: float = 0.0
+    model_uncertainty: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -105,6 +113,25 @@ class ContractCandidate:
     expected_pnl: float
     contract_score: float
     selection_reason: str
+    q_price: float = 0.0
+    p_terminal_edge: float = 0.0
+    p_trading_edge: float = 0.0
+    p_tail: float = 0.0
+    q_tail: float = 0.0
+    p_minus_q_tail: float = 0.0
+    expected_return_on_premium: float = 0.0
+    probability_of_profit: float = 0.0
+    probability_of_50pct_loss: float = 0.0
+    probability_of_total_loss: float = 0.0
+    timing_fit: float = 0.0
+    skew_tax: float = 0.0
+    model_confidence: float = 0.0
+    model_error_buffer: float = 0.0
+    theta_cost: float = 0.0
+    iv_tail_edge_bonus: float = 0.0
+    expiry_score: float = 0.0
+    utility: float = 0.0
+    rejection_reasons: list[str] = field(default_factory=list)
     selected: bool = False
     instrument_key: Optional[str] = None
     price_source: str = "runtime_dataset"

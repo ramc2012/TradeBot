@@ -51,6 +51,36 @@ def test_ltp_route_normalizes_display_symbols(monkeypatch) -> None:
     }
 
 
+def test_ltp_route_ignores_implausible_mock_index_prices(monkeypatch) -> None:
+    class _FakeAdapter:
+        broker_name = "upstox"
+
+        async def get_ltp(self, symbols: list[str]) -> dict[str, float]:
+            return {symbol: 100.0 for symbol in symbols}
+
+    async def _fake_get_market_adapter():
+        return _FakeAdapter(), "upstox"
+
+    async def _fake_latest_local_spot_close(app_symbol: str) -> float:
+        return {
+            "NSE:NIFTY50-INDEX": 24025.5,
+            "NSE:BANKNIFTY-INDEX": 55110.0,
+        }.get(app_symbol, 0.0)
+
+    monkeypatch.setattr(market_router, "_get_market_adapter", _fake_get_market_adapter)
+    monkeypatch.setattr(market_router, "_latest_local_spot_close", _fake_latest_local_spot_close)
+    monkeypatch.setattr(market_router.data_router, "get_ltp", lambda _symbol: 99.0)
+
+    client = _build_client()
+    response = client.post("/api/market/ltp", json={"symbols": ["NIFTY", "BANKNIFTY"]})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "NSE:NIFTY50-INDEX": 24025.5,
+        "NSE:BANKNIFTY-INDEX": 55110.0,
+    }
+
+
 def test_expiries_route_normalizes_display_symbol(monkeypatch) -> None:
     class _FakeAdapter:
         broker_name = "fyers"
@@ -70,7 +100,11 @@ def test_expiries_route_normalizes_display_symbol(monkeypatch) -> None:
     async def _fake_get_market_adapter():
         return adapter, "fyers"
 
+    async def _fake_local_option_expiries(_symbol: str) -> list[str]:
+        return []
+
     monkeypatch.setattr(market_router, "_get_market_adapter", _fake_get_market_adapter)
+    monkeypatch.setattr(market_router, "_local_option_expiries", _fake_local_option_expiries)
 
     client = _build_client()
     response = client.get("/api/market/expiries/NIFTY")
@@ -115,7 +149,11 @@ def test_option_chain_route_normalizes_display_symbol(monkeypatch) -> None:
     async def _fake_refresh(symbol: str, expiry: str):
         refreshed.append((symbol, expiry))
 
+    async def _fake_local_option_expiries(_symbol: str) -> list[str]:
+        return []
+
     monkeypatch.setattr(market_router, "_get_market_adapter", _fake_get_market_adapter)
+    monkeypatch.setattr(market_router, "_local_option_expiries", _fake_local_option_expiries)
     monkeypatch.setattr(market_router.option_chain_service, "set_broker", lambda _broker: None)
     monkeypatch.setattr(market_router.option_chain_service, "track", lambda _symbol, _expiry: None)
     monkeypatch.setattr(market_router.option_chain_service, "_refresh", _fake_refresh)

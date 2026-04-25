@@ -5,13 +5,18 @@ import { clsx } from "clsx";
 
 import { getLTP } from "@/lib/api";
 import { createTickSocket } from "@/lib/websocket";
-import { MARKET_INDEX_SYMBOLS, getMarketIndexLabel } from "@/lib/marketSymbols";
+import {
+  MARKET_INDEX_PRICE_BANDS,
+  MARKET_INDEX_SYMBOLS,
+  getMarketIndexLabel,
+  type MarketIndexSymbol,
+} from "@/lib/marketSymbols";
 import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
 import type { Tick } from "@/store";
 import { useTickStore, useTickSymbol } from "@/store";
 
-const HEADER_TICK_STORAGE_KEY = "nomad-curie.header-ticks.v4";
-const HEADER_LTP_STORAGE_KEY = "nomad-curie.header-ltp.v4";
+const HEADER_TICK_STORAGE_KEY = "nomad-curie.header-ticks.v5";
+const HEADER_LTP_STORAGE_KEY = "nomad-curie.header-ltp.v5";
 
 type TickSnapshot = Record<string, Tick>;
 
@@ -20,16 +25,40 @@ function asFiniteNumber(value: unknown): number | null {
   return Number.isFinite(next) ? next : null;
 }
 
-function normalizeTick(value: unknown): Tick | null {
+function isMarketIndexSymbol(symbol: string): symbol is MarketIndexSymbol {
+  return (MARKET_INDEX_SYMBOLS as readonly string[]).includes(symbol);
+}
+
+function isPlausibleIndexPrice(symbol: string, value: unknown): boolean {
+  const price = asFiniteNumber(value);
+  if (price == null || price <= 0) return false;
+  if (!isMarketIndexSymbol(symbol)) return true;
+  const [low, high] = MARKET_INDEX_PRICE_BANDS[symbol];
+  return price >= low && price <= high;
+}
+
+function isPlausibleIndexTick(symbol: string, tick: Tick): boolean {
+  if (!isPlausibleIndexPrice(symbol, tick.ltp)) return false;
+  if (tick.high > 0 && !isPlausibleIndexPrice(symbol, tick.high)) return false;
+  if (tick.low > 0 && !isPlausibleIndexPrice(symbol, tick.low)) return false;
+  if (tick.close > 0 && !isPlausibleIndexPrice(symbol, tick.close)) return false;
+  return true;
+}
+
+function normalizeTick(value: unknown, expectedSymbol?: string): Tick | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Partial<Record<keyof Tick, unknown>>;
-  if (typeof raw.symbol !== "string" || !raw.symbol.trim()) return null;
+  const symbol = typeof raw.symbol === "string" && raw.symbol.trim()
+    ? raw.symbol
+    : expectedSymbol;
+  if (!symbol) return null;
+  if (expectedSymbol && symbol !== expectedSymbol) return null;
 
   const ltp = asFiniteNumber(raw.ltp);
-  if (ltp == null) return null;
+  if (ltp == null || !isPlausibleIndexPrice(symbol, ltp)) return null;
 
-  return {
-    symbol: raw.symbol,
+  const tick = {
+    symbol,
     ltp,
     open: asFiniteNumber(raw.open) ?? ltp,
     high: asFiniteNumber(raw.high) ?? ltp,
@@ -39,6 +68,7 @@ function normalizeTick(value: unknown): Tick | null {
     oi: asFiniteNumber(raw.oi) ?? 0,
     timestamp: typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString(),
   };
+  return isPlausibleIndexTick(symbol, tick) ? tick : null;
 }
 
 function loadTickSnapshot(): TickSnapshot {
@@ -48,7 +78,7 @@ function loadTickSnapshot(): TickSnapshot {
     if (!raw) return {};
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const sanitizedEntries = Object.entries(parsed || {})
-      .map(([symbol, tick]) => [symbol, normalizeTick(tick)] as const)
+      .map(([symbol, tick]) => [symbol, normalizeTick(tick, symbol)] as const)
       .filter((entry): entry is readonly [string, Tick] => entry[1] !== null);
     return Object.fromEntries(sanitizedEntries) as TickSnapshot;
   } catch {
@@ -146,7 +176,7 @@ export default function RealTimeTicker() {
 
     socketsRef.current = MARKET_INDEX_SYMBOLS.map((symbol) =>
       createTickSocket(symbol, (data: unknown) => {
-        const tick = normalizeTick(data);
+        const tick = normalizeTick(data, symbol);
         if (!tick) return;
         updateTick(tick);
         persistedTicksRef.current = {
@@ -173,7 +203,7 @@ export default function RealTimeTicker() {
 
     Object.entries(payload).forEach(([symbol, rawLtp]) => {
       const ltp = asFiniteNumber(rawLtp);
-      if (ltp == null || ltp <= 0) return;
+      if (ltp == null || !isPlausibleIndexPrice(symbol, ltp)) return;
       const existing = useTickStore.getState().getTick(symbol);
       const nextTick = {
         symbol,

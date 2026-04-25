@@ -732,7 +732,7 @@ class MPAnalyticsEngine:
         rows: list[dict],
         lookback: int = 60,
         composite_20d: bool = True,
-        composite_60d: bool = True,
+        composite_50d: bool = True,
     ) -> dict:
         """Return everything in one payload for the frontend dashboard."""
         # Sort rows chronologically
@@ -743,9 +743,9 @@ class MPAnalyticsEngine:
             profiles["composite_20d"] = self.build_composite_profile(
                 rows_sorted, lookback=20, label="Composite 20D"
             )
-        if composite_60d:
-            profiles["composite_60d"] = self.build_composite_profile(
-                rows_sorted, lookback=60, label="Composite 60D"
+        if composite_50d:
+            profiles["composite_50d"] = self.build_composite_profile(
+                rows_sorted, lookback=50, label="Composite 50D"
             )
 
         weekly = self.build_weekly_profiles(rows_sorted)

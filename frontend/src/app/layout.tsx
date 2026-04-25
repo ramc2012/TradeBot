@@ -12,18 +12,32 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="bg-bg-primary text-text-primary min-h-screen">
         <Providers>
           <div className="flex flex-col h-screen overflow-hidden">
-            <AppErrorBoundary
-              compact
-              scopeLabel="Shell Error"
-              title="The live status strip failed."
-              detail="Ticker or broker-status components crashed. The workspace can still run; retry this shell section or continue from the overview."
-            >
-              <>
+            <>
+              <AppErrorBoundary
+                compact
+                scopeLabel="Ticker Error"
+                title="The live ticker strip failed."
+                detail="The workspace can still run while the index ticker recovers."
+              >
                 <RealTimeTicker />
+              </AppErrorBoundary>
+              <AppErrorBoundary
+                compact
+                scopeLabel="Broker Error"
+                title="The broker status strip failed."
+                detail="The workspace can still run while broker and portfolio status recover."
+              >
                 <BrokerStatusBar />
+              </AppErrorBoundary>
+              <AppErrorBoundary
+                compact
+                scopeLabel="Mode Error"
+                title="The trading-mode warning failed."
+                detail="The workspace can still run while the mode warning recovers."
+              >
                 <LiveModeWarning />
-              </>
-            </AppErrorBoundary>
+              </AppErrorBoundary>
+            </>
             <div className="flex flex-1 overflow-hidden">
               <AppErrorBoundary
                 compact

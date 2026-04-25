@@ -80,6 +80,20 @@ SYMBOL_MAP = {
         "lot_size": 10,
         "tick_size": 0.5,
     },
+    "CRUDEOIL": {
+        "app_symbol": "MCX:CRUDEOIL26MAYFUT",
+        "display": "CRUDEOIL",
+        "instrument_proxy": "commodity_futures",
+        "lot_size": 100,
+        "tick_size": 1.0,
+    },
+}
+INDEX_PRICE_BANDS: dict[str, tuple[float, float]] = {
+    "NIFTY": (10_000.0, 50_000.0),
+    "BANKNIFTY": (20_000.0, 100_000.0),
+    "FINNIFTY": (10_000.0, 60_000.0),
+    "MIDCPNIFTY": (5_000.0, 40_000.0),
+    "SENSEX": (30_000.0, 150_000.0),
 }
 
 
@@ -89,6 +103,9 @@ def available_live_symbols() -> list[str]:
 
 def _fyers_continuous_futures_symbol(symbol_code: str, as_of: date) -> str:
     normalized_symbol = symbol_code.upper()
+    app_symbol = str(SYMBOL_MAP.get(normalized_symbol, {}).get("app_symbol") or "")
+    if app_symbol.startswith("MCX:"):
+        return app_symbol
     return f"NSE:{normalized_symbol}{as_of.strftime('%y')}{as_of.strftime('%b').upper()}FUT"
 
 
@@ -185,16 +202,26 @@ async def build_live_analysis(symbol_code: str = "NIFTY") -> dict[str, Any]:
         if len(session_dates) < 2:
             raise RuntimeError("At least two completed sessions are required for live validation.")
 
-        latest_session_date = session_dates[-1]
-        prior_session_date = session_dates[-2]
-        payload = await _build_analysis_from_session_rows(
-            normalized_symbol,
-            current_session_rows=sessions[latest_session_date],
-            prior_session_rows=sessions[prior_session_date],
-            history_source=history_source,
-            history_symbol=history_symbol,
-            snapshot_cutoff=None,
-        )
+        payload: dict[str, Any] | None = None
+        last_error: RuntimeError | None = None
+        for current_index in range(len(session_dates) - 1, 0, -1):
+            latest_session_date = session_dates[current_index]
+            prior_session_date = session_dates[current_index - 1]
+            try:
+                payload = await _build_analysis_from_session_rows(
+                    normalized_symbol,
+                    current_session_rows=sessions[latest_session_date],
+                    prior_session_rows=sessions[prior_session_date],
+                    history_source=history_source,
+                    history_symbol=history_symbol,
+                    snapshot_cutoff=None,
+                )
+                break
+            except RuntimeError as exc:
+                last_error = exc
+                continue
+        if payload is None:
+            raise last_error or RuntimeError("No usable session pair was available for live validation.")
         encoded_payload = jsonable_encoder(payload)
         _LIVE_ANALYSIS_CACHE[normalized_symbol] = (
             monotonic() + _LIVE_ANALYSIS_CACHE_TTL_SECONDS,
@@ -431,12 +458,45 @@ async def _fetch_recent_minute_rows(
     upstox_symbol = to_broker_symbol(app_symbol)
     best_available: tuple[list[dict[str, Any]], str, str] | None = None
 
+    def _valid_price(value: Any) -> bool:
+        band = INDEX_PRICE_BANDS.get(symbol_code.upper())
+        if not band:
+            try:
+                return float(value or 0.0) > 0.0
+            except (TypeError, ValueError):
+                return False
+        try:
+            price = float(value or 0.0)
+        except (TypeError, ValueError):
+            return False
+        return band[0] <= price <= band[1]
+
+    def _filter_symbol_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not rows:
+            return []
+        filtered: list[dict[str, Any]] = []
+        for row in rows:
+            open_price = row.get("open", row.get("close"))
+            high_price = row.get("high", row.get("close"))
+            low_price = row.get("low", row.get("close"))
+            close_price = row.get("close")
+            if not all(_valid_price(value) for value in (open_price, high_price, low_price, close_price)):
+                continue
+            try:
+                if float(high_price) < float(low_price):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            filtered.append(row)
+        return filtered
+
     def _choose_source(
         rows: list[dict[str, Any]],
         source: str,
         history_symbol: str,
     ) -> tuple[list[dict[str, Any]], str, str] | None:
         nonlocal best_available
+        rows = _filter_symbol_rows(rows)
         if not rows:
             return None
         if best_available is None:
@@ -532,7 +592,10 @@ async def _fetch_recent_minute_rows(
             / "1minute.csv.gz"
         )
         if csv_path.exists():
-            cutoff = (datetime.now(IST) - timedelta(days=lookback_days)).date()
+            # Packaged spot CSVs can lag live DB rows; keep enough history here
+            # to combine a valid recent partial source with older completed
+            # sessions for safe closed-market replays.
+            cutoff = (datetime.now(IST) - timedelta(days=max(lookback_days, 60))).date()
             rows = []
             with gzip.open(csv_path, "rt") as fh:
                 for r in csv.DictReader(fh):
@@ -549,6 +612,25 @@ async def _fetch_recent_minute_rows(
                             })
                     except Exception:
                         continue
+            if best_available is not None:
+                if len(best_available[0]) < 120:
+                    return best_available
+                seen_times: set[str] = set()
+                combined: list[dict[str, Any]] = []
+                for row in [*rows, *best_available[0]]:
+                    key = str(row.get("time") or row.get("timestamp") or "")
+                    if not key or key in seen_times:
+                        continue
+                    seen_times.add(key)
+                    combined.append(row)
+                combined.sort(key=lambda row: str(row.get("time") or row.get("timestamp") or ""))
+                selected = _choose_source(
+                    combined,
+                    f"{best_available[1]}+local_csv_spot",
+                    best_available[2],
+                )
+                if selected is not None:
+                    return selected
             selected = _choose_source(rows, "local_csv_spot", csv_path.name)
             if selected is not None:
                 return selected

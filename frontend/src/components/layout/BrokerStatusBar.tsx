@@ -134,18 +134,22 @@ export default function BrokerStatusBar() {
   });
 
   const layoutData = useMemo(() => normalizeLayoutSnapshot(layoutQuery.data), [layoutQuery.data]);
+  const sanitizedStoreBrokerStatuses = useMemo(
+    () => normalizeBrokerStatuses(storeBrokerStatuses),
+    [storeBrokerStatuses],
+  );
   const statusData = layoutData?.broker_status.length ? layoutData.broker_status : undefined;
   const portfolioData = layoutData?.portfolio_summary ?? undefined;
-  const effectiveStatuses = statusData?.length ? statusData : storeBrokerStatuses.length ? storeBrokerStatuses : undefined;
+  const effectiveStatuses = statusData?.length ? statusData : sanitizedStoreBrokerStatuses.length ? sanitizedStoreBrokerStatuses : undefined;
   const effectivePortfolio = portfolioData ?? portfolio ?? null;
   const totalEquity = Number(effectivePortfolio?.total_equity ?? 0);
   const dayPnl = Number(effectivePortfolio?.day_pnl ?? 0);
   const hasPortfolio = effectivePortfolio != null && Number.isFinite(totalEquity);
 
   useEffect(() => {
-    if (!statusData?.length || brokerStatusesMatch(storeBrokerStatuses, statusData)) return;
+    if (!statusData?.length || brokerStatusesMatch(sanitizedStoreBrokerStatuses, statusData)) return;
     setBrokerStatuses(statusData);
-  }, [statusData, storeBrokerStatuses, setBrokerStatuses]);
+  }, [statusData, sanitizedStoreBrokerStatuses, setBrokerStatuses]);
 
   useEffect(() => {
     if (!portfolioData || !Number.isFinite(Number(portfolioData.total_equity ?? 0))) return;

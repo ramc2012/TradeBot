@@ -92,6 +92,7 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
 }: LiveSnapshotQueryOptions<TData, TError>): LiveSnapshotQueryResult<TData, TError> {
   const queryClient = useQueryClient();
   const queryKeyHash = useMemo(() => JSON.stringify(queryKey), [queryKey]);
+  const hasStreamFactory = Boolean(streamFactory);
   const streamFactoryRef = useRef(streamFactory);
   const [snapshot, setSnapshot] = useState<SnapshotEnvelope<TData> | null>(() => loadSnapshot<TData>(storageKey));
   const [isVisible, setIsVisible] = useState(() =>
@@ -105,15 +106,15 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
   useEffect(() => {
     const nextSnapshot = loadSnapshot<TData>(storageKey);
     setSnapshot(nextSnapshot);
-    setAllowQueryFallback(!streamFactory || !preferStream || !nextSnapshot);
-  }, [storageKey, preferStream, streamFactory]);
+    setAllowQueryFallback(!hasStreamFactory || !preferStream || !nextSnapshot);
+  }, [storageKey, preferStream, hasStreamFactory]);
 
   useEffect(() => {
     streamFactoryRef.current = streamFactory;
   }, [streamFactory]);
 
   useEffect(() => {
-    if (!streamFactory || !preferStream || options.enabled === false) {
+    if (!hasStreamFactory || !preferStream || options.enabled === false) {
       setAllowQueryFallback(true);
       return undefined;
     }
@@ -133,7 +134,7 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
       setAllowQueryFallback(true);
     }, delayMs);
     return () => window.clearTimeout(timeout);
-  }, [isStreamConnected, options.enabled, preferStream, queryKeyHash, snapshot?.savedAt, streamFactory]);
+  }, [hasStreamFactory, isStreamConnected, options.enabled, preferStream, queryKeyHash, snapshot?.savedAt]);
 
   const query = useQuery<TData, TError, TData, QueryKey>({
     ...options,
@@ -145,10 +146,10 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
   });
 
   useEffect(() => {
-    if (streamFactory && preferStream && isStreamConnected && query.isSuccess) {
+    if (hasStreamFactory && preferStream && isStreamConnected && query.isSuccess) {
       setAllowQueryFallback(false);
     }
-  }, [isStreamConnected, preferStream, query.isSuccess, streamFactory]);
+  }, [hasStreamFactory, isStreamConnected, preferStream, query.isSuccess]);
 
   useEffect(() => {
     if (typeof document === "undefined") return undefined;

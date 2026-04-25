@@ -1646,10 +1646,8 @@ async def _sync_market_data_feed() -> None:
         market_data_router.set_broker(adapter)
         await market_data_router.subscribe(list(LIVE_INDEX_APP_SYMBOLS))
     else:
+        await market_data_router.stop_mock_feed()
         await market_data_router.unsubscribe()
-        asyncio.create_task(
-            market_data_router.start_mock_feed(list(LIVE_INDEX_APP_SYMBOLS), interval_secs=1.0)
-        )
 
 
 async def auto_restore_sessions() -> None:
