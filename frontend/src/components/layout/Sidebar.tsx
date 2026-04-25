@@ -43,6 +43,7 @@ const NAV_GROUPS = [
       { href: "/auction-intelligence", label: "Auction IQ", icon: Layers3 },
       { href: "/fractal-market-profile", label: "Fractal MP", icon: Fingerprint },
       { href: "/mp-intelligence", label: "MP Live", icon: Brain },
+      { href: "/macro-research", label: "Macro Research", icon: BarChart3 },
       { href: "/analysis", label: "Research", icon: FlaskConical, matchers: ["/analysis", "/backtester", "/data"] },
       { href: "/agent", label: "Agent", icon: Bot },
     ],

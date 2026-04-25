@@ -47,10 +47,10 @@ export function resolveApiBaseUrlCandidates(): string[] {
   if (cloudRunBackendHost) {
     pushUnique(candidates, `${protocol}//${cloudRunBackendHost}`);
   }
-  pushUnique(candidates, origin);
   if (isLocalHostname(hostname)) {
     pushUnique(candidates, `${protocol}//${hostname}:${DEFAULT_BACKEND_PORT}`);
   }
+  pushUnique(candidates, origin);
   return candidates;
 }
 

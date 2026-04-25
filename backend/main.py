@@ -11,7 +11,7 @@ from core.config import settings
 from core.market_hours_paper_supervisor import market_hours_paper_supervisor
 from core.paper_bootstrap import bootstrap_paper_trading_runtime
 from db.redis_client import get_redis, close_redis
-from api.routers import auth, trading, market, analytics, agent, commodity, rag, backtester as backtester_router
+from api.routers import auth, trading, market, analytics, agent, commodity, macro_research, rag, backtester as backtester_router
 from api.routers import fo_data as fo_data_router
 from api.routers import analysis as analysis_router
 from api.routers import strategy as strategy_router
@@ -148,6 +148,7 @@ app.include_router(market.router)
 app.include_router(analytics.router)
 app.include_router(agent.router)
 app.include_router(rag.router)
+app.include_router(macro_research.router)
 app.include_router(commodity.router)
 app.include_router(backtester_router.router)
 app.include_router(fo_data_router.router)

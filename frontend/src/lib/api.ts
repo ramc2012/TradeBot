@@ -211,6 +211,19 @@ export const getSectorRotation = (timeframe = "daily") =>
   api.get("/api/analytics/sector-rotation", { params: { timeframe } });
 export const getMacroDashboard = () => api.get("/api/analytics/macro-dashboard");
 
+// ── Macro Research / Sector Discovery ─────────────────────────────────────
+export const getMacroResearchOverview = (refresh = false) =>
+  api.get("/api/macro-research/overview", { params: { refresh } });
+export const getMacroResearchSectors = (refresh = false) =>
+  api.get("/api/macro-research/sectors", { params: { refresh } });
+export const getMacroResearchSector = (sectorCode: string, refresh = false) =>
+  api.get(`/api/macro-research/sectors/${encodeURIComponent(sectorCode)}`, { params: { refresh } });
+export const getMacroResearchBuddingSectors = (refresh = false) =>
+  api.get("/api/macro-research/budding-sectors", { params: { refresh } });
+export const getMacroResearchSources = () => api.get("/api/macro-research/sources");
+export const searchMacroResearch = (q: string, sector?: string, limit = 12, refresh = false) =>
+  api.get("/api/macro-research/search", { params: { q, sector, limit, refresh } });
+
 // ── Agent ─────────────────────────────────────────────────────────────────
 export const getProposals = () => api.get("/api/agent/proposals");
 export const approveProposal = (id: string) => api.post(`/api/agent/proposals/${id}/approve`);
