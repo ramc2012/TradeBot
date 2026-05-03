@@ -496,11 +496,33 @@ class SectorInteractionService:
         config = self._country(country)
         pipeline = self.pipeline_status(config.code)
         runtime = sector_ingestion_store.summary(config.code)
+        filtered_runtime_observations = [
+            row
+            for row in sector_ingestion_store.load_observations(config.code, limit=20_000)
+            if not self._is_deprecated_runtime_stub(config, row)
+        ]
+        if len(filtered_runtime_observations) != int(runtime.get("observation_count") or 0):
+            recent_runs_for_summary = sector_ingestion_store.load_runs(config.code, limit=20)
+            runtime = {
+                "observation_count": len(filtered_runtime_observations),
+                "indicator_count": len({str(row.get("indicator_code")) for row in filtered_runtime_observations}),
+                "sector_count": len({str(row.get("sector")) for row in filtered_runtime_observations}),
+                "latest_observation_date": max((str(row.get("date")) for row in filtered_runtime_observations), default=None),
+                "latest_created_at": max((str(row.get("created_at")) for row in filtered_runtime_observations), default=None),
+                "run_count": len(recent_runs_for_summary),
+                "last_run": recent_runs_for_summary[0] if recent_runs_for_summary else None,
+            }
         connector_rows = []
         recent_runs = sector_ingestion_store.load_runs(config.code, limit=8)
-        recent_observations = sector_ingestion_store.load_observations(config.code, limit=12)
+        recent_observations = [
+            row
+            for row in sector_ingestion_store.load_observations(config.code, limit=200)
+            if not self._is_deprecated_runtime_stub(config, row)
+        ][:12]
         latest_by_indicator: dict[str, dict[str, Any]] = {}
         for row in sector_ingestion_store.load_observations(config.code, limit=20_000):
+            if self._is_deprecated_runtime_stub(config, row):
+                continue
             code = str(row.get("indicator_code"))
             if code not in latest_by_indicator:
                 latest_by_indicator[code] = row
@@ -538,6 +560,61 @@ class SectorInteractionService:
         observations: list[SectorObservation] = []
         blocked_connectors: list[dict[str, Any]] = []
         errors: list[str] = []
+        if config.code == "IN":
+            from sector_interaction.india_public_collectors import india_public_data_collector
+
+            indicators = self._indicator_configs(config)
+            result = india_public_data_collector.collect(config=config, indicators=indicators, run_id=run_id)
+            observations.extend(result.observations)
+            blocked_connectors.extend(result.blocked_connectors)
+            errors.extend(result.errors)
+            for indicator in indicators:
+                can_collect = indicator.source_status == "open_data"
+                if can_collect:
+                    continue
+                blocked_connectors.append(
+                    {
+                        "indicator_code": indicator.code,
+                        "label": indicator.label,
+                        "source_status": indicator.source_status,
+                        "reason": "blocked until source access, license, terms review, or dedicated live-market ingestion is used",
+                    }
+                )
+            stored = 0 if dry_run else sector_ingestion_store.append_observations(observations)
+            finished_at = sector_ingestion_store.now_iso()
+            run = CollectorRun(
+                run_id=run_id,
+                country=config.code,
+                mode="india_public_dry_run" if dry_run else "india_public_append",
+                started_at=started_at,
+                finished_at=finished_at,
+                status="success" if not errors else "partial_failure",
+                attempted_connectors=len(indicators),
+                stored_observations=stored,
+                blocked_connectors=blocked_connectors,
+                errors=errors,
+                collector_version="sector-ingestion-india-public-v1",
+            )
+            if not dry_run:
+                sector_ingestion_store.append_run(run)
+                self.signals.cache_clear()
+                self.extended_network.cache_clear()
+                self.validation_backtest.cache_clear()
+            return {
+                "country": config.code,
+                "label": config.label,
+                "run": run.__dict__,
+                "dry_run": dry_run,
+                "preview_observations": [observation.__dict__ for observation in observations[:12]],
+                "generated_observations": len(observations),
+                "stored_observations": stored,
+                "blocked_connectors": blocked_connectors,
+                "message": (
+                    "Dry run only; no India public-source observations were stored."
+                    if dry_run
+                    else f"Stored {stored} India public-source observations."
+                ),
+            }
         for indicator in self._indicator_configs(config):
             can_collect = indicator.source_status == "open_data" or (include_prototype and indicator.source_status == "prototype")
             if not can_collect:
@@ -972,6 +1049,8 @@ class SectorInteractionService:
         records: list[dict[str, Any]] = []
         valid_codes = {indicator.code for indicator in self._indicator_configs(config)}
         for row in rows:
+            if self._is_deprecated_runtime_stub(config, row):
+                continue
             indicator_code = str(row.get("indicator_code") or "")
             if indicator_code not in valid_codes:
                 continue
@@ -1004,6 +1083,13 @@ class SectorInteractionService:
         if len(pivot.index) > 1:
             pivot = pivot.apply(lambda column: pd.Series(self._zscore_array(column.to_numpy(dtype=float)), index=pivot.index))
         return pivot
+
+    def _is_deprecated_runtime_stub(self, config: CountryConfig, row: dict[str, Any]) -> bool:
+        if config.code != "IN":
+            return False
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        mode = str(metadata.get("mode") or "")
+        return mode in {"open_data_runtime_stub", "prototype_runtime_stub"}
 
     def _simulate_returns(self, config: CountryConfig, periods: int) -> pd.DataFrame:
         rng = np.random.default_rng(config.seed + periods)

@@ -6,6 +6,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
+import numpy as np
+import pandas as pd
 from sqlalchemy import text
 
 from db.database import AsyncSessionLocal
@@ -491,7 +493,7 @@ class IndiaLiveSectorService:
                 {
                     str(row.get("date"))
                     for row in sector_ingestion_store.load_observations("IN", limit=20_000)
-                    if row.get("date")
+                    if row.get("date") and not self._is_deprecated_runtime_stub(row)
                 }
             )
         except Exception:
@@ -613,17 +615,37 @@ class IndiaLiveSectorService:
 
     async def validation_payload(self) -> dict[str, Any]:
         overview = await self.overview()
+        try:
+            from sector_interaction.ingestion import sector_ingestion_store
+
+            observed_dates = len(
+                {
+                    str(row.get("date"))
+                    for row in sector_ingestion_store.load_observations("IN", limit=20_000)
+                    if row.get("date") and not self._is_deprecated_runtime_stub(row)
+                }
+            )
+        except Exception:
+            observed_dates = 1
+        real_validation = await self._real_runtime_validation_payload(observed_dates=observed_dates)
+        if real_validation is not None:
+            return real_validation
+        pending_reason = (
+            "Backtest is pending until enough aligned real sector-index monthly return windows are available."
+            if observed_dates >= 24
+            else "Backtest is intentionally disabled until enough dated live/public sector observations are stored."
+        )
         return {
             "country": "IN",
             "label": "India",
             "source_mode": "validation_pending_live_india_history",
             "runtime_handoff": {
                 "active": False,
-                "observed_dates": 1,
+                "observed_dates": observed_dates,
                 "required_dates": 24,
                 "indicator_count": 4,
-                "source": "live India F&O/ATM sector snapshot",
-                "reason": "Backtest is intentionally disabled until enough dated live sector snapshots are stored.",
+                "source": "live India F&O/ATM sector snapshot plus public-source ingestion store",
+                "reason": pending_reason,
             },
             "summary": {
                 "observations": 0,
@@ -635,8 +657,94 @@ class IndiaLiveSectorService:
             },
             "equity_curve": [],
             "recent_windows": [],
-            "method": f"Validation pending. Latest live India snapshot is {overview.get('as_of')}; no synthetic India backtest is shown.",
+            "method": f"Validation pending. Latest live India snapshot is {overview.get('as_of')}; {pending_reason} No synthetic India backtest is shown.",
         }
+
+    async def _real_runtime_validation_payload(self, *, observed_dates: int) -> dict[str, Any] | None:
+        if observed_dates < 24:
+            return None
+        try:
+            from sector_interaction.real_history import real_sector_history_service
+            from sector_interaction.service import COUNTRIES, sector_interaction_service
+
+            config = COUNTRIES["IN"]
+            indicators = sector_interaction_service._runtime_indicator_frame(config)
+            if indicators is None or len(indicators.index) < 24:
+                return None
+            returns, source, detail, _close_counts = await real_sector_history_service._load_india_returns(
+                periods=500,
+                timeframe="daily",
+            )
+            if returns is None or returns.empty:
+                return None
+            monthly_returns = (1.0 + returns).resample("ME").prod() - 1.0
+            monthly_indicators = indicators.resample("ME").last().ffill()
+            common_dates = monthly_returns.index.intersection(monthly_indicators.index)
+            common_sectors = [sector for sector in config.sectors if sector in monthly_returns.columns]
+            if len(common_dates) < 12 or len(common_sectors) < 4:
+                return None
+            monthly_returns = monthly_returns.loc[common_dates, common_sectors]
+            monthly_indicators = monthly_indicators.loc[common_dates]
+            signal_frame = sector_interaction_service._sector_signal_frame(config, monthly_indicators)
+            signal_frame = signal_frame.reindex(columns=common_sectors).shift(1)
+            rows: list[dict[str, Any]] = []
+            strategy_returns: list[float] = []
+            for timestamp in common_dates[1:]:
+                scores = signal_frame.loc[timestamp].dropna()
+                if scores.empty:
+                    continue
+                top_count = max(1, min(3, len(scores) // 3))
+                leaders = list(scores.sort_values(ascending=False).head(top_count).index)
+                laggards = list(scores.sort_values(ascending=True).head(top_count).index)
+                leader_return = float(monthly_returns.loc[timestamp, leaders].mean())
+                laggard_return = float(monthly_returns.loc[timestamp, laggards].mean())
+                long_short = leader_return - laggard_return
+                strategy_returns.append(long_short)
+                rows.append(
+                    {
+                        "date": timestamp.date().isoformat(),
+                        "leaders": leaders,
+                        "laggards": laggards,
+                        "leader_return": round(leader_return, 5),
+                        "laggard_return": round(laggard_return, 5),
+                        "long_short_return": round(long_short, 5),
+                        "cumulative_return": round(float(np.prod([1.0 + value for value in strategy_returns]) - 1.0), 5),
+                    }
+                )
+            if not rows:
+                return None
+            returns_array = np.asarray(strategy_returns, dtype=float)
+            cumulative = float(np.prod(1.0 + returns_array) - 1.0) if len(returns_array) else 0.0
+            avg = float(np.mean(returns_array)) if len(returns_array) else 0.0
+            stdev = float(np.std(returns_array, ddof=1)) if len(returns_array) > 1 else 0.0
+            information_ratio = (avg / stdev) * np.sqrt(12.0) if stdev > 0 else 0.0
+            hit_rate = float(np.mean(returns_array > 0.0)) if len(returns_array) else 0.0
+            return {
+                "country": "IN",
+                "label": "India",
+                "source_mode": "real_sector_returns_runtime_indicators",
+                "runtime_handoff": {
+                    "active": True,
+                    "observed_dates": observed_dates,
+                    "required_dates": 24,
+                    "indicator_count": len(monthly_indicators.columns),
+                    "source": "durable India public/live ingestion store",
+                    "reason": "Runtime India indicators are aligned against real sector-index returns.",
+                },
+                "summary": {
+                    "observations": len(rows),
+                    "cumulative_return_pct": round(cumulative * 100.0, 2),
+                    "average_monthly_return_pct": round(avg * 100.0, 2),
+                    "hit_rate_pct": round(hit_rate * 100.0, 2),
+                    "information_ratio": round(float(information_ratio), 2),
+                    "max_drawdown_pct": round(sector_interaction_service._max_drawdown([row["cumulative_return"] for row in rows]) * 100.0, 2),
+                },
+                "equity_curve": [{"date": row["date"], "value": round(1.0 + row["cumulative_return"], 5)} for row in rows],
+                "recent_windows": rows[-12:],
+                "method": f"Real India validation: runtime public/live sector indicators versus real monthly sector-index returns from {source}. {detail or ''}".strip(),
+            }
+        except Exception:
+            return None
 
     async def report_payload(self) -> dict[str, Any]:
         signals = await self.signals_payload()
@@ -685,6 +793,10 @@ class IndiaLiveSectorService:
             str(row.get("sector")): (value - mean) / stdev
             for row, value in zip(sectors, values)
         }
+
+    def _is_deprecated_runtime_stub(self, row: dict[str, Any]) -> bool:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        return str(metadata.get("mode") or "") in {"open_data_runtime_stub", "prototype_runtime_stub"}
 
     async def _load_live_rows(self) -> list[dict[str, Any]]:
         async with AsyncSessionLocal() as session:

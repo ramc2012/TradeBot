@@ -7,6 +7,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sector_interaction.ingestion import SectorIngestionStore, SectorObservation
+from sector_interaction.india_public_collectors import IndiaCollectorResult, IndiaPublicDataCollector
 from sector_interaction.india_live import SECTOR_LABELS, india_live_sector_service, sector_for_symbol, sector_label
 from sector_interaction.nse_constituents import NSEConstituentService
 import sector_interaction.service as sector_service_module
@@ -139,17 +140,107 @@ def test_ingestion_status_exposes_runtime_store_contract() -> None:
     assert payload["promotion_rules"]
 
 
-def test_run_ingestion_dry_run_generates_open_data_observations() -> None:
+def test_run_ingestion_dry_run_generates_open_data_observations(monkeypatch) -> None:
     service = SectorInteractionService()
+    sample = SectorObservation(
+        date="2026-03-31",
+        country="IN",
+        indicator_code="upi_spend_growth",
+        sector="Nifty Bank",
+        value=1.5,
+        quality_score=0.74,
+        source="NPCI UPI statistics",
+        source_status="open_data",
+        collector_version="test",
+        run_id="test-run",
+        created_at="2026-05-03T00:00:00+00:00",
+        metadata={"configured_exposure": 0.45},
+    )
+
+    def _fake_collect(*, config, indicators, run_id, timeout_seconds=8.0):
+        return IndiaCollectorResult(
+            observations=[sample],
+            blocked_connectors=[
+                {
+                    "indicator_code": "gst_auto_pulse",
+                    "label": "Auto GST and registration pulse",
+                    "source_status": "open_data",
+                    "reason": "not configured in test",
+                }
+            ],
+            errors=[],
+        )
+
+    monkeypatch.setattr("sector_interaction.india_public_collectors.india_public_data_collector.collect", _fake_collect)
 
     payload = service.run_ingestion("IN", dry_run=True)
 
     assert payload["country"] == "IN"
     assert payload["dry_run"] is True
-    assert payload["generated_observations"] > 0
+    assert payload["generated_observations"] == 1
     assert payload["stored_observations"] == 0
     assert payload["preview_observations"]
     assert payload["blocked_connectors"]
+    assert payload["preview_observations"][0]["collector_version"] == "test"
+
+
+def test_india_public_collector_parses_npci_upi_rows() -> None:
+    collector = IndiaPublicDataCollector()
+    payload = {
+        "status": 200,
+        "data": {
+            "results": [
+                {
+                    "month": "March-2026",
+                    "no_of_banks_live_on_upi": "705",
+                    "volume_in_mn": "22,641.11",
+                    "value_in_cr": "29,52,542.05",
+                },
+                {
+                    "month": "February-2026",
+                    "no_of_banks_live_on_upi": "694",
+                    "volume_in_mn": "20,394.18",
+                    "value_in_cr": "26,84,229.29",
+                },
+            ]
+        },
+    }
+
+    rows = collector._parse_upi_rows(payload)
+
+    assert rows[0]["date"] == "2026-03-31"
+    assert rows[0]["value_cr"] == 2952542.05
+    assert rows[1]["date"] == "2026-02-28"
+
+
+def test_india_public_collector_parses_ppac_crude_rows(monkeypatch) -> None:
+    collector = IndiaPublicDataCollector()
+    monkeypatch.setattr(collector, "_current_financial_year", lambda: "2025-2026")
+    payload = {
+        "result": {
+            "3": {
+                "title": "<b>CRUDE OIL</b>",
+                "april": "<b>20986</b>",
+                "may": "21329",
+                "june": "20314",
+                "july": "18889",
+                "august": "19603",
+                "september": "20208",
+                "october": "21005",
+                "november": "21236",
+                "december": "21588",
+                "january": "21094",
+                "february": "20128",
+                "march": "19002",
+            }
+        }
+    }
+
+    rows = collector._parse_ppac_crude_rows(payload)
+
+    assert rows[0]["date"] == "2025-04-30"
+    assert rows[-1]["date"] == "2026-03-31"
+    assert rows[0]["crude_import"] == 20986.0
 
 
 def test_india_live_taxonomy_maps_fno_watchlist_symbols() -> None:
