@@ -6,6 +6,7 @@ import {
   SystemHealthBoard,
   type SystemHealthResponse,
 } from "@/components/system/SystemHealthBoard";
+import UpstoxApiBudgetCard from "@/components/system/UpstoxApiBudgetCard";
 import PageTabs from "@/components/layout/PageTabs";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import { getSystemHealth } from "@/lib/api";
@@ -73,7 +74,10 @@ export default function HealthPage() {
       </section>
 
       {health ? (
-        <SystemHealthBoard health={health} />
+        <div className="space-y-4">
+          <UpstoxApiBudgetCard />
+          <SystemHealthBoard health={health} />
+        </div>
       ) : (
         <div className="flex min-h-[280px] items-center justify-center rounded-[24px] border border-dashed border-bg-active bg-bg-secondary/15 text-sm text-text-muted">
           <span className="animate-pulse">Loading deployed service health…</span>

@@ -1,11 +1,11 @@
 {
-  "last_synced_at": "2026-04-24T10:00:00",
+  "last_synced_at": "2026-05-01T17:10:00",
   "open_positions": [
     {
       "position_id": "f9dbfdccb24843b782cf24a8acf0a77f",
       "status": "open",
       "opened_at": "2026-04-24T09:50:00",
-      "updated_at": "2026-04-24T10:00:00",
+      "updated_at": "2026-04-30T10:00:00",
       "closed_at": null,
       "underlying": "SENSEX",
       "timeframe": "5minute",
@@ -25,7 +25,7 @@
       "latest_premium": 170.0,
       "exit_premium": null,
       "entry_spot": 76733.27,
-      "latest_spot": 76719.7,
+      "latest_spot": 77135.28,
       "exit_spot": null,
       "unrealized_pnl": 0.0,
       "realized_pnl": 0.0,
@@ -38,7 +38,7 @@
       "position_id": "5d59649499b648649500d56009f6914a",
       "status": "open",
       "opened_at": "2026-04-24T10:00:00",
-      "updated_at": "2026-04-24T10:00:00",
+      "updated_at": "2026-04-30T10:00:00",
       "closed_at": null,
       "underlying": "NIFTY",
       "timeframe": "5minute",
@@ -55,17 +55,17 @@
       "quantity_lots": 2,
       "quantity_units": 130,
       "entry_premium": 53.2,
-      "latest_premium": 53.2,
+      "latest_premium": 64.75,
       "exit_premium": null,
       "entry_spot": 23912.1,
-      "latest_spot": 23912.1,
+      "latest_spot": 24043.7,
       "exit_spot": null,
-      "unrealized_pnl": 0.0,
+      "unrealized_pnl": 1501.5,
       "realized_pnl": 0.0,
       "expected_pnl": 305.12,
       "selection_reason": "Local weekly CE with 1.00 delta, 75% liquidity score, and 305.12 expected PnL.",
       "price_source": "local_watchlist",
-      "mark_time": "2026-04-24T10:00:00"
+      "mark_time": "2026-04-07T08:27:46.111896+00:00"
     }
   ],
   "closed_positions": []

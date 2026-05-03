@@ -53,6 +53,9 @@ export interface Tick {
   volume: number;
   oi: number;
   timestamp: string;
+  source?: string;
+  stale?: boolean;
+  stale_seconds?: number | null;
 }
 
 interface BrokerStatus {

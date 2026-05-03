@@ -186,8 +186,12 @@ def _research_sync_service(now_utc: datetime) -> dict[str, Any]:
     completed_at = _parse_iso_datetime(runtime.get("run_completed_at"))
     next_run_at = _parse_iso_datetime(runtime.get("next_run_at"))
     error = runtime.get("error")
+    runtime_detail = str(runtime.get("detail") or "").strip()
 
-    if error:
+    if "valid saved Upstox token" in runtime_detail:
+        status = "critical"
+        detail = runtime_detail
+    elif error:
         status = "critical"
         detail = str(error)
     elif state == "running":
@@ -213,6 +217,7 @@ def _research_sync_service(now_utc: datetime) -> dict[str, Any]:
             "run_started_at": runtime.get("run_started_at"),
             "run_completed_at": runtime.get("run_completed_at"),
             "next_run_at": next_run_at.isoformat() if next_run_at else None,
+            "detail": runtime_detail or None,
             "last_result": runtime.get("last_result") or {},
         },
     )
@@ -233,11 +238,19 @@ def _broker_rollover_meta(snapshot: dict[str, Any], now_utc: datetime) -> dict[s
 
     upstox = snapshot.get("upstox_token_health") or {}
     upstox_expiry = _parse_iso_datetime(upstox.get("expires_at_ist"))
+    fyers = snapshot.get("fyers_token_health") or {}
+
+    if not snapshot.get("broker_ready"):
+        warnings.append("No valid broker session is active before the next market open.")
     if snapshot.get("upstox_ready") and upstox_expiry and upstox_expiry <= next_open_ist:
         warnings.append("Upstox access tokens expire before the next market open.")
+    elif upstox.get("needs_reconnect"):
+        warnings.append("Upstox must be reconnected before the next market open.")
 
     if snapshot.get("fyers_ready"):
         warnings.append("Fyers requires re-authentication before a new trading day.")
+    elif fyers.get("needs_reconnect"):
+        warnings.append("Fyers must be reconnected before the next market open.")
 
     return {
         "next_market_open_ist": next_open_ist.isoformat(),

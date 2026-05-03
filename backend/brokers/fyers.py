@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Callable, Optional
 
@@ -41,6 +42,18 @@ class FyersAdapter(BrokerAdapter):
 
     def _auth_header(self) -> dict:
         return {"Authorization": f"{settings.FYERS_APP_ID}:{self._access_token}"}
+
+    def _set_token_state(
+        self,
+        access_token: str,
+        *,
+        refresh_token: Optional[str] = None,
+    ) -> None:
+        self._access_token = str(access_token or "").strip()
+        if refresh_token:
+            self._refresh_token = str(refresh_token).strip()
+        if self._client is not None:
+            self._client.headers.update({"Authorization": f"{settings.FYERS_APP_ID}:{self._access_token}"})
 
     async def _get_data_json(self, path: str, params: Optional[dict] = None) -> dict:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -152,11 +165,25 @@ class FyersAdapter(BrokerAdapter):
 
     async def authenticate(self, credentials: dict) -> AuthToken:
         """
-        credentials: { auth_code: str }  OR  { access_token: str }
+        credentials: { auth_code: str } OR { access_token: str }
+        OR { refresh_token: str, pin: str }.
         """
         if "access_token" in credentials:
-            self._access_token = credentials["access_token"]
-            return AuthToken(access_token=self._access_token)
+            self._set_token_state(
+                credentials["access_token"],
+                refresh_token=credentials.get("refresh_token"),
+            )
+            return AuthToken(
+                access_token=self._access_token or "",
+                refresh_token=self._refresh_token,
+            )
+
+        refresh_token = str(credentials.get("refresh_token") or "").strip()
+        if refresh_token:
+            pin = str(credentials.get("pin") or settings.FYERS_PIN or "").strip()
+            if not pin:
+                raise ValueError("Fyers PIN is required to refresh a saved refresh token")
+            return await self._authenticate_with_refresh_token(refresh_token, pin)
 
         auth_code = credentials["auth_code"]
         try:
@@ -170,8 +197,8 @@ class FyersAdapter(BrokerAdapter):
             )
             session.set_token(auth_code)
             response = await asyncio.to_thread(session.generate_token)
-            self._access_token = response.get("access_token", "")
             refresh_token = response.get("refresh_token") or response.get("refreshToken")
+            self._set_token_state(response.get("access_token", ""), refresh_token=refresh_token)
             expires_at_raw = response.get("expires_at") or response.get("expiresAt")
             parsed_expiry: Optional[datetime] = None
             if expires_at_raw:
@@ -183,17 +210,62 @@ class FyersAdapter(BrokerAdapter):
                     parsed_expiry = None
             logger.info("Fyers authenticated successfully")
             return AuthToken(
-                access_token=self._access_token,
-                refresh_token=str(refresh_token).strip() or None,
+                access_token=self._access_token or "",
+                refresh_token=self._refresh_token or str(refresh_token).strip() or None,
                 expires_at=parsed_expiry or datetime.now(UTC) + timedelta(hours=8),
             )
         except Exception as e:
             logger.error(f"Fyers authentication failed: {e}")
             raise
 
+    async def _authenticate_with_refresh_token(self, refresh_token: str, pin: str) -> AuthToken:
+        payload_base = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "pin": pin,
+        }
+        hash_inputs = (
+            f"{settings.FYERS_APP_ID}:{settings.FYERS_SECRET}",
+            f"{settings.FYERS_APP_ID}{settings.FYERS_SECRET}",
+        )
+        last_error: str | None = None
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for hash_input in hash_inputs:
+                payload = {
+                    **payload_base,
+                    "appIdHash": hashlib.sha256(hash_input.encode()).hexdigest(),
+                }
+                response = await client.post(
+                    f"{self.BASE_URL}/validate-refresh-token",
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                try:
+                    body = response.json()
+                except Exception:
+                    body = {"message": response.text[:240]}
+                if response.status_code == 200 and body.get("access_token"):
+                    new_refresh = body.get("refresh_token") or body.get("refreshToken") or refresh_token
+                    self._set_token_state(body["access_token"], refresh_token=new_refresh)
+                    expires_in = int(body.get("expires_in") or body.get("expiresIn") or 28800)
+                    logger.info("Fyers refreshed access token using saved refresh token")
+                    return AuthToken(
+                        access_token=self._access_token or "",
+                        refresh_token=self._refresh_token or refresh_token,
+                        expires_at=datetime.now(UTC) + timedelta(seconds=expires_in),
+                    )
+                last_error = body.get("message") or body.get("error_description") or str(body)
+                if body.get("code") != -371:
+                    break
+        raise ValueError(f"Fyers refresh-token exchange failed: {last_error or 'unknown error'}")
+
     async def refresh_token(self) -> AuthToken:
-        """Fyers tokens don't refresh — re-auth required each session."""
-        raise NotImplementedError("Fyers requires re-authentication each day")
+        if not self._refresh_token:
+            raise NotImplementedError("Fyers refresh_token is not available")
+        pin = str(settings.FYERS_PIN or "").strip()
+        if not pin:
+            raise NotImplementedError("Fyers PIN is required to refresh the saved refresh_token")
+        return await self._authenticate_with_refresh_token(self._refresh_token, pin)
 
     async def get_profile(self) -> UserProfile:
         async with httpx.AsyncClient(timeout=10) as client:

@@ -1724,6 +1724,49 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
     ) -> None:
         return await StrategyExitMixin._close_position(self, runtime, position, exit_price, reason, qty, partial)
 
+    async def operator_close_position(
+        self,
+        *,
+        strategy_key: str,
+        symbol: str,
+        reason: str = "operator_override",
+    ) -> dict[str, Any]:
+        """Close one agent-held paper position through an explicit operator override."""
+        runtime = self.get_runtime(strategy_key)
+        if runtime is None:
+            raise ValueError(f"Unknown strategy lane: {strategy_key}")
+
+        position = runtime.positions.get(symbol)
+        if position is None:
+            raise ValueError(f"No open position for {symbol} in {strategy_key}")
+
+        exit_price = float(position.current_price or position.entry_price or 0.0)
+        if exit_price <= 0:
+            raise ValueError(f"No valid mark price available for {symbol}")
+
+        close_reason = reason.strip()[:80] if reason and reason.strip() else "operator_override"
+        await self._close_position(
+            runtime,
+            position,
+            exit_price,
+            close_reason,
+            qty=position.qty,
+            partial=False,
+        )
+        self._last_message = f"Operator closed {position.underlying} {position.option_type} {int(position.strike)} from {runtime.label}."
+        self._append_commentary("Operator", self._last_message, tone="warning")
+        self._persist_state()
+
+        return {
+            "closed": True,
+            "strategy_key": runtime.key,
+            "symbol": symbol,
+            "exit_price": exit_price,
+            "qty": position.qty,
+            "reason": close_reason,
+            "status": self.get_status(refresh=False),
+        }
+
     # ── Helper Methods ───────────────────────────────────────────────────────
 
     async def _load_candles(

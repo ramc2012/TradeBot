@@ -3,7 +3,7 @@
 import { memo, useEffect, useRef } from "react";
 import { clsx } from "clsx";
 
-import { getLTP } from "@/lib/api";
+import { getLatestTicks } from "@/lib/api";
 import { createTickSocket } from "@/lib/websocket";
 import {
   MARKET_INDEX_PRICE_BANDS,
@@ -15,8 +15,8 @@ import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
 import type { Tick } from "@/store";
 import { useTickStore, useTickSymbol } from "@/store";
 
-const HEADER_TICK_STORAGE_KEY = "nomad-curie.header-ticks.v5";
-const HEADER_LTP_STORAGE_KEY = "nomad-curie.header-ltp.v5";
+const HEADER_TICK_STORAGE_KEY = "nomad-curie.header-ticks.v6";
+const HEADER_LTP_STORAGE_KEY = "nomad-curie.header-latest-ticks.v6";
 
 type TickSnapshot = Record<string, Tick>;
 
@@ -67,6 +67,9 @@ function normalizeTick(value: unknown, expectedSymbol?: string): Tick | null {
     volume: asFiniteNumber(raw.volume) ?? 0,
     oi: asFiniteNumber(raw.oi) ?? 0,
     timestamp: typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString(),
+    source: typeof raw.source === "string" ? raw.source : undefined,
+    stale: typeof raw.stale === "boolean" ? raw.stale : undefined,
+    stale_seconds: asFiniteNumber(raw.stale_seconds),
   };
   return isPlausibleIndexTick(symbol, tick) ? tick : null;
 }
@@ -108,9 +111,20 @@ function formatTickValue(value?: number, digits = 2) {
   return Number.isFinite(value) ? value!.toFixed(digits) : "--";
 }
 
+function formatSource(tick?: Tick) {
+  if (!tick) return "";
+  if (tick.stale) return "DB STALE";
+  if (tick.source === "market_ticks") return "DB TICK";
+  if (tick.source === "underlying_spot_candles") return "DB BAR";
+  if (tick.source === "data_router") return "CACHE";
+  if (tick.source && tick.source !== "unavailable") return tick.source.toUpperCase();
+  return "";
+}
+
 const TickerItem = memo(function TickerItem({ symbol }: { symbol: string }) {
   const tick = useTickSymbol(symbol);
   const positive = tick && tick.close > 0 ? tick.ltp >= tick.close : undefined;
+  const sourceLabel = formatSource(tick);
 
   return (
     <div className="min-w-[220px] rounded-xl border border-bg-border bg-bg-secondary/72 px-3 py-2">
@@ -144,10 +158,17 @@ const TickerItem = memo(function TickerItem({ symbol }: { symbol: string }) {
             </span>
           </div>
         </div>
-        <div className="min-w-[82px] text-right text-[10px] text-text-muted">
-          {tick && Number.isFinite(tick.high) && Number.isFinite(tick.low) && tick.high > 0 && tick.low > 0
-            ? `H ${formatTickValue(tick.high, 0)} · L ${formatTickValue(tick.low, 0)}`
-            : <span className="animate-pulse text-text-muted/50">connecting…</span>}
+        <div className="min-w-[88px] text-right text-[10px] text-text-muted">
+          <div>
+            {tick && Number.isFinite(tick.high) && Number.isFinite(tick.low) && tick.high > 0 && tick.low > 0
+              ? `H ${formatTickValue(tick.high, 0)} · L ${formatTickValue(tick.low, 0)}`
+              : <span className="animate-pulse text-text-muted/50">connecting…</span>}
+          </div>
+          {sourceLabel ? (
+            <div className={clsx("mt-0.5 font-mono text-[8px] tracking-[0.16em]", tick?.stale ? "text-amber-300" : "text-text-muted/70")}>
+              {sourceLabel}
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
@@ -160,10 +181,10 @@ export default function RealTimeTicker() {
   const persistedTicksRef = useRef<TickSnapshot>({});
   const lastPersistAtRef = useRef(0);
 
-  const ltpQuery = usePersistentSnapshotQuery<Record<string, number>>({
+  const latestTicksQuery = usePersistentSnapshotQuery<Record<string, Tick>>({
     storageKey: HEADER_LTP_STORAGE_KEY,
-    queryKey: ["headerIndexLtp"],
-    queryFn: () => getLTP([...MARKET_INDEX_SYMBOLS]).then((response) => response.data),
+    queryKey: ["headerIndexLatestTicks"],
+    queryFn: () => getLatestTicks([...MARKET_INDEX_SYMBOLS]).then((response) => response.data),
     staleTime: 15_000,
     refetchInterval: 30_000,
     refetchOnWindowFocus: false,
@@ -198,24 +219,12 @@ export default function RealTimeTicker() {
   }, [updateTick]);
 
   useEffect(() => {
-    const payload = ltpQuery.data;
+    const payload = latestTicksQuery.data;
     if (!payload || typeof payload !== "object") return;
 
-    Object.entries(payload).forEach(([symbol, rawLtp]) => {
-      const ltp = asFiniteNumber(rawLtp);
-      if (ltp == null || !isPlausibleIndexPrice(symbol, ltp)) return;
-      const existing = useTickStore.getState().getTick(symbol);
-      const nextTick = {
-        symbol,
-        ltp,
-        open: existing?.open ?? ltp,
-        high: existing?.high ? Math.max(existing.high, ltp) : ltp,
-        low: existing?.low ? Math.min(existing.low, ltp) : ltp,
-        volume: existing?.volume ?? 0,
-        oi: existing?.oi ?? 0,
-        close: existing?.close ?? existing?.open ?? ltp,
-        timestamp: new Date().toISOString(),
-      } satisfies Tick;
+    Object.entries(payload).forEach(([symbol, rawTick]) => {
+      const nextTick = normalizeTick(rawTick, symbol);
+      if (!nextTick) return;
       updateTick(nextTick);
       persistedTicksRef.current = {
         ...persistedTicksRef.current,
@@ -224,7 +233,7 @@ export default function RealTimeTicker() {
     });
 
     persistTickSnapshot(persistedTicksRef.current);
-  }, [ltpQuery.data, updateTick]);
+  }, [latestTicksQuery.data, updateTick]);
 
   return (
     <div className="shrink-0 border-b border-bg-border bg-bg-primary/95 px-3 py-2 backdrop-blur">

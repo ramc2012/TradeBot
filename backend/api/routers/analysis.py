@@ -528,6 +528,7 @@ def _build_research_scheduler_summary(
     runtime_completed_at = _parse_iso_datetime(runtime_state.get("run_completed_at"))
     runtime_next_run_at = _parse_iso_datetime(runtime_state.get("next_run_at"))
     runtime_error = str(runtime_state.get("error") or "").strip()
+    runtime_detail = str(runtime_state.get("detail") or "").strip()
 
     if contracts_pending > 0 and runtime_name:
         runtime_overdue = (
@@ -536,7 +537,11 @@ def _build_research_scheduler_summary(
             and runtime_next_run_at <= now_utc
             and active_recent_symbols == 0
         )
-        if runtime_name == "running":
+        if "valid saved Upstox token" in runtime_detail:
+            state = "stalled"
+            label = "Waiting for broker reconnect"
+            detail = runtime_detail
+        elif runtime_name == "running":
             state = "running"
             label = "Aggregation in progress"
             detail = (

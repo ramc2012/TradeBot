@@ -312,3 +312,18 @@ class StrategyExitMixin:
                     "regime": position.regime,
                 },
             )
+
+        from agentic_rag.trade_memory import build_strategy_trade_case, record_trade_case
+
+        trade_case = build_strategy_trade_case(
+            runtime_key=runtime.key,
+            runtime_label=runtime.label,
+            position=position,
+            exit_price=exit_price,
+            reason=reason,
+            close_qty=close_qty,
+            pnl=pnl,
+            partial=partial,
+            source=f"paper_strategy_agent:{runtime.key}",
+        )
+        await record_trade_case(trade_case)

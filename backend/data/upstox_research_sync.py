@@ -305,7 +305,22 @@ class UpstoxResearchSync:
         return [merged[key] for key in sorted(merged)]
 
     async def _upsert_universe(self) -> int:
-        universe = await self.client.fetch_fo_universe()
+        try:
+            universe = await self.client.fetch_fo_universe()
+        except Exception as exc:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    text("SELECT COUNT(*) FROM fo_underlying_catalog")
+                )
+                cached_rows = int(result.scalar() or 0)
+            if cached_rows > 0:
+                logger.warning(
+                    "Could not refresh NSE F&O universe; reusing "
+                    f"{cached_rows} cached underlying rows: {exc}"
+                )
+                return 0
+            raise
+
         rows = [
             {"symbol": symbol, "kind": "INDEX"}
             for symbol in sorted(universe["indices"])
@@ -352,8 +367,17 @@ class UpstoxResearchSync:
         synced = 0
         expiries_stored = 0
         for symbol in symbols:
-            meta = await self.client._resolve_underlying_metadata(symbol)
-            expiry_dates = await self.client._fetch_expiry_dates(symbol)
+            try:
+                meta = await self.client._resolve_underlying_metadata(symbol)
+                expiry_dates = await self.client._fetch_expiry_dates(symbol)
+            except UpstoxAuthError as exc:
+                logger.error(
+                    f"Stopping expiry discovery because Upstox authentication failed: {exc}"
+                )
+                raise
+            except Exception as exc:
+                logger.warning(f"Skipping expiry metadata for {symbol}: {exc}")
+                continue
             monthly_expiries, prev_map = self.client._select_monthly_expiries(
                 expiry_dates,
                 self.from_date,
@@ -763,22 +787,45 @@ class UpstoxResearchSync:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
                 text("""
-                    SELECT symbol, kind, spot_instrument_key, spot_range_start, spot_range_end
-                    FROM fo_underlying_catalog
-                    WHERE spot_instrument_key IS NOT NULL
+                    WITH actual_spot_ranges AS (
+                        SELECT
+                            underlying,
+                            MIN(timezone('Asia/Kolkata', time)::date) AS actual_range_start,
+                            MAX(timezone('Asia/Kolkata', time)::date) AS actual_range_end
+                        FROM underlying_spot_candles
+                        WHERE interval = :interval
+                        GROUP BY underlying
+                    )
+                    SELECT
+                        u.symbol,
+                        u.kind,
+                        u.spot_instrument_key,
+                        u.spot_range_start,
+                        u.spot_range_end,
+                        a.actual_range_start,
+                        a.actual_range_end
+                    FROM fo_underlying_catalog u
+                    LEFT JOIN actual_spot_ranges a
+                      ON a.underlying = u.symbol
+                    WHERE u.spot_instrument_key IS NOT NULL
                       AND (
-                        spot_synced_at IS NULL
-                        OR spot_range_start IS NULL
-                        OR spot_range_end IS NULL
-                        OR spot_range_start > :from_date
-                        OR spot_range_end < :to_date
+                        u.spot_synced_at IS NULL
+                        OR u.spot_range_start IS NULL
+                        OR u.spot_range_end IS NULL
+                        OR a.actual_range_start IS NULL
+                        OR a.actual_range_end IS NULL
+                        OR a.actual_range_start > :from_date
+                        OR a.actual_range_end < :to_date
+                        OR u.spot_range_start IS DISTINCT FROM a.actual_range_start
+                        OR u.spot_range_end IS DISTINCT FROM a.actual_range_end
                       )
-                    ORDER BY CASE WHEN kind = 'INDEX' THEN 0 ELSE 1 END,
-                             COALESCE(spot_range_end, DATE '1900-01-01'),
-                             symbol
+                    ORDER BY CASE WHEN u.kind = 'INDEX' THEN 0 ELSE 1 END,
+                             COALESCE(a.actual_range_end, u.spot_range_end, DATE '1900-01-01'),
+                             u.symbol
                     LIMIT :limit
                 """),
                 {
+                    "interval": self.interval,
                     "limit": limit,
                     "from_date": self.from_date,
                     "to_date": self.to_date,
@@ -789,16 +836,18 @@ class UpstoxResearchSync:
         stored_rows = 0
         for row in rows:
             fetch_windows: list[tuple[date, date]] = []
-            if row.spot_range_start is None or row.spot_range_end is None:
+            current_start = row.actual_range_start or row.spot_range_start
+            current_end = row.actual_range_end or row.spot_range_end
+            if current_start is None or current_end is None:
                 fetch_windows.append((self.from_date, self.to_date))
             else:
-                if row.spot_range_start > self.from_date:
+                if current_start > self.from_date:
                     fetch_windows.append(
-                        (self.from_date, row.spot_range_start - timedelta(days=1))
+                        (self.from_date, current_start - timedelta(days=1))
                     )
-                if row.spot_range_end < self.to_date:
+                if current_end < self.to_date:
                     fetch_windows.append(
-                        (row.spot_range_end + timedelta(days=1), self.to_date)
+                        (current_end + timedelta(days=1), self.to_date)
                     )
 
             merged: dict[str, dict] = {}
@@ -816,6 +865,34 @@ class UpstoxResearchSync:
             candles = [merged[key] for key in sorted(merged)]
             if not candles:
                 logger.warning(f"No spot candles returned for {row.symbol}")
+                if (
+                    current_start is not None
+                    and current_end is not None
+                    and (
+                        row.spot_range_start != current_start
+                        or row.spot_range_end != current_end
+                    )
+                ):
+                    async with AsyncSessionLocal() as session:
+                        await session.execute(
+                            text("""
+                                UPDATE fo_underlying_catalog
+                                SET spot_range_start = :spot_range_start,
+                                    spot_range_end = :spot_range_end,
+                                    updated_at = NOW()
+                                WHERE symbol = :symbol
+                            """),
+                            {
+                                "symbol": row.symbol,
+                                "spot_range_start": current_start,
+                                "spot_range_end": current_end,
+                            },
+                        )
+                        await session.commit()
+                    logger.info(
+                        f"Repaired spot range metadata for {row.symbol}: "
+                        f"{current_start} to {current_end}"
+                    )
                 continue
 
             payload = [
@@ -834,6 +911,18 @@ class UpstoxResearchSync:
                 }
                 for candle in candles
             ]
+            payload_dates = [
+                item["time"].astimezone(IST).date()
+                for item in payload
+            ]
+            actual_range_start = min(
+                [date_value for date_value in (current_start, *payload_dates) if date_value is not None],
+                default=None,
+            )
+            actual_range_end = max(
+                [date_value for date_value in (current_end, *payload_dates) if date_value is not None],
+                default=None,
+            )
 
             async with AsyncSessionLocal() as session:
                 await session.execute(
@@ -862,21 +951,15 @@ class UpstoxResearchSync:
                     text("""
                         UPDATE fo_underlying_catalog
                         SET spot_synced_at = NOW(),
-                            spot_range_start = LEAST(
-                                COALESCE(spot_range_start, :spot_range_start),
-                                :spot_range_start
-                            ),
-                            spot_range_end = GREATEST(
-                                COALESCE(spot_range_end, :spot_range_end),
-                                :spot_range_end
-                            ),
+                            spot_range_start = :spot_range_start,
+                            spot_range_end = :spot_range_end,
                             updated_at = NOW()
                         WHERE symbol = :symbol
                     """),
                     {
                         "symbol": row.symbol,
-                        "spot_range_start": self.from_date,
-                        "spot_range_end": self.to_date,
+                        "spot_range_start": actual_range_start,
+                        "spot_range_end": actual_range_end,
                     },
                 )
                 await session.commit()
@@ -1167,11 +1250,20 @@ class UpstoxResearchSync:
 
         for row in rows:
             spot_map = await self._load_spot_map(row["underlying"])
+            fallback_to_date = min(self.to_date, row["expiry"])
+            fallback_from_date = max(
+                self.from_date,
+                fallback_to_date - timedelta(days=365),
+            )
+            fetch_from_date = row["candle_from_date"] or fallback_from_date
+            fetch_to_date = row["candle_to_date"] or fallback_to_date
+            if fetch_to_date < fetch_from_date:
+                fetch_from_date = fetch_to_date
             try:
                 candles = await self.client._fetch_candles_from_upstox(
                     row["instrument_key"],
-                    row["candle_from_date"],
-                    row["candle_to_date"],
+                    fetch_from_date,
+                    fetch_to_date,
                 )
             except UpstoxAuthError as exc:
                 logger.error(
@@ -1243,6 +1335,8 @@ class UpstoxResearchSync:
                         UPDATE fo_contract_catalog
                         SET sync_status = :sync_status,
                             candle_count = :candle_count,
+                            candle_from_date = :candle_from_date,
+                            candle_to_date = :candle_to_date,
                             first_candle_time = :first_candle_time,
                             last_candle_time = :last_candle_time,
                             last_synced_at = NOW(),
@@ -1254,6 +1348,8 @@ class UpstoxResearchSync:
                         "instrument_key": row["instrument_key"],
                         "sync_status": status,
                         "candle_count": len(payload),
+                        "candle_from_date": fetch_from_date,
+                        "candle_to_date": fetch_to_date,
                         "first_candle_time": (
                             _parse_iso_ts(payload[0]["time"]) if payload else None
                         ),

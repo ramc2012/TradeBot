@@ -11,7 +11,7 @@ from core.config import settings
 from core.market_hours_paper_supervisor import market_hours_paper_supervisor
 from core.paper_bootstrap import bootstrap_paper_trading_runtime
 from db.redis_client import get_redis, close_redis
-from api.routers import auth, trading, market, analytics, agent, commodity, macro_research, rag, backtester as backtester_router
+from api.routers import auth, trading, market, analytics, agent, commodity, macro_research, rag, sector_interaction, backtester as backtester_router
 from api.routers import fo_data as fo_data_router
 from api.routers import analysis as analysis_router
 from api.routers import strategy as strategy_router
@@ -48,6 +48,7 @@ from paper_engine.strategy_agent import paper_strategy_agent
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
     logger.info("═══ Nomad Curie starting up ═══")
+    research_sync_task: asyncio.Task | None = None
 
     # Ensure Redis is reachable
     try:
@@ -109,9 +110,32 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Market-hours paper supervisor start skipped: {e}")
 
+    if settings.RESEARCH_SYNC_EMBEDDED_ENABLED:
+        async def _embedded_research_sync_worker() -> None:
+            try:
+                from data.run_upstox_research_sync import run_daemon_from_env
+
+                await run_daemon_from_env()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception(f"Embedded research sync daemon stopped: {exc}")
+
+        research_sync_task = asyncio.create_task(
+            _embedded_research_sync_worker(),
+            name="embedded-research-sync",
+        )
+        logger.info("✓ Embedded research sync daemon started")
+
     yield
 
     # Shutdown
+    if research_sync_task is not None:
+        research_sync_task.cancel()
+        try:
+            await research_sync_task
+        except asyncio.CancelledError:
+            logger.info("Embedded research sync daemon stopped")
     await market_hours_paper_supervisor.stop()
     await rl_auto_trainer.stop()
     await paper_strategy_agent.stop()
@@ -148,6 +172,7 @@ app.include_router(market.router)
 app.include_router(analytics.router)
 app.include_router(agent.router)
 app.include_router(rag.router)
+app.include_router(sector_interaction.router)
 app.include_router(macro_research.router)
 app.include_router(commodity.router)
 app.include_router(backtester_router.router)

@@ -38,6 +38,8 @@ class DirectionalOptionsRiskEngine:
         reasons: list[str] = []
         if candidate.expected_pnl <= candidate.option_price * min_expected_edge_pct:
             reasons.append("Expected edge does not clear the long-premium hurdle.")
+        if candidate.rejection_reasons:
+            reasons.extend(f"Optimizer rejected candidate: {reason}." for reason in candidate.rejection_reasons)
         if daily_realized <= -(risk_budget * float(self.config["daily_loss_cap_r"])):
             reasons.append("Daily loss cap is already breached.")
         if weekly_realized <= -(risk_budget * float(self.config["weekly_loss_cap_r"])):

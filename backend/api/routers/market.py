@@ -1,12 +1,13 @@
 """Market data routes."""
 from __future__ import annotations
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
+from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -21,6 +22,8 @@ from market_data.market_intelligence_runtime import APP_SYMBOLS
 from market_data.symbols import to_app_symbol, to_broker_symbol, to_fyers_symbol
 from analytics.greeks import bs_greeks, implied_volatility
 from analytics.sector import sector_tracker
+from macro_research import macro_research_service
+from sector_interaction.india_live import india_live_sector_service
 from api.routers.auth import (
     ensure_fyers_session,
     ensure_upstox_session,
@@ -39,6 +42,21 @@ _INDEX_PRICE_BANDS: dict[str, tuple[float, float]] = {
     "MIDCPNIFTY": (5_000.0, 40_000.0),
     "SENSEX": (30_000.0, 150_000.0),
 }
+_MARKET_SNAPSHOT_STALE_AFTER_SECONDS = 15 * 60
+
+
+@router.get("/intelligence-context")
+async def market_intelligence_context() -> dict:
+    """Merged market-intelligence context for UI and strategy agents."""
+    sector_interaction = await india_live_sector_service.market_intelligence_payload()
+    macro_research = await macro_research_service.overview(refresh=False)
+    return {
+        "module": "market_intelligence_context",
+        "country": "IN",
+        "sector_interaction": sector_interaction,
+        "macro_research": macro_research,
+        "market_read": macro_research.get("market_read", {}),
+    }
 
 
 @dataclass(frozen=True)
@@ -153,38 +171,179 @@ def _is_valid_index_price(app_symbol: str, value: float | int | None) -> bool:
     return low <= price <= high
 
 
-async def _latest_local_spot_close(app_symbol: str) -> float:
-    underlying = _INDEX_UNDERLYING_BY_APP_SYMBOL.get(app_symbol)
+class LatestTickSnapshot(BaseModel):
+    symbol: str
+    ltp: float = 0.0
+    open: float = 0.0
+    high: float = 0.0
+    low: float = 0.0
+    close: float = 0.0
+    volume: float = 0.0
+    oi: float = 0.0
+    timestamp: str | None = None
+    source: str = "unavailable"
+    stale_seconds: float | None = None
+    stale: bool = True
+
+
+def _snapshot_age_seconds(timestamp: datetime | None) -> float | None:
+    if timestamp is None:
+        return None
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    else:
+        timestamp = timestamp.astimezone(timezone.utc)
+    return max((datetime.now(timezone.utc) - timestamp).total_seconds(), 0.0)
+
+
+def _build_tick_snapshot(
+    *,
+    app_symbol: str,
+    ltp: float | int | None,
+    open_: float | int | None = None,
+    high: float | int | None = None,
+    low: float | int | None = None,
+    close: float | int | None = None,
+    volume: float | int | None = 0.0,
+    oi: float | int | None = 0.0,
+    timestamp: datetime | None = None,
+    source: str,
+) -> LatestTickSnapshot | None:
+    if not _is_valid_index_price(app_symbol, ltp):
+        return None
+
+    price = float(ltp or 0.0)
+    safe_open = float(open_ or price)
+    safe_high = float(high or price)
+    safe_low = float(low or price)
+    safe_close = float(close or price)
+    age = _snapshot_age_seconds(timestamp)
+    return LatestTickSnapshot(
+        symbol=app_symbol,
+        ltp=price,
+        open=safe_open if _is_valid_index_price(app_symbol, safe_open) else price,
+        high=safe_high if _is_valid_index_price(app_symbol, safe_high) else max(price, safe_close),
+        low=safe_low if _is_valid_index_price(app_symbol, safe_low) else min(price, safe_close),
+        close=safe_close if _is_valid_index_price(app_symbol, safe_close) else price,
+        volume=float(volume or 0.0),
+        oi=float(oi or 0.0),
+        timestamp=timestamp.isoformat() if timestamp else None,
+        source=source,
+        stale_seconds=age,
+        stale=age is None or age > _MARKET_SNAPSHOT_STALE_AFTER_SECONDS,
+    )
+
+
+async def _latest_market_tick_snapshot(market_symbol: _ResolvedMarketSymbol) -> LatestTickSnapshot | None:
+    underlying = _INDEX_UNDERLYING_BY_APP_SYMBOL.get(market_symbol.app_symbol)
     band = _INDEX_PRICE_BANDS.get(str(underlying or "").upper())
     if not underlying or not band:
-        return 0.0
+        return None
 
     low, high = band
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            text(
-                """
-                SELECT close
-                FROM underlying_spot_candles
-                WHERE underlying = :underlying
-                  AND close IS NOT NULL
-                  AND close BETWEEN :low AND :high
-                ORDER BY time DESC
-                LIMIT 1
-                """
-            ),
-            {"underlying": underlying, "low": low, "high": high},
-        )
-        row = result.first()
-    return float(getattr(row, "close", 0.0) or 0.0) if row else 0.0
+    candidates = [market_symbol.app_symbol, market_symbol.broker_symbol, market_symbol.fyers_symbol]
+    try:
+        async with AsyncSessionLocal() as session:
+            tick_result = await session.execute(
+                text(
+                    """
+                    SELECT time, ltp, open, high, low, close, volume, oi
+                    FROM market_ticks
+                    WHERE symbol = ANY(:symbols)
+                      AND ltp IS NOT NULL
+                      AND ltp BETWEEN :low AND :high
+                    ORDER BY time DESC
+                    LIMIT 1
+                    """
+                ),
+                {"symbols": candidates, "low": low, "high": high},
+            )
+            tick = tick_result.first()
+            if tick:
+                return _build_tick_snapshot(
+                    app_symbol=market_symbol.app_symbol,
+                    ltp=getattr(tick, "ltp", None),
+                    open_=getattr(tick, "open", None),
+                    high=getattr(tick, "high", None),
+                    low=getattr(tick, "low", None),
+                    close=getattr(tick, "close", None),
+                    volume=getattr(tick, "volume", None),
+                    oi=getattr(tick, "oi", None),
+                    timestamp=getattr(tick, "time", None),
+                    source="market_ticks",
+                )
+
+            candle_result = await session.execute(
+                text(
+                    """
+                    SELECT time, open, high, low, close, volume, oi
+                    FROM underlying_spot_candles
+                    WHERE underlying = :underlying
+                      AND close IS NOT NULL
+                      AND close BETWEEN :low AND :high
+                    ORDER BY time DESC
+                    LIMIT 1
+                    """
+                ),
+                {"underlying": underlying, "low": low, "high": high},
+            )
+            candle = candle_result.first()
+            if candle:
+                return _build_tick_snapshot(
+                    app_symbol=market_symbol.app_symbol,
+                    ltp=getattr(candle, "close", None),
+                    open_=getattr(candle, "open", None),
+                    high=getattr(candle, "high", None),
+                    low=getattr(candle, "low", None),
+                    close=getattr(candle, "close", None),
+                    volume=getattr(candle, "volume", None),
+                    oi=getattr(candle, "oi", None),
+                    timestamp=getattr(candle, "time", None),
+                    source="underlying_spot_candles",
+                )
+    except Exception as exc:
+        logger.trace(f"[Market] Local latest tick unavailable for {market_symbol.app_symbol}: {exc}")
+    return None
+
+
+async def _latest_index_tick_snapshot(
+    app_symbol: str,
+    *candidates: float | int | None,
+    source: str = "data_router",
+) -> LatestTickSnapshot:
+    for candidate in candidates:
+        if _is_valid_index_price(app_symbol, candidate):
+            db_snapshot = await _latest_market_tick_snapshot(_resolve_market_symbol(app_symbol))
+            price = float(candidate or 0.0)
+            snapshot = _build_tick_snapshot(
+                app_symbol=app_symbol,
+                ltp=price,
+                open_=db_snapshot.open if db_snapshot else None,
+                high=max(db_snapshot.high, price) if db_snapshot and db_snapshot.high else None,
+                low=min(db_snapshot.low, price) if db_snapshot and db_snapshot.low else None,
+                close=db_snapshot.close if db_snapshot and db_snapshot.close else None,
+                volume=db_snapshot.volume if db_snapshot else 0.0,
+                oi=db_snapshot.oi if db_snapshot else 0.0,
+                timestamp=datetime.now(timezone.utc),
+                source=source,
+            )
+            if snapshot:
+                return snapshot
+
+    db_snapshot = await _latest_market_tick_snapshot(_resolve_market_symbol(app_symbol))
+    if db_snapshot:
+        return db_snapshot
+    return LatestTickSnapshot(symbol=app_symbol, source="unavailable")
+
+
+async def _latest_local_spot_close(app_symbol: str) -> float:
+    snapshot = await _latest_market_tick_snapshot(_resolve_market_symbol(app_symbol))
+    return snapshot.ltp if snapshot else 0.0
 
 
 async def _best_index_ltp(app_symbol: str, *candidates: float | int | None) -> float:
-    for candidate in candidates:
-        if _is_valid_index_price(app_symbol, candidate):
-            return float(candidate or 0.0)
-    local_close = await _latest_local_spot_close(app_symbol)
-    return local_close if _is_valid_index_price(app_symbol, local_close) else 0.0
+    snapshot = await _latest_index_tick_snapshot(app_symbol, *candidates)
+    return snapshot.ltp
 
 
 async def _fetch_fyers_historical_rows(
@@ -456,38 +615,53 @@ class LTPRequest(BaseModel):
 
 @router.post("/ltp")
 async def get_ltp(req: LTPRequest):
-    market_symbols = [_resolve_market_symbol(symbol) for symbol in req.symbols]
+    snapshots = await _resolve_latest_tick_snapshots(req.symbols)
+    return {symbol: snapshot.ltp for symbol, snapshot in snapshots.items()}
+
+
+async def _resolve_latest_tick_snapshots(symbols: list[str]) -> dict[str, LatestTickSnapshot]:
+    market_symbols = [_resolve_market_symbol(symbol) for symbol in symbols]
     adapter, source = await _get_market_adapter()
+    live: dict[str, float] = {}
+    mapped: dict[str, str] = {}
+
     if not adapter:
         return {
-            item.app_symbol: await _best_index_ltp(
+            item.app_symbol: await _latest_index_tick_snapshot(
                 item.app_symbol,
                 data_router.get_ltp(item.app_symbol),
+                source="data_router",
             )
             for item in market_symbols
         }
+
     try:
         mapped = {
             item.app_symbol: _market_symbol_for_adapter(adapter, item)
             for item in market_symbols
         }
         live = await adapter.get_ltp(list(mapped.values()))
-        return {
-            app_symbol: await _best_index_ltp(
-                app_symbol,
-                live.get(adapter_symbol, 0.0),
-                data_router.get_ltp(app_symbol),
-            )
-            for app_symbol, adapter_symbol in mapped.items()
-        }
-    except Exception:
-        return {
-            item.app_symbol: await _best_index_ltp(
-                item.app_symbol,
-                data_router.get_ltp(item.app_symbol),
-            )
-            for item in market_symbols
-        }
+    except Exception as exc:
+        logger.trace(f"[Market] Live latest tick lookup failed via {source}: {exc}")
+        live = {}
+
+    snapshots: dict[str, LatestTickSnapshot] = {}
+    for item in market_symbols:
+        adapter_symbol = mapped.get(item.app_symbol, "")
+        live_price = live.get(adapter_symbol, 0.0) if adapter_symbol else 0.0
+        router_price = data_router.get_ltp(item.app_symbol)
+        snapshots[item.app_symbol] = await _latest_index_tick_snapshot(
+            item.app_symbol,
+            live_price,
+            router_price,
+            source=source if _is_valid_index_price(item.app_symbol, live_price) else "data_router",
+        )
+    return snapshots
+
+
+@router.post("/latest-ticks")
+async def get_latest_ticks(req: LTPRequest) -> dict[str, LatestTickSnapshot]:
+    return await _resolve_latest_tick_snapshots(req.symbols)
 
 
 @router.get("/greeks/{symbol}/{strike}/{expiry}/{option_type}")

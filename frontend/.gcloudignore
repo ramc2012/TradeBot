@@ -1,4 +1,7 @@
-.next/
-node_modules/
+.git
+.gitignore
+.next
+node_modules
+coverage
+*.log
 tsconfig.tsbuildinfo
-npm-debug.log*

@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   getBrokerStatus, getCredentialsStatus, saveCredentials, getFyersAuthUrl, getUpstoxAuthUrl, connectUpstox,
   getIciciLoginUrl, connectIciciBreeze, connectFivepaisa,
-  disconnectBroker, getRiskStatus, updateRiskConfig, getResearchCacheStatus,
+  disconnectBroker, getRiskStatus, updateRiskConfig,
   getTelegramSettings, saveTelegramSettings, discoverTelegramChats, sendTelegramTest,
   describeApiError,
 } from "@/lib/api";
@@ -117,31 +117,6 @@ function brokerBadgeLabel(status?: Partial<BrokerStatusEntry> | null): string {
   return "DISCONNECTED";
 }
 
-function formatInteger(value?: number | null): string {
-  if (value == null || Number.isNaN(value)) return "—";
-  return new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(value);
-}
-
-function formatDecimal(value?: number | null, digits = 1): string {
-  if (value == null || Number.isNaN(value)) return "—";
-  return new Intl.NumberFormat("en-IN", {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  }).format(value);
-}
-
-function formatDuration(seconds?: number | null): string {
-  if (seconds == null || Number.isNaN(seconds) || seconds < 0) return "—";
-  const total = Math.round(seconds);
-  const days = Math.floor(total / 86400);
-  const hours = Math.floor((total % 86400) / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m`;
-  return `${total}s`;
-}
-
 function humanizeBrokerValue(value?: string | null): string | null {
   const normalized = String(value || "").trim();
   if (!normalized) return null;
@@ -218,154 +193,6 @@ function useAllCredsStatus() {
     retry: 2,
     retryDelay: (attempt) => Math.min(1000 * (attempt + 1), 3000),
   });
-}
-
-function UpstoxApiBudgetCard() {
-  const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ["settingsResearchCacheStatus"],
-    queryFn: () => getResearchCacheStatus().then((r) => r.data),
-    staleTime: 60_000,
-    refetchOnWindowFocus: false,
-    retry: false,
-  });
-
-  const budget = data?.api_budget;
-  const scheduler = data?.scheduler;
-
-  return (
-    <div className="card p-4 space-y-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="font-semibold text-sm">Upstox API Budget</div>
-          <p className="text-xs text-text-muted mt-1">
-            Rolling call usage, configured pacing, and theoretical useful-dataset ETA for the research sync.
-          </p>
-        </div>
-        <button onClick={() => refetch()} className="text-text-muted hover:text-text-primary p-1 rounded" title="Refresh">
-          <RefreshCw size={14} />
-        </button>
-      </div>
-
-      {isLoading && (
-        <div className="text-xs text-text-muted flex items-center gap-2">
-          <Loader2 size={12} className="animate-spin" /> Loading API budget…
-        </div>
-      )}
-
-      {isError && (
-        <div className="text-xs text-accent-red flex items-center gap-2">
-          <AlertCircle size={12} /> Could not load API budget telemetry.
-        </div>
-      )}
-
-      {!isLoading && !isError && budget && (
-        <>
-          <div className="grid gap-3 md:grid-cols-4">
-            <div className="rounded border border-bg-border bg-bg-secondary/40 p-3">
-              <div className="text-[11px] uppercase tracking-wide text-text-muted">Rolling 30m</div>
-              <div className="mt-1 text-lg font-semibold text-text-primary">
-                {formatInteger(budget.rolling_30m?.calls)} / {formatInteger(budget.limits?.per_30_minutes)}
-              </div>
-              <div className="text-xs text-text-muted">
-                {formatDecimal(budget.rolling_30m?.utilization_pct_of_doc_limit, 1)}% of documented cap
-              </div>
-            </div>
-            <div className="rounded border border-bg-border bg-bg-secondary/40 p-3">
-              <div className="text-[11px] uppercase tracking-wide text-text-muted">Configured Ceiling</div>
-              <div className="mt-1 text-lg font-semibold text-text-primary">
-                {formatInteger(budget.configured?.calls_per_30_minutes)} / {formatInteger(budget.limits?.per_30_minutes)}
-              </div>
-              <div className="text-xs text-text-muted">
-                gap {formatDecimal(budget.configured?.gap_seconds, 1)}s between calls
-              </div>
-            </div>
-            <div className="rounded border border-bg-border bg-bg-secondary/40 p-3">
-              <div className="text-[11px] uppercase tracking-wide text-text-muted">Last Run Rate</div>
-              <div className="mt-1 text-lg font-semibold text-text-primary">
-                {formatDecimal(budget.last_run?.avg_calls_per_second, 2)}/s
-              </div>
-              <div className="text-xs text-text-muted">
-                {formatInteger(budget.last_run?.calls)} calls in {formatDuration(budget.last_run?.elapsed_seconds)}
-              </div>
-            </div>
-            <div className="rounded border border-bg-border bg-bg-secondary/40 p-3">
-              <div className="text-[11px] uppercase tracking-wide text-text-muted">Full Useful Target</div>
-              <div className="mt-1 text-lg font-semibold text-text-primary">
-                {formatDuration(budget.theoretical?.full_seconds_at_configured_rate)}
-              </div>
-              <div className="text-xs text-text-muted">
-                configured-rate estimate from empty cache
-              </div>
-            </div>
-          </div>
-
-          <div className="grid gap-3 lg:grid-cols-2">
-            <div className="rounded border border-bg-border bg-bg-secondary/30 p-3 space-y-2">
-              <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Current Rates vs Limits</div>
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">Observed avg / min</div>
-                  <div className="font-semibold text-text-primary">{formatDecimal(budget.rolling_30m?.avg_calls_per_minute, 1)}</div>
-                </div>
-                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">Doc max / min</div>
-                  <div className="font-semibold text-text-primary">{formatInteger(budget.limits?.per_minute)}</div>
-                </div>
-                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">Observed avg / sec</div>
-                  <div className="font-semibold text-text-primary">{formatDecimal(budget.rolling_30m?.avg_calls_per_second, 3)}</div>
-                </div>
-                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">Configured / sec</div>
-                  <div className="font-semibold text-text-primary">{formatDecimal(budget.configured?.calls_per_second, 3)}</div>
-                </div>
-              </div>
-              <div className="text-xs text-text-muted">
-                Scheduler: <span className="text-text-primary">{scheduler?.label || "—"}</span>
-              </div>
-            </div>
-
-            <div className="rounded border border-bg-border bg-bg-secondary/30 p-3 space-y-2">
-              <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Useful-Dataset ETA</div>
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">Total estimated calls</div>
-                  <div className="font-semibold text-text-primary">{formatInteger(budget.theoretical?.total_calls)}</div>
-                </div>
-                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">Remaining estimated calls</div>
-                  <div className="font-semibold text-text-primary">{formatInteger(budget.theoretical?.remaining_calls)}</div>
-                </div>
-                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">Full ETA at observed rate</div>
-                  <div className="font-semibold text-text-primary">{formatDuration(budget.theoretical?.full_seconds_at_observed_rate)}</div>
-                </div>
-                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">Remaining ETA at observed rate</div>
-                  <div className="font-semibold text-text-primary">{formatDuration(budget.theoretical?.remaining_seconds_at_observed_rate)}</div>
-                </div>
-              </div>
-              <div className="text-[11px] text-text-muted">
-                Model: 1 expiry fetch per underlying, 1 spot-history fetch per underlying, 1 contract-discovery fetch per expiry, and 1 historical-candle fetch per required CE/PE research contract.
-              </div>
-            </div>
-          </div>
-
-          <div className="rounded border border-bg-border bg-bg-secondary/30 p-3 space-y-2">
-            <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Call Mix In Last 30 Minutes</div>
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 text-xs">
-              {Object.entries(budget.rolling_30m?.by_endpoint || {}).map(([endpoint, count]) => (
-                <div key={endpoint} className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">{endpoint.replaceAll("_", " ")}</div>
-                  <div className="font-semibold text-text-primary">{formatInteger(Number(count))}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </>
-      )}
-    </div>
-  );
 }
 
 function TelegramCard() {
@@ -611,6 +438,7 @@ function FyersCard({ status, onRefresh }: { status: BrokerStatusEntry | undefine
 
   const [appId, setAppId] = useState("");
   const [secret, setSecret] = useState("");
+  const [pin, setPin] = useState("");
   const [authCode, setAuthCode] = useState("");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
@@ -629,6 +457,7 @@ function FyersCard({ status, onRefresh }: { status: BrokerStatusEntry | undefine
   const handleSaveCreds = async () => {
     const appIdToSave = appId.trim() || savedAppId;
     const secretToSave = secret.trim();
+    const pinToSave = pin.trim();
     const hasSavedSecret = Boolean(savedFields["secret"]);
     if (!appIdToSave) {
       setMsg("Enter APP ID");
@@ -643,9 +472,11 @@ function FyersCard({ status, onRefresh }: { status: BrokerStatusEntry | undefine
       await saveCredentials("fyers", {
         app_id: appIdToSave,
         ...(secretToSave ? { secret: secretToSave } : {}),
+        ...(pinToSave ? { pin: pinToSave } : {}),
         redirect_uri: FYERS_FIXED_REDIRECT_URI,
       });
       setSecret("");
+      setPin("");
       setMsg("✓ Credentials saved");
       qc.invalidateQueries({ queryKey: ["allCredsStatus"] });
       qc.invalidateQueries({ queryKey: ["credentialsStatus", "fyers"] });
@@ -748,6 +579,7 @@ function FyersCard({ status, onRefresh }: { status: BrokerStatusEntry | undefine
             <div className="text-xs font-bold text-text-secondary">Step 1 — API Credentials</div>
             <TextInput value={appId} onChange={setAppId} label="APP ID (Client ID)" placeholder="XXXXXXXX-100" saved={savedFields["app_id"]} />
             <PasswordInput value={secret} onChange={setSecret} label="Secret Key" placeholder="secret" saved={savedFields["secret"]} />
+            <PasswordInput value={pin} onChange={setPin} label="PIN for refresh token reuse" placeholder="optional; stored encrypted" saved={savedFields["pin"]} />
             <TextInput value={effectiveRedirectUri}
               label="Redirect URI (fixed for Fyers login)" readOnly saved={savedFields["redirect_uri"]} />
             <button onClick={handleSaveCreds} disabled={saving}
@@ -796,6 +628,7 @@ function UpstoxCard({ status, onRefresh }: { status: BrokerStatusEntry | undefin
   const [expanded, setExpanded] = useState(false);
   const [apiKey, setApiKey] = useState("");
   const [secret, setSecret] = useState("");
+  const [analyticsToken, setAnalyticsToken] = useState("");
   const [authCode, setAuthCode] = useState("");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
@@ -804,10 +637,29 @@ function UpstoxCard({ status, onRefresh }: { status: BrokerStatusEntry | undefin
   const UPSTOX_REDIRECT = "https://www.google.com";
 
   const handleSaveCreds = async () => {
-    if (!apiKey || !secret) { setMsg("Enter both API Key and Secret"); return; }
+    const apiKeyToSave = apiKey.trim();
+    const secretToSave = secret.trim();
+    const analyticsTokenToSave = analyticsToken.trim();
+    const hasSavedApiKey = Boolean(savedFields["api_key"]);
+    const hasSavedSecret = Boolean(savedFields["secret"]);
+    if (!analyticsTokenToSave && !apiKeyToSave && !hasSavedApiKey) {
+      setMsg("Enter API Key or Analytics Token");
+      return;
+    }
+    if (!analyticsTokenToSave && !secretToSave && !hasSavedSecret) {
+      setMsg("Enter Secret or Analytics Token");
+      return;
+    }
     setSaving(true); setMsg("");
     try {
-      await saveCredentials("upstox", { api_key: apiKey, secret, redirect_uri: UPSTOX_REDIRECT });
+      await saveCredentials("upstox", {
+        ...(apiKeyToSave ? { api_key: apiKeyToSave } : {}),
+        ...(secretToSave ? { secret: secretToSave } : {}),
+        ...(analyticsTokenToSave ? { analytics_token: analyticsTokenToSave } : {}),
+        redirect_uri: UPSTOX_REDIRECT,
+      });
+      setSecret("");
+      setAnalyticsToken("");
       setMsg("✓ Credentials saved");
       qc.invalidateQueries({ queryKey: ["allCredsStatus"] });
     } catch (e: any) { setMsg(describeApiError(e, "Failed to save Upstox credentials")); }
@@ -920,6 +772,7 @@ function UpstoxCard({ status, onRefresh }: { status: BrokerStatusEntry | undefin
             </p>
             <TextInput value={apiKey} onChange={setApiKey} label="API Key" placeholder="your_api_key" saved={savedFields["api_key"]} />
             <PasswordInput value={secret} onChange={setSecret} label="Secret" placeholder="your_secret" saved={savedFields["secret"]} />
+            <PasswordInput value={analyticsToken} onChange={setAnalyticsToken} label="Analytics Token for paper/backfill" placeholder="optional long-lived read-only token" saved={savedFields["analytics_token"]} />
             <button onClick={handleSaveCreds} disabled={saving}
               className="px-3 py-1.5 rounded text-xs bg-bg-hover border border-bg-border text-text-secondary hover:border-accent-blue/40 disabled:opacity-50 flex items-center gap-1">
               {saving ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />} Save Credentials
@@ -1385,7 +1238,7 @@ export default function SettingsPage() {
     }
     qc.invalidateQueries({ queryKey: ["allCredsStatus"] });
     qc.invalidateQueries({ queryKey: ["riskStatus"] });
-    qc.invalidateQueries({ queryKey: ["settingsResearchCacheStatus"] });
+    qc.invalidateQueries({ queryKey: ["researchCacheStatus"] });
   }, [refetchBrokers, qc]);
 
   return (
@@ -1411,7 +1264,6 @@ export default function SettingsPage() {
             Live broker validation is temporarily unavailable. Showing the last broker state received by the layout bar.
           </div>
         )}
-        <UpstoxApiBudgetCard />
         <TelegramCard />
         <FyersCard status={statusMap["fyers"]} onRefresh={handleRefresh} />
         <UpstoxCard status={statusMap["upstox"]} onRefresh={handleRefresh} />

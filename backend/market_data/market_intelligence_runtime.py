@@ -18,6 +18,8 @@ from core.config import settings
 from db.database import AsyncSessionLocal
 from market_data.option_chain import OC_TTL, option_chain_service
 from market_data.symbols import to_broker_symbol, to_fyers_symbol
+from macro_research import macro_research_service
+from sector_interaction.india_live import india_live_sector_service
 
 
 UTC = timezone.utc
@@ -311,10 +313,30 @@ class MarketIntelligenceRuntime:
         )
         watchlists = await self.refresh_nse_watchlists()
         option_chains = await self.refresh_index_option_chains()
+        try:
+            sector_interaction = await india_live_sector_service.market_intelligence_payload()
+        except Exception as exc:
+            logger.warning(f"[MarketIntelligence] Sector interaction refresh failed: {exc}")
+            sector_interaction = {
+                "module": "sector_interaction",
+                "source_mode": "error",
+                "error": str(exc),
+            }
+        try:
+            macro_research = await macro_research_service.overview(refresh=False)
+        except Exception as exc:
+            logger.warning(f"[MarketIntelligence] Macro research refresh failed: {exc}")
+            macro_research = {
+                "module": "macro_research",
+                "source_mode": "error",
+                "error": str(exc),
+            }
         return {
             "spot_gap_fill": spot_gap_fill,
             "watchlists": watchlists,
             "option_chains": option_chains,
+            "sector_interaction": sector_interaction,
+            "macro_research": macro_research,
         }
 
     async def get_strategy_health(self) -> dict[str, Any]:

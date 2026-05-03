@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import {
   Activity,
@@ -10,6 +11,7 @@ import {
   CheckCircle2,
   ChevronDown,
   Layers3,
+  Network,
   RefreshCw,
   TrendingDown,
   TrendingUp,
@@ -35,7 +37,7 @@ import {
   YAxis,
 } from "recharts";
 
-import { getMPAnalytics } from "@/lib/api";
+import { getMarketIntelligenceContext, getMPAnalytics } from "@/lib/api";
 import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
 
 // ─── Colour palette ───────────────────────────────────────────────────────────
@@ -145,6 +147,134 @@ function StatCard({
         {value}
       </p>
       {sub && <p className="text-[10px] text-zinc-600 mt-0.5">{sub}</p>}
+    </div>
+  );
+}
+
+function MarketContextPanel({
+  sectorInteraction,
+  macroResearch,
+}: {
+  sectorInteraction?: any;
+  macroResearch?: any;
+}) {
+  const topSectors = sectorInteraction?.top_sectors ?? [];
+  const laggingSectors = sectorInteraction?.lagging_sectors ?? [];
+  const realModel = sectorInteraction?.real_model ?? {};
+  const nseOverlay = sectorInteraction?.nse_constituent_status ?? {};
+  const macroRead = macroResearch?.market_read ?? {};
+  const macroLeaders = macroResearch?.sector_leaders ?? [];
+  const macroRisks = macroResearch?.sector_risks ?? [];
+  const themes = macroResearch?.budding_themes ?? [];
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
+        <StatCard label="Live F&O Stocks" value={sectorInteraction?.universe?.stocks ?? "—"} sub="sector interaction universe" accent={COLORS.trend_up} />
+        <StatCard label="Mapped Stocks" value={sectorInteraction?.universe?.mapped ?? "—"} sub="F&O/ATM taxonomy" />
+        <StatCard
+          label="NSE Overlay"
+          value={nseOverlay.runtime_overlay_active ? "Active" : "Static"}
+          sub={`${nseOverlay.sector_count ?? 0} official sector CSVs`}
+          accent={nseOverlay.runtime_overlay_active ? COLORS.trend_up : COLORS.failed_auction}
+        />
+        <StatCard label="Real VAR Edges" value={realModel.edge_count ?? "—"} sub={realModel.source_mode?.replaceAll("_", " ") || "sector-index model"} accent={COLORS.trend_up} />
+        <StatCard label="Macro Headwinds" value={macroRead.headwind_count ?? "—"} sub="context gate risks" accent={COLORS.trend_dn} />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
+        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+          <SectionHeader icon={Network} title="Sector Interaction Leadership" sub="live F&O/ATM watchlist + RRG state" />
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[680px] text-xs">
+              <thead className="text-left text-zinc-500">
+                <tr className="border-b border-zinc-800">
+                  <th className="py-2 pr-3">Rank</th>
+                  <th className="py-2 pr-3">Sector</th>
+                  <th className="py-2 pr-3">Score</th>
+                  <th className="py-2 pr-3">RRG</th>
+                  <th className="py-2 pr-3">Avg Change</th>
+                  <th className="py-2 pr-3">Leaders</th>
+                </tr>
+              </thead>
+              <tbody>
+                {topSectors.slice(0, 8).map((sector: any) => (
+                  <tr key={sector.sector_key} className="border-b border-zinc-800/70">
+                    <td className="py-2 pr-3 font-mono text-zinc-400">{sector.rank}</td>
+                    <td className="py-2 pr-3 font-semibold text-zinc-100">{sector.sector}</td>
+                    <td className="py-2 pr-3 font-mono text-emerald-400">{fmt(sector.leadership_score, 2)}</td>
+                    <td className="py-2 pr-3 text-zinc-300">{sector.rrg_quadrant}</td>
+                    <td className="py-2 pr-3 font-mono">{pct(sector.avg_change_pct)}</td>
+                    <td className="py-2 pr-3 text-zinc-500">{(sector.leaders ?? []).slice(0, 3).map((item: any) => item.symbol).join(", ") || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+          <SectionHeader icon={Brain} title="Macro Research Context" sub="sector discovery and risk gate" />
+          <div className="rounded-lg border border-zinc-800 bg-zinc-950/40 p-3 text-sm leading-6 text-zinc-300">
+            {macroRead.headline ?? "Macro research context is loading."}
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-3">
+            <div>
+              <p className="mb-2 text-[11px] uppercase tracking-wide text-zinc-500">Macro Leaders</p>
+              <div className="space-y-1">
+                {macroLeaders.slice(0, 5).map((sector: any) => (
+                  <div key={sector.code} className="flex items-center justify-between rounded border border-zinc-800 bg-zinc-950/35 px-2 py-1.5 text-xs">
+                    <span className="text-zinc-300">{sector.label}</span>
+                    <span className="font-mono text-emerald-400">{fmt(sector.health_score, 1)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div>
+              <p className="mb-2 text-[11px] uppercase tracking-wide text-zinc-500">Risk Sectors</p>
+              <div className="space-y-1">
+                {macroRisks.slice(0, 5).map((sector: any) => (
+                  <div key={sector.code} className="flex items-center justify-between rounded border border-zinc-800 bg-zinc-950/35 px-2 py-1.5 text-xs">
+                    <span className="text-zinc-300">{sector.label}</span>
+                    <span className="font-mono text-red-400">{fmt(sector.risk_score, 1)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+          <SectionHeader icon={TrendingDown} title="Lagging Sector Watch" sub="avoid forcing longs into weak rotations" />
+          <div className="grid gap-2 sm:grid-cols-2">
+            {laggingSectors.slice(0, 6).map((sector: any) => (
+              <div key={sector.sector_key} className="rounded border border-zinc-800 bg-zinc-950/35 p-3">
+                <div className="text-sm font-semibold text-zinc-100">{sector.sector}</div>
+                <div className="mt-1 flex items-center justify-between text-xs">
+                  <span className="text-zinc-500">{sector.rrg_quadrant}</span>
+                  <span className="font-mono text-red-400">{fmt(sector.leadership_score, 2)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+          <SectionHeader icon={Zap} title="Budding Themes" sub="macro research discovery queue" />
+          <div className="grid gap-2 sm:grid-cols-2">
+            {themes.slice(0, 6).map((theme: any) => (
+              <div key={theme.code} className="rounded border border-zinc-800 bg-zinc-950/35 p-3">
+                <div className="text-sm font-semibold text-zinc-100">{theme.label}</div>
+                <div className="mt-1 flex items-center justify-between text-xs">
+                  <span className="text-zinc-500">{theme.stage}</span>
+                  <span className="font-mono text-blue-400">{fmt(theme.budding_score, 1)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1106,9 +1236,10 @@ function CompositeProfilePanel({ profiles, weeklyProfiles }: { profiles: any; we
 
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
 
-type Tab = "profiles" | "migration" | "regime" | "performance" | "cvd" | "drift";
+type Tab = "market" | "profiles" | "migration" | "regime" | "performance" | "cvd" | "drift";
 
 const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
+  { id: "market", label: "Macro + Sectors", icon: Network },
   { id: "profiles", label: "Multi-TF Profiles", icon: Layers3 },
   { id: "migration", label: "Value Migration", icon: TrendingUp },
   { id: "regime", label: "Regime History", icon: Activity },
@@ -1120,7 +1251,7 @@ const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
 export default function MPIntelligenceDashboard() {
   const [underlying, setUnderlying] = useState("NIFTY");
   const [lookback, setLookback] = useState(60);
-  const [activeTab, setActiveTab] = useState<Tab>("migration");
+  const [activeTab, setActiveTab] = useState<Tab>("market");
 
   const {
     data,
@@ -1136,6 +1267,14 @@ export default function MPIntelligenceDashboard() {
       getMPAnalytics(underlying, lookback).then((r) => r.data),
     staleTime: 60_000,
     refetchInterval: 90_000,
+    refetchOnWindowFocus: false,
+  });
+
+  const marketContextQuery = useQuery({
+    queryKey: ["mp-intelligence", "market-context"],
+    queryFn: () => getMarketIntelligenceContext().then((r) => r.data),
+    staleTime: 5 * 60_000,
+    refetchInterval: 5 * 60_000,
     refetchOnWindowFocus: false,
   });
 
@@ -1214,13 +1353,16 @@ export default function MPIntelligenceDashboard() {
 
           <button
             type="button"
-            onClick={() => refetch()}
-            disabled={isFetching}
+            onClick={() => {
+              refetch();
+              marketContextQuery.refetch();
+            }}
+            disabled={isFetching || marketContextQuery.isFetching}
             aria-label="Refresh MP analytics data"
             className="flex items-center gap-1.5 rounded-full border border-bg-border bg-bg-primary/20 px-3 py-1.5 text-xs font-semibold text-text-secondary transition-colors hover:border-bg-active hover:text-text-primary disabled:opacity-50"
           >
-            <RefreshCw className={clsx("h-3 w-3", isFetching && "animate-spin")} />
-            {isFetching ? "Refreshing…" : "Refresh"}
+            <RefreshCw className={clsx("h-3 w-3", (isFetching || marketContextQuery.isFetching) && "animate-spin")} />
+            {isFetching || marketContextQuery.isFetching ? "Refreshing…" : "Refresh"}
           </button>
         </div>
         </div>
@@ -1322,6 +1464,20 @@ export default function MPIntelligenceDashboard() {
           </div>
 
           <div className="pt-1">
+            {activeTab === "market" && (
+              <section>
+                <SectionHeader
+                  icon={Network}
+                  title="Market Intelligence Context"
+                  sub="macro research + sector interaction merged into the MP decision layer"
+                />
+                <MarketContextPanel
+                  sectorInteraction={marketContextQuery.data?.sector_interaction}
+                  macroResearch={marketContextQuery.data?.macro_research}
+                />
+              </section>
+            )}
+
             {activeTab === "profiles" && (
               <section>
                 <SectionHeader

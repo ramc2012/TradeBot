@@ -23,6 +23,7 @@ import {
 } from "recharts";
 
 import {
+  closeStrategyAgentPosition,
   getOrders,
   getRiskStatus,
   getStrategyAgentStatus,
@@ -269,7 +270,17 @@ function LaneSelector({
   );
 }
 
-const PositionsTable = memo(function PositionsTable({ positions }: { positions: StrategyPosition[] }) {
+const PositionsTable = memo(function PositionsTable({
+  positions,
+  strategyKey,
+  closingSymbol,
+  onClosePosition,
+}: {
+  positions: StrategyPosition[];
+  strategyKey?: string;
+  closingSymbol?: string | null;
+  onClosePosition: (symbol: string) => void;
+}) {
   if (!positions.length) {
     return (
       <div className="flex min-h-[160px] items-center justify-center rounded-xl border border-dashed border-bg-border text-sm text-text-muted">
@@ -280,7 +291,7 @@ const PositionsTable = memo(function PositionsTable({ positions }: { positions: 
 
   return (
     <div className="overflow-auto">
-      <table className="w-full min-w-[880px] text-left text-xs">
+      <table className="w-full min-w-[960px] text-left text-xs">
         <thead className="border-b border-bg-border text-text-muted">
           <tr>
             <th className="py-2 pr-3">Contract</th>
@@ -291,32 +302,49 @@ const PositionsTable = memo(function PositionsTable({ positions }: { positions: 
             <th className="py-2 pr-3">Ret%</th>
             <th className="py-2 pr-3">Phase</th>
             <th className="py-2 pr-3">Signal</th>
-            <th className="py-2">Updated</th>
+            <th className="py-2 pr-3">Updated</th>
+            <th className="py-2 text-right">Operator</th>
           </tr>
         </thead>
         <tbody>
-          {positions.map((position) => (
-            <tr key={`${position.symbol}-${position.entered_at || position.price_updated_at || "na"}`} className="border-b border-bg-border/40">
-              <td className="py-2 pr-3">
-                <div className="font-semibold text-text-primary">{position.underlying}</div>
-                <div className="text-text-muted">
-                  {position.option_type || "--"} {position.strike ?? "--"} · {position.expiry || "--"}
-                </div>
-              </td>
-              <td className="py-2 pr-3 font-mono text-text-primary">{position.qty}</td>
-              <td className="py-2 pr-3 font-mono text-text-primary">{fmt(position.entry_price)}</td>
-              <td className="py-2 pr-3 font-mono text-text-primary">{fmt(position.current_price)}</td>
-              <td className={clsx("py-2 pr-3 font-mono font-semibold", pnlTone(position.unrealized_pnl))}>
-                {fmtSigned(position.unrealized_pnl, 0)}
-              </td>
-              <td className={clsx("py-2 pr-3 font-mono", pnlTone(position.return_pct))}>
-                {position.return_pct != null ? `${fmtSigned(position.return_pct, 1)}%` : "--"}
-              </td>
-              <td className="py-2 pr-3 text-text-secondary">{position.phase || "--"}</td>
-              <td className="py-2 pr-3 text-text-secondary">{position.signal_reason}</td>
-              <td className="py-2 text-text-secondary">{fmtTime(position.price_updated_at || position.entered_at)}</td>
-            </tr>
-          ))}
+          {positions.map((position) => {
+            const isClosing = closingSymbol === position.symbol;
+            return (
+              <tr key={`${position.symbol}-${position.entered_at || position.price_updated_at || "na"}`} className="border-b border-bg-border/40">
+                <td className="py-2 pr-3">
+                  <div className="font-semibold text-text-primary">{position.underlying}</div>
+                  <div className="text-text-muted">
+                    {position.option_type || "--"} {position.strike ?? "--"} · {position.expiry || "--"}
+                  </div>
+                </td>
+                <td className="py-2 pr-3 font-mono text-text-primary">{position.qty}</td>
+                <td className="py-2 pr-3 font-mono text-text-primary">{fmt(position.entry_price)}</td>
+                <td className="py-2 pr-3 font-mono text-text-primary">{fmt(position.current_price)}</td>
+                <td className={clsx("py-2 pr-3 font-mono font-semibold", pnlTone(position.unrealized_pnl))}>
+                  {fmtSigned(position.unrealized_pnl, 0)}
+                </td>
+                <td className={clsx("py-2 pr-3 font-mono", pnlTone(position.return_pct))}>
+                  {position.return_pct != null ? `${fmtSigned(position.return_pct, 1)}%` : "--"}
+                </td>
+                <td className="py-2 pr-3 text-text-secondary">{position.phase || "--"}</td>
+                <td className="max-w-[260px] truncate py-2 pr-3 text-text-secondary" title={position.signal_reason}>
+                  {position.signal_reason}
+                </td>
+                <td className="py-2 pr-3 text-text-secondary">{fmtTime(position.price_updated_at || position.entered_at)}</td>
+                <td className="py-2 text-right">
+                  <button
+                    type="button"
+                    onClick={() => onClosePosition(position.symbol)}
+                    disabled={!strategyKey || Boolean(closingSymbol)}
+                    title="Operator close at the latest agent mark"
+                    className="rounded-lg border border-accent-red/35 bg-accent-red/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-accent-red transition-colors hover:bg-accent-red/20 disabled:cursor-not-allowed disabled:opacity-45"
+                  >
+                    {isClosing ? "Closing" : "Close"}
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -493,6 +521,7 @@ export default function StrategyDashboard() {
   const queryClient = useQueryClient();
   const [selectedKey, setSelectedKey] = useState<string>("");
   const [activeTab, setActiveTab] = useState<"positions" | "trades" | "commentary" | "regimes">("positions");
+  const [closingSymbol, setClosingSymbol] = useState<string | null>(null);
 
   const dashboardQuery = useLiveSnapshotQuery<{
     agent_status: AgentStatus;
@@ -555,6 +584,21 @@ export default function StrategyDashboard() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["nseKillSwitch"] });
       queryClient.invalidateQueries({ queryKey: ["strategyAgentStatus"] });
+    },
+  });
+  const operatorClose = useMutation({
+    mutationFn: ({ strategyKey, symbol }: { strategyKey: string; symbol: string }) =>
+      closeStrategyAgentPosition(strategyKey, symbol, "operator_override"),
+    onMutate: ({ symbol }) => {
+      setClosingSymbol(symbol);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["strategyDashboardSnapshot"] });
+      queryClient.invalidateQueries({ queryKey: ["strategyAgentStatus"] });
+      queryClient.invalidateQueries({ queryKey: ["strategyEquityHistory"] });
+    },
+    onSettled: () => {
+      setClosingSymbol(null);
     },
   });
 
@@ -716,7 +760,17 @@ export default function StrategyDashboard() {
           </div>
 
           <div className="mt-4">
-            {activeTab === "positions" ? <PositionsTable positions={selectedLane?.positions || []} /> : null}
+            {activeTab === "positions" ? (
+              <PositionsTable
+                positions={selectedLane?.positions || []}
+                strategyKey={selectedLane?.key}
+                closingSymbol={operatorClose.isPending ? closingSymbol : null}
+                onClosePosition={(symbol) => {
+                  if (!selectedLane?.key || operatorClose.isPending) return;
+                  operatorClose.mutate({ strategyKey: selectedLane.key, symbol });
+                }}
+              />
+            ) : null}
             {activeTab === "trades" ? <TradeHistoryTable trades={selectedLane?.trade_history || []} /> : null}
             {activeTab === "commentary" ? <CommentaryFeed items={agentStatus?.commentary || []} /> : null}
             {activeTab === "regimes" ? <RegimeTable regimes={agentStatus?.regime_summary || {}} /> : null}

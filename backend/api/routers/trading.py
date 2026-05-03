@@ -103,6 +103,12 @@ class KillSwitchRequest(BaseModel):
     active: bool
 
 
+class StrategyPositionCloseRequest(BaseModel):
+    strategy_key: str
+    symbol: str
+    reason: str = "operator_override"
+
+
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.post("/mode")
@@ -368,6 +374,18 @@ async def strategy_equity_history():
 @router.post("/strategy-agent/run-once")
 async def run_strategy_agent_once(force: bool = True):
     return await paper_strategy_agent.run_once(force=force)
+
+
+@router.post("/strategy-agent/positions/close")
+async def close_strategy_agent_position(req: StrategyPositionCloseRequest):
+    try:
+        return await paper_strategy_agent.operator_close_position(
+            strategy_key=req.strategy_key,
+            symbol=req.symbol,
+            reason=req.reason,
+        )
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.put("/strategy-agent/auto-run")

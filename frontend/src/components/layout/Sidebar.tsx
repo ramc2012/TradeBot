@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { clsx } from "clsx";
 import { useEffect, useState } from "react";
@@ -15,6 +16,7 @@ import {
   FlaskConical,
   Fingerprint,
   Globe,
+  Network,
   LayoutDashboard,
   Layers3,
   Settings,
@@ -44,6 +46,7 @@ const NAV_GROUPS = [
       { href: "/fractal-market-profile", label: "Fractal MP", icon: Fingerprint },
       { href: "/mp-intelligence", label: "MP Live", icon: Brain },
       { href: "/macro-research", label: "Macro Research", icon: BarChart3 },
+      { href: "/sector-interaction", label: "Sector Network", icon: Network },
       { href: "/analysis", label: "Research", icon: FlaskConical, matchers: ["/analysis", "/backtester", "/data"] },
       { href: "/agent", label: "Agent", icon: Bot },
     ],
@@ -118,11 +121,10 @@ export default function Sidebar() {
                     : pathname === matcher || pathname.startsWith(`${matcher}/`) || pathname.startsWith(matcher),
                 );
                 return (
-                  <a
+                  <Link
                     key={href}
                     href={href}
                     title={label}
-                    data-shell-nav="true"
                     className={clsx(
                       "group relative flex rounded-xl text-sm transition-colors",
                       collapsed ? "justify-center px-0 py-2.5" : "items-center gap-3 px-3 py-2.5",
@@ -151,7 +153,7 @@ export default function Sidebar() {
                         {label}
                       </span>
                     )}
-                  </a>
+                  </Link>
                 );
               })}
             </div>

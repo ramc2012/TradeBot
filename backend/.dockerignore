@@ -10,4 +10,9 @@ tests/
 *.pyd
 commodity_strategy.json
 nse_strategy_state.json
-
+credentials.json
+runtime/
+reports/
+*.sqlite
+*.db
+*.jsonl

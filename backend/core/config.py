@@ -9,6 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 _PROJECT_ROOT = _BACKEND_DIR.parent
 FYERS_FIXED_REDIRECT_URI = "https://trade.fyers.in/api-login/redirect-uri/index.html"
+UPSTOX_SANDBOX_REDIRECT_URI = "https://www.google.com"
 
 
 def normalize_fyers_redirect_uri(value: str | None) -> str:
@@ -17,6 +18,16 @@ def normalize_fyers_redirect_uri(value: str | None) -> str:
         return FYERS_FIXED_REDIRECT_URI
     if raw.endswith("/api/auth/fyers/callback"):
         return FYERS_FIXED_REDIRECT_URI
+    return raw
+
+
+def normalize_upstox_redirect_uri(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return UPSTOX_SANDBOX_REDIRECT_URI
+    lowered = raw.lower()
+    if lowered.startswith(("http://localhost", "https://localhost", "http://127.0.0.1", "https://127.0.0.1", "http://0.0.0.0", "https://0.0.0.0")):
+        return UPSTOX_SANDBOX_REDIRECT_URI
     return raw
 
 
@@ -44,6 +55,7 @@ class Settings(BaseSettings):
     DATABASE_POOL_RECYCLE_SECONDS: int = 900
     REDIS_URL: str = "redis://localhost:6383/0"
     RESEARCH_SYNC_AUTO_ENABLED: bool = False
+    RESEARCH_SYNC_EMBEDDED_ENABLED: bool = False
     STRATEGY_SPOT_SYNC_ENABLED: bool = False
     NSE_STRATEGY_BYPASS_MARKET_PROFILE_GATE: bool = False
     PAPER_TRADING_ONLY: bool = False
@@ -62,6 +74,7 @@ class Settings(BaseSettings):
     DIRECTIONAL_OPTIONS_AUTO_ENABLED: bool = True
     DIRECTIONAL_OPTIONS_AUTO_INTERVAL_SECONDS: int = 300
     COMMODITY_FYERS_RATE_LIMIT_BACKOFF_SECONDS: int = 90
+    SECTOR_INTERACTION_DURABLE_STATE_ENABLED: bool = False
 
     # Security
     SECRET_KEY: str = "change-me-to-a-random-secret-key"
@@ -70,11 +83,13 @@ class Settings(BaseSettings):
     FYERS_APP_ID: str = ""
     FYERS_SECRET: str = ""
     FYERS_REDIRECT_URI: str = FYERS_FIXED_REDIRECT_URI
+    FYERS_PIN: str = ""
 
     # Upstox
     UPSTOX_API_KEY: str = ""
     UPSTOX_SECRET: str = ""
-    UPSTOX_REDIRECT_URI: str = "https://www.google.com"
+    UPSTOX_REDIRECT_URI: str = UPSTOX_SANDBOX_REDIRECT_URI
+    UPSTOX_ANALYTICS_TOKEN: str = ""
 
     # 5Paisa
     FIVEPAISA_APP_NAME: str = ""
@@ -118,6 +133,11 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_fyers_redirect(cls, v):
         return normalize_fyers_redirect_uri(v)
+
+    @field_validator("UPSTOX_REDIRECT_URI", mode="before")
+    @classmethod
+    def normalize_upstox_redirect(cls, v):
+        return normalize_upstox_redirect_uri(v)
 
 
 @lru_cache

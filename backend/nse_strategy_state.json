@@ -265,39 +265,39 @@
       ],
       "meta": {
         "mode": "market_closed",
-        "updated_at": "2026-04-25T08:59:53.789842+05:30",
+        "updated_at": "2026-05-03T19:24:20.003438+05:30",
         "market_state": "closed",
         "scan_interval": "30minute",
         "watchlist_rows": 170,
         "broker_snapshot": {
-          "connected_brokers": [],
+          "fyers_ready": false,
+          "broker_ready": false,
+          "upstox_ready": false,
           "session_brokers": [
             "fyers",
             "upstox"
           ],
-          "upstox_ready": false,
-          "fyers_ready": false,
-          "broker_ready": false,
-          "upstox_token_health": {
-            "connected": true,
-            "source": "active_session",
-            "valid": false,
-            "status": "expired_reconnect_required",
-            "checked_at": "2026-04-24T09:48:33.606194+00:00",
-            "has_saved_token": true,
-            "needs_reconnect": true,
-            "message": "Saved Upstox access token is invalid. Upstox does not provide refresh tokens for this flow, so reconnect Upstox in Settings.",
-            "expires_at_ist": "2026-04-25T03:30:00+05:30"
-          },
+          "connected_brokers": [],
           "fyers_token_health": {
-            "connected": true,
-            "source": "active_session",
             "valid": false,
+            "source": "active_session",
             "status": "expired_reconnect_required",
+            "message": "Saved Fyers access token is invalid. Reconnect Fyers in Settings.",
+            "connected": true,
             "checked_at": "2026-04-24T09:48:33.962896+00:00",
             "has_saved_token": true,
-            "needs_reconnect": true,
-            "message": "Saved Fyers access token is invalid. Reconnect Fyers in Settings."
+            "needs_reconnect": true
+          },
+          "upstox_token_health": {
+            "valid": false,
+            "source": "active_session",
+            "status": "expired_reconnect_required",
+            "message": "Saved Upstox access token is invalid. Upstox does not provide refresh tokens for this flow, so reconnect Upstox in Settings.",
+            "connected": true,
+            "checked_at": "2026-04-24T09:48:33.606194+00:00",
+            "expires_at_ist": "2026-04-25T03:30:00+05:30",
+            "has_saved_token": true,
+            "needs_reconnect": true
           }
         },
         "market_intelligence": {
@@ -530,7 +530,7 @@
             "exit_price": 66.9665,
             "pnl": 34871.21875,
             "entry_time": "2026-04-09T14:18:28.200836+05:30",
-            "exit_time": "2026-04-24T06:21:37.238426",
+            "exit_time": "2026-04-24T06:21:37.238426+05:30",
             "instrument_type": "CE",
             "expiry": "2026-04-30",
             "strike": 1340.0,
@@ -548,7 +548,7 @@
             "exit_price": 131.58417500000002,
             "pnl": 95258.125,
             "entry_time": "2026-04-09T14:59:07.612330+05:30",
-            "exit_time": "2026-04-24T06:24:44.208172",
+            "exit_time": "2026-04-24T06:24:44.208172+05:30",
             "instrument_type": "CE",
             "expiry": "2026-04-30",
             "strike": 2300.0,
@@ -1696,287 +1696,287 @@
             "equity": 1017632.0
           },
           {
-            "time": "2026-04-24T06:20:36.721889",
+            "time": "2026-04-24T06:20:36.721889+05:30",
             "equity": 1002757.0
           },
           {
-            "time": "2026-04-24T06:21:37.238866",
+            "time": "2026-04-24T06:21:37.238866+05:30",
             "equity": 1127048.25
           },
           {
-            "time": "2026-04-24T06:21:40.903045",
+            "time": "2026-04-24T06:21:40.903045+05:30",
             "equity": 1167673.25
           },
           {
-            "time": "2026-04-24T06:22:41.728098",
+            "time": "2026-04-24T06:22:41.728098+05:30",
             "equity": 1167673.25
           },
           {
-            "time": "2026-04-24T06:23:44.110635",
+            "time": "2026-04-24T06:23:44.110635+05:30",
             "equity": 1167673.25
           },
           {
-            "time": "2026-04-24T06:24:44.208406",
+            "time": "2026-04-24T06:24:44.208406+05:30",
             "equity": 1420321.1875
           },
           {
-            "time": "2026-04-24T06:24:45.480227",
+            "time": "2026-04-24T06:24:45.480227+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:25:48.251288",
+            "time": "2026-04-24T06:25:48.251288+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:26:49.476478",
+            "time": "2026-04-24T06:26:49.476478+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:27:51.297217",
+            "time": "2026-04-24T06:27:51.297217+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:28:51.929087",
+            "time": "2026-04-24T06:28:51.929087+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:29:54.145732",
+            "time": "2026-04-24T06:29:54.145732+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:30:57.576990",
+            "time": "2026-04-24T06:30:57.576990+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:31:59.803827",
+            "time": "2026-04-24T06:31:59.803827+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:33:00.962938",
+            "time": "2026-04-24T06:33:00.962938+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:34:03.572473",
+            "time": "2026-04-24T06:34:03.572473+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:35:04.927149",
+            "time": "2026-04-24T06:35:04.927149+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:36:12.984605",
+            "time": "2026-04-24T06:36:12.984605+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:37:16.465233",
+            "time": "2026-04-24T06:37:16.465233+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:38:20.637439",
+            "time": "2026-04-24T06:38:20.637439+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:39:22.066746",
+            "time": "2026-04-24T06:39:22.066746+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:40:23.924776",
+            "time": "2026-04-24T06:40:23.924776+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:41:25.692352",
+            "time": "2026-04-24T06:41:25.692352+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:42:28.966147",
+            "time": "2026-04-24T06:42:28.966147+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:43:30.135661",
+            "time": "2026-04-24T06:43:30.135661+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:44:32.312266",
+            "time": "2026-04-24T06:44:32.312266+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:45:34.673478",
+            "time": "2026-04-24T06:45:34.673478+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:46:42.297551",
+            "time": "2026-04-24T06:46:42.297551+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:47:44.775804",
+            "time": "2026-04-24T06:47:44.775804+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:48:49.735792",
+            "time": "2026-04-24T06:48:49.735792+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:50:05.365119",
+            "time": "2026-04-24T06:50:05.365119+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:51:11.444284",
+            "time": "2026-04-24T06:51:11.444284+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:52:19.874034",
+            "time": "2026-04-24T06:52:19.874034+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:53:27.429596",
+            "time": "2026-04-24T06:53:27.429596+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:54:28.988423",
+            "time": "2026-04-24T06:54:28.988423+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:55:31.943143",
+            "time": "2026-04-24T06:55:31.943143+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:56:32.649855",
+            "time": "2026-04-24T06:56:32.649855+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:57:36.001336",
+            "time": "2026-04-24T06:57:36.001336+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:58:38.072116",
+            "time": "2026-04-24T06:58:38.072116+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T06:59:40.433498",
+            "time": "2026-04-24T06:59:40.433498+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:00:42.282892",
+            "time": "2026-04-24T07:00:42.282892+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:01:44.009419",
+            "time": "2026-04-24T07:01:44.009419+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:02:45.518248",
+            "time": "2026-04-24T07:02:45.518248+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:03:50.848265",
+            "time": "2026-04-24T07:03:50.848265+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:04:57.420001",
+            "time": "2026-04-24T07:04:57.420001+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:06:00.477533",
+            "time": "2026-04-24T07:06:00.477533+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:07:02.746321",
+            "time": "2026-04-24T07:07:02.746321+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:08:08.541489",
+            "time": "2026-04-24T07:08:08.541489+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:09:11.116275",
+            "time": "2026-04-24T07:09:11.116275+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:10:13.903316",
+            "time": "2026-04-24T07:10:13.903316+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:11:15.828645",
+            "time": "2026-04-24T07:11:15.828645+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:12:22.814489",
+            "time": "2026-04-24T07:12:22.814489+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:13:24.953854",
+            "time": "2026-04-24T07:13:24.953854+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:14:30.442450",
+            "time": "2026-04-24T07:14:30.442450+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:17:12.490858",
+            "time": "2026-04-24T07:17:12.490858+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:36:47.243559",
+            "time": "2026-04-24T07:36:47.243559+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:46:17.311511",
+            "time": "2026-04-24T07:46:17.311511+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T07:55:35.463435",
+            "time": "2026-04-24T07:55:35.463435+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T08:04:41.260361",
+            "time": "2026-04-24T08:04:41.260361+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T08:13:08.051132",
+            "time": "2026-04-24T08:13:08.051132+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T08:22:32.960972",
+            "time": "2026-04-24T08:22:32.960972+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T08:31:15.415624",
+            "time": "2026-04-24T08:31:15.415624+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T08:39:03.926708",
+            "time": "2026-04-24T08:39:03.926708+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T08:47:38.372598",
+            "time": "2026-04-24T08:47:38.372598+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T09:03:22.279211",
+            "time": "2026-04-24T09:03:22.279211+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T09:11:09.387080",
+            "time": "2026-04-24T09:11:09.387080+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T09:20:29.632067",
+            "time": "2026-04-24T09:20:29.632067+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T09:29:53.994073",
+            "time": "2026-04-24T09:29:53.994073+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T09:38:17.690042",
+            "time": "2026-04-24T09:38:17.690042+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T09:47:12.644690",
+            "time": "2026-04-24T09:47:12.644690+05:30",
             "equity": 1508571.1875
           },
           {
-            "time": "2026-04-24T09:58:38.664849",
+            "time": "2026-04-24T09:58:38.664849+05:30",
             "equity": 1508571.1875
           }
         ]
@@ -1990,124 +1990,124 @@
       "processed_signals": {},
       "signal_lane": [
         {
-          "strategy": "Strategy 2",
+          "as_of": "2026-04-24T15:24:07.801100+05:30",
+          "reason": "spot_warmup",
           "source": "live_scan",
+          "status": "waiting",
+          "strategy": "Strategy 2",
+          "strength": "standby",
+          "direction": null,
+          "freshness": "missing",
+          "trade_date": "live scan",
           "underlying": "BANKNIFTY",
-          "signal_date": "2026-04-24",
-          "trade_date": "live scan",
-          "as_of": "2026-04-24T15:24:07.801100+05:30",
-          "direction": null,
-          "reason": "spot_warmup",
-          "strength": "standby",
-          "status": "waiting",
-          "freshness": "missing",
-          "instruction": "BANKNIFTY: 0 spot bars loaded for latest available session. Waiting for intraday Market Profile warm-up."
+          "instruction": "BANKNIFTY: 0 spot bars loaded for latest available session. Waiting for intraday Market Profile warm-up.",
+          "signal_date": "2026-04-24"
         },
         {
-          "strategy": "Strategy 2",
+          "as_of": "2026-04-24T15:24:07.801100+05:30",
+          "reason": "spot_warmup",
           "source": "live_scan",
+          "status": "waiting",
+          "strategy": "Strategy 2",
+          "strength": "standby",
+          "direction": null,
+          "freshness": "missing",
+          "trade_date": "live scan",
           "underlying": "FINNIFTY",
-          "signal_date": "2026-04-24",
-          "trade_date": "live scan",
-          "as_of": "2026-04-24T15:24:07.801100+05:30",
-          "direction": null,
-          "reason": "spot_warmup",
-          "strength": "standby",
-          "status": "waiting",
-          "freshness": "missing",
-          "instruction": "FINNIFTY: 0 spot bars loaded for latest available session. Waiting for intraday Market Profile warm-up."
+          "instruction": "FINNIFTY: 0 spot bars loaded for latest available session. Waiting for intraday Market Profile warm-up.",
+          "signal_date": "2026-04-24"
         },
         {
-          "strategy": "Strategy 2",
+          "as_of": "2026-04-24T15:24:07.801100+05:30",
+          "reason": "spot_warmup",
           "source": "live_scan",
+          "status": "waiting",
+          "strategy": "Strategy 2",
+          "strength": "standby",
+          "direction": null,
+          "freshness": "missing",
+          "trade_date": "live scan",
           "underlying": "MIDCPNIFTY",
-          "signal_date": "2026-04-24",
-          "trade_date": "live scan",
-          "as_of": "2026-04-24T15:24:07.801100+05:30",
-          "direction": null,
-          "reason": "spot_warmup",
-          "strength": "standby",
-          "status": "waiting",
-          "freshness": "missing",
-          "instruction": "MIDCPNIFTY: 0 spot bars loaded for latest available session. Waiting for intraday Market Profile warm-up."
+          "instruction": "MIDCPNIFTY: 0 spot bars loaded for latest available session. Waiting for intraday Market Profile warm-up.",
+          "signal_date": "2026-04-24"
         },
         {
-          "strategy": "Strategy 2",
+          "as_of": "2026-04-24T15:24:07.801100+05:30",
+          "reason": "spot_warmup",
           "source": "live_scan",
+          "status": "waiting",
+          "strategy": "Strategy 2",
+          "strength": "standby",
+          "direction": null,
+          "freshness": "missing",
+          "trade_date": "live scan",
           "underlying": "NIFTY",
-          "signal_date": "2026-04-24",
-          "trade_date": "live scan",
-          "as_of": "2026-04-24T15:24:07.801100+05:30",
-          "direction": null,
-          "reason": "spot_warmup",
-          "strength": "standby",
-          "status": "waiting",
-          "freshness": "missing",
-          "instruction": "NIFTY: 0 spot bars loaded for latest available session. Waiting for intraday Market Profile warm-up."
+          "instruction": "NIFTY: 0 spot bars loaded for latest available session. Waiting for intraday Market Profile warm-up.",
+          "signal_date": "2026-04-24"
         },
         {
-          "strategy": "Strategy 2",
-          "source": "live_scan",
-          "underlying": "SENSEX",
-          "signal_date": "2026-04-24",
-          "trade_date": "live scan",
           "as_of": "2026-04-24T15:24:07.801100+05:30",
-          "direction": null,
           "reason": "spot_warmup",
-          "strength": "standby",
+          "source": "live_scan",
           "status": "waiting",
+          "strategy": "Strategy 2",
+          "strength": "standby",
+          "direction": null,
           "freshness": "missing",
-          "instruction": "SENSEX: 0 spot bars loaded for latest available session. Waiting for intraday Market Profile warm-up."
+          "trade_date": "live scan",
+          "underlying": "SENSEX",
+          "instruction": "SENSEX: 0 spot bars loaded for latest available session. Waiting for intraday Market Profile warm-up.",
+          "signal_date": "2026-04-24"
         }
       ],
       "meta": {
         "mode": "market_closed",
-        "scan_interval": "5minute",
-        "watchlist_rows": 5,
-        "updated_at": "2026-04-25T08:59:53.789842+05:30",
         "pipeline": [
           {
             "name": "Strategy 2 BANKNIFTY",
-            "status": "missing",
             "rows": 0,
-            "last_date": "\u2014",
             "detail": "none spot rows warming up (latest available session)",
-            "freshness": "missing"
+            "status": "missing",
+            "freshness": "missing",
+            "last_date": "\u2014"
           },
           {
             "name": "Strategy 2 FINNIFTY",
-            "status": "missing",
             "rows": 0,
-            "last_date": "\u2014",
             "detail": "none spot rows warming up (latest available session)",
-            "freshness": "missing"
+            "status": "missing",
+            "freshness": "missing",
+            "last_date": "\u2014"
           },
           {
             "name": "Strategy 2 MIDCPNIFTY",
-            "status": "missing",
             "rows": 0,
-            "last_date": "\u2014",
             "detail": "none spot rows warming up (latest available session)",
-            "freshness": "missing"
+            "status": "missing",
+            "freshness": "missing",
+            "last_date": "\u2014"
           },
           {
             "name": "Strategy 2 NIFTY",
-            "status": "missing",
             "rows": 0,
-            "last_date": "\u2014",
             "detail": "none spot rows warming up (latest available session)",
-            "freshness": "missing"
+            "status": "missing",
+            "freshness": "missing",
+            "last_date": "\u2014"
           },
           {
             "name": "Strategy 2 SENSEX",
-            "status": "missing",
             "rows": 0,
-            "last_date": "\u2014",
             "detail": "none spot rows warming up (latest available session)",
-            "freshness": "missing"
+            "status": "missing",
+            "freshness": "missing",
+            "last_date": "\u2014"
           }
         ],
-        "market_state": "closed"
+        "updated_at": "2026-05-03T19:24:20.003438+05:30",
+        "market_state": "closed",
+        "scan_interval": "5minute",
+        "watchlist_rows": 5
       },
       "recent_events": [],
       "positions": [],
@@ -3091,279 +3091,279 @@
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:20:36.723463",
+            "time": "2026-04-24T06:20:36.723463+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:21:40.905493",
+            "time": "2026-04-24T06:21:40.905493+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:22:41.729779",
+            "time": "2026-04-24T06:22:41.729779+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:23:44.115647",
+            "time": "2026-04-24T06:23:44.115647+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:24:45.481681",
+            "time": "2026-04-24T06:24:45.481681+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:25:48.268109",
+            "time": "2026-04-24T06:25:48.268109+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:26:49.478400",
+            "time": "2026-04-24T06:26:49.478400+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:27:51.299896",
+            "time": "2026-04-24T06:27:51.299896+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:28:51.932649",
+            "time": "2026-04-24T06:28:51.932649+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:29:54.148738",
+            "time": "2026-04-24T06:29:54.148738+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:30:57.581992",
+            "time": "2026-04-24T06:30:57.581992+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:31:59.806435",
+            "time": "2026-04-24T06:31:59.806435+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:33:00.966692",
+            "time": "2026-04-24T06:33:00.966692+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:34:03.575450",
+            "time": "2026-04-24T06:34:03.575450+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:35:04.928969",
+            "time": "2026-04-24T06:35:04.928969+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:36:12.988114",
+            "time": "2026-04-24T06:36:12.988114+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:37:16.482324",
+            "time": "2026-04-24T06:37:16.482324+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:38:20.639896",
+            "time": "2026-04-24T06:38:20.639896+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:39:22.068378",
+            "time": "2026-04-24T06:39:22.068378+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:40:23.934990",
+            "time": "2026-04-24T06:40:23.934990+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:41:25.694097",
+            "time": "2026-04-24T06:41:25.694097+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:42:28.968866",
+            "time": "2026-04-24T06:42:28.968866+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:43:30.138229",
+            "time": "2026-04-24T06:43:30.138229+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:44:32.314608",
+            "time": "2026-04-24T06:44:32.314608+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:45:35.068215",
+            "time": "2026-04-24T06:45:35.068215+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:46:42.301556",
+            "time": "2026-04-24T06:46:42.301556+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:47:44.780119",
+            "time": "2026-04-24T06:47:44.780119+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:48:49.819657",
+            "time": "2026-04-24T06:48:49.819657+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:50:06.134043",
+            "time": "2026-04-24T06:50:06.134043+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:51:11.481997",
+            "time": "2026-04-24T06:51:11.481997+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:52:19.877725",
+            "time": "2026-04-24T06:52:19.877725+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:53:27.493584",
+            "time": "2026-04-24T06:53:27.493584+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:54:28.992624",
+            "time": "2026-04-24T06:54:28.992624+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:55:31.948581",
+            "time": "2026-04-24T06:55:31.948581+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:56:32.651978",
+            "time": "2026-04-24T06:56:32.651978+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:57:36.004287",
+            "time": "2026-04-24T06:57:36.004287+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:58:38.075698",
+            "time": "2026-04-24T06:58:38.075698+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T06:59:40.447354",
+            "time": "2026-04-24T06:59:40.447354+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:00:42.285908",
+            "time": "2026-04-24T07:00:42.285908+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:01:44.011501",
+            "time": "2026-04-24T07:01:44.011501+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:02:45.520486",
+            "time": "2026-04-24T07:02:45.520486+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:03:50.853298",
+            "time": "2026-04-24T07:03:50.853298+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:04:57.450402",
+            "time": "2026-04-24T07:04:57.450402+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:06:00.548526",
+            "time": "2026-04-24T07:06:00.548526+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:07:02.748736",
+            "time": "2026-04-24T07:07:02.748736+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:08:08.550368",
+            "time": "2026-04-24T07:08:08.550368+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:09:11.123867",
+            "time": "2026-04-24T07:09:11.123867+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:10:13.906799",
+            "time": "2026-04-24T07:10:13.906799+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:11:15.837326",
+            "time": "2026-04-24T07:11:15.837326+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:12:22.817427",
+            "time": "2026-04-24T07:12:22.817427+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:13:24.956222",
+            "time": "2026-04-24T07:13:24.956222+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:14:30.446869",
+            "time": "2026-04-24T07:14:30.446869+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:17:12.524807",
+            "time": "2026-04-24T07:17:12.524807+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:36:47.289145",
+            "time": "2026-04-24T07:36:47.289145+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:46:17.319961",
+            "time": "2026-04-24T07:46:17.319961+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T07:55:35.469968",
+            "time": "2026-04-24T07:55:35.469968+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T08:04:41.277105",
+            "time": "2026-04-24T08:04:41.277105+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T08:13:08.069846",
+            "time": "2026-04-24T08:13:08.069846+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T08:22:33.030303",
+            "time": "2026-04-24T08:22:33.030303+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T08:31:15.419621",
+            "time": "2026-04-24T08:31:15.419621+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T08:39:03.934616",
+            "time": "2026-04-24T08:39:03.934616+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T08:47:38.378205",
+            "time": "2026-04-24T08:47:38.378205+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T09:03:22.289962",
+            "time": "2026-04-24T09:03:22.289962+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T09:11:09.389589",
+            "time": "2026-04-24T09:11:09.389589+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T09:20:29.634356",
+            "time": "2026-04-24T09:20:29.634356+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T09:29:54.020150",
+            "time": "2026-04-24T09:29:54.020150+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T09:38:17.694636",
+            "time": "2026-04-24T09:38:17.694636+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T09:47:12.665715",
+            "time": "2026-04-24T09:47:12.665715+05:30",
             "equity": 1000000.0
           },
           {
-            "time": "2026-04-24T09:58:38.669040",
+            "time": "2026-04-24T09:58:38.669040+05:30",
             "equity": 1000000.0
           }
         ]

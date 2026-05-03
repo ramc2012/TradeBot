@@ -2309,6 +2309,22 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "trade",
             f"EXIT {position.display_name} {position.option_type or ''} @{current_price:.2f} ({reason}) | {exit_lots} lot",
         )
+        multiplier = 1 if position.action == "BUY" else -1
+        pnl = multiplier * (current_price - position.entry_price) * qty
+        from agentic_rag.trade_memory import build_strategy_trade_case, record_trade_case
+
+        trade_case = build_strategy_trade_case(
+            runtime_key=position.strategy_key,
+            runtime_label=position.strategy_title,
+            position=position,
+            exit_price=current_price,
+            reason=reason,
+            close_qty=qty,
+            pnl=pnl,
+            partial=keep_open and qty < position.qty,
+            source="paper_commodity_strategy_agent",
+        )
+        await record_trade_case(trade_case)
         if keep_open and qty < position.qty:
             position.qty -= qty
             position.lots = max(1, position.qty // max(position.lot_size, 1))

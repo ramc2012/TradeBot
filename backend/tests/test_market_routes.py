@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 
@@ -39,7 +40,11 @@ def test_ltp_route_normalizes_display_symbols(monkeypatch) -> None:
     async def _fake_get_market_adapter():
         return _FakeAdapter(), "upstox"
 
+    async def _no_db_snapshot(_market_symbol):
+        return None
+
     monkeypatch.setattr(market_router, "_get_market_adapter", _fake_get_market_adapter)
+    monkeypatch.setattr(market_router, "_latest_market_tick_snapshot", _no_db_snapshot)
 
     client = _build_client()
     response = client.post("/api/market/ltp", json={"symbols": ["NIFTY", "BANKNIFTY"]})
@@ -61,14 +66,29 @@ def test_ltp_route_ignores_implausible_mock_index_prices(monkeypatch) -> None:
     async def _fake_get_market_adapter():
         return _FakeAdapter(), "upstox"
 
-    async def _fake_latest_local_spot_close(app_symbol: str) -> float:
-        return {
+    async def _fake_latest_market_tick_snapshot(market_symbol) -> market_router.LatestTickSnapshot | None:
+        prices = {
             "NSE:NIFTY50-INDEX": 24025.5,
             "NSE:BANKNIFTY-INDEX": 55110.0,
-        }.get(app_symbol, 0.0)
+        }
+        price = prices.get(market_symbol.app_symbol)
+        if not price:
+            return None
+        return market_router.LatestTickSnapshot(
+            symbol=market_symbol.app_symbol,
+            ltp=price,
+            open=price,
+            high=price,
+            low=price,
+            close=price,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            source="underlying_spot_candles",
+            stale=False,
+            stale_seconds=0.0,
+        )
 
     monkeypatch.setattr(market_router, "_get_market_adapter", _fake_get_market_adapter)
-    monkeypatch.setattr(market_router, "_latest_local_spot_close", _fake_latest_local_spot_close)
+    monkeypatch.setattr(market_router, "_latest_market_tick_snapshot", _fake_latest_market_tick_snapshot)
     monkeypatch.setattr(market_router.data_router, "get_ltp", lambda _symbol: 99.0)
 
     client = _build_client()
@@ -79,6 +99,41 @@ def test_ltp_route_ignores_implausible_mock_index_prices(monkeypatch) -> None:
         "NSE:NIFTY50-INDEX": 24025.5,
         "NSE:BANKNIFTY-INDEX": 55110.0,
     }
+
+
+def test_latest_ticks_route_reports_database_source(monkeypatch) -> None:
+    async def _fake_get_market_adapter():
+        return None, "none"
+
+    async def _fake_latest_market_tick_snapshot(market_symbol) -> market_router.LatestTickSnapshot:
+        return market_router.LatestTickSnapshot(
+            symbol=market_symbol.app_symbol,
+            ltp=24025.5,
+            open=23980.0,
+            high=24040.0,
+            low=23950.0,
+            close=23990.0,
+            volume=100,
+            oi=0,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            source="market_ticks",
+            stale=False,
+            stale_seconds=0.0,
+        )
+
+    monkeypatch.setattr(market_router, "_get_market_adapter", _fake_get_market_adapter)
+    monkeypatch.setattr(market_router, "_latest_market_tick_snapshot", _fake_latest_market_tick_snapshot)
+    monkeypatch.setattr(market_router.data_router, "get_ltp", lambda _symbol: 0.0)
+
+    client = _build_client()
+    response = client.post("/api/market/latest-ticks", json={"symbols": ["NIFTY"]})
+
+    assert response.status_code == 200
+    payload = response.json()["NSE:NIFTY50-INDEX"]
+    assert payload["ltp"] == 24025.5
+    assert payload["close"] == 23990.0
+    assert payload["source"] == "market_ticks"
+    assert payload["stale"] is False
 
 
 def test_expiries_route_normalizes_display_symbol(monkeypatch) -> None:

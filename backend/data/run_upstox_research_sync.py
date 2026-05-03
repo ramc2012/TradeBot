@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -25,9 +26,31 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _load_upstox_token() -> str:
+    try:
+        from api.routers.auth import (
+            _broker_credentials,
+            _token_is_expired,
+            get_broker_token,
+            load_persistent_credentials,
+        )
+
+        load_persistent_credentials()
+        token = get_broker_token("upstox")
+        if token:
+            upstox_creds = _broker_credentials.get("upstox", {})
+            if not _token_is_expired(token, expires_at=upstox_creds.get("expires_at")):
+                return token.strip()
+            logger.warning("Saved Upstox token is expired; waiting for reconnect")
+    except Exception as exc:
+        logger.warning(f"Could not load Upstox token through credential store: {exc}")
+
     if not DEFAULT_CREDS_PATH.exists():
         return ""
-    payload = json.loads(DEFAULT_CREDS_PATH.read_text())
+    try:
+        payload = json.loads(DEFAULT_CREDS_PATH.read_text())
+    except Exception as exc:
+        logger.warning(f"Could not read {DEFAULT_CREDS_PATH}: {exc}")
+        return ""
     return str(payload.get("upstox", {}).get("access_token", "")).strip()
 
 
@@ -225,6 +248,59 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or str(value).strip() == "":
+        return default
+    return int(str(value).strip())
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None or str(value).strip() == "":
+        return default
+    return float(str(value).strip())
+
+
+def _env_time(name: str) -> time | None:
+    value = os.environ.get(name)
+    if value is None or str(value).strip() == "":
+        return None
+    return _parse_hhmm(str(value).strip())
+
+
+def _build_daemon_args_from_env() -> argparse.Namespace:
+    return argparse.Namespace(
+        from_date=os.environ.get(
+            "RESEARCH_FROM_DATE",
+            (date.today() - timedelta(days=365)).isoformat(),
+        ),
+        to_date=os.environ.get("RESEARCH_TO_DATE", date.today().isoformat()),
+        poll_minutes=_env_int("RESEARCH_POLL_MINUTES", 30),
+        backlog_poll_seconds=_env_float(
+            "RESEARCH_BACKLOG_POLL_SECONDS",
+            DEFAULT_BACKLOG_POLL_SECONDS,
+        ),
+        underlying_limit=_env_int("RESEARCH_UNDERLYING_LIMIT", 25),
+        expiry_limit=_env_int("RESEARCH_EXPIRY_LIMIT", 80),
+        spot_limit=_env_int("RESEARCH_SPOT_LIMIT", 25),
+        contract_limit=_env_int("RESEARCH_CONTRACT_LIMIT", 120),
+        risk_free_rate=_env_float("RESEARCH_RISK_FREE_RATE", 0.06),
+        upstox_gap_seconds=_env_float("RESEARCH_UPSTOX_GAP_SECONDS", 1.2),
+        daemon=True,
+        window_start_ist=_env_time("RESEARCH_WINDOW_START_IST"),
+        window_end_ist=_env_time("RESEARCH_WINDOW_END_IST"),
+        daily_once_per_window=_env_bool("RESEARCH_DAILY_ONCE_PER_WINDOW", False),
+    )
+
+
 def _configure_logging() -> None:
     logger.remove()
     logger.add(sys.stderr, level="INFO")
@@ -279,9 +355,7 @@ async def _sleep_until(next_run_at: datetime) -> None:
         await asyncio.sleep(min(MAX_DAEMON_SLEEP_SECONDS, remaining_seconds))
 
 
-async def _run() -> int:
-    _configure_logging()
-    args = _parse_args()
+async def _run_with_args(args: argparse.Namespace) -> int:
     token = _load_upstox_token().strip()
     sync: UpstoxResearchSync | None = None
 
@@ -322,12 +396,12 @@ async def _run() -> int:
                         "sleep_seconds": round(sleep_seconds, 2),
                         "elapsed_seconds": round(elapsed_seconds, 2),
                         "error": None,
-                        "detail": "Waiting for a saved Upstox token in backend/credentials.json",
+                        "detail": "Waiting for a valid saved Upstox token in the credential store",
                         "last_result": runtime_state.get("last_result"),
                         "history": history,
                     }
                 )
-                logger.warning("No saved Upstox token found in backend/credentials.json")
+                logger.warning("No valid saved Upstox token found in the credential store")
                 await _sleep_until(next_run_at)
                 continue
 
@@ -479,7 +553,7 @@ async def _run() -> int:
         return 0
 
     if sync is None:
-        print("No saved Upstox token found in backend/credentials.json")
+        print("No valid saved Upstox token found in the credential store")
         return 1
 
     result = await sync.run_once(
@@ -490,6 +564,15 @@ async def _run() -> int:
     )
     print(json.dumps(result, indent=2))
     return 0
+
+
+async def run_daemon_from_env() -> None:
+    await _run_with_args(_build_daemon_args_from_env())
+
+
+async def _run() -> int:
+    _configure_logging()
+    return await _run_with_args(_parse_args())
 
 
 def main() -> None:

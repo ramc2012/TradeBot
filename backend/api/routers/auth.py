@@ -18,7 +18,13 @@ import psycopg2
 from psycopg2.extras import Json
 
 from brokers import get_broker, BROKER_MAP
-from core.config import FYERS_FIXED_REDIRECT_URI, normalize_fyers_redirect_uri, settings
+from core.config import (
+    FYERS_FIXED_REDIRECT_URI,
+    UPSTOX_SANDBOX_REDIRECT_URI,
+    normalize_fyers_redirect_uri,
+    normalize_upstox_redirect_uri,
+    settings,
+)
 from core.security import decrypt_token, encrypt_token, issue_ephemeral_token, verify_ephemeral_token
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -80,8 +86,8 @@ _broker_snapshot_cache: dict[str, Any] = {
 }
 _broker_snapshot_lock = asyncio.Lock()
 _SENSITIVE_CREDENTIAL_FIELDS = {
-    "fyers": {"app_id", "secret", "redirect_uri", "access_token", "refresh_token"},
-    "upstox": {"api_key", "secret", "redirect_uri", "access_token", "refresh_token"},
+    "fyers": {"app_id", "secret", "redirect_uri", "access_token", "refresh_token", "pin"},
+    "upstox": {"api_key", "secret", "redirect_uri", "access_token", "refresh_token", "analytics_token"},
     "fivepaisa": {"app_name", "app_source", "user_id", "email", "password", "user_key", "encryption_key"},
     "icici_breeze": {"api_key", "secret"},
     "telegram": {"bot_token", "chat_id"},
@@ -387,7 +393,7 @@ def _persist_broker_session(
     }
     for key, value in updates.items():
         if value in (None, ""):
-            if key in entry and key in {"refresh_token", "expires_at"}:
+            if key in entry and key in {"expires_at"}:
                 entry.pop(key, None)
                 changed = True
             continue
@@ -432,6 +438,7 @@ def _merge_explicit_env_credentials(creds: dict) -> dict:
     fyers_app_id = _explicit_env("FYERS_APP_ID")
     fyers_secret = _explicit_env("FYERS_SECRET")
     fyers_redirect = _explicit_env("FYERS_REDIRECT_URI")
+    fyers_pin = _explicit_env("FYERS_PIN")
     fyers_existing = dict(merged_creds.get("fyers") or {})
     fyers_seed = {
         "app_id": fyers_app_id,
@@ -439,12 +446,19 @@ def _merge_explicit_env_credentials(creds: dict) -> dict:
     }
     if fyers_redirect and (fyers_existing or fyers_app_id or fyers_secret):
         fyers_seed["redirect_uri"] = normalize_fyers_redirect_uri(fyers_redirect)
+    if fyers_pin:
+        fyers_seed["pin"] = fyers_pin
     env_seed = {
         "fyers": fyers_seed,
         "upstox": {
             "api_key": _explicit_env("UPSTOX_API_KEY"),
             "secret": _explicit_env("UPSTOX_SECRET"),
-            "redirect_uri": _explicit_env("UPSTOX_REDIRECT_URI"),
+            "analytics_token": _explicit_env("UPSTOX_ANALYTICS_TOKEN"),
+            "redirect_uri": (
+                normalize_upstox_redirect_uri(_explicit_env("UPSTOX_REDIRECT_URI"))
+                if _explicit_env("UPSTOX_REDIRECT_URI")
+                else None
+            ),
         },
         "fivepaisa": {
             "app_name": _explicit_env("FIVEPAISA_APP_NAME"),
@@ -485,6 +499,11 @@ def _normalize_broker_credentials(creds: dict) -> tuple[dict, bool]:
             if broker_values.get("redirect_uri") != redirect_uri:
                 broker_values["redirect_uri"] = redirect_uri
                 changed = True
+        if broker == "upstox" and broker_values:
+            redirect_uri = normalize_upstox_redirect_uri(broker_values.get("redirect_uri"))
+            if broker_values.get("redirect_uri") != redirect_uri:
+                broker_values["redirect_uri"] = redirect_uri
+                changed = True
         normalized[broker] = broker_values
     return normalized, changed
 
@@ -494,13 +513,16 @@ def _apply_credentials_to_settings(broker: str, creds: dict) -> None:
     if broker == "fyers":
         if creds.get("app_id"):   settings.FYERS_APP_ID = creds["app_id"]
         if creds.get("secret"):   settings.FYERS_SECRET = creds["secret"]
+        if creds.get("pin"):      settings.FYERS_PIN = creds["pin"]
         settings.FYERS_REDIRECT_URI = normalize_fyers_redirect_uri(
             creds.get("redirect_uri") or settings.FYERS_REDIRECT_URI
         )
     elif broker == "upstox":
         if creds.get("api_key"):      settings.UPSTOX_API_KEY = creds["api_key"]
         if creds.get("secret"):       settings.UPSTOX_SECRET = creds["secret"]
-        if creds.get("redirect_uri"): settings.UPSTOX_REDIRECT_URI = creds["redirect_uri"]
+        if creds.get("analytics_token"): settings.UPSTOX_ANALYTICS_TOKEN = creds["analytics_token"]
+        if creds.get("redirect_uri"):
+            settings.UPSTOX_REDIRECT_URI = normalize_upstox_redirect_uri(creds["redirect_uri"])
         # access_token is stored for auto-restore but not pushed to settings
     elif broker == "fivepaisa":
         if creds.get("app_name"):       settings.FIVEPAISA_APP_NAME = creds["app_name"]
@@ -654,6 +676,46 @@ async def _validate_fyers_access_token(access_token: str) -> bool:
         return False
 
 
+def _has_saved_fyers_refresh_material() -> bool:
+    fyers_creds = _broker_credentials.get("fyers", {})
+    return bool(
+        str(fyers_creds.get("refresh_token") or "").strip()
+        and str(fyers_creds.get("pin") or settings.FYERS_PIN or "").strip()
+        and str(fyers_creds.get("app_id") or settings.FYERS_APP_ID or "").strip()
+        and str(fyers_creds.get("secret") or settings.FYERS_SECRET or "").strip()
+    )
+
+
+async def _refresh_fyers_session_from_saved_credentials() -> bool:
+    refresh_persistent_credentials(force=True)
+    fyers_creds = _broker_credentials.get("fyers", {})
+    refresh_token = str(fyers_creds.get("refresh_token") or "").strip()
+    pin = str(fyers_creds.get("pin") or settings.FYERS_PIN or "").strip()
+    if not _has_saved_fyers_refresh_material():
+        return False
+    try:
+        from brokers.fyers import FyersAdapter
+
+        adapter = FyersAdapter()
+        token = await adapter.authenticate({"refresh_token": refresh_token, "pin": pin})
+        profile = await adapter.get_profile()
+        with _active_brokers_lock:
+            _active_brokers["fyers"] = {
+                "adapter": adapter,
+                "token": token,
+                "profile": profile,
+                "connected_at": datetime.utcnow().isoformat(),
+                "auto_refreshed": True,
+            }
+        _persist_broker_session("fyers", token)
+        await _sync_market_data_feed()
+        logger.info("✓ Fyers refreshed from saved refresh token")
+        return True
+    except Exception as exc:
+        logger.warning(f"Fyers refresh-token restore failed: {exc}")
+        return False
+
+
 def _next_upstox_expiry_ist(now_utc: datetime) -> datetime:
     now_ist = now_utc.astimezone(IST)
     cutoff = now_ist.replace(hour=3, minute=30, second=0, microsecond=0)
@@ -666,8 +728,9 @@ async def get_upstox_token_health(force: bool = False) -> dict:
     refresh_persistent_credentials(force=force)
     upstox_creds = _broker_credentials.get("upstox", {})
     active_token = _get_active_session_access_token("upstox")
+    analytics_token = str(upstox_creds.get("analytics_token", "")).strip()
     saved_token = str(upstox_creds.get("access_token", "")).strip()
-    token_to_check = active_token or saved_token
+    token_to_check = active_token or analytics_token or saved_token
     with _active_brokers_lock:
         connected = "upstox" in _active_brokers
     now = datetime.now(timezone.utc)
@@ -679,7 +742,8 @@ async def get_upstox_token_health(force: bool = False) -> dict:
             "valid": False,
             "status": "missing",
             "checked_at": None,
-            "has_saved_token": bool(saved_token),
+            "has_saved_token": bool(saved_token or analytics_token),
+            "analytics_token_saved": bool(analytics_token),
             "needs_reconnect": True,
             "message": "No saved Upstox token is available. Connect Upstox in Settings.",
             "expires_at_ist": None,
@@ -699,11 +763,22 @@ async def get_upstox_token_health(force: bool = False) -> dict:
         cached["source"] = "active_session" if active_token else "saved_credentials"
         return cached
 
-    is_valid = await _validate_upstox_access_token(token_to_check)
-    source = "active_session" if active_token else "saved_credentials"
+    source = (
+        "active_session"
+        if active_token
+        else ("analytics_token" if analytics_token and token_to_check == analytics_token else "saved_credentials")
+    )
     expires_at_ist = _next_upstox_expiry_ist(now).isoformat()
+    is_valid = (
+        not _token_is_expired(token_to_check)
+        if source == "analytics_token"
+        else await _validate_upstox_access_token(token_to_check)
+    )
 
-    if is_valid:
+    if is_valid and source == "analytics_token":
+        status = "valid_analytics_token"
+        message = "Upstox analytics token is saved and usable for read-only historical data/backfill."
+    elif is_valid:
         status = "valid_no_refresh"
         expiry_label = _next_upstox_expiry_ist(now).strftime("%B %d, %Y %I:%M %p IST")
         message = (
@@ -723,7 +798,8 @@ async def get_upstox_token_health(force: bool = False) -> dict:
         "valid": is_valid,
         "status": status,
         "checked_at": now.isoformat(),
-        "has_saved_token": bool(saved_token),
+        "has_saved_token": bool(saved_token or analytics_token),
+        "analytics_token_saved": bool(analytics_token),
         "needs_reconnect": not is_valid,
         "message": message,
         "expires_at_ist": expires_at_ist,
@@ -772,6 +848,7 @@ async def get_fyers_token_health(force: bool = False) -> dict:
 
     is_valid = await _validate_fyers_access_token(token_to_check)
     source = "active_session" if active_token else "saved_credentials"
+    refresh_available = _has_saved_fyers_refresh_material()
     result = {
         "connected": connected,
         "source": source,
@@ -779,11 +856,16 @@ async def get_fyers_token_health(force: bool = False) -> dict:
         "status": "valid_session" if is_valid else "expired_reconnect_required",
         "checked_at": now.isoformat(),
         "has_saved_token": bool(saved_token),
+        "refresh_available": refresh_available,
         "needs_reconnect": not is_valid,
         "message": (
             "Fyers token is valid for the current session."
             if is_valid
-            else "Saved Fyers access token is invalid. Reconnect Fyers in Settings."
+            else (
+                "Saved Fyers access token is invalid, but encrypted refresh material is available."
+                if refresh_available
+                else "Saved Fyers access token is invalid. Reconnect Fyers in Settings."
+            )
         ),
     }
     _fyers_token_health_cache.update(
@@ -971,16 +1053,16 @@ async def ensure_fyers_session(force_validate: bool = False) -> bool:
 
     saved_token = str(_broker_credentials.get("fyers", {}).get("access_token", "")).strip()
     if not saved_token:
-        return False
+        return await _refresh_fyers_session_from_saved_credentials()
 
     # Don't try to restore an already-expired saved token
     if _token_is_expired(saved_token, expires_at=_broker_credentials.get("fyers", {}).get("expires_at")):
         logger.info("[Fyers] Saved token is expired — re-authentication required")
-        return False
+        return await _refresh_fyers_session_from_saved_credentials()
 
     if force_validate and not await _validate_fyers_access_token(saved_token):
         logger.warning("Saved Fyers token is invalid during on-demand restore")
-        return False
+        return await _refresh_fyers_session_from_saved_credentials()
 
     try:
         from brokers.fyers import FyersAdapter
@@ -1102,6 +1184,12 @@ async def save_credentials(req: SaveCredentialsRequest):
             or existing.get("redirect_uri")
             or FYERS_FIXED_REDIRECT_URI
         )
+    elif req.broker == "upstox":
+        merged["redirect_uri"] = normalize_upstox_redirect_uri(
+            req.credentials.get("redirect_uri")
+            or existing.get("redirect_uri")
+            or UPSTOX_SANDBOX_REDIRECT_URI
+        )
     _broker_credentials[req.broker] = merged
 
     # Persist immediately so cloud revisions can restore later.
@@ -1139,7 +1227,9 @@ async def get_credentials_status(broker: str):
     elif broker == "upstox":
         if creds.get("api_key"):
             display["api_key"] = str(creds["api_key"])
-        display["redirect_uri"] = str(creds.get("redirect_uri") or settings.UPSTOX_REDIRECT_URI or "")
+        display["redirect_uri"] = normalize_upstox_redirect_uri(
+            str(creds.get("redirect_uri") or settings.UPSTOX_REDIRECT_URI or "")
+        )
     return {
         "broker": broker,
         "has_credentials": any(filled.values()),
@@ -1618,16 +1708,26 @@ def get_broker_token(broker: str) -> Optional[str]:
     """Return the access token string for an active broker session or saved token."""
     with _active_brokers_lock:
         info = _active_brokers.get(broker)
-    if not info:
+    def _saved_token() -> Optional[str]:
+        if broker == "upstox":
+            analytics_token = str(_broker_credentials.get("upstox", {}).get("analytics_token", "")).strip()
+            if analytics_token:
+                return analytics_token
         saved = str(_broker_credentials.get(broker, {}).get("access_token", "")).strip()
         return saved or None
+
+    if not info:
+        return _saved_token()
     token = info.get("token")
     if token is None:
-        saved = str(_broker_credentials.get(broker, {}).get("access_token", "")).strip()
-        return saved or None
-    return getattr(token, "access_token", None) or str(
-        _broker_credentials.get(broker, {}).get("access_token", "")
-    ).strip() or None
+        return _saved_token()
+    active_token = str(getattr(token, "access_token", None) or "").strip()
+    if active_token and not _token_is_expired(
+        active_token,
+        expires_at=getattr(token, "expires_at", None),
+    ):
+        return active_token
+    return _saved_token()
 
 
 def get_connected_brokers() -> list[str]:
@@ -1683,3 +1783,15 @@ async def auto_restore_sessions() -> None:
             logger.warning("Fyers auto-restore timed out after 10 seconds")
         if not restored:
             logger.warning("Fyers auto-restore failed — manual connect required")
+    elif _has_saved_fyers_refresh_material():
+        logger.info("Auto-refreshing Fyers session from saved refresh token…")
+        try:
+            restored = await asyncio.wait_for(
+                _refresh_fyers_session_from_saved_credentials(),
+                timeout=AUTO_RESTORE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            restored = False
+            logger.warning("Fyers refresh-token restore timed out after 10 seconds")
+        if not restored:
+            logger.warning("Fyers refresh-token restore failed — manual connect required")

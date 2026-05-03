@@ -115,6 +115,41 @@ DEFAULT_DOCUMENTS: list[RAGDocument] = [
             "explain how the system acted."
         ),
     ),
+    RAGDocument(
+        id="playbook-sector-interaction-var-granger",
+        collection="playbooks",
+        title="Sector interaction VAR and Granger model",
+        source="nomad-curie-rag-seed",
+        metadata={
+            "strategy_key": "sector_interaction",
+            "scope": "model",
+            "tags": ["VAR", "Granger", "sectors", "lead-lag"],
+        },
+        text=(
+            "Use aligned US or India sector returns to fit VAR models, select lag by AIC, "
+            "convert significant pairwise Granger p-values into directed edge weights, "
+            "and rank sectors by outgoing minus incoming influence. Correlation heatmaps "
+            "show contemporaneous comovement; directed edges show lead-lag structure."
+        ),
+    ),
+    RAGDocument(
+        id="playbook-sector-alternative-data-pipeline",
+        collection="playbooks",
+        title="Sector alternative-data acquisition pipeline",
+        source="nomad-curie-rag-seed",
+        metadata={
+            "strategy_key": "sector_interaction",
+            "scope": "alternative-data",
+            "tags": ["sources", "pipeline", "compliance", "signals"],
+        },
+        text=(
+            "Collect permitted alternative data from search trends, transactions, hiring, patents, "
+            "filings, policy disclosures, sentiment, geospatial sources, macro releases, commodities, "
+            "and news. Normalize each source into timestamped sector or ticker metrics, map them to "
+            "GICS or NSE sector definitions, validate predictive power with out-of-sample tests, and "
+            "store source quality, legal constraints, and model outputs for auditability."
+        ),
+    ),
 ]
 
 

@@ -140,6 +140,7 @@ export const getOrders = () => api.get("/api/trading/orders");
 export const cancelOrder = (id: string) => api.delete(`/api/trading/orders/${id}`);
 export const getPositions = () => api.get("/api/trading/positions");
 export const getTrades = () => api.get("/api/trading/trades");
+export const getTradingMode = () => api.get("/api/trading/mode");
 export const setMode = (mode: string, broker?: string) =>
   api.post("/api/trading/mode", { mode, broker });
 export const killSwitch = () => api.post("/api/trading/kill-switch");
@@ -151,6 +152,12 @@ export const getStrategyAgentStatus = () => api.get("/api/trading/strategy-agent
 export const getStrategyEquityHistory = () => api.get("/api/trading/strategy-agent/equity-history");
 export const runStrategyAgentOnce = (force = true) =>
   api.post("/api/trading/strategy-agent/run-once", null, { params: { force } });
+export const closeStrategyAgentPosition = (strategyKey: string, symbol: string, reason = "operator_override") =>
+  api.post("/api/trading/strategy-agent/positions/close", {
+    strategy_key: strategyKey,
+    symbol,
+    reason,
+  });
 export const getRiskStatus = () => api.get("/api/trading/risk-status");
 export const updateRiskConfig = (config: object) => api.put("/api/trading/risk-config", config);
 
@@ -196,6 +203,8 @@ export const getIVRank = (symbol: string) => api.get(`/api/market/iv-rank/${enco
 export const getPCR = (symbol: string, expiry?: string) =>
   api.get(`/api/market/pcr/${encodeURIComponent(symbol)}`, { params: { expiry } });
 export const getLTP = (symbols: string[]) => api.post("/api/market/ltp", { symbols });
+export const getLatestTicks = (symbols: string[]) => api.post("/api/market/latest-ticks", { symbols });
+export const getMarketIntelligenceContext = () => api.get("/api/market/intelligence-context");
 export const getGreeks = (symbol: string, strike: number, expiry: string, optionType: string, spot: number, iv = 0.2) =>
   api.get(`/api/market/greeks/${encodeURIComponent(symbol)}/${strike}/${expiry}/${optionType}`, {
     params: { spot, iv },
@@ -223,6 +232,53 @@ export const getMacroResearchBuddingSectors = (refresh = false) =>
 export const getMacroResearchSources = () => api.get("/api/macro-research/sources");
 export const searchMacroResearch = (q: string, sector?: string, limit = 12, refresh = false) =>
   api.get("/api/macro-research/search", { params: { q, sector, limit, refresh } });
+
+// ── Sector Interaction / Alternative Data ─────────────────────────────────
+export const getSectorInteractionOverview = () => api.get("/api/sector-interaction/overview");
+export const getSectorInteractionIndiaOverview = () => api.get("/api/sector-interaction/india/overview");
+export const getSectorInteractionIndiaRealModel = (periods = 160, maxLag = 2, alpha = 0.05, timeframe = "daily") =>
+  api.get("/api/sector-interaction/india/real-model", {
+    params: { periods, max_lag: maxLag, alpha, timeframe },
+  });
+export const getSectorInteractionIndiaSector = (sectorKey: string) =>
+  api.get(`/api/sector-interaction/sectors/${encodeURIComponent(sectorKey)}`);
+export const getSectorInteractionMarketIntelligence = () => api.get("/api/sector-interaction/market-intelligence");
+export const getSectorInteractionNSEConstituentStatus = () =>
+  api.get("/api/sector-interaction/nse-constituents/status");
+export const syncSectorInteractionNSEConstituents = (timeoutSeconds = 8) =>
+  api.post("/api/sector-interaction/nse-constituents/sync", null, {
+    params: { timeout_seconds: timeoutSeconds },
+  });
+export const getSectorInteractionModel = (country = "US", periods = 160, maxLag = 2, alpha = 0.05) =>
+  api.get("/api/sector-interaction/model", {
+    params: { country, periods, max_lag: maxLag, alpha },
+  });
+export const getSectorInteractionSourceMap = (country = "US") =>
+  api.get("/api/sector-interaction/source-map", { params: { country } });
+export const getSectorInteractionSignals = (country = "US", periods = 160) =>
+  api.get("/api/sector-interaction/signals", { params: { country, periods } });
+export const getSectorInteractionExtendedNetwork = (country = "US", periods = 160, maxLag = 2, alpha = 0.05) =>
+  api.get("/api/sector-interaction/extended-network", {
+    params: { country, periods, max_lag: maxLag, alpha },
+  });
+export const getSectorInteractionValidationBacktest = (country = "US", periods = 160) =>
+  api.get("/api/sector-interaction/validation-backtest", { params: { country, periods } });
+export const getSectorInteractionPipelineStatus = (country = "US") =>
+  api.get("/api/sector-interaction/pipeline-status", { params: { country } });
+export const getSectorInteractionIngestionStatus = (country = "US") =>
+  api.get("/api/sector-interaction/ingestion-status", { params: { country } });
+export const runSectorInteractionIngestion = (country = "US", dryRun = true, includePrototype = false) =>
+  api.post("/api/sector-interaction/run-ingestion", null, {
+    params: { country, dry_run: dryRun, include_prototype: includePrototype },
+  });
+export const runSectorInteractionIndiaLiveMarketIngestion = (dryRun = true) =>
+  api.post("/api/sector-interaction/india/run-live-market-ingestion", null, {
+    params: { dry_run: dryRun },
+  });
+export const getSectorInteractionReport = (country = "US", periods = 160) =>
+  api.get("/api/sector-interaction/report", { params: { country, periods } });
+export const getSectorInteractionAcquisitionPlan = () => api.get("/api/sector-interaction/acquisition-plan");
+export const seedSectorInteractionRAG = () => api.post("/api/sector-interaction/seed-rag");
 
 // ── Agent ─────────────────────────────────────────────────────────────────
 export const getProposals = () => api.get("/api/agent/proposals");

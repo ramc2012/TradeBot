@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from time import monotonic
 
 from fastapi.encoders import jsonable_encoder
@@ -88,9 +89,15 @@ async def _accept_authenticated_socket(websocket: WebSocket, channel: str) -> di
 async def ws_ticks(websocket: WebSocket, symbol: str):
     """Stream real-time ticks for a symbol via Redis pub/sub."""
     await _accept_authenticated_socket(websocket, f"ticks:{symbol}")
-    redis = await get_redis()
-    pubsub = redis.pubsub()
-    await pubsub.subscribe(f"ticks:{symbol}")
+    try:
+        redis = await get_redis()
+        pubsub = redis.pubsub()
+        await pubsub.subscribe(f"ticks:{symbol}")
+    except Exception as exc:
+        logger.warning(f"[WS] Redis tick stream unavailable for {symbol}; using snapshot fallback: {exc}")
+        await _stream_tick_snapshot_fallback(websocket, symbol)
+        return
+
     try:
         async for message in pubsub.listen():
             if message["type"] == "message":
@@ -101,7 +108,53 @@ async def ws_ticks(websocket: WebSocket, symbol: str):
     except Exception as e:
         logger.error(f"[WS] Error in ticks handler: {e}")
     finally:
-        await pubsub.unsubscribe(f"ticks:{symbol}")
+        try:
+            await pubsub.unsubscribe(f"ticks:{symbol}")
+        except Exception:
+            pass
+
+
+async def _stream_tick_snapshot_fallback(websocket: WebSocket, symbol: str) -> None:
+    """Keep ticker clients fed when Redis pub/sub is unavailable."""
+    from api.routers.market import _latest_index_tick_snapshot
+    from market_data import data_router
+
+    last_payload: str | None = None
+    try:
+        while True:
+            snapshot = await _latest_index_tick_snapshot(
+                symbol,
+                data_router.get_ltp(symbol),
+                source="data_router",
+            )
+            payload = json.dumps(
+                {
+                    "symbol": symbol,
+                    "ltp": snapshot.ltp,
+                    "open": snapshot.open,
+                    "high": snapshot.high,
+                    "low": snapshot.low,
+                    "close": snapshot.close,
+                    "volume": snapshot.volume,
+                    "oi": snapshot.oi,
+                    "timestamp": snapshot.timestamp or datetime.now(timezone.utc).isoformat(),
+                    "source": snapshot.source,
+                    "stale": snapshot.stale,
+                    "stale_seconds": snapshot.stale_seconds,
+                },
+                separators=(",", ":"),
+            )
+            if not _socket_is_connected(websocket):
+                break
+            if payload != last_payload:
+                await websocket.send_text(payload)
+                last_payload = payload
+            await asyncio.sleep(5)
+    except WebSocketDisconnect:
+        logger.info(f"[WS] Client disconnected from fallback ticks:{symbol}")
+    except Exception as exc:
+        if not _is_socket_closed_error(exc):
+            logger.error(f"[WS] Fallback tick stream failed for {symbol}: {exc}")
 
 
 async def _stream_snapshot(
@@ -169,11 +222,12 @@ async def ws_layout(websocket: WebSocket):
 
     async def payload_factory():
         from api.routers.auth import broker_status
-        from api.routers.trading import portfolio_summary
+        from api.routers.trading import get_mode, portfolio_summary
 
         return {
             "broker_status": await broker_status(),
             "portfolio_summary": await portfolio_summary(),
+            "trading_mode": await get_mode(),
         }
 
     await _stream_snapshot(

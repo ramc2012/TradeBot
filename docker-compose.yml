@@ -51,6 +51,8 @@ services:
       # Internal Docker network addresses (container-to-container, use original ports)
       DATABASE_URL: postgresql+asyncpg://nomadcurie:nomadcurie@db:5432/nomadcurie
       REDIS_URL: redis://redis:6379/0
+      RESEARCH_SYNC_AUTO_ENABLED: ${RESEARCH_SYNC_AUTO_ENABLED:-true}
+      RESEARCH_SYNC_EMBEDDED_ENABLED: ${RESEARCH_SYNC_EMBEDDED_ENABLED:-false}
       BACKEND_CORS_ORIGINS: '${BACKEND_CORS_ORIGINS:-["http://localhost:3000","http://127.0.0.1:3000"]}'
       BACKEND_CORS_ORIGIN_REGEX: "${BACKEND_CORS_ORIGIN_REGEX:-^https?://[^/]+(:[0-9]+)?$}"
     volumes:
@@ -82,6 +84,7 @@ services:
       APP_ENV: production
       DATABASE_URL: postgresql+asyncpg://nomadcurie:nomadcurie@db:5432/nomadcurie
       REDIS_URL: redis://redis:6379/0
+      RESEARCH_SYNC_AUTO_ENABLED: ${RESEARCH_SYNC_AUTO_ENABLED:-true}
       RESEARCH_FROM_DATE: ${RESEARCH_FROM_DATE:-2025-03-28}
       RESEARCH_TO_DATE: ${RESEARCH_TO_DATE:-2026-03-28}
       RESEARCH_POLL_MINUTES: ${RESEARCH_POLL_MINUTES:-30}

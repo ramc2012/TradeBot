@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
+from agentic_rag import ContextGateRequest, rag_service
 from directional_options.backtest import DirectionalOptionsBacktester
 from directional_options.config import clone_default_config
 from directional_options.data import DirectionalOptionsDataStore
@@ -248,6 +249,7 @@ class DirectionalOptionsService:
         candidate_payload: dict[str, object] | None = None
         candidates_payload: list[dict[str, object]] = []
         risk_payload: dict[str, object] | None = None
+        rag_context: dict[str, Any] | None = None
         if signal is not None:
             selection = self.selector.select(
                 underlying=underlying,
@@ -270,6 +272,21 @@ class DirectionalOptionsService:
                         equity=float(self.config["risk"]["starting_equity"]),
                     )
                 )
+                rag_context = self._build_rag_context(
+                    underlying=underlying,
+                    symbol=candidate.trading_symbol,
+                    signal=signal,
+                    regime=regime,
+                    candidate=candidate_payload,
+                    risk_payload=risk_payload,
+                    data_context={
+                        "timeframe": timeframe,
+                        "spot_price": spot_price,
+                        "rv_annualized": float(row.get("rv_annualized", 0.0)),
+                        "rv_percentile": float(row.get("rv_percentile", 0.0)),
+                    },
+                )
+                self._apply_rag_context_to_risk(rag_context, risk_payload)
 
         return {
             "as_of": timestamp.isoformat(),
@@ -282,6 +299,7 @@ class DirectionalOptionsService:
             "selected_contract": candidate_payload,
             "contract_candidates": candidates_payload,
             "risk": risk_payload,
+            "rag_context": rag_context,
             "selection_reason": selection_reason,
         }
 
@@ -331,6 +349,7 @@ class DirectionalOptionsService:
         candidate_payload: dict[str, object] | None = None
         candidates_payload: list[dict[str, object]] = []
         risk_payload: dict[str, object] | None = None
+        rag_context: dict[str, Any] | None = None
 
         if not bool(data_status.get("execution_ready")):
             selection_reason = (
@@ -377,6 +396,23 @@ class DirectionalOptionsService:
                         equity=float(self.config["risk"]["starting_equity"]),
                     )
                 )
+                rag_context = await self._build_rag_context_async(
+                    underlying=underlying,
+                    symbol=candidate.trading_symbol,
+                    signal=signal,
+                    regime=regime,
+                    candidate=candidate_payload,
+                    risk_payload=risk_payload,
+                    data_context={
+                        "timeframe": timeframe,
+                        "spot_price": spot_price,
+                        "rv_annualized": float(row.get("rv_annualized", 0.0)),
+                        "rv_percentile": float(row.get("rv_percentile", 0.0)),
+                        "history_source": history_source,
+                        "price_source": candidate.price_source,
+                    },
+                )
+                self._apply_rag_context_to_risk(rag_context, risk_payload)
 
         return {
             "as_of": timestamp.isoformat(),
@@ -389,10 +425,144 @@ class DirectionalOptionsService:
             "selected_contract": candidate_payload,
             "contract_candidates": candidates_payload,
             "risk": risk_payload,
+            "rag_context": rag_context,
             "selection_reason": selection_reason,
             "data_status": data_status,
             "history_source": history_source,
             "history_symbol": history_symbol,
+        }
+
+    def _build_rag_context(
+        self,
+        *,
+        underlying: str,
+        symbol: str | None,
+        signal,
+        regime,
+        candidate: dict[str, Any],
+        risk_payload: dict[str, Any] | None,
+        data_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            return rag_service.context_gate(
+                self._rag_request(
+                    underlying=underlying,
+                    symbol=symbol,
+                    signal=signal,
+                    regime=regime,
+                    candidate=candidate,
+                    risk_payload=risk_payload,
+                    data_context=data_context,
+                )
+            ).model_dump()
+        except Exception as exc:
+            return self._rag_unavailable(exc)
+
+    async def _build_rag_context_async(
+        self,
+        *,
+        underlying: str,
+        symbol: str | None,
+        signal,
+        regime,
+        candidate: dict[str, Any],
+        risk_payload: dict[str, Any] | None,
+        data_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            request = self._rag_request(
+                underlying=underlying,
+                symbol=symbol,
+                signal=signal,
+                regime=regime,
+                candidate=candidate,
+                risk_payload=risk_payload,
+                data_context=data_context,
+            )
+            return (await asyncio.to_thread(rag_service.context_gate, request)).model_dump()
+        except Exception as exc:
+            return self._rag_unavailable(exc)
+
+    def _rag_request(
+        self,
+        *,
+        underlying: str,
+        symbol: str | None,
+        signal,
+        regime,
+        candidate: dict[str, Any],
+        risk_payload: dict[str, Any] | None,
+        data_context: dict[str, Any],
+    ) -> ContextGateRequest:
+        numeric_context = {
+            **data_context,
+            "confidence": getattr(signal, "confidence", None),
+            "expected_move": getattr(signal, "expected_move", None),
+            "expected_move_pct": getattr(signal, "expected_move_pct", None),
+            "expected_horizon_bars": getattr(signal, "expected_horizon_bars", None),
+            "expected_iv_change": getattr(signal, "expected_iv_change", None),
+            "jump_score": getattr(signal, "jump_score", None),
+            "timing_precision": getattr(signal, "timing_precision", None),
+            "model_uncertainty": getattr(signal, "model_uncertainty", None),
+            "strike": candidate.get("strike"),
+            "expiry": candidate.get("expiry"),
+            "expiry_kind": candidate.get("expiry_kind"),
+            "delta": candidate.get("delta"),
+            "delta_bucket": candidate.get("delta_bucket"),
+            "p_trading_edge": candidate.get("p_trading_edge"),
+            "p_terminal_edge": candidate.get("p_terminal_edge"),
+            "p_minus_q_tail": candidate.get("p_minus_q_tail"),
+            "probability_of_profit": candidate.get("probability_of_profit"),
+            "skew_tax": candidate.get("skew_tax"),
+            "timing_fit": candidate.get("timing_fit"),
+            "expected_return_on_premium": candidate.get("expected_return_on_premium"),
+            "liquidity_score": candidate.get("liquidity_score"),
+            "risk_approved": bool((risk_payload or {}).get("approved")),
+        }
+        query = (
+            f"directional_long_options {underlying} {symbol or ''} {getattr(signal, 'direction', '')} "
+            f"{getattr(signal, 'sleeve', '')} {getattr(regime, 'label', '')} "
+            f"{candidate.get('expiry_kind')} {candidate.get('delta_bucket')} "
+            f"iv edge skew theta timing p_minus_q"
+        )
+        return ContextGateRequest(
+            strategy_key="directional_long_options",
+            underlying=underlying,
+            symbol=symbol,
+            signal_direction=getattr(signal, "direction", None),
+            setup_name=getattr(signal, "sleeve", None),
+            regime=getattr(regime, "label", None),
+            event_tags=[
+                "directional_options",
+                "distributional_optimizer",
+                str(candidate.get("expiry_kind") or ""),
+                str(candidate.get("delta_bucket") or ""),
+            ],
+            numeric_context={key: value for key, value in numeric_context.items() if value is not None},
+            hard_risk_passed=bool((risk_payload or {}).get("approved", True)),
+            query=query,
+        )
+
+    def _apply_rag_context_to_risk(self, rag_context: dict[str, Any] | None, risk_payload: dict[str, Any] | None) -> None:
+        if not rag_context or not risk_payload:
+            return
+        if rag_context.get("decision") != "block":
+            return
+        risk_payload["approved"] = False
+        reasons = list(risk_payload.get("reasons") or [])
+        reasons.append(f"RAG context gate blocked trade: {', '.join(rag_context.get('reason_codes') or ['context_block'])}.")
+        risk_payload["reasons"] = reasons
+
+    @staticmethod
+    def _rag_unavailable(exc: Exception) -> dict[str, Any]:
+        return {
+            "decision": "warn",
+            "confidence": 0.0,
+            "summary": f"RAG context unavailable: {exc}",
+            "reason_codes": ["rag_unavailable"],
+            "case_stats": {"matched_cases": 0, "resolved_cases": 0},
+            "retrievals": [],
+            "audit_bundle": {},
         }
 
     def _build_live_data_status(

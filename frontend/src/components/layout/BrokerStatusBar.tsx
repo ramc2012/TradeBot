@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useMemo } from "react";
-import { getBrokerStatus, getPortfolioSummary } from "@/lib/api";
+import { getBrokerStatus, getPortfolioSummary, getTradingMode } from "@/lib/api";
 import { isBrokerReady, type BrokerStatusEntry } from "@/lib/broker-status";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import { createLayoutSocket } from "@/lib/websocket";
@@ -20,6 +20,12 @@ type LayoutSnapshot = {
     win_rate: number;
     sharpe_ratio: number;
     max_drawdown: number;
+  };
+  trading_mode?: {
+    mode?: "paper" | "live" | null;
+    broker?: BrokerName | string | null;
+    paper_only?: boolean;
+    live_manager_active?: boolean;
   };
 };
 
@@ -89,6 +95,7 @@ function normalizeLayoutSnapshot(value: LayoutSnapshot | undefined): LayoutSnaps
       sharpe_ratio: 0,
       max_drawdown: 0,
     },
+    trading_mode: value.trading_mode,
   };
 }
 
@@ -117,16 +124,17 @@ function brokerStatusesMatch(
 }
 
 export default function BrokerStatusBar() {
-  const { mode, portfolio, brokerStatuses: storeBrokerStatuses, setPortfolio, setBrokerStatuses } = useStore();
+  const { mode, portfolio, brokerStatuses: storeBrokerStatuses, setMode, setActiveBroker, setPortfolio, setBrokerStatuses } = useStore();
 
   const layoutQuery = useLiveSnapshotQuery<LayoutSnapshot>({
     queryKey: ["layoutSnapshot"],
     queryFn: async () => {
-      const [broker_status, portfolio_summary] = await Promise.all([
+      const [broker_status, portfolio_summary, trading_mode] = await Promise.all([
         getBrokerStatus().then((response) => response.data),
         getPortfolioSummary().then((response) => response.data),
+        getTradingMode().then((response) => response.data).catch(() => undefined),
       ]);
-      return { broker_status, portfolio_summary };
+      return { broker_status, portfolio_summary, trading_mode };
     },
     streamFactory: (onData, onStatusChange) =>
       createLayoutSocket((data) => onData(data as LayoutSnapshot), onStatusChange),
@@ -140,6 +148,7 @@ export default function BrokerStatusBar() {
   );
   const statusData = layoutData?.broker_status.length ? layoutData.broker_status : undefined;
   const portfolioData = layoutData?.portfolio_summary ?? undefined;
+  const modeData = layoutData?.trading_mode;
   const effectiveStatuses = statusData?.length ? statusData : sanitizedStoreBrokerStatuses.length ? sanitizedStoreBrokerStatuses : undefined;
   const effectivePortfolio = portfolioData ?? portfolio ?? null;
   const totalEquity = Number(effectivePortfolio?.total_equity ?? 0);
@@ -150,6 +159,21 @@ export default function BrokerStatusBar() {
     if (!statusData?.length || brokerStatusesMatch(sanitizedStoreBrokerStatuses, statusData)) return;
     setBrokerStatuses(statusData);
   }, [statusData, sanitizedStoreBrokerStatuses, setBrokerStatuses]);
+
+  useEffect(() => {
+    if (modeData?.mode === "paper" || modeData?.mode === "live") {
+      setMode(modeData.mode);
+    }
+    const broker = modeData?.broker;
+    if (
+      broker === "fyers" ||
+      broker === "upstox" ||
+      broker === "fivepaisa" ||
+      broker === "icici_breeze"
+    ) {
+      setActiveBroker(broker);
+    }
+  }, [modeData?.broker, modeData?.mode, setActiveBroker, setMode]);
 
   useEffect(() => {
     if (!portfolioData || !Number.isFinite(Number(portfolioData.total_equity ?? 0))) return;

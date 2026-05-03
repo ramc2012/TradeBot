@@ -89,6 +89,7 @@ class DirectionalOptionsPaperStore:
         contract = dict(snapshot.get("selected_contract") or {})
         risk = dict(snapshot.get("risk") or {})
         data_status = dict(snapshot.get("data_status") or {})
+        rag_context = dict(snapshot.get("rag_context") or {})
         recorded_at = str(snapshot.get("as_of") or _utc_now())
         execution_ready = bool(data_status.get("execution_ready"))
         actionable = bool(signal and contract and risk.get("approved") and execution_ready)
@@ -115,6 +116,7 @@ class DirectionalOptionsPaperStore:
             "latest_premium": latest_mark or None,
             "latest_spot": latest_spot,
             "expected_pnl": contract.get("expected_pnl"),
+            "rag_context": rag_context,
             "data_status": data_status,
         }
         self._append_journal(journal_entry)
@@ -225,6 +227,7 @@ class DirectionalOptionsPaperStore:
                         "realized_pnl": 0.0,
                         "expected_pnl": float(contract.get("expected_pnl") or 0.0),
                         "selection_reason": snapshot.get("selection_reason"),
+                        "rag_context": rag_context,
                         "price_source": contract.get("price_source") or "local_watchlist",
                         "mark_time": recorded_at,
                     }
