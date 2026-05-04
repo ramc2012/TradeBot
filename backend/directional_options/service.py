@@ -11,6 +11,7 @@ from typing import Any, Optional
 import pandas as pd
 
 from agentic_rag import ContextGateRequest, rag_service
+from core.config import settings
 from directional_options.backtest import DirectionalOptionsBacktester
 from directional_options.config import clone_default_config
 from directional_options.data import DirectionalOptionsDataStore
@@ -65,6 +66,8 @@ class DirectionalOptionsService:
             for item in self.config["universe"]
             if item in data_underlyings or (item == "CRUDEOIL" and runtime_root_exists)
         ]
+        if not available and (settings.PAPER_TRADING_ONLY or settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY):
+            available = list(self.config["universe"])
         automation = market_hours_paper_supervisor.get_runner_status("directional_options")
         payload = {
             "key": "directional_long_options",
@@ -137,19 +140,31 @@ class DirectionalOptionsService:
 
             summary = self.summary()
             lookback_days = max(int(self.config["paper_trading"]["live_lookback_days"]), lookback_sessions)
-            spot, history_source, history_symbol = await asyncio.wait_for(
-                self.store.load_live_spot_frame(
-                    underlying,
-                    lookback_days=lookback_days,
-                ),
-                timeout=8.0,
-            )
-            feature_frame = await asyncio.to_thread(
-                self.feature_engine.build_frame,
-                spot,
-                timeframe,
-                lookback_sessions=lookback_sessions,
-            )
+            try:
+                spot, history_source, history_symbol = await asyncio.wait_for(
+                    self.store.load_live_spot_frame(
+                        underlying,
+                        lookback_days=lookback_days,
+                    ),
+                    timeout=8.0,
+                )
+                feature_frame = await asyncio.to_thread(
+                    self.feature_engine.build_frame,
+                    spot,
+                    timeframe,
+                    lookback_sessions=lookback_sessions,
+                )
+            except Exception as exc:
+                payload = await self._degraded_live_payload(
+                    summary=summary,
+                    underlying=underlying,
+                    timeframe=timeframe,
+                    lookback_sessions=lookback_sessions,
+                    reason="spot_history_unavailable",
+                    detail=str(exc),
+                )
+                self._live_cache[cache_key] = (monotonic() + self._live_cache_ttl_seconds, payload)
+                return payload
             try:
                 strategy_health = await asyncio.wait_for(market_intelligence_runtime.get_strategy_health(), timeout=3.0)
             except Exception as exc:
@@ -182,6 +197,58 @@ class DirectionalOptionsService:
             }
             self._live_cache[cache_key] = (monotonic() + self._live_cache_ttl_seconds, payload)
             return payload
+
+    async def _degraded_live_payload(
+        self,
+        *,
+        summary: dict[str, object],
+        underlying: str,
+        timeframe: str,
+        lookback_sessions: int,
+        reason: str,
+        detail: str,
+    ) -> dict[str, object]:
+        snapshot = {
+            "as_of": None,
+            "underlying": underlying,
+            "timeframe": timeframe,
+            "spot_price": None,
+            "feature_snapshot": None,
+            "regime": None,
+            "signal": None,
+            "selected_contract": None,
+            "contract_candidates": [],
+            "risk": None,
+            "rag_context": None,
+            "selection_reason": detail or reason.replace("_", " "),
+            "data_status": {
+                "history_source": "none",
+                "history_symbol": underlying,
+                "latest_watchlist_time": None,
+                "watchlist_age_seconds": None,
+                "watchlist_rows_today": 0,
+                "watchlist_rows_latest": 0,
+                "readiness_mode": "degraded",
+                "latest_spot_time": None,
+                "spot_age_seconds": None,
+                "execution_ready": False,
+                "degraded_reason": reason,
+                "detail": detail,
+            },
+            "history_source": "none",
+            "history_symbol": underlying,
+        }
+        return {
+            "module": summary,
+            "selection": {
+                "underlying": underlying,
+                "timeframe": timeframe,
+                "lookback_sessions": lookback_sessions,
+            },
+            "snapshot": snapshot,
+            "paper_positions": await self.paper.list_positions(symbol=underlying, status="all", limit=8),
+            "paper_journal": await self.paper.list_journal(symbol=underlying, limit=8),
+        }
 
     async def record_paper_snapshot(
         self,
@@ -585,23 +652,41 @@ class DirectionalOptionsService:
             if spot_ts.tzinfo is None:
                 spot_ts = spot_ts.tz_localize("UTC")
             spot_age_seconds = max(0.0, (pd.Timestamp.utcnow() - spot_ts).total_seconds())
+        watchlist_rows = int(
+            strategy_health.get("watchlist_rows_today")
+            or strategy_health.get("watchlist_rows_latest")
+            or 0
+        )
+        market_intelligence_ready = bool(strategy_health.get("ready", bool(watchlist_rows)))
+        using_latest_session = str(strategy_health.get("readiness_mode") or "") == "latest_session"
         execution_ready = bool(
             not feature_frame.empty
             and latest_spot_time
-            and strategy_health.get("watchlist_rows_today")
-            and (watchlist_age_seconds is None or float(watchlist_age_seconds) <= stale_limit)
-            and (spot_age_seconds is None or float(spot_age_seconds) <= stale_limit)
+            and watchlist_rows
+            and market_intelligence_ready
+            and (
+                using_latest_session
+                or watchlist_age_seconds is None
+                or float(watchlist_age_seconds) <= stale_limit
+            )
+            and (
+                using_latest_session
+                or spot_age_seconds is None
+                or float(spot_age_seconds) <= stale_limit
+            )
         )
         degraded_reason = None
         if feature_frame.empty:
             degraded_reason = "missing_spot_history"
         elif not latest_spot_time:
             degraded_reason = "shared_spot_store_missing_symbol"
-        elif not strategy_health.get("watchlist_rows_today"):
+        elif not watchlist_rows:
             degraded_reason = "local_watchlist_empty"
-        elif watchlist_age_seconds is not None and float(watchlist_age_seconds) > stale_limit:
+        elif not market_intelligence_ready:
+            degraded_reason = "market_intelligence_not_ready"
+        elif not using_latest_session and watchlist_age_seconds is not None and float(watchlist_age_seconds) > stale_limit:
             degraded_reason = "local_watchlist_stale"
-        elif spot_age_seconds is not None and float(spot_age_seconds) > stale_limit:
+        elif not using_latest_session and spot_age_seconds is not None and float(spot_age_seconds) > stale_limit:
             degraded_reason = "shared_spot_store_stale"
         return {
             "history_source": history_source,
@@ -609,6 +694,8 @@ class DirectionalOptionsService:
             "latest_watchlist_time": latest_watchlist_time,
             "watchlist_age_seconds": watchlist_age_seconds,
             "watchlist_rows_today": int(strategy_health.get("watchlist_rows_today") or 0),
+            "watchlist_rows_latest": int(strategy_health.get("watchlist_rows_latest") or 0),
+            "readiness_mode": strategy_health.get("readiness_mode"),
             "latest_spot_time": latest_spot_time,
             "spot_age_seconds": spot_age_seconds,
             "execution_ready": execution_ready,

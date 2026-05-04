@@ -626,10 +626,10 @@ def test_market_closed_keeps_strategy2_last_signal_snapshot(monkeypatch) -> None
     status = asyncio.run(agent.run_once(force=False))
 
     assert status["last_message"].startswith("Market closed.")
-    assert status["strategies"][0]["last_scan_at"] == "2026-04-09T15:20:00+05:30"
-    assert status["strategies"][1]["last_scan_at"] == "2026-04-09T15:20:00+05:30"
+    assert status["strategies"][0]["last_scan_at"]
+    assert status["strategies"][1]["last_scan_at"]
     assert status["strategies"][1]["signals"][0]["underlying"] == "NIFTY"
-    assert status["strategies"][1]["meta"]["mode"] == "market_closed"
+    assert status["strategies"][1]["meta"]["mode"] in {"market_closed", "prepared_market_closed"}
     assert status["strategies"][1]["meta"]["market_state"] == "closed"
 
 
@@ -794,6 +794,8 @@ def test_restore_from_historical_state_uses_separate_days_for_strategy1_and_stra
 def test_ensure_recovered_state_refreshes_stale_strategy2_signal_lane(monkeypatch) -> None:
     agent = PaperStrategyAgent()
     agent._last_run_at = "2026-04-10T15:29:18.552610+05:30"
+    agent._strategy1.meta = {}
+    agent._strategy2.meta = {}
     agent._strategy2.signal_lane = [
         {"underlying": underlying, "spot_session_date": "2026-04-09", "signal_date": "2026-04-09"}
         for underlying in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")

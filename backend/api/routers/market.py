@@ -24,6 +24,7 @@ from analytics.greeks import bs_greeks, implied_volatility
 from analytics.sector import sector_tracker
 from macro_research import macro_research_service
 from sector_interaction.india_live import india_live_sector_service
+from market_data.source_policy import route_order, source_policy_snapshot
 from api.routers.auth import (
     ensure_fyers_session,
     ensure_upstox_session,
@@ -50,12 +51,18 @@ async def market_intelligence_context() -> dict:
     """Merged market-intelligence context for UI and strategy agents."""
     sector_interaction = await india_live_sector_service.market_intelligence_payload()
     macro_research = await macro_research_service.overview(refresh=False)
+    active_brokers = [
+        source
+        for source in ("fyers", "upstox")
+        if get_active_adapter(source) is not None
+    ]
     return {
         "module": "market_intelligence_context",
         "country": "IN",
         "sector_interaction": sector_interaction,
         "macro_research": macro_research,
         "market_read": macro_research.get("market_read", {}),
+        "source_policy": source_policy_snapshot(active_brokers=active_brokers),
     }
 
 
@@ -82,21 +89,23 @@ def _market_symbol_for_adapter(adapter, market_symbol: _ResolvedMarketSymbol) ->
 
 
 async def _get_market_adapter():
-    fyers = get_active_adapter("fyers")
-    if fyers:
-        return fyers, "fyers"
-    if await ensure_fyers_session():
-        fyers = get_active_adapter("fyers")
-        if fyers:
-            return fyers, "fyers"
-
-    upstox = get_active_adapter("upstox")
-    if upstox:
-        return upstox, "upstox"
-    if await ensure_upstox_session():
-        upstox = get_active_adapter("upstox")
-        if upstox:
-            return upstox, "upstox"
+    for source in route_order("option_chain"):
+        if source == "fyers":
+            fyers = get_active_adapter("fyers")
+            if fyers:
+                return fyers, "fyers"
+            if await ensure_fyers_session():
+                fyers = get_active_adapter("fyers")
+                if fyers:
+                    return fyers, "fyers"
+        elif source == "upstox":
+            upstox = get_active_adapter("upstox")
+            if upstox:
+                return upstox, "upstox"
+            if await ensure_upstox_session():
+                upstox = get_active_adapter("upstox")
+                if upstox:
+                    return upstox, "upstox"
 
     return None, "none"
 
@@ -490,13 +499,24 @@ async def get_option_chain(symbol: str, expiry: Optional[str] = Query(None)):
 
 
 @router.get("/atm-watchlist/expiries")
-async def get_atm_watchlist_expiries(expiry: Optional[str] = Query(None)):
-    return await atm_watchlist_service.get_expiries(expiry)
+async def get_atm_watchlist_expiries(
+    expiry: Optional[str] = Query(None),
+    live_refresh: bool = Query(False),
+):
+    return await atm_watchlist_service.get_expiries(expiry, live_refresh=live_refresh)
 
 
 @router.get("/atm-watchlist")
-async def get_atm_watchlist(expiry: Optional[str] = Query(None)):
-    return await atm_watchlist_service.get_watchlist(expiry)
+async def get_atm_watchlist(
+    expiry: Optional[str] = Query(None),
+    symbols: Optional[list[str]] = Query(None),
+    live_refresh: bool = Query(False),
+):
+    return await atm_watchlist_service.get_watchlist(
+        expiry,
+        symbols=symbols,
+        live_refresh=live_refresh,
+    )
 
 
 @router.get("/market-profile/{symbol}")

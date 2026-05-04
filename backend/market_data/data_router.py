@@ -28,9 +28,13 @@ class DataRouter:
         self._tick_buffer: Dict[str, Tick] = {}  # latest tick per symbol
         self._mock_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._source_policy: dict[str, Any] = {}
 
     def set_broker(self, broker: BrokerAdapter):
         self._broker = broker
+
+    def set_source_policy(self, policy: dict[str, Any]):
+        self._source_policy = dict(policy or {})
 
     def register_callback(self, symbol: str, callback: Callable[[Tick], None]):
         self._callbacks.setdefault(symbol, []).append(callback)
@@ -129,6 +133,11 @@ class DataRouter:
         return tick.ltp if tick else 0.0
 
     def get_status(self) -> dict[str, Any]:
+        source_policy = dict(self._source_policy)
+        if not source_policy:
+            from market_data.source_policy import source_policy_snapshot
+
+            source_policy = source_policy_snapshot()
         broker_name = getattr(self._broker, "broker_name", None) if self._broker else None
         mock_running = bool(self._mock_task and not self._mock_task.done())
         last_tick_times = [
@@ -166,6 +175,7 @@ class DataRouter:
             "mock_running": mock_running,
             "last_tick_at": last_tick_at.isoformat() if last_tick_at else None,
             "last_tick_age_seconds": last_tick_age_seconds,
+            "source_policy": source_policy,
         }
 
     # ── Mock tick feed for testing ───────────────────────────────────────────

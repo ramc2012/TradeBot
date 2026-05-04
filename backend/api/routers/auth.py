@@ -100,6 +100,11 @@ def _is_sensitive_credential(broker: str, field: str) -> bool:
     return field in _SENSITIVE_CREDENTIAL_FIELDS.get(broker, set())
 
 
+def _looks_like_placeholder_credential(value: Any) -> bool:
+    raw = str(value or "").strip().lower()
+    return raw in {"x", "xx", "xxx", "test", "dummy", "placeholder", "your_api_key", "your_secret"}
+
+
 def _encrypt_credential_value(value: Any) -> Any:
     text_value = str(value or "").strip()
     if not text_value:
@@ -1178,6 +1183,19 @@ async def save_credentials(req: SaveCredentialsRequest):
     # Merge with existing (partial saves allowed — don't wipe other fields)
     existing = _broker_credentials.get(req.broker, {})
     merged = {**existing, **{k: v for k, v in req.credentials.items() if v}}
+    if req.broker == "upstox":
+        api_key_candidate = req.credentials.get("api_key")
+        secret_candidate = req.credentials.get("secret")
+        if api_key_candidate is not None and _looks_like_placeholder_credential(api_key_candidate):
+            raise HTTPException(
+                400,
+                "Upstox API Key looks like a placeholder. Save the real API key from account.upstox.com → Developer Apps.",
+            )
+        if secret_candidate is not None and _looks_like_placeholder_credential(secret_candidate):
+            raise HTTPException(
+                400,
+                "Upstox Secret looks like a placeholder. Save the real secret from account.upstox.com → Developer Apps.",
+            )
     if req.broker == "fyers":
         merged["redirect_uri"] = normalize_fyers_redirect_uri(
             req.credentials.get("redirect_uri")
@@ -1545,6 +1563,11 @@ async def fyers_callback(auth_code: str = None, code: str = None):
 async def upstox_auth_url():
     if not settings.UPSTOX_API_KEY:
         raise HTTPException(400, "UPSTOX_API_KEY not configured. Save credentials first.")
+    if _looks_like_placeholder_credential(settings.UPSTOX_API_KEY):
+        raise HTTPException(
+            400,
+            "Saved Upstox API Key is a placeholder. Replace it with the real API key from account.upstox.com → Developer Apps.",
+        )
     from brokers.upstox import UpstoxAdapter
     return {"auth_url": UpstoxAdapter().get_auth_url()}
 
@@ -1739,9 +1762,22 @@ def get_connected_brokers() -> list[str]:
 async def _sync_market_data_feed() -> None:
     """Keep the shared index tick feed aligned with the current active broker."""
     from market_data import data_router as market_data_router
+    from market_data.source_policy import choose_active_adapter, source_policy_snapshot
     from market_data.symbols import LIVE_INDEX_APP_SYMBOLS
 
-    adapter = get_active_adapter("fyers") or get_active_adapter("upstox") or get_active_adapter()
+    active_adapters = {
+        "fyers": get_active_adapter("fyers"),
+        "upstox": get_active_adapter("upstox"),
+    }
+    active_brokers = [name for name, adapter in active_adapters.items() if adapter is not None]
+    adapter, source, decisions = choose_active_adapter("live_ticks", active_adapters)
+    market_data_router.set_source_policy(
+        source_policy_snapshot(
+            active_brokers=active_brokers,
+            selected_live_source=source,
+            route_decisions=decisions,
+        )
+    )
     if adapter:
         market_data_router.set_broker(adapter)
         await market_data_router.subscribe(list(LIVE_INDEX_APP_SYMBOLS))

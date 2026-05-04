@@ -32,8 +32,8 @@ UTC = timezone.utc
 DEFAULT_WATCHLIST_TTL = 900
 DEFAULT_EXPIRY_TTL = 300
 DEFAULT_PARTIAL_TTL = 900
-DEFAULT_BUILD_LOCK_TTL = 900
-WATCHLIST_CACHE_VERSION = "v5"
+DEFAULT_BUILD_LOCK_TTL = 120
+WATCHLIST_CACHE_VERSION = "v10"
 SYMBOL_EXPIRY_CACHE_VERSION = "v2"
 
 # ── NSE expiry rules ──────────────────────────────────────────────────────────
@@ -576,6 +576,21 @@ class ATMWatchlistService:
             for row in await self._load_persisted_watchlist_rows(selected_expiry, underlyings):
                 prior_rows[row["underlying"]] = row
             loaded_from_persisted = bool(prior_rows)
+            allow_table_fallback = len(underlyings) >= 50
+            if allow_table_fallback and len(prior_rows) < min(len(underlyings), 50):
+                try:
+                    for row in await self._load_premium_candle_watchlist_rows(selected_expiry, underlyings):
+                        prior_rows.setdefault(row["underlying"], row)
+                except Exception as exc:
+                    logger.debug(f"[ATM watchlist] premium-candle fallback unavailable: {exc}")
+                loaded_from_persisted = bool(prior_rows)
+            if allow_table_fallback and len(prior_rows) < min(len(underlyings), 50):
+                try:
+                    for row in await self._load_catalog_watchlist_rows(selected_expiry, underlyings):
+                        prior_rows.setdefault(row["underlying"], row)
+                except Exception as exc:
+                    logger.debug(f"[ATM watchlist] catalog fallback unavailable: {exc}")
+                loaded_from_persisted = bool(prior_rows)
 
         if upstox_adapter is None and fyers_adapter is None:
             if prior_rows:
@@ -606,6 +621,12 @@ class ATMWatchlistService:
         logger.info(
             f"[ATM watchlist] {len(prior_rows)} cached, {len(pending)} to fetch for {selected_expiry} ({scope_key})"
         )
+        coverage_target = (
+            len(underlyings)
+            if len(underlyings) < 50
+            else max(50, int(len(underlyings) * 0.9))
+        )
+        sufficient_prior_coverage = len(prior_rows) >= coverage_target
 
         def _build_payload(rows: list[dict[str, Any]], detail: Optional[str], build_status: str) -> dict[str, Any]:
             sorted_rows = _sort_rows(rows)
@@ -697,12 +718,32 @@ class ATMWatchlistService:
                         (detail_msg + " " if detail_msg else "")
                         + "Showing the last saved ATM watchlist while live refresh updates in background."
                     )
-                else:
+                elif sufficient_prior_coverage:
                     background_targets = []
                     detail_msg = (
                         (detail_msg + " " if detail_msg else "")
                         + "Showing the last saved full-universe ATM watchlist. "
                         + "Background live refresh is deferred to avoid a cold-start broker stampede."
+                    )
+                else:
+                    payload_status = "building"
+                    seed_metas = pending[: min(8, len(pending))]
+                    if seed_metas:
+                        seed_rows = [
+                            row
+                            for row in await asyncio.gather(
+                                *(build(meta, delay=i * 0.05) for i, meta in enumerate(seed_metas))
+                            )
+                            if row
+                        ]
+                        for row in seed_rows:
+                            prior_rows[row["underlying"]] = row
+                        pending = [m for m in underlyings if m.symbol not in prior_rows]
+                        rows = _sort_rows(list(prior_rows.values()))
+                    background_targets = pending
+                    detail_msg = (
+                        (detail_msg + " " if detail_msg else "")
+                        + "Saved ATM watchlist coverage is incomplete; live refresh is building the missing stock universe."
                     )
             elif pending:
                 payload_status = "building"
@@ -1442,6 +1483,314 @@ class ATMWatchlistService:
                     "atm_strike": float(row.strike),
                     "live_source": str(row.source_broker or "snapshot"),
                     "fyers_symbol": fyers_symbol,
+                    "lot_size": int(row.lot_size) if row.lot_size is not None else None,
+                    "ce": _option_payload("ce", "CE"),
+                    "pe": _option_payload("pe", "PE"),
+                }
+            )
+        return payload_rows
+
+    async def _load_premium_candle_watchlist_rows(
+        self,
+        expiry: str,
+        underlyings: list[UnderlyingMeta],
+    ) -> list[dict[str, Any]]:
+        if not underlyings:
+            return []
+        expiry_date = self._parse_expiry(expiry)
+        if expiry_date is None:
+            return []
+        underlying_symbols = [meta.symbol for meta in underlyings]
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    """
+                    WITH latest_contracts AS (
+                        SELECT DISTINCT ON (underlying, strike, option_type)
+                            time,
+                            underlying,
+                            expiry,
+                            strike,
+                            option_type,
+                            instrument_key,
+                            trading_symbol,
+                            close AS ltp,
+                            volume,
+                            oi,
+                            iv,
+                            underlying_price
+                        FROM option_premium_candles
+                        WHERE expiry = :expiry
+                          AND underlying = ANY(:underlyings)
+                          AND option_type IN ('CE', 'PE')
+                          AND close IS NOT NULL
+                        ORDER BY underlying, strike, option_type, time DESC
+                    ),
+                    latest_spot AS (
+                        SELECT DISTINCT ON (underlying)
+                            underlying,
+                            underlying_price,
+                            time
+                        FROM latest_contracts
+                        WHERE underlying_price IS NOT NULL
+                          AND underlying_price > 0
+                        ORDER BY underlying, time DESC
+                    ),
+                    atm_strikes AS (
+                        SELECT DISTINCT ON (contracts.underlying)
+                            contracts.underlying,
+                            contracts.strike,
+                            spot.underlying_price,
+                            spot.time AS spot_time
+                        FROM latest_contracts contracts
+                        JOIN latest_spot spot
+                          ON spot.underlying = contracts.underlying
+                        ORDER BY contracts.underlying,
+                                 ABS(contracts.strike::float8 - spot.underlying_price::float8),
+                                 contracts.strike
+                    )
+                    SELECT
+                        atm.underlying,
+                        COALESCE(underlying_catalog.kind, 'STOCK') AS kind,
+                        atm.strike,
+                        atm.underlying_price,
+                        COALESCE(catalog_ce.lot_size, catalog_pe.lot_size, underlying_catalog.lot_size) AS lot_size,
+                        ce.instrument_key AS ce_instrument_key,
+                        ce.trading_symbol AS ce_trading_symbol,
+                        ce.ltp AS ce_ltp,
+                        ce.volume AS ce_volume,
+                        ce.oi AS ce_oi,
+                        ce.iv AS ce_iv,
+                        pe.instrument_key AS pe_instrument_key,
+                        pe.trading_symbol AS pe_trading_symbol,
+                        pe.ltp AS pe_ltp,
+                        pe.volume AS pe_volume,
+                        pe.oi AS pe_oi,
+                        pe.iv AS pe_iv
+                    FROM atm_strikes atm
+                    LEFT JOIN latest_contracts ce
+                      ON ce.underlying = atm.underlying
+                     AND ce.strike = atm.strike
+                     AND ce.option_type = 'CE'
+                    LEFT JOIN latest_contracts pe
+                      ON pe.underlying = atm.underlying
+                     AND pe.strike = atm.strike
+                     AND pe.option_type = 'PE'
+                    LEFT JOIN fo_contract_catalog catalog_ce
+                      ON catalog_ce.instrument_key = ce.instrument_key
+                    LEFT JOIN fo_contract_catalog catalog_pe
+                      ON catalog_pe.instrument_key = pe.instrument_key
+                    LEFT JOIN fo_underlying_catalog underlying_catalog
+                      ON underlying_catalog.symbol = atm.underlying
+                    WHERE ce.ltp IS NOT NULL
+                       OR pe.ltp IS NOT NULL
+                    ORDER BY CASE WHEN COALESCE(underlying_catalog.kind, 'STOCK') = 'INDEX' THEN 0 ELSE 1 END,
+                             atm.underlying
+                    """
+                ),
+                {"expiry": expiry_date, "underlyings": underlying_symbols},
+            )
+            rows = result.fetchall()
+
+        meta_by_symbol = {meta.symbol: meta for meta in underlyings}
+        payload_rows: list[dict[str, Any]] = []
+        for row in rows:
+            meta = meta_by_symbol.get(str(row.underlying))
+            if meta is None:
+                continue
+
+            def _option_payload(prefix: str, option_type: str) -> Optional[dict[str, Any]]:
+                ltp = getattr(row, f"{prefix}_ltp")
+                instrument_key = getattr(row, f"{prefix}_instrument_key")
+                trading_symbol = getattr(row, f"{prefix}_trading_symbol")
+                if all(value is None for value in (ltp, instrument_key, trading_symbol)):
+                    return None
+                return {
+                    "strike": float(row.strike),
+                    "option_type": option_type,
+                    "instrument_key": instrument_key,
+                    "trading_symbol": trading_symbol,
+                    "ltp": round(float(ltp or 0.0), 2),
+                    "prev_close": None,
+                    "change": None,
+                    "change_pct": None,
+                    "oi": int(getattr(row, f"{prefix}_oi") or 0),
+                    "prev_oi": None,
+                    "oi_change": None,
+                    "oi_change_pct": None,
+                    "volume": int(getattr(row, f"{prefix}_volume") or 0),
+                    "iv": round(float(getattr(row, f"{prefix}_iv") or 0.0), 4)
+                    if getattr(row, f"{prefix}_iv") is not None else None,
+                    "macd": None,
+                    "macd_signal": None,
+                    "macd_histogram": None,
+                    "rsi": None,
+                }
+
+            payload_rows.append(
+                {
+                    "underlying": str(row.underlying),
+                    "kind": str(row.kind),
+                    "spot_price": round(float(row.underlying_price or 0.0), 2),
+                    "expiry": expiry,
+                    "atm_strike": float(row.strike),
+                    "live_source": "upstox_history",
+                    "fyers_symbol": self._to_fyers_symbol(meta),
+                    "lot_size": int(row.lot_size) if row.lot_size is not None else None,
+                    "ce": _option_payload("ce", "CE"),
+                    "pe": _option_payload("pe", "PE"),
+                }
+            )
+        return payload_rows
+
+    async def _load_catalog_watchlist_rows(
+        self,
+        expiry: str,
+        underlyings: list[UnderlyingMeta],
+    ) -> list[dict[str, Any]]:
+        if not underlyings:
+            return []
+        expiry_date = self._parse_expiry(expiry)
+        if expiry_date is None:
+            return []
+        underlying_symbols = [meta.symbol for meta in underlyings]
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    """
+                    WITH latest_spot AS (
+                        SELECT DISTINCT ON (underlying)
+                            underlying,
+                            close AS spot_price,
+                            time
+                        FROM underlying_spot_candles
+                        WHERE interval = '1minute'
+                          AND underlying = ANY(:underlyings)
+                          AND close IS NOT NULL
+                        ORDER BY underlying, time DESC
+                    ),
+                    latest_premium_spot AS (
+                        SELECT DISTINCT ON (underlying)
+                            underlying,
+                            underlying_price AS spot_price,
+                            time
+                        FROM option_premium_candles
+                        WHERE expiry = :expiry
+                          AND underlying = ANY(:underlyings)
+                          AND underlying_price IS NOT NULL
+                          AND underlying_price > 0
+                        ORDER BY underlying, time DESC
+                    ),
+                    median_strikes AS (
+                        SELECT
+                            underlying,
+                            percentile_cont(0.5) WITHIN GROUP (ORDER BY strike::float8) AS median_strike
+                        FROM fo_contract_catalog
+                        WHERE expiry = :expiry
+                          AND underlying = ANY(:underlyings)
+                          AND option_type IN ('CE', 'PE')
+                        GROUP BY underlying
+                    ),
+                    price_refs AS (
+                        SELECT
+                            med.underlying,
+                            COALESCE(spot.spot_price, premium.spot_price, med.median_strike) AS reference_price
+                        FROM median_strikes med
+                        LEFT JOIN latest_spot spot
+                          ON spot.underlying = med.underlying
+                        LEFT JOIN latest_premium_spot premium
+                          ON premium.underlying = med.underlying
+                    ),
+                    atm_strikes AS (
+                        SELECT DISTINCT ON (catalog.underlying)
+                            catalog.underlying,
+                            catalog.strike,
+                            refs.reference_price AS spot_price
+                        FROM fo_contract_catalog catalog
+                        JOIN price_refs refs
+                          ON refs.underlying = catalog.underlying
+                        WHERE catalog.expiry = :expiry
+                          AND catalog.underlying = ANY(:underlyings)
+                          AND catalog.option_type IN ('CE', 'PE')
+                        ORDER BY catalog.underlying,
+                                 ABS(catalog.strike::float8 - refs.reference_price::float8),
+                                 catalog.strike
+                    )
+                    SELECT
+                        atm.underlying,
+                        COALESCE(underlying_catalog.kind, 'STOCK') AS kind,
+                        atm.strike,
+                        atm.spot_price,
+                        COALESCE(ce.lot_size, pe.lot_size, underlying_catalog.lot_size) AS lot_size,
+                        ce.instrument_key AS ce_instrument_key,
+                        ce.trading_symbol AS ce_trading_symbol,
+                        pe.instrument_key AS pe_instrument_key,
+                        pe.trading_symbol AS pe_trading_symbol
+                    FROM atm_strikes atm
+                    LEFT JOIN fo_contract_catalog ce
+                      ON ce.underlying = atm.underlying
+                     AND ce.expiry = :expiry
+                     AND ce.strike = atm.strike
+                     AND ce.option_type = 'CE'
+                    LEFT JOIN fo_contract_catalog pe
+                      ON pe.underlying = atm.underlying
+                     AND pe.expiry = :expiry
+                     AND pe.strike = atm.strike
+                     AND pe.option_type = 'PE'
+                    LEFT JOIN fo_underlying_catalog underlying_catalog
+                      ON underlying_catalog.symbol = atm.underlying
+                    WHERE ce.instrument_key IS NOT NULL
+                       OR pe.instrument_key IS NOT NULL
+                    ORDER BY CASE WHEN COALESCE(underlying_catalog.kind, 'STOCK') = 'INDEX' THEN 0 ELSE 1 END,
+                             atm.underlying
+                    """
+                ),
+                {"expiry": expiry_date, "underlyings": underlying_symbols},
+            )
+            rows = result.fetchall()
+
+        meta_by_symbol = {meta.symbol: meta for meta in underlyings}
+        payload_rows: list[dict[str, Any]] = []
+        for row in rows:
+            meta = meta_by_symbol.get(str(row.underlying))
+            if meta is None:
+                continue
+
+            def _option_payload(prefix: str, option_type: str) -> Optional[dict[str, Any]]:
+                instrument_key = getattr(row, f"{prefix}_instrument_key")
+                trading_symbol = getattr(row, f"{prefix}_trading_symbol")
+                if not instrument_key and not trading_symbol:
+                    return None
+                return {
+                    "strike": float(row.strike),
+                    "option_type": option_type,
+                    "instrument_key": instrument_key,
+                    "trading_symbol": trading_symbol,
+                    "ltp": 0.0,
+                    "prev_close": None,
+                    "change": None,
+                    "change_pct": None,
+                    "oi": 0,
+                    "prev_oi": None,
+                    "oi_change": None,
+                    "oi_change_pct": None,
+                    "volume": 0,
+                    "iv": None,
+                    "macd": None,
+                    "macd_signal": None,
+                    "macd_histogram": None,
+                    "rsi": None,
+                }
+
+            payload_rows.append(
+                {
+                    "underlying": str(row.underlying),
+                    "kind": str(row.kind),
+                    "spot_price": round(float(row.spot_price or 0.0), 2),
+                    "expiry": expiry,
+                    "atm_strike": float(row.strike),
+                    "live_source": "catalog",
+                    "fyers_symbol": self._to_fyers_symbol(meta),
                     "lot_size": int(row.lot_size) if row.lot_size is not None else None,
                     "ce": _option_payload("ce", "CE"),
                     "pe": _option_payload("pe", "PE"),

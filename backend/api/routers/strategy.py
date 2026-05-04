@@ -481,6 +481,11 @@ def _build_strategy1_live_signals(agent_status: dict[str, Any]) -> list[dict[str
 
 
 def _build_strategy1_watchlist_signals(agent_status: dict[str, Any]) -> list[dict[str, Any]]:
+    strat = _find_strategy(agent_status, "macd_strategy")
+    prepared_watchlist = (strat.get("meta", {}) or {}).get("prepared_watchlist") or []
+    if prepared_watchlist:
+        return [dict(item) for item in prepared_watchlist]
+
     regime_summary = agent_status.get("regime_summary", {}) or {}
     signals: list[dict[str, Any]] = []
     as_of = agent_status.get("last_run_at")

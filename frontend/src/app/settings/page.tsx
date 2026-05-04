@@ -642,6 +642,15 @@ function UpstoxCard({ status, onRefresh }: { status: BrokerStatusEntry | undefin
     const analyticsTokenToSave = analyticsToken.trim();
     const hasSavedApiKey = Boolean(savedFields["api_key"]);
     const hasSavedSecret = Boolean(savedFields["secret"]);
+    const placeholderValues = new Set(["x", "xx", "xxx", "test", "dummy", "placeholder", "your_api_key", "your_secret"]);
+    if (apiKeyToSave && placeholderValues.has(apiKeyToSave.toLowerCase())) {
+      setMsg("Enter the real Upstox API Key. The saved value cannot be a placeholder like x.");
+      return;
+    }
+    if (secretToSave && placeholderValues.has(secretToSave.toLowerCase())) {
+      setMsg("Enter the real Upstox Secret. The saved value cannot be a placeholder like x.");
+      return;
+    }
     if (!analyticsTokenToSave && !apiKeyToSave && !hasSavedApiKey) {
       setMsg("Enter API Key or Analytics Token");
       return;

@@ -32,6 +32,16 @@ import type { StrategyAgentStatus } from "@/components/trading/StrategyAgentMoni
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import {
   getBrokerStatus,
+  getCommodityATMWatchlist,
+  getCommodityStrategyStatus,
+  getDirectionalOptionsLiveSnapshot,
+  getDirectionalOptionsPaperJournal,
+  getDirectionalOptionsPaperPositions,
+  getDirectionalOptionsSummary,
+  getFractalMarketProfileLiveSnapshot,
+  getFractalMarketProfilePaperJournal,
+  getFractalMarketProfilePaperPositions,
+  getFractalMarketProfileSummary,
   getStrategyAgentComments,
   getStrategyAgentStatus,
   getStrategyDataStatus,
@@ -42,6 +52,8 @@ import { isBrokerReady } from "@/lib/broker-status";
 import { createStrategyOverviewSocket } from "@/lib/websocket";
 
 type StrategyTab = "portfolio" | "signals" | "operations";
+type StrategyDetailTab = "instruments" | "positions" | "history" | "portfolio" | "performance";
+type InstrumentCategory = "conditions_met" | "watch" | "avoid";
 
 type StrategyComment = {
   time: string;
@@ -91,6 +103,20 @@ type StrategyPortfolioRow = {
   status: "open" | "closed";
   statusLabel: string;
   signalReason?: string | null;
+};
+
+type StrategyInstrumentCandidate = {
+  symbol: string;
+  category: InstrumentCategory;
+  priorityScore: number;
+  statusLabel: string;
+  reason: string;
+  direction?: string | null;
+  source?: string | null;
+  historyTrades: number;
+  historyPnl: number;
+  winRate: number | null;
+  lastSeen?: string | null;
 };
 
 function formatNumber(value?: number | null, digits = 2) {
@@ -269,6 +295,15 @@ function MetricTile({
   );
 }
 
+function MiniMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-[0.14em] text-text-muted">{label}</div>
+      <div className="mt-1 font-mono text-sm font-semibold text-text-primary">{value}</div>
+    </div>
+  );
+}
+
 function PanelHeader({
   icon,
   title,
@@ -322,6 +357,34 @@ function TabButton({
   );
 }
 
+function DetailTabButton({
+  active,
+  label,
+  count,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  count?: number;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={clsx(
+        "inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-semibold transition-colors",
+        active
+          ? "border-accent-blue/40 bg-accent-blue/10 text-accent-blue"
+          : "border-bg-border bg-bg-secondary/25 text-text-secondary hover:border-bg-active hover:text-text-primary",
+      )}
+    >
+      <span>{label}</span>
+      {count != null ? <span className="font-mono text-[11px] text-text-muted">{count}</span> : null}
+    </button>
+  );
+}
+
 function normalizeSignalRows(rows: StrategySignalRow[] | undefined) {
   return (rows || []).map((row, index) => ({ ...row, _id: `${row.underlying}-${row.reason || row.status || index}` }));
 }
@@ -339,6 +402,307 @@ function strategyContractLabel(optionType?: string | null, strike?: number | nul
 function strategyUnderlyingFromSymbol(symbol?: string | null) {
   const parts = String(symbol || "").split(":");
   return parts.length > 1 ? parts[1] : String(symbol || "--");
+}
+
+function signalUnderlying(row: any) {
+  return String(row?.underlying || row?.symbol || "--").trim();
+}
+
+function tradeUnderlying(row: any) {
+  return strategyUnderlyingFromSymbol(row?.symbol || row?.underlying);
+}
+
+function categoryLabel(category: InstrumentCategory) {
+  if (category === "conditions_met") return "Already Conditions Met";
+  if (category === "watch") return "Interesting To Watch";
+  return "To Be Avoided";
+}
+
+function categoryTone(category: InstrumentCategory) {
+  if (category === "conditions_met") return "text-accent-green";
+  if (category === "watch") return "text-accent-amber";
+  return "text-accent-red";
+}
+
+function defaultStrategyUniverse(strategyKey?: string) {
+  if (strategyKey === "index_mp_strategy") return ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"];
+  if (strategyKey === "directional_long_options") return ["NIFTY", "BANKNIFTY", "SENSEX", "CRUDEOIL"];
+  if (strategyKey === "commodity_futures" || strategyKey === "commodity_options" || strategyKey === "commodity_strategy") {
+    return ["CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER"];
+  }
+  if (strategyKey === "market_profile" || strategyKey === "fractal_market_profile") return ["NIFTY", "SENSEX", "CRUDEOIL"];
+  return ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"];
+}
+
+function buildEmptySummary(overrides: Record<string, number> = {}) {
+  return {
+    open_positions: 0,
+    total_trades: 0,
+    unrealized_pnl: 0,
+    realized_pnl: 0,
+    total_equity: 0,
+    win_rate: null,
+    entries: 0,
+    exits: 0,
+    ...overrides,
+  };
+}
+
+function normalizeExternalPosition(row: any, fallbackUnderlying = "--") {
+  const underlying = String(row?.underlying || row?.symbol || fallbackUnderlying || "--").replace(/^MCX:/, "");
+  return {
+    symbol: row?.symbol || row?.trading_symbol || underlying,
+    underlying,
+    option_type: row?.option_type || row?.instrument_type || row?.direction || "--",
+    strike: Number(row?.strike || row?.strike_price || 0) || null,
+    expiry: row?.expiry || row?.expiry_date || null,
+    qty: Number(row?.qty || row?.quantity || row?.lots || 0),
+    entry_price: Number(row?.entry_price || row?.avg_price || row?.premium || 0) || null,
+    current_price: Number(row?.current_price || row?.mark_price || row?.latest_premium || row?.ltp || 0) || null,
+    unrealized_pnl: Number(row?.unrealized_pnl || row?.pnl || 0),
+    return_pct: Number(row?.return_pct || 0) || null,
+    phase: row?.phase || row?.status || "paper",
+    signal_reason: row?.selection_reason || row?.reason || row?.thesis || null,
+    entered_at: row?.entered_at || row?.entry_time || row?.recorded_at || null,
+    price_updated_at: row?.price_updated_at || row?.mark_time || row?.recorded_at || null,
+  };
+}
+
+function normalizeExternalTrade(row: any, fallbackUnderlying = "--") {
+  const underlying = String(row?.underlying || row?.symbol || fallbackUnderlying || "--").replace(/^MCX:/, "");
+  return {
+    symbol: row?.symbol || row?.trading_symbol || underlying,
+    underlying,
+    option_type: row?.option_type || row?.instrument_type || row?.direction || "--",
+    strike: Number(row?.strike || row?.strike_price || 0) || null,
+    expiry: row?.expiry || row?.expiry_date || null,
+    qty: Number(row?.qty || row?.quantity || row?.lots || 0),
+    entry_price: Number(row?.entry_price || row?.premium || 0) || null,
+    exit_price: Number(row?.exit_price || row?.mark_price || row?.latest_premium || 0) || null,
+    pnl: Number(row?.realized_pnl || row?.pnl || row?.result_R || 0),
+    action: row?.selection_reason || row?.reason || row?.lesson || row?.status || "paper record",
+    entry_time: row?.entry_time || row?.recorded_at || null,
+    exit_time: row?.exit_time || row?.closed_at || row?.recorded_at || null,
+  };
+}
+
+function buildExternalStrategies(extra: any) {
+  const commodityStatus = extra?.commodityStatus || {};
+  const directionalSummary = extra?.directionalSummary || {};
+  const directionalLive = extra?.directionalLive?.snapshot || {};
+  const directionalPositions = extra?.directionalPositions?.open_positions || extra?.directionalPositions?.positions || [];
+  const directionalJournal = extra?.directionalJournal?.journal || extra?.directionalJournal?.records || [];
+  const fmpSummary = extra?.fmpSummary || {};
+  const fmpLive = extra?.fmpLive || {};
+  const fmpPositions = extra?.fmpPositions?.open_positions || extra?.fmpPositions?.positions || [];
+  const fmpJournal = extra?.fmpJournal?.journal || extra?.fmpJournal?.records || [];
+
+  const commodityAgents = (commodityStatus?.strategy_agents || []).map((agent: any) => ({
+    key: agent.key || "commodity_strategy",
+    label: agent.label || prettify(agent.key || "Commodity Strategy"),
+    summary: buildEmptySummary({ open_positions: Number(agent.open_positions || 0) }),
+    positions: (agent.positions || []).map((row: any) => normalizeExternalPosition(row, row?.underlying || "CRUDEOIL")),
+    trade_history: (agent.trade_history || []).map((row: any) => normalizeExternalTrade(row, row?.underlying || "CRUDEOIL")),
+    signals: agent.signals || [],
+    recent_events: agent.recent_events || [],
+    last_scan_at: agent.last_scan_at || commodityStatus?.last_run_at,
+    last_message: agent.last_message || commodityStatus?.last_message || "Waiting for MCX market hours.",
+    meta: { mode: agent.mode || commodityStatus?.mode || "market_closed", scope: "MCX futures/options" },
+    instrument_universe: ["CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER"],
+  }));
+
+  const directionalSignal = directionalLive?.signal
+    ? [{
+        underlying: directionalLive.underlying || "NIFTY",
+        direction: directionalLive.signal.direction,
+        status: directionalLive.selected_contract ? "entry-ready" : "monitoring",
+        reason: directionalLive.selection_reason,
+        instruction: directionalLive.signal.thesis,
+        as_of: directionalLive.as_of,
+        source: "distributional_optimizer",
+      }]
+    : [];
+
+  const directional = {
+    key: "directional_long_options",
+    label: directionalSummary?.label || "Directional Long Options",
+    summary: buildEmptySummary({
+      open_positions: Number(directionalPositions.length || 0),
+      total_trades: Number(directionalJournal.length || 0),
+    }),
+    positions: directionalPositions.map((row: any) => normalizeExternalPosition(row, directionalLive?.underlying || "NIFTY")),
+    trade_history: directionalJournal.map((row: any) => normalizeExternalTrade(row, directionalLive?.underlying || "NIFTY")),
+    signals: directionalSignal,
+    recent_events: directionalJournal,
+    last_scan_at: directionalLive?.as_of || directionalSummary?.automation?.last_success_at,
+    last_message: directionalLive?.selection_reason || directionalSummary?.automation?.last_message || "Armed for next session.",
+    meta: {
+      mode: directionalLive?.data_status?.execution_ready ? "prepared" : directionalSummary?.automation?.last_message || "armed",
+      data_status: directionalLive?.data_status,
+      scope: "CE/PE distributional optimizer",
+    },
+    instrument_universe: directionalSummary?.underlyings?.length ? directionalSummary.underlyings : ["NIFTY", "BANKNIFTY", "SENSEX", "CRUDEOIL"],
+  };
+
+  const fmpSnapshot = fmpLive?.snapshot || fmpLive;
+  const fmpSignal = fmpSnapshot?.proposal || fmpSnapshot?.signal;
+  const fmpSignals = fmpSignal
+    ? [{
+        underlying: fmpSnapshot?.symbol || fmpSignal?.symbol || "NIFTY",
+        direction: fmpSignal?.direction || fmpSignal?.option_type,
+        status: fmpSignal?.approved ? "entry-ready" : "monitoring",
+        reason: fmpSignal?.reason || fmpSignal?.setup,
+        instruction: fmpSignal?.thesis || fmpSignal?.reason,
+        as_of: fmpSnapshot?.as_of,
+        source: "fractal_market_profile",
+      }]
+    : [];
+  const fmp = {
+    key: "fractal_market_profile",
+    label: "Fractal Market Profile",
+    summary: buildEmptySummary({
+      open_positions: Number(fmpSummary?.paper_summary?.open_positions || fmpPositions.length || 0),
+      total_trades: Number(fmpSummary?.paper_summary?.closed_positions || fmpJournal.length || 0),
+      realized_pnl: Number(fmpSummary?.paper_summary?.realized_pnl || 0),
+      unrealized_pnl: Number(fmpSummary?.paper_summary?.unrealized_pnl || 0),
+    }),
+    positions: fmpPositions.map((row: any) => normalizeExternalPosition(row, "NIFTY")),
+    trade_history: fmpJournal.map((row: any) => normalizeExternalTrade(row, "NIFTY")),
+    signals: fmpSignals,
+    recent_events: fmpJournal,
+    last_scan_at: fmpSummary?.automation?.last_success_at || fmpSnapshot?.as_of,
+    last_message: fmpSummary?.automation?.last_message || "Armed for next market session.",
+    meta: { mode: fmpSummary?.auto_started ? "armed" : "idle", scope: "MP/FMP" },
+    instrument_universe: fmpSummary?.supported_symbols || ["NIFTY", "SENSEX", "CRUDEOIL"],
+  };
+
+  return [directional, ...commodityAgents, fmp];
+}
+
+async function safeApi<T>(request: Promise<{ data: T }>, fallback: T): Promise<T> {
+  try {
+    const response = await request;
+    return response.data;
+  } catch {
+    return fallback;
+  }
+}
+
+function buildStrategyInstrumentCandidates(strategy: any, signalRows: any[]): StrategyInstrumentCandidate[] {
+  const candidates = new Map<string, StrategyInstrumentCandidate>();
+  const history = new Map<string, { trades: number; wins: number; pnl: number; latest?: string | null }>();
+
+  function ensure(symbol: string): StrategyInstrumentCandidate {
+    const normalized = String(symbol || "--").trim() || "--";
+    const existing = candidates.get(normalized);
+    if (existing) return existing;
+    const candidate: StrategyInstrumentCandidate = {
+      symbol: normalized,
+      category: "avoid",
+      priorityScore: 0,
+      statusLabel: "no current setup",
+      reason: "No fresh qualifying condition is available for this strategy.",
+      historyTrades: 0,
+      historyPnl: 0,
+      winRate: null,
+      lastSeen: null,
+    };
+    candidates.set(normalized, candidate);
+    return candidate;
+  }
+
+  for (const trade of strategy?.trade_history || []) {
+    const symbol = tradeUnderlying(trade);
+    if (!symbol || symbol === "--") continue;
+    const pnl = Number(trade.pnl || 0);
+    const item = history.get(symbol) || { trades: 0, wins: 0, pnl: 0, latest: null };
+    item.trades += 1;
+    item.wins += pnl > 0 ? 1 : 0;
+    item.pnl += pnl;
+    item.latest = trade.exit_time || trade.entry_time || item.latest;
+    history.set(symbol, item);
+  }
+
+  for (const event of strategy?.recent_events || []) {
+    if (String(event.event || "").toLowerCase() !== "exit") continue;
+    const symbol = signalUnderlying(event);
+    if (!symbol || symbol === "--" || history.has(symbol)) continue;
+    const pnl = Number(event.pnl || 0);
+    history.set(symbol, {
+      trades: 1,
+      wins: pnl > 0 ? 1 : 0,
+      pnl,
+      latest: event.time,
+    });
+  }
+
+  for (const [symbol, item] of Array.from(history.entries())) {
+    const candidate = ensure(symbol);
+    candidate.historyTrades = item.trades;
+    candidate.historyPnl = item.pnl;
+    candidate.winRate = item.trades ? item.wins / item.trades : null;
+    candidate.lastSeen = item.latest || candidate.lastSeen;
+    candidate.priorityScore += item.pnl > 0 ? 30 + Math.min(item.pnl / 1000, 20) : -25;
+    if (item.pnl > 0) {
+      candidate.category = "watch";
+      candidate.statusLabel = "historically favourable";
+      candidate.reason = "Past strategy history is positive; wait for the live trigger before entry.";
+    } else if (item.trades > 0) {
+      candidate.category = "avoid";
+      candidate.statusLabel = "negative history";
+      candidate.reason = "Historical strategy result is negative until a stronger fresh condition overrides it.";
+    }
+  }
+
+  for (const position of strategy?.positions || []) {
+    const candidate = ensure(position.underlying);
+    candidate.category = "conditions_met";
+    candidate.statusLabel = "open position";
+    candidate.reason = position.signal_reason || "Strategy already has a live/open condition.";
+    candidate.direction = position.option_type;
+    candidate.source = "position";
+    candidate.lastSeen = position.price_updated_at || position.entered_at;
+    candidate.priorityScore += 100;
+  }
+
+  for (const row of signalRows || []) {
+    const symbol = signalUnderlying(row);
+    if (!symbol || symbol === "--") continue;
+    const candidate = ensure(symbol);
+    const status = String(row.status || "").toLowerCase();
+    const hasDirection = Boolean(row.direction);
+    candidate.direction = row.direction || candidate.direction;
+    candidate.source = row.source || candidate.source;
+    candidate.lastSeen = row.option_last_bar_time || row.spot_last_time || row.as_of || candidate.lastSeen;
+
+    if (status.includes("entry-ready") || status.includes("active") || status.includes("open")) {
+      candidate.category = "conditions_met";
+      candidate.statusLabel = prettify(row.status);
+      candidate.reason = row.instruction || row.reason || "Entry condition is already satisfied.";
+      candidate.priorityScore += 90;
+    } else if (hasDirection && candidate.historyPnl >= 0) {
+      candidate.category = candidate.category === "conditions_met" ? candidate.category : "watch";
+      candidate.statusLabel = prettify(row.status || row.strength || "watching");
+      candidate.reason = row.instruction || row.reason || "Directional context exists, but final entry condition is pending.";
+      candidate.priorityScore += 45;
+    } else if (status.includes("missing") || status.includes("not-ready") || status.includes("stale")) {
+      candidate.category = "avoid";
+      candidate.statusLabel = prettify(row.status);
+      candidate.reason = row.instruction || "Input data is missing or stale.";
+      candidate.priorityScore -= 40;
+    }
+  }
+
+  for (const symbol of strategy?.instrument_universe || defaultStrategyUniverse(strategy?.key)) {
+    ensure(symbol);
+  }
+
+  return Array.from(candidates.values()).sort((left, right) => {
+    const categoryRank = { conditions_met: 0, watch: 1, avoid: 2 };
+    const rankDiff = categoryRank[left.category] - categoryRank[right.category];
+    if (rankDiff) return rankDiff;
+    return right.priorityScore - left.priorityScore;
+  });
 }
 
 function buildStrategyPortfolioRows(
@@ -402,24 +766,54 @@ function buildStrategyPortfolioRows(
 
 export default function StrategyPage() {
   const [activeTab, setActiveTab] = useState<StrategyTab>("portfolio");
+  const [selectedStrategyKey, setSelectedStrategyKey] = useState("macd_strategy");
+  const [activeStrategyTab, setActiveStrategyTab] = useState<StrategyDetailTab>("instruments");
 
   const strategyOverviewQuery = useLiveSnapshotQuery<{
     agent_status: StrategyAgentStatus;
     open_signals: any;
-    comments: StrategyComment[];
-    brokers: any[];
-    pipeline: any;
-    live_portfolio: any;
-  }>({
+	    comments: StrategyComment[];
+	    brokers: any[];
+	    pipeline: any;
+	    live_portfolio: any;
+	    strategy_desk?: any;
+	  }>({
     queryKey: ["strategyOverview"],
     queryFn: async () => {
-      const [agent_status, open_signals, comments, brokers, pipeline, live_portfolio] = await Promise.all([
+      const [
+        agent_status,
+        open_signals,
+        comments,
+        brokers,
+        pipeline,
+        live_portfolio,
+        commodity_status,
+        commodity_watchlist,
+        directional_summary,
+        directional_live,
+        directional_positions,
+        directional_journal,
+        fmp_summary,
+        fmp_live,
+        fmp_positions,
+        fmp_journal,
+      ] = await Promise.all([
         getStrategyAgentStatus().then((response) => response.data as StrategyAgentStatus),
         getStrategyOpenSignals().then((response) => response.data as any),
         getStrategyAgentComments().then((response) => response.data as StrategyComment[]),
         getBrokerStatus().then((response) => response.data as any[]),
         getStrategyDataStatus().then((response) => response.data as any),
         getStrategyPortfolio().then((response) => response.data as any),
+        safeApi(getCommodityStrategyStatus(), {}),
+        safeApi(getCommodityATMWatchlist(), {}),
+        safeApi(getDirectionalOptionsSummary(), {}),
+        safeApi(getDirectionalOptionsLiveSnapshot("NIFTY", "5minute", 16), {}),
+        safeApi(getDirectionalOptionsPaperPositions(undefined, "all", 50), {}),
+        safeApi(getDirectionalOptionsPaperJournal(undefined, 50), {}),
+        safeApi(getFractalMarketProfileSummary(), {}),
+        safeApi(getFractalMarketProfileLiveSnapshot("NIFTY"), {}),
+        safeApi(getFractalMarketProfilePaperPositions(undefined, "all", 50), {}),
+        safeApi(getFractalMarketProfilePaperJournal(undefined, 50), {}),
       ]);
       return {
         agent_status,
@@ -428,6 +822,18 @@ export default function StrategyPage() {
         brokers,
         pipeline,
         live_portfolio,
+        strategy_desk: {
+          commodityStatus: commodity_status,
+          commodityWatchlist: commodity_watchlist,
+          directionalSummary: directional_summary,
+          directionalLive: directional_live,
+          directionalPositions: directional_positions,
+          directionalJournal: directional_journal,
+          fmpSummary: fmp_summary,
+          fmpLive: fmp_live,
+          fmpPositions: fmp_positions,
+          fmpJournal: fmp_journal,
+        },
       };
     },
     streamFactory: (onData, onStatusChange) =>
@@ -437,10 +843,11 @@ export default function StrategyPage() {
             agent_status: StrategyAgentStatus;
             open_signals: any;
             comments: StrategyComment[];
-            brokers: any[];
-            pipeline: any;
-            live_portfolio: any;
-          }),
+	            brokers: any[];
+	            pipeline: any;
+	            live_portfolio: any;
+	            strategy_desk?: any;
+	          }),
         onStatusChange,
       ),
     staleTime: 10_000,
@@ -452,8 +859,11 @@ export default function StrategyPage() {
   const brokers = strategyOverviewQuery.data?.brokers;
   const pipeline = strategyOverviewQuery.data?.pipeline;
   const livePortfolio = strategyOverviewQuery.data?.live_portfolio;
+  const strategyDesk = strategyOverviewQuery.data?.strategy_desk;
 
   const strategies = useMemo(() => agentStatus?.strategies || [], [agentStatus?.strategies]);
+  const externalStrategies = useMemo(() => buildExternalStrategies(strategyDesk), [strategyDesk]);
+  const deskStrategies = useMemo(() => [...strategies, ...externalStrategies], [externalStrategies, strategies]);
   const {
     allPositions,
     totalOpenPnl,
@@ -501,6 +911,49 @@ export default function StrategyPage() {
   const optionHistoryHealth = summarizeOptionHistoryHealth(agentStatus);
   const equityCurve = useMemo(() => livePortfolio?.equity_curve || [], [livePortfolio?.equity_curve]);
   const monthly = useMemo(() => livePortfolio?.monthly || [], [livePortfolio?.monthly]);
+  const selectedStrategy = useMemo(
+    () => deskStrategies.find((strategy) => strategy.key === selectedStrategyKey) || deskStrategies[0],
+    [selectedStrategyKey, deskStrategies],
+  );
+  const selectedSignalRows = selectedStrategy?.key === "index_mp_strategy"
+    ? strategy2Rows
+    : selectedStrategy?.key === "macd_strategy"
+      ? strategy1Rows
+      : normalizeSignalRows(selectedStrategy?.signals || []);
+  const selectedPortfolioRows = useMemo(
+    () => {
+      const existingRows = portfolioRows.filter((row) => row.strategyKey === selectedStrategy?.key);
+      if (existingRows.length || !selectedStrategy || strategies.some((strategy) => strategy.key === selectedStrategy.key)) {
+        return existingRows;
+      }
+      return buildStrategyPortfolioRows([selectedStrategy], selectedStrategy.last_scan_at || agentStatus?.last_run_at);
+    },
+    [agentStatus?.last_run_at, portfolioRows, selectedStrategy, strategies],
+  );
+  const selectedCandidates = useMemo(
+    () => buildStrategyInstrumentCandidates(selectedStrategy, selectedSignalRows),
+    [selectedSignalRows, selectedStrategy],
+  );
+  const candidatesByCategory = useMemo(
+    () => ({
+      conditions_met: selectedCandidates.filter((candidate) => candidate.category === "conditions_met"),
+      watch: selectedCandidates.filter((candidate) => candidate.category === "watch"),
+      avoid: selectedCandidates.filter((candidate) => candidate.category === "avoid"),
+    }),
+    [selectedCandidates],
+  );
+  const strategyRuntimeRows = agentStatus?.strategy_agents || [];
+  const liveStrategyCount = deskStrategies.length || strategyRuntimeRows.length || strategies.length;
+  const activeScanCount = deskStrategies.filter((strategy: any) => strategy?.meta?.mode !== "disabled").length || strategyRuntimeRows.filter((strategy: any) => strategy.mode !== "disabled").length || strategies.length;
+  const commodityWatchRows = Number(strategyDesk?.commodityWatchlist?.summary?.total_rows || 0);
+  const marketIntelligenceHealth = ((agentStatus?.data_health || {}) as any).market_intelligence || {};
+  const directionalDataStatus = strategyDesk?.directionalLive?.snapshot?.data_status || {};
+  const fmpAutomation = strategyDesk?.fmpSummary?.automation || {};
+  const pipelineRows = [...(pipeline?.live_pipeline || []), ...(pipeline?.strategy2_pipeline || [])];
+  const okPipelineRows = pipelineRows.filter((item: any) => item.status === "ok").length;
+  const currentLiveRows = pipelineRows.filter((item: any) => item.freshness === "live").length;
+  const marketDataLabel = currentLiveRows > 0 ? "Live" : okPipelineRows > 0 ? "Replay / session-close" : "Stale / blocked";
+  const marketDataTone = currentLiveRows > 0 ? "text-accent-green" : okPipelineRows > 0 ? "text-accent-amber" : "text-accent-red";
 
   return (
     <div className="mx-auto max-w-[1680px] space-y-6 pb-10">
@@ -543,7 +996,9 @@ export default function StrategyPage() {
           </div>
         </div>
 
-        <div className="mt-5 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+        <div className="mt-5 grid gap-3 md:grid-cols-3 xl:grid-cols-8">
+          <MetricTile label="Live Strategies" value={String(liveStrategyCount)} detail={`${activeScanCount} scan-capable`} tone="text-accent-blue" />
+          <MetricTile label="Market Data" value={marketDataLabel} detail={`${okPipelineRows}/${pipelineRows.length || 0} feeds OK`} tone={marketDataTone} />
           <MetricTile label="Open Positions" value={String(allPositions.length)} />
           <MetricTile label="Strategy 1 Open" value={String(strategies.find((strategy) => strategy.key === "macd_strategy")?.summary.open_positions || 0)} />
           <MetricTile label="Strategy 2 Open" value={String(strategies.find((strategy) => strategy.key === "index_mp_strategy")?.summary.open_positions || 0)} />
@@ -551,6 +1006,294 @@ export default function StrategyPage() {
           <MetricTile label="Realized" value={formatSigned(totalRealized, 0)} tone={pnlTone(totalRealized)} />
           <MetricTile label="Win Rate" value={totalTrades ? `${combinedWinRate.toFixed(1)}%` : "--"} detail={`${totalTrades} closed trades`} />
         </div>
+      </section>
+
+      <section className="rounded-[28px] border border-bg-border bg-bg-secondary/20 p-4">
+        <PanelHeader
+          icon={<Bot size={16} className="text-accent-green" />}
+          title="Strategy Agent Readiness"
+          detail="Every strategy agent is shown with its visible instrument scope and tomorrow-open preparation state. Upstox analytics history is treated as valid paper-trading data; live broker reconnect is still shown separately."
+          meta={`${deskStrategies.length} strategy lanes`}
+        />
+        <div className="mt-4 grid gap-3 lg:grid-cols-2 xl:grid-cols-4">
+          <div className="rounded-2xl border border-bg-border bg-bg-primary/25 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-sm font-semibold text-text-primary">NSE CE/PE MACD + MP</div>
+              <StatusBadge label={marketIntelligenceHealth?.ready ? "prepared" : "checking"} tone={marketIntelligenceHealth?.ready ? "ready" : "warning"} />
+            </div>
+            <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
+              <MiniMetric label="F&O Rows" value={String(marketIntelligenceHealth?.watchlist_rows_latest || 0)} />
+              <MiniMetric label="CE Ready" value={String(marketIntelligenceHealth?.latest_ce_ready || 0)} />
+              <MiniMetric label="PE Ready" value={String(marketIntelligenceHealth?.latest_pe_ready || 0)} />
+            </div>
+            <div className="mt-3 text-xs text-text-muted">{marketIntelligenceHealth?.latest_watchlist_session || "session pending"} · {prettify(marketIntelligenceHealth?.readiness_mode)}</div>
+          </div>
+
+          <div className="rounded-2xl border border-bg-border bg-bg-primary/25 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-sm font-semibold text-text-primary">Directional Options</div>
+              <StatusBadge label={directionalDataStatus.execution_ready ? "prepared" : "monitoring"} tone={directionalDataStatus.execution_ready ? "ready" : "warning"} />
+            </div>
+            <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
+              <MiniMetric label="Universe" value={String(strategyDesk?.directionalSummary?.underlyings?.length || 0)} />
+              <MiniMetric label="Watch Rows" value={String(directionalDataStatus.watchlist_rows_latest || directionalDataStatus.watchlist_rows_today || 0)} />
+              <MiniMetric label="Mode" value={prettify(directionalDataStatus.readiness_mode || "armed")} />
+            </div>
+            <div className="mt-3 text-xs text-text-muted">{strategyDesk?.directionalLive?.snapshot?.selection_reason || strategyDesk?.directionalSummary?.automation?.last_message || "Awaiting next scan."}</div>
+          </div>
+
+          <div className="rounded-2xl border border-bg-border bg-bg-primary/25 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-sm font-semibold text-text-primary">Commodity</div>
+              <StatusBadge label={commodityWatchRows ? "prepared" : "needs feed"} tone={commodityWatchRows ? "ready" : "warning"} />
+            </div>
+            <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
+              <MiniMetric label="Agents" value={String(strategyDesk?.commodityStatus?.strategy_agents?.length || 0)} />
+              <MiniMetric label="Watch Rows" value={String(commodityWatchRows)} />
+              <MiniMetric label="Open" value={String(strategyDesk?.commodityStatus?.strategy_agents?.reduce?.((sum: number, item: any) => sum + Number(item.open_positions || 0), 0) || 0)} />
+            </div>
+            <div className="mt-3 text-xs text-text-muted">{strategyDesk?.commodityStatus?.last_message || strategyDesk?.commodityWatchlist?.detail || "Waiting for MCX market hours."}</div>
+          </div>
+
+          <div className="rounded-2xl border border-bg-border bg-bg-primary/25 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-sm font-semibold text-text-primary">MP / FMP</div>
+              <StatusBadge label={fmpAutomation.loop_active ? "armed" : "idle"} tone={fmpAutomation.loop_active ? "ready" : "warning"} />
+            </div>
+            <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
+              <MiniMetric label="Symbols" value={String(strategyDesk?.fmpSummary?.supported_symbols?.length || 0)} />
+              <MiniMetric label="Open" value={String(strategyDesk?.fmpSummary?.paper_summary?.open_positions || 0)} />
+              <MiniMetric label="Replay" value={String(strategyDesk?.fmpSummary?.replay_reports?.length || 0)} />
+            </div>
+            <div className="mt-3 text-xs text-text-muted">{fmpAutomation.last_message || "Armed for next session."}</div>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-[28px] border border-bg-border bg-bg-secondary/20 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <PanelHeader
+            icon={<Shield size={16} className="text-accent-blue" />}
+            title="Individual Strategy Workbench"
+            detail="Each strategy has its own priority instruments and operational tabs. Instruments are ranked first by live condition state, then by realized strategy history."
+            meta={selectedStrategy?.label || "No strategy selected"}
+          />
+          <div className="flex flex-wrap gap-2">
+            {deskStrategies.map((strategy) => (
+              <button
+                key={strategy.key}
+                type="button"
+                onClick={() => {
+                  setSelectedStrategyKey(strategy.key);
+                  setActiveStrategyTab("instruments");
+                }}
+                className={clsx(
+                  "rounded-xl border px-3 py-2 text-left text-xs transition-colors",
+                  selectedStrategy?.key === strategy.key
+                    ? "border-accent-blue/40 bg-accent-blue/10 text-accent-blue"
+                    : "border-bg-border bg-bg-primary/25 text-text-secondary hover:border-bg-active hover:text-text-primary",
+                )}
+              >
+                <div className="font-semibold">{strategy.key === "macd_strategy" ? "Strategy 1" : strategy.key === "index_mp_strategy" ? "Strategy 2" : strategy.label}</div>
+                <div className="mt-1 text-[11px] text-text-muted">{strategy.summary.open_positions || 0} open · {strategy.summary.total_trades || 0} trades</div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-4">
+          <MetricTile label="Mode" value={prettify(selectedStrategy?.meta?.mode || "unknown")} detail={formatTimestamp(selectedStrategy?.last_scan_at)} />
+          <MetricTile label="Priority Instruments" value={String(candidatesByCategory.conditions_met.length + candidatesByCategory.watch.length)} detail="met + watch" tone="text-accent-green" />
+          <MetricTile label="Avoid List" value={String(candidatesByCategory.avoid.length)} detail="blocked, stale or weak history" tone="text-accent-red" />
+          <MetricTile label="Strategy P&L" value={formatSigned(selectedStrategy?.summary.realized_pnl, 0)} detail={`${selectedStrategy?.summary.total_trades || 0} closed trades`} tone={pnlTone(selectedStrategy?.summary.realized_pnl)} />
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          <DetailTabButton active={activeStrategyTab === "instruments"} label="Priority Instruments" count={selectedCandidates.length} onClick={() => setActiveStrategyTab("instruments")} />
+          <DetailTabButton active={activeStrategyTab === "positions"} label="Trade Positions" count={selectedStrategy?.positions?.length || 0} onClick={() => setActiveStrategyTab("positions")} />
+          <DetailTabButton active={activeStrategyTab === "history"} label="Trade History" count={selectedStrategy?.trade_history?.length || 0} onClick={() => setActiveStrategyTab("history")} />
+          <DetailTabButton active={activeStrategyTab === "portfolio"} label="Strategy Portfolio" count={selectedPortfolioRows.length} onClick={() => setActiveStrategyTab("portfolio")} />
+          <DetailTabButton active={activeStrategyTab === "performance"} label="Performance Metrics" onClick={() => setActiveStrategyTab("performance")} />
+        </div>
+
+        {activeStrategyTab === "instruments" ? (
+          <div className="mt-4 grid gap-4 xl:grid-cols-3">
+            {(["conditions_met", "watch", "avoid"] as InstrumentCategory[]).map((category) => (
+              <div key={category} className="rounded-2xl border border-bg-border bg-bg-primary/25 p-3">
+                <div className={clsx("text-sm font-semibold", categoryTone(category))}>{categoryLabel(category)}</div>
+                <div className="mt-1 text-xs text-text-muted">
+                  {category === "conditions_met"
+                    ? "Can be acted on only if risk engine and broker state approve."
+                    : category === "watch"
+                      ? "Historically favourable or aligned, but final condition is pending."
+                      : "No signal, stale inputs, or negative strategy history."}
+                </div>
+                <div className="mt-3 max-h-[420px] space-y-2 overflow-y-auto pr-1">
+                  {candidatesByCategory[category].length ? (
+                    candidatesByCategory[category].map((candidate) => (
+                      <div key={`${category}-${candidate.symbol}`} className="rounded-xl border border-bg-border bg-bg-secondary/25 px-3 py-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="font-semibold text-text-primary">{candidate.symbol}</div>
+                            <div className="mt-1 text-[11px] text-text-muted">{candidate.reason}</div>
+                          </div>
+                          <div className="text-right">
+                            <StatusBadge label={candidate.direction || candidate.statusLabel} tone={candidate.category === "avoid" ? "error" : candidate.direction || candidate.statusLabel} />
+                            <div className="mt-2 font-mono text-[11px] text-text-muted">score {formatNumber(candidate.priorityScore, 1)}</div>
+                          </div>
+                        </div>
+                        <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
+                          <div className="rounded-lg border border-bg-border bg-bg-primary/30 px-2 py-2">
+                            <div className="text-text-muted">Hist P&L</div>
+                            <div className={clsx("mt-1 font-mono", pnlTone(candidate.historyPnl))}>{formatSigned(candidate.historyPnl, 0)}</div>
+                          </div>
+                          <div className="rounded-lg border border-bg-border bg-bg-primary/30 px-2 py-2">
+                            <div className="text-text-muted">Win Rate</div>
+                            <div className="mt-1 font-mono text-text-primary">{candidate.winRate != null ? `${(candidate.winRate * 100).toFixed(0)}%` : "--"}</div>
+                          </div>
+                          <div className="rounded-lg border border-bg-border bg-bg-primary/30 px-2 py-2">
+                            <div className="text-text-muted">Last Seen</div>
+                            <div className="mt-1 font-mono text-text-primary">{formatTimestamp(candidate.lastSeen)}</div>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="rounded-xl border border-dashed border-bg-border px-3 py-8 text-center text-xs text-text-muted">
+                      No instruments in this bucket.
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        {activeStrategyTab === "positions" ? (
+          <div className="mt-4 overflow-x-auto rounded-2xl border border-bg-border bg-bg-primary/25 p-3">
+            <table className="w-full min-w-[1180px] text-left text-xs">
+              <thead className="text-text-muted">
+                <tr className="border-b border-bg-border">
+                  <th className="pb-2 pr-3">Underlying</th>
+                  <th className="pb-2 pr-3">Contract</th>
+                  <th className="pb-2 pr-3">Qty</th>
+                  <th className="pb-2 pr-3">Entry</th>
+                  <th className="pb-2 pr-3">Mark</th>
+                  <th className="pb-2 pr-3">Phase</th>
+                  <th className="pb-2">P&L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(selectedStrategy?.positions || []).length ? (
+                  (selectedStrategy?.positions || []).map((position: any) => (
+                    <tr key={`${position.symbol}-${position.entered_at}`} className="border-b border-bg-border/40">
+                      <td className="py-3 pr-3 font-semibold text-text-primary">{position.underlying}</td>
+                      <td className="py-3 pr-3 font-mono text-text-secondary">{position.option_type} {position.strike} · {position.expiry}</td>
+                      <td className="py-3 pr-3 font-mono text-text-primary">{position.qty}</td>
+                      <td className="py-3 pr-3 font-mono text-text-secondary">{formatNumber(position.entry_price)}</td>
+                      <td className="py-3 pr-3 font-mono text-text-secondary">{formatNumber(position.current_price)}</td>
+                      <td className="py-3 pr-3"><StatusBadge label={prettify(position.phase)} tone={position.phase} /></td>
+                      <td className={clsx("py-3 font-mono font-semibold", pnlTone(position.unrealized_pnl))}>{formatSigned(position.unrealized_pnl, 0)}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr><td colSpan={7} className="py-10 text-center text-sm text-text-muted">No open positions for this strategy.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+
+        {activeStrategyTab === "history" ? (
+          <div className="mt-4 overflow-x-auto rounded-2xl border border-bg-border bg-bg-primary/25 p-3">
+            <table className="w-full min-w-[1180px] text-left text-xs">
+              <thead className="text-text-muted">
+                <tr className="border-b border-bg-border">
+                  <th className="pb-2 pr-3">Underlying</th>
+                  <th className="pb-2 pr-3">Contract</th>
+                  <th className="pb-2 pr-3">Entry</th>
+                  <th className="pb-2 pr-3">Exit</th>
+                  <th className="pb-2 pr-3">Reason</th>
+                  <th className="pb-2">P&L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(selectedStrategy?.trade_history || []).length ? (
+                  (selectedStrategy?.trade_history || []).map((trade: any) => (
+                    <tr key={`${trade.symbol}-${trade.exit_time || trade.entry_time}`} className="border-b border-bg-border/40">
+                      <td className="py-3 pr-3 font-semibold text-text-primary">{tradeUnderlying(trade)}</td>
+                      <td className="py-3 pr-3 font-mono text-text-secondary">{strategyContractLabel(trade.option_type, trade.strike, trade.expiry)}</td>
+                      <td className="py-3 pr-3 font-mono text-text-secondary">{formatNumber(trade.entry_price)} · {formatTimestamp(trade.entry_time)}</td>
+                      <td className="py-3 pr-3 font-mono text-text-secondary">{formatNumber(trade.exit_price)} · {formatTimestamp(trade.exit_time)}</td>
+                      <td className="py-3 pr-3 text-text-muted">{prettify(trade.action || trade.instrument_type)}</td>
+                      <td className={clsx("py-3 font-mono font-semibold", pnlTone(trade.pnl))}>{formatSigned(trade.pnl, 0)}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr><td colSpan={6} className="py-10 text-center text-sm text-text-muted">No closed trade history for this strategy.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+
+        {activeStrategyTab === "portfolio" ? (
+          <div className="mt-4 grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
+            <div className="rounded-2xl border border-bg-border bg-bg-primary/25 p-4">
+              <PanelHeader icon={<Shield size={16} className="text-accent-green" />} title="Strategy Portfolio" detail="Capital and exposure specific to the selected strategy." />
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <MetricTile label="Equity" value={formatCompact(selectedStrategy?.summary.total_equity)} />
+                <MetricTile label="Open P&L" value={formatSigned(selectedStrategy?.summary.unrealized_pnl, 0)} tone={pnlTone(selectedStrategy?.summary.unrealized_pnl)} />
+                <MetricTile label="Realized" value={formatSigned(selectedStrategy?.summary.realized_pnl, 0)} tone={pnlTone(selectedStrategy?.summary.realized_pnl)} />
+                <MetricTile label="Entries / Exits" value={`${selectedStrategy?.summary.entries || 0} / ${selectedStrategy?.summary.exits || 0}`} />
+              </div>
+            </div>
+            <div className="max-h-[360px] overflow-auto rounded-2xl border border-bg-border bg-bg-primary/25 p-3">
+              {selectedPortfolioRows.length ? (
+                selectedPortfolioRows.map((row) => (
+                  <div key={row.id} className="mb-2 rounded-xl border border-bg-border bg-bg-secondary/25 px-3 py-3 text-xs">
+                    <div className="flex justify-between gap-3">
+                      <span className="font-semibold text-text-primary">{row.underlying}</span>
+                      <span className={clsx("font-mono", pnlTone(row.pnl))}>{formatSigned(row.pnl, 0)}</span>
+                    </div>
+                    <div className="mt-1 text-text-muted">{row.contract} · {row.statusLabel}</div>
+                  </div>
+                ))
+              ) : (
+                <div className="py-12 text-center text-sm text-text-muted">No portfolio rows for this strategy.</div>
+              )}
+            </div>
+          </div>
+        ) : null}
+
+        {activeStrategyTab === "performance" ? (
+          <div className="mt-4 grid gap-4 xl:grid-cols-2">
+            <div className="rounded-2xl border border-bg-border bg-bg-primary/25 p-4">
+              <PanelHeader icon={<BarChart3 size={16} className="text-accent-blue" />} title="Performance Metrics" detail="Live paper metrics reported by the selected strategy runtime." />
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <MetricTile label="Trades" value={String(selectedStrategy?.summary.total_trades || 0)} />
+                <MetricTile label="Win Rate" value={selectedStrategy?.summary.win_rate != null ? `${((selectedStrategy.summary.win_rate || 0) * 100).toFixed(1)}%` : "--"} />
+                <MetricTile label="Open Positions" value={String(selectedStrategy?.summary.open_positions || 0)} />
+                <MetricTile label="Signals" value={String(selectedStrategy?.signals?.length || 0)} />
+              </div>
+            </div>
+            <div className="rounded-2xl border border-bg-border bg-bg-primary/25 p-4">
+              <PanelHeader icon={<Database size={16} className="text-accent-amber" />} title="Market Data Visibility" detail="Shows whether this strategy is seeing current data, session-close replay, or stale inputs." />
+              <div className="mt-4 space-y-2 text-xs">
+                {(selectedStrategy?.key === "index_mp_strategy" ? pipeline?.strategy2_pipeline : pipeline?.live_pipeline || []).map((item: any) => (
+                  <div key={item.name} className="rounded-xl border border-bg-border bg-bg-secondary/25 px-3 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-semibold text-text-primary">{item.name}</span>
+                      <StatusBadge label={item.freshness || item.status} tone={item.status || item.freshness} />
+                    </div>
+                    <div className="mt-1 text-text-muted">{item.detail}</div>
+                    <div className="mt-1 font-mono text-[11px] text-text-muted">{item.rows || 0} rows · {item.last_date}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : null}
       </section>
 
       <section className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">

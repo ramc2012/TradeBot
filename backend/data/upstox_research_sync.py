@@ -1266,10 +1266,40 @@ class UpstoxResearchSync:
                     fetch_to_date,
                 )
             except UpstoxAuthError as exc:
-                logger.error(
-                    f"Stopping contract sync because Upstox authentication failed: {exc}"
+                if str(row["instrument_key"]).count("|") < 2:
+                    logger.error(
+                        f"Stopping contract sync because Upstox authentication failed: {exc}"
+                    )
+                    raise
+                logger.warning(
+                    "Skipping expired option contract after Upstox rejected the "
+                    f"expired-candle request for {row['trading_symbol']}: {exc}"
                 )
-                raise
+                async with AsyncSessionLocal() as session:
+                    await session.execute(
+                        text("""
+                            UPDATE fo_contract_catalog
+                            SET sync_status = 'empty',
+                                candle_count = 0,
+                                candle_from_date = :candle_from_date,
+                                candle_to_date = :candle_to_date,
+                                first_candle_time = NULL,
+                                last_candle_time = NULL,
+                                last_synced_at = NOW(),
+                                last_error = :last_error,
+                                updated_at = NOW()
+                            WHERE instrument_key = :instrument_key
+                        """),
+                        {
+                            "instrument_key": row["instrument_key"],
+                            "candle_from_date": fetch_from_date,
+                            "candle_to_date": fetch_to_date,
+                            "last_error": str(exc)[:500],
+                        },
+                    )
+                    await session.commit()
+                empty += 1
+                continue
 
             status = "empty"
             payload = []
@@ -1369,7 +1399,10 @@ class UpstoxResearchSync:
                 )
             else:
                 empty += 1
-                logger.warning(f"No candles returned for {row['trading_symbol']}")
+                if row["expiry"] < date.today():
+                    logger.info(f"No expired candles returned for {row['trading_symbol']}; marking empty.")
+                else:
+                    logger.warning(f"No candles returned for {row['trading_symbol']}")
 
         refreshed = await self._rebuild_chain_metrics(touched_pairs) if touched_pairs else 0
         return stored_rows, completed, empty, refreshed

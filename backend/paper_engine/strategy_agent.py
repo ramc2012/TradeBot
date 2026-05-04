@@ -119,8 +119,32 @@ def _in_market_hours(now: Optional[datetime] = None) -> bool:
         return False
     return time(9, 15) <= current.time() <= time(15, 30)
 
+def _looks_like_stale_blocking_message(message: Optional[str]) -> bool:
+    text = str(message or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "market-intelligence data is not ready",
+            "broker_unavailable",
+            "broker unavailable",
+            "no valid nse broker session",
+            "atm watchlist empty",
+        )
+    )
+
 def _contract_symbol(underlying: str, expiry: str, strike: float, option_type: str) -> str:
     return f"OPT:{underlying}:{expiry}:{int(round(strike))}:{option_type}"
+
+
+def _coerce_date(value: Any) -> Optional[date]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
 
 
 def _bars_since_entry(candles: list[dict[str, Any]], entered_at: Optional[str]) -> Optional[int]:
@@ -828,23 +852,23 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             await asyncio.sleep(self.scan_interval_seconds)
 
     async def ensure_recovered_state(self) -> None:
-        if self._historical_recovery_attempted:
-            return
         self._historical_recovery_attempted = True
         try:
             async with AsyncSessionLocal() as session:
                 latest_snapshot_day = await session.scalar(
                     text(
                         """
-                        SELECT MAX(time::date)
+                        SELECT MAX(timezone('Asia/Kolkata', time)::date)
                         FROM atm_option_watchlist_snapshots
+                        WHERE timezone('Asia/Kolkata', time)::date < :today
+                           OR timezone('Asia/Kolkata', time)::time >= TIME '15:15'
                         """
-                    )
+                    ).bindparams(today=_now_ist().date())
                 )
                 latest_position_day = await session.scalar(
                     text(
                         """
-                        SELECT MAX(created_at::date)
+                        SELECT MAX(timezone('Asia/Kolkata', created_at)::date)
                         FROM positions
                         WHERE qty > 0
                           AND symbol LIKE 'OPT:%'
@@ -862,6 +886,20 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     if isinstance(signal, dict)
                 ]
             )
+            current_prepared_day = _latest_runtime_day(
+                [
+                    (runtime.meta or {}).get("updated_at")
+                    for runtime in self._runtimes()
+                    if (runtime.meta or {}).get("mode") == "prepared_market_closed"
+                ]
+            )
+            if current_prepared_day is not None:
+                latest_required_day = max(
+                    [day for day in (latest_snapshot_day, latest_position_day) if day is not None],
+                    default=None,
+                )
+                if latest_required_day is None or current_prepared_day >= latest_required_day:
+                    return
             needs_strategy1 = latest_position_day is not None and (
                 not self._strategy1.positions
                 or current_strategy1_day is None
@@ -940,6 +978,274 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             )
 
     @staticmethod
+    def _prepared_side_score(row: dict[str, Any]) -> tuple[Optional[str], str, float]:
+        ce = row.get("ce") or {}
+        pe = row.get("pe") or {}
+
+        def _as_float(value: Any) -> Optional[float]:
+            try:
+                if value is None:
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        ce_macd = _as_float(ce.get("macd"))
+        pe_macd = _as_float(pe.get("macd"))
+        if ce_macd is not None and pe_macd is not None:
+            if ce_macd >= 0 > pe_macd:
+                return "CE", "bullish ATM option MACD quadrant", abs(ce_macd) + abs(pe_macd)
+            if ce_macd < 0 <= pe_macd:
+                return "PE", "bearish ATM option MACD quadrant", abs(ce_macd) + abs(pe_macd)
+
+        ce_change = _as_float(ce.get("change_pct"))
+        pe_change = _as_float(pe.get("change_pct"))
+        if ce_change is not None and pe_change is not None:
+            gap = ce_change - pe_change
+            if gap > 0.5:
+                return "CE", "CE premium strength versus PE", abs(gap)
+            if gap < -0.5:
+                return "PE", "PE premium strength versus CE", abs(gap)
+
+        return None, "no directional option-premium edge yet", 0.0
+
+    def _build_prepared_strategy1_watchlist(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        started_at: datetime,
+        limit: int = 80,
+    ) -> list[dict[str, Any]]:
+        prepared: list[dict[str, Any]] = []
+        for row in rows:
+            underlying = str(row.get("underlying") or "").strip()
+            if not underlying or underlying in EXCLUDED_UNDERLYINGS:
+                continue
+            direction, reason, score = self._prepared_side_score(row)
+            if direction not in {"CE", "PE"}:
+                continue
+            side = row.get("ce") if direction == "CE" else row.get("pe")
+            side = side or {}
+            try:
+                ltp = float(side.get("ltp") or 0.0)
+            except (TypeError, ValueError):
+                ltp = 0.0
+            if ltp <= 0:
+                continue
+            iv_raw = side.get("iv")
+            iv_pct = None
+            if iv_raw is not None:
+                try:
+                    iv_val = float(iv_raw)
+                    iv_pct = iv_val * 100.0 if iv_val < 1.0 else iv_val
+                except (TypeError, ValueError):
+                    iv_pct = None
+            if check_iv_filter(iv_pct, MAX_ENTRY_IV_PCT, HARD_MAX_IV_PCT) == "reject":
+                continue
+            if not (MIN_PREMIUM <= ltp <= MAX_PREMIUM):
+                score -= 25.0
+
+            prepared.append(
+                {
+                    "strategy": "Strategy 1",
+                    "source": "prepared_watchlist",
+                    "underlying": underlying,
+                    "signal_date": started_at.date().isoformat(),
+                    "trade_date": "pre-market preparation",
+                    "as_of": started_at.isoformat(),
+                    "direction": direction,
+                    "reason": reason,
+                    "strength": "monitoring",
+                    "status": "watching",
+                    "freshness": "prepared",
+                    "instruction": (
+                        f"{underlying}: {direction} is favoured by {reason}; "
+                        "wait for the live MACD zero-cross and risk gates after market open."
+                    ),
+                    "spot_price": _round_or_none(row.get("spot_price"), 2),
+                    "expiry": row.get("expiry"),
+                    "atm_strike": row.get("atm_strike"),
+                    "ltp": _round_or_none(ltp, 2),
+                    "iv_pct": _round_or_none(iv_pct, 2),
+                    "priority_score": _round_or_none(score, 4),
+                    "option_last_bar_time": started_at.isoformat(),
+                    "spot_last_time": started_at.isoformat(),
+                }
+            )
+
+        prepared.sort(key=lambda item: float(item.get("priority_score") or 0.0), reverse=True)
+        return prepared[:limit]
+
+    async def _prepare_closed_market_state(
+        self,
+        started_at: datetime,
+        *,
+        market_intelligence_health: dict[str, Any],
+        broker_snapshot: Optional[dict[str, Any]],
+        local_only_mode: bool,
+    ) -> None:
+        rows: list[dict[str, Any]] = []
+        watchlist_detail: Optional[str] = None
+        broker_ready = bool((broker_snapshot or {}).get("broker_ready"))
+        live_refresh = bool(broker_ready and not local_only_mode)
+
+        try:
+            expiry_scope = await atm_watchlist_service.get_expiries(
+                self._last_expiry,
+                live_refresh=live_refresh,
+            )
+            self._last_expiry = str(expiry_scope.get("default_expiry") or self._last_expiry or "")
+            self._last_candidate_expiries = [
+                str(item)
+                for item in (expiry_scope.get("expiries") or [])
+                if str(item or "").strip()
+            ]
+            watchlist = await atm_watchlist_service.get_watchlist(
+                expiry=self._last_expiry or None,
+                live_refresh=live_refresh,
+            )
+            rows = list(watchlist.get("rows") or [])
+            watchlist_detail = str(watchlist.get("detail") or "").strip() or None
+        except Exception as exc:
+            watchlist_detail = f"Closed-market watchlist preparation failed: {exc}"
+            logger.warning(f"[Strategy] closed-market preparation skipped: {exc}")
+
+        try:
+            self._active_windows = await get_all_active_windows(as_of=started_at.date())
+            self._scan_windows = await get_all_strategy1_scan_windows(as_of=started_at.date())
+        except Exception as exc:
+            logger.debug(f"[Strategy] closed-market window preparation skipped: {exc}")
+
+        all_underlyings = [
+            str(row.get("underlying") or "").strip()
+            for row in rows
+            if str(row.get("underlying") or "").strip()
+        ]
+        stock_underlyings = [
+            str(row.get("underlying") or "").strip()
+            for row in rows
+            if str(row.get("kind") or "").upper() == "STOCK"
+        ]
+        index_underlyings = [
+            str(row.get("underlying") or "").strip()
+            for row in rows
+            if str(row.get("kind") or "").upper() == "INDEX"
+        ]
+        prepared_watchlist = self._build_prepared_strategy1_watchlist(rows, started_at=started_at)
+        latest_watchlist_time = (
+            market_intelligence_health.get("latest_watchlist_time")
+            or market_intelligence_health.get("latest_watchlist_session")
+        )
+
+        s1_message = (
+            f"Prepared for next NSE session: {len(rows)} ATM rows "
+            f"({len(stock_underlyings)} stocks, {len(index_underlyings)} indices), "
+            f"{len(prepared_watchlist)} priority watch candidates. "
+            "No entries are opened while market is closed."
+        )
+        if watchlist_detail:
+            s1_message = f"{s1_message} {watchlist_detail}"
+
+        self._last_run_at = started_at.isoformat()
+        self._strategy1.last_scan_at = started_at.isoformat()
+        self._strategy1.last_message = s1_message
+        self._strategy1.meta = {
+            **(self._strategy1.meta or {}),
+            "mode": "prepared_market_closed",
+            "market_state": "closed",
+            "updated_at": started_at.isoformat(),
+            "watchlist_rows": len(rows),
+            "stock_underlyings": len(stock_underlyings),
+            "index_underlyings": len(index_underlyings),
+            "latest_watchlist_time": latest_watchlist_time,
+            "prepared_watchlist": prepared_watchlist,
+            "instrument_universe": all_underlyings,
+            "active_windows": len(self._active_windows),
+            "scan_windows": len(self._scan_windows),
+        }
+        for item in prepared_watchlist:
+            await self._persist_agent_signal_observation(
+                self._strategy1,
+                item,
+                status="watching",
+            )
+
+        index_rows = [row for row in rows if str(row.get("underlying") or "") in STRATEGY2_UNDERLYINGS]
+        strategy2_contexts: dict[str, dict[str, Any]] = {}
+        for row in index_rows:
+            underlying = str(row.get("underlying") or "")
+            try:
+                context = await self._build_strategy2_signal_context(row, started_at)
+            except Exception as exc:
+                logger.warning(f"[Strategy2] closed-market context preparation failed for {underlying}: {exc}")
+                context = self._build_strategy2_preparation_failure_context(row, started_at, exc)
+            signal = self._normalize_strategy2_prepared_signal(
+                dict(context.get("signal") or {}),
+                row=row,
+                started_at=started_at,
+            )
+            context["signal"] = signal
+            context["can_enter"] = False
+            strategy2_contexts[underlying] = context
+
+        strategy2_signals = [
+            strategy2_contexts[underlying]["signal"]
+            for underlying in STRATEGY2_UNDERLYINGS
+            if underlying in strategy2_contexts
+        ]
+        strategy2_pipeline = [
+            strategy2_contexts[underlying]["pipeline"]
+            for underlying in STRATEGY2_UNDERLYINGS
+            if underlying in strategy2_contexts and strategy2_contexts[underlying].get("pipeline")
+        ]
+        trend_aligned_count = sum(1 for item in strategy2_signals if item.get("status") == "trend-aligned")
+        waiting_count = sum(1 for item in strategy2_signals if item.get("status") in {"waiting-cross", "waiting"})
+        stale_count = sum(1 for item in strategy2_signals if item.get("freshness") == "stale")
+        missing_count = sum(1 for item in strategy2_signals if item.get("freshness") == "missing")
+        s2_message = (
+            f"Prepared for next index session: {len(index_rows)} index lanes, "
+            f"{trend_aligned_count} trend-aligned and {waiting_count} waiting. "
+            "No Strategy 2 entries are opened while market is closed; first live 5-minute bar must re-confirm."
+        )
+        self._strategy2.last_scan_at = started_at.isoformat()
+        self._strategy2.last_message = s2_message
+        self._strategy2.signal_lane = strategy2_signals
+        self._strategy2.meta = {
+            **(self._strategy2.meta or {}),
+            "mode": "prepared_market_closed",
+            "market_state": "closed",
+            "scan_interval": self._strategy2.meta.get("scan_interval", "5minute") if self._strategy2.meta else "5minute",
+            "watchlist_rows": len(index_rows),
+            "updated_at": started_at.isoformat(),
+            "instrument_universe": [symbol for symbol in STRATEGY2_UNDERLYINGS if symbol in set(index_underlyings or STRATEGY2_UNDERLYINGS)],
+            "pipeline": strategy2_pipeline,
+            "entry_ready_count": 0,
+            "trend_aligned_count": trend_aligned_count,
+            "waiting_count": waiting_count,
+            "stale_count": stale_count,
+            "missing_count": missing_count,
+            "prepared_note": "Closed-market preparation never creates actionable Strategy 2 entries.",
+        }
+        row_map = {str(row.get("underlying") or ""): row for row in index_rows}
+        for signal in strategy2_signals:
+            await self._persist_agent_signal_observation(
+                self._strategy2,
+                signal,
+                status="watching",
+                row=row_map.get(str(signal.get("underlying") or "")),
+            )
+
+        await self._ensure_open_position_order_records(self._strategy1)
+        await self._ensure_open_position_order_records(self._strategy2)
+
+        self._last_message = (
+            f"Market closed. Strategy preparation is ready: {len(rows)} ATM rows, "
+            f"Fyers={'ready' if (broker_snapshot or {}).get('fyers_ready') else 'not ready'}, "
+            f"Upstox={'ready' if (broker_snapshot or {}).get('upstox_ready') else 'not ready'}."
+        )
+        self._append_commentary("System", self._last_message, tone="info")
+
+    @staticmethod
     def _broker_failure_message(snapshot: dict[str, Any]) -> str:
         upstox_status = str((snapshot.get("upstox_token_health") or {}).get("status") or "disconnected")
         fyers_status = str((snapshot.get("fyers_token_health") or {}).get("status") or "disconnected")
@@ -953,9 +1259,12 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
     def _local_data_failure_message(health: dict[str, Any]) -> str:
         latest_watchlist_time = str(health.get("latest_watchlist_time") or "none")
         watchlist_rows = int(health.get("watchlist_rows_today") or 0)
+        latest_rows = int(health.get("watchlist_rows_latest") or watchlist_rows)
+        readiness_mode = str(health.get("readiness_mode") or "missing")
         return (
             "Shared market-intelligence data is not ready for the paper scan. "
-            f"Watchlist rows today={watchlist_rows}, latest watchlist time={latest_watchlist_time}."
+            f"Today rows={watchlist_rows}, latest-session rows={latest_rows}, "
+            f"mode={readiness_mode}, latest watchlist time={latest_watchlist_time}."
         )
 
     @staticmethod
@@ -1426,15 +1735,39 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             option_history_service.reset_health()
             try:
                 if not force and not _in_market_hours(started_at):
-                    last_live_scan = self._last_run_at or self._strategy2.last_scan_at or self._strategy1.last_scan_at
-                    self._last_message = (
-                        f"Market closed. Showing last live strategy state from {last_live_scan}."
-                        if last_live_scan
-                        else "Waiting for NSE market hours."
-                    )
-                    for lane in self._lane_agents():
-                        lane.on_market_closed(started_at, last_live_scan)
-                    self._append_commentary("System", "Market closed. Agent idle.", tone="idle")
+                    local_only_mode = settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY
+                    try:
+                        market_intelligence_health = await market_intelligence_runtime.get_strategy_health()
+                    except Exception as exc:
+                        market_intelligence_health = {"ready": False, "error": str(exc)}
+                    try:
+                        broker_snapshot = await get_broker_connection_snapshot(force_validate=False)
+                    except Exception as exc:
+                        broker_snapshot = {"broker_ready": False, "error": str(exc)}
+                    self._last_data_health = {
+                        **({"broker_snapshot": broker_snapshot} if broker_snapshot is not None else {}),
+                        "market_intelligence": market_intelligence_health,
+                        "option_history": option_history_service.get_health_snapshot(),
+                    }
+                    if market_intelligence_health.get("ready") or (broker_snapshot or {}).get("broker_ready"):
+                        await self._prepare_closed_market_state(
+                            started_at,
+                            market_intelligence_health=market_intelligence_health,
+                            broker_snapshot=broker_snapshot,
+                            local_only_mode=local_only_mode,
+                        )
+                    else:
+                        last_live_scan = self._last_run_at or self._strategy2.last_scan_at or self._strategy1.last_scan_at
+                        self._last_message = (
+                            f"Market closed. Showing last live strategy state from {last_live_scan}."
+                            if last_live_scan
+                            else "Waiting for NSE market hours."
+                        )
+                        for lane in self._lane_agents():
+                            lane.on_market_closed(started_at, last_live_scan)
+                            if _looks_like_stale_blocking_message(lane.runtime.last_message):
+                                lane.runtime.last_message = self._last_message
+                        self._append_commentary("System", "Market closed. Agent idle.", tone="idle")
                     return await self._status_with_risk_snapshot()
 
                 local_only_mode = settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY
@@ -1812,6 +2145,18 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             contexts[row["underlying"]] = await self._build_strategy2_signal_context(row, started_at)
 
         runtime.signal_lane = [contexts[row["underlying"]]["signal"] for row in index_rows]
+        for row in index_rows:
+            signal = dict(contexts[row["underlying"]].get("signal") or {})
+            signal.setdefault("expiry", row.get("expiry"))
+            signal.setdefault("atm_strike", row.get("atm_strike"))
+            direction = signal.get("direction")
+            if direction == "CE" and row.get("ce"):
+                signal.setdefault("ltp", (row.get("ce") or {}).get("ltp"))
+                signal.setdefault("iv_pct", (row.get("ce") or {}).get("iv"))
+            elif direction == "PE" and row.get("pe"):
+                signal.setdefault("ltp", (row.get("pe") or {}).get("ltp"))
+                signal.setdefault("iv_pct", (row.get("pe") or {}).get("iv"))
+            await self._persist_agent_signal_observation(runtime, signal, row=row)
         runtime.meta = {
             "mode": "live_scan",
             "scan_interval": "5minute",
@@ -1833,6 +2178,119 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             f"Scanned {len(index_rows)} indices. "
             f"{actionable} aligned lanes, {len(runtime.positions)} open positions."
         )
+
+    def _build_strategy2_preparation_failure_context(
+        self,
+        row: dict[str, Any],
+        started_at: datetime,
+        exc: Exception,
+    ) -> dict[str, Any]:
+        underlying = str(row.get("underlying") or "").strip() or "UNKNOWN"
+        detail = str(exc).strip()[:160] or exc.__class__.__name__
+        signal = {
+            "strategy": "Strategy 2",
+            "source": "closed_market_preparation",
+            "underlying": underlying,
+            "signal_date": started_at.date().isoformat(),
+            "trade_date": "pre-market preparation",
+            "as_of": started_at.isoformat(),
+            "direction": None,
+            "reason": "preparation_error",
+            "strength": "standby",
+            "status": "waiting",
+            "freshness": "missing",
+            "instruction": f"{underlying}: Strategy 2 preparation failed: {detail}. Recheck after market open.",
+            "expiry": row.get("expiry"),
+            "atm_strike": row.get("atm_strike"),
+            "spot_price": _round_or_none(row.get("spot_price"), 2),
+        }
+        return {
+            "direction": None,
+            "signal": signal,
+            "pipeline": {
+                "name": f"Strategy 2 {underlying}",
+                "status": "warning",
+                "rows": 0,
+                "last_date": "—",
+                "detail": f"Closed-market preparation error: {detail}",
+                "freshness": "missing",
+            },
+            "can_enter": False,
+        }
+
+    def _normalize_strategy2_prepared_signal(
+        self,
+        signal: dict[str, Any],
+        *,
+        row: dict[str, Any],
+        started_at: datetime,
+    ) -> dict[str, Any]:
+        underlying = str(signal.get("underlying") or row.get("underlying") or "").strip()
+        raw_status = str(signal.get("status") or "waiting").lower().strip()
+        direction = str(signal.get("direction") or "").upper().strip()
+        if direction not in {"CE", "PE"}:
+            direction = None
+
+        if raw_status in {"entry-ready", "conditions_met", "active", "trend-aligned"} and direction:
+            status = "trend-aligned"
+        elif raw_status in {"waiting-cross", "waiting"}:
+            status = raw_status
+        elif raw_status == "standby":
+            status = "standby"
+        elif raw_status in {"blocked", "avoid"}:
+            status = "avoid"
+        else:
+            status = "waiting"
+
+        side = (row.get("ce") if direction == "CE" else row.get("pe")) or {}
+        ltp = side.get("ltp")
+        iv_pct = None
+        try:
+            if side.get("iv") is not None:
+                iv_value = float(side.get("iv"))
+                iv_pct = iv_value * 100.0 if iv_value <= 1.0 else iv_value
+        except (TypeError, ValueError):
+            iv_pct = None
+
+        priority_score = None
+        if direction == "CE":
+            priority_score = _round_or_none(abs(float(signal.get("ce_macd") or 0.0)), 4)
+        elif direction == "PE":
+            priority_score = _round_or_none(abs(float(signal.get("pe_macd") or 0.0)), 4)
+        if priority_score in {None, 0}:
+            _, _, score = self._prepared_side_score(row)
+            priority_score = _round_or_none(score, 4)
+
+        instruction = str(signal.get("instruction") or f"{underlying}: waiting for Strategy 2 live confirmation.")
+        if raw_status in {"entry-ready", "conditions_met", "active"}:
+            instruction = (
+                f"{instruction} Closed-market zero-crosses are monitoring context only; "
+                "re-confirm on the first live 5-minute bar before entry."
+            )
+        else:
+            instruction = f"{instruction} Re-confirm on the first live 5-minute bar before entry."
+
+        prepared = {
+            **signal,
+            "source": "closed_market_preparation",
+            "raw_source": signal.get("source"),
+            "prepared_status": raw_status,
+            "underlying": underlying,
+            "signal_date": started_at.date().isoformat(),
+            "trade_date": "pre-market preparation",
+            "as_of": started_at.isoformat(),
+            "direction": direction,
+            "status": status,
+            "strength": "monitoring" if status in {"trend-aligned", "waiting-cross", "waiting"} else signal.get("strength", "standby"),
+            "instruction": instruction,
+            "expiry": signal.get("expiry") or row.get("expiry"),
+            "atm_strike": signal.get("atm_strike") or row.get("atm_strike"),
+            "strike": signal.get("strike") or row.get("atm_strike"),
+            "ltp": signal.get("ltp") if signal.get("ltp") is not None else ltp,
+            "iv_pct": signal.get("iv_pct") if signal.get("iv_pct") is not None else iv_pct,
+            "priority_score": signal.get("priority_score") if signal.get("priority_score") is not None else priority_score,
+        }
+        return prepared
 
     async def _scan_strategy2_entries(
         self,
@@ -2660,12 +3118,12 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                             (time, underlying, market, expiry, strike, option_type,
                              macd_value, signal_value, histogram, signal_type, premium_at_signal)
                         VALUES
-                            (now(), :underlying, 'NSE', :expiry::date, :strike, :option_type,
+                            (now(), :underlying, 'NSE', CAST(:expiry AS DATE), :strike, :option_type,
                              :macd_value, :signal_value, :histogram, :signal_type, :premium_at_signal)
                     """),
                     {
                         "underlying": underlying,
-                        "expiry": expiry,
+                        "expiry": _coerce_date(expiry),
                         "strike": strike,
                         "option_type": option_type,
                         "macd_value": macd_value,
@@ -2708,17 +3166,17 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                         VALUES
                             (:id, :session_id, 'paper', 'paper', :symbol, 'NSE',
                              :instrument_type, :strike, :expiry, :option_type,
-                             :action, 'MARKET', :qty, :price, 'filled',
+                             :action, 'MARKET', :qty, :price, 'FILLED',
                              :price, now(), now())
                     """),
                     {
                         "id": str(uuid.uuid4()),
                         "session_id": session_id,
                         "symbol": symbol,
-                        "instrument_type": "OPTION",
+                        "instrument_type": option_type if option_type in {"CE", "PE"} else "EQ",
                         "option_type": option_type,
                         "strike": strike,
-                        "expiry": expiry,
+                        "expiry": str(_coerce_date(expiry) or expiry or ""),
                         "action": action,
                         "qty": qty,
                         "price": price,
@@ -2727,6 +3185,68 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 await session.commit()
         except Exception as exc:
             logger.warning(f"[Strategy] Failed to persist order: {exc}")
+
+    async def _ensure_open_position_order_records(self, runtime: StrategyRuntime) -> None:
+        """Backfill missing BUY order audit rows for restored/open positions."""
+        if not runtime.positions:
+            return
+        try:
+            from db.database import AsyncSessionLocal
+
+            async with AsyncSessionLocal() as session:
+                session_id = await self._ensure_paper_session_record(session, runtime)
+                for position in runtime.positions.values():
+                    result = await session.execute(
+                        text(
+                            """
+                            SELECT id
+                            FROM orders
+                            WHERE session_id = :session_id
+                              AND symbol = :symbol
+                              AND action = 'BUY'
+                            LIMIT 1
+                            """
+                        ),
+                        {
+                            "session_id": session_id,
+                            "symbol": position.symbol,
+                        },
+                    )
+                    if result.first():
+                        continue
+                    await session.execute(
+                        text(
+                            """
+                            INSERT INTO orders
+                                (id, session_id, mode, broker, symbol, exchange,
+                                 instrument_type, strike, expiry, option_type,
+                                 action, order_type, qty, price, status,
+                                 fill_price, fill_time, created_at)
+                            VALUES
+                                (:id, :session_id, 'paper', 'paper', :symbol, 'NSE',
+                                 :instrument_type, :strike, :expiry, :option_type,
+                                 'BUY', 'MARKET', :qty, :price, 'FILLED',
+                                 :price, :fill_time, :created_at)
+                            ON CONFLICT (id) DO NOTHING
+                            """
+                        ),
+                        {
+                            "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{runtime.key}:entry-order:{position.symbol}")),
+                            "session_id": session_id,
+                            "symbol": position.symbol,
+                            "instrument_type": position.option_type if position.option_type in {"CE", "PE"} else "EQ",
+                            "strike": position.strike,
+                            "expiry": str(_coerce_date(position.expiry) or position.expiry or ""),
+                            "option_type": position.option_type,
+                            "qty": position.initial_qty or position.qty,
+                            "price": position.entry_price,
+                            "fill_time": _parse_iso_timestamp(position.entered_at) or _now_ist(),
+                            "created_at": _parse_iso_timestamp(position.entered_at) or _now_ist(),
+                        },
+                    )
+                await session.commit()
+        except Exception as exc:
+            logger.warning(f"[Strategy] Failed to reconcile open position order records: {exc}")
 
     async def _persist_position(
         self,
@@ -2756,7 +3276,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                         "session_id": session_id,
                         "symbol": pos.symbol,
                         "strike": pos.strike,
-                        "expiry": pos.expiry,
+                        "expiry": _coerce_date(pos.expiry),
                         "option_type": pos.option_type,
                         "qty": pos.qty,
                         "avg_price": pos.entry_price,
@@ -2766,6 +3286,135 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 await session.commit()
         except Exception as exc:
             logger.warning(f"[Strategy] Failed to persist position: {exc}")
+
+    async def _persist_agent_signal_observation(
+        self,
+        runtime: StrategyRuntime,
+        signal: dict[str, Any],
+        *,
+        status: Optional[str] = None,
+        row: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Persist a strategy observation even when it does not become a position."""
+        try:
+            underlying = str(signal.get("underlying") or (row or {}).get("underlying") or "").upper().strip()
+            if not underlying:
+                return
+            option_type = str(signal.get("direction") or signal.get("option_type") or "").upper().strip() or None
+            if option_type not in {"CE", "PE"}:
+                option_type = None
+            expiry = signal.get("expiry") or (row or {}).get("expiry")
+            expiry_date = _coerce_date(expiry)
+            strike = signal.get("strike") or signal.get("atm_strike") or (row or {}).get("atm_strike")
+            try:
+                strike_value = float(strike) if strike not in {None, ""} else None
+            except (TypeError, ValueError):
+                strike_value = None
+
+            signal_date = str(signal.get("signal_date") or _now_ist().date().isoformat())
+            source = str(signal.get("source") or "observation")
+            signal_key = str(
+                signal.get("signal_key")
+                or f"{runtime.key}:{source}:{underlying}:{option_type or 'NA'}:{expiry or 'NA'}:{signal_date}"
+            )
+            symbol = str(signal.get("symbol") or "").strip()
+            if not symbol:
+                symbol = (
+                    self._contract_symbol(underlying, str(expiry), strike_value, option_type)
+                    if expiry_date and strike_value is not None and option_type
+                    else f"{runtime.key}:{underlying}:{option_type or 'NA'}"
+                )
+
+            raw_status = str(status or signal.get("status") or "observed").lower().strip()
+            status_value = {
+                "entry-ready": "candidate",
+                "conditions_met": "candidate",
+                "active": "candidate",
+                "trend-aligned": "watching",
+                "watching": "watching",
+                "waiting-cross": "watching",
+                "standby": "observed",
+                "avoid": "blocked",
+                "blocked": "blocked",
+            }.get(raw_status, raw_status or "observed")
+
+            def _flt(value: Any) -> Optional[float]:
+                try:
+                    if value is None or value == "":
+                        return None
+                    return float(value)
+                except (TypeError, ValueError):
+                    return None
+
+            strength = _flt(signal.get("priority_score"))
+            if strength is None:
+                strength = _flt(signal.get("strength"))
+            signal_bar_time = (
+                _parse_iso_timestamp(str(signal.get("option_last_bar_time") or ""))
+                or _parse_iso_timestamp(str(signal.get("spot_last_time") or ""))
+                or _parse_iso_timestamp(str(signal.get("as_of") or ""))
+            )
+            iv_pct = _flt(signal.get("iv_pct") or signal.get("entry_iv_pct"))
+            if iv_pct is not None and iv_pct <= 1.0:
+                iv_pct *= 100.0
+
+            async with AsyncSessionLocal() as session:
+                session_id = await self._ensure_paper_session_record(session, runtime)
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO agent_signals (
+                            id, session_id, market, strategy_key, strategy_label, signal_key,
+                            symbol, underlying, expiry, strike, option_type, signal_reason,
+                            signal_strength, spot_setup, regime, status, entry_price,
+                            entry_iv_pct, tte_days, option_ma20, option_ma50,
+                            above_option_ma20, above_option_ma50, signal_bar_time, entered_at,
+                            closed_at, metadata, created_at, updated_at
+                        ) VALUES (
+                            :id, :session_id, 'NSE', :strategy_key, :strategy_label, :signal_key,
+                            :symbol, :underlying, CAST(:expiry AS DATE), :strike, :option_type, :signal_reason,
+                            :signal_strength, :spot_setup, :regime, :status, :entry_price,
+                            :entry_iv_pct, :tte_days, NULL, NULL,
+                            FALSE, FALSE, :signal_bar_time, NULL,
+                            NULL, CAST(:metadata AS JSONB), NOW(), NOW()
+                        )
+                        ON CONFLICT (signal_key) DO UPDATE SET
+                            status = EXCLUDED.status,
+                            signal_reason = EXCLUDED.signal_reason,
+                            signal_strength = EXCLUDED.signal_strength,
+                            entry_price = EXCLUDED.entry_price,
+                            entry_iv_pct = EXCLUDED.entry_iv_pct,
+                            signal_bar_time = COALESCE(EXCLUDED.signal_bar_time, agent_signals.signal_bar_time),
+                            metadata = agent_signals.metadata || EXCLUDED.metadata,
+                            updated_at = NOW()
+                        """
+                    ),
+                    {
+                        "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, signal_key)),
+                        "session_id": session_id,
+                        "strategy_key": runtime.key,
+                        "strategy_label": runtime.label,
+                        "signal_key": signal_key,
+                        "symbol": symbol,
+                        "underlying": underlying,
+                        "expiry": expiry_date,
+                        "strike": strike_value,
+                        "option_type": option_type,
+                        "signal_reason": str(signal.get("reason") or source)[:120],
+                        "signal_strength": strength,
+                        "spot_setup": signal.get("mp_day_type") or signal.get("spot_setup"),
+                        "regime": signal.get("regime") or signal.get("mp_day_type"),
+                        "status": status_value[:40],
+                        "entry_price": _flt(signal.get("ltp") or signal.get("entry_price")),
+                        "entry_iv_pct": iv_pct,
+                        "tte_days": signal.get("tte_days"),
+                        "signal_bar_time": signal_bar_time,
+                        "metadata": json.dumps(signal),
+                    },
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.warning(f"[Strategy] Failed to persist agent signal observation: {exc}")
 
     async def _persist_agent_signal(
         self,
@@ -2794,7 +3443,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                             closed_at, metadata, created_at, updated_at
                         ) VALUES (
                             :id, :session_id, 'NSE', :strategy_key, :strategy_label, :signal_key,
-                            :symbol, :underlying, :expiry::date, :strike, :option_type, :signal_reason,
+                            :symbol, :underlying, CAST(:expiry AS DATE), :strike, :option_type, :signal_reason,
                             :signal_strength, :spot_setup, :regime, :status, :entry_price,
                             :entry_iv_pct, :tte_days, :option_ma20, :option_ma50,
                             :above_option_ma20, :above_option_ma50, :signal_bar_time, :entered_at,
@@ -2821,7 +3470,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                         "signal_key": f"{runtime.key}:{pos.symbol}:{pos.entry_bar_time}",
                         "symbol": pos.symbol,
                         "underlying": pos.underlying,
-                        "expiry": pos.expiry,
+                        "expiry": _coerce_date(pos.expiry),
                         "strike": pos.strike,
                         "option_type": pos.option_type,
                         "signal_reason": pos.signal_reason,
@@ -2857,7 +3506,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                             entered_at, closed_at, metadata, created_at, updated_at
                         ) VALUES (
                             :id, :signal_id, :session_id, 'NSE', :strategy_key, :strategy_label,
-                            :symbol, :underlying, :expiry::date, :strike, :option_type, :qty, :initial_qty,
+                            :symbol, :underlying, CAST(:expiry AS DATE), :strike, :option_type, :qty, :initial_qty,
                             :entry_price, :current_price, :peak_price, :realized_pnl, :unrealized_pnl,
                             :entry_iv_pct, :spot_setup, :regime, :signal_reason, :phase, :status,
                             :option_ma20, :option_ma50, :above_option_ma20, :above_option_ma50,
@@ -2886,7 +3535,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                         "strategy_label": runtime.label,
                         "symbol": pos.symbol,
                         "underlying": pos.underlying,
-                        "expiry": pos.expiry,
+                        "expiry": _coerce_date(pos.expiry),
                         "strike": pos.strike,
                         "option_type": pos.option_type,
                         "qty": pos.qty,
@@ -3200,6 +3849,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     "last_message": runtime.last_message,
                     "signals": runtime.signal_lane,
                     "meta": runtime.meta,
+                    "instrument_universe": (runtime.meta or {}).get("instrument_universe") or [],
                 }
                 for runtime in self._runtimes()
             ],

@@ -915,7 +915,7 @@ def test_option_exit_uses_direct_quote_over_stale_watchlist_price(tmp_path: Path
         display_name="Natural Gas",
         initial_qty=11250,
         peak_price=6.65,
-        expiry="2026-04-29",
+        expiry="2026-05-29",
         strike=250.0,
         option_type="CE",
     )

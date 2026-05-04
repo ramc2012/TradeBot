@@ -193,10 +193,10 @@ export const getOptionChain = (symbol: string, expiry?: string) =>
   api.get(`/api/market/option-chain/${encodeURIComponent(symbol)}`, { params: { expiry } });
 export const getOptionExpiries = (symbol: string) =>
   api.get(`/api/market/expiries/${encodeURIComponent(symbol)}`);
-export const getATMWatchlistExpiries = (expiry?: string) =>
-  api.get("/api/market/atm-watchlist/expiries", { params: { expiry } });
-export const getATMWatchlist = (expiry?: string) =>
-  api.get("/api/market/atm-watchlist", { params: { expiry } });
+export const getATMWatchlistExpiries = (expiry?: string, liveRefresh = false) =>
+  api.get("/api/market/atm-watchlist/expiries", { params: { expiry, live_refresh: liveRefresh } });
+export const getATMWatchlist = (expiry?: string, liveRefresh = false) =>
+  api.get("/api/market/atm-watchlist", { params: { expiry, live_refresh: liveRefresh } });
 export const getMarketProfile = (symbol: string, timeframe = "daily") =>
   api.get(`/api/market/market-profile/${encodeURIComponent(symbol)}`, { params: { timeframe } });
 export const getIVRank = (symbol: string) => api.get(`/api/market/iv-rank/${encodeURIComponent(symbol)}`);

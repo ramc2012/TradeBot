@@ -247,7 +247,9 @@ def _broker_rollover_meta(snapshot: dict[str, Any], now_utc: datetime) -> dict[s
     elif upstox.get("needs_reconnect"):
         warnings.append("Upstox must be reconnected before the next market open.")
 
-    if snapshot.get("fyers_ready"):
+    if snapshot.get("fyers_ready") and fyers.get("refresh_available"):
+        pass
+    elif snapshot.get("fyers_ready"):
         warnings.append("Fyers requires re-authentication before a new trading day.")
     elif fyers.get("needs_reconnect"):
         warnings.append("Fyers must be reconnected before the next market open.")

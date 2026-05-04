@@ -79,6 +79,24 @@ async def lifespan(app: FastAPI):
     # the shared header feed idle so the UI falls back to stored spot closes
     # instead of publishing synthetic 100-based index ticks.
     if adapter:
+        from api.routers.auth import get_active_adapter
+        from market_data.source_policy import choose_active_adapter, source_policy_snapshot
+
+        active_adapters = {
+            "fyers": get_active_adapter("fyers"),
+            "upstox": get_active_adapter("upstox"),
+        }
+        active_brokers = [name for name, active_adapter in active_adapters.items() if active_adapter is not None]
+        selected_adapter, source, decisions = choose_active_adapter("live_ticks", active_adapters)
+        if selected_adapter is not None:
+            adapter = selected_adapter
+        market_data_router.set_source_policy(
+            source_policy_snapshot(
+                active_brokers=active_brokers,
+                selected_live_source=source,
+                route_decisions=decisions,
+            )
+        )
         market_data_router.set_broker(adapter)
         await market_data_router.subscribe(list(LIVE_INDEX_APP_SYMBOLS))
     else:

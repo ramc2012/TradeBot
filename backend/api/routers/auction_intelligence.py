@@ -9,6 +9,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from auction_intelligence import AuctionIntelligenceService
@@ -27,6 +28,7 @@ from auction_intelligence.live import (
     build_shadow_backfill_snapshots,
     build_live_validation_series,
 )
+from auction_intelligence.market_profile.engine import MarketProfileEngine
 from auction_intelligence.paper import PaperPositionBook
 from auction_intelligence.paper.journal import JournalReader
 from auction_intelligence.shadow import ShadowPersistenceService
@@ -167,7 +169,7 @@ def _parse_time_value(raw: str | None) -> time | None:
 def _normalize_symbol_filter(symbol: str | None) -> str | None:
     if not symbol:
         return None
-    return symbol.upper().replace(" FUT", "").strip()
+    return symbol.upper().replace(" FUT", "").replace(" INDEX", "").strip()
 
 
 def _journal_matches_symbol(record: dict, symbol: str | None) -> bool:
@@ -175,8 +177,8 @@ def _journal_matches_symbol(record: dict, symbol: str | None) -> bool:
     if not normalized:
         return True
 
-    symbol_field = str(record.get("symbol") or "").upper().replace(" FUT", "").strip()
-    underlying_field = str(record.get("underlying_symbol") or "").upper().replace(" FUT", "").strip()
+    symbol_field = str(record.get("symbol") or "").upper().replace(" FUT", "").replace(" INDEX", "").strip()
+    underlying_field = str(record.get("underlying_symbol") or "").upper().replace(" FUT", "").replace(" INDEX", "").strip()
     trading_symbol = str(record.get("trading_symbol") or "").upper().strip()
 
     return (
@@ -388,7 +390,8 @@ async def shadow_backfill(
 
 @router.get("/shadow-records")
 async def shadow_records(symbol: str = "BANKNIFTY", limit: int = 50) -> dict:
-    symbol_key = f"{symbol.upper()} FUT"
+    symbol_base = _normalize_symbol_filter(symbol) or "BANKNIFTY"
+    symbol_key = f"{symbol_base} FUT"
     records = await _shadow_store.list_records(symbol=symbol_key, limit=limit)
     return {
         "symbol": symbol_key,
@@ -771,6 +774,8 @@ _MP_DATA_ROOT = _BACKEND_ROOT / "mp_data"
 _DATA_ROOT = _BACKEND_ROOT / "runtime" / "index_analytics_data"
 
 _SUPPORTED_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "SENSEX", "CRUDEOIL")
+_AUCTION_LIVE_MP_TIMEOUT_SECONDS = 30.0
+_FMP_LIVE_MP_TIMEOUT_SECONDS = 20.0
 _MP_PRICE_BANDS: dict[str, tuple[float, float]] = {
     "NIFTY": (10_000.0, 50_000.0),
     "BANKNIFTY": (20_000.0, 100_000.0),
@@ -778,6 +783,13 @@ _MP_PRICE_BANDS: dict[str, tuple[float, float]] = {
     "MIDCPNIFTY": (5_000.0, 40_000.0),
     "SENSEX": (30_000.0, 150_000.0),
 }
+
+
+def _mp_tick_size(underlying: str) -> float:
+    normalized = underlying.upper()
+    if normalized == "CRUDEOIL":
+        return 10.0
+    return 0.5
 
 
 def _mp_enr_path(underlying: str) -> Path:
@@ -810,6 +822,71 @@ def _mp_params_path(underlying: str) -> Path:
 
 def _spot_path(underlying: str) -> Path:
     return _DATA_ROOT / "spot" / f"underlying={underlying}" / "1minute.csv.gz"
+
+
+async def _load_spot_status(underlying: str) -> dict:
+    """Return 1-minute spot availability from durable DB first, then files."""
+    normalized = underlying.upper()
+    try:
+        from sqlalchemy import text
+        from db.database import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT
+                        COUNT(*) AS rows,
+                        MAX(time) AS latest_time,
+                        MAX(synced_at) AS latest_sync,
+                        MAX(source) AS source
+                    FROM underlying_spot_candles
+                    WHERE underlying = :underlying
+                      AND interval = '1minute'
+                    """
+                ),
+                {"underlying": normalized},
+            )
+            row = result.mappings().first()
+            db_rows = int((row or {}).get("rows") or 0)
+            latest_time = (row or {}).get("latest_time")
+            if db_rows > 0:
+                return {
+                    "name": f"{normalized} Spot 1-min",
+                    "status": "ok",
+                    "rows": db_rows,
+                    "last_date": str(latest_time)[:10] if latest_time else "—",
+                    "detail": f"{db_rows:,} candles · source=underlying_spot_candles",
+                    "source": "underlying_spot_candles",
+                    "latest_time": str(latest_time) if latest_time else None,
+                    "latest_sync": str((row or {}).get("latest_sync")) if (row or {}).get("latest_sync") else None,
+                }
+    except Exception as exc:
+        logger.debug(f"[Auction MP] DB spot status unavailable for {normalized}: {exc}")
+
+    sp = _spot_path(normalized)
+    if sp.exists():
+        import pandas as pd
+
+        df = pd.read_csv(gzip.open(sp, "rt"), usecols=["time"])
+        last = str(df["time"].iloc[-1])[:10] if len(df) else "—"
+        return {
+            "name": f"{normalized} Spot 1-min",
+            "status": "ok",
+            "rows": len(df),
+            "last_date": last,
+            "detail": f"{len(df):,} candles · source=packaged_file",
+            "source": "packaged_file",
+        }
+
+    return {
+        "name": f"{normalized} Spot 1-min",
+        "status": "missing",
+        "rows": 0,
+        "last_date": "—",
+        "detail": "No DB/file 1-minute spot rows; live MP bridge may still build a daily profile.",
+        "source": "none",
+    }
 
 
 def _safe_csv(path: Path) -> list[dict]:
@@ -998,6 +1075,118 @@ def _build_live_mp_row_from_fmp(snapshot: dict, profile_key: str = "daily_profil
     }
 
 
+async def _build_db_spot_mp_row(underlying: str) -> dict | None:
+    """Build a same-day MP row directly from durable 1-minute spot candles."""
+    normalized = underlying.upper()
+    try:
+        from sqlalchemy import text
+        from db.database import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    """
+                    WITH latest_session AS (
+                        SELECT MAX(timezone('Asia/Kolkata', time)::date) AS session_date
+                        FROM underlying_spot_candles
+                        WHERE underlying = :underlying
+                          AND interval = '1minute'
+                    )
+                    SELECT time, open, high, low, close, volume
+                    FROM underlying_spot_candles, latest_session
+                    WHERE underlying = :underlying
+                      AND interval = '1minute'
+                      AND timezone('Asia/Kolkata', time)::date = latest_session.session_date
+                    ORDER BY time ASC
+                    """
+                ),
+                {"underlying": normalized},
+            )
+            db_rows = result.mappings().all()
+    except Exception as exc:
+        logger.debug(f"[Auction MP] DB spot MP fallback unavailable for {normalized}: {exc}")
+        return None
+
+    bars: list[MarketBar] = []
+    for row in db_rows:
+        timestamp = row.get("time")
+        if not isinstance(timestamp, datetime):
+            continue
+        try:
+            bars.append(
+                MarketBar(
+                    timestamp=timestamp,
+                    open=float(row.get("open") or 0.0),
+                    high=float(row.get("high") or 0.0),
+                    low=float(row.get("low") or 0.0),
+                    close=float(row.get("close") or 0.0),
+                    volume=float(row.get("volume") or 0.0),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+
+    if len(bars) < 20:
+        return None
+
+    try:
+        profile = MarketProfileEngine(
+            {
+                "period_minutes": 30,
+                "tick_size": _mp_tick_size(normalized),
+                "value_area_pct": 0.70,
+                "initial_balance_periods": 2,
+            }
+        ).build_profile(normalized, bars)
+    except Exception as exc:
+        logger.debug(f"[Auction MP] DB spot MP fallback failed for {normalized}: {exc}")
+        return None
+
+    row = {
+        "date": profile.session_date,
+        "poc": profile.poc,
+        "vah": profile.vah,
+        "val": profile.val,
+        "var": max(profile.vah - profile.val, 0.0),
+        "ibh": profile.initial_balance_high,
+        "ibl": profile.initial_balance_low,
+        "ibr": profile.initial_balance_range,
+        "ib_broken_up": profile.range_extension_up > 0.0,
+        "ib_broken_dn": profile.range_extension_down > 0.0,
+        "fa_up": False,
+        "fa_dn": False,
+        "session_high": profile.high_price,
+        "session_low": profile.low_price,
+        "open_price": profile.open_price,
+        "close_price": profile.close_price,
+        "total_tpos": sum(profile.tpo_counts.values()),
+        "daily_move": profile.close_price - profile.open_price,
+        "daily_pct": ((profile.close_price - profile.open_price) / profile.open_price * 100.0) if profile.open_price else 0.0,
+        "close_pct_range": (
+            (profile.close_price - profile.low_price) / max(profile.high_price - profile.low_price, _mp_tick_size(normalized))
+            if profile.high_price > profile.low_price
+            else 0.5
+        ),
+        "day_type": "",
+        "ib_ext_up_fail": False,
+        "ib_ext_dn_fail": False,
+        "ib_ext_up_reversal": False,
+        "ib_ext_dn_reversal": False,
+        "poor_high": profile.poor_high,
+        "poor_low": profile.poor_low,
+        "excess_high": _metric_flag(profile.excess_high),
+        "excess_low": _metric_flag(profile.excess_low),
+        "tail_high_buckets": len(profile.selling_tail),
+        "tail_low_buckets": len(profile.buying_tail),
+        "buyer_fail_score": 0.0,
+        "seller_fail_score": 0.0,
+        "net_failure": 0.0,
+        "range_factor": profile.day_range / max(profile.initial_balance_range, _mp_tick_size(normalized)),
+    }
+    row["day_type"] = _classify_day_type(row)
+    return row
+
+
 async def _load_mp_rows(
     underlying: str,
     *,
@@ -1023,30 +1212,48 @@ async def _load_mp_rows(
 
     candidate_rows: list[tuple[str, dict]] = []
     rejected_sources: list[str] = []
+    live_snapshot_ok = False
 
-    try:
-        live_snapshot = await asyncio.wait_for(build_live_analysis(symbol_code=underlying), timeout=4.0)
-        live_row = _build_live_mp_row(live_snapshot)
-        if _plausible_mp_row(underlying, live_row):
-            candidate_rows.append(("live_snapshot", live_row))
-        elif live_row:
-            rejected_sources.append("live_snapshot")
-    except Exception as exc:
-        status["live_error"] = str(exc)
-
-    try:
-        from fractal_market_profile.service import fmp_service
-
-        fmp_snapshot = await asyncio.wait_for(fmp_service.live_snapshot(underlying), timeout=6.0)
-        for profile_key in ("prior_daily_profile", "daily_profile"):
-            fmp_row = _build_live_mp_row_from_fmp(fmp_snapshot, profile_key=profile_key)
-            if _plausible_mp_row(underlying, fmp_row):
-                candidate_rows.append((f"fractal_market_profile:{profile_key}", fmp_row))
-            elif fmp_row:
-                rejected_sources.append(f"fractal_market_profile:{profile_key}")
-    except Exception as exc:
-        if not status["live_error"]:
+    if underlying.upper() != "CRUDEOIL":
+        try:
+            live_snapshot = await asyncio.wait_for(
+                build_live_analysis(symbol_code=underlying),
+                timeout=_AUCTION_LIVE_MP_TIMEOUT_SECONDS,
+            )
+            live_row = _build_live_mp_row(live_snapshot)
+            if _plausible_mp_row(underlying, live_row):
+                candidate_rows.append(("live_snapshot", live_row))
+                live_snapshot_ok = True
+            elif live_row:
+                rejected_sources.append("live_snapshot")
+        except Exception as exc:
             status["live_error"] = str(exc)
+
+    if not live_snapshot_ok:
+        try:
+            from fractal_market_profile.service import fmp_service
+
+            fmp_snapshot = await asyncio.wait_for(
+                fmp_service.live_snapshot(underlying),
+                timeout=_FMP_LIVE_MP_TIMEOUT_SECONDS,
+            )
+            for profile_key in ("prior_daily_profile", "daily_profile"):
+                fmp_row = _build_live_mp_row_from_fmp(fmp_snapshot, profile_key=profile_key)
+                if _plausible_mp_row(underlying, fmp_row):
+                    candidate_rows.append((f"fractal_market_profile:{profile_key}", fmp_row))
+                elif fmp_row:
+                    rejected_sources.append(f"fractal_market_profile:{profile_key}")
+        except Exception as exc:
+            if not status["live_error"]:
+                status["live_error"] = str(exc)
+            else:
+                status["live_fmp_error"] = str(exc)
+
+    db_spot_row = await _build_db_spot_mp_row(underlying)
+    if _plausible_mp_row(underlying, db_spot_row):
+        candidate_rows.append(("db_spot_1minute_profile", db_spot_row))
+    elif db_spot_row:
+        rejected_sources.append("db_spot_1minute_profile")
 
     if rejected_sources:
         status["live_rejected"] = True
@@ -1445,68 +1652,87 @@ async def mp_data_status() -> list[dict]:
     """Pipeline health for the MP+Order-Flow strategy — per supported underlying."""
     sources: list[dict] = []
 
-    import pandas as pd
-
     for ul in _SUPPORTED_UNDERLYINGS:
         # Spot candles
-        sp = _spot_path(ul)
-        if sp.exists():
-            df = pd.read_csv(gzip.open(sp, "rt"), usecols=["time"])
-            last = str(df["time"].iloc[-1])[:10] if len(df) else "—"
-            sources.append({
-                "name": f"{ul} Spot 1-min",
-                "status": "ok",
-                "rows": len(df),
-                "last_date": last,
-                "detail": f"{len(df):,} candles",
-            })
-        else:
-            sources.append({
-                "name": f"{ul} Spot 1-min",
-                "status": "missing",
-                "rows": 0,
-                "last_date": "—",
-                "detail": "Fetch via broker API",
-            })
+        sources.append(await _load_spot_status(ul))
 
-        # Daily MP params
-        mp = _mp_params_path(ul)
-        mp_rows = _safe_csv(mp)
+        # Daily MP params / enriched rows. Use the same live bridge as the
+        # strategy endpoints so the readiness panel reflects broker-backed FMP
+        # snapshots, not only static files shipped in the container.
+        mp_rows, data_status = await _load_mp_rows(ul, allow_params_fallback=True)
+        source = str(data_status.get("source") or "none")
+        stale_days = data_status.get("stale_days")
+        live_bridge = data_status.get("live_bridge") or []
+        live_appended = bool(data_status.get("live_appended"))
+        latest_date = str(data_status.get("latest_date") or "—")
         if mp_rows:
+            status = "ok"
+            if not live_appended and isinstance(stale_days, int) and stale_days > 7:
+                status = "warning"
+            detail_parts = [f"{len(mp_rows)} sessions", f"source={source}"]
+            if live_bridge:
+                detail_parts.append(f"live_bridge={','.join(str(item) for item in live_bridge)}")
+            if isinstance(stale_days, int) and stale_days > 0:
+                detail_parts.append(f"packaged_lag={stale_days}d")
             sources.append({
                 "name": f"{ul} Daily MP",
-                "status": "ok",
+                "status": status,
                 "rows": len(mp_rows),
-                "last_date": mp_rows[-1].get("date", "—"),
-                "detail": f"{len(mp_rows)} sessions",
+                "last_date": latest_date,
+                "detail": " · ".join(detail_parts),
+                "source": source,
+                "live_appended": live_appended,
+                "live_latest_date": data_status.get("live_latest_date"),
             })
         else:
+            detail = "Fetch via broker/FMP live bridge"
+            if data_status.get("live_error"):
+                detail = f"{detail}; last error: {data_status.get('live_error')}"
             sources.append({
                 "name": f"{ul} Daily MP",
                 "status": "missing",
                 "rows": 0,
                 "last_date": "—",
-                "detail": "Run build_nifty_mp.py",
+                "detail": detail,
+                "source": source,
+                "live_appended": False,
             })
 
-        # Enriched failure scores
-        enr = _mp_enr_path(ul)
-        enr_rows = _safe_csv(enr)
-        if enr_rows:
+        # Failure-score availability is separate from MP availability because
+        # FMP live profiles can keep the auction page usable even when the
+        # historical buyer/seller failure-score feature set is not packaged.
+        failure_rows = [
+            row
+            for row in mp_rows
+            if row.get("buyer_fail_score") not in {None, ""}
+            or row.get("seller_fail_score") not in {None, ""}
+        ]
+        if failure_rows:
             sources.append({
                 "name": f"{ul} Failure Scores",
                 "status": "ok",
-                "rows": len(enr_rows),
-                "last_date": enr_rows[-1].get("date", "—"),
-                "detail": f"Buyer/seller scores — {len(enr_rows)} days",
+                "rows": len(failure_rows),
+                "last_date": failure_rows[-1].get("date", latest_date),
+                "detail": f"Buyer/seller scores available · source={source}",
+                "source": source,
             })
-        else:
+        elif mp_rows:
             sources.append({
                 "name": f"{ul} Failure Scores",
                 "status": "warning",
                 "rows": 0,
+                "last_date": latest_date,
+                "detail": "MP profile available, but buyer/seller failure scores are unavailable in the current source.",
+                "source": source,
+            })
+        else:
+            sources.append({
+                "name": f"{ul} Failure Scores",
+                "status": "missing",
+                "rows": 0,
                 "last_date": "—",
-                "detail": "Run build_nifty_mp.py",
+                "detail": "No MP rows available for failure-score features.",
+                "source": source,
             })
 
     return sources

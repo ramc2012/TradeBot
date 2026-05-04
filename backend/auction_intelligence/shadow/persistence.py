@@ -10,6 +10,15 @@ from db.database import AsyncSessionLocal
 from db.models import ShadowObservation
 
 
+def _symbol_variants(symbol: str) -> set[str]:
+    raw = str(symbol or "").upper().strip()
+    base = raw.replace(" FUT", "").replace(" INDEX", "").strip()
+    variants = {raw}
+    if base:
+        variants.update({base, f"{base} FUT", f"{base} INDEX"})
+    return {item for item in variants if item}
+
+
 class ShadowPersistenceService:
     async def record_records(self, records: list[dict[str, Any]]) -> dict[str, Any]:
         if not records:
@@ -83,7 +92,7 @@ class ShadowPersistenceService:
                     desc(ShadowObservation.recorded_at),
                 )
                 if symbol:
-                    stmt = stmt.where(ShadowObservation.symbol == symbol)
+                    stmt = stmt.where(ShadowObservation.symbol.in_(_symbol_variants(symbol)))
                 stmt = stmt.limit(limit)
                 result = await session.execute(stmt)
                 rows = result.scalars().all()

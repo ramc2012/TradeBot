@@ -341,29 +341,147 @@ class MarketIntelligenceRuntime:
 
     async def get_strategy_health(self) -> dict[str, Any]:
         now = datetime.now(IST)
-        today_start = datetime.combine(now.date(), SESSION_OPEN, tzinfo=IST).astimezone(UTC)
+        today_start = datetime.combine(now.date(), time.min, tzinfo=IST).astimezone(UTC)
+        tomorrow_start = today_start + timedelta(days=1)
         async with AsyncSessionLocal() as session:
             watchlist_time = await session.scalar(
                 text(
                     """
                     SELECT MAX(time)
                     FROM atm_option_watchlist_snapshots
-                    WHERE time >= :today_start
+                    WHERE expiry >= CURRENT_DATE
                     """
                 ),
-                {"today_start": today_start},
             )
-            watchlist_exists = await session.scalar(
+            if watchlist_time is None:
+                watchlist_time = await session.scalar(
+                    text("SELECT MAX(time) FROM atm_option_watchlist_snapshots")
+                )
+
+            today_stats = await session.execute(
                 text(
                     """
-                    SELECT 1
+                    SELECT
+                        COUNT(DISTINCT underlying)::INT AS underlyings,
+                        COUNT(DISTINCT underlying) FILTER (WHERE option_type = 'CE' AND ltp IS NOT NULL)::INT AS ce_ready,
+                        COUNT(DISTINCT underlying) FILTER (WHERE option_type = 'PE' AND ltp IS NOT NULL)::INT AS pe_ready,
+                        COUNT(DISTINCT underlying) FILTER (WHERE kind = 'STOCK')::INT AS stocks,
+                        COUNT(DISTINCT underlying) FILTER (WHERE kind = 'INDEX')::INT AS indices
                     FROM atm_option_watchlist_snapshots
                     WHERE time >= :today_start
-                    LIMIT 1
+                      AND time < :tomorrow_start
+                      AND expiry >= CURRENT_DATE
                     """
                 ),
-                {"today_start": today_start},
+                {"today_start": today_start, "tomorrow_start": tomorrow_start},
             )
+            today_row = today_stats.mappings().first() or {}
+
+            latest_row: dict[str, Any] = {}
+            latest_session_start: datetime | None = None
+            latest_session_end: datetime | None = None
+            if watchlist_time is not None:
+                latest_ist = _parse_time(watchlist_time).astimezone(IST)
+                latest_session_start = datetime.combine(latest_ist.date(), time.min, tzinfo=IST).astimezone(UTC)
+                latest_session_end = latest_session_start + timedelta(days=1)
+                latest_stats = await session.execute(
+                    text(
+                        """
+                        SELECT
+                            COUNT(DISTINCT underlying)::INT AS underlyings,
+                            COUNT(DISTINCT underlying) FILTER (WHERE option_type = 'CE' AND ltp IS NOT NULL)::INT AS ce_ready,
+                            COUNT(DISTINCT underlying) FILTER (WHERE option_type = 'PE' AND ltp IS NOT NULL)::INT AS pe_ready,
+                            COUNT(DISTINCT underlying) FILTER (WHERE kind = 'STOCK')::INT AS stocks,
+                            COUNT(DISTINCT underlying) FILTER (WHERE kind = 'INDEX')::INT AS indices
+                        FROM atm_option_watchlist_snapshots
+                        WHERE time >= :session_start
+                          AND time < :session_end
+                          AND expiry >= CURRENT_DATE
+                        """
+                    ),
+                    {"session_start": latest_session_start, "session_end": latest_session_end},
+                )
+                latest_row = dict(latest_stats.mappings().first() or {})
+
+            premium_row: dict[str, Any] = {}
+            if int(latest_row.get("underlyings") or 0) < 50:
+                premium_stats = await session.execute(
+                    text(
+                        """
+                        WITH latest AS (
+                            SELECT DISTINCT ON (underlying, option_type)
+                                time,
+                                underlying,
+                                option_type,
+                                close AS ltp
+                            FROM option_premium_candles
+                            WHERE expiry >= CURRENT_DATE
+                              AND option_type IN ('CE', 'PE')
+                              AND close IS NOT NULL
+                            ORDER BY underlying, option_type, time DESC
+                        )
+                        SELECT
+                            MAX(time) AS latest_time,
+                            COUNT(DISTINCT underlying)::INT AS underlyings,
+                            COUNT(DISTINCT underlying) FILTER (WHERE option_type = 'CE' AND ltp IS NOT NULL)::INT AS ce_ready,
+                            COUNT(DISTINCT underlying) FILTER (WHERE option_type = 'PE' AND ltp IS NOT NULL)::INT AS pe_ready
+                        FROM latest
+                        """
+                    )
+                )
+                premium_row = dict(premium_stats.mappings().first() or {})
+                premium_time = premium_row.get("latest_time")
+                premium_is_newer = (
+                    premium_time is not None
+                    and (
+                        watchlist_time is None
+                        or _parse_time(premium_time) > _parse_time(watchlist_time)
+                    )
+                )
+                if (
+                    int(premium_row.get("underlyings") or 0) > int(latest_row.get("underlyings") or 0)
+                    and (watchlist_time is None or premium_is_newer)
+                ):
+                    latest_row = {
+                        **latest_row,
+                        **premium_row,
+                        "stocks": max(int(latest_row.get("stocks") or 0), int(premium_row.get("underlyings") or 0) - 7),
+                        "indices": max(int(latest_row.get("indices") or 0), 7),
+                    }
+                    if premium_row.get("latest_time") is not None:
+                        watchlist_time = premium_row.get("latest_time")
+                        latest_ist = _parse_time(watchlist_time).astimezone(IST)
+                        latest_session_start = datetime.combine(latest_ist.date(), time.min, tzinfo=IST).astimezone(UTC)
+                        latest_session_end = latest_session_start + timedelta(days=1)
+
+            if int(latest_row.get("underlyings") or 0) < 50:
+                catalog_stats = await session.execute(
+                    text(
+                        """
+                        WITH eligible AS (
+                            SELECT DISTINCT catalog.underlying, catalog.option_type
+                            FROM fo_contract_catalog catalog
+                            WHERE catalog.expiry >= CURRENT_DATE
+                              AND catalog.option_type IN ('CE', 'PE')
+                              AND catalog.instrument_key IS NOT NULL
+                        )
+                        SELECT
+                            COUNT(DISTINCT underlying)::INT AS underlyings,
+                            COUNT(DISTINCT underlying) FILTER (WHERE option_type = 'CE')::INT AS ce_ready,
+                            COUNT(DISTINCT underlying) FILTER (WHERE option_type = 'PE')::INT AS pe_ready
+                        FROM eligible
+                        """
+                    )
+                )
+                catalog_row = dict(catalog_stats.mappings().first() or {})
+                if int(catalog_row.get("underlyings") or 0) > int(latest_row.get("underlyings") or 0):
+                    latest_row = {
+                        **latest_row,
+                        **catalog_row,
+                        "stocks": max(int(latest_row.get("stocks") or 0), int(catalog_row.get("underlyings") or 0) - 7),
+                        "indices": max(int(latest_row.get("indices") or 0), 7),
+                    }
+
             spot_rows = await session.execute(
                 text(
                     """
@@ -371,11 +489,10 @@ class MarketIntelligenceRuntime:
                     FROM underlying_spot_candles
                     WHERE interval = '1minute'
                       AND underlying = ANY(:underlyings)
-                      AND time >= :today_start
                     GROUP BY underlying
                     """
                 ),
-                {"underlyings": list(NSE_INDEX_SCOPE), "today_start": today_start},
+                {"underlyings": list(NSE_INDEX_SCOPE)},
             )
             per_symbol = {
                 str(row.underlying): _parse_time(row.latest_time).isoformat()
@@ -391,13 +508,30 @@ class MarketIntelligenceRuntime:
                 (datetime.now(UTC) - _parse_time(watchlist_time)).total_seconds(),
             )
 
-        watchlist_rows_today = 1 if watchlist_exists is not None else 0
-        ready = bool(watchlist_rows_today) and (
+        watchlist_rows_today = int(today_row.get("underlyings") or 0)
+        watchlist_rows_latest = int(latest_row.get("underlyings") or 0)
+        today_ready = bool(watchlist_rows_today) and (
             watchlist_age_seconds is None or watchlist_age_seconds <= 600
         )
+        latest_session_ready = watchlist_rows_latest >= 50
+        readiness_mode = "live" if today_ready else "latest_session" if latest_session_ready else "missing"
+        ready = today_ready or latest_session_ready
         return {
             "ready": ready,
+            "readiness_mode": readiness_mode,
             "watchlist_rows_today": watchlist_rows_today,
+            "watchlist_rows_latest": watchlist_rows_latest,
+            "latest_ce_ready": int(latest_row.get("ce_ready") or 0),
+            "latest_pe_ready": int(latest_row.get("pe_ready") or 0),
+            "latest_stock_underlyings": int(latest_row.get("stocks") or 0),
+            "latest_index_underlyings": int(latest_row.get("indices") or 0),
+            "today_ce_ready": int(today_row.get("ce_ready") or 0),
+            "today_pe_ready": int(today_row.get("pe_ready") or 0),
+            "latest_watchlist_session": (
+                latest_session_start.astimezone(IST).date().isoformat()
+                if latest_session_start is not None
+                else None
+            ),
             "latest_watchlist_time": latest_watchlist_iso,
             "watchlist_age_seconds": watchlist_age_seconds,
             "latest_spot_rows": per_symbol,

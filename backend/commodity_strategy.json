@@ -24,8 +24,8 @@
     "kill_switch_active": false,
     "start_required": false,
     "last_run_at": "2026-04-24T22:02:49.570374+05:30",
-    "last_error": null,
-    "last_message": "Waiting for MCX market hours."
+    "last_error": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required.",
+    "last_message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
   },
   "runtime": {
     "watchlist": [
@@ -2363,6 +2363,11 @@
     ],
     "commentary": [
       {
+        "time": "2026-05-04T09:49:49.989563+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
         "time": "2026-05-01T23:30:18.078865+05:30",
         "tone": "idle",
         "message": "Commodity market closed. Agent idle."
@@ -2756,11 +2761,6 @@
         "time": "2026-04-24T11:52:10.083805+05:30",
         "tone": "warning",
         "message": "Commodity history warnings detected: fyers: 1 failure(s), latest 'loaded 0 rows'."
-      },
-      {
-        "time": "2026-04-24T11:51:19.435539+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 3 option rows. 0 open positions."
       }
     ],
     "processed_signals": {

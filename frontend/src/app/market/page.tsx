@@ -10,12 +10,15 @@ import {
   ArrowUpRight,
   BarChart3,
   CheckCircle2,
+  Database,
   Minus,
   Radar,
   RefreshCw,
   Wifi,
   WifiOff,
   X,
+  Brain,
+  Network,
 } from "lucide-react";
 
 import { StreamStatus } from "@/components/live/StreamStatus";
@@ -24,6 +27,7 @@ import {
   getATMWatchlist,
   getATMWatchlistExpiries,
   getBrokerStatus,
+  getMarketIntelligenceContext,
   getMarketProfile,
   getOptionChain,
   getOptionExpiries,
@@ -220,7 +224,7 @@ type MarketWatchlistSnapshot = {
   watchlist: ATMWatchlistPayload;
 };
 
-type MarketWorkspace = "options" | "sectors" | "watchlist";
+type MarketWorkspace = "intelligence" | "options" | "sectors" | "watchlist";
 
 function formatChangePct(ltp?: number, close?: number) {
   if (!ltp || !close) return "--";
@@ -258,6 +262,11 @@ function formatIndicator(value?: number | null, digits = 2) {
   if (value == null || Number.isNaN(value)) return "--";
   const prefix = value > 0 ? "+" : "";
   return `${prefix}${value.toFixed(digits)}`;
+}
+
+function formatPlainNumber(value?: number | null, digits = 1) {
+  if (value == null || Number.isNaN(value)) return "--";
+  return value.toFixed(digits);
 }
 
 function valueTone(value?: number | null) {
@@ -452,6 +461,237 @@ function PulseIndicatorCard({
           {detail}
         </div>
       )}
+    </div>
+  );
+}
+
+function MarketIntelligenceContextPanel({
+  context,
+  loading,
+  onRefresh,
+  refreshing,
+}: {
+  context?: any;
+  loading: boolean;
+  onRefresh: () => void;
+  refreshing: boolean;
+}) {
+  const sectorInteraction = context?.sector_interaction ?? {};
+  const macroResearch = context?.macro_research ?? {};
+  const topSectors = sectorInteraction?.top_sectors ?? [];
+  const laggingSectors = sectorInteraction?.lagging_sectors ?? [];
+  const realModel = sectorInteraction?.real_model ?? {};
+  const nseOverlay = sectorInteraction?.nse_constituent_status ?? {};
+  const macroRead = macroResearch?.market_read ?? {};
+  const macroLeaders = macroResearch?.sector_leaders ?? [];
+  const macroRisks = macroResearch?.sector_risks ?? [];
+  const themes = macroResearch?.budding_themes ?? [];
+  const sourcePolicy = context?.source_policy ?? {};
+  const routes = sourcePolicy?.routes ?? {};
+  const durableStorage = sourcePolicy?.durable_storage ?? {};
+  const liveRoute = routes?.live_ticks ?? {};
+  const historicalRoute = routes?.historical ?? {};
+  const optionChainRoute = routes?.option_chain ?? {};
+  const mpRoute = routes?.market_profile ?? {};
+  const liveSelected = liveRoute?.selected || liveRoute?.active_live_sources?.[0] || "awaiting broker";
+
+  if (loading && !context) {
+    return (
+      <div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
+        <div className="h-72 animate-pulse rounded-[24px] border border-bg-border bg-bg-secondary/35" />
+        <div className="h-72 animate-pulse rounded-[24px] border border-bg-border bg-bg-secondary/35" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <section className="rounded-[24px] border border-bg-border bg-bg-secondary/35 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-text-muted">
+              <Brain size={15} className="text-accent-blue" />
+              Market Intelligence Context
+            </div>
+            <h2 className="mt-2 text-xl font-semibold text-text-primary">Macro research and sector interaction are merged here.</h2>
+            <p className="mt-1 max-w-3xl text-sm leading-6 text-text-secondary">
+              India-first macro read, live sector leadership, NSE constituent overlay, RRG state, and real VAR status are shown together before drilling into options or sector rotation.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={refreshing}
+            className="inline-flex items-center gap-2 rounded-xl border border-bg-border bg-bg-primary/30 px-3 py-2 text-xs font-semibold text-text-secondary transition-colors hover:border-bg-active hover:text-text-primary disabled:opacity-50"
+          >
+            <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />
+            Refresh Context
+          </button>
+        </div>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+          <PulseIndicatorCard label="Live F&O Stocks" value={`${sectorInteraction?.universe?.stocks ?? "--"}`} detail="sector interaction universe" tone="text-accent-green" />
+          <PulseIndicatorCard label="Mapped Stocks" value={`${sectorInteraction?.universe?.mapped ?? "--"}`} detail="F&O/ATM taxonomy" />
+          <PulseIndicatorCard label="NSE Overlay" value={nseOverlay.runtime_overlay_active ? "Active" : "Static"} detail={`${nseOverlay.sector_count ?? 0} official CSVs`} tone={nseOverlay.runtime_overlay_active ? "text-accent-green" : "text-accent-amber"} />
+          <PulseIndicatorCard label="Real VAR Edges" value={`${realModel.edge_count ?? "--"}`} detail={realModel.source_mode?.replaceAll("_", " ") || "sector-index model"} tone="text-accent-blue" />
+          <PulseIndicatorCard label="Macro Headwinds" value={`${macroRead.headwind_count ?? "--"}`} detail="research risk gates" tone="text-accent-red" />
+        </div>
+
+        <div className="mt-4 rounded-2xl border border-bg-border bg-bg-primary/30 p-3">
+          <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-text-primary">
+            <Database size={16} className="text-accent-green" />
+            Durable Data and Feed Routing
+          </div>
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+            <PulseIndicatorCard
+              label="Live Ticks"
+              value={String(liveSelected).replaceAll("_", " ")}
+              detail={(liveRoute?.order ?? []).join(" > ") || "fyers > upstox"}
+              tone={liveSelected === "fyers" ? "text-accent-green" : liveSelected === "upstox" ? "text-accent-blue" : "text-accent-amber"}
+            />
+            <PulseIndicatorCard
+              label="MP / Order Flow"
+              value={(mpRoute?.order ?? []).slice(0, 2).join(" > ") || "fyers > db"}
+              detail="tick quality priority"
+              tone="text-accent-green"
+            />
+            <PulseIndicatorCard
+              label="History"
+              value={durableStorage?.first_read_source || "postgres"}
+              detail={(historicalRoute?.order ?? []).join(" > ") || "postgres > upstox analytics"}
+              tone="text-accent-blue"
+            />
+            <PulseIndicatorCard
+              label="Option Chain"
+              value={(optionChainRoute?.order ?? []).slice(0, 2).join(" > ") || "fyers > upstox"}
+              detail="catalog fallback only"
+              tone="text-accent-amber"
+            />
+          </div>
+          <div className="mt-3 text-xs leading-5 text-text-muted">
+            {durableStorage?.note || "Historical candles and Market Intelligence context are read from durable storage first; broker calls are used to fill gaps."}
+          </div>
+        </div>
+      </section>
+
+      <div className="grid gap-4 xl:grid-cols-[1.08fr_0.92fr]">
+        <section className="rounded-[24px] border border-bg-border bg-bg-secondary/35 p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2 text-sm font-semibold text-text-primary">
+                <Network size={16} className="text-accent-green" />
+                Sector Interaction Leadership
+              </div>
+              <div className="mt-1 text-xs text-text-muted">Live F&O/ATM watchlist leadership plus RRG state.</div>
+            </div>
+            <div className="text-right text-[11px] text-text-muted">
+              {realModel.source_mode?.replaceAll("_", " ") || "real model loading"}
+            </div>
+          </div>
+          <div className="overflow-x-auto rounded-2xl border border-bg-border bg-bg-primary/30">
+            <table className="w-full min-w-[760px] text-sm">
+              <thead className="bg-bg-secondary/70 text-left text-[11px] uppercase tracking-[0.14em] text-text-muted">
+                <tr>
+                  <th className="px-4 py-3">Rank</th>
+                  <th className="px-4 py-3">Sector</th>
+                  <th className="px-4 py-3">Score</th>
+                  <th className="px-4 py-3">RRG</th>
+                  <th className="px-4 py-3">Avg Change</th>
+                  <th className="px-4 py-3">Leaders</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-bg-border/70 text-text-secondary">
+                {topSectors.slice(0, 8).map((sector: any) => (
+                  <tr key={sector.sector_key}>
+                    <td className="px-4 py-3 font-mono">{sector.rank}</td>
+                    <td className="px-4 py-3 font-semibold text-text-primary">{sector.sector}</td>
+                    <td className="px-4 py-3 font-mono text-accent-green">{formatPlainNumber(sector.leadership_score, 2)}</td>
+                    <td className="px-4 py-3">{sector.rrg_quadrant}</td>
+                    <td className={clsx("px-4 py-3 font-mono", valueTone(sector.avg_change_pct))}>{formatSignedPct(sector.avg_change_pct)}</td>
+                    <td className="px-4 py-3 text-xs text-text-muted">{(sector.leaders ?? []).slice(0, 3).map((item: any) => item.symbol).join(", ") || "--"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="rounded-[24px] border border-bg-border bg-bg-secondary/35 p-4">
+          <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-text-primary">
+            <BarChart3 size={16} className="text-accent-blue" />
+            Macro Research Context
+          </div>
+          <div className="rounded-2xl border border-bg-border bg-bg-primary/30 p-3 text-sm leading-6 text-text-secondary">
+            {macroRead.headline ?? "Macro research context is loading."}
+          </div>
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            <div>
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">Macro Leaders</div>
+              <div className="space-y-2">
+                {macroLeaders.slice(0, 5).map((sector: any) => (
+                  <div key={sector.code} className="flex items-center justify-between rounded-xl border border-bg-border bg-bg-primary/30 px-3 py-2 text-xs">
+                    <span className="text-text-secondary">{sector.label}</span>
+                    <span className="font-mono text-accent-green">{formatPlainNumber(sector.health_score, 1)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div>
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">Macro Risks</div>
+              <div className="space-y-2">
+                {macroRisks.slice(0, 5).map((sector: any) => (
+                  <div key={sector.code} className="flex items-center justify-between rounded-xl border border-bg-border bg-bg-primary/30 px-3 py-2 text-xs">
+                    <span className="text-text-secondary">{sector.label}</span>
+                    <span className="font-mono text-accent-red">{formatPlainNumber(sector.risk_score, 1)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="mt-4 border-t border-bg-border pt-3">
+            <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">Budding Themes</div>
+            <div className="flex flex-wrap gap-2">
+              {themes.slice(0, 6).map((theme: any) => (
+                <span key={theme.code ?? theme.label} className="rounded-full border border-accent-blue/25 bg-accent-blue/10 px-3 py-1 text-xs text-accent-blue">
+                  {theme.label ?? theme.code}
+                </span>
+              ))}
+              {!themes.length && <span className="text-xs text-text-muted">Theme discovery loading.</span>}
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <section className="grid gap-4 lg:grid-cols-2">
+        <div className="rounded-[24px] border border-bg-border bg-bg-secondary/35 p-4">
+          <div className="text-sm font-semibold text-text-primary">Lagging Sectors</div>
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
+            {laggingSectors.slice(0, 6).map((sector: any) => (
+              <div key={sector.sector_key} className="rounded-xl border border-bg-border bg-bg-primary/30 px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm text-text-secondary">{sector.sector}</span>
+                  <span className="font-mono text-xs text-accent-red">{formatPlainNumber(sector.leadership_score, 2)}</span>
+                </div>
+                <div className="mt-1 text-[11px] text-text-muted">{sector.rrg_quadrant}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="rounded-[24px] border border-bg-border bg-bg-secondary/35 p-4">
+          <div className="text-sm font-semibold text-text-primary">Real-Data Status</div>
+          <div className="mt-3 space-y-2 text-xs leading-5 text-text-secondary">
+            <div className="rounded-xl border border-bg-border bg-bg-primary/30 px-3 py-2">
+              Sector model: {realModel.source_mode?.replaceAll("_", " ") || "--"} / edges {realModel.edge_count ?? "--"}
+            </div>
+            <div className="rounded-xl border border-bg-border bg-bg-primary/30 px-3 py-2">
+              NSE overlay: {nseOverlay.runtime_overlay_active ? "official runtime overlay active" : "static fallback"} / {nseOverlay.symbol_count ?? 0} symbols
+            </div>
+            <div className="rounded-xl border border-bg-border bg-bg-primary/30 px-3 py-2">
+              Macro source: World Bank + configured India sector research catalog
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
@@ -923,7 +1163,7 @@ export default function MarketPage() {
   const [symbol, setSymbol] = useState<MarketIndexSymbol>("NSE:NIFTY50-INDEX");
   const [expiry, setExpiry] = useState("");
   const [profileTimeframe, setProfileTimeframe] = useState<"day" | "week" | "month">("day");
-  const [workspace, setWorkspace] = useState<MarketWorkspace>("options");
+  const [workspace, setWorkspace] = useState<MarketWorkspace>("intelligence");
   const [sectorTimeframe, setSectorTimeframe] = useState<"hourly" | "daily" | "weekly" | "monthly">("daily");
   const [selectedSectorCode, setSelectedSectorCode] = useState("");
   const [selectedStockCode, setSelectedStockCode] = useState("");
@@ -982,6 +1222,14 @@ export default function MarketPage() {
     enabled: workspace === "sectors",
     refetchInterval: 60000,
     staleTime: 5000,
+  });
+
+  const marketContextQuery = useQuery({
+    queryKey: ["marketIntelligenceContext"],
+    queryFn: () => getMarketIntelligenceContext().then((response) => response.data),
+    refetchInterval: workspace === "intelligence" ? 5 * 60_000 : false,
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
   });
 
   const watchlistLiveQuery = useLiveSnapshotQuery<MarketWatchlistSnapshot>({
@@ -1090,13 +1338,23 @@ export default function MarketPage() {
         </div>
 
         <div className="flex min-w-0 gap-2 overflow-x-auto pb-1">
+          <MarketTabButton active={workspace === "intelligence"} label="Macro + Sectors" onClick={() => setWorkspace("intelligence")} />
           <MarketTabButton active={workspace === "options"} label="Options Desk" onClick={() => setWorkspace("options")} />
           <MarketTabButton active={workspace === "sectors"} label="Sector Rotation" onClick={() => setWorkspace("sectors")} />
           <MarketTabButton active={workspace === "watchlist"} label="ATM Watchlist" onClick={() => setWorkspace("watchlist")} />
         </div>
       </section>
 
-      {workspace === "options" ? (
+      {workspace === "intelligence" ? (
+        <MarketIntelligenceContextPanel
+          context={marketContextQuery.data}
+          loading={marketContextQuery.isLoading}
+          refreshing={marketContextQuery.isFetching}
+          onRefresh={() => {
+            void marketContextQuery.refetch();
+          }}
+        />
+      ) : workspace === "options" ? (
         <div className="grid gap-4 xl:grid-cols-[1.6fr_0.82fr]">
           <section className="card rounded-[24px] p-4">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-bg-border/70 pb-3">

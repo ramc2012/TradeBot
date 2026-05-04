@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     MARKET_INTELLIGENCE_GAP_FILL_LOOKBACK_DAYS: int = 10
     MARKET_INTELLIGENCE_FULL_WATCHLIST_REFRESH_MINUTES: int = 15
     MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY: bool = False
+    MARKET_DATA_LIVE_TICK_ORDER: str = "fyers,upstox"
+    MARKET_DATA_MARKET_PROFILE_ORDER: str = "fyers,postgres,upstox"
+    MARKET_DATA_ORDER_FLOW_ORDER: str = "fyers,upstox"
+    MARKET_DATA_OPTION_CHAIN_ORDER: str = "fyers,upstox,catalog"
+    MARKET_DATA_HISTORICAL_ORDER: str = "postgres,upstox_analytics,upstox,fyers"
+    MARKET_DATA_ANALYTICS_ORDER: str = "postgres,upstox_analytics,upstox"
     AUCTION_INTELLIGENCE_AUTO_ENABLED: bool = True
     AUCTION_INTELLIGENCE_AUTO_INTERVAL_SECONDS: int = 180
     FRACTAL_MARKET_PROFILE_AUTO_ENABLED: bool = True

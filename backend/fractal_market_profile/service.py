@@ -509,7 +509,19 @@ class FractalMarketProfileService:
             rows, history_source, history_symbol = await self._load_live_rows(normalized)
             sessions = _group_rows_by_session(rows, allow_partial_live_session=True)
             if not sessions:
-                raise RuntimeError(f"No spot history available for {normalized}.")
+                degraded_payload = await self._degraded_live_snapshot(
+                    normalized,
+                    history_source=history_source,
+                    history_symbol=history_symbol,
+                    row_count=len(rows),
+                    reason="missing_spot_history",
+                    detail=f"No usable spot history sessions are available for {normalized}.",
+                )
+                self._live_cache[normalized] = (
+                    monotonic() + self._live_cache_ttl_seconds,
+                    degraded_payload,
+                )
+                return jsonable_encoder(degraded_payload)
 
             session_dates = sorted(sessions)
             current_date = session_dates[-1]
@@ -538,6 +550,55 @@ class FractalMarketProfileService:
             )
             return jsonable_encoder(encoded_payload)
 
+    async def _degraded_live_snapshot(
+        self,
+        symbol_code: str,
+        *,
+        history_source: str,
+        history_symbol: str,
+        row_count: int,
+        reason: str,
+        detail: str,
+    ) -> dict[str, Any]:
+        return jsonable_encoder(
+            {
+                "symbol_code": symbol_code,
+                "history_source": history_source,
+                "history_symbol": history_symbol,
+                "supported_symbols": list(SUPPORTED_SYMBOLS),
+                "generated_at": _utc_now().isoformat(),
+                "session": {
+                    "symbol": symbol_code,
+                    "session_date": None,
+                    "last_price": None,
+                    "current_hour": None,
+                    "minutes_to_close": None,
+                },
+                "daily_profile": None,
+                "prior_daily_profile": None,
+                "hourly_profiles": [],
+                "current_hour_profile": None,
+                "current_signal": {
+                    "actionable": False,
+                    "action": None,
+                    "confidence": 0.0,
+                    "setup_name": "data_unavailable",
+                    "reason": detail,
+                },
+                "paper_positions": await self.paper.list_positions(symbol=symbol_code, status="all", limit=8),
+                "paper_journal": await self.paper.list_journal(symbol=symbol_code, limit=8),
+                "data_status": {
+                    "execution_ready": False,
+                    "degraded_reason": reason,
+                    "detail": detail,
+                    "history_source": history_source,
+                    "history_symbol": history_symbol,
+                    "row_count": int(row_count),
+                    "session_count": 0,
+                },
+            }
+        )
+
     async def live_health(self, symbol_code: str = "NIFTY") -> dict[str, Any]:
         normalized = self._normalize_symbol(symbol_code)
         rows, history_source, history_symbol = await self._load_live_rows(normalized)
@@ -557,6 +618,13 @@ class FractalMarketProfileService:
 
     async def record_paper_snapshot(self, symbol_code: str = "NIFTY") -> dict[str, Any]:
         snapshot = await self.live_snapshot(symbol_code)
+        data_status = dict(snapshot.get("data_status") or {})
+        if data_status.get("execution_ready") is False and data_status.get("degraded_reason"):
+            positions = await self.paper.list_positions(symbol=snapshot.get("symbol_code"), status="all", limit=50)
+            snapshot["paper_summary"] = positions.get("summary") or {}
+            snapshot["paper_record_skipped"] = True
+            snapshot["paper_skip_reason"] = data_status.get("degraded_reason")
+            return snapshot
         summary = await self.paper.record_signal(snapshot)
         snapshot["paper_summary"] = summary
         return snapshot

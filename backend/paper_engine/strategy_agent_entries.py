@@ -408,6 +408,42 @@ class StrategyEntryMixin:
                 -(c["strength"] or 0),
             )
         )
+        persist_observation = getattr(self, "_persist_agent_signal_observation", None)
+        if callable(persist_observation):
+            for candidate in candidates:
+                row = candidate["row"]
+                side = candidate["side"]
+                await persist_observation(
+                    runtime,
+                    {
+                        "strategy": "Strategy 1",
+                        "source": "live_scan",
+                        "signal_key": f"{runtime.key}:{candidate['signal_key']}:{candidate['latest_bar_time']}",
+                        "underlying": row.get("underlying"),
+                        "signal_date": str(row.get("time") or candidate["latest_bar_time"])[:10],
+                        "as_of": str(candidate["latest_bar_time"]),
+                        "direction": candidate.get("opt_type"),
+                        "reason": candidate.get("reason"),
+                        "strength": candidate.get("strength"),
+                        "status": "entry-ready",
+                        "freshness": "live",
+                        "instruction": (
+                            f"{row.get('underlying')}: {candidate.get('opt_type')} zero-cross passed "
+                            "Strategy 1 filters; paper entry depends on capacity and risk state."
+                        ),
+                        "expiry": row.get("expiry"),
+                        "atm_strike": side.get("strike"),
+                        "ltp": candidate.get("latest_close"),
+                        "iv_pct": candidate.get("iv_pct"),
+                        "tte_days": candidate.get("tte_days"),
+                        "spot_setup": candidate.get("spot_setup"),
+                        "regime": getattr(candidate.get("quadrant"), "regime", None),
+                        "mp_day_type": candidate.get("mp_day_type"),
+                        "option_last_bar_time": candidate.get("latest_bar_time"),
+                    },
+                    status="candidate",
+                    row=row,
+                )
 
         if self._kill_switch_active:
             if candidates:

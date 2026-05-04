@@ -1772,6 +1772,115 @@ class CommodityStrategyAgent(BaseStrategyAgent):
 
         return enriched_rows
 
+    async def _prepare_closed_market_state(self, started_at: datetime) -> dict[str, Any]:
+        """Refresh commodity watchlists outside MCX hours without opening entries."""
+        await ensure_fyers_session(force_validate=False)
+        await ensure_upstox_session(force_validate=False)
+        fyers_health = await get_fyers_token_health(force=False)
+        upstox_health = await get_upstox_token_health(force=False)
+        self._last_data_health = {
+            "fyers_token_health": fyers_health,
+            "upstox_token_health": upstox_health,
+            "option_history": option_history_service.get_health_snapshot(),
+            "mode": "closed_market_preparation",
+        }
+        if not fyers_health.get("valid"):
+            message = self._fyers_failure_message(fyers_health)
+            self._last_error = message
+            self._last_message = message
+            self._append_commentary("error", message)
+            return self.get_status(refresh=False)
+
+        adapter = await self._get_fyers_adapter()
+        if not adapter:
+            self._last_message = "Fyers adapter is unavailable. Commodity preparation cannot refresh watchlists."
+            self._last_error = self._last_message
+            self._append_commentary("error", self._last_message)
+            return self.get_status(refresh=False)
+
+        quote_map = await self._safe_get_ltp(adapter, self._symbols)
+        futures_rows: list[dict[str, Any]] = []
+        for symbol in self._symbols:
+            row = await self._analyze_futures_symbol(symbol, quote_map.get(symbol))
+            if row:
+                prepared_row = dict(row)
+                prepared_row["preparation_mode"] = "closed_market"
+                prepared_row["can_enter"] = False
+                futures_rows.append(prepared_row)
+        futures_rows = self._decorate_futures_rows(futures_rows)
+        futures_rows, retained_futures = self._stabilize_futures_watchlist(
+            futures_rows,
+            live_quotes=quote_map,
+        )
+
+        option_rows = self._decorate_option_rows(await self._build_option_watchlist())
+        option_rows, retained_options = self._stabilize_option_watchlist(option_rows)
+        option_symbols_to_quote = sorted(
+            {
+                str(symbol).strip()
+                for row in option_rows
+                for symbol in (row.get("ce_symbol"), row.get("pe_symbol"))
+                if str(symbol or "").strip()
+            }
+        )
+        option_quote_map = (
+            await self._safe_get_ltp(adapter, option_symbols_to_quote)
+            if option_symbols_to_quote
+            else {}
+        )
+        option_rows = self._overlay_live_option_quotes(option_rows, option_quote_map)
+        option_rows = [
+            {
+                **dict(row),
+                "preparation_mode": "closed_market",
+                "can_enter": False,
+            }
+            for row in option_rows
+        ]
+
+        latest_prices = {
+            row["symbol"]: float(row["price"])
+            for row in futures_rows
+            if row.get("price") is not None
+        }
+        for row in option_rows:
+            for symbol_key, price_key in (("ce_symbol", "ce_trade_price"), ("pe_symbol", "pe_trade_price")):
+                live_symbol = str(row.get(symbol_key) or "")
+                live_price = row.get(price_key)
+                if live_symbol and live_price is not None:
+                    latest_prices[live_symbol] = float(live_price)
+        if latest_prices:
+            self._runtime.portfolio.update_prices(latest_prices)
+
+        self._runtime.futures_watchlist = futures_rows
+        self._runtime.option_watchlist = option_rows
+        self._last_run_at = started_at.isoformat()
+        self._last_error = None
+        option_history_health = option_history_service.get_health_snapshot()
+        self._last_data_health = {
+            "fyers_token_health": fyers_health,
+            "upstox_token_health": upstox_health,
+            "option_history": option_history_health,
+            "mode": "closed_market_preparation",
+        }
+        self._last_message = (
+            f"Market closed. Prepared for next MCX session: {len(futures_rows)} futures rows "
+            f"and {len(option_rows)} option rows. No commodity entries are opened while MCX is closed."
+        )
+        retention_parts: list[str] = []
+        if retained_futures:
+            retention_parts.append(f"retained {len(retained_futures)} futures rows")
+        if retained_options:
+            retention_parts.append(f"retained {len(retained_options)} option rows")
+        if retention_parts:
+            self._last_message = f"{self._last_message} Reused the last good snapshot for {', '.join(retention_parts)}."
+        health_warning = self._option_history_warning(option_history_health)
+        if health_warning:
+            self._last_message = f"{self._last_message} {health_warning}"
+            self._append_commentary("warning", health_warning)
+        self._append_commentary("info", self._last_message)
+        return self.get_status(refresh=False)
+
     async def _analyze_option_row(self, row: dict[str, Any]) -> Optional[dict[str, Any]]:
         symbol = str(row.get("symbol") or "")
         underlying = str(row.get("underlying") or get_commodity_display_name(symbol))
@@ -1920,9 +2029,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     return self.get_status(refresh=False)
 
                 if not force and not _in_commodity_hours(started_at):
-                    self._last_message = "Waiting for MCX market hours."
-                    self._append_commentary("idle", "Commodity market closed. Agent idle.")
-                    return self.get_status(refresh=False)
+                    self._append_commentary("idle", "Commodity market closed. Refreshing next-session preparation state.")
+                    return await self._prepare_closed_market_state(started_at)
 
                 await ensure_fyers_session(force_validate=False)
                 await ensure_upstox_session(force_validate=False)

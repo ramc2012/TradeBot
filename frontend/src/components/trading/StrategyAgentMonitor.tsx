@@ -38,6 +38,19 @@ export type StrategyAgentStatus = {
     fyers_token_health?: BrokerTokenHealth;
     option_history?: OptionHistoryHealth;
   };
+  strategy_agents?: Array<{
+    key: string;
+    label: string;
+    timeframe?: string | null;
+    instrument_scope?: string | null;
+    execution_mode?: string | null;
+    position_cap?: number | null;
+    last_scan_at?: string | null;
+    last_message?: string | null;
+    open_positions?: number | null;
+    signals?: number | null;
+    mode?: string | null;
+  }>;
   strategies: Array<{
     key: string;
     label: string;
