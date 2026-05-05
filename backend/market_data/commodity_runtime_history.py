@@ -1,6 +1,7 @@
 """Small bridge for strategy modules that need live MCX futures candles."""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,6 +17,12 @@ DEFAULT_COMMODITY_FUTURES: dict[str, str] = {
     "CRUDEOIL": "MCX:CRUDEOIL26MAYFUT",
 }
 
+# Per-instrument lock so concurrent callers don't race on the same upsert.
+_PERSIST_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
+# Track the latest in-DB time per (instrument_key, interval) once observed,
+# so subsequent calls only insert genuinely new rows without re-querying.
+_LATEST_PERSISTED: dict[tuple[str, str], datetime] = {}
+
 
 def _parse_time(value: Any) -> datetime | None:
     if value is None:
@@ -29,6 +36,15 @@ def _parse_time(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+def _persist_lock(instrument_key: str, interval: str) -> asyncio.Lock:
+    key = (instrument_key, interval)
+    lock = _PERSIST_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _PERSIST_LOCKS[key] = lock
+    return lock
+
+
 async def _persist_commodity_spot_rows(
     *,
     underlying: str,
@@ -36,82 +52,123 @@ async def _persist_commodity_spot_rows(
     rows: list[dict[str, Any]],
     interval: str,
 ) -> int:
-    """Upsert commodity 1-min/etc. rows into underlying_spot_candles.
+    """Upsert *only new* commodity rows into underlying_spot_candles.
 
     Keeps MP/auction-intelligence pipelines aligned with the commodity desk
-    by writing to the same table the index pipeline uses, so the data-status
-    panel (`mp-data-status`) and `_build_db_spot_mp_row` can find them.
+    while staying cheap: each invocation persists at most a handful of rows
+    (the bars produced since the last successful persist), instead of
+    re-upserting the full lookback window every call.
     """
     if not rows:
         return 0
-    payload: list[dict[str, Any]] = []
-    for row in rows:
-        ts = _parse_time(row.get("time") or row.get("timestamp"))
-        if ts is None:
-            continue
-        close = row.get("close")
-        try:
-            close_f = float(close) if close is not None else 0.0
-        except (TypeError, ValueError):
-            continue
-        if close_f <= 0:
-            continue
-        try:
-            payload.append(
-                {
-                    "time": ts.astimezone(UTC),
-                    "instrument_key": instrument_key,
-                    "underlying": underlying.upper(),
-                    "interval": interval,
-                    "open": float(row.get("open") or close_f),
-                    "high": float(row.get("high") or close_f),
-                    "low": float(row.get("low") or close_f),
-                    "close": close_f,
-                    "volume": int(float(row.get("volume") or 0.0)),
-                    "oi": int(float(row.get("oi") or 0.0)),
-                    "source": "commodity_broker_history",
-                }
-            )
-        except (TypeError, ValueError):
-            continue
 
-    if not payload:
+    cache_key = (instrument_key, interval)
+    lock = _persist_lock(instrument_key, interval)
+
+    if lock.locked():
+        # Another caller is already persisting for this instrument; skip to
+        # avoid request-path contention on the same primary key set.
         return 0
 
-    try:
-        from db.database import AsyncSessionLocal
+    async with lock:
+        try:
+            from db.database import AsyncSessionLocal
 
-        async with AsyncSessionLocal() as session:
-            await session.execute(
-                text(
-                    """
-                    INSERT INTO underlying_spot_candles (
-                        time, instrument_key, underlying, interval, open, high,
-                        low, close, volume, oi, source, synced_at
-                    ) VALUES (
-                        :time, :instrument_key, :underlying, :interval, :open, :high,
-                        :low, :close, :volume, :oi, :source, NOW()
+            latest_known = _LATEST_PERSISTED.get(cache_key)
+            if latest_known is None:
+                # First observation: ask the DB once, then cache for the
+                # lifetime of the process so subsequent calls are cheap.
+                async with AsyncSessionLocal() as session:
+                    latest_known = await session.scalar(
+                        text(
+                            """
+                            SELECT MAX(time) FROM underlying_spot_candles
+                            WHERE instrument_key = :instrument_key
+                              AND interval = :interval
+                            """
+                        ),
+                        {"instrument_key": instrument_key, "interval": interval},
                     )
-                    ON CONFLICT (instrument_key, interval, time) DO UPDATE
-                    SET open = EXCLUDED.open,
-                        high = EXCLUDED.high,
-                        low = EXCLUDED.low,
-                        close = EXCLUDED.close,
-                        volume = EXCLUDED.volume,
-                        oi = EXCLUDED.oi,
-                        source = EXCLUDED.source,
-                        synced_at = NOW()
-                    """
-                ),
-                payload,
+                if latest_known is not None and latest_known.tzinfo is None:
+                    latest_known = latest_known.replace(tzinfo=UTC)
+                _LATEST_PERSISTED[cache_key] = latest_known or datetime.min.replace(tzinfo=UTC)
+                latest_known = _LATEST_PERSISTED[cache_key]
+
+            payload: list[dict[str, Any]] = []
+            newest_seen = latest_known
+            for row in rows:
+                ts = _parse_time(row.get("time") or row.get("timestamp"))
+                if ts is None:
+                    continue
+                ts = ts.astimezone(UTC)
+                # Only insert rows strictly newer than what we've already persisted.
+                if latest_known is not None and ts <= latest_known:
+                    continue
+                close = row.get("close")
+                try:
+                    close_f = float(close) if close is not None else 0.0
+                except (TypeError, ValueError):
+                    continue
+                if close_f <= 0:
+                    continue
+                try:
+                    payload.append(
+                        {
+                            "time": ts,
+                            "instrument_key": instrument_key,
+                            "underlying": underlying.upper(),
+                            "interval": interval,
+                            "open": float(row.get("open") or close_f),
+                            "high": float(row.get("high") or close_f),
+                            "low": float(row.get("low") or close_f),
+                            "close": close_f,
+                            "volume": int(float(row.get("volume") or 0.0)),
+                            "oi": int(float(row.get("oi") or 0.0)),
+                            "source": "commodity_broker_history",
+                        }
+                    )
+                    if newest_seen is None or ts > newest_seen:
+                        newest_seen = ts
+                except (TypeError, ValueError):
+                    continue
+
+            if not payload:
+                return 0
+
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO underlying_spot_candles (
+                            time, instrument_key, underlying, interval, open, high,
+                            low, close, volume, oi, source, synced_at
+                        ) VALUES (
+                            :time, :instrument_key, :underlying, :interval, :open, :high,
+                            :low, :close, :volume, :oi, :source, NOW()
+                        )
+                        ON CONFLICT (instrument_key, interval, time) DO UPDATE
+                        SET open = EXCLUDED.open,
+                            high = EXCLUDED.high,
+                            low = EXCLUDED.low,
+                            close = EXCLUDED.close,
+                            volume = EXCLUDED.volume,
+                            oi = EXCLUDED.oi,
+                            source = EXCLUDED.source,
+                            synced_at = NOW()
+                        """
+                    ),
+                    payload,
+                )
+                await session.commit()
+
+            if newest_seen is not None:
+                _LATEST_PERSISTED[cache_key] = newest_seen
+            return len(payload)
+        except Exception as exc:
+            logger.debug(
+                f"[commodity_runtime_history] persist skipped for {underlying} ({instrument_key}): {exc}"
             )
-            await session.commit()
-        return len(payload)
-    except Exception as exc:
-        logger.debug(
-            f"[commodity_runtime_history] persist skipped for {underlying} ({instrument_key}): {exc}"
-        )
-        return 0
+            return 0
 
 
 async def load_commodity_history_rows(
@@ -127,9 +184,10 @@ async def load_commodity_history_rows(
     contracts and fall back to Fyers symbols, so this keeps MP/FMP/directional
     testing aligned with the live commodity desk.
 
-    When `persist=True` (default), rows are also upserted into
-    `underlying_spot_candles` so MP/auction-intelligence/db_spot consumers
-    see commodity history through the same table indices use.
+    When `persist=True` (default), incremental persistence is scheduled as a
+    fire-and-forget background task so the caller's request returns
+    immediately. Only rows newer than the highest already-persisted timestamp
+    are inserted, keeping each persist O(new_bars) rather than O(lookback).
     """
     normalized_root = str(root or "").strip().upper()
     from paper_engine.commodity_strategy_agent import CommodityStrategyAgent
@@ -153,11 +211,19 @@ async def load_commodity_history_rows(
     )
 
     if persist and rows:
-        await _persist_commodity_spot_rows(
-            underlying=normalized_root,
-            instrument_key=selected_symbol,
-            rows=rows,
-            interval=interval,
-        )
+        # Fire-and-forget: persistence must never block the request path.
+        try:
+            asyncio.create_task(
+                _persist_commodity_spot_rows(
+                    underlying=normalized_root,
+                    instrument_key=selected_symbol,
+                    rows=rows,
+                    interval=interval,
+                ),
+                name=f"persist-commodity-{selected_symbol}-{interval}",
+            )
+        except RuntimeError:
+            # No running loop (e.g. called from sync context) — skip silently.
+            pass
 
     return rows, selected_symbol
