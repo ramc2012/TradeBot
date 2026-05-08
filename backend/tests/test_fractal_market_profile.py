@@ -10,6 +10,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from auction_intelligence import live as auction_live
+import api.routers.fractal_market_profile as fmp_router_module
+from fractal_market_profile.config import SUPPORTED_SYMBOLS
 from fractal_market_profile.paper import FMPPaperStore
 import fractal_market_profile.service as fmp_service_module
 from fractal_market_profile.service import FractalMarketProfileService
@@ -82,6 +84,12 @@ def _profile(
         "value_migration_score": score,
         "value_migration_step": step,
     }
+
+
+def test_fmp_supports_banknifty_and_symbol_code_alias() -> None:
+    assert "BANKNIFTY" in SUPPORTED_SYMBOLS
+    assert fmp_router_module._resolve_symbol(None, "banknifty") == "BANKNIFTY"
+    assert fmp_router_module._resolve_symbol("NIFTY", "SENSEX") == "SENSEX"
 
 
 @pytest.mark.asyncio

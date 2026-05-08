@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import market_data.atm_watchlist as atm_watchlist_module
@@ -268,21 +268,21 @@ def test_get_expiries_reports_catalog_fallback_when_saved_ladder_is_used(monkeyp
 
     async def fake_broker_expiries(meta: UnderlyingMeta, *args, **kwargs) -> tuple[list[str], str]:
         ladders = {
-            "NIFTY": ["2026-04-30", "2026-05-28"],
-            "BANKNIFTY": ["2026-04-29", "2026-05-27"],
-            "FINNIFTY": ["2026-04-28", "2026-05-26"],
-            "MIDCPNIFTY": ["2026-04-27", "2026-05-25"],
-            "SENSEX": ["2026-04-24", "2026-05-29"],
+            "NIFTY": ["2026-05-26", "2026-06-30"],
+            "BANKNIFTY": ["2026-05-26", "2026-06-30"],
+            "FINNIFTY": ["2026-05-26", "2026-06-30"],
+            "MIDCPNIFTY": ["2026-05-26", "2026-06-30"],
+            "SENSEX": ["2026-05-29", "2026-06-26"],
         }
         return ladders[meta.symbol], "catalog"
 
     async def fake_load_persisted(symbol: str) -> list[str]:
         ladders = {
-            "NIFTY": ["2026-04-30", "2026-05-28"],
-            "BANKNIFTY": ["2026-04-29", "2026-05-27"],
-            "FINNIFTY": ["2026-04-28", "2026-05-26"],
-            "MIDCPNIFTY": ["2026-04-27", "2026-05-25"],
-            "SENSEX": ["2026-04-24", "2026-05-29"],
+            "NIFTY": ["2026-05-26", "2026-06-30"],
+            "BANKNIFTY": ["2026-05-26", "2026-06-30"],
+            "FINNIFTY": ["2026-05-26", "2026-06-30"],
+            "MIDCPNIFTY": ["2026-05-26", "2026-06-30"],
+            "SENSEX": ["2026-05-29", "2026-06-26"],
         }
         return ladders[symbol]
 
@@ -297,10 +297,10 @@ def test_get_expiries_reports_catalog_fallback_when_saved_ladder_is_used(monkeyp
     payload = asyncio.run(service.get_expiries(live_refresh=False))
 
     assert payload["source"] == "catalog"
-    assert payload["default_expiry"] == "2026-04-28"
+    assert payload["default_expiry"] == "2026-05-26"
     assert "saved expiry catalog" in str(payload["detail"])
-    assert "2026-04-28" in payload["expiries"]
-    assert "BNKN 2026-04-28" in payload["expiry_scope_note"]
+    assert "2026-05-26" in payload["expiries"]
+    assert "BNKN 2026-05-26" in payload["expiry_scope_note"]
 
 
 def test_get_expiries_prefers_live_fyers_ladders_over_saved_catalog_when_upstox_is_offline(monkeypatch) -> None:
@@ -310,11 +310,11 @@ def test_get_expiries_prefers_live_fyers_ladders_over_saved_catalog_when_upstox_
     class _LiveFyersAdapter:
         async def get_option_contracts(self, symbol: str) -> list[dict]:
             ladders = {
-                "NSE:NIFTY50-INDEX": ["2026-04-21", "2026-04-28", "2026-05-28"],
-                "NSE:NIFTYBANK-INDEX": ["2026-04-23", "2026-04-29", "2026-05-27"],
-                "NSE:FINNIFTY-INDEX": ["2026-04-22", "2026-04-28", "2026-05-26"],
-                "NSE:MIDCPNIFTY-INDEX": ["2026-04-20", "2026-04-27", "2026-05-25"],
-                "BSE:SENSEX-INDEX": ["2026-04-24", "2026-05-29"],
+                "NSE:NIFTY50-INDEX": ["2026-05-12", "2026-05-26", "2026-06-30"],
+                "NSE:NIFTYBANK-INDEX": ["2026-05-12", "2026-05-26", "2026-06-30"],
+                "NSE:FINNIFTY-INDEX": ["2026-05-12", "2026-05-26", "2026-06-30"],
+                "NSE:MIDCPNIFTY-INDEX": ["2026-05-12", "2026-05-26", "2026-06-30"],
+                "BSE:SENSEX-INDEX": ["2026-05-29", "2026-06-26"],
             }
             return [{"expiry": expiry} for expiry in ladders[symbol]]
 
@@ -332,11 +332,11 @@ def test_get_expiries_prefers_live_fyers_ladders_over_saved_catalog_when_upstox_
 
     async def fake_load_persisted(symbol: str) -> list[str]:
         stale = {
-            "NIFTY": ["2026-04-28", "2026-05-26"],
-            "BANKNIFTY": ["2026-04-28", "2026-05-26"],
-            "FINNIFTY": ["2026-04-28", "2026-05-26"],
-            "MIDCPNIFTY": ["2026-04-28", "2026-05-26"],
-            "SENSEX": ["2026-04-24", "2026-05-29"],
+            "NIFTY": ["2026-05-26", "2026-06-30"],
+            "BANKNIFTY": ["2026-05-26", "2026-06-30"],
+            "FINNIFTY": ["2026-05-26", "2026-06-30"],
+            "MIDCPNIFTY": ["2026-05-26", "2026-06-30"],
+            "SENSEX": ["2026-05-29", "2026-06-26"],
         }
         return stale[symbol]
 
@@ -350,12 +350,12 @@ def test_get_expiries_prefers_live_fyers_ladders_over_saved_catalog_when_upstox_
     payload = asyncio.run(service.get_expiries(live_refresh=True))
 
     assert payload["source"] == "fyers"
-    assert payload["default_expiry"] == "2026-04-28"
-    assert payload["index_monthlies"]["NIFTY"] == "2026-04-28"
-    assert payload["index_monthlies"]["BANKNIFTY"] == "2026-04-28"
-    assert payload["index_monthlies"]["FINNIFTY"] == "2026-04-28"
-    assert payload["index_monthlies"]["MIDCPNIFTY"] == "2026-04-28"
-    assert payload["index_monthlies"]["SENSEX"] == "2026-04-24"
+    assert payload["default_expiry"] == "2026-05-26"
+    assert payload["index_monthlies"]["NIFTY"] == "2026-05-26"
+    assert payload["index_monthlies"]["BANKNIFTY"] == "2026-05-26"
+    assert payload["index_monthlies"]["FINNIFTY"] == "2026-05-26"
+    assert payload["index_monthlies"]["MIDCPNIFTY"] == "2026-05-26"
+    assert payload["index_monthlies"]["SENSEX"] == "2026-05-29"
     assert payload["detail"] is None
 
 
@@ -374,7 +374,7 @@ def test_get_expiries_uses_common_nse_monthlies_even_when_live_ladders_are_stale
 
     class _UniformUpstoxAdapter:
         async def get_option_contracts(self, _symbol: str) -> list[dict]:
-            return [{"expiry": expiry} for expiry in ["2026-04-21", "2026-04-28", "2026-05-26"]]
+            return [{"expiry": expiry} for expiry in ["2026-05-12", "2026-05-26", "2026-06-30"]]
 
     monkeypatch.setattr(atm_watchlist_module, "get_redis", lambda: _fake_get_redis(redis))
     monkeypatch.setattr(atm_watchlist_module, "get_active_adapter", lambda broker: None)
@@ -386,13 +386,13 @@ def test_get_expiries_uses_common_nse_monthlies_even_when_live_ladders_are_stale
     payload = asyncio.run(service.get_expiries(live_refresh=True))
 
     assert payload["source"] == "upstox"
-    assert payload["expiries"] == ["2026-04-21", "2026-04-28", "2026-05-26"]
-    assert payload["default_expiry"] == "2026-04-28"
-    assert payload["index_monthlies"]["NIFTY"] == "2026-04-28"
-    assert payload["index_monthlies"]["BANKNIFTY"] == "2026-04-28"
-    assert payload["index_monthlies"]["FINNIFTY"] == "2026-04-28"
-    assert payload["index_monthlies"]["MIDCPNIFTY"] == "2026-04-28"
-    assert payload["index_monthlies"]["SENSEX"] == "2026-04-24"
+    assert payload["expiries"] == ["2026-05-12", "2026-05-26", "2026-06-30"]
+    assert payload["default_expiry"] == "2026-05-26"
+    assert payload["index_monthlies"]["NIFTY"] == "2026-05-26"
+    assert payload["index_monthlies"]["BANKNIFTY"] == "2026-05-26"
+    assert payload["index_monthlies"]["FINNIFTY"] == "2026-05-26"
+    assert payload["index_monthlies"]["MIDCPNIFTY"] == "2026-05-26"
+    assert payload["index_monthlies"]["SENSEX"] == "2026-05-29"
 
 
 def test_get_watchlist_returns_building_payload_on_first_load(monkeypatch) -> None:
@@ -558,6 +558,124 @@ def test_get_watchlist_uses_persisted_snapshot_board_when_brokers_are_offline(mo
     assert payload["summary"]["total_rows"] == 1
     assert payload["rows"][0]["underlying"] == "BANKNIFTY"
     assert "last saved ATM watchlist" in payload["detail"]
+
+
+def test_get_watchlist_refreshes_stale_full_persisted_board(monkeypatch) -> None:
+    service = ATMWatchlistService()
+    redis = _FakeRedis()
+    scheduled = []
+
+    async def fake_get_expiries(_expiry: str | None = None, *, live_refresh: bool = False) -> dict:
+        return {"default_expiry": "2026-05-26"}
+
+    async def fake_load_underlyings() -> list[UnderlyingMeta]:
+        return [
+            UnderlyingMeta("RELIANCE", "STOCK", "NSE_EQ|RELIANCE", "NSE_EQ|RELIANCE"),
+            UnderlyingMeta("VEDL", "STOCK", "NSE_EQ|VEDL", "NSE_EQ|VEDL"),
+        ]
+
+    async def fake_load_persisted_rows(expiry: str, underlyings: list[UnderlyingMeta]) -> list[dict]:
+        stale_as_of = datetime(2026, 4, 24, 6, 26, tzinfo=timezone.utc).isoformat()
+        return [
+            {
+                "underlying": meta.symbol,
+                "kind": meta.kind,
+                "spot_price": 100.0,
+                "as_of": stale_as_of,
+                "expiry": expiry,
+                "atm_strike": 100.0,
+                "live_source": "snapshot",
+                "fyers_symbol": f"NSE:{meta.symbol}-EQ",
+                "lot_size": 1,
+                "ce": {"ltp": 10.0, "option_type": "CE", "strike": 100.0, "as_of": stale_as_of},
+                "pe": {"ltp": 11.0, "option_type": "PE", "strike": 100.0, "as_of": stale_as_of},
+            }
+            for meta in underlyings
+        ]
+
+    def fake_ensure_future(coro):
+        scheduled.append(coro)
+        coro.close()
+        return None
+
+    monkeypatch.setattr(atm_watchlist_module, "get_redis", lambda: _fake_get_redis(redis))
+    monkeypatch.setattr(atm_watchlist_module, "get_active_adapter", lambda broker: _FakeFyersAdapter() if broker == "fyers" else None)
+    monkeypatch.setattr(atm_watchlist_module.asyncio, "ensure_future", fake_ensure_future)
+    monkeypatch.setattr(service, "get_expiries", fake_get_expiries)
+    monkeypatch.setattr(service, "_load_underlyings", fake_load_underlyings)
+    monkeypatch.setattr(service, "_get_upstox_adapter", lambda: _async_payload(None))
+    monkeypatch.setattr(service, "_load_persisted_watchlist_rows", fake_load_persisted_rows)
+
+    payload = asyncio.run(service.get_watchlist("2026-05-26", live_refresh=True))
+
+    assert payload["build_status"] == "building"
+    assert payload["summary"]["total_rows"] == 2
+    assert "stale" in str(payload["detail"])
+    assert "rebuilding the stock universe" in str(payload["detail"])
+    assert scheduled
+
+
+def test_live_refresh_ignores_stale_cached_watchlist_payload(monkeypatch) -> None:
+    service = ATMWatchlistService()
+    redis = _FakeRedis()
+    stale_as_of = datetime(2026, 4, 24, 6, 26, tzinfo=timezone.utc).isoformat()
+    cache_key = f"atm_watchlist:{atm_watchlist_module.WATCHLIST_CACHE_VERSION}:live:2026-05-26:scope:VEDL"
+    stale_row = {
+        "underlying": "VEDL",
+        "kind": "STOCK",
+        "spot_price": 711.0,
+        "as_of": stale_as_of,
+        "expiry": "2026-05-26",
+        "atm_strike": 710.0,
+        "live_source": "snapshot",
+        "ce": {"ltp": 17.0, "option_type": "CE", "strike": 710.0, "as_of": stale_as_of},
+        "pe": {"ltp": 14.6, "option_type": "PE", "strike": 710.0, "as_of": stale_as_of},
+    }
+    redis._values[cache_key] = json.dumps({
+        "expiry": "2026-05-26",
+        "rows": [stale_row],
+        "summary": {"total_rows": 1, "ce_ready": 1, "pe_ready": 1},
+        "source": "snapshot",
+        "detail": "cached stale payload",
+        "build_status": "ready",
+        "timestamp": stale_as_of,
+    })
+
+    monkeypatch.setattr(atm_watchlist_module, "get_redis", lambda: _fake_get_redis(redis))
+    monkeypatch.setattr(atm_watchlist_module, "get_active_adapter", lambda broker: None)
+    monkeypatch.setattr(atm_watchlist_module, "ensure_fyers_session", lambda **kwargs: _async_payload(False))
+    monkeypatch.setattr(service, "_get_upstox_adapter", lambda: _async_payload(None))
+    monkeypatch.setattr(service, "get_expiries", lambda _expiry=None, live_refresh=False: _async_payload({"default_expiry": "2026-05-26"}))
+    monkeypatch.setattr(service, "_load_underlyings", lambda: _async_payload([
+        UnderlyingMeta("VEDL", "STOCK", "NSE_EQ|VEDL", "NSE_EQ|VEDL"),
+    ]))
+    monkeypatch.setattr(service, "_load_persisted_watchlist_rows", lambda expiry, underlyings: _async_payload([stale_row]))
+
+    payload = asyncio.run(service.get_watchlist("2026-05-26", ["VEDL"], live_refresh=True))
+
+    assert payload["build_status"] == "stale"
+    assert payload["detail"] != "cached stale payload"
+    assert "saved ATM watchlist board is stale" in payload["detail"]
+
+
+def test_get_upstox_adapter_uses_analytics_token_when_session_is_expired(monkeypatch) -> None:
+    service = ATMWatchlistService()
+    authenticated: list[str] = []
+
+    class _FakeUpstoxAdapter:
+        async def authenticate(self, credentials: dict):
+            authenticated.append(credentials["access_token"])
+            return SimpleNamespace(access_token=credentials["access_token"])
+
+    monkeypatch.setattr(atm_watchlist_module, "ensure_upstox_session", lambda **kwargs: _async_payload(False))
+    monkeypatch.setattr(atm_watchlist_module, "get_active_adapter", lambda broker: None)
+    monkeypatch.setattr(atm_watchlist_module, "get_broker_token", lambda broker: "analytics-token" if broker == "upstox" else "")
+    monkeypatch.setattr(atm_watchlist_module, "UpstoxAdapter", _FakeUpstoxAdapter)
+
+    adapter = asyncio.run(service._get_upstox_adapter())
+
+    assert isinstance(adapter, _FakeUpstoxAdapter)
+    assert authenticated == ["analytics-token"]
 
 
 def test_load_persisted_watchlist_rows_falls_back_when_underlying_lot_size_column_is_missing(monkeypatch) -> None:
@@ -927,7 +1045,15 @@ def test_load_underlyings_bootstraps_when_catalog_has_only_indices(monkeypatch) 
 
     rows = asyncio.run(service._load_underlyings())
 
-    assert [row.symbol for row in rows] == ["NIFTY", "BANKNIFTY", "RELIANCE"]
+    assert [row.symbol for row in rows] == [
+        "NIFTY",
+        "BANKNIFTY",
+        "FINNIFTY",
+        "MIDCPNIFTY",
+        "SENSEX",
+        "RELIANCE",
+    ]
+    assert rows[4].underlying_key == "BSE_INDEX|SENSEX"
 
 
 async def _async_payload(payload):

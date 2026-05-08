@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -128,7 +128,7 @@ class PaperPortfolio:
                 setup_type=order.setup_type,
                 entry_iv_pct=order.entry_iv_pct,
                 regime=order.regime,
-                opened_at=order.fill_time or datetime.utcnow(),
+                opened_at=order.fill_time or datetime.now(timezone.utc),
             )
             self.available_capital -= margin_used
             logger.info(f"[Portfolio] Opened position: {order.symbol} {order.action} {order.qty} @ {fill_price}")
@@ -147,7 +147,7 @@ class PaperPortfolio:
             exit_price=fill_price,
             pnl=pnl,
             entry_time=pos.opened_at,
-            exit_time=close_order.fill_time or datetime.utcnow(),
+            exit_time=close_order.fill_time or datetime.now(timezone.utc),
             instrument_type=pos.instrument_type,
             expiry=pos.expiry,
             strike=pos.strike,
@@ -159,13 +159,13 @@ class PaperPortfolio:
         )
         self._trade_history.append(trade)
 
-        today = date.today()
-        self._daily_pnl[today] = self._daily_pnl[today] + pnl
+        trade_day = trade.exit_time.date()
+        self._daily_pnl[trade_day] = self._daily_pnl[trade_day] + pnl
 
         margin_released = self._estimate_margin(
             pos.symbol,
             close_order.qty,
-            fill_price,
+            pos.avg_price,
             instrument_type=pos.instrument_type,
             option_type=pos.option_type,
         )
@@ -178,7 +178,7 @@ class PaperPortfolio:
 
         # Record equity
         equity = self.total_equity
-        self._equity_curve.append((datetime.utcnow(), equity))
+        self._equity_curve.append((datetime.now(timezone.utc), equity))
         if equity > self._peak_equity:
             self._peak_equity = equity
 
@@ -189,6 +189,23 @@ class PaperPortfolio:
         for pos in self._positions.values():
             if pos.symbol in price_map:
                 pos.current_price = price_map[pos.symbol]
+
+    def reserved_margin(self) -> float:
+        """Capital reserved against currently open paper positions."""
+        return sum(
+            self._estimate_margin(
+                pos.symbol,
+                pos.qty,
+                pos.avg_price,
+                instrument_type=pos.instrument_type,
+                option_type=pos.option_type,
+            )
+            for pos in self._positions.values()
+        )
+
+    def reconcile_available_capital(self) -> None:
+        """Rebuild cash from realized P&L and currently reserved entry margin."""
+        self.available_capital = self.initial_capital + self.realized_pnl - self.reserved_margin()
 
     def _find_position_key(self, symbol: str, action: str) -> Optional[str]:
         for key, pos in self._positions.items():
@@ -323,7 +340,7 @@ class PaperPortfolio:
     def snapshot_equity(self) -> None:
         """Capture a timestamped equity snapshot (call after each strategy scan)."""
         equity = self.total_equity
-        self._equity_curve.append((datetime.utcnow(), equity))
+        self._equity_curve.append((datetime.now(timezone.utc), equity))
         if equity > self._peak_equity:
             self._peak_equity = equity
 

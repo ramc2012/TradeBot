@@ -80,6 +80,9 @@ _CREDENTIAL_REFRESH_TTL_SECONDS = 15.0
 _credentials_db_checked_at_monotonic = 0.0
 _credentials_db_updated_at: datetime | None = None
 _BROKER_SNAPSHOT_CACHE_TTL_SECONDS = 5.0
+_BROKER_SNAPSHOT_SESSION_TIMEOUT_SECONDS = 1.5
+_BROKER_SNAPSHOT_HEALTH_TIMEOUT_SECONDS = 2.0
+_BROKER_SNAPSHOT_FORCE_TIMEOUT_SECONDS = 5.0
 _broker_snapshot_cache: dict[str, Any] = {
     "expires_at": 0.0,
     "result": None,
@@ -879,6 +882,37 @@ async def get_fyers_token_health(force: bool = False) -> dict:
     return result
 
 
+async def _await_broker_snapshot_step(label: str, operation, timeout: float, fallback):
+    try:
+        return await asyncio.wait_for(operation, timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning(f"Broker snapshot step {label} exceeded {timeout:.1f}s; using cached/session fallback")
+        return fallback
+    except Exception as exc:
+        logger.warning(f"Broker snapshot step {label} failed: {exc}")
+        return fallback
+
+
+def _broker_health_timeout_payload(broker: str, *, connected: bool, force: bool = False) -> dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat()
+    label = BROKER_STATUS_LABELS.get(broker, broker.upper())
+    source = "active_session" if connected else "none"
+    return {
+        "connected": connected,
+        "source": source,
+        "valid": connected,
+        "status": "validation_timeout" if connected else "validation_unavailable",
+        "checked_at": now,
+        "has_saved_token": True,
+        "needs_reconnect": False if connected else bool(force),
+        "message": (
+            f"{label} validation timed out; using the active session state for this status poll."
+            if connected
+            else f"{label} validation timed out and no active session is available."
+        ),
+    }
+
+
 async def get_broker_connection_snapshot(force_validate: bool = False) -> dict[str, Any]:
     """Return a compact broker connection snapshot for UI and Telegram usage."""
     if not force_validate:
@@ -893,12 +927,54 @@ async def get_broker_connection_snapshot(force_validate: bool = False) -> dict[s
                 return dict(cached)
 
         refresh_persistent_credentials(force=force_validate)
-        await ensure_upstox_session(force_validate=force_validate)
-        await ensure_fyers_session(force_validate=force_validate)
+        step_timeout = (
+            _BROKER_SNAPSHOT_FORCE_TIMEOUT_SECONDS
+            if force_validate
+            else _BROKER_SNAPSHOT_SESSION_TIMEOUT_SECONDS
+        )
+        await asyncio.gather(
+            _await_broker_snapshot_step(
+                "ensure_upstox_session",
+                ensure_upstox_session(force_validate=force_validate),
+                step_timeout,
+                False,
+            ),
+            _await_broker_snapshot_step(
+                "ensure_fyers_session",
+                ensure_fyers_session(force_validate=force_validate),
+                step_timeout,
+                False,
+            ),
+        )
 
         session_brokers = get_connected_brokers()
-        upstox_health = await get_upstox_token_health(force=force_validate)
-        fyers_health = await get_fyers_token_health(force=force_validate)
+        health_timeout = (
+            _BROKER_SNAPSHOT_FORCE_TIMEOUT_SECONDS
+            if force_validate
+            else _BROKER_SNAPSHOT_HEALTH_TIMEOUT_SECONDS
+        )
+        upstox_health, fyers_health = await asyncio.gather(
+            _await_broker_snapshot_step(
+                "upstox_token_health",
+                get_upstox_token_health(force=force_validate),
+                health_timeout,
+                _broker_health_timeout_payload(
+                    "upstox",
+                    connected="upstox" in session_brokers,
+                    force=force_validate,
+                ),
+            ),
+            _await_broker_snapshot_step(
+                "fyers_token_health",
+                get_fyers_token_health(force=force_validate),
+                health_timeout,
+                _broker_health_timeout_payload(
+                    "fyers",
+                    connected="fyers" in session_brokers,
+                    force=force_validate,
+                ),
+            ),
+        )
         upstox_ready = "upstox" in session_brokers and bool(upstox_health.get("valid"))
         fyers_ready = "fyers" in session_brokers and bool(fyers_health.get("valid"))
 

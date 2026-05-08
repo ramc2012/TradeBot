@@ -437,6 +437,64 @@ class CommodityATMWatchlistService:
     ) -> None:
         cache[key] = deepcopy(payload)
 
+    def _static_contract_catalog(
+        self,
+        symbols: list[str],
+        selected_option_expiries: dict[str, str],
+        selected_option_lookup_symbols: dict[str, str],
+        *,
+        detail: str,
+        source: str,
+    ) -> dict[str, Any]:
+        contracts: list[dict[str, Any]] = []
+        for symbol in symbols:
+            spec = get_commodity_contract_spec(symbol)
+            underlying = _extract_commodity_root(symbol)
+            selected_expiry = selected_option_expiries.get(symbol)
+            selected_lookup_symbol = selected_option_lookup_symbols.get(symbol) or symbol
+            expiry_mappings = (
+                [{"expiry": selected_expiry, "lookup_symbol": selected_lookup_symbol}]
+                if selected_expiry
+                else []
+            )
+            contracts.append(
+                {
+                    "symbol": symbol,
+                    "underlying": underlying or spec.root,
+                    "lookup_symbol": symbol,
+                    "expiries": [selected_expiry] if selected_expiry else [],
+                    "selected_expiry": selected_expiry,
+                    "suggested_expiry": selected_expiry,
+                    "active_expiry": selected_expiry,
+                    "has_options": bool(selected_expiry),
+                    "active_lookup_symbol": selected_lookup_symbol,
+                    "default_lookup_symbol": symbol,
+                    "expiry_mappings": expiry_mappings,
+                    "selected_lookup_symbol": selected_lookup_symbol if selected_expiry else None,
+                    "selection_policy": "saved_static_fallback" if selected_expiry else "static_metadata_only",
+                    "selection_locked": bool(selected_expiry),
+                    "lot_size": spec.futures_lot_size,
+                    "contract_unit_label": spec.contract_unit_label,
+                    "quote_unit_label": spec.quote_unit_label,
+                    "strategy_title": spec.options_label,
+                    "detail": "Live MCX expiry discovery is unavailable; showing saved/static contract metadata.",
+                }
+            )
+        payload: dict[str, Any] = {
+            "contracts": contracts,
+            "summary": {
+                "total_symbols": len(contracts),
+                "contracts_ready": sum(1 for item in contracts if item.get("has_options")),
+                "active_selections": sum(1 for item in contracts if item.get("active_expiry")),
+            },
+            "source": source,
+            "detail": detail,
+            "timestamp": _utc_now().isoformat(),
+        }
+        if self._fyers_backoff_until is not None:
+            payload["backoff_until"] = self._fyers_backoff_until.isoformat()
+        return payload
+
     def get_cached_contract_catalog(
         self,
         symbols: list[str],
@@ -544,6 +602,16 @@ class CommodityATMWatchlistService:
             )
             if cached_payload is not None:
                 return cached_payload
+            return self._static_contract_catalog(
+                normalized,
+                selected_option_expiries,
+                selected_option_lookup_symbols,
+                detail=(
+                    "Fyers contract discovery is cooling down after rate limits. "
+                    "Showing saved MCX futures with static contract metadata."
+                ),
+                source="fyers_rate_limit_static",
+            )
         symbol_contracts: list[dict[str, Any] | Exception] = []
         rate_limit_errors: list[str] = []
         for index, symbol in enumerate(normalized):
@@ -554,6 +622,9 @@ class CommodityATMWatchlistService:
             except Exception as exc:
                 if _is_rate_limit_error(exc):
                     rate_limit_errors.append(str(exc))
+                    symbol_contracts.append(exc)
+                    symbol_contracts.extend(RuntimeError(str(exc)) for _ in normalized[index + 1 :])
+                    break
                 symbol_contracts.append(exc)
 
         contracts: list[dict[str, Any]] = []
@@ -669,6 +740,23 @@ class CommodityATMWatchlistService:
                 self._clear_rate_limit()
         elif rate_limit_errors:
             self._mark_rate_limit(rate_limit_errors[-1])
+            cached_payload = self._cached_payload(
+                self._contract_catalog_cache,
+                cache_key,
+                label="commodity contract catalog",
+            )
+            if cached_payload is not None:
+                return cached_payload
+            return self._static_contract_catalog(
+                normalized,
+                selected_option_expiries,
+                selected_option_lookup_symbols,
+                detail=(
+                    "Fyers contract discovery hit rate limits. "
+                    "Showing saved MCX futures with static contract metadata until cooldown ends."
+                ),
+                source="fyers_rate_limit_static",
+            )
         return payload
 
     async def get_expiries(self, symbols: list[str]) -> dict[str, Any]:
@@ -970,6 +1058,8 @@ class CommodityATMWatchlistService:
             try:
                 expiries = await self._get_symbol_expiries(adapter, candidate)
             except Exception as exc:
+                if _is_rate_limit_error(exc):
+                    raise
                 failures.append(str(exc))
                 continue
             upcoming_expiries = _filter_upcoming_expiries(expiries)

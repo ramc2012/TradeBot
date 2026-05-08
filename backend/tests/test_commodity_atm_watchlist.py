@@ -237,6 +237,46 @@ def test_contract_catalog_reuses_last_good_payload_on_rate_limit() -> None:
     assert "last good commodity contract catalog" in str(second["detail"])
 
 
+def test_contract_catalog_enters_static_cooldown_without_cached_payload_on_rate_limit() -> None:
+    service = CommodityATMWatchlistService()
+
+    class _RateLimitAdapter(_FakeCommodityAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.contract_requests = 0
+
+        async def get_option_contracts(self, symbol: str) -> list[dict]:
+            self.contract_requests += 1
+            raise RuntimeError("Fyers data API error 429: request limit reached")
+
+    adapter = _RateLimitAdapter()
+
+    async def _get_adapter():
+        return adapter
+
+    service._get_fyers_adapter = _get_adapter  # type: ignore[method-assign]
+
+    first = asyncio.run(
+        service.get_contract_catalog(
+            ["MCX:GOLD26JUNFUT", "MCX:CRUDEOIL26MAYFUT"],
+            {"MCX:GOLD26JUNFUT": "2099-05-27"},
+        )
+    )
+    second = asyncio.run(
+        service.get_contract_catalog(
+            ["MCX:GOLD26JUNFUT", "MCX:CRUDEOIL26MAYFUT"],
+            {"MCX:GOLD26JUNFUT": "2099-05-27"},
+        )
+    )
+
+    assert first["source"] == "fyers_rate_limit_static"
+    assert first["summary"]["total_symbols"] == 2
+    assert first["summary"]["contracts_ready"] == 1
+    assert first["contracts"][0]["active_expiry"] == "2099-05-27"
+    assert second["source"] == "fyers_rate_limit_static"
+    assert adapter.contract_requests == 1
+
+
 def test_watchlist_reuses_last_good_payload_on_rate_limit() -> None:
     service = CommodityATMWatchlistService()
     adapter = _FakeCommodityAdapter()

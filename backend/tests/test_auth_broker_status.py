@@ -219,3 +219,28 @@ def test_broker_connection_snapshot_reuses_short_lived_cache(monkeypatch) -> Non
     assert first["connected_brokers"] == ["fyers"]
     assert second["connected_brokers"] == ["fyers"]
     assert calls == {"upstox": 1, "fyers": 1}
+
+
+def test_broker_connection_snapshot_times_out_slow_health_checks(monkeypatch) -> None:
+    async def _noop(*args, **kwargs) -> bool:
+        return False
+
+    async def _slow_health(force: bool = False) -> dict:
+        await asyncio.sleep(10)
+        return {"valid": False}
+
+    monkeypatch.setattr(auth, "_BROKER_SNAPSHOT_SESSION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(auth, "_BROKER_SNAPSHOT_HEALTH_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(auth, "refresh_persistent_credentials", lambda force=False: None)
+    monkeypatch.setattr(auth, "ensure_upstox_session", _noop)
+    monkeypatch.setattr(auth, "ensure_fyers_session", _noop)
+    monkeypatch.setattr(auth, "get_connected_brokers", lambda: ["fyers", "upstox"])
+    monkeypatch.setattr(auth, "get_upstox_token_health", _slow_health)
+    monkeypatch.setattr(auth, "get_fyers_token_health", _slow_health)
+
+    snapshot = asyncio.run(auth.get_broker_connection_snapshot())
+
+    assert snapshot["connected_brokers"] == ["fyers", "upstox"]
+    assert snapshot["broker_ready"] is True
+    assert snapshot["upstox_token_health"]["status"] == "validation_timeout"
+    assert snapshot["fyers_token_health"]["status"] == "validation_timeout"

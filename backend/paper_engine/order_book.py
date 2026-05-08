@@ -2,7 +2,7 @@
 from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import RLock
 from typing import Callable, Dict, List, Optional
 from loguru import logger
@@ -37,7 +37,7 @@ class PaperOrder:
     sl_order_id: Optional[str] = None
     target_order_id: Optional[str] = None
     parent_order_id: Optional[str] = None
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ─── Callbacks ───────────────────────────────────────────────────────────────
@@ -180,7 +180,7 @@ class PaperOrderBook:
                     if not current or current.status != "OPEN":
                         continue
                     current.fill_price = fill_price
-                    current.fill_time = tick.timestamp or datetime.utcnow()
+                    current.fill_time = tick.timestamp or datetime.now(timezone.utc)
                     current.status = "FILLED"
                     del self._orders[current.order_id]
                 filled.append(current)
@@ -223,7 +223,7 @@ class PaperOrderBook:
 
     def _fill_market(self, order: PaperOrder, ltp: float):
         order.fill_price = self._apply_slippage(ltp, order.action)
-        order.fill_time = datetime.utcnow()
+        order.fill_time = datetime.now(timezone.utc)
         order.status = "FILLED"
         logger.info(
             f"[PaperOB] INSTANT FILL {order.order_id[:8]} "

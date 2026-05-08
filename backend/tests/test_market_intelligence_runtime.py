@@ -227,3 +227,32 @@ async def test_refresh_nse_watchlists_limits_full_universe_refresh_to_stock_mont
         ("2026-04-24", ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")),
         ("2026-04-28", ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")),
     ]
+
+
+def test_strategy_readiness_blocks_stale_latest_session_for_execution() -> None:
+    stale = market_intelligence_module._strategy_readiness_fields(
+        watchlist_rows_today=0,
+        watchlist_rows_latest=171,
+        watchlist_age_seconds=14 * 24 * 60 * 60,
+    )
+    assert stale["ready"] is True
+    assert stale["execution_ready"] is False
+    assert stale["readiness_mode"] == "latest_session"
+    assert stale["execution_mode"] == "stale_latest_session"
+
+    fresh = market_intelligence_module._strategy_readiness_fields(
+        watchlist_rows_today=0,
+        watchlist_rows_latest=171,
+        watchlist_age_seconds=60 * 60,
+    )
+    assert fresh["ready"] is True
+    assert fresh["execution_ready"] is True
+    assert fresh["execution_mode"] == "latest_session"
+
+    live = market_intelligence_module._strategy_readiness_fields(
+        watchlist_rows_today=171,
+        watchlist_rows_latest=171,
+        watchlist_age_seconds=120,
+    )
+    assert live["execution_ready"] is True
+    assert live["execution_mode"] == "live"

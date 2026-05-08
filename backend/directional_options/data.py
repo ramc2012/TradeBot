@@ -279,6 +279,47 @@ class DirectionalOptionsDataStore:
             )
         return payload
 
+    async def latest_live_watchlist_status(
+        self,
+        *,
+        underlying: str,
+        as_of: str | datetime | pd.Timestamp | None = None,
+    ) -> dict[str, Any]:
+        as_of_ts = _parse_ts(as_of or datetime.now(UTC))
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    """
+                    WITH latest AS (
+                        SELECT DISTINCT ON (expiry, strike, option_type)
+                            time,
+                            expiry,
+                            strike,
+                            option_type
+                        FROM atm_option_watchlist_snapshots
+                        WHERE underlying = :underlying
+                          AND expiry >= CURRENT_DATE
+                          AND ltp IS NOT NULL
+                          AND time <= :as_of
+                        ORDER BY expiry, strike, option_type, time DESC
+                    )
+                    SELECT COUNT(*) AS rows, MAX(time) AS latest_time
+                    FROM latest
+                    """
+                ),
+                {
+                    "underlying": underlying.upper(),
+                    "as_of": as_of_ts.to_pydatetime(),
+                },
+            )
+            row = result.first()
+
+        latest_time = getattr(row, "latest_time", None) if row is not None else None
+        return {
+            "rows": int(getattr(row, "rows", 0) or 0) if row is not None else 0,
+            "latest_time": _parse_ts(latest_time).isoformat() if latest_time is not None else None,
+        }
+
     async def latest_local_option_mark(
         self,
         *,

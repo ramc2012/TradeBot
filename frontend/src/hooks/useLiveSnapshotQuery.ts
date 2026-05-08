@@ -94,13 +94,17 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
   const queryKeyHash = useMemo(() => JSON.stringify(queryKey), [queryKey]);
   const hasStreamFactory = Boolean(streamFactory);
   const streamFactoryRef = useRef(streamFactory);
-  const [snapshot, setSnapshot] = useState<SnapshotEnvelope<TData> | null>(() => loadSnapshot<TData>(storageKey));
+  const initialSnapshotRef = useRef<SnapshotEnvelope<TData> | null | undefined>(undefined);
+  if (initialSnapshotRef.current === undefined) {
+    initialSnapshotRef.current = loadSnapshot<TData>(storageKey);
+  }
+  const [snapshot, setSnapshot] = useState<SnapshotEnvelope<TData> | null>(() => initialSnapshotRef.current ?? null);
   const [isVisible, setIsVisible] = useState(() =>
     typeof document === "undefined" ? true : document.visibilityState === "visible",
   );
   const [isStreamConnected, setIsStreamConnected] = useState(false);
   const [allowQueryFallback, setAllowQueryFallback] = useState(
-    () => !streamFactory || !preferStream || !loadSnapshot<TData>(storageKey),
+    () => !streamFactory || !preferStream || !initialSnapshotRef.current,
   );
 
   useEffect(() => {

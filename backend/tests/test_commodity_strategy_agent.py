@@ -88,6 +88,53 @@ def test_evaluate_commodity_signal_reports_insufficient_data() -> None:
     assert signal["reason"] == "insufficient_data"
 
 
+def test_commodity_options_pe_cross_does_not_require_ce_quadrant(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    ce_closes = [180.0 - (index * 1.5) for index in range(40)]
+    pe_closes = [100.0 + (index * 4.0) for index in range(20)] + [
+        176.0 - ((index + 1) * 2.0) for index in range(20)
+    ]
+
+    async def fake_load_candles(**kwargs):
+        option_type = kwargs["option_type"]
+        return _build_candles(ce_closes if option_type == "CE" else pe_closes)
+
+    monkeypatch.setattr(commodity_module.option_history_service, "load_candles", fake_load_candles)
+
+    agent = CommodityStrategyAgent()
+    row = {
+        "symbol": "MCX:GOLD26JUNFUT",
+        "underlying": "GOLD",
+        "expiry": "2099-06-26",
+        "ce": {
+            "instrument_key": "MCX_FO|GOLD_CE",
+            "trading_symbol": "GOLD CE",
+            "strike": 152000.0,
+            "option_type": "CE",
+            "ltp": 900.0,
+            "is_liquid": True,
+        },
+        "pe": {
+            "instrument_key": "MCX_FO|GOLD_PE",
+            "trading_symbol": "GOLD PE",
+            "strike": 152000.0,
+            "option_type": "PE",
+            "ltp": 850.0,
+            "is_liquid": True,
+        },
+    }
+
+    analyzed = asyncio.run(agent._analyze_option_row(row))
+
+    assert analyzed is not None
+    assert analyzed["regime"] == "dead_zone"
+    assert analyzed["signal_side"] == "PE"
+    assert analyzed["signal_reason"] == "pe_macd_zero_cross"
+    assert analyzed["pe_cross"] is True
+
+
 def test_filter_closed_interval_rows_drops_incomplete_tail_bar() -> None:
     start = datetime(2026, 4, 16, 9, 15, tzinfo=UTC)
     candles = [

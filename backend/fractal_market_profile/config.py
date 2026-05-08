@@ -12,22 +12,25 @@ SESSION_CLOSE = time(15, 30)
 LATEST_ENTRY_TIME = time(14, 30)
 FORCE_EXIT_TIME = time(15, 0)
 
-SUPPORTED_SYMBOLS: tuple[str, ...] = ("NIFTY", "SENSEX", "CRUDEOIL")
+SUPPORTED_SYMBOLS: tuple[str, ...] = ("NIFTY", "BANKNIFTY", "SENSEX", "CRUDEOIL")
 
 INDEX_APP_SYMBOLS: dict[str, str] = {
     "NIFTY": "NSE:NIFTY50-INDEX",
+    "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
     "SENSEX": "BSE:SENSEX-INDEX",
     "CRUDEOIL": "MCX:CRUDEOIL26MAYFUT",
 }
 
 LOT_SIZES: dict[str, int] = {
     "NIFTY": 65,
+    "BANKNIFTY": 30,
     "SENSEX": 10,
     "CRUDEOIL": 100,
 }
 
 OPTION_STRIKE_STEPS: dict[str, float] = {
     "NIFTY": 50.0,
+    "BANKNIFTY": 100.0,
     "SENSEX": 100.0,
     "CRUDEOIL": 50.0,
 }

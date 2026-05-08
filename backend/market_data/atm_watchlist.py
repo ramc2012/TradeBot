@@ -20,8 +20,9 @@ from analysis.instruments import (
     get_monthly_expiry,
     get_index_monthly_expiry,
 )
-from api.routers.auth import ensure_fyers_session, ensure_upstox_session, get_active_adapter
+from api.routers.auth import ensure_fyers_session, ensure_upstox_session, get_active_adapter, get_broker_token
 from brokers.base import BrokerAdapter, OptionChain, OptionChainEntry
+from brokers.upstox import UpstoxAdapter
 from db.database import AsyncSessionLocal
 from db.redis_client import get_redis
 from market_data.fo_universe_bootstrap import ensure_fo_underlying_catalog
@@ -33,8 +34,9 @@ DEFAULT_WATCHLIST_TTL = 900
 DEFAULT_EXPIRY_TTL = 300
 DEFAULT_PARTIAL_TTL = 900
 DEFAULT_BUILD_LOCK_TTL = 120
-WATCHLIST_CACHE_VERSION = "v10"
+WATCHLIST_CACHE_VERSION = "v12"
 SYMBOL_EXPIRY_CACHE_VERSION = "v2"
+PERSISTED_WATCHLIST_FRESH_SECONDS = 36 * 60 * 60
 
 # ── NSE expiry rules ──────────────────────────────────────────────────────────
 # NSE index contracts currently share the same Tuesday expiry ladder. Stocks
@@ -88,6 +90,43 @@ def _nearest_index_expiry(symbol: str) -> date:
 def _stock_monthly_for_selected_expiry(selected_expiry: date) -> date:
     """Resolve stocks to the monthly expiry for the selected expiry month."""
     return get_monthly_expiry(selected_expiry.year, selected_expiry.month)
+
+
+def _parse_payload_datetime(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _latest_watchlist_row_time(rows: list[dict[str, Any]]) -> Optional[datetime]:
+    latest: Optional[datetime] = None
+    for row in rows:
+        candidates = [
+            _parse_payload_datetime(row.get("as_of")),
+            _parse_payload_datetime((row.get("ce") or {}).get("as_of")),
+            _parse_payload_datetime((row.get("pe") or {}).get("as_of")),
+        ]
+        row_latest = max((candidate for candidate in candidates if candidate is not None), default=None)
+        if row_latest is not None and (latest is None or row_latest > latest):
+            latest = row_latest
+    return latest
+
+
+def _watchlist_rows_are_fresh(rows: list[dict[str, Any]]) -> bool:
+    latest = _latest_watchlist_row_time(rows)
+    if latest is None:
+        return False
+    return (datetime.now(UTC) - latest).total_seconds() <= PERSISTED_WATCHLIST_FRESH_SECONDS
 
 
 def _index_monthly_for_selected_expiry(symbol: str, selected_expiry: date) -> date:
@@ -270,7 +309,9 @@ class ATMWatchlistService:
                 latest.strike,
                 latest.source_broker,
                 latest.underlying_price,
+                latest.time AS as_of,
                 {lot_size_select}
+                ce.time AS ce_as_of,
                 ce.instrument_key AS ce_instrument_key,
                 ce.trading_symbol AS ce_trading_symbol,
                 ce.ltp AS ce_ltp,
@@ -287,6 +328,7 @@ class ATMWatchlistService:
                 ce.macd_signal AS ce_macd_signal,
                 ce.macd_histogram AS ce_macd_histogram,
                 ce.rsi AS ce_rsi,
+                pe.time AS pe_as_of,
                 pe.instrument_key AS pe_instrument_key,
                 pe.trading_symbol AS pe_trading_symbol,
                 pe.ltp AS pe_ltp,
@@ -307,7 +349,7 @@ class ATMWatchlistService:
             LEFT JOIN fo_underlying_catalog catalog
               ON catalog.symbol = latest.underlying
             LEFT JOIN LATERAL (
-                SELECT instrument_key, trading_symbol, ltp, prev_close, change, change_pct,
+                SELECT time, instrument_key, trading_symbol, ltp, prev_close, change, change_pct,
                        oi, prev_oi, oi_change, oi_change_pct, volume, iv,
                        macd, macd_signal, macd_histogram, rsi
                 FROM atm_option_watchlist_snapshots
@@ -319,7 +361,7 @@ class ATMWatchlistService:
                 LIMIT 1
             ) ce ON TRUE
             LEFT JOIN LATERAL (
-                SELECT instrument_key, trading_symbol, ltp, prev_close, change, change_pct,
+                SELECT time, instrument_key, trading_symbol, ltp, prev_close, change, change_pct,
                        oi, prev_oi, oi_change, oi_change_pct, volume, iv,
                        macd, macd_signal, macd_histogram, rsi
                 FROM atm_option_watchlist_snapshots
@@ -344,7 +386,12 @@ class ATMWatchlistService:
         cache_key = f"atm_watchlist:expiries:{WATCHLIST_CACHE_VERSION}:{mode_key}:{selected_expiry or 'default'}"
         cached = await redis.get(cache_key)
         if cached:
-            return json.loads(cached)
+            cached_payload = json.loads(cached)
+            cached_rows = list(cached_payload.get("rows") or [])
+            if live_refresh and not _watchlist_rows_are_fresh(cached_rows):
+                await redis.delete(cache_key)
+            else:
+                return cached_payload
         if not live_refresh:
             shared_live_cache = await redis.get(
                 f"atm_watchlist:expiries:{WATCHLIST_CACHE_VERSION}:live:{selected_expiry or 'default'}"
@@ -525,7 +572,12 @@ class ATMWatchlistService:
 
         cached = await redis.get(cache_key)
         if cached:
-            return json.loads(cached)
+            cached_payload = json.loads(cached)
+            cached_rows = list(cached_payload.get("rows") or [])
+            if live_refresh and not _watchlist_rows_are_fresh(cached_rows):
+                await redis.delete(cache_key)
+            else:
+                return cached_payload
 
         if scope_symbols and not live_refresh:
             full_cache_keys = [shared_live_full_cache_key]
@@ -570,9 +622,14 @@ class ATMWatchlistService:
         prior_rows: dict[str, dict] = {}
         loaded_from_persisted = False
         if partial_cache:
-            for row in json.loads(partial_cache):
-                prior_rows[row["underlying"]] = row
-        else:
+            partial_rows = list(json.loads(partial_cache))
+            if live_refresh and not _watchlist_rows_are_fresh(partial_rows):
+                await redis.delete(partial_key)
+                partial_cache = None
+            else:
+                for row in partial_rows:
+                    prior_rows[row["underlying"]] = row
+        if not partial_cache:
             for row in await self._load_persisted_watchlist_rows(selected_expiry, underlyings):
                 prior_rows[row["underlying"]] = row
             loaded_from_persisted = bool(prior_rows)
@@ -595,13 +652,19 @@ class ATMWatchlistService:
         if upstox_adapter is None and fyers_adapter is None:
             if prior_rows:
                 rows = _sort_rows(list(prior_rows.values()))
+                stale_live_refresh = live_refresh and not _watchlist_rows_are_fresh(rows)
                 payload = {
                     "expiry": selected_expiry,
                     "rows": rows,
                     "summary": _summarize_rows(rows),
                     "source": "snapshot",
-                    "detail": "Live brokers are offline. Showing the last saved ATM watchlist board.",
-                    "build_status": "ready",
+                    "detail": (
+                        "Live brokers are offline and the saved ATM watchlist board is stale. "
+                        "Reconnect Fyers or Upstox to refresh it."
+                        if stale_live_refresh
+                        else "Live brokers are offline. Showing the last saved ATM watchlist board."
+                    ),
+                    "build_status": "stale" if stale_live_refresh else "ready",
                     "timestamp": datetime.now(UTC).isoformat(),
                 }
                 await redis.set(cache_key, json.dumps(payload), ex=DEFAULT_WATCHLIST_TTL)
@@ -664,10 +727,12 @@ class ATMWatchlistService:
             detail_prefix: Optional[str],
         ) -> None:
             completed = 0
+            refreshed = 0
             for meta in pending_metas:
                 row = await build(meta)
                 completed += 1
                 if row:
+                    refreshed += 1
                     prior[row["underlying"]] = row
                 rows = _sort_rows(list(prior.values()))
                 await redis.set(partial_key, json.dumps(rows), ex=DEFAULT_PARTIAL_TTL)
@@ -691,7 +756,7 @@ class ATMWatchlistService:
             logger.info(
                 f"[ATM watchlist] BG build done: {len(rows)}/{len(all_underlyings)} rows for {selected_expiry} ({scope_key})"
             )
-            build_complete = len(rows) >= len(all_underlyings)
+            build_complete = len(rows) >= len(all_underlyings) and refreshed >= len(pending_metas)
             if build_complete:
                 await redis.delete(partial_key)
                 await redis.delete(build_lock_key)
@@ -699,11 +764,22 @@ class ATMWatchlistService:
             if not build_complete:
                 detail_msg = (
                     (detail_msg + " " if detail_msg else "")
-                    + f"Building {len(all_underlyings) - len(rows)} remaining symbols in background."
+                    + (
+                        "Live refresh could not update the saved ATM watchlist yet."
+                        if len(rows) >= len(all_underlyings)
+                        else f"Building {len(all_underlyings) - len(rows)} remaining symbols in background."
+                    )
                 )
             if build_complete:
                 _payload = _build_payload(rows, detail_msg, "ready")
                 await redis.set(cache_key, json.dumps(_payload), ex=DEFAULT_WATCHLIST_TTL)
+            else:
+                _payload = _build_payload(
+                    rows,
+                    detail_msg,
+                    "stale" if len(rows) >= len(all_underlyings) else "building",
+                )
+                await redis.set(cache_key, json.dumps(_payload), ex=60)
             await self._archive_expired_contracts()
 
         if prior_rows:
@@ -711,6 +787,7 @@ class ATMWatchlistService:
             detail_msg = None if fyers_adapter else "Fyers is not connected, using Upstox live chain data."
             payload_status = "ready"
             background_targets = pending
+            background_detail_prefix = None if fyers_adapter else "Fyers is not connected, using Upstox live chain data."
             if loaded_from_persisted and not partial_cache:
                 if scope_symbols:
                     background_targets = underlyings
@@ -718,13 +795,30 @@ class ATMWatchlistService:
                         (detail_msg + " " if detail_msg else "")
                         + "Showing the last saved ATM watchlist while live refresh updates in background."
                     )
-                elif sufficient_prior_coverage:
+                    background_detail_prefix = detail_msg
+                elif sufficient_prior_coverage and _watchlist_rows_are_fresh(rows):
                     background_targets = []
                     detail_msg = (
                         (detail_msg + " " if detail_msg else "")
                         + "Showing the last saved full-universe ATM watchlist. "
                         + "Background live refresh is deferred to avoid a cold-start broker stampede."
                     )
+                elif sufficient_prior_coverage:
+                    payload_status = "building"
+                    background_targets = underlyings
+                    latest_row_time = _latest_watchlist_row_time(rows)
+                    stale_detail = (
+                        "Saved full-universe ATM watchlist is stale; "
+                        "live refresh is rebuilding the stock universe in background."
+                    )
+                    if latest_row_time is not None:
+                        stale_detail = (
+                            f"Saved full-universe ATM watchlist is stale "
+                            f"(latest {latest_row_time.astimezone(timezone(timedelta(hours=5, minutes=30))).strftime('%Y-%m-%d %H:%M IST')}); "
+                            "live refresh is rebuilding the stock universe in background."
+                        )
+                    detail_msg = (detail_msg + " " if detail_msg else "") + stale_detail
+                    background_detail_prefix = detail_msg
                 else:
                     payload_status = "building"
                     seed_metas = pending[: min(8, len(pending))]
@@ -745,12 +839,14 @@ class ATMWatchlistService:
                         (detail_msg + " " if detail_msg else "")
                         + "Saved ATM watchlist coverage is incomplete; live refresh is building the missing stock universe."
                     )
+                    background_detail_prefix = detail_msg
             elif pending:
                 payload_status = "building"
                 detail_msg = (
                     (detail_msg + " " if detail_msg else "")
                     + f"Building {len(pending)} remaining symbols in background."
                 )
+                background_detail_prefix = detail_msg
             if background_targets:
                 already_building = await redis.get(build_lock_key)
                 if not already_building:
@@ -761,7 +857,7 @@ class ATMWatchlistService:
                             dict(prior_rows),
                             underlyings,
                             "building" if payload_status == "building" else "ready",
-                            None if fyers_adapter else "Fyers is not connected, using Upstox live chain data.",
+                            background_detail_prefix,
                         )
                     )
             partial_payload = _build_payload(rows, detail_msg, payload_status)
@@ -977,6 +1073,7 @@ class ATMWatchlistService:
             "underlying": meta.symbol,
             "kind": meta.kind,
             "spot_price": round(spot_price, 2),
+            "as_of": datetime.now(UTC).isoformat(),
             "expiry": expiry,
             "atm_strike": atm_strike,
             "live_source": live_source,
@@ -1015,6 +1112,7 @@ class ATMWatchlistService:
         payload = {
             "strike": strike,
             "option_type": entry.option_type,
+            "as_of": datetime.now(UTC).isoformat(),
             "instrument_key": instrument_key,
             "trading_symbol": trading_symbol,
             "ltp": round(float(entry.ltp or 0.0), 2),
@@ -1442,9 +1540,11 @@ class ATMWatchlistService:
                 trading_symbol = getattr(row, f"{prefix}_trading_symbol")
                 if all(value is None for value in (ltp, instrument_key, trading_symbol)):
                     return None
+                as_of = getattr(row, f"{prefix}_as_of", None) or getattr(row, "as_of", None)
                 return {
                     "strike": float(row.strike),
                     "option_type": option_type,
+                    "as_of": as_of.isoformat() if hasattr(as_of, "isoformat") else str(as_of or ""),
                     "instrument_key": instrument_key,
                     "trading_symbol": trading_symbol,
                     "ltp": round(float(ltp or 0.0), 2),
@@ -1474,11 +1574,13 @@ class ATMWatchlistService:
                     if getattr(row, f"{prefix}_rsi") is not None else None,
                 }
 
+            row_as_of = getattr(row, "as_of", None)
             payload_rows.append(
                 {
                     "underlying": str(row.underlying),
                     "kind": str(row.kind),
                     "spot_price": round(float(row.underlying_price or 0.0), 2),
+                    "as_of": row_as_of.isoformat() if hasattr(row_as_of, "isoformat") else str(row_as_of or ""),
                     "expiry": expiry,
                     "atm_strike": float(row.strike),
                     "live_source": str(row.source_broker or "snapshot"),
@@ -1514,6 +1616,7 @@ class ATMWatchlistService:
                             option_type,
                             instrument_key,
                             trading_symbol,
+                            time,
                             close AS ltp,
                             volume,
                             oi,
@@ -1557,12 +1660,14 @@ class ATMWatchlistService:
                         COALESCE(catalog_ce.lot_size, catalog_pe.lot_size, underlying_catalog.lot_size) AS lot_size,
                         ce.instrument_key AS ce_instrument_key,
                         ce.trading_symbol AS ce_trading_symbol,
+                        ce.time AS ce_as_of,
                         ce.ltp AS ce_ltp,
                         ce.volume AS ce_volume,
                         ce.oi AS ce_oi,
                         ce.iv AS ce_iv,
                         pe.instrument_key AS pe_instrument_key,
                         pe.trading_symbol AS pe_trading_symbol,
+                        pe.time AS pe_as_of,
                         pe.ltp AS pe_ltp,
                         pe.volume AS pe_volume,
                         pe.oi AS pe_oi,
@@ -1605,9 +1710,11 @@ class ATMWatchlistService:
                 trading_symbol = getattr(row, f"{prefix}_trading_symbol")
                 if all(value is None for value in (ltp, instrument_key, trading_symbol)):
                     return None
+                as_of = getattr(row, f"{prefix}_as_of", None)
                 return {
                     "strike": float(row.strike),
                     "option_type": option_type,
+                    "as_of": as_of.isoformat() if hasattr(as_of, "isoformat") else str(as_of or ""),
                     "instrument_key": instrument_key,
                     "trading_symbol": trading_symbol,
                     "ltp": round(float(ltp or 0.0), 2),
@@ -1632,6 +1739,7 @@ class ATMWatchlistService:
                     "underlying": str(row.underlying),
                     "kind": str(row.kind),
                     "spot_price": round(float(row.underlying_price or 0.0), 2),
+                    "as_of": row.spot_time.isoformat() if hasattr(row.spot_time, "isoformat") else str(row.spot_time or ""),
                     "expiry": expiry,
                     "atm_strike": float(row.strike),
                     "live_source": "upstox_history",
@@ -2080,6 +2188,22 @@ class ATMWatchlistService:
             await ensure_fo_underlying_catalog()
             rows = await _query_rows()
         if rows:
+            by_symbol = {row.symbol.upper(): row for row in rows}
+            missing_defaults = [
+                meta for meta in DEFAULT_INDEX_UNDERLYINGS
+                if meta.symbol.upper() not in by_symbol
+            ]
+            if missing_defaults:
+                logger.warning(
+                    "[ATM watchlist] fo_underlying_catalog is missing default index rows: "
+                    f"{', '.join(meta.symbol for meta in missing_defaults)}. "
+                    "Using built-in broker keys so index strategy coverage stays complete."
+                )
+                default_symbols = {meta.symbol.upper() for meta in DEFAULT_INDEX_UNDERLYINGS}
+                rows = [
+                    by_symbol.get(meta.symbol.upper(), meta)
+                    for meta in DEFAULT_INDEX_UNDERLYINGS
+                ] + [row for row in rows if row.symbol.upper() not in default_symbols]
             return rows
         logger.warning(
             "[ATM watchlist] fo_underlying_catalog is empty; "
@@ -2092,6 +2216,15 @@ class ATMWatchlistService:
         adapter = get_active_adapter("upstox")
         if adapter:
             return adapter
+        analytics_token = str(get_broker_token("upstox") or "").strip()
+        if analytics_token:
+            try:
+                fallback = UpstoxAdapter()
+                await fallback.authenticate({"access_token": analytics_token})
+                logger.info("[ATM watchlist] Using saved Upstox analytics token for read-only chain refresh")
+                return fallback
+            except Exception as exc:
+                logger.debug(f"[ATM watchlist] Upstox analytics-token fallback failed: {exc}")
         return None
 
     @staticmethod

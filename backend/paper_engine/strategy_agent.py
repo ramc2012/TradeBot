@@ -3,7 +3,7 @@
 Implements the full MACD zero-cross strategy on 30-minute ATM option
 premium candles with:
 - Physical-delivery trading window (prev_expiry−7 to current_expiry−7)
-- MACD quadrant regime filter (bullish/bearish/dead zone)
+- CE/PE leg-specific MACD zero-cross entries
 - Layered exit management (target +50%, runner, trail, hard stop)
 - Spot MA context classification (breakout/trend/reversal)
 - IV filtering and Kelly-based position sizing
@@ -30,11 +30,7 @@ from analysis.macd_engine import (
     check_iv_filter,
 )
 from analysis.instruments import get_monthly_expiry
-from agent.macd_quadrant import (
-    QuadrantResult,
-    compute_quadrant,
-    check_macd_death_signal,
-)
+from agent.macd_quadrant import QuadrantResult
 from agent.strategy_config import (
     MACD_FAST,
     MACD_SLOW,
@@ -183,6 +179,14 @@ STRATEGY2_FYERS_SYMBOLS = {
 }
 
 
+def _strategy2_expected_session_date(started_at: datetime) -> date:
+    return started_at.date() - timedelta(days=1) if started_at.time() < time(9, 15) else started_at.date()
+
+
+def _strategy2_is_regular_session(started_at: datetime) -> bool:
+    return time(9, 15) <= started_at.time() <= time(15, 30)
+
+
 def detect_macd_zero_cross(closes: list[float], option_type: str = "CE") -> tuple[bool, Optional[float], Optional[str]]:
     """Detect MACD zero-line crossover on option premium closes.
 
@@ -203,6 +207,34 @@ def detect_macd_zero_cross(closes: list[float], option_type: str = "CE") -> tupl
         should_enter = previous >= 0 > current
 
     return should_enter, float(current), "macd_zero_cross" if should_enter else None
+
+
+def _latest_populated_session_rows(
+    rows: list[dict[str, Any]],
+    *,
+    min_rows: int = 30,
+) -> tuple[list[dict[str, Any]], Optional[date]]:
+    parsed_rows: list[tuple[datetime, dict[str, Any]]] = []
+    for row in rows:
+        parsed = _parse_iso_timestamp(row.get("time"))
+        if parsed is not None:
+            parsed_rows.append((parsed, row))
+    if not parsed_rows:
+        return [], None
+    grouped: dict[date, list[tuple[datetime, dict[str, Any]]]] = {}
+    for parsed, row in parsed_rows:
+        grouped.setdefault(parsed.date(), []).append((parsed, row))
+    latest_rows: list[dict[str, Any]] = []
+    latest_date: Optional[date] = None
+    for session_date in sorted(grouped, reverse=True):
+        items = sorted(grouped[session_date], key=lambda item: item[0])
+        session_rows = [row for _parsed, row in items]
+        if latest_date is None:
+            latest_date = session_date
+            latest_rows = session_rows
+        if len(session_rows) >= min_rows:
+            return session_rows, session_date
+    return latest_rows, latest_date
 
 
 def detect_greeks_signal(
@@ -1105,6 +1137,18 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 live_refresh=live_refresh,
             )
             rows = list(watchlist.get("rows") or [])
+            strategy2_native_rows = await self._load_strategy2_native_watchlist_rows(
+                expiry_scope,
+                live_refresh=live_refresh,
+            )
+            if strategy2_native_rows:
+                rows_by_underlying = {
+                    str(row.get("underlying") or "").strip(): row
+                    for row in rows
+                    if str(row.get("underlying") or "").strip()
+                }
+                rows_by_underlying.update(strategy2_native_rows)
+                rows = list(rows_by_underlying.values())
             watchlist_detail = str(watchlist.get("detail") or "").strip() or None
         except Exception as exc:
             watchlist_detail = f"Closed-market watchlist preparation failed: {exc}"
@@ -1187,6 +1231,21 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             context["signal"] = signal
             context["can_enter"] = False
             strategy2_contexts[underlying] = context
+        for underlying in STRATEGY2_UNDERLYINGS:
+            if underlying in strategy2_contexts:
+                continue
+            row = {"underlying": underlying}
+            context = self._build_strategy2_preparation_failure_context(
+                row,
+                started_at,
+                RuntimeError("ATM watchlist row missing for configured Strategy 2 underlying"),
+            )
+            context["signal"] = self._normalize_strategy2_prepared_signal(
+                dict(context.get("signal") or {}),
+                row=row,
+                started_at=started_at,
+            )
+            strategy2_contexts[underlying] = context
 
         strategy2_signals = [
             strategy2_contexts[underlying]["signal"]
@@ -1245,6 +1304,41 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         )
         self._append_commentary("System", self._last_message, tone="info")
 
+    async def _load_strategy2_native_watchlist_rows(
+        self,
+        expiry_scope: dict[str, Any],
+        *,
+        live_refresh: bool,
+    ) -> dict[str, dict[str, Any]]:
+        index_monthlies = dict(expiry_scope.get("index_monthlies") or {})
+        requests = [
+            (underlying, str(index_monthlies.get(underlying) or "").strip())
+            for underlying in STRATEGY2_UNDERLYINGS
+        ]
+        requests = [(underlying, expiry) for underlying, expiry in requests if expiry]
+        if not requests:
+            return {}
+        results = await asyncio.gather(
+            *(
+                atm_watchlist_service.get_watchlist(
+                    expiry=expiry,
+                    symbols=[underlying],
+                    live_refresh=live_refresh,
+                )
+                for underlying, expiry in requests
+            ),
+            return_exceptions=True,
+        )
+        rows_by_underlying: dict[str, dict[str, Any]] = {}
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            for row in result.get("rows") or []:
+                underlying = str(row.get("underlying") or "").strip()
+                if underlying in STRATEGY2_UNDERLYINGS:
+                    rows_by_underlying[underlying] = row
+        return rows_by_underlying
+
     @staticmethod
     def _broker_failure_message(snapshot: dict[str, Any]) -> str:
         upstox_status = str((snapshot.get("upstox_token_health") or {}).get("status") or "disconnected")
@@ -1261,11 +1355,31 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         watchlist_rows = int(health.get("watchlist_rows_today") or 0)
         latest_rows = int(health.get("watchlist_rows_latest") or watchlist_rows)
         readiness_mode = str(health.get("readiness_mode") or "missing")
+        execution_mode = str(health.get("execution_mode") or readiness_mode)
+        age = health.get("watchlist_age_seconds")
+        max_age = health.get("max_execution_age_seconds")
+        age_detail = ""
+        if age is not None:
+            age_detail = f", age={int(float(age))}s"
+            if max_age is not None:
+                age_detail += f", max execution age={int(float(max_age))}s"
+        if health.get("ready") and not health.get("execution_ready", health.get("ready")):
+            return (
+                "Shared market-intelligence data is stale for the paper scan. "
+                f"Today rows={watchlist_rows}, latest-session rows={latest_rows}, "
+                f"mode={readiness_mode}, execution mode={execution_mode}, "
+                f"latest watchlist time={latest_watchlist_time}{age_detail}."
+            )
         return (
             "Shared market-intelligence data is not ready for the paper scan. "
             f"Today rows={watchlist_rows}, latest-session rows={latest_rows}, "
-            f"mode={readiness_mode}, latest watchlist time={latest_watchlist_time}."
+            f"mode={readiness_mode}, execution mode={execution_mode}, "
+            f"latest watchlist time={latest_watchlist_time}{age_detail}."
         )
+
+    @staticmethod
+    def _market_intelligence_execution_ready(health: dict[str, Any]) -> bool:
+        return bool(health.get("execution_ready", health.get("ready")))
 
     @staticmethod
     def _option_history_warning(health: dict[str, Any]) -> Optional[str]:
@@ -1605,7 +1719,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 for row in spot_rows_all
                 if (_parse_iso_timestamp(row.get("time")) or datetime.min.replace(tzinfo=IST)) <= started_at
             ]
-            session_rows, session_date = _latest_session_rows(spot_rows)
+            session_rows, session_date = _latest_populated_session_rows(spot_rows)
             if len(session_rows) < 30:
                 continue
             profile = market_profile_builder.build_profile_from_rows(underlying, session_rows, "day", "1minute")
@@ -1779,15 +1893,20 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                         "market_intelligence": market_intelligence_health,
                         "option_history": option_history_service.get_health_snapshot(),
                     }
-                    if not market_intelligence_health.get("ready"):
+                    if not self._market_intelligence_execution_ready(market_intelligence_health):
                         message = self._local_data_failure_message(market_intelligence_health)
                         self._last_error = message
                         self._last_message = message
+                        data_mode = (
+                            "local_data_stale"
+                            if market_intelligence_health.get("ready")
+                            else "local_data_unavailable"
+                        )
                         for lane in self._lane_agents():
                             lane.runtime.last_message = message
                             lane.runtime.meta = {
                                 **(lane.runtime.meta or {}),
-                                "mode": "local_data_unavailable",
+                                "mode": data_mode,
                                 "updated_at": started_at.isoformat(),
                                 "market_intelligence": market_intelligence_health,
                             }
@@ -1930,6 +2049,13 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                             rows_by_underlying[und] = r
 
                 rows = list(rows_by_underlying.values())
+                strategy2_native_rows = await self._load_strategy2_native_watchlist_rows(
+                    expiry_scope,
+                    live_refresh=not local_only_mode,
+                )
+                if strategy2_native_rows:
+                    rows_by_underlying.update(strategy2_native_rows)
+                    rows = list(rows_by_underlying.values())
                 expiries = sorted({r.get("expiry", "") for r in rows if r.get("expiry")})
 
                 if not rows:
@@ -2110,7 +2236,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         interval: str = "30minute",
         limit: int = 80,
     ) -> list[dict]:
-        return await option_history_service.load_candles(
+        candles = await option_history_service.load_candles(
             underlying=row["underlying"],
             expiry=date.fromisoformat(row["expiry"]),
             strike=float(side["strike"]),
@@ -2120,6 +2246,28 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             limit=limit,
             allow_broker_refresh=not (settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY),
         )
+        candles = list(candles or [])
+        snapshot_time = _parse_iso_timestamp(str(side.get("as_of") or row.get("as_of") or ""))
+        try:
+            snapshot_close = float(side.get("ltp"))
+        except (TypeError, ValueError):
+            snapshot_close = 0.0
+        latest_candle_time = _parse_iso_timestamp(candles[-1].get("time")) if candles else None
+        if snapshot_time is not None and snapshot_close > 0 and (
+            latest_candle_time is None or snapshot_time > latest_candle_time
+        ):
+            candles.append(
+                {
+                    "time": snapshot_time.isoformat(),
+                    "open": snapshot_close,
+                    "high": snapshot_close,
+                    "low": snapshot_close,
+                    "close": snapshot_close,
+                    "volume": side.get("volume") or 0,
+                    "source": "atm_watchlist_snapshot",
+                }
+            )
+        return candles[-limit:]
 
     async def _run_strategy2(
         self,
@@ -2129,13 +2277,25 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
     ) -> None:
         index_rows = [row for row in rows if row.get("underlying") in STRATEGY2_UNDERLYINGS]
         if not index_rows:
+            contexts = {
+                underlying: self._build_strategy2_preparation_failure_context(
+                    {"underlying": underlying},
+                    started_at,
+                    RuntimeError("ATM watchlist row missing for configured Strategy 2 underlying"),
+                )
+                for underlying in STRATEGY2_UNDERLYINGS
+            }
+            runtime.signal_lane = [
+                contexts[underlying]["signal"]
+                for underlying in STRATEGY2_UNDERLYINGS
+            ]
             runtime.meta = {
                 **(runtime.meta or {}),
                 "mode": "no_index_rows",
                 "scan_interval": runtime.meta.get("scan_interval", "5minute") if runtime.meta else "5minute",
                 "watchlist_rows": 0,
                 "updated_at": started_at.isoformat(),
-                "pipeline": runtime.meta.get("pipeline", []) if runtime.meta else [],
+                "pipeline": [contexts[underlying]["pipeline"] for underlying in STRATEGY2_UNDERLYINGS],
             }
             runtime.last_message = "No index ATM rows available for Strategy 2."
             return
@@ -2143,8 +2303,20 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         contexts: dict[str, dict[str, Any]] = {}
         for row in index_rows:
             contexts[row["underlying"]] = await self._build_strategy2_signal_context(row, started_at)
+        for underlying in STRATEGY2_UNDERLYINGS:
+            if underlying in contexts:
+                continue
+            contexts[underlying] = self._build_strategy2_preparation_failure_context(
+                {"underlying": underlying},
+                started_at,
+                RuntimeError("ATM watchlist row missing for configured Strategy 2 underlying"),
+            )
 
-        runtime.signal_lane = [contexts[row["underlying"]]["signal"] for row in index_rows]
+        runtime.signal_lane = [
+            contexts[underlying]["signal"]
+            for underlying in STRATEGY2_UNDERLYINGS
+            if underlying in contexts
+        ]
         for row in index_rows:
             signal = dict(contexts[row["underlying"]].get("signal") or {})
             signal.setdefault("expiry", row.get("expiry"))
@@ -2162,7 +2334,11 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "scan_interval": "5minute",
             "watchlist_rows": len(index_rows),
             "updated_at": started_at.isoformat(),
-            "pipeline": [contexts[row["underlying"]]["pipeline"] for row in index_rows],
+            "pipeline": [
+                contexts[underlying]["pipeline"]
+                for underlying in STRATEGY2_UNDERLYINGS
+                if underlying in contexts and contexts[underlying].get("pipeline")
+            ],
         }
 
         await self._manage_strategy2_exits(runtime, index_rows, contexts, started_at)
@@ -2549,7 +2725,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             freshness = "live"
             if not option_fresh:
                 freshness = "missing"
-            elif started_at - option_fresh > timedelta(minutes=20):
+            elif _strategy2_is_regular_session(started_at) and started_at - option_fresh > timedelta(minutes=20):
                 freshness = "stale"
             can_enter = can_enter and freshness == "live"
 
@@ -2606,9 +2782,10 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             }
 
         spot_rows, spot_source = await self._load_strategy2_spot_rows(underlying, started_at)
-        session_rows, session_date = _latest_session_rows(spot_rows)
+        session_rows, session_date = _latest_populated_session_rows(spot_rows)
         spot_last_time = session_rows[-1].get("time") if session_rows else None
-        using_latest_session = session_date is not None and session_date != started_at.date()
+        expected_session_date = _strategy2_expected_session_date(started_at)
+        using_latest_session = session_date is not None and session_date != expected_session_date
         session_label = session_date.isoformat() if session_date else "latest available session"
 
         if len(session_rows) < 30:
@@ -2693,7 +2870,13 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         freshness = "live"
         if not spot_fresh or not option_fresh:
             freshness = "missing"
-        elif using_latest_session or started_at - spot_fresh > timedelta(minutes=10) or started_at - option_fresh > timedelta(minutes=20):
+        elif using_latest_session or (
+            _strategy2_is_regular_session(started_at)
+            and (
+                started_at - spot_fresh > timedelta(minutes=10)
+                or started_at - option_fresh > timedelta(minutes=20)
+            )
+        ):
             freshness = "stale"
         can_enter = can_enter and freshness == "live"
 

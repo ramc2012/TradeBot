@@ -4,7 +4,8 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from dataclasses import asdict
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
+from time import monotonic
 from typing import Optional
 
 from fastapi import APIRouter, Body, HTTPException, Query
@@ -763,6 +764,7 @@ async def rl_reset() -> dict:
 
 import csv
 import gzip
+import json
 import math
 from collections import defaultdict
 from pathlib import Path
@@ -774,8 +776,15 @@ _MP_DATA_ROOT = _BACKEND_ROOT / "mp_data"
 _DATA_ROOT = _BACKEND_ROOT / "runtime" / "index_analytics_data"
 
 _SUPPORTED_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "SENSEX", "CRUDEOIL")
+_MP_DATA_STATUS_CACHE_TTL_SECONDS = 120.0
+_mp_data_status_cache: dict[str, object] = {"payload": None, "expires_at": 0.0}
+_mp_data_status_cache_lock = asyncio.Lock()
+_mp_collection_tasks: dict[str, asyncio.Task] = {}
+_mp_collection_tasks_lock = asyncio.Lock()
 _AUCTION_LIVE_MP_TIMEOUT_SECONDS = 30.0
 _FMP_LIVE_MP_TIMEOUT_SECONDS = 20.0
+_DURABLE_DAILY_MP_TIMEFRAME = "auction_daily"
+_DURABLE_DAILY_MP_SPOOL_ROOT = _BACKEND_ROOT / "runtime" / "auction_intelligence" / "daily_mp_spool"
 _MP_PRICE_BANDS: dict[str, tuple[float, float]] = {
     "NIFTY": (10_000.0, 50_000.0),
     "BANKNIFTY": (20_000.0, 100_000.0),
@@ -836,30 +845,31 @@ async def _load_spot_status(underlying: str) -> dict:
                 text(
                     """
                     SELECT
-                        COUNT(*) AS rows,
-                        MAX(time) AS latest_time,
-                        MAX(synced_at) AS latest_sync,
-                        MAX(source) AS source
+                        time AS latest_time,
+                        synced_at AS latest_sync,
+                        source AS source
                     FROM underlying_spot_candles
                     WHERE underlying = :underlying
                       AND interval = '1minute'
+                    ORDER BY time DESC
+                    LIMIT 1
                     """
                 ),
                 {"underlying": normalized},
             )
             row = result.mappings().first()
-            db_rows = int((row or {}).get("rows") or 0)
             latest_time = (row or {}).get("latest_time")
-            if db_rows > 0:
+            if latest_time:
                 return {
                     "name": f"{normalized} Spot 1-min",
                     "status": "ok",
-                    "rows": db_rows,
+                    "rows": 1,
                     "last_date": str(latest_time)[:10] if latest_time else "—",
-                    "detail": f"{db_rows:,} candles · source=underlying_spot_candles",
+                    "detail": "Latest candle available · source=underlying_spot_candles",
                     "source": "underlying_spot_candles",
                     "latest_time": str(latest_time) if latest_time else None,
                     "latest_sync": str((row or {}).get("latest_sync")) if (row or {}).get("latest_sync") else None,
+                    "count_mode": "latest_only",
                 }
     except Exception as exc:
         logger.debug(f"[Auction MP] DB spot status unavailable for {normalized}: {exc}")
@@ -894,6 +904,22 @@ def _safe_csv(path: Path) -> list[dict]:
         return []
     with open(path) as f:
         return list(csv.DictReader(f))
+
+
+def _merge_mp_rows(base_rows: list[dict], extra_rows: list[dict]) -> tuple[list[dict], int]:
+    by_date: dict[date, dict] = {}
+    order: list[date] = []
+    for row in [*base_rows, *extra_rows]:
+        row_date = _parse_row_date(row.get("date"))
+        if not row_date:
+            continue
+        if row_date not in by_date:
+            order.append(row_date)
+        by_date[row_date] = row
+    merged = [by_date[row_date] for row_date in sorted(order)]
+    base_dates = {_parse_row_date(row.get("date")) for row in base_rows}
+    added = sum(1 for row_date in by_date if row_date not in base_dates)
+    return merged, added
 
 
 def _flt(row: dict, key: str, default: float = 0.0) -> float:
@@ -944,6 +970,101 @@ def _plausible_mp_row(underlying: str, row: dict | None) -> bool:
     if high < low or not (low <= close <= high):
         return False
     return vah >= val
+
+
+def _valid_durable_mp_rows(underlying: str, rows: list[dict]) -> list[dict]:
+    valid: dict[date, dict] = {}
+    for row in rows:
+        if not _plausible_mp_row(underlying, row):
+            continue
+        row_date = _parse_row_date(row.get("date"))
+        if not row_date:
+            continue
+        valid[row_date] = row
+    return [valid[row_date] for row_date in sorted(valid)]
+
+
+def _durable_mp_spool_path(underlying: str) -> Path:
+    return _DURABLE_DAILY_MP_SPOOL_ROOT / f"{underlying.upper()}.jsonl"
+
+
+def _load_spooled_durable_mp_rows(underlying: str) -> list[dict]:
+    path = _durable_mp_spool_path(underlying)
+    if not path.exists():
+        return []
+
+    rows: list[dict] = []
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                row = payload.get("row") if isinstance(payload, dict) else None
+                if isinstance(row, dict):
+                    rows.append(row)
+    except Exception as exc:
+        logger.debug(f"[Auction MP] Durable MP spool read failed for {underlying}: {exc}")
+        return []
+    return _valid_durable_mp_rows(underlying, rows)
+
+
+def _spool_durable_mp_rows(underlying: str, rows: list[dict], *, reason: str) -> int:
+    valid_rows = _valid_durable_mp_rows(underlying, rows)
+    if not valid_rows:
+        return 0
+
+    try:
+        _DURABLE_DAILY_MP_SPOOL_ROOT.mkdir(parents=True, exist_ok=True)
+        path = _durable_mp_spool_path(underlying)
+        spooled_at = datetime.now(timezone.utc).isoformat()
+        with open(path, "a") as f:
+            for row in valid_rows:
+                f.write(
+                    json.dumps(
+                        {
+                            "date": row.get("date"),
+                            "reason": reason,
+                            "spooled_at": spooled_at,
+                            "row": row,
+                        },
+                        default=str,
+                    )
+                    + "\n"
+                )
+        return len(valid_rows)
+    except Exception as exc:
+        logger.warning(f"[Auction MP] Durable MP spool write failed for {underlying}: {exc}")
+        return 0
+
+
+def _drop_spooled_durable_mp_dates(underlying: str, row_dates: set[date]) -> None:
+    if not row_dates:
+        return
+    path = _durable_mp_spool_path(underlying)
+    if not path.exists():
+        return
+
+    kept_lines: list[str] = []
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                row = payload.get("row") if isinstance(payload, dict) else None
+                row_date = _parse_row_date(row.get("date")) if isinstance(row, dict) else None
+                if row_date not in row_dates:
+                    kept_lines.append(line)
+        if kept_lines:
+            with open(path, "w") as f:
+                f.writelines(kept_lines)
+        else:
+            path.unlink(missing_ok=True)
+    except Exception as exc:
+        logger.debug(f"[Auction MP] Durable MP spool cleanup failed for {underlying}: {exc}")
 
 
 def _extract_live_failure_scores(snapshot: dict) -> tuple[float, float]:
@@ -1087,10 +1208,14 @@ async def _build_db_spot_mp_row(underlying: str) -> dict | None:
                 text(
                     """
                     WITH latest_session AS (
-                        SELECT MAX(timezone('Asia/Kolkata', time)::date) AS session_date
+                        SELECT timezone('Asia/Kolkata', time)::date AS session_date
                         FROM underlying_spot_candles
                         WHERE underlying = :underlying
                           AND interval = '1minute'
+                        GROUP BY timezone('Asia/Kolkata', time)::date
+                        HAVING COUNT(*) >= 20
+                        ORDER BY session_date DESC
+                        LIMIT 1
                     )
                     SELECT time, open, high, low, close, volume
                     FROM underlying_spot_candles, latest_session
@@ -1187,29 +1312,15 @@ async def _build_db_spot_mp_row(underlying: str) -> dict | None:
     return row
 
 
-async def _load_mp_rows(
+async def _collect_live_mp_candidate_rows(
     underlying: str,
-    *,
-    allow_params_fallback: bool = False,
-) -> tuple[list[dict], dict[str, object]]:
-    source = "enriched_mp_with_failures"
-    rows = _safe_csv(_mp_enr_path(underlying))
-    if not rows and allow_params_fallback:
-        rows = _safe_csv(_mp_params_path(underlying))
-        source = "daily_mp_params"
-
-    packaged_latest = rows[-1].get("date") if rows else None
+) -> tuple[list[tuple[str, dict]], dict[str, object]]:
     status: dict[str, object] = {
-        "source": source,
-        "packaged_latest_date": packaged_latest,
-        "latest_date": packaged_latest,
-        "live_appended": False,
         "live_latest_date": None,
         "live_rejected": False,
         "live_bridge": None,
         "live_error": None,
     }
-
     candidate_rows: list[tuple[str, dict]] = []
     rejected_sources: list[str] = []
     live_snapshot_ok = False
@@ -1259,6 +1370,251 @@ async def _load_mp_rows(
         status["live_rejected"] = True
         status["live_rejected_sources"] = rejected_sources
 
+    if candidate_rows:
+        status["live_bridge"] = [source_name for source_name, _ in candidate_rows]
+        latest_candidate_date = max(
+            (
+                row_date
+                for _, candidate in candidate_rows
+                if (row_date := _parse_row_date(candidate.get("date"))) is not None
+            ),
+            default=None,
+        )
+        if latest_candidate_date:
+            status["live_latest_date"] = latest_candidate_date.isoformat()
+
+    return candidate_rows, status
+
+
+async def _load_durable_mp_rows(underlying: str) -> list[dict]:
+    """Load live-appended daily MP rows persisted in Timescale/Postgres."""
+    normalized = underlying.upper()
+    spooled_rows = _load_spooled_durable_mp_rows(normalized)
+    try:
+        from sqlalchemy import text
+        from db.database import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT DISTINCT ON ((tpo_data->>'date'))
+                        tpo_data
+                    FROM market_profiles
+                    WHERE symbol = :symbol
+                      AND timeframe = :timeframe
+                      AND tpo_data ? 'date'
+                    ORDER BY (tpo_data->>'date') ASC, time DESC
+                    """
+                ),
+                {"symbol": normalized, "timeframe": _DURABLE_DAILY_MP_TIMEFRAME},
+            )
+            payloads = [row[0] for row in result.all()]
+    except Exception as exc:
+        logger.debug(f"[Auction MP] Durable daily MP cache unavailable for {normalized}: {exc}")
+        return spooled_rows
+
+    rows: list[dict] = []
+    for payload in payloads:
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+        if isinstance(payload, dict) and _plausible_mp_row(normalized, payload):
+            rows.append(payload)
+    merged_rows, _ = _merge_mp_rows(rows, spooled_rows)
+    return merged_rows
+
+
+async def _persist_durable_mp_rows(underlying: str, rows: list[dict]) -> int:
+    """Persist live/db/FMP daily MP rows so future cold calls do not regress."""
+    normalized = underlying.upper()
+    valid_rows = _valid_durable_mp_rows(normalized, rows)
+    spooled_rows = _load_spooled_durable_mp_rows(normalized)
+    rows, _ = _merge_mp_rows(spooled_rows, valid_rows)
+    payloads: list[dict] = []
+    for row in rows:
+        row_date = _parse_row_date(row.get("date"))
+        if not row_date:
+            continue
+        payloads.append(
+            {
+                "time": datetime.combine(row_date, time(15, 30)),
+                "poc": _flt(row, "poc"),
+                "vah": _flt(row, "vah"),
+                "val": _flt(row, "val"),
+                "ib_high": _flt(row, "ibh"),
+                "ib_low": _flt(row, "ibl"),
+                "payload": json.dumps(row, default=str),
+            }
+        )
+
+    if not payloads:
+        return 0
+
+    persisted_dates = {
+        row_date
+        for row in rows
+        if (row_date := _parse_row_date(row.get("date"))) is not None
+    }
+
+    try:
+        from sqlalchemy import text
+        from db.database import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                text(
+                    """
+                    DELETE FROM market_profiles
+                    WHERE symbol = :symbol
+                      AND timeframe = :timeframe
+                      AND time = :time
+                    """
+                ),
+                [
+                    {
+                        "symbol": normalized,
+                        "timeframe": _DURABLE_DAILY_MP_TIMEFRAME,
+                        "time": payload["time"],
+                    }
+                    for payload in payloads
+                ],
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO market_profiles
+                        (time, symbol, timeframe, poc, vah, val, ib_high, ib_low, tpo_data)
+                    VALUES
+                        (:time, :symbol, :timeframe, :poc, :vah, :val, :ib_high, :ib_low, CAST(:payload AS JSONB))
+                    """
+                ),
+                [
+                    {
+                        "time": payload["time"],
+                        "symbol": normalized,
+                        "timeframe": _DURABLE_DAILY_MP_TIMEFRAME,
+                        "poc": payload["poc"],
+                        "vah": payload["vah"],
+                        "val": payload["val"],
+                        "ib_high": payload["ib_high"],
+                        "ib_low": payload["ib_low"],
+                        "payload": payload["payload"],
+                    }
+                    for payload in payloads
+                ],
+            )
+            await session.commit()
+            _drop_spooled_durable_mp_dates(normalized, persisted_dates)
+            return len(payloads)
+    except Exception as exc:
+        logger.warning(f"[Auction MP] Failed to persist durable daily MP cache for {normalized}: {exc}")
+        _spool_durable_mp_rows(normalized, valid_rows, reason="postgres_unavailable")
+        return 0
+
+
+async def _refresh_durable_mp_collection(underlying: str, *, reason: str) -> dict[str, object]:
+    normalized = underlying.upper()
+    candidate_rows, live_status = await _collect_live_mp_candidate_rows(normalized)
+    candidate_payloads = [row for _, row in candidate_rows]
+    persisted = await _persist_durable_mp_rows(normalized, candidate_payloads)
+    return {
+        "underlying": normalized,
+        "reason": reason,
+        "candidate_rows": len(candidate_payloads),
+        "durable_persisted": persisted,
+        **live_status,
+    }
+
+
+async def _ensure_mp_collection_task(underlying: str, *, reason: str) -> None:
+    normalized = underlying.upper()
+
+    def _finalize(task: asyncio.Task) -> None:
+        _mp_collection_tasks.pop(normalized, None)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning(f"[Auction MP] Background durable collection failed for {normalized}: {exc}")
+
+    async with _mp_collection_tasks_lock:
+        current = _mp_collection_tasks.get(normalized)
+        if current and not current.done():
+            return
+        try:
+            task = asyncio.create_task(
+                _refresh_durable_mp_collection(normalized, reason=reason),
+                name=f"auction-mp-collect-{normalized}",
+            )
+            task.add_done_callback(_finalize)
+            _mp_collection_tasks[normalized] = task
+        except RuntimeError:
+            logger.debug(f"[Auction MP] No running loop; skipped background collection for {normalized}")
+
+
+async def _load_mp_rows(
+    underlying: str,
+    *,
+    allow_params_fallback: bool = False,
+    live_refresh: bool = True,
+) -> tuple[list[dict], dict[str, object]]:
+    source = "enriched_mp_with_failures"
+    rows = _safe_csv(_mp_enr_path(underlying))
+    if not rows and allow_params_fallback:
+        rows = _safe_csv(_mp_params_path(underlying))
+        source = "daily_mp_params"
+
+    packaged_latest = rows[-1].get("date") if rows else None
+    durable_rows = await _load_durable_mp_rows(underlying)
+    durable_added = 0
+    if durable_rows:
+        rows, durable_added = _merge_mp_rows(rows, durable_rows)
+        if durable_added:
+            source = f"{source}+durable_cache"
+
+    latest_row_date = rows[-1].get("date") if rows else packaged_latest
+    status: dict[str, object] = {
+        "source": source,
+        "packaged_latest_date": packaged_latest,
+        "latest_date": latest_row_date,
+        "live_appended": False,
+        "live_refreshed": False,
+        "durable_appended": durable_added > 0,
+        "durable_merged": bool(durable_rows),
+        "durable_rows": len(durable_rows),
+        "live_latest_date": None,
+        "live_rejected": False,
+        "live_bridge": None,
+        "live_error": None,
+        "collection_mode": "blocking" if live_refresh else "background",
+    }
+
+    if not live_refresh:
+        await _ensure_mp_collection_task(underlying, reason="lightweight_read")
+        packaged_latest_date = _parse_row_date(packaged_latest)
+        status["stale_days"] = None
+        if packaged_latest_date:
+            status["stale_days"] = max((date.today() - packaged_latest_date).days, 0)
+        return rows, status
+
+    try:
+        candidate_rows, live_status = await asyncio.wait_for(
+            _collect_live_mp_candidate_rows(underlying),
+            timeout=5.0,
+        )
+    except asyncio.TimeoutError:
+        candidate_rows = []
+        live_status = {
+            "live_rejected": True,
+            "live_bridge": [],
+            "live_error": "live MP collection timed out; using durable/cache rows",
+        }
+    status.update(live_status)
+
     if not candidate_rows:
         packaged_latest_date = _parse_row_date(packaged_latest)
         status["stale_days"] = None
@@ -1268,8 +1624,15 @@ async def _load_mp_rows(
 
     packaged_latest_date = _parse_row_date(packaged_latest)
     existing_dates = {_parse_row_date(row.get("date")) for row in rows}
+    latest_existing_date = max((row_date for row_date in existing_dates if row_date), default=packaged_latest_date)
     appended_sources: list[str] = []
+    refreshed_sources: list[str] = []
     latest_candidate_date: date | None = None
+    persisted = await _persist_durable_mp_rows(
+        underlying,
+        [candidate for _, candidate in candidate_rows],
+    )
+    status["durable_persisted"] = persisted
 
     for source_name, candidate in sorted(
         candidate_rows,
@@ -1280,19 +1643,34 @@ async def _load_mp_rows(
             continue
         latest_candidate_date = max(latest_candidate_date, candidate_date) if latest_candidate_date else candidate_date
         if candidate_date in existing_dates:
+            rows, _ = _merge_mp_rows(rows, [candidate])
+            refreshed_sources.append(source_name)
+            latest_refreshed_date = max(
+                (row_date for row in rows if (row_date := _parse_row_date(row.get("date"))) is not None),
+                default=candidate_date,
+            )
+            status["latest_date"] = latest_refreshed_date.isoformat()
             continue
-        if packaged_latest_date is not None and candidate_date <= packaged_latest_date:
+        if latest_existing_date is not None and candidate_date <= latest_existing_date:
             continue
         rows = [*rows, candidate]
         existing_dates.add(candidate_date)
+        latest_existing_date = candidate_date
         appended_sources.append(source_name)
         status["latest_date"] = candidate.get("date")
+
+    rows = sorted(rows, key=lambda row: str(row.get("date") or ""))
 
     if appended_sources:
         source_suffix = "live_snapshot" if appended_sources == ["live_snapshot"] else "live_bridge"
         status["source"] = f"{source}+{source_suffix}"
         status["live_appended"] = True
         status["live_bridge"] = appended_sources
+        status["live_latest_date"] = rows[-1].get("date")
+    elif refreshed_sources:
+        status["source"] = f"{source}+live_refresh"
+        status["live_refreshed"] = True
+        status["live_bridge"] = refreshed_sources
         status["live_latest_date"] = rows[-1].get("date")
     elif latest_candidate_date:
         status["live_latest_date"] = latest_candidate_date.isoformat()
@@ -1535,6 +1913,36 @@ async def _build_mp_rag_context(
     )
 
 
+async def _build_mp_rag_context_fast(
+    underlying: str,
+    latest: dict,
+    *,
+    open_signal_payload: dict | None = None,
+    orderflow_proxy: dict | None = None,
+    timeout_seconds: float = 3.0,
+) -> dict:
+    try:
+        return await asyncio.wait_for(
+            _build_mp_rag_context(
+                underlying,
+                latest,
+                open_signal_payload=open_signal_payload,
+                orderflow_proxy=orderflow_proxy,
+            ),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        return {
+            "decision": "warn",
+            "confidence": 0.0,
+            "summary": "RAG context timed out; MP numeric signal returned without blocking the dashboard.",
+            "reason_codes": ["rag_timeout"],
+            "case_stats": {"matched_cases": 0, "resolved_cases": 0},
+            "retrievals": [],
+            "audit_bundle": {},
+        }
+
+
 def _build_mp_agent_context_payload(underlying: str, latest: dict, *, limit: int = 10) -> list[dict]:
     comments: list[dict] = []
     buyer_fail = _flt(latest, "buyer_fail_score")
@@ -1650,6 +2058,23 @@ def _build_mp_agent_context_payload(underlying: str, latest: dict, *, limit: int
 @router.get("/mp-data-status")
 async def mp_data_status() -> list[dict]:
     """Pipeline health for the MP+Order-Flow strategy — per supported underlying."""
+    cached = _mp_data_status_cache.get("payload")
+    if isinstance(cached, list) and float(_mp_data_status_cache.get("expires_at") or 0.0) > monotonic():
+        return cached
+
+    async with _mp_data_status_cache_lock:
+        cached = _mp_data_status_cache.get("payload")
+        if isinstance(cached, list) and float(_mp_data_status_cache.get("expires_at") or 0.0) > monotonic():
+            return cached
+
+        sources = await _build_mp_data_status()
+        _mp_data_status_cache["payload"] = sources
+        _mp_data_status_cache["expires_at"] = monotonic() + _MP_DATA_STATUS_CACHE_TTL_SECONDS
+        return sources
+
+
+async def _build_mp_data_status() -> list[dict]:
+    """Build uncached MP pipeline health for the readiness panel."""
     sources: list[dict] = []
 
     for ul in _SUPPORTED_UNDERLYINGS:
@@ -1659,19 +2084,25 @@ async def mp_data_status() -> list[dict]:
         # Daily MP params / enriched rows. Use the same live bridge as the
         # strategy endpoints so the readiness panel reflects broker-backed FMP
         # snapshots, not only static files shipped in the container.
-        mp_rows, data_status = await _load_mp_rows(ul, allow_params_fallback=True)
+        mp_rows, data_status = await _load_mp_rows(ul, allow_params_fallback=True, live_refresh=False)
         source = str(data_status.get("source") or "none")
         stale_days = data_status.get("stale_days")
         live_bridge = data_status.get("live_bridge") or []
         live_appended = bool(data_status.get("live_appended"))
+        live_refreshed = bool(data_status.get("live_refreshed"))
+        durable_appended = bool(data_status.get("durable_appended"))
         latest_date = str(data_status.get("latest_date") or "—")
         if mp_rows:
             status = "ok"
-            if not live_appended and isinstance(stale_days, int) and stale_days > 7:
+            if not live_appended and not live_refreshed and not durable_appended and isinstance(stale_days, int) and stale_days > 7:
                 status = "warning"
             detail_parts = [f"{len(mp_rows)} sessions", f"source={source}"]
             if live_bridge:
                 detail_parts.append(f"live_bridge={','.join(str(item) for item in live_bridge)}")
+            if live_refreshed:
+                detail_parts.append("live_refreshed=true")
+            if durable_appended:
+                detail_parts.append(f"durable_cache={data_status.get('durable_rows')}")
             if isinstance(stale_days, int) and stale_days > 0:
                 detail_parts.append(f"packaged_lag={stale_days}d")
             sources.append({
@@ -1682,6 +2113,9 @@ async def mp_data_status() -> list[dict]:
                 "detail": " · ".join(detail_parts),
                 "source": source,
                 "live_appended": live_appended,
+                "live_refreshed": live_refreshed,
+                "durable_appended": durable_appended,
+                "durable_rows": data_status.get("durable_rows"),
                 "live_latest_date": data_status.get("live_latest_date"),
             })
         else:
@@ -1741,7 +2175,7 @@ async def mp_data_status() -> list[dict]:
 @router.get("/mp-signals")
 async def mp_signals(underlying: str = "NIFTY", limit: int = 20) -> dict:
     """Recent MP day signals with failure scores and direction for the given underlying."""
-    rows, data_status = await _load_mp_rows(underlying)
+    rows, data_status = await _load_mp_rows(underlying, live_refresh=False)
     if not rows:
         return {
             "underlying": underlying,
@@ -1777,7 +2211,7 @@ async def mp_open_signal(underlying: str = "NIFTY") -> dict:
         }
     payload = _build_mp_open_signal_payload(underlying, rows[-1])
     payload["data_status"] = data_status
-    payload["rag_context"] = await _build_mp_rag_context(
+    payload["rag_context"] = await _build_mp_rag_context_fast(
         underlying,
         rows[-1],
         open_signal_payload=payload,
@@ -1791,7 +2225,7 @@ async def mp_agent_context(underlying: str = "NIFTY", limit: int = 10) -> list[d
     Contextual agent reasoning for the MP+Order-Flow strategy.
     Returns structured comments explaining the latest MP structure.
     """
-    rows, _ = await _load_mp_rows(underlying)
+    rows, _ = await _load_mp_rows(underlying, live_refresh=False)
     if not rows:
         return [{"time": "", "type": "system", "level": "warning",
                  "message": f"No MP failure data found for {underlying}."}]
@@ -1831,7 +2265,7 @@ async def mp_dashboard(
     sessions = [_build_mp_signal_record(row) for row in rows[-lookback:]]
     latest_row = rows[-1]
     open_signal_payload = _build_mp_open_signal_payload(underlying, latest_row)
-    rag_context = await _build_mp_rag_context(
+    rag_context = await _build_mp_rag_context_fast(
         underlying,
         latest_row,
         open_signal_payload=open_signal_payload,

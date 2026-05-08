@@ -2363,6 +2363,46 @@
     ],
     "commentary": [
       {
+        "time": "2026-05-08T09:34:15.451966+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-07T23:34:35.679166+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Agent idle."
+      },
+      {
+        "time": "2026-05-07T09:31:51.020291+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-06T23:30:24.530207+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Agent idle."
+      },
+      {
+        "time": "2026-05-06T09:29:11.777852+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-05T23:54:30.864925+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Agent idle."
+      },
+      {
+        "time": "2026-05-05T09:49:22.470847+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-04T23:52:53.683968+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Agent idle."
+      },
+      {
         "time": "2026-05-04T09:49:49.989563+05:30",
         "tone": "error",
         "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
@@ -2721,46 +2761,6 @@
         "time": "2026-04-24T11:56:41.653621+05:30",
         "tone": "success",
         "message": "Scanned 4 futures rows and 2 option rows. 0 open positions. Reused the last good snapshot for retained 1 option rows."
-      },
-      {
-        "time": "2026-04-24T11:55:53.113041+05:30",
-        "tone": "warning",
-        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: fyers: 2 failure(s), latest 'loaded 0 rows'."
-      },
-      {
-        "time": "2026-04-24T11:55:53.113003+05:30",
-        "tone": "warning",
-        "message": "Commodity history warnings detected: fyers: 2 failure(s), latest 'loaded 0 rows'."
-      },
-      {
-        "time": "2026-04-24T11:55:00.630556+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions."
-      },
-      {
-        "time": "2026-04-24T11:54:10.073906+05:30",
-        "tone": "warning",
-        "message": "Scanned 4 futures rows and 4 option rows. 0 open positions. Commodity history warnings detected: upstox: 1 failure(s), latest 'loaded 173 rows'."
-      },
-      {
-        "time": "2026-04-24T11:54:10.073852+05:30",
-        "tone": "warning",
-        "message": "Commodity history warnings detected: upstox: 1 failure(s), latest 'loaded 173 rows'."
-      },
-      {
-        "time": "2026-04-24T11:52:44.278112+05:30",
-        "tone": "success",
-        "message": "Scanned 4 futures rows and 3 option rows. 0 open positions."
-      },
-      {
-        "time": "2026-04-24T11:52:10.083841+05:30",
-        "tone": "warning",
-        "message": "Scanned 4 futures rows and 3 option rows. 0 open positions. Commodity history warnings detected: fyers: 1 failure(s), latest 'loaded 0 rows'."
-      },
-      {
-        "time": "2026-04-24T11:52:10.083805+05:30",
-        "tone": "warning",
-        "message": "Commodity history warnings detected: fyers: 1 failure(s), latest 'loaded 0 rows'."
       }
     ],
     "processed_signals": {
@@ -2777,7 +2777,7 @@
     "signal_audit": [],
     "portfolio": {
       "initial_capital": 1000000.0,
-      "available_capital": 944341.6501824996,
+      "available_capital": 920592.52315,
       "trade_history": [
         {
           "symbol": "MCX:GOLD26JUNFUT",
@@ -2985,61 +2985,7 @@
           "exit_price": 150138.0315,
           "pnl": -740.7675000000163,
           "entry_time": "2026-04-07T11:05:18.700236+05:30",
-          "exit_time": "2026-04-07T06:58:17.464756+05:30",
-          "instrument_type": "FUT",
-          "expiry": null,
-          "strike": null,
-          "option_type": null,
-          "signal_id": null,
-          "setup_type": null,
-          "entry_iv_pct": null,
-          "regime": null
-        },
-        {
-          "symbol": "MCX:SILVERM26JUNFUT",
-          "action": "SELL",
-          "qty": 1,
-          "entry_price": 240593.643,
-          "exit_price": 242360.1195,
-          "pnl": -1766.4764999999898,
-          "entry_time": "2026-04-07T11:11:28.712654+05:30",
-          "exit_time": "2026-04-07T08:22:18.934128+05:30",
-          "instrument_type": "FUT",
-          "expiry": null,
-          "strike": null,
-          "option_type": null,
-          "signal_id": null,
-          "setup_type": null,
-          "entry_iv_pct": null,
-          "regime": null
-        },
-        {
-          "symbol": "MCX:NATURALGAS26MAYFUT",
-          "action": "SELL",
-          "qty": 1,
-          "entry_price": 277.76104999999995,
-          "exit_price": 275.03745,
-          "pnl": 2.7235999999999763,
-          "entry_time": "2026-04-07T13:31:14.230227+05:30",
-          "exit_time": "2026-04-07T08:58:04.627408+05:30",
-          "instrument_type": "FUT",
-          "expiry": null,
-          "strike": null,
-          "option_type": null,
-          "signal_id": null,
-          "setup_type": null,
-          "entry_iv_pct": null,
-          "regime": null
-        },
-        {
-          "symbol": "MCX:GOLD26JUNFUT",
-          "action": "BUY",
-          "qty": 1,
-          "entry_price": 150825.375,
-          "exit_price": 149260.3325,
-          "pnl": -1565.0425000000105,
-          "entry_time": "2026-04-07T13:53:51.942640+05:30",
-          "exit_time": "2026-04-07T13:42:35.359038+05:30",
+          "exit_time": "2026-04-07T12:28:17.464756+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -3068,14 +3014,32 @@
           "regime": null
         },
         {
+          "symbol": "MCX:SILVERM26JUNFUT",
+          "action": "SELL",
+          "qty": 1,
+          "entry_price": 240593.643,
+          "exit_price": 242360.1195,
+          "pnl": -1766.4764999999898,
+          "entry_time": "2026-04-07T11:11:28.712654+05:30",
+          "exit_time": "2026-04-07T13:52:18.934128+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null,
+          "signal_id": null,
+          "setup_type": null,
+          "entry_iv_pct": null,
+          "regime": null
+        },
+        {
           "symbol": "MCX:NATURALGAS26MAYFUT",
           "action": "SELL",
           "qty": 1,
-          "entry_price": 274.76255,
-          "exit_price": 283.04145,
-          "pnl": -8.278900000000021,
-          "entry_time": "2026-04-07T14:28:04.628233+05:30",
-          "exit_time": "2026-04-07T13:42:35.361509+05:30",
+          "entry_price": 277.76104999999995,
+          "exit_price": 275.03745,
+          "pnl": 2.7235999999999763,
+          "entry_time": "2026-04-07T13:31:14.230227+05:30",
+          "exit_time": "2026-04-07T14:28:04.627408+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -3105,13 +3069,49 @@
         },
         {
           "symbol": "MCX:GOLD26JUNFUT",
+          "action": "BUY",
+          "qty": 1,
+          "entry_price": 150825.375,
+          "exit_price": 149260.3325,
+          "pnl": -1565.0425000000105,
+          "entry_time": "2026-04-07T13:53:51.942640+05:30",
+          "exit_time": "2026-04-07T19:12:35.359038+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null,
+          "signal_id": null,
+          "setup_type": null,
+          "entry_iv_pct": null,
+          "regime": null
+        },
+        {
+          "symbol": "MCX:NATURALGAS26MAYFUT",
+          "action": "SELL",
+          "qty": 1,
+          "entry_price": 274.76255,
+          "exit_price": 283.04145,
+          "pnl": -8.278900000000021,
+          "entry_time": "2026-04-07T14:28:04.628233+05:30",
+          "exit_time": "2026-04-07T19:12:35.361509+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null,
+          "signal_id": null,
+          "setup_type": null,
+          "entry_iv_pct": null,
+          "regime": null
+        },
+        {
+          "symbol": "MCX:GOLD26JUNFUT",
           "action": "SELL",
           "qty": 1,
           "entry_price": 149260.3325,
           "exit_price": 150250.0875,
           "pnl": -989.7550000000047,
           "entry_time": "2026-04-07T19:12:35.362055+05:30",
-          "exit_time": "2026-04-07T17:07:37.154194+05:30",
+          "exit_time": "2026-04-07T22:37:37.154194+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -3129,7 +3129,7 @@
           "exit_price": 240019.95,
           "pnl": -1994.022500000021,
           "entry_time": "2026-04-07T19:12:35.362299+05:30",
-          "exit_time": "2026-04-07T17:36:01.098353+05:30",
+          "exit_time": "2026-04-07T23:06:01.098353+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -3266,24 +3266,6 @@
           "regime": null
         },
         {
-          "symbol": "MCX:GOLD26JUNFUT",
-          "action": "BUY",
-          "qty": 10,
-          "entry_price": 152277.1005,
-          "exit_price": 153118.4025,
-          "pnl": 8413.01999999996,
-          "entry_time": "2026-04-09T16:01:14.686231+05:30",
-          "exit_time": "2026-04-09T15:04:54.767515+05:30",
-          "instrument_type": "FUT",
-          "expiry": null,
-          "strike": null,
-          "option_type": null,
-          "signal_id": null,
-          "setup_type": null,
-          "entry_iv_pct": null,
-          "regime": null
-        },
-        {
           "symbol": "MCX:NATURALGAS26MAYFUT",
           "action": "SELL",
           "qty": 1250,
@@ -3310,6 +3292,24 @@
           "pnl": -33451.8,
           "entry_time": "2026-04-09T14:05:58.262341+05:30",
           "exit_time": "2026-04-09T16:27:47.861860+05:30",
+          "instrument_type": "FUT",
+          "expiry": null,
+          "strike": null,
+          "option_type": null,
+          "signal_id": null,
+          "setup_type": null,
+          "entry_iv_pct": null,
+          "regime": null
+        },
+        {
+          "symbol": "MCX:GOLD26JUNFUT",
+          "action": "BUY",
+          "qty": 10,
+          "entry_price": 152277.1005,
+          "exit_price": 153118.4025,
+          "pnl": 8413.01999999996,
+          "entry_time": "2026-04-09T16:01:14.686231+05:30",
+          "exit_time": "2026-04-09T20:34:54.767515+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -3465,13 +3465,13 @@
         },
         {
           "symbol": "MCX:GOLD26JUNFUT",
-          "action": "SELL",
+          "action": "BUY",
           "qty": 10,
-          "entry_price": 152430.7465,
-          "exit_price": 152801.3625,
-          "pnl": -3706.1599999997998,
-          "entry_time": "2026-04-10T22:18:09.796335+05:30",
-          "exit_time": "2026-04-10T17:22:00.467134+05:30",
+          "entry_price": 152804.364,
+          "exit_price": 152498.7125,
+          "pnl": -3056.515000000072,
+          "entry_time": "2026-04-10T17:26:55.360855+05:30",
+          "exit_time": "2026-04-10T17:30:35.445999+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -3483,13 +3483,13 @@
         },
         {
           "symbol": "MCX:GOLD26JUNFUT",
-          "action": "BUY",
+          "action": "SELL",
           "qty": 10,
-          "entry_price": 152804.364,
-          "exit_price": 152498.7125,
-          "pnl": -3056.515000000072,
-          "entry_time": "2026-04-10T17:26:55.360855+05:30",
-          "exit_time": "2026-04-10T17:30:35.445999+05:30",
+          "entry_price": 152430.7465,
+          "exit_price": 152801.3625,
+          "pnl": -3706.1599999997998,
+          "entry_time": "2026-04-10T22:18:09.796335+05:30",
+          "exit_time": "2026-04-10T22:52:00.467134+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,
@@ -3543,7 +3543,7 @@
           "exit_price": 151733.0955,
           "pnl": -4529.594999999972,
           "entry_time": "2026-04-13T22:15:08.505053+05:30",
-          "exit_time": "2026-04-13T17:08:18.910695+05:30",
+          "exit_time": "2026-04-13T22:38:18.910695+05:30",
           "instrument_type": "FUT",
           "expiry": null,
           "strike": null,

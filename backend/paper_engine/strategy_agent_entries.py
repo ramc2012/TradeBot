@@ -24,7 +24,6 @@ from agent.strategy_config import (
     MIN_TTE_DAYS,
     REGIME_BEARISH,
     REGIME_BULLISH,
-    REGIME_DEAD,
     SETUP_BREAKOUT,
     SETUP_PREMIUM,
 )
@@ -65,25 +64,49 @@ class StrategyEntryMixin:
                 text(
                     """
                     WITH ranked AS (
-                        SELECT instrument_key,
-                               option_type,
-                               time,
-                               macd,
-                               macd_signal,
-                               macd_histogram,
-                               rsi,
-                               ltp,
+                        SELECT *,
                                ROW_NUMBER() OVER (
                                    PARTITION BY instrument_key
-                                   ORDER BY time DESC
+                                   ORDER BY macd_bucket DESC
                                ) AS rn
-                        FROM atm_option_watchlist_snapshots
-                        WHERE time::date = :trading_day
-                          AND instrument_key = ANY(:instrument_keys)
+                        FROM (
+                            SELECT instrument_key,
+                                   option_type,
+                                   time,
+                                   (
+                                       date_trunc('hour', timezone('Asia/Kolkata', time))
+                                       + (
+                                           floor(date_part('minute', timezone('Asia/Kolkata', time)) / 30)::int
+                                           * interval '30 minutes'
+                                       )
+                                   ) AS macd_bucket,
+                                   macd,
+                                   macd_signal,
+                                   macd_histogram,
+                                   rsi,
+                                   ltp,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY instrument_key,
+                                                    (
+                                                        date_trunc('hour', timezone('Asia/Kolkata', time))
+                                                        + (
+                                                            floor(date_part('minute', timezone('Asia/Kolkata', time)) / 30)::int
+                                                            * interval '30 minutes'
+                                                        )
+                                                    )
+                                       ORDER BY time DESC
+                                   ) AS bucket_rn
+                            FROM atm_option_watchlist_snapshots
+                            WHERE timezone('Asia/Kolkata', time)::date = :trading_day
+                              AND instrument_key = ANY(:instrument_keys)
+                              AND macd IS NOT NULL
+                        ) bucketed
+                        WHERE bucket_rn = 1
                     )
                     SELECT instrument_key,
                            option_type,
                            time,
+                           macd_bucket,
                            macd,
                            macd_signal,
                            macd_histogram,
@@ -91,7 +114,7 @@ class StrategyEntryMixin:
                            ltp,
                            rn
                     FROM ranked
-                    WHERE rn <= 2
+                    WHERE rn <= 6
                     ORDER BY instrument_key ASC, rn ASC
                     """
                 ),
@@ -124,7 +147,16 @@ class StrategyEntryMixin:
         instrument_key = str(side.get("instrument_key") or "").strip()
         ranked = snapshot_state.get(instrument_key, {})
         latest = ranked.get(1) or {}
-        previous = ranked.get(2) or {}
+        previous = {}
+        latest_bucket = latest.get("macd_bucket")
+        for rank in sorted(key for key in ranked if key > 1):
+            candidate = ranked.get(rank) or {}
+            if candidate.get("macd") is None:
+                continue
+            if latest_bucket is not None and candidate.get("macd_bucket") == latest_bucket:
+                continue
+            previous = candidate
+            break
 
         current_macd = side.get("macd")
         if current_macd is None:
@@ -154,6 +186,8 @@ class StrategyEntryMixin:
             "current_rsi": float(current_rsi) if current_rsi is not None else None,
             "latest_ltp": float(latest_ltp) if latest_ltp is not None else 0.0,
             "latest_bar_time": latest_time_iso,
+            "latest_macd_bucket": str(latest_bucket or ""),
+            "previous_macd_bucket": str(previous.get("macd_bucket") or ""),
         }
 
     async def _build_strategy1_market_profile_gate(
@@ -252,13 +286,12 @@ class StrategyEntryMixin:
         rows: list[dict[str, Any]],
         window_map: dict[str, dict],
     ) -> None:
-        capacity = self.max_positions - len(runtime.positions)
-        if capacity <= 0:
-            self._append_commentary(runtime.label, "Position cap reached. Managing exits only.", tone="warning")
-            return
+        capacity = max(self.max_positions - len(runtime.positions), 0)
+        cap_reached = capacity <= 0
 
         candidates: list[dict[str, Any]] = []
         snapshot_state = await self._load_strategy1_recent_snapshot_state(rows)
+        persist_observation = getattr(self, "_persist_agent_signal_observation", None)
 
         for row in rows:
             underlying = row.get("underlying", "")
@@ -283,9 +316,6 @@ class StrategyEntryMixin:
                 except (ValueError, TypeError):
                     pass
 
-            if self._has_underlying_position(runtime, underlying):
-                continue
-
             ce_side = row.get("ce")
             pe_side = row.get("pe")
             if not ce_side or not pe_side:
@@ -298,42 +328,97 @@ class StrategyEntryMixin:
             if ce_macd is None or pe_macd is None:
                 continue
 
-            regime_name = (
-                REGIME_BULLISH
-                if ce_macd >= 0 > pe_macd
-                else REGIME_BEARISH
-                if ce_macd < 0 <= pe_macd
-                else REGIME_DEAD
-            )
-            quadrant = SimpleNamespace(regime=regime_name)
-            self._regime_cache[underlying] = quadrant
-            if regime_name == REGIME_DEAD:
-                continue
-
-            expected_mp_direction: Optional[str] = None
-            if regime_name == REGIME_BULLISH and (ce_snapshot.get("previous_macd") is not None and ce_snapshot["previous_macd"] <= 0 < ce_macd):
+            ce_cross = ce_snapshot.get("previous_macd") is not None and ce_snapshot["previous_macd"] <= 0 < ce_macd
+            pe_cross = pe_snapshot.get("previous_macd") is not None and pe_snapshot["previous_macd"] >= 0 > pe_macd
+            if ce_cross:
                 side = ce_side
                 side_snapshot = ce_snapshot
                 opt_type = "CE"
+                regime_name = REGIME_BULLISH
                 expected_mp_direction = "CE"
-            elif regime_name == REGIME_BEARISH and (pe_snapshot.get("previous_macd") is not None and pe_snapshot["previous_macd"] >= 0 > pe_macd):
+            elif pe_cross:
                 side = pe_side
                 side_snapshot = pe_snapshot
                 opt_type = "PE"
+                regime_name = REGIME_BEARISH
                 expected_mp_direction = "PE"
             else:
+                continue
+            quadrant = SimpleNamespace(regime=regime_name)
+            self._regime_cache[underlying] = quadrant
+
+            latest_bar_time = str(side_snapshot.get("latest_bar_time") or "")
+            if not latest_bar_time:
                 continue
 
             strength = abs(float(side_snapshot.get("current_macd") or 0.0))
             reason = "macd_zero_cross"
+            signal_key = f"{underlying}:{opt_type}"
+
+            async def persist_raw_signal(status_value: str, block_reason: Optional[str] = None, **extra: Any) -> None:
+                if not callable(persist_observation):
+                    return
+                side_for_signal = side or {}
+                payload = {
+                    "strategy": "Strategy 1",
+                    "source": "live_scan_raw_macd",
+                    "signal_key": f"{runtime.key}:raw_macd_cross:{signal_key}:{latest_bar_time}",
+                    "underlying": underlying,
+                    "signal_date": latest_bar_time[:10],
+                    "as_of": latest_bar_time,
+                    "direction": opt_type,
+                    "reason": block_reason or reason,
+                    "strength": strength,
+                    "status": status_value,
+                    "freshness": "live",
+                    "instruction": (
+                        f"{underlying}: {opt_type} raw MACD zero-cross observed; "
+                        "filter outcome is stored in metadata."
+                    ),
+                    "expiry": row.get("expiry"),
+                    "atm_strike": side_for_signal.get("strike"),
+                    "ltp": extra.get("ltp", side_snapshot.get("latest_ltp")),
+                    "iv_pct": extra.get("iv_pct"),
+                    "tte_days": tte,
+                    "spot_setup": extra.get("spot_setup"),
+                    "regime": regime_name,
+                    "option_last_bar_time": latest_bar_time,
+                    "previous_macd": side_snapshot.get("previous_macd"),
+                    "current_macd": side_snapshot.get("current_macd"),
+                    "ce_macd": ce_macd,
+                    "pe_macd": pe_macd,
+                    "ce_cross": ce_cross,
+                    "pe_cross": pe_cross,
+                    "latest_macd_bucket": side_snapshot.get("latest_macd_bucket"),
+                    "previous_macd_bucket": side_snapshot.get("previous_macd_bucket"),
+                    **extra,
+                }
+                await persist_observation(
+                    runtime,
+                    payload,
+                    status=status_value,
+                    row=row,
+                )
+
+            await persist_raw_signal("observed", raw_stage="pre_filter")
+
+            if self._has_underlying_position(runtime, underlying):
+                await persist_raw_signal("blocked", "existing_underlying_position")
+                continue
+
+            if cap_reached:
+                await persist_raw_signal("blocked", "position_cap_reached")
+                continue
 
             live_ltp = float(side_snapshot.get("latest_ltp") or side.get("ltp") or 0.0)
             if live_ltp > 0:
                 latest_close = live_ltp
             else:
+                await persist_raw_signal("blocked", "missing_ltp")
                 continue
 
             if latest_close < MIN_PREMIUM or latest_close > MAX_PREMIUM:
+                await persist_raw_signal("blocked", "premium_out_of_range", ltp=latest_close)
                 continue
 
             option_ma20 = None
@@ -348,19 +433,27 @@ class StrategyEntryMixin:
                 iv_pct = iv_val * 100.0 if iv_val < 1.0 else iv_val
             iv_status = check_iv_filter(iv_pct, MAX_ENTRY_IV_PCT, HARD_MAX_IV_PCT)
             if iv_status == "reject":
+                await persist_raw_signal("blocked", "iv_rejected", ltp=latest_close, iv_pct=iv_pct)
                 continue
 
-            latest_bar_time = str(side_snapshot.get("latest_bar_time") or "")
-            if not latest_bar_time:
-                continue
-            signal_key = f"{underlying}:{opt_type}"
             if runtime.processed_signals.get(signal_key) == latest_bar_time:
+                await persist_raw_signal("blocked", "already_processed", ltp=latest_close, iv_pct=iv_pct)
                 continue
 
             spot_context = await self._compute_spot_context(underlying, window)
             setup = spot_context.get("setup", "unknown")
             mp_gate = await self._build_strategy1_market_profile_gate(underlying, expected_mp_direction)
             if not mp_gate.get("confirmed"):
+                await persist_raw_signal(
+                    "blocked",
+                    f"mp_gate_{mp_gate.get('reason') or 'not_confirmed'}",
+                    ltp=latest_close,
+                    iv_pct=iv_pct,
+                    spot_setup=setup,
+                    mp_day_type=mp_gate.get("day_type"),
+                    mp_direction=mp_gate.get("direction"),
+                    mp_reason=mp_gate.get("reason"),
+                )
                 continue
 
             candidates.append(
@@ -408,7 +501,6 @@ class StrategyEntryMixin:
                 -(c["strength"] or 0),
             )
         )
-        persist_observation = getattr(self, "_persist_agent_signal_observation", None)
         if callable(persist_observation):
             for candidate in candidates:
                 row = candidate["row"]

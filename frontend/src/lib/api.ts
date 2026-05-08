@@ -6,6 +6,9 @@ export const API_URL = resolveApiBaseUrl();
 let reachableApiBaseUrl: string | null = null;
 let reachableApiBaseUrlPromise: Promise<string> | null = null;
 const API_PROBE_TIMEOUT_MS = 2500;
+const BROKER_STATUS_TIMEOUT_MS = 6_000;
+const BROKER_STATUS_FORCE_TIMEOUT_MS = 15_000;
+const LATEST_TICKS_TIMEOUT_MS = 4_000;
 
 async function probeApiBaseUrl(candidate: string): Promise<boolean> {
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
@@ -112,6 +115,7 @@ export const getCredentialsStatus = (broker: string) =>
 export const getBrokerStatus = (options?: { forceValidate?: boolean }) =>
   api.get("/api/auth/broker-status", {
     params: options?.forceValidate ? { force_validate: true } : undefined,
+    timeout: options?.forceValidate ? BROKER_STATUS_FORCE_TIMEOUT_MS : BROKER_STATUS_TIMEOUT_MS,
   });
 export const getSystemHealth = () => api.get("/api/system/health");
 export const getSystemOverview = () => api.get("/api/system/overview");
@@ -203,7 +207,8 @@ export const getIVRank = (symbol: string) => api.get(`/api/market/iv-rank/${enco
 export const getPCR = (symbol: string, expiry?: string) =>
   api.get(`/api/market/pcr/${encodeURIComponent(symbol)}`, { params: { expiry } });
 export const getLTP = (symbols: string[]) => api.post("/api/market/ltp", { symbols });
-export const getLatestTicks = (symbols: string[]) => api.post("/api/market/latest-ticks", { symbols });
+export const getLatestTicks = (symbols: string[]) =>
+  api.post("/api/market/latest-ticks", { symbols }, { timeout: LATEST_TICKS_TIMEOUT_MS });
 export const getMarketIntelligenceContext = () => api.get("/api/market/intelligence-context");
 export const getGreeks = (symbol: string, strike: number, expiry: string, optionType: string, spot: number, iv = 0.2) =>
   api.get(`/api/market/greeks/${encodeURIComponent(symbol)}/${strike}/${expiry}/${optionType}`, {

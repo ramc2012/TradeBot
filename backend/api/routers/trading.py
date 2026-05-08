@@ -40,6 +40,162 @@ async def _get_or_create_paper_session() -> tuple[str, PaperOrderBook, PaperPort
         return session_id, order_book, portfolio
 
 
+def _strategy_runtime_rows() -> list[tuple[str, str, object]]:
+    rows: list[tuple[str, str, object]] = []
+    for strategy in paper_strategy_agent.get_status(refresh=False).get("strategies", []):
+        key = str(strategy.get("key") or "")
+        runtime = paper_strategy_agent.get_runtime(key)
+        if runtime is not None:
+            rows.append((key, str(strategy.get("label") or key), runtime))
+    return rows
+
+
+async def _paper_position_rows(*, include_strategy: bool = True) -> list[dict]:
+    _, _, portfolio = await _get_or_create_paper_session()
+    rows = [
+        {
+            **position,
+            "source": "manual_paper",
+            "strategy_key": None,
+            "strategy_label": "Manual Paper",
+        }
+        for position in portfolio.get_positions_list()
+    ]
+    if include_strategy:
+        for key, label, runtime in _strategy_runtime_rows():
+            for position in runtime.portfolio.get_positions_list():
+                rows.append(
+                    {
+                        **position,
+                        "source": "strategy_agent",
+                        "strategy_key": key,
+                        "strategy_label": label,
+                    }
+                )
+    return rows
+
+
+async def _paper_trade_rows(*, include_strategy: bool = True) -> list[dict]:
+    _, _, portfolio = await _get_or_create_paper_session()
+    sources: list[tuple[str, str | None, str, PaperPortfolio]] = [
+        ("manual_paper", None, "Manual Paper", portfolio)
+    ]
+    if include_strategy:
+        sources.extend(
+            ("strategy_agent", key, label, runtime.portfolio)
+            for key, label, runtime in _strategy_runtime_rows()
+        )
+
+    rows: list[dict] = []
+    for source, strategy_key, strategy_label, source_portfolio in sources:
+        for trade in source_portfolio._trade_history:
+            rows.append(
+                {
+                    "symbol": trade.symbol,
+                    "action": trade.action,
+                    "qty": trade.qty,
+                    "entry_price": trade.entry_price,
+                    "exit_price": trade.exit_price,
+                    "pnl": trade.pnl,
+                    "entry_time": trade.entry_time.isoformat(),
+                    "exit_time": trade.exit_time.isoformat(),
+                    "instrument_type": trade.instrument_type,
+                    "expiry": trade.expiry,
+                    "strike": trade.strike,
+                    "option_type": trade.option_type,
+                    "signal_id": trade.signal_id,
+                    "setup_type": trade.setup_type,
+                    "source": source,
+                    "strategy_key": strategy_key,
+                    "strategy_label": strategy_label,
+                }
+            )
+    return sorted(rows, key=lambda row: str(row.get("exit_time") or ""))
+
+
+async def _paper_order_rows(*, include_strategy: bool = True) -> list[dict]:
+    _, ob, _ = await _get_or_create_paper_session()
+    sources: list[tuple[str, str | None, str, PaperOrderBook]] = [
+        ("manual_paper", None, "Manual Paper", ob)
+    ]
+    if include_strategy:
+        sources.extend(
+            ("strategy_agent", key, label, runtime.order_book)
+            for key, label, runtime in _strategy_runtime_rows()
+        )
+
+    rows: list[dict] = []
+    for source, strategy_key, strategy_label, order_book in sources:
+        for order in order_book.get_open_orders():
+            rows.append(
+                {
+                    "order_id": order.order_id,
+                    "symbol": order.symbol,
+                    "action": order.action,
+                    "qty": order.qty,
+                    "price": order.price,
+                    "status": order.status,
+                    "order_type": order.order_type,
+                    "sl": order.sl,
+                    "target": order.target,
+                    "instrument_type": order.instrument_type,
+                    "expiry": order.expiry,
+                    "strike": order.strike,
+                    "option_type": order.option_type,
+                    "created_at": order.created_at.isoformat(),
+                    "source": source,
+                    "strategy_key": strategy_key,
+                    "strategy_label": strategy_label,
+                }
+            )
+    return rows
+
+
+async def _paper_portfolio_summary(*, include_strategy: bool = True) -> dict:
+    _, _, portfolio = await _get_or_create_paper_session()
+    portfolios: list[tuple[str, str | None, str, PaperPortfolio]] = [
+        ("manual_paper", None, "Manual Paper", portfolio)
+    ]
+    if include_strategy:
+        portfolios.extend(
+            ("strategy_agent", key, label, runtime.portfolio)
+            for key, label, runtime in _strategy_runtime_rows()
+        )
+
+    trades = await _paper_trade_rows(include_strategy=include_strategy)
+    pnls = [float(row.get("pnl") or 0.0) for row in trades]
+    wins = [pnl for pnl in pnls if pnl > 0]
+    losses = [pnl for pnl in pnls if pnl < 0]
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+
+    return {
+        "session_id": "combined-paper",
+        "initial_capital": round(sum(float(p.initial_capital or 0.0) for _, _, _, p in portfolios), 2),
+        "available_capital": round(sum(float(p.available_capital or 0.0) for _, _, _, p in portfolios), 2),
+        "total_equity": round(sum(float(p.total_equity or 0.0) for _, _, _, p in portfolios), 2),
+        "unrealized_pnl": round(sum(float(p.unrealized_pnl or 0.0) for _, _, _, p in portfolios), 2),
+        "realized_pnl": round(sum(float(p.realized_pnl or 0.0) for _, _, _, p in portfolios), 2),
+        "day_pnl": round(sum(float(p.day_pnl or 0.0) for _, _, _, p in portfolios), 2),
+        "total_trades": len(trades),
+        "win_rate": round(len(wins) / len(trades), 4) if trades else 0.0,
+        "avg_win": round(sum(wins) / len(wins), 2) if wins else 0.0,
+        "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0.0,
+        "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss else None,
+        "max_drawdown": round(max((float(p.max_drawdown or 0.0) for _, _, _, p in portfolios), default=0.0), 4),
+        "sharpe_ratio": round(sum(float(p.sharpe_ratio() or 0.0) for _, _, _, p in portfolios), 4),
+        "sources": [
+            {
+                "source": source,
+                "strategy_key": strategy_key,
+                "strategy_label": strategy_label,
+                **source_portfolio.get_summary(),
+            }
+            for source, strategy_key, strategy_label, source_portfolio in portfolios
+        ],
+    }
+
+
 async def _get_trading_state_snapshot() -> tuple[str, str, Optional[LiveOrderManager]]:
     async with _trading_state_lock:
         return _mode, _active_broker, _live_manager
@@ -226,19 +382,7 @@ async def place_order(req: PlaceOrderRequest):
 async def get_orders():
     mode, active_broker, live_manager = await _get_trading_state_snapshot()
     if mode == "paper":
-        _, ob, _ = await _get_or_create_paper_session()
-        orders = ob.get_open_orders()
-        return [
-            {
-                "order_id": o.order_id,
-                "symbol": o.symbol,
-                "action": o.action,
-                "qty": o.qty,
-                "price": o.price,
-                "status": o.status,
-            }
-            for o in orders
-        ]
+        return await _paper_order_rows()
     elif mode == "live":
         adapter = get_active_adapter(active_broker)
         if not adapter:
@@ -273,8 +417,7 @@ async def cancel_order(order_id: str):
 async def get_positions():
     mode, active_broker, _ = await _get_trading_state_snapshot()
     if mode == "paper":
-        _, _, portfolio = await _get_or_create_paper_session()
-        return portfolio.get_positions_list()
+        return await _paper_position_rows()
     elif mode == "live":
         adapter = get_active_adapter(active_broker)
         if not adapter:
@@ -292,20 +435,7 @@ async def get_trades():
             return []
         return await adapter.get_trade_book()
     if mode == "paper":
-        _, _, portfolio = await _get_or_create_paper_session()
-        return [
-            {
-                "symbol": t.symbol,
-                "action": t.action,
-                "qty": t.qty,
-                "entry_price": t.entry_price,
-                "exit_price": t.exit_price,
-                "pnl": t.pnl,
-                "entry_time": t.entry_time.isoformat(),
-                "exit_time": t.exit_time.isoformat(),
-            }
-            for t in portfolio._trade_history
-        ]
+        return await _paper_trade_rows()
     return []
 
 
@@ -343,14 +473,12 @@ async def update_kill_switch(body: KillSwitchRequest):
 
 @router.get("/portfolio-summary")
 async def portfolio_summary():
-    _, _, portfolio = await _get_or_create_paper_session()
-    return portfolio.get_summary()
+    return await _paper_portfolio_summary()
 
 
 @router.get("/strategy-agent/status")
 async def strategy_agent_status():
-    await paper_strategy_agent.ensure_recovered_state()
-    return paper_strategy_agent.get_status()
+    return paper_strategy_agent.get_status(refresh=False)
 
 
 @router.get("/strategy-agent/equity-history")

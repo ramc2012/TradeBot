@@ -26,6 +26,9 @@ UTC = timezone.utc
 IST = timezone(timedelta(hours=5, minutes=30))
 SESSION_OPEN = time(9, 15)
 NSE_INDEX_SCOPE = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
+STRATEGY_LIVE_WATCHLIST_MAX_AGE_SECONDS = 10 * 60
+STRATEGY_EXECUTION_MAX_WATCHLIST_AGE_SECONDS = 36 * 60 * 60
+STRATEGY_MIN_LATEST_UNDERLYINGS = 50
 APP_SYMBOLS = {
     "NIFTY": "NSE:NIFTY50-INDEX",
     "BANKNIFTY": "NSE:BANKNIFTY-INDEX",
@@ -48,6 +51,45 @@ def _parse_time(value: Any) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _strategy_readiness_fields(
+    *,
+    watchlist_rows_today: int,
+    watchlist_rows_latest: int,
+    watchlist_age_seconds: Optional[float],
+) -> dict[str, Any]:
+    today_ready = (
+        bool(watchlist_rows_today)
+        and watchlist_age_seconds is not None
+        and watchlist_age_seconds <= STRATEGY_LIVE_WATCHLIST_MAX_AGE_SECONDS
+    )
+    latest_session_ready = watchlist_rows_latest >= STRATEGY_MIN_LATEST_UNDERLYINGS
+    latest_session_execution_ready = (
+        latest_session_ready
+        and watchlist_age_seconds is not None
+        and watchlist_age_seconds <= STRATEGY_EXECUTION_MAX_WATCHLIST_AGE_SECONDS
+    )
+    readiness_mode = "live" if today_ready else "latest_session" if latest_session_ready else "missing"
+    if today_ready:
+        execution_mode = "live"
+    elif latest_session_execution_ready:
+        execution_mode = "latest_session"
+    elif latest_session_ready and watchlist_age_seconds is not None:
+        execution_mode = "stale_latest_session"
+    elif latest_session_ready:
+        execution_mode = "catalog_only"
+    else:
+        execution_mode = "missing"
+    return {
+        "ready": today_ready or latest_session_ready,
+        "execution_ready": today_ready or latest_session_execution_ready,
+        "readiness_mode": readiness_mode,
+        "execution_mode": execution_mode,
+        "latest_session_ready": latest_session_ready,
+        "max_live_age_seconds": STRATEGY_LIVE_WATCHLIST_MAX_AGE_SECONDS,
+        "max_execution_age_seconds": STRATEGY_EXECUTION_MAX_WATCHLIST_AGE_SECONDS,
+    }
 
 
 class MarketIntelligenceRuntime:
@@ -404,7 +446,7 @@ class MarketIntelligenceRuntime:
                 latest_row = dict(latest_stats.mappings().first() or {})
 
             premium_row: dict[str, Any] = {}
-            if int(latest_row.get("underlyings") or 0) < 50:
+            if int(latest_row.get("underlyings") or 0) < STRATEGY_MIN_LATEST_UNDERLYINGS:
                 premium_stats = await session.execute(
                     text(
                         """
@@ -454,7 +496,7 @@ class MarketIntelligenceRuntime:
                         latest_session_start = datetime.combine(latest_ist.date(), time.min, tzinfo=IST).astimezone(UTC)
                         latest_session_end = latest_session_start + timedelta(days=1)
 
-            if int(latest_row.get("underlyings") or 0) < 50:
+            if int(latest_row.get("underlyings") or 0) < STRATEGY_MIN_LATEST_UNDERLYINGS:
                 catalog_stats = await session.execute(
                     text(
                         """
@@ -510,15 +552,13 @@ class MarketIntelligenceRuntime:
 
         watchlist_rows_today = int(today_row.get("underlyings") or 0)
         watchlist_rows_latest = int(latest_row.get("underlyings") or 0)
-        today_ready = bool(watchlist_rows_today) and (
-            watchlist_age_seconds is None or watchlist_age_seconds <= 600
+        readiness = _strategy_readiness_fields(
+            watchlist_rows_today=watchlist_rows_today,
+            watchlist_rows_latest=watchlist_rows_latest,
+            watchlist_age_seconds=watchlist_age_seconds,
         )
-        latest_session_ready = watchlist_rows_latest >= 50
-        readiness_mode = "live" if today_ready else "latest_session" if latest_session_ready else "missing"
-        ready = today_ready or latest_session_ready
         return {
-            "ready": ready,
-            "readiness_mode": readiness_mode,
+            **readiness,
             "watchlist_rows_today": watchlist_rows_today,
             "watchlist_rows_latest": watchlist_rows_latest,
             "latest_ce_ready": int(latest_row.get("ce_ready") or 0),

@@ -11,7 +11,7 @@ import json
 import os
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -120,6 +120,46 @@ def _in_commodity_hours(now: Optional[datetime] = None) -> bool:
 
 def _parse_datetime(value: Any) -> Optional[datetime]:
     return _parse_iso_timestamp(value)
+
+
+def _order_fill_time_ist(order: PaperOrder) -> datetime:
+    fill_time = order.fill_time or datetime.now(timezone.utc)
+    if fill_time.tzinfo is None:
+        fill_time = fill_time.replace(tzinfo=timezone.utc)
+    return fill_time.astimezone(IST)
+
+
+def _repair_portfolio_ledger(portfolio: PaperPortfolio) -> None:
+    """Normalize commodity ledger timestamps and rebuild cash from realized P&L."""
+    repaired_history = []
+    ist_offset = timedelta(hours=5, minutes=30)
+    for trade in getattr(portfolio, "_trade_history", []):
+        entry_time = trade.entry_time
+        exit_time = trade.exit_time
+        if entry_time.tzinfo is None:
+            entry_time = entry_time.replace(tzinfo=IST)
+        else:
+            entry_time = entry_time.astimezone(IST)
+        if exit_time.tzinfo is None:
+            exit_time = exit_time.replace(tzinfo=IST)
+        else:
+            exit_time = exit_time.astimezone(IST)
+
+        if exit_time < entry_time:
+            candidate = exit_time + ist_offset
+            if candidate >= entry_time:
+                exit_time = candidate
+
+        trade.entry_time = entry_time
+        trade.exit_time = exit_time
+        repaired_history.append(trade)
+
+    repaired_history.sort(key=lambda item: item.exit_time)
+    portfolio._trade_history = repaired_history
+    portfolio._daily_pnl = defaultdict(float)
+    for trade in repaired_history:
+        portfolio._daily_pnl[trade.exit_time.date()] += float(trade.pnl)
+    portfolio.reconcile_available_capital()
 
 
 def _is_rate_limit_error(exc: Exception | str) -> bool:
@@ -916,10 +956,11 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 expiry=position.expiry,
                 strike=position.strike,
                 option_type=position.option_type,
-                opened_at=_parse_datetime(position.entered_at) or datetime.utcnow(),
+                opened_at=_parse_datetime(position.entered_at) or datetime.now(timezone.utc),
             )
             for position in self._runtime.positions.values()
         }
+        _repair_portfolio_ledger(portfolio)
 
     def _build_saved_state(self) -> dict[str, Any]:
         portfolio = self._runtime.portfolio
@@ -1305,10 +1346,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             validation_detail = "Waiting for a fresh 30-minute option MACD cross."
             if row.get("regime") == "warmup":
                 validation = "warming_up"
-                validation_detail = "CE and PE candles need more history before the MACD quadrant is tradable."
-            elif row.get("regime") == "dead_zone":
-                validation = "dead_zone"
-                validation_detail = "Both CE and PE MACD are below zero. Strategy 1 skips the dead zone."
+                validation_detail = "CE and PE candles need more history before 30-minute option MACD is valid."
             elif signal_side and not row.get("is_trade_contract_liquid"):
                 validation = "illiquid_contract"
                 validation_detail = "The nearest liquid contract filter rejected the current CE/PE candidate."
@@ -1330,9 +1368,9 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             elif signal_side:
                 validation = "ready"
                 validation_detail = "The selected CE/PE contract has a fresh 30-minute MACD trigger and passes the liquidity check."
-            elif row.get("regime") in {"bullish", "bearish", "vol_spike"}:
+            elif row.get("regime") in {"bullish", "bearish", "dead_zone", "vol_spike"}:
                 validation = "trend_aligned"
-                validation_detail = "The MACD quadrant is aligned, but a fresh zero-cross has not fired yet."
+                validation_detail = "Option MACD context is available, but a fresh CE/PE zero-cross has not fired yet."
 
             decorated.append(
                 {
@@ -1948,23 +1986,27 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         signal_side: Optional[str] = None
         signal_reason = "waiting_cross"
         selected_side: dict[str, Any] | None = None
-        if regime == "bullish" and ce_analysis.get("signal") == "BUY":
+        ce_cross = ce_analysis.get("signal") == "BUY"
+        pe_cross = pe_analysis.get("signal") == "SELL"
+        if ce_cross and pe_cross:
+            ce_strength = abs(float(ce_indicators.get("macd") or 0.0))
+            pe_strength = abs(float(pe_indicators.get("macd") or 0.0))
+            if ce_strength >= pe_strength:
+                signal_side = "CE"
+                signal_reason = "ce_macd_zero_cross_stronger_than_pe"
+                selected_side = ce
+            else:
+                signal_side = "PE"
+                signal_reason = "pe_macd_zero_cross_stronger_than_ce"
+                selected_side = pe
+        elif ce_cross:
             signal_side = "CE"
             signal_reason = "ce_macd_zero_cross"
             selected_side = ce
-        elif regime == "bearish" and pe_analysis.get("signal") == "SELL":
+        elif pe_cross:
             signal_side = "PE"
             signal_reason = "pe_macd_zero_cross"
             selected_side = pe
-        elif regime == "vol_spike":
-            if ce_analysis.get("signal") == "BUY":
-                signal_side = "CE"
-                signal_reason = "ce_macd_zero_cross_vol_spike"
-                selected_side = ce
-            elif pe_analysis.get("signal") == "SELL":
-                signal_side = "PE"
-                signal_reason = "pe_macd_zero_cross_vol_spike"
-                selected_side = pe
 
         trade_price = 0.0
         trade_symbol = ""
@@ -1997,6 +2039,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "regime": regime,
             "signal_side": signal_side,
             "signal_reason": signal_reason,
+            "ce_cross": ce_cross,
+            "pe_cross": pe_cross,
             "trade_symbol": trade_symbol,
             "trade_strike": trade_strike,
             "trade_price": _round_or_none(trade_price, 2),
@@ -2651,7 +2695,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._runtime.orders.insert(
             0,
             {
-                "time": (order.fill_time or datetime.utcnow()).isoformat(),
+                "time": _order_fill_time_ist(order).isoformat(),
                 "order_id": order.order_id,
                 "symbol": order.symbol,
                 "action": order.action,

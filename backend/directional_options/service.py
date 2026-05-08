@@ -380,14 +380,14 @@ class DirectionalOptionsService:
         history_source: str,
         history_symbol: str,
     ) -> dict[str, object]:
-        data_status = self._build_live_data_status(
-            underlying=underlying,
-            feature_frame=feature_frame,
-            strategy_health=strategy_health,
-            history_source=history_source,
-            history_symbol=history_symbol,
-        )
         if feature_frame.empty:
+            data_status = self._build_live_data_status(
+                underlying=underlying,
+                feature_frame=feature_frame,
+                strategy_health=strategy_health,
+                history_source=history_source,
+                history_symbol=history_symbol,
+            )
             data_status["execution_ready"] = False
             data_status["degraded_reason"] = "missing_spot_history"
             return {
@@ -411,6 +411,40 @@ class DirectionalOptionsService:
         feature_snapshot = self.feature_engine.snapshot(row)
         regime = self.regime.classify(row)
         signal = self.signals.predict(row, regime, timeframe)
+        if signal is None and not int(
+            strategy_health.get("watchlist_rows_today")
+            or strategy_health.get("watchlist_rows_latest")
+            or 0
+        ):
+            local_watchlist_status = await self.store.latest_live_watchlist_status(
+                underlying=underlying,
+                as_of=timestamp,
+            )
+            if int(local_watchlist_status.get("rows") or 0) > 0:
+                latest_watchlist_time = local_watchlist_status.get("latest_time")
+                strategy_health = {
+                    **strategy_health,
+                    "ready": True,
+                    "readiness_mode": strategy_health.get("readiness_mode") or "local_watchlist_snapshot",
+                    "latest_watchlist_time": strategy_health.get("latest_watchlist_time") or latest_watchlist_time,
+                    "watchlist_rows_today": int(local_watchlist_status.get("rows") or 0),
+                    "watchlist_rows_latest": int(local_watchlist_status.get("rows") or 0),
+                }
+                if latest_watchlist_time:
+                    latest_ts = pd.Timestamp(latest_watchlist_time)
+                    if latest_ts.tzinfo is None:
+                        latest_ts = latest_ts.tz_localize("UTC")
+                    strategy_health["watchlist_age_seconds"] = max(
+                        0.0,
+                        (pd.Timestamp.utcnow() - latest_ts).total_seconds(),
+                    )
+        data_status = self._build_live_data_status(
+            underlying=underlying,
+            feature_frame=feature_frame,
+            strategy_health=strategy_health,
+            history_source=history_source,
+            history_symbol=history_symbol,
+        )
 
         selection_reason = "Regime is not tradeable."
         candidate_payload: dict[str, object] | None = None
@@ -418,13 +452,9 @@ class DirectionalOptionsService:
         risk_payload: dict[str, object] | None = None
         rag_context: dict[str, Any] | None = None
 
-        if not bool(data_status.get("execution_ready")):
-            selection_reason = (
-                str(data_status.get("degraded_reason") or "Local market-intelligence data is not fresh enough for paper execution.")
-                .replace("_", " ")
-            )
-        elif signal is not None:
-            option_snapshot_lookup_failed = False
+        snapshot_rows: list[dict[str, Any]] = []
+        option_snapshot_lookup_failed = False
+        if signal is not None:
             try:
                 snapshot_rows = await asyncio.wait_for(
                     self.store.list_live_contract_snapshots(
@@ -440,6 +470,26 @@ class DirectionalOptionsService:
                 option_snapshot_lookup_failed = True
                 selection_reason = f"Live option snapshot lookup timed out or failed: {exc}"
                 snapshot_rows = []
+            if snapshot_rows and not bool(data_status.get("execution_ready")):
+                latest_option_time = max(str(item.get("time") or "") for item in snapshot_rows)
+                data_status.update(
+                    {
+                        "latest_watchlist_time": latest_option_time or data_status.get("latest_watchlist_time"),
+                        "watchlist_rows_latest": max(
+                            int(data_status.get("watchlist_rows_latest") or 0),
+                            len(snapshot_rows),
+                        ),
+                        "execution_ready": True,
+                        "degraded_reason": None,
+                    }
+                )
+
+        if not bool(data_status.get("execution_ready")):
+            selection_reason = (
+                str(data_status.get("degraded_reason") or "Local market-intelligence data is not fresh enough for paper execution.")
+                .replace("_", " ")
+            )
+        elif signal is not None:
             selection = self.selector.select_from_live_snapshots(
                 underlying=underlying,
                 timestamp=timestamp,
@@ -645,6 +695,8 @@ class DirectionalOptionsService:
         watchlist_age_seconds = strategy_health.get("watchlist_age_seconds")
         latest_spot_map = dict(strategy_health.get("latest_spot_rows") or {})
         latest_spot_time = latest_spot_map.get(str(underlying).upper())
+        if not latest_spot_time and not feature_frame.empty:
+            latest_spot_time = pd.Timestamp(feature_frame.iloc[-1]["time"]).isoformat()
         stale_limit = float(self.config["paper_trading"]["stale_watchlist_seconds"])
         spot_age_seconds: Optional[float] = None
         if latest_spot_time:

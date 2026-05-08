@@ -8,16 +8,11 @@ from core.config import settings
 
 def _database_pool_config() -> dict[str, int | bool]:
     is_development = settings.APP_ENV == "development"
-    # Production defaults bumped from (3, 2) to (10, 20). The previous values
-    # left a single Cloud Run instance with at most 5 concurrent connections,
-    # which the multi-agent runtime (Strategy 1+2 scanners, FMP, directional,
-    # auction-IQ, MP, commodity, plus API traffic) routinely exhausted —
-    # surfacing as `QueuePool limit ... reached, connection timed out`
-    # cascades that hung whole runners. 10+20 ≈ 30 conns/instance keeps a
-    # comfortable safety margin while staying well under typical Postgres
-    # max_connections.
-    pool_size = settings.DATABASE_POOL_SIZE or (10 if is_development else 10)
-    max_overflow = settings.DATABASE_MAX_OVERFLOW or (20 if is_development else 20)
+    # Keep per-instance connection demand conservative. Cloud Run may run
+    # several API instances during market hours; large pools per instance can
+    # exhaust Postgres before individual requests see local pool pressure.
+    pool_size = settings.DATABASE_POOL_SIZE or (5 if is_development else 3)
+    max_overflow = settings.DATABASE_MAX_OVERFLOW or (5 if is_development else 2)
     return {
         "pool_pre_ping": True,
         "pool_size": max(pool_size, 1),

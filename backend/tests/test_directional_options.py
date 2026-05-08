@@ -436,12 +436,10 @@ async def test_directional_options_live_snapshot_uses_local_market_intelligence(
 
     async def fake_strategy_health():
         return {
-            "watchlist_rows_today": 420,
-            "latest_watchlist_time": t2.isoformat(),
-            "watchlist_age_seconds": 15.0,
-            "latest_spot_rows": {
-                "NIFTY": t2.isoformat(),
-            },
+            "watchlist_rows_today": 0,
+            "latest_watchlist_time": None,
+            "watchlist_age_seconds": None,
+            "latest_spot_rows": {},
         }
 
     monkeypatch.setattr(service.store, "load_live_spot_frame", fake_load_live_spot_frame)
@@ -455,5 +453,36 @@ async def test_directional_options_live_snapshot_uses_local_market_intelligence(
     payload = await service.live_snapshot("NIFTY", "5minute", 4)
 
     assert payload["snapshot"]["data_status"]["execution_ready"] is True
+    assert payload["snapshot"]["data_status"]["watchlist_rows_latest"] == 1
     assert payload["snapshot"]["selected_contract"]["trading_symbol"] == "NIFTY 22500 CE"
     assert payload["snapshot"]["selected_contract"]["price_source"] == "local_watchlist"
+
+
+def test_live_data_status_uses_loaded_feature_time_when_health_spot_map_lags() -> None:
+    service = DirectionalOptionsService()
+    now = pd.Timestamp.utcnow()
+    feature_frame = pd.DataFrame(
+        [
+            {
+                "time": now,
+                "close": 22500.0,
+            }
+        ]
+    )
+
+    status = service._build_live_data_status(
+        underlying="NIFTY",
+        feature_frame=feature_frame,
+        strategy_health={
+            "ready": True,
+            "watchlist_rows_today": 12,
+            "latest_watchlist_time": now.isoformat(),
+            "watchlist_age_seconds": 10.0,
+            "latest_spot_rows": {},
+        },
+        history_source="timescaledb_spot_1minute",
+        history_symbol="NIFTY",
+    )
+
+    assert status["latest_spot_time"] == now.isoformat()
+    assert status["degraded_reason"] is None

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
 import { clsx } from "clsx";
@@ -269,6 +269,27 @@ function formatPlainNumber(value?: number | null, digits = 1) {
   return value.toFixed(digits);
 }
 
+function formatBuildup(value?: string | null) {
+  if (!value) return "--";
+  return value
+    .split("_")
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatMomentumBucket(value: string) {
+  const labels: Record<string, string> = {
+    lt_minus_5: "< -5%",
+    minus_5_to_minus_2: "-5 to -2%",
+    minus_2_to_0: "-2 to 0%",
+    zero_to_2: "0 to 2%",
+    two_to_5: "2 to 5%",
+    gt_5: "> 5%",
+    unknown: "Unknown",
+  };
+  return labels[value] ?? formatBuildup(value);
+}
+
 function valueTone(value?: number | null) {
   if (value == null || Number.isNaN(value)) return "text-text-muted";
   if (value > 0) return "text-accent-green";
@@ -494,6 +515,24 @@ function MarketIntelligenceContextPanel({
   const optionChainRoute = routes?.option_chain ?? {};
   const mpRoute = routes?.market_profile ?? {};
   const liveSelected = liveRoute?.selected || liveRoute?.active_live_sources?.[0] || "awaiting broker";
+  const fno360 = context?.fno_360 ?? {};
+  const fnoMarket = fno360?.market ?? {};
+  const fnoBreadth = fno360?.breadth ?? {};
+  const fnoBuildup = fno360?.buildup_counts ?? {};
+  const fnoTopVolume = fno360?.top_volume ?? [];
+  const fnoTopOi = fno360?.top_oi ?? [];
+  const fnoAnalytics = fno360?.analytics ?? {};
+  const indexWatch = fnoAnalytics?.index_watch ?? [];
+  const marketBias = fnoAnalytics?.market_bias ?? {};
+  const momentumDistribution = fnoAnalytics?.momentum_distribution ?? {};
+  const activeOptions = fnoAnalytics?.active_options ?? [];
+  const futuresGainers = fnoAnalytics?.futures_gainers ?? [];
+  const futuresLosers = fnoAnalytics?.futures_losers ?? [];
+  const volatilityWatch = fnoAnalytics?.volatility_watch ?? [];
+  const positiveContributors = fnoAnalytics?.positive_contributors ?? [];
+  const oiConcentration = fnoAnalytics?.oi_concentration ?? {};
+  const momentumMax = Math.max(1, ...Object.values(momentumDistribution).map((value: any) => Number(value) || 0));
+  const fnoReady = fno360?.status === "ready";
 
   if (loading && !context) {
     return (
@@ -529,9 +568,15 @@ function MarketIntelligenceContextPanel({
           </button>
         </div>
 
-        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-6">
           <PulseIndicatorCard label="Live F&O Stocks" value={`${sectorInteraction?.universe?.stocks ?? "--"}`} detail="sector interaction universe" tone="text-accent-green" />
           <PulseIndicatorCard label="Mapped Stocks" value={`${sectorInteraction?.universe?.mapped ?? "--"}`} detail="F&O/ATM taxonomy" />
+          <PulseIndicatorCard
+            label="FNO 360"
+            value={`${fnoMarket?.total_underlyings ?? "--"}`}
+            detail={`${fnoMarket?.stock_underlyings ?? 0} stocks / ${fnoMarket?.index_underlyings ?? 0} indices`}
+            tone={fnoReady ? "text-accent-green" : "text-accent-amber"}
+          />
           <PulseIndicatorCard label="NSE Overlay" value={nseOverlay.runtime_overlay_active ? "Active" : "Static"} detail={`${nseOverlay.sector_count ?? 0} official CSVs`} tone={nseOverlay.runtime_overlay_active ? "text-accent-green" : "text-accent-amber"} />
           <PulseIndicatorCard label="Real VAR Edges" value={`${realModel.edge_count ?? "--"}`} detail={realModel.source_mode?.replaceAll("_", " ") || "sector-index model"} tone="text-accent-blue" />
           <PulseIndicatorCard label="Macro Headwinds" value={`${macroRead.headwind_count ?? "--"}`} detail="research risk gates" tone="text-accent-red" />
@@ -570,6 +615,223 @@ function MarketIntelligenceContextPanel({
           </div>
           <div className="mt-3 text-xs leading-5 text-text-muted">
             {durableStorage?.note || "Historical candles and Market Intelligence context are read from durable storage first; broker calls are used to fill gaps."}
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-[24px] border border-bg-border bg-bg-secondary/35 p-4">
+        <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-semibold text-text-primary">
+              <Radar size={16} className="text-accent-green" />
+              FNO 360 Statistics
+            </div>
+            <div className="mt-1 text-xs text-text-muted">
+              {fno360?.latest_time ? `Snapshot ${new Date(fno360.latest_time).toLocaleString()}` : "Waiting for persisted F&O snapshot"}
+            </div>
+          </div>
+          <div className={clsx("rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em]", fnoReady ? "border-accent-green/30 bg-accent-green/10 text-accent-green" : "border-accent-amber/30 bg-accent-amber/10 text-accent-amber")}>
+            {fno360?.status ?? "loading"}
+          </div>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+          <PulseIndicatorCard label="PCR OI" value={formatPlainNumber(fnoMarket?.pcr_oi, 2)} detail={`${formatCompact(fnoMarket?.pe_oi_total)} PE / ${formatCompact(fnoMarket?.ce_oi_total)} CE`} tone="text-accent-blue" />
+          <PulseIndicatorCard label="PCR Volume" value={formatPlainNumber(fnoMarket?.pcr_volume, 2)} detail={`${formatCompact(fnoMarket?.pe_volume_total)} PE / ${formatCompact(fnoMarket?.ce_volume_total)} CE`} tone="text-accent-blue" />
+          <PulseIndicatorCard label="Net OI Change" value={formatCompact(fnoMarket?.net_oi_change_total)} detail={`${formatCompact(fnoMarket?.ce_oi_change_total)} CE - ${formatCompact(fnoMarket?.pe_oi_change_total)} PE`} tone={valueTone(fnoMarket?.net_oi_change_total)} directionValue={fnoMarket?.net_oi_change_total} />
+          <PulseIndicatorCard label="Average IV" value={formatIv(fnoMarket?.average_iv)} detail="CE/PE snapshot mean" tone="text-accent-amber" />
+          <PulseIndicatorCard label="Breadth" value={`${fnoBreadth?.advancers ?? 0}/${fnoBreadth?.decliners ?? 0}`} detail={`${fnoBreadth?.unchanged ?? 0} unchanged`} tone="text-accent-green" />
+          <PulseIndicatorCard label="Average Move" value={formatSignedPct(fnoMarket?.average_change_pct)} detail="ATM CE/PE mean" tone={valueTone(fnoMarket?.average_change_pct)} directionValue={fnoMarket?.average_change_pct} />
+        </div>
+
+        <div className="mt-4 grid gap-4 xl:grid-cols-[1fr_1fr_1fr]">
+          <div className="rounded-2xl border border-bg-border bg-bg-primary/30 p-3">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="text-sm font-semibold text-text-primary">Index Watch</div>
+              <div className="text-[11px] text-text-muted">ATM F&O snapshot</div>
+            </div>
+            <div className="space-y-2">
+              {indexWatch.slice(0, 6).map((item: any) => (
+                <div key={`${item.symbol}-index-watch`} className="grid grid-cols-[1fr_auto_auto] items-center gap-3 rounded-xl border border-bg-border bg-bg-secondary/35 px-3 py-2 text-xs">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-text-primary">{item.symbol}</div>
+                    <div className="mt-1 text-[11px] text-text-muted">PCR {formatPlainNumber(item.pcr_oi, 2)} · OI {formatCompact(item.total_oi)}</div>
+                  </div>
+                  <div className="font-mono text-text-secondary">{formatPlainNumber(item.spot_price, 2)}</div>
+                  <div className={clsx("font-mono", valueTone(item.avg_change_pct))}>{formatSignedPct(item.avg_change_pct)}</div>
+                </div>
+              ))}
+              {!indexWatch.length && <div className="text-xs text-text-muted">Index analytics loading.</div>}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-bg-border bg-bg-primary/30 p-3">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="text-sm font-semibold text-text-primary">Market Bias Strength</div>
+              <span className={clsx("rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em]", marketBias?.label === "bullish" ? "border-accent-green/30 bg-accent-green/10 text-accent-green" : marketBias?.label === "bearish" ? "border-accent-red/30 bg-accent-red/10 text-accent-red" : "border-bg-border bg-bg-secondary/40 text-text-secondary")}>
+                {marketBias?.label ?? "balanced"}
+              </span>
+            </div>
+            <div className={clsx("font-mono text-3xl font-semibold", valueTone(marketBias?.score))}>{formatSigned(marketBias?.score, 1)}</div>
+            <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+              <PulseRow label="Long" value={`${marketBias?.long ?? 0}`} tone="text-accent-green" />
+              <PulseRow label="Short" value={`${marketBias?.short ?? 0}`} tone="text-accent-red" />
+              <PulseRow label="Short Cover" value={`${marketBias?.short_covering ?? 0}`} tone="text-accent-blue" />
+              <PulseRow label="Long Unwind" value={`${marketBias?.long_unwinding ?? 0}`} tone="text-accent-amber" />
+            </div>
+            <div className="mt-3 text-xs text-text-muted">
+              OI concentration: {formatPlainNumber(oiConcentration?.top_10_oi_share_pct, 1)}% in top names.
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-bg-border bg-bg-primary/30 p-3">
+            <div className="mb-3 text-sm font-semibold text-text-primary">Momentum Distribution</div>
+            <div className="space-y-2">
+              {Object.entries(momentumDistribution).map(([bucket, count]) => (
+                <div key={bucket} className="grid grid-cols-[92px_1fr_32px] items-center gap-2 text-xs">
+                  <span className="text-text-muted">{formatMomentumBucket(bucket)}</span>
+                  <div className="h-2 overflow-hidden rounded-full bg-bg-secondary">
+                    <div
+                      className={clsx("h-full rounded-full", bucket.startsWith("minus") || bucket === "lt_minus_5" ? "bg-accent-red" : "bg-accent-green")}
+                      style={{ width: `${Math.max(4, (Number(count) / momentumMax) * 100)}%` }}
+                    />
+                  </div>
+                  <span className="text-right font-mono text-text-secondary">{String(count)}</span>
+                </div>
+              ))}
+              {!Object.keys(momentumDistribution).length && <div className="text-xs text-text-muted">Momentum buckets loading.</div>}
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+          <div className="overflow-x-auto rounded-2xl border border-bg-border bg-bg-primary/30">
+            <table className="w-full min-w-[860px] text-sm">
+              <thead className="bg-bg-secondary/70 text-left text-[11px] uppercase tracking-[0.14em] text-text-muted">
+                <tr>
+                  <th className="px-4 py-3">Symbol</th>
+                  <th className="px-4 py-3">Volume</th>
+                  <th className="px-4 py-3">Total OI</th>
+                  <th className="px-4 py-3">PCR OI</th>
+                  <th className="px-4 py-3">Avg IV</th>
+                  <th className="px-4 py-3">Move</th>
+                  <th className="px-4 py-3">Buildup</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-bg-border/70 text-text-secondary">
+                {fnoTopVolume.slice(0, 8).map((item: any) => (
+                  <tr key={`${item.symbol}-${item.expiry}`}>
+                    <td className="px-4 py-3 font-semibold text-text-primary">{item.symbol}</td>
+                    <td className="px-4 py-3 font-mono">{formatCompact(item.total_volume)}</td>
+                    <td className="px-4 py-3 font-mono">{formatCompact(item.total_oi)}</td>
+                    <td className="px-4 py-3 font-mono text-accent-blue">{formatPlainNumber(item.pcr_oi, 2)}</td>
+                    <td className="px-4 py-3 font-mono text-accent-amber">{formatIv(item.avg_iv)}</td>
+                    <td className={clsx("px-4 py-3 font-mono", valueTone(item.avg_change_pct))}>{formatSignedPct(item.avg_change_pct)}</td>
+                    <td className="px-4 py-3 text-xs text-text-muted">{formatBuildup(item.buildup)}</td>
+                  </tr>
+                ))}
+                {!fnoTopVolume.length && (
+                  <tr>
+                    <td className="px-4 py-6 text-center text-xs text-text-muted" colSpan={7}>
+                      Persisted F&O statistics are not available yet.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="grid gap-3">
+            <div className="rounded-2xl border border-bg-border bg-bg-primary/30 p-3">
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">Buildup Counts</div>
+              <div className="grid grid-cols-2 gap-2">
+                {Object.entries(fnoBuildup).map(([key, value]) => (
+                  <div key={key} className="rounded-xl border border-bg-border bg-bg-secondary/40 px-3 py-2">
+                    <div className="text-[11px] text-text-muted">{formatBuildup(key)}</div>
+                    <div className="mt-1 font-mono text-lg font-semibold text-text-primary">{String(value)}</div>
+                  </div>
+                ))}
+                {!Object.keys(fnoBuildup).length && <div className="col-span-2 text-xs text-text-muted">No buildup distribution yet.</div>}
+              </div>
+            </div>
+            <div className="rounded-2xl border border-bg-border bg-bg-primary/30 p-3">
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">Highest OI</div>
+              <div className="space-y-2">
+                {fnoTopOi.slice(0, 5).map((item: any) => (
+                  <div key={`${item.symbol}-${item.expiry}-oi`} className="flex items-center justify-between rounded-xl border border-bg-border bg-bg-secondary/40 px-3 py-2 text-xs">
+                    <span className="font-semibold text-text-secondary">{item.symbol}</span>
+                    <span className="font-mono text-text-primary">{formatCompact(item.total_oi)}</span>
+                  </div>
+                ))}
+                {!fnoTopOi.length && <div className="text-xs text-text-muted">OI leaders loading.</div>}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-4 xl:grid-cols-3">
+          <div className="rounded-2xl border border-bg-border bg-bg-primary/30 p-3">
+            <div className="mb-3 text-sm font-semibold text-text-primary">Active Options</div>
+            <div className="space-y-2">
+              {activeOptions.slice(0, 7).map((item: any) => (
+                <div key={`${item.symbol}-${item.side}-${item.strike}`} className="grid grid-cols-[1fr_auto] gap-3 rounded-xl border border-bg-border bg-bg-secondary/40 px-3 py-2 text-xs">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-text-primary">{item.symbol} {item.side} {formatPlainNumber(item.strike, 0)}</div>
+                    <div className={clsx("mt-1 font-mono", valueTone(item.change_pct))}>{formatSignedPct(item.change_pct)} · IV {formatIv(item.iv)}</div>
+                  </div>
+                  <div className="text-right font-mono text-accent-blue">{formatCompact(item.volume)}</div>
+                </div>
+              ))}
+              {!activeOptions.length && <div className="text-xs text-text-muted">Active option contracts loading.</div>}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-bg-border bg-bg-primary/30 p-3">
+            <div className="mb-3 text-sm font-semibold text-text-primary">Futures Movers</div>
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+              <div className="space-y-2">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent-green">Gainers</div>
+                {futuresGainers.slice(0, 5).map((item: any) => (
+                  <div key={`${item.symbol}-gainer`} className="flex items-center justify-between rounded-xl border border-bg-border bg-bg-secondary/40 px-3 py-2 text-xs">
+                    <span className="font-semibold text-text-secondary">{item.symbol}</span>
+                    <span className="font-mono text-accent-green">{formatSignedPct(item.avg_change_pct)}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="space-y-2">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent-red">Losers</div>
+                {futuresLosers.slice(0, 5).map((item: any) => (
+                  <div key={`${item.symbol}-loser`} className="flex items-center justify-between rounded-xl border border-bg-border bg-bg-secondary/40 px-3 py-2 text-xs">
+                    <span className="font-semibold text-text-secondary">{item.symbol}</span>
+                    <span className="font-mono text-accent-red">{formatSignedPct(item.avg_change_pct)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-bg-border bg-bg-primary/30 p-3">
+            <div className="mb-3 text-sm font-semibold text-text-primary">Volatility and Contributors</div>
+            <div className="space-y-2">
+              {volatilityWatch.slice(0, 3).map((item: any) => (
+                <div key={`${item.symbol}-vol`} className="flex items-center justify-between rounded-xl border border-bg-border bg-bg-secondary/40 px-3 py-2 text-xs">
+                  <span className="font-semibold text-text-secondary">{item.symbol}</span>
+                  <span className="font-mono text-accent-amber">{formatIv(item.avg_iv)}</span>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 border-t border-bg-border pt-3">
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">Positive Contributors</div>
+              <div className="space-y-2">
+                {positiveContributors.slice(0, 4).map((item: any) => (
+                  <div key={`${item.symbol}-contrib`} className="grid grid-cols-[1fr_auto] items-center gap-3 text-xs">
+                    <span className="font-semibold text-text-secondary">{item.symbol}</span>
+                    <span className="font-mono text-accent-green">{formatPlainNumber(item.impact_score, 1)}</span>
+                  </div>
+                ))}
+                {!positiveContributors.length && <div className="text-xs text-text-muted">Contributor analytics loading.</div>}
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -1281,7 +1543,10 @@ export default function MarketPage() {
     }
   }, [sectorQuery.data, selectedSectorCode]);
 
-  const selectedSectorStocks = sectorQuery.data?.stocks_by_sector?.[selectedSectorCode]?.rrg?.points ?? [];
+  const selectedSectorStocks = useMemo(
+    () => sectorQuery.data?.stocks_by_sector?.[selectedSectorCode]?.rrg?.points ?? [],
+    [sectorQuery.data?.stocks_by_sector, selectedSectorCode],
+  );
 
   useEffect(() => {
     if (!selectedSectorStocks.length) {
@@ -1296,32 +1561,65 @@ export default function MarketPage() {
   const chain = chainQuery.data;
   const profile = profileQuery.data;
   const sectorRotation = sectorQuery.data;
-  const entries = chain?.entries ?? [];
-  const ceEntries = entries.filter((entry) => entry.option_type === "CE");
-  const peEntries = entries.filter((entry) => entry.option_type === "PE");
-  const strikes = Array.from(new Set(entries.map((entry) => entry.strike))).sort((a, b) => a - b);
-  const atmIndex = Math.max(0, strikes.findIndex((strike) => strike === chain?.atm_strike));
-  const visibleStrikes = strikes.length > 0
-    ? strikes.slice(Math.max(0, atmIndex - 8), Math.min(strikes.length, atmIndex + 9))
-    : [];
+  const entries = useMemo(() => chain?.entries ?? [], [chain?.entries]);
+  const { ceEntries, peEntries, strikes, visibleStrikes } = useMemo(() => {
+    const nextCeEntries: ChainEntry[] = [];
+    const nextPeEntries: ChainEntry[] = [];
+    const strikeSet = new Set<number>();
+    for (const entry of entries) {
+      strikeSet.add(entry.strike);
+      if (entry.option_type === "CE") {
+        nextCeEntries.push(entry);
+      } else if (entry.option_type === "PE") {
+        nextPeEntries.push(entry);
+      }
+    }
+    const nextStrikes = Array.from(strikeSet).sort((a, b) => a - b);
+    const nextAtmIndex = Math.max(0, nextStrikes.findIndex((strike) => strike === chain?.atm_strike));
+    return {
+      ceEntries: nextCeEntries,
+      peEntries: nextPeEntries,
+      strikes: nextStrikes,
+      visibleStrikes: nextStrikes.length > 0
+        ? nextStrikes.slice(Math.max(0, nextAtmIndex - 8), Math.min(nextStrikes.length, nextAtmIndex + 9))
+        : [],
+    };
+  }, [chain?.atm_strike, entries]);
   const liveSpot = selectedTick?.ltp || chain?.spot_price || 0;
   const spotPositive = selectedTick && selectedTick.close > 0 ? selectedTick.ltp >= selectedTick.close : undefined;
 
-  const sectorPoints = sectorRotation?.rrg?.points ?? [];
-  const sectorWatchlist = sectorRotation?.watchlist ?? [];
-  const selectedSector = sectorPoints.find((sector) => sector.code === selectedSectorCode)
-    ?? sectorWatchlist.find((sector) => sector.code === selectedSectorCode)
-    ?? sectorWatchlist[0]
-    ?? null;
-  const leadingSectors = sectorWatchlist.filter((sector) => sector.quadrant === "leading");
-  const improvingSectors = sectorWatchlist.filter((sector) => sector.quadrant === "improving");
-  const weakeningSectors = sectorWatchlist.filter((sector) => sector.quadrant === "weakening");
-  const laggingSectors = sectorWatchlist.filter((sector) => sector.quadrant === "lagging");
-  const selectedSectorStockRows = sectorRotation?.stocks_by_sector?.[selectedSectorCode]?.stocks ?? [];
-  const stockLeading = selectedSectorStockRows.filter((stock) => stock.quadrant === "leading");
-  const stockImproving = selectedSectorStockRows.filter((stock) => stock.quadrant === "improving");
-  const stockWeakening = selectedSectorStockRows.filter((stock) => stock.quadrant === "weakening");
-  const stockLagging = selectedSectorStockRows.filter((stock) => stock.quadrant === "lagging");
+  const sectorPoints = useMemo(() => sectorRotation?.rrg?.points ?? [], [sectorRotation?.rrg?.points]);
+  const sectorWatchlist = useMemo(() => sectorRotation?.watchlist ?? [], [sectorRotation?.watchlist]);
+  const {
+    selectedSector,
+    leadingSectors,
+    improvingSectors,
+    weakeningSectors,
+    laggingSectors,
+    selectedSectorStockRows,
+    stockLeading,
+    stockImproving,
+    stockWeakening,
+    stockLagging,
+  } = useMemo(() => {
+    const nextSelectedSector = sectorPoints.find((sector) => sector.code === selectedSectorCode)
+      ?? sectorWatchlist.find((sector) => sector.code === selectedSectorCode)
+      ?? sectorWatchlist[0]
+      ?? null;
+    const stocks = sectorRotation?.stocks_by_sector?.[selectedSectorCode]?.stocks ?? [];
+    return {
+      selectedSector: nextSelectedSector,
+      leadingSectors: sectorWatchlist.filter((sector) => sector.quadrant === "leading"),
+      improvingSectors: sectorWatchlist.filter((sector) => sector.quadrant === "improving"),
+      weakeningSectors: sectorWatchlist.filter((sector) => sector.quadrant === "weakening"),
+      laggingSectors: sectorWatchlist.filter((sector) => sector.quadrant === "lagging"),
+      selectedSectorStockRows: stocks,
+      stockLeading: stocks.filter((stock) => stock.quadrant === "leading"),
+      stockImproving: stocks.filter((stock) => stock.quadrant === "improving"),
+      stockWeakening: stocks.filter((stock) => stock.quadrant === "weakening"),
+      stockLagging: stocks.filter((stock) => stock.quadrant === "lagging"),
+    };
+  }, [sectorPoints, sectorRotation?.stocks_by_sector, sectorWatchlist, selectedSectorCode]);
   const isWatchlistBuilding = watchlistData?.build_status === "building";
   const showWatchlistLoading = watchlistLiveQuery.isLoading || (isWatchlistBuilding && !(watchlistData?.rows?.length));
   const selectSectorAndOpen = (code: string) => {

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
+
 from agent import window_calculator as window_calculator_module
 from paper_engine.order_book import PaperOrderBook
 from paper_engine.portfolio import PaperPortfolio
@@ -13,7 +15,10 @@ from paper_engine.strategy_agent import (
     PaperStrategyAgent,
     StrategyPosition,
     _ensure_ist_datetime,
+    _latest_populated_session_rows,
     _latest_session_rows,
+    _strategy2_expected_session_date,
+    _strategy2_is_regular_session,
     detect_greeks_signal,
     detect_macd_zero_cross,
 )
@@ -60,6 +65,33 @@ def test_detect_greeks_signal_on_supportive_series() -> None:
     assert reason == "greeks_sync_signal"
 
 
+def test_latest_populated_session_rows_ignores_partial_after_hours_bucket() -> None:
+    full_start = datetime(2026, 5, 6, 9, 15, tzinfo=UTC)
+    partial_start = datetime(2026, 5, 6, 18, 30, tzinfo=UTC)
+    rows = [
+        {"time": (full_start + timedelta(minutes=index)).isoformat(), "close": 100.0 + index}
+        for index in range(60)
+    ] + [
+        {"time": (partial_start + timedelta(minutes=index)).isoformat(), "close": 200.0 + index}
+        for index in range(3)
+    ]
+
+    session_rows, session_date = _latest_populated_session_rows(rows, min_rows=30)
+
+    assert session_date == date(2026, 5, 6)
+    assert len(session_rows) == 60
+
+
+def test_strategy2_expected_session_date_uses_previous_date_before_open() -> None:
+    before_open = datetime(2026, 5, 7, 0, 15, tzinfo=UTC)
+    after_open = datetime(2026, 5, 7, 9, 20, tzinfo=UTC)
+
+    assert _strategy2_expected_session_date(before_open) == date(2026, 5, 6)
+    assert _strategy2_expected_session_date(after_open) == date(2026, 5, 7)
+    assert _strategy2_is_regular_session(before_open) is False
+    assert _strategy2_is_regular_session(after_open) is True
+
+
 def test_paper_portfolio_summary_sanitizes_infinite_profit_factor() -> None:
     portfolio = PaperPortfolio(initial_capital=1_000_000.0, session_id="test")
     summary = portfolio.get_summary()
@@ -104,6 +136,35 @@ def test_trade_history_persists_signal_metadata() -> None:
     assert trade.setup_type == "breakout"
     assert trade.entry_iv_pct == 24.5
     assert trade.regime == "bullish"
+
+
+def test_paper_portfolio_option_close_does_not_double_count_pnl() -> None:
+    portfolio = PaperPortfolio(initial_capital=1_000_000.0, session_id="cash")
+    order_book = PaperOrderBook(on_fill=portfolio.on_fill)
+
+    order_book.place_order(
+        symbol="OPT:NIFTY:2026-04-30:24000:CE",
+        action="BUY",
+        order_type="MARKET",
+        qty=100,
+        instrument_type="CE",
+        option_type="CE",
+        ltp=100.0,
+    )
+    order_book.place_order(
+        symbol="OPT:NIFTY:2026-04-30:24000:CE",
+        action="SELL",
+        order_type="MARKET",
+        qty=100,
+        instrument_type="CE",
+        option_type="CE",
+        ltp=80.0,
+    )
+
+    trade = portfolio._trade_history[0]
+
+    assert trade.pnl == pytest.approx((79.96 - 100.05) * 100)
+    assert portfolio.available_capital == pytest.approx(1_000_000.0 + trade.pnl)
 
 
 def test_candidate_expiries_include_next_when_front_is_near() -> None:
@@ -481,12 +542,41 @@ def test_strategy1_scan_entries_uses_snapshot_macd_cross(monkeypatch) -> None:
     async def fake_snapshot_state(_rows):
         return {
             "NSE_FO|CE1": {
-                1: {"time": datetime(2026, 4, 16, 11, 58, tzinfo=strategy_agent_module.IST), "macd": 1.4, "macd_signal": 0.8, "macd_histogram": 0.6, "rsi": 62.5, "ltp": 118.0},
-                2: {"time": datetime(2026, 4, 16, 11, 28, tzinfo=strategy_agent_module.IST), "macd": -0.3},
+                1: {
+                    "time": datetime(2026, 4, 16, 11, 58, tzinfo=strategy_agent_module.IST),
+                    "macd_bucket": datetime(2026, 4, 16, 11, 30),
+                    "macd": 1.4,
+                    "macd_signal": 0.8,
+                    "macd_histogram": 0.6,
+                    "rsi": 62.5,
+                    "ltp": 118.0,
+                },
+                2: {
+                    "time": datetime(2026, 4, 16, 11, 55, tzinfo=strategy_agent_module.IST),
+                    "macd_bucket": datetime(2026, 4, 16, 11, 30),
+                    "macd": 1.4,
+                },
+                3: {
+                    "time": datetime(2026, 4, 16, 11, 28, tzinfo=strategy_agent_module.IST),
+                    "macd_bucket": datetime(2026, 4, 16, 11, 0),
+                    "macd": -0.3,
+                },
             },
             "NSE_FO|PE1": {
-                1: {"time": datetime(2026, 4, 16, 11, 58, tzinfo=strategy_agent_module.IST), "macd": -0.6, "macd_signal": -0.9, "macd_histogram": 0.3, "rsi": 38.0, "ltp": 91.0},
-                2: {"time": datetime(2026, 4, 16, 11, 28, tzinfo=strategy_agent_module.IST), "macd": -0.4},
+                1: {
+                    "time": datetime(2026, 4, 16, 11, 58, tzinfo=strategy_agent_module.IST),
+                    "macd_bucket": datetime(2026, 4, 16, 11, 30),
+                    "macd": 0.6,
+                    "macd_signal": 0.4,
+                    "macd_histogram": 0.3,
+                    "rsi": 38.0,
+                    "ltp": 91.0,
+                },
+                2: {
+                    "time": datetime(2026, 4, 16, 11, 28, tzinfo=strategy_agent_module.IST),
+                    "macd_bucket": datetime(2026, 4, 16, 11, 0),
+                    "macd": 0.4,
+                },
             },
         }
 
@@ -889,6 +979,46 @@ def test_run_once_uses_market_intelligence_health_when_paper_only(monkeypatch) -
     assert status["data_health"]["market_intelligence"]["ready"] is False
 
 
+def test_run_once_blocks_stale_market_intelligence_when_paper_only(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    broker_calls = {"count": 0}
+
+    async def fake_broker_snapshot(*, force_validate: bool = False):
+        broker_calls["count"] += 1
+        return {"broker_ready": True}
+
+    async def fake_market_intelligence_health():
+        return {
+            "ready": True,
+            "execution_ready": False,
+            "readiness_mode": "latest_session",
+            "execution_mode": "stale_latest_session",
+            "watchlist_rows_today": 0,
+            "watchlist_rows_latest": 171,
+            "latest_watchlist_time": "2026-04-24T09:29:55.977752+00:00",
+            "watchlist_age_seconds": 14 * 24 * 60 * 60,
+            "max_execution_age_seconds": 36 * 60 * 60,
+        }
+
+    monkeypatch.setattr(strategy_agent_module.settings, "PAPER_TRADING_ONLY", True)
+    monkeypatch.setattr(strategy_agent_module, "_in_market_hours", lambda _: True)
+    monkeypatch.setattr(strategy_agent_module, "get_broker_connection_snapshot", fake_broker_snapshot)
+    monkeypatch.setattr(
+        strategy_agent_module.market_intelligence_runtime,
+        "get_strategy_health",
+        fake_market_intelligence_health,
+    )
+
+    status = asyncio.run(agent.run_once(force=False))
+
+    assert broker_calls["count"] == 0
+    assert "Shared market-intelligence data is stale" in status["last_message"]
+    assert "execution mode=stale_latest_session" in status["last_message"]
+    assert status["data_health"]["market_intelligence"]["ready"] is True
+    assert status["data_health"]["market_intelligence"]["execution_ready"] is False
+    assert status["strategies"][0]["meta"]["mode"] == "local_data_stale"
+
+
 def test_manage_exits_ignores_first_ma20_pullback(monkeypatch) -> None:
     agent = PaperStrategyAgent()
     runtime = agent._strategy1
@@ -984,3 +1114,38 @@ def test_manage_exits_closes_after_pullback_ignore_window(monkeypatch) -> None:
     asyncio.run(agent._manage_exits(runtime))
 
     assert closed == ["ma20_pullback_exit"]
+
+
+def test_load_candles_appends_newer_atm_watchlist_snapshot(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    start = datetime(2026, 5, 6, 9, 15, tzinfo=UTC)
+
+    async def fake_load_candles(**_kwargs):
+        return [
+            {"time": (start + timedelta(minutes=5 * index)).isoformat(), "close": 100.0 + index}
+            for index in range(3)
+        ]
+
+    monkeypatch.setattr(strategy_agent_module.option_history_service, "load_candles", fake_load_candles)
+
+    rows = asyncio.run(
+        agent._load_candles(
+            {"underlying": "BANKNIFTY", "expiry": "2026-05-26"},
+            {
+                "strike": 56400,
+                "option_type": "CE",
+                "instrument_key": "NSE_FO|67564",
+                "ltp": 943.75,
+                "volume": 312750,
+                "as_of": (start + timedelta(minutes=30)).isoformat(),
+            },
+            interval="5minute",
+            limit=96,
+        )
+    )
+
+    assert datetime.fromisoformat(rows[-1]["time"]).timestamp() == pytest.approx(
+        (start + timedelta(minutes=30)).timestamp()
+    )
+    assert rows[-1]["close"] == 943.75
+    assert rows[-1]["source"] == "atm_watchlist_snapshot"

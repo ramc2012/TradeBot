@@ -207,8 +207,7 @@ async def get_data_status() -> dict[str, Any]:
     strategy2_pipeline: list[dict[str, Any]] = []
     archive_pipeline: list[dict[str, Any]] = []
 
-    await paper_strategy_agent.ensure_recovered_state()
-    agent_status = paper_strategy_agent.get_status()
+    agent_status = paper_strategy_agent.get_status(refresh=False)
     strat1 = _find_strategy(agent_status, "macd_strategy")
     strat2 = _find_strategy(agent_status, "index_mp_strategy")
     n_pos = strat1.get("summary", {}).get("open_positions", 0)

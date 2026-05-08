@@ -2,28 +2,99 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
+from market_data.commodity_contract_specs import get_commodity_contract_spec
 from market_data.commodity_atm_watchlist import commodity_atm_watchlist_service
 from paper_engine.commodity_strategy_agent import commodity_strategy_agent
 
 router = APIRouter(prefix="/api/commodity", tags=["commodity"])
 
 
-def _degraded_contract_catalog(detail: str) -> dict[str, object]:
+def _normalized_symbols(symbols: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_symbol in symbols:
+        symbol = str(raw_symbol or "").strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        normalized.append(symbol)
+    return normalized
+
+
+def _degraded_contract_catalog(
+    detail: str,
+    *,
+    symbols: Optional[list[str]] = None,
+    selected_option_expiries: Optional[dict[str, str]] = None,
+    selected_option_lookup_symbols: Optional[dict[str, str]] = None,
+) -> dict[str, object]:
+    selected_expiries = {
+        str(symbol).strip().upper(): str(expiry).strip()
+        for symbol, expiry in dict(selected_option_expiries or {}).items()
+        if str(symbol).strip() and str(expiry).strip()
+    }
+    selected_lookup_symbols = {
+        str(symbol).strip().upper(): str(lookup_symbol).strip().upper()
+        for symbol, lookup_symbol in dict(selected_option_lookup_symbols or {}).items()
+        if str(symbol).strip() and str(lookup_symbol).strip()
+    }
+    contracts: list[dict[str, object]] = []
+    for symbol in _normalized_symbols(symbols or []):
+        spec = get_commodity_contract_spec(symbol)
+        selected_expiry = selected_expiries.get(symbol)
+        selected_lookup_symbol = selected_lookup_symbols.get(symbol) or symbol
+        expiry_mappings = (
+            [{"expiry": selected_expiry, "lookup_symbol": selected_lookup_symbol}]
+            if selected_expiry
+            else []
+        )
+        contracts.append(
+            {
+                "symbol": symbol,
+                "underlying": spec.root,
+                "lookup_symbol": symbol,
+                "expiries": [selected_expiry] if selected_expiry else [],
+                "selected_expiry": selected_expiry,
+                "suggested_expiry": selected_expiry,
+                "active_expiry": selected_expiry,
+                "has_options": bool(selected_expiry),
+                "active_lookup_symbol": selected_lookup_symbol,
+                "default_lookup_symbol": symbol,
+                "expiry_mappings": expiry_mappings,
+                "selected_lookup_symbol": selected_lookup_symbol if selected_expiry else None,
+                "selection_policy": "saved_static_fallback" if selected_expiry else "static_metadata_only",
+                "selection_locked": bool(selected_expiry),
+                "lot_size": spec.futures_lot_size,
+                "contract_unit_label": spec.contract_unit_label,
+                "quote_unit_label": spec.quote_unit_label,
+                "strategy_title": spec.options_label,
+                "detail": "Live MCX expiry discovery is unavailable; showing saved/static contract metadata.",
+            }
+        )
+    fallback_detail = detail
+    if contracts:
+        fallback_detail = (
+            f"{detail} Showing saved MCX futures with static contract metadata; "
+            "live expiry discovery will retry on the next refresh."
+        )
     return {
-        "source": "degraded",
+        "source": "degraded_static",
         "build_status": "degraded",
-        "detail": detail,
-        "rows": [],
+        "detail": fallback_detail,
+        "contracts": contracts,
+        "rows": contracts,
         "summary": {
-            "total_symbols": 0,
-            "contracts_ready": 0,
-            "active_selections": 0,
+            "total_symbols": len(contracts),
+            "contracts_ready": sum(1 for item in contracts if item.get("has_options")),
+            "active_selections": sum(1 for item in contracts if item.get("active_expiry")),
         },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -49,7 +120,7 @@ async def _bounded_contract_catalog(
     timeout: float = 4.0,
 ) -> dict[str, object]:
     try:
-        return await asyncio.wait_for(
+        payload = await asyncio.wait_for(
             commodity_atm_watchlist_service.get_contract_catalog(
                 symbols,
                 selected_option_expiries,
@@ -57,8 +128,21 @@ async def _bounded_contract_catalog(
             ),
             timeout=timeout,
         )
+        if symbols and not list(payload.get("contracts") or []):
+            return _degraded_contract_catalog(
+                str(payload.get("detail") or "Commodity contract catalog is unavailable."),
+                symbols=symbols,
+                selected_option_expiries=selected_option_expiries,
+                selected_option_lookup_symbols=selected_option_lookup_symbols,
+            )
+        return payload
     except Exception as exc:
-        return _degraded_contract_catalog(f"Commodity contract catalog refresh timed out or failed: {exc}")
+        return _degraded_contract_catalog(
+            f"Commodity contract catalog refresh timed out or failed: {exc}",
+            symbols=symbols,
+            selected_option_expiries=selected_option_expiries,
+            selected_option_lookup_symbols=selected_option_lookup_symbols,
+        )
 
 
 async def _bounded_atm_watchlist(

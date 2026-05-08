@@ -8,244 +8,244 @@
   ],
   "commentary": [
     {
-      "time": "2026-05-04T22:23:35.244232+05:30",
+      "time": "2026-05-08T17:02:20.291612+05:30",
       "scope": "System",
       "tone": "idle",
       "message": "Market closed. Agent idle."
     },
     {
-      "time": "2026-05-04T22:22:05.870907+05:30",
-      "scope": "System",
-      "tone": "warning",
-      "message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, latest watchlist time=none."
-    },
-    {
-      "time": "2026-05-04T22:22:05.861231+05:30",
+      "time": "2026-05-08T14:01:48.221958+05:30",
       "scope": "System",
       "tone": "error",
       "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
     },
     {
-      "time": "2026-05-04T22:22:05.798588+05:30",
+      "time": "2026-05-08T14:00:45.741666+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Shared market-intelligence data is stale for the paper scan. Today rows=0, latest-session rows=171, mode=latest_session, execution mode=stale_latest_session, latest watchlist time=2026-04-24T09:29:55.977752+00:00, age=1209600s, max execution age=129600s."
+    },
+    {
+      "time": "2026-05-08T14:00:45.691134+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, execution mode=missing, latest watchlist time=none."
+    },
+    {
+      "time": "2026-05-08T14:00:45.674745+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-05-08T14:00:45.603364+05:30",
       "scope": "System",
       "tone": "idle",
       "message": "Market closed. Agent idle."
     },
     {
-      "time": "2026-05-04T22:22:05.247947+05:30",
+      "time": "2026-05-08T14:00:45.138940+05:30",
       "scope": "System",
       "tone": "success",
       "message": "Scan complete. 6 rows, S1=2, S2=0."
     },
     {
-      "time": "2026-05-04T22:22:05.234646+05:30",
+      "time": "2026-05-08T14:00:45.123542+05:30",
       "scope": "System",
       "tone": "success",
       "message": "Scan complete. 1 rows, S1=2, S2=0."
     },
     {
-      "time": "2026-05-04T22:22:05.234553+05:30",
+      "time": "2026-05-08T14:00:45.123244+05:30",
       "scope": "Strategy 1",
       "tone": "warning",
       "message": "Current monthly window is exhausted for 1 underlyings. Rolling scan to the next expiry: AUROPHARMA"
     },
     {
-      "time": "2026-05-04T22:00:34.360313+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-05-04T21:59:30.347409+05:30",
-      "scope": "System",
-      "tone": "warning",
-      "message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, latest watchlist time=none."
-    },
-    {
-      "time": "2026-05-04T21:59:30.333968+05:30",
+      "time": "2026-05-08T13:58:48.119288+05:30",
       "scope": "System",
       "tone": "error",
       "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
     },
     {
-      "time": "2026-05-04T21:59:30.296285+05:30",
+      "time": "2026-05-08T13:57:05.722705+05:30",
       "scope": "System",
-      "tone": "info",
-      "message": "Market closed. Strategy preparation is ready: 218 ATM rows, Fyers=not ready, Upstox=not ready."
+      "tone": "warning",
+      "message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, latest watchlist time=none."
     },
     {
-      "time": "2026-05-04T21:59:24.784926+05:30",
+      "time": "2026-05-08T13:57:05.703211+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-05-08T13:57:05.601571+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-05-08T13:57:04.909480+05:30",
       "scope": "System",
       "tone": "success",
       "message": "Scan complete. 6 rows, S1=2, S2=0."
     },
     {
-      "time": "2026-05-04T21:59:24.770967+05:30",
+      "time": "2026-05-08T13:57:04.888088+05:30",
       "scope": "System",
       "tone": "success",
       "message": "Scan complete. 1 rows, S1=2, S2=0."
     },
     {
-      "time": "2026-05-04T21:59:24.770875+05:30",
+      "time": "2026-05-08T13:57:04.887876+05:30",
       "scope": "Strategy 1",
       "tone": "warning",
       "message": "Current monthly window is exhausted for 1 underlyings. Rolling scan to the next expiry: AUROPHARMA"
     },
     {
-      "time": "2026-05-04T21:53:34.090359+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-05-04T21:52:17.807821+05:30",
-      "scope": "System",
-      "tone": "warning",
-      "message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, latest watchlist time=none."
-    },
-    {
-      "time": "2026-05-04T21:52:17.797916+05:30",
+      "time": "2026-05-08T10:45:29.884957+05:30",
       "scope": "System",
       "tone": "error",
       "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
     },
     {
-      "time": "2026-05-04T21:52:17.735521+05:30",
+      "time": "2026-05-07T17:16:35.272175+05:30",
       "scope": "System",
       "tone": "idle",
       "message": "Market closed. Agent idle."
     },
     {
-      "time": "2026-05-04T21:52:17.022828+05:30",
+      "time": "2026-05-07T14:54:42.174220+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-05-07T14:53:15.356205+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, latest watchlist time=none."
+    },
+    {
+      "time": "2026-05-07T14:53:15.306671+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-05-07T14:53:15.270515+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-05-07T14:53:14.718182+05:30",
       "scope": "System",
       "tone": "success",
       "message": "Scan complete. 6 rows, S1=2, S2=0."
     },
     {
-      "time": "2026-05-04T21:52:17.004968+05:30",
+      "time": "2026-05-07T14:53:14.705208+05:30",
       "scope": "System",
       "tone": "success",
       "message": "Scan complete. 1 rows, S1=2, S2=0."
     },
     {
-      "time": "2026-05-04T21:52:17.004878+05:30",
+      "time": "2026-05-07T14:53:14.705060+05:30",
       "scope": "Strategy 1",
       "tone": "warning",
       "message": "Current monthly window is exhausted for 1 underlyings. Rolling scan to the next expiry: AUROPHARMA"
     },
     {
-      "time": "2026-05-04T20:07:30.603790+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-05-04T20:06:00.845507+05:30",
-      "scope": "System",
-      "tone": "warning",
-      "message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, latest watchlist time=none."
-    },
-    {
-      "time": "2026-05-04T20:06:00.828678+05:30",
+      "time": "2026-05-07T14:17:20.871475+05:30",
       "scope": "System",
       "tone": "error",
       "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
     },
     {
-      "time": "2026-05-04T20:06:00.745256+05:30",
+      "time": "2026-05-07T14:15:33.736029+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, latest watchlist time=none."
+    },
+    {
+      "time": "2026-05-07T14:15:33.721902+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-05-07T14:15:33.638721+05:30",
       "scope": "System",
       "tone": "idle",
       "message": "Market closed. Agent idle."
     },
     {
-      "time": "2026-05-04T20:05:59.894419+05:30",
+      "time": "2026-05-07T14:15:33.007970+05:30",
       "scope": "System",
       "tone": "success",
       "message": "Scan complete. 6 rows, S1=2, S2=0."
     },
     {
-      "time": "2026-05-04T20:05:59.875839+05:30",
+      "time": "2026-05-07T14:15:32.986958+05:30",
       "scope": "System",
       "tone": "success",
       "message": "Scan complete. 1 rows, S1=2, S2=0."
     },
     {
-      "time": "2026-05-04T20:05:59.875707+05:30",
+      "time": "2026-05-07T14:15:32.986777+05:30",
       "scope": "Strategy 1",
       "tone": "warning",
       "message": "Current monthly window is exhausted for 1 underlyings. Rolling scan to the next expiry: AUROPHARMA"
     },
     {
-      "time": "2026-05-04T20:05:48.168515+05:30",
-      "scope": "System",
-      "tone": "warning",
-      "message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, latest watchlist time=none."
-    },
-    {
-      "time": "2026-05-04T20:05:48.151382+05:30",
+      "time": "2026-05-07T14:14:20.745975+05:30",
       "scope": "System",
       "tone": "error",
       "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
     },
     {
-      "time": "2026-05-04T20:05:48.063775+05:30",
+      "time": "2026-05-07T14:12:31.823596+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, latest watchlist time=none."
+    },
+    {
+      "time": "2026-05-07T14:12:31.813223+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-05-07T14:12:31.732899+05:30",
       "scope": "System",
       "tone": "idle",
       "message": "Market closed. Agent idle."
     },
     {
-      "time": "2026-05-04T20:05:47.275325+05:30",
+      "time": "2026-05-07T14:12:31.108492+05:30",
       "scope": "System",
       "tone": "success",
       "message": "Scan complete. 6 rows, S1=2, S2=0."
     },
     {
-      "time": "2026-05-04T20:05:47.254450+05:30",
+      "time": "2026-05-07T14:12:31.090183+05:30",
       "scope": "System",
       "tone": "success",
       "message": "Scan complete. 1 rows, S1=2, S2=0."
     },
     {
-      "time": "2026-05-04T20:05:47.254303+05:30",
+      "time": "2026-05-07T14:12:31.090012+05:30",
       "scope": "Strategy 1",
       "tone": "warning",
       "message": "Current monthly window is exhausted for 1 underlyings. Rolling scan to the next expiry: AUROPHARMA"
     },
     {
-      "time": "2026-05-04T20:04:30.474201+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-05-04T20:02:49.410415+05:30",
-      "scope": "System",
-      "tone": "warning",
-      "message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, latest watchlist time=none."
-    },
-    {
-      "time": "2026-05-04T20:02:49.392486+05:30",
+      "time": "2026-05-07T13:59:20.149203+05:30",
       "scope": "System",
       "tone": "error",
       "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
-    },
-    {
-      "time": "2026-05-04T20:02:49.297638+05:30",
-      "scope": "System",
-      "tone": "idle",
-      "message": "Market closed. Agent idle."
-    },
-    {
-      "time": "2026-05-04T20:02:48.364646+05:30",
-      "scope": "System",
-      "tone": "success",
-      "message": "Scan complete. 6 rows, S1=2, S2=0."
-    },
-    {
-      "time": "2026-05-04T20:02:48.345950+05:30",
-      "scope": "System",
-      "tone": "success",
-      "message": "Scan complete. 1 rows, S1=2, S2=0."
     }
   ],
   "strategies": {
@@ -253,7 +253,7 @@
       "entries": 2,
       "exits": 0,
       "last_scan_at": "2026-04-09T15:20:00+05:30",
-      "last_message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, latest watchlist time=none.",
+      "last_message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required.",
       "processed_signals": {
         "AUROPHARMA:CE": "2026-04-09T14:15:00+05:30"
       },
@@ -265,22 +265,38 @@
       ],
       "meta": {
         "mode": "market_closed",
-        "updated_at": "2026-05-04T22:27:35.368904+05:30",
+        "updated_at": "2026-05-08T18:13:43.029918+05:30",
         "market_state": "closed",
         "scan_windows": 220,
         "scan_interval": "30minute",
-        "active_windows": 220,
+        "active_windows": 216,
         "watchlist_rows": 6,
         "broker_snapshot": {
+          "connected_brokers": [],
+          "session_brokers": [],
+          "upstox_ready": false,
           "fyers_ready": false,
           "broker_ready": false,
-          "upstox_ready": false,
-          "connected_brokers": [],
-          "fyers_token_health": {
-            "status": "expired_reconnect_required"
-          },
           "upstox_token_health": {
-            "status": "expired_reconnect_required"
+            "connected": false,
+            "source": "saved_credentials",
+            "valid": false,
+            "status": "expired_reconnect_required",
+            "checked_at": "2026-05-08T09:31:07.958786+00:00",
+            "has_saved_token": true,
+            "needs_reconnect": true,
+            "message": "Saved Upstox access token is invalid. Upstox does not provide refresh tokens for this flow, so reconnect Upstox in Settings.",
+            "expires_at_ist": "2026-05-09T03:30:00+05:30"
+          },
+          "fyers_token_health": {
+            "connected": false,
+            "source": "saved_credentials",
+            "valid": false,
+            "status": "expired_reconnect_required",
+            "checked_at": "2026-05-08T09:31:07.868225+00:00",
+            "has_saved_token": true,
+            "needs_reconnect": true,
+            "message": "Saved Fyers access token is invalid. Reconnect Fyers in Settings."
           }
         },
         "index_underlyings": 5,
@@ -288,7 +304,7 @@
         "prepared_watchlist": [
           {
             "ltp": 1101.05,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 32.07,
             "reason": "CE premium strength versus PE",
@@ -303,14 +319,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "PAGEIND",
             "instruction": "PAGEIND: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 450.41,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 526.45,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 38.45,
             "reason": "bullish ATM option MACD quadrant",
@@ -325,14 +341,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "SOLARINDS",
             "instruction": "SOLARINDS: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 126.4445,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 33.75,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 39.28,
             "reason": "CE premium strength versus PE",
@@ -347,14 +363,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "FORTIS",
             "instruction": "FORTIS: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 116.26,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 155.75,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 17.59,
             "reason": "bearish ATM option MACD quadrant",
@@ -369,14 +385,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "NIFTY",
             "instruction": "NIFTY: PE is favoured by bearish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 109.9541,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 187.4,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 20.0,
             "reason": "bearish ATM option MACD quadrant",
@@ -391,14 +407,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "FINNIFTY",
             "instruction": "FINNIFTY: PE is favoured by bearish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 101.0499,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 187.5,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 34.93,
             "reason": "bullish ATM option MACD quadrant",
@@ -413,14 +429,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "PERSISTENT",
             "instruction": "PERSISTENT: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 95.1286,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 262.55,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 39.4,
             "reason": "bullish ATM option MACD quadrant",
@@ -435,14 +451,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "OFSS",
             "instruction": "OFSS: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 84.6706,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 18.45,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 42.44,
             "reason": "CE premium strength versus PE",
@@ -457,14 +473,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "DELHIVERY",
             "instruction": "DELHIVERY: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 70.4,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 886.75,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 36.5,
             "reason": "bullish ATM option MACD quadrant",
@@ -479,14 +495,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "SHREECEM",
             "instruction": "SHREECEM: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 65.0838,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 8.68,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 38.56,
             "reason": "PE premium strength versus CE",
@@ -501,14 +517,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "NYKAA",
             "instruction": "NYKAA: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 63.53,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 38.0,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 39.9,
             "reason": "CE premium strength versus PE",
@@ -523,14 +539,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "NAUKRI",
             "instruction": "NAUKRI: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 61.02,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 277.1,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 36.39,
             "reason": "bullish ATM option MACD quadrant",
@@ -545,14 +561,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "POLYCAB",
             "instruction": "POLYCAB: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 60.7539,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 46.0,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 39.16,
             "reason": "CE premium strength versus PE",
@@ -567,14 +583,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "HAVELLS",
             "instruction": "HAVELLS: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 54.25,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 8.4,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 29.53,
             "reason": "CE premium strength versus PE",
@@ -589,14 +605,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "ONGC",
             "instruction": "ONGC: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 52.53,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 169.15,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 38.32,
             "reason": "PE premium strength versus CE",
@@ -611,14 +627,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "HEROMOTOCO",
             "instruction": "HEROMOTOCO: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 51.3,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 40.65,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 23.26,
             "reason": "CE premium strength versus PE",
@@ -633,14 +649,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "SUNPHARMA",
             "instruction": "SUNPHARMA: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 49.44,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 137.0,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 37.24,
             "reason": "bullish ATM option MACD quadrant",
@@ -655,14 +671,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "TRENT",
             "instruction": "TRENT: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 47.9263,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 28.6,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 44.11,
             "reason": "CE premium strength versus PE",
@@ -677,14 +693,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "MOTILALOFS",
             "instruction": "MOTILALOFS: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 46.98,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 210.9,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 36.68,
             "reason": "bearish ATM option MACD quadrant",
@@ -699,14 +715,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "EICHERMOT",
             "instruction": "EICHERMOT: PE is favoured by bearish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 45.9594,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 396.95,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 35.89,
             "reason": "bullish ATM option MACD quadrant",
@@ -721,14 +737,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "ULTRACEMCO",
             "instruction": "ULTRACEMCO: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 45.3141,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 257.4,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 30.12,
             "reason": "bullish ATM option MACD quadrant",
@@ -743,14 +759,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "BAJAJ-AUTO",
             "instruction": "BAJAJ-AUTO: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 45.0006,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 40.25,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 44.63,
             "reason": "PE premium strength versus CE",
@@ -765,14 +781,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "UNOMINDA",
             "instruction": "UNOMINDA: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 41.79,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 171.55,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 37.52,
             "reason": "bullish ATM option MACD quadrant",
@@ -787,14 +803,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "LTM",
             "instruction": "LTM: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 41.2868,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 11.65,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 43.54,
             "reason": "PE premium strength versus CE",
@@ -809,14 +825,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "EXIDEIND",
             "instruction": "EXIDEIND: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 36.05,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 207.45,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 34.25,
             "reason": "bullish ATM option MACD quadrant",
@@ -831,14 +847,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "ABB",
             "instruction": "ABB: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 35.6934,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 15.3,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 34.19,
             "reason": "PE premium strength versus CE",
@@ -853,14 +869,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "LICHSGFIN",
             "instruction": "LICHSGFIN: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 35.08,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 39.75,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 34.55,
             "reason": "PE premium strength versus CE",
@@ -875,14 +891,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "AUROPHARMA",
             "instruction": "AUROPHARMA: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 34.78,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 456.7,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 33.71,
             "reason": "bullish ATM option MACD quadrant",
@@ -897,14 +913,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "MARUTI",
             "instruction": "MARUTI: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 34.6031,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 114.5,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 21.7,
             "reason": "PE premium strength versus CE",
@@ -919,14 +935,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "MIDCPNIFTY",
             "instruction": "MIDCPNIFTY: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 34.53,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 1236.45,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 40.51,
             "reason": "PE premium strength versus CE",
@@ -941,14 +957,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "BOSCHLTD",
             "instruction": "BOSCHLTD: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 30.64,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 134.25,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 36.72,
             "reason": "bullish ATM option MACD quadrant",
@@ -963,14 +979,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "LT",
             "instruction": "LT: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 30.2152,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 60.55,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 37.79,
             "reason": "CE premium strength versus PE",
@@ -985,14 +1001,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "PHOENIXLTD",
             "instruction": "PHOENIXLTD: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 29.09,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 194.0,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 43.17,
             "reason": "bullish ATM option MACD quadrant",
@@ -1007,14 +1023,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "TATAELXSI",
             "instruction": "TATAELXSI: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 28.7175,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 122.3,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 34.87,
             "reason": "bullish ATM option MACD quadrant",
@@ -1029,14 +1045,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "HAL",
             "instruction": "HAL: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 27.1158,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 2.68,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 23.38,
             "reason": "PE premium strength versus CE",
@@ -1051,14 +1067,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "SAMMAANCAP",
             "instruction": "SAMMAANCAP: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 23.11,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 49.15,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 30.49,
             "reason": "bullish ATM option MACD quadrant",
@@ -1073,14 +1089,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "OBEROIRLTY",
             "instruction": "OBEROIRLTY: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 22.1165,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 37.6,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 33.13,
             "reason": "PE premium strength versus CE",
@@ -1095,14 +1111,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "UNITDSPR",
             "instruction": "UNITDSPR: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 20.72,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 82.1,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 33.45,
             "reason": "bullish ATM option MACD quadrant",
@@ -1117,14 +1133,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "TCS",
             "instruction": "TCS: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 20.4707,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 26.55,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 28.22,
             "reason": "CE premium strength versus PE",
@@ -1139,14 +1155,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "ZYDUSLIFE",
             "instruction": "ZYDUSLIFE: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 19.32,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 57.6,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 30.48,
             "reason": "CE premium strength versus PE",
@@ -1161,14 +1177,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "COLPAL",
             "instruction": "COLPAL: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 18.64,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 122.7,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 39.53,
             "reason": "bullish ATM option MACD quadrant",
@@ -1183,14 +1199,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "MUTHOOTFIN",
             "instruction": "MUTHOOTFIN: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 18.0714,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 194.2,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 32.15,
             "reason": "CE premium strength versus PE",
@@ -1205,14 +1221,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "DIVISLAB",
             "instruction": "DIVISLAB: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 17.53,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 23.6,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 42.34,
             "reason": "PE premium strength versus CE",
@@ -1227,14 +1243,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "UPL",
             "instruction": "UPL: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 16.34,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 202.6,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 28.15,
             "reason": "bullish ATM option MACD quadrant",
@@ -1249,14 +1265,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "APOLLOHOSP",
             "instruction": "APOLLOHOSP: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 15.9878,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 158.35,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 39.38,
             "reason": "CE premium strength versus PE",
@@ -1271,14 +1287,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "KEI",
             "instruction": "KEI: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 15.75,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 115.85,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 27.58,
             "reason": "PE premium strength versus CE",
@@ -1293,14 +1309,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "ALKEM",
             "instruction": "ALKEM: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 14.7,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 54.2,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 38.84,
             "reason": "bullish ATM option MACD quadrant",
@@ -1315,14 +1331,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "TORNTPOWER",
             "instruction": "TORNTPOWER: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 14.1916,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 107.3,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 44.5,
             "reason": "bullish ATM option MACD quadrant",
@@ -1337,14 +1353,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "HDFCAMC",
             "instruction": "HDFCAMC: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 14.0696,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 85.0,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 31.83,
             "reason": "PE premium strength versus CE",
@@ -1359,14 +1375,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "PIIND",
             "instruction": "PIIND: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 13.82,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 36.25,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 24.0,
             "reason": "bullish ATM option MACD quadrant",
@@ -1381,14 +1397,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "HCLTECH",
             "instruction": "HCLTECH: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 13.6593,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 59.0,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 29.33,
             "reason": "bullish ATM option MACD quadrant",
@@ -1403,14 +1419,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "SBILIFE",
             "instruction": "SBILIFE: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 12.8011,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 28.65,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 34.32,
             "reason": "bearish ATM option MACD quadrant",
@@ -1425,14 +1441,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "MAXHEALTH",
             "instruction": "MAXHEALTH: PE is favoured by bearish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 12.5764,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 154.1,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 39.7,
             "reason": "bullish ATM option MACD quadrant",
@@ -1447,14 +1463,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "SUPREMEIND",
             "instruction": "SUPREMEIND: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 12.5154,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 32.45,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 27.06,
             "reason": "bearish ATM option MACD quadrant",
@@ -1469,14 +1485,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "RELIANCE",
             "instruction": "RELIANCE: PE is favoured by bearish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 12.0815,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 47.05,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 31.75,
             "reason": "bullish ATM option MACD quadrant",
@@ -1491,14 +1507,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "TECHM",
             "instruction": "TECHM: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 12.007,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 52.9,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 36.02,
             "reason": "PE premium strength versus CE",
@@ -1513,14 +1529,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "MFSL",
             "instruction": "MFSL: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 11.25,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 10.65,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 27.33,
             "reason": "PE premium strength versus CE",
@@ -1535,14 +1551,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "PATANJALI",
             "instruction": "PATANJALI: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 11.08,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 35.0,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 36.77,
             "reason": "bullish ATM option MACD quadrant",
@@ -1557,14 +1573,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "HINDALCO",
             "instruction": "HINDALCO: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 11.035,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 9.0,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 40.16,
             "reason": "PE premium strength versus CE",
@@ -1579,14 +1595,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "CROMPTON",
             "instruction": "CROMPTON: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 11.03,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 72.6,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 35.05,
             "reason": "CE premium strength versus PE",
@@ -1601,14 +1617,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "GLENMARK",
             "instruction": "GLENMARK: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 10.71,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 123.5,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 39.5,
             "reason": "bullish ATM option MACD quadrant",
@@ -1623,14 +1639,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "SIEMENS",
             "instruction": "SIEMENS: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 10.5644,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 360.0,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 39.03,
             "reason": "CE premium strength versus PE",
@@ -1645,14 +1661,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "BAJAJHLDNG",
             "instruction": "BAJAJHLDNG: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 10.48,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 43.7,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 36.76,
             "reason": "bullish ATM option MACD quadrant",
@@ -1667,14 +1683,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "CDSL",
             "instruction": "CDSL: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 10.3652,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 4.81,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 41.22,
             "reason": "PE premium strength versus CE",
@@ -1689,14 +1705,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "IOC",
             "instruction": "IOC: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 10.29,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 128.95,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 38.28,
             "reason": "bullish ATM option MACD quadrant",
@@ -1711,14 +1727,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "TVSMOTOR",
             "instruction": "TVSMOTOR: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 10.2283,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 45.0,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 34.28,
             "reason": "bullish ATM option MACD quadrant",
@@ -1733,14 +1749,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "AXISBANK",
             "instruction": "AXISBANK: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 9.9938,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 98.8,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 36.24,
             "reason": "bullish ATM option MACD quadrant",
@@ -1755,14 +1771,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "GRASIM",
             "instruction": "GRASIM: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 9.939,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 19.25,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 25.65,
             "reason": "CE premium strength versus PE",
@@ -1777,14 +1793,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "MARICO",
             "instruction": "MARICO: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 9.47,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 43.0,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 34.98,
             "reason": "bearish ATM option MACD quadrant",
@@ -1799,14 +1815,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "PIDILITIND",
             "instruction": "PIDILITIND: PE is favoured by bearish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 9.2083,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 23.65,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 44.04,
             "reason": "PE premium strength versus CE",
@@ -1821,14 +1837,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "SBICARD",
             "instruction": "SBICARD: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 9.17,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 70.0,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 34.87,
             "reason": "bullish ATM option MACD quadrant",
@@ -1843,14 +1859,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "MANKIND",
             "instruction": "MANKIND: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 9.1141,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 165.85,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 28.39,
             "reason": "bullish ATM option MACD quadrant",
@@ -1865,14 +1881,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "BRITANNIA",
             "instruction": "BRITANNIA: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 8.755,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 42.0,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 39.83,
             "reason": "bullish ATM option MACD quadrant",
@@ -1887,14 +1903,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "LAURUSLABS",
             "instruction": "LAURUSLABS: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 8.7078,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 56.9,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 41.78,
             "reason": "bullish ATM option MACD quadrant",
@@ -1909,14 +1925,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "CHOLAFIN",
             "instruction": "CHOLAFIN: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 8.515,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 69.2,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 35.34,
             "reason": "PE premium strength versus CE",
@@ -1931,14 +1947,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "ASIANPAINT",
             "instruction": "ASIANPAINT: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 8.15,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 29.15,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 40.22,
             "reason": "bullish ATM option MACD quadrant",
@@ -1953,14 +1969,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "VEDL",
             "instruction": "VEDL: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 8.0041,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 33.75,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 44.34,
             "reason": "PE premium strength versus CE",
@@ -1975,14 +1991,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "360ONE",
             "instruction": "360ONE: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 7.82,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 37.1,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 35.65,
             "reason": "bullish ATM option MACD quadrant",
@@ -1997,14 +2013,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "GODREJCP",
             "instruction": "GODREJCP: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 7.6892,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 164.15,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 37.26,
             "reason": "PE premium strength versus CE",
@@ -2019,14 +2035,14 @@
             "trade_date": "pre-market preparation",
             "underlying": "DMART",
             "instruction": "DMART: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 7.65,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           },
           {
             "ltp": 170.95,
-            "as_of": "2026-05-04T21:59:24.804535+05:30",
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
             "expiry": "2026-04-28",
             "iv_pct": 38.05,
             "reason": "bullish ATM option MACD quadrant",
@@ -2041,10 +2057,10 @@
             "trade_date": "pre-market preparation",
             "underlying": "CUMMINSIND",
             "instruction": "CUMMINSIND: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
-            "signal_date": "2026-05-04",
+            "signal_date": "2026-05-06",
             "priority_score": 7.6387,
-            "spot_last_time": "2026-05-04T21:59:24.804535+05:30",
-            "option_last_bar_time": "2026-05-04T21:59:24.804535+05:30"
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
           }
         ],
         "instrument_universe": [
@@ -2268,9 +2284,15 @@
           "ZYDUSLIFE"
         ],
         "market_intelligence": {
-          "ready": false,
+          "ready": true,
+          "execution_mode": "stale_latest_session",
+          "readiness_mode": "latest_session",
+          "execution_ready": false,
           "watchlist_rows_today": 0,
-          "latest_watchlist_time": null
+          "latest_watchlist_time": "2026-04-24T09:29:55.977752+00:00",
+          "watchlist_age_seconds": 1209600,
+          "watchlist_rows_latest": 171,
+          "max_execution_age_seconds": 129600
         },
         "latest_watchlist_time": "2026-04-24T09:29:55.977752+00:00",
         "recovered_trading_day": "2026-04-09",
@@ -3954,7 +3976,7 @@
       "entries": 0,
       "exits": 0,
       "last_scan_at": "2026-04-09T15:20:00+05:30",
-      "last_message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, latest watchlist time=none.",
+      "last_message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required.",
       "processed_signals": {},
       "signal_lane": [
         {
@@ -3974,26 +3996,48 @@
             "last_date": "2026-04-09 15:20"
           }
         ],
-        "updated_at": "2026-05-04T22:27:35.368904+05:30",
+        "updated_at": "2026-05-08T18:13:43.029918+05:30",
         "market_state": "closed",
         "scan_interval": "5minute",
         "watchlist_rows": 0,
         "broker_snapshot": {
+          "connected_brokers": [],
+          "session_brokers": [],
+          "upstox_ready": false,
           "fyers_ready": false,
           "broker_ready": false,
-          "upstox_ready": false,
-          "connected_brokers": [],
-          "fyers_token_health": {
-            "status": "expired_reconnect_required"
-          },
           "upstox_token_health": {
-            "status": "expired_reconnect_required"
+            "connected": false,
+            "source": "saved_credentials",
+            "valid": false,
+            "status": "expired_reconnect_required",
+            "checked_at": "2026-05-08T09:31:07.958786+00:00",
+            "has_saved_token": true,
+            "needs_reconnect": true,
+            "message": "Saved Upstox access token is invalid. Upstox does not provide refresh tokens for this flow, so reconnect Upstox in Settings.",
+            "expires_at_ist": "2026-05-09T03:30:00+05:30"
+          },
+          "fyers_token_health": {
+            "connected": false,
+            "source": "saved_credentials",
+            "valid": false,
+            "status": "expired_reconnect_required",
+            "checked_at": "2026-05-08T09:31:07.868225+00:00",
+            "has_saved_token": true,
+            "needs_reconnect": true,
+            "message": "Saved Fyers access token is invalid. Reconnect Fyers in Settings."
           }
         },
         "market_intelligence": {
-          "ready": false,
+          "ready": true,
+          "execution_mode": "stale_latest_session",
+          "readiness_mode": "latest_session",
+          "execution_ready": false,
           "watchlist_rows_today": 0,
-          "latest_watchlist_time": null
+          "latest_watchlist_time": "2026-04-24T09:29:55.977752+00:00",
+          "watchlist_age_seconds": 1209600,
+          "watchlist_rows_latest": 171,
+          "max_execution_age_seconds": 129600
         }
       },
       "recent_events": [],

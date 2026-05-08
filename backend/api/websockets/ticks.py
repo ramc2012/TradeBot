@@ -406,11 +406,18 @@ async def ws_market_watchlist(websocket: WebSocket):
             get_atm_watchlist_expiries,
         )
 
-        expiry_payload = await get_atm_watchlist_expiries(requested_expiry)
+        expiry_payload = await get_atm_watchlist_expiries(
+            expiry=requested_expiry,
+            live_refresh=False,
+        )
         effective_expiry = requested_expiry or expiry_payload.get("default_expiry")
         return {
             "expiry_catalog": expiry_payload,
-            "watchlist": await get_atm_watchlist(effective_expiry),
+            "watchlist": await get_atm_watchlist(
+                expiry=effective_expiry,
+                symbols=None,
+                live_refresh=False,
+            ),
         }
 
     await _stream_snapshot(

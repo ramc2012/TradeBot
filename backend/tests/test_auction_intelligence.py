@@ -2780,7 +2780,19 @@ def test_mp_dashboard_appends_live_session_when_packaged_data_is_stale(monkeypat
             },
         }
 
+    async def _no_durable_rows(*args, **kwargs):
+        return []
+
+    async def _no_db_spot_row(*args, **kwargs):
+        return None
+
+    async def _skip_durable_persist(*args, **kwargs):
+        return 0
+
     monkeypatch.setattr(auction_intelligence_router, "build_live_analysis", _live_snapshot)
+    monkeypatch.setattr(auction_intelligence_router, "_load_durable_mp_rows", _no_durable_rows)
+    monkeypatch.setattr(auction_intelligence_router, "_build_db_spot_mp_row", _no_db_spot_row)
+    monkeypatch.setattr(auction_intelligence_router, "_persist_durable_mp_rows", _skip_durable_persist)
 
     app = FastAPI()
     app.include_router(router)
@@ -2796,3 +2808,145 @@ def test_mp_dashboard_appends_live_session_when_packaged_data_is_stale(monkeypat
     assert payload["latest"]["date"] == "2026-04-20"
     assert payload["data_status"]["live_appended"] is True
     assert payload["data_status"]["source"].endswith("+live_snapshot")
+
+
+def test_mp_rows_uses_durable_cache_when_live_bridge_misses(monkeypatch) -> None:
+    old_row = {
+        "date": "2026-04-07",
+        "poc": 22400.0,
+        "vah": 22500.0,
+        "val": 22300.0,
+        "ibh": 22480.0,
+        "ibl": 22320.0,
+        "ibr": 160.0,
+        "session_high": 22520.0,
+        "session_low": 22280.0,
+        "open_price": 22410.0,
+        "close_price": 22450.0,
+    }
+    durable_row = {
+        **old_row,
+        "date": "2026-04-20",
+        "poc": 24426.0,
+        "vah": 24471.0,
+        "val": 24341.0,
+        "ibh": 24417.35,
+        "ibl": 24242.6,
+        "ibr": 174.75,
+        "session_high": 24473.15,
+        "session_low": 24242.6,
+        "open_price": 24391.5,
+        "close_price": 24435.6,
+    }
+
+    async def _offline_live(*args, **kwargs):
+        raise RuntimeError("bridge offline")
+
+    async def _durable_rows(*args, **kwargs):
+        return [durable_row]
+
+    async def _no_db_spot_row(*args, **kwargs):
+        return None
+
+    async def _skip_durable_persist(*args, **kwargs):
+        return 0
+
+    monkeypatch.setattr(auction_intelligence_router, "_safe_csv", lambda path: [old_row])
+    monkeypatch.setattr(auction_intelligence_router, "build_live_analysis", _offline_live)
+    monkeypatch.setattr(auction_intelligence_router, "_load_durable_mp_rows", _durable_rows)
+    monkeypatch.setattr(auction_intelligence_router, "_persist_durable_mp_rows", _skip_durable_persist)
+    monkeypatch.setattr(auction_intelligence_router, "_build_db_spot_mp_row", _no_db_spot_row)
+    monkeypatch.setattr(auction_intelligence_router, "_build_live_mp_row_from_fmp", lambda *args, **kwargs: None)
+    monkeypatch.setattr(auction_intelligence_router, "_FMP_LIVE_MP_TIMEOUT_SECONDS", 0.001)
+
+    rows, data_status = asyncio.run(auction_intelligence_router._load_mp_rows("NIFTY"))
+
+    assert rows[-1]["date"] == "2026-04-20"
+    assert data_status["latest_date"] == "2026-04-20"
+    assert data_status["durable_appended"] is True
+    assert data_status["source"].endswith("+durable_cache")
+
+
+def test_mp_rows_refreshes_and_persists_same_day_live_candidate(monkeypatch) -> None:
+    base_row = {
+        "date": "2026-04-20",
+        "poc": 24400.0,
+        "vah": 24450.0,
+        "val": 24350.0,
+        "ibh": 24420.0,
+        "ibl": 24250.0,
+        "ibr": 170.0,
+        "session_high": 24470.0,
+        "session_low": 24240.0,
+        "open_price": 24390.0,
+        "close_price": 24420.0,
+    }
+    live_row = {
+        **base_row,
+        "poc": 24426.0,
+        "vah": 24471.0,
+        "val": 24341.0,
+        "session_high": 24473.15,
+        "session_low": 24242.6,
+        "close_price": 24435.6,
+    }
+    persisted_rows: list[dict] = []
+
+    async def _no_durable_rows(*args, **kwargs):
+        return []
+
+    async def _collect_live_rows(*args, **kwargs):
+        return [("live_snapshot", live_row)], {
+            "live_latest_date": "2026-04-20",
+            "live_rejected": False,
+            "live_bridge": ["live_snapshot"],
+            "live_error": None,
+        }
+
+    async def _capture_persisted(*args, **kwargs):
+        persisted_rows.extend(kwargs.get("rows") or args[1])
+        return len(kwargs.get("rows") or args[1])
+
+    monkeypatch.setattr(auction_intelligence_router, "_safe_csv", lambda path: [base_row])
+    monkeypatch.setattr(auction_intelligence_router, "_load_durable_mp_rows", _no_durable_rows)
+    monkeypatch.setattr(auction_intelligence_router, "_collect_live_mp_candidate_rows", _collect_live_rows)
+    monkeypatch.setattr(auction_intelligence_router, "_persist_durable_mp_rows", _capture_persisted)
+
+    rows, data_status = asyncio.run(auction_intelligence_router._load_mp_rows("NIFTY"))
+
+    assert rows[-1]["poc"] == live_row["poc"]
+    assert persisted_rows[0]["poc"] == live_row["poc"]
+    assert data_status["live_refreshed"] is True
+    assert data_status["source"].endswith("+live_refresh")
+
+
+def test_durable_mp_persist_spools_when_postgres_is_unavailable(monkeypatch, tmp_path) -> None:
+    row = {
+        "date": "2026-04-20",
+        "poc": 24426.0,
+        "vah": 24471.0,
+        "val": 24341.0,
+        "ibh": 24417.35,
+        "ibl": 24242.6,
+        "ibr": 174.75,
+        "session_high": 24473.15,
+        "session_low": 24242.6,
+        "open_price": 24391.5,
+        "close_price": 24435.6,
+    }
+
+    def _db_down():
+        raise RuntimeError("db down")
+
+    from db import database
+
+    monkeypatch.setattr(auction_intelligence_router, "_DURABLE_DAILY_MP_SPOOL_ROOT", tmp_path)
+    monkeypatch.setattr(database, "AsyncSessionLocal", _db_down)
+
+    persisted = asyncio.run(auction_intelligence_router._persist_durable_mp_rows("NIFTY", [row]))
+    spooled_rows = auction_intelligence_router._load_spooled_durable_mp_rows("NIFTY")
+    durable_rows = asyncio.run(auction_intelligence_router._load_durable_mp_rows("NIFTY"))
+
+    assert persisted == 0
+    assert spooled_rows[-1]["date"] == "2026-04-20"
+    assert durable_rows[-1]["poc"] == row["poc"]

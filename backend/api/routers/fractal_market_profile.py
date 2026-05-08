@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, HTTPException, Query
 
 from fractal_market_profile.service import fmp_service
@@ -13,10 +15,17 @@ async def fractal_market_profile_summary() -> dict:
     return await fmp_service.summary()
 
 
+def _resolve_symbol(symbol: str | None, symbol_code: str | None) -> str:
+    return str(symbol_code or symbol or "NIFTY").upper().strip()
+
+
 @router.get("/live-snapshot")
-async def fractal_market_profile_live_snapshot(symbol: str = Query("NIFTY")) -> dict:
+async def fractal_market_profile_live_snapshot(
+    symbol: str | None = Query(None),
+    symbol_code: Annotated[str | None, Query(alias="symbol_code")] = None,
+) -> dict:
     try:
-        return await fmp_service.live_snapshot(symbol)
+        return await fmp_service.live_snapshot(_resolve_symbol(symbol, symbol_code))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -24,9 +33,12 @@ async def fractal_market_profile_live_snapshot(symbol: str = Query("NIFTY")) -> 
 
 
 @router.post("/paper-proposal")
-async def fractal_market_profile_paper_proposal(symbol: str = Query("NIFTY")) -> dict:
+async def fractal_market_profile_paper_proposal(
+    symbol: str | None = Query(None),
+    symbol_code: Annotated[str | None, Query(alias="symbol_code")] = None,
+) -> dict:
     try:
-        return await fmp_service.record_paper_snapshot(symbol)
+        return await fmp_service.record_paper_snapshot(_resolve_symbol(symbol, symbol_code))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -52,11 +64,12 @@ async def fractal_market_profile_paper_positions(
 
 @router.get("/replay-report")
 async def fractal_market_profile_replay_report(
-    symbol: str = Query("NIFTY"),
+    symbol: str | None = Query(None),
+    symbol_code: Annotated[str | None, Query(alias="symbol_code")] = None,
     force: bool = Query(False),
 ) -> dict:
     try:
-        return await fmp_service.replay_report(symbol, force=force)
+        return await fmp_service.replay_report(_resolve_symbol(symbol, symbol_code), force=force)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:

@@ -90,6 +90,13 @@ def _strategy_metric(strategy: dict[str, Any], field: str, default: float = 0.0)
         return float(default)
 
 
+def _agent_status_snapshot(agent: Any) -> dict[str, Any]:
+    try:
+        return agent.get_status(refresh=False)
+    except TypeError:
+        return agent.get_status()
+
+
 async def _manual_book_summary() -> dict[str, Any]:
     _, _, portfolio = await _get_or_create_paper_session()
     trades = [
@@ -605,8 +612,8 @@ async def system_overview() -> dict[str, Any]:
             return cached
 
         health = await system_health()
-        nse_status = paper_strategy_agent.get_status()
-        commodity_status = commodity_strategy_agent.get_status()
+        nse_status = _agent_status_snapshot(paper_strategy_agent)
+        commodity_status = _agent_status_snapshot(commodity_strategy_agent)
         manual = await _manual_book_summary()
         auction = await auction_intelligence_summary()
         risk = _risk_manager.get_status()
