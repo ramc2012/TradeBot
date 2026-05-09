@@ -88,6 +88,17 @@ def _as_dt_text(value: Any) -> Optional[str]:
     return str(value) if value else None
 
 
+def _as_dt_value(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
 class StrategyLearningService:
     def __init__(self) -> None:
         self._cache: dict[LearningKey, LearningScore] = {}
@@ -314,6 +325,8 @@ class StrategyLearningService:
                     [
                         {
                             **score.to_dict(),
+                            "last_signal_at": _as_dt_value(score.last_signal_at),
+                            "last_trade_at": _as_dt_value(score.last_trade_at),
                             "metadata": json.dumps(score.metadata or {}),
                         }
                         for score in scores
