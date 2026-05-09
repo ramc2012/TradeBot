@@ -97,6 +97,7 @@ from paper_engine.order_book import PaperOrderBook
 from paper_engine.portfolio import PaperPortfolio, VirtualPosition
 from paper_engine.strategy_agent_entries import StrategyEntryMixin
 from paper_engine.strategy_agent_exits import StrategyExitMixin
+from paper_engine.strategy_learning import strategy_learning_service
 from paper_engine.strategy_agent_state import (
     CommentaryEntry,
     StrategyEvent,
@@ -2482,6 +2483,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             return
 
         opened = 0
+        learning_scores = await strategy_learning_service.load_scores(runtime.key)
         for row in rows:
             if opened >= capacity:
                 break
@@ -2534,6 +2536,20 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 "mp_day_type": context.get("day_type"),
                 "fraction_override": max(KELLY_FRACTION * STRATEGY2_KELLY_SCALE, 0.01),
             }
+            score = strategy_learning_service.pick_score(
+                learning_scores,
+                strategy_key=runtime.key,
+                underlying=str(row.get("underlying") or ""),
+                option_type=str(direction or ""),
+                signal_reason=str(candidate.get("reason") or ""),
+            )
+            strategy_learning_service.annotate_payload(candidate, score)
+            candidate["fraction_override"] = max(
+                0.005,
+                float(candidate["fraction_override"]) * float(candidate.get("learning_size_multiplier") or 1.0),
+            )
+            if candidate.get("learning_blocked"):
+                continue
             if runtime.processed_signals.get(candidate["signal_key"]) == candidate["latest_bar_time"]:
                 continue
             await self._open_position(runtime, candidate)

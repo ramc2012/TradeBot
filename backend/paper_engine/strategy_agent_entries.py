@@ -34,6 +34,7 @@ from market_data import market_profile_builder, option_history_service
 from db.database import AsyncSessionLocal
 from paper_engine.base_strategy_agent import _latest_session_rows, _now_ist, _round_or_none
 from paper_engine.portfolio import PaperPortfolio
+from paper_engine.strategy_learning import strategy_learning_service
 from paper_engine.strategy_agent_state import StrategyEvent, StrategyPosition, StrategyRuntime
 
 if TYPE_CHECKING:
@@ -506,10 +507,23 @@ class StrategyEntryMixin:
                 }
             )
 
+        learning_scores = await strategy_learning_service.load_scores(runtime.key)
+        for candidate in candidates:
+            row = candidate["row"]
+            score = strategy_learning_service.pick_score(
+                learning_scores,
+                strategy_key=runtime.key,
+                underlying=str(row.get("underlying") or ""),
+                option_type=str(candidate.get("opt_type") or ""),
+                signal_reason=str(candidate.get("reason") or ""),
+            )
+            strategy_learning_service.annotate_payload(candidate, score)
+
         setup_rank = {SETUP_PREMIUM: 0, SETUP_BREAKOUT: 1, "trend": 2, "reversal": 3, "unknown": 4}
         candidates.sort(
             key=lambda c: (
                 setup_rank.get(c["spot_setup"], 4),
+                -(float(c.get("learning_score") or 0.0)),
                 c.get("iv_pct") or 999,
                 -(c["strength"] or 0),
             )
@@ -545,6 +559,11 @@ class StrategyEntryMixin:
                         "regime": getattr(candidate.get("quadrant"), "regime", None),
                         "mp_day_type": candidate.get("mp_day_type"),
                         "option_last_bar_time": candidate.get("latest_bar_time"),
+                        "learning_score": candidate.get("learning_score"),
+                        "learning_confidence": candidate.get("learning_confidence"),
+                        "learning_size_multiplier": candidate.get("learning_size_multiplier"),
+                        "learning_risk_multiplier": candidate.get("learning_risk_multiplier"),
+                        "learning_blocked": candidate.get("learning_blocked"),
                     },
                     status="candidate",
                     row=row,
@@ -559,8 +578,16 @@ class StrategyEntryMixin:
                 )
             return
 
+        tradable_candidates = [candidate for candidate in candidates if not candidate.get("learning_blocked")]
+        if candidates and not tradable_candidates:
+            self._append_commentary(
+                runtime.label,
+                "Learning risk gate blocked all current Strategy 1 candidates from opening new entries.",
+                tone="warning",
+            )
+
         opened = 0
-        for candidate in candidates[:capacity]:
+        for candidate in tradable_candidates[:capacity]:
             await self._open_position(runtime, candidate)
             opened += 1
 
@@ -632,6 +659,8 @@ class StrategyEntryMixin:
                 fraction = KELLY_CAUTIOUS_FRACTION
             else:
                 fraction = KELLY_FRACTION
+        learning_size_multiplier = float(candidate.get("learning_size_multiplier") or 1.0)
+        fraction *= max(0.5, min(1.2, learning_size_multiplier))
 
         allocation = max(runtime.portfolio.total_equity * fraction, latest_close * lot_size)
         lots = max(1, int(allocation // max(latest_close * lot_size, 1.0)))
@@ -768,6 +797,10 @@ class StrategyEntryMixin:
                 "mp_reason": candidate.get("mp_reason"),
                 "mp_source": candidate.get("mp_source"),
                 "mp_session_date": candidate.get("mp_session_date"),
+                "learning_score": candidate.get("learning_score"),
+                "learning_confidence": candidate.get("learning_confidence"),
+                "learning_size_multiplier": candidate.get("learning_size_multiplier"),
+                "learning_risk_multiplier": candidate.get("learning_risk_multiplier"),
             },
         )
 

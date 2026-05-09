@@ -678,24 +678,35 @@ function buildStrategyInstrumentCandidates(strategy: any, signalRows: any[]): St
     const candidate = ensure(symbol);
     const status = String(row.status || "").toLowerCase();
     const hasDirection = Boolean(row.direction);
+    const learningScore = Number(row.learning_score || 0);
+    const learningEntries = Number(row.learning_entries || 0);
+    const learningNote = learningEntries
+      ? ` Learning score ${formatSigned(learningScore, 1)} from ${learningEntries} stored observation${learningEntries === 1 ? "" : "s"}.`
+      : "";
     candidate.direction = row.direction || candidate.direction;
     candidate.source = row.source || candidate.source;
     candidate.lastSeen = row.option_last_bar_time || row.spot_last_time || row.as_of || candidate.lastSeen;
+    candidate.priorityScore += learningScore;
 
-    if (status.includes("entry-ready") || status.includes("active") || status.includes("open")) {
+    if (row.learning_blocked) {
+      candidate.category = "avoid";
+      candidate.statusLabel = "learning risk gate";
+      candidate.reason = `${row.instruction || row.reason || "Learning score is blocking new entries for this setup."}${learningNote}`;
+      candidate.priorityScore -= 80;
+    } else if (status.includes("entry-ready") || status.includes("active") || status.includes("open")) {
       candidate.category = "conditions_met";
       candidate.statusLabel = prettify(row.status);
-      candidate.reason = row.instruction || row.reason || "Entry condition is already satisfied.";
+      candidate.reason = `${row.instruction || row.reason || "Entry condition is already satisfied."}${learningNote}`;
       candidate.priorityScore += 90;
     } else if (hasDirection && candidate.historyPnl >= 0) {
       candidate.category = candidate.category === "conditions_met" ? candidate.category : "watch";
       candidate.statusLabel = prettify(row.status || row.strength || "watching");
-      candidate.reason = row.instruction || row.reason || "Directional context exists, but final entry condition is pending.";
+      candidate.reason = `${row.instruction || row.reason || "Directional context exists, but final entry condition is pending."}${learningNote}`;
       candidate.priorityScore += 45;
     } else if (status.includes("missing") || status.includes("not-ready") || status.includes("stale")) {
       candidate.category = "avoid";
       candidate.statusLabel = prettify(row.status);
-      candidate.reason = row.instruction || "Input data is missing or stale.";
+      candidate.reason = `${row.instruction || "Input data is missing or stale."}${learningNote}`;
       candidate.priorityScore -= 40;
     }
   }

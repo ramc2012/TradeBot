@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from paper_engine.strategy_agent import paper_strategy_agent
+from paper_engine.strategy_learning import strategy_learning_service
 
 router = APIRouter(prefix="/api/strategy", tags=["strategy"])
 
@@ -605,6 +606,7 @@ async def _build_strategy1_snapshot_watchlist_signals(limit: int = 500) -> list[
             continue
         grouped[option_key][rank] = dict(raw)
 
+    learning_scores = await strategy_learning_service.load_scores("macd_strategy")
     signals: list[dict[str, Any]] = []
     for option_key, ranks in grouped.items():
         current = ranks.get(1) or {}
@@ -698,7 +700,18 @@ async def _build_strategy1_snapshot_watchlist_signals(limit: int = 500) -> list[
             "instrument_key": current.get("instrument_key"),
             "trading_symbol": current.get("trading_symbol"),
         }
-        signal["priority_score"] = _round_or_none(_strategy1_snapshot_priority(signal), 4)
+        score = strategy_learning_service.pick_score(
+            learning_scores,
+            strategy_key="macd_strategy",
+            underlying=underlying,
+            option_type=direction,
+            signal_reason=reason,
+        )
+        strategy_learning_service.annotate_payload(signal, score)
+        signal["priority_score"] = _round_or_none(
+            _strategy1_snapshot_priority(signal) + float(signal.get("learning_score") or 0.0),
+            4,
+        )
         signals.append(signal)
 
     best_by_side: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1249,3 +1262,20 @@ async def get_open_signals(underlying: str = "SENSEX") -> dict:
         "signals": flattened[:12],
         "skip_reason": None if flattened else "No live entries or aligned strategy signals right now.",
     }
+
+
+@router.get("/learning-summary")
+async def get_learning_summary(
+    refresh: bool = Query(False, description="Refresh persisted learning scores before returning the summary"),
+    limit: int = Query(20, ge=1, le=100),
+) -> dict:
+    """Return learned NSE strategy priors used for ranking and sizing."""
+    return await strategy_learning_service.summary(refresh=refresh, limit=limit)
+
+
+@router.post("/learning-refresh")
+async def refresh_learning_scores(
+    lookback_days: int = Query(120, ge=7, le=730),
+) -> dict:
+    """Recompute learned Strategy 1/2 scores from persisted signal/trade observations."""
+    return await strategy_learning_service.refresh_scores(lookback_days=lookback_days)
