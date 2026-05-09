@@ -415,6 +415,15 @@ def _flt(row: dict, key: str) -> float:
         return 0.0
 
 
+def _round_or_none(value: Any, digits: int = 2) -> Optional[float]:
+    try:
+        if value is None or value == "":
+            return None
+        return round(float(value), digits)
+    except (TypeError, ValueError):
+        return None
+
+
 def _classify_from_row(r: dict) -> str:
     """Classify day type from enriched MP row."""
     fa_up = str(r.get("fa_up", "")).lower() == "true"
@@ -479,6 +488,223 @@ def _build_strategy1_live_signals(agent_status: dict[str, Any]) -> list[dict[str
     return signals
 
 
+def _strategy1_snapshot_priority(row: dict[str, Any]) -> float:
+    status = str(row.get("status") or "")
+    macd = abs(float(row.get("macd") or 0.0))
+    histogram = abs(float(row.get("macd_histogram") or 0.0))
+    if status == "entry-ready":
+        return 100.0 + macd + histogram
+    if status == "trend-aligned":
+        return 60.0 + macd + histogram
+    if status == "waiting-cross":
+        return 25.0 + histogram
+    return -20.0
+
+
+async def _build_strategy1_snapshot_watchlist_signals(limit: int = 500) -> list[dict[str, Any]]:
+    try:
+        from db.database import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            latest_day = await session.scalar(
+                text(
+                    """
+                    SELECT MAX(timezone('Asia/Kolkata', time)::date)
+                    FROM atm_option_watchlist_snapshots
+                    WHERE ltp IS NOT NULL
+                    """
+                )
+            )
+            if latest_day is None:
+                return []
+
+            result = await session.execute(
+                text(
+                    """
+                    WITH bucketed AS (
+                        SELECT *,
+                               COALESCE(
+                                   NULLIF(instrument_key, ''),
+                                   underlying || ':' || expiry::text || ':' || strike::text || ':' || option_type
+                               ) AS option_key,
+                               (
+                                   date_trunc('hour', timezone('Asia/Kolkata', time))
+                                   + (
+                                       floor(date_part('minute', timezone('Asia/Kolkata', time)) / 30)::int
+                                       * interval '30 minutes'
+                                   )
+                               ) AS macd_bucket,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY COALESCE(
+                                                    NULLIF(instrument_key, ''),
+                                                    underlying || ':' || expiry::text || ':' || strike::text || ':' || option_type
+                                                ),
+                                                (
+                                                    date_trunc('hour', timezone('Asia/Kolkata', time))
+                                                    + (
+                                                        floor(date_part('minute', timezone('Asia/Kolkata', time)) / 30)::int
+                                                        * interval '30 minutes'
+                                                    )
+                                                )
+                                   ORDER BY time DESC
+                               ) AS bucket_rn
+                        FROM atm_option_watchlist_snapshots
+                        WHERE timezone('Asia/Kolkata', time)::date = :latest_day
+                    ),
+                    ranked AS (
+                        SELECT *,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY option_key
+                                   ORDER BY macd_bucket DESC
+                               ) AS rn
+                        FROM bucketed
+                        WHERE bucket_rn = 1
+                    )
+                    SELECT option_key,
+                           underlying,
+                           kind,
+                           expiry::text AS expiry,
+                           strike,
+                           option_type,
+                           source_broker,
+                           instrument_key,
+                           trading_symbol,
+                           underlying_price,
+                           ltp,
+                           change_pct,
+                           oi,
+                           volume,
+                           iv,
+                           macd,
+                           macd_signal,
+                           macd_histogram,
+                           rsi,
+                           time,
+                           macd_bucket,
+                           rn
+                    FROM ranked
+                    WHERE rn <= 2
+                    ORDER BY underlying ASC, option_type ASC, rn ASC
+                    """
+                ),
+                {"latest_day": latest_day},
+            )
+            snapshot_rows = result.mappings().all()
+    except Exception as exc:
+        logger.debug(f"[Strategy] Strategy 1 snapshot classifier unavailable: {exc}")
+        return []
+
+    grouped: dict[str, dict[int, dict[str, Any]]] = defaultdict(dict)
+    for raw in snapshot_rows:
+        option_key = str(raw.get("option_key") or "").strip()
+        if not option_key:
+            continue
+        try:
+            rank = int(raw.get("rn") or 0)
+        except (TypeError, ValueError):
+            continue
+        grouped[option_key][rank] = dict(raw)
+
+    signals: list[dict[str, Any]] = []
+    for option_key, ranks in grouped.items():
+        current = ranks.get(1) or {}
+        previous = ranks.get(2) or {}
+        underlying = str(current.get("underlying") or "").strip()
+        direction = str(current.get("option_type") or "").upper().strip()
+        if not underlying or direction not in {"CE", "PE"}:
+            continue
+
+        def _flt_value(mapping: dict[str, Any], key: str) -> Optional[float]:
+            try:
+                value = mapping.get(key)
+                if value is None or value == "":
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        current_macd = _flt_value(current, "macd")
+        previous_macd = _flt_value(previous, "macd")
+        current_hist = _flt_value(current, "macd_histogram")
+        ltp = _flt_value(current, "ltp")
+        iv = _flt_value(current, "iv")
+        iv_pct = (iv * 100.0 if iv is not None and iv <= 1.0 else iv)
+        bucket_time = current.get("macd_bucket") or current.get("time")
+        as_of = current.get("time") or bucket_time
+
+        if current_macd is None:
+            status = "missing-indicators"
+            reason = "macd_unavailable"
+            strength = "avoid"
+            instruction = (
+                f"{underlying} {direction}: latest ATM snapshot has no MACD yet. "
+                "Need enough 30-minute premium history for this contract."
+            )
+        elif direction == "CE" and previous_macd is not None and previous_macd <= 0 < current_macd:
+            status = "entry-ready"
+            reason = "ce_macd_zero_cross"
+            strength = "strong"
+            instruction = f"{underlying} CE: fresh MACD zero-cross from {previous_macd:.4f} to {current_macd:.4f}."
+        elif direction == "PE" and previous_macd is not None and previous_macd >= 0 > current_macd:
+            status = "entry-ready"
+            reason = "pe_macd_zero_cross"
+            strength = "strong"
+            instruction = f"{underlying} PE: fresh MACD zero-cross from {previous_macd:.4f} to {current_macd:.4f}."
+        elif direction == "CE" and current_macd > 0:
+            status = "trend-aligned"
+            reason = "ce_macd_already_above_zero"
+            strength = "monitoring"
+            instruction = f"{underlying} CE: MACD is already above zero; wait for a new live zero-cross before entry."
+        elif direction == "PE" and current_macd < 0:
+            status = "trend-aligned"
+            reason = "pe_macd_already_below_zero"
+            strength = "monitoring"
+            instruction = f"{underlying} PE: MACD is already below zero; wait for a new live zero-cross before entry."
+        else:
+            status = "waiting-cross"
+            reason = f"{direction.lower()}_macd_not_crossed"
+            strength = "standby"
+            instruction = f"{underlying} {direction}: MACD has not crossed into the actionable side yet."
+
+        signal = {
+            "strategy": "Strategy 1",
+            "source": "persisted_atm_snapshot",
+            "symbol": f"{underlying} {direction}",
+            "underlying": underlying,
+            "signal_date": str(latest_day),
+            "trade_date": "latest persisted session",
+            "as_of": _format_dateish(as_of),
+            "direction": direction,
+            "reason": reason,
+            "strength": strength,
+            "status": status,
+            "freshness": _status_icon_detail(
+                _staleness_status(as_of, row_count=1, max_age_days=3)
+            ),
+            "instruction": instruction,
+            "expiry": current.get("expiry"),
+            "atm_strike": _round_or_none(current.get("strike"), 2),
+            "strike": _round_or_none(current.get("strike"), 2),
+            "ltp": _round_or_none(ltp, 2),
+            "iv_pct": _round_or_none(iv_pct, 2),
+            "macd": _round_or_none(current_macd, 4),
+            "previous_macd": _round_or_none(previous_macd, 4),
+            "macd_histogram": _round_or_none(current_hist, 4),
+            "rsi": _round_or_none(current.get("rsi"), 2),
+            "priority_score": 0.0,
+            "option_last_bar_time": _format_dateish(bucket_time),
+            "spot_last_time": _format_dateish(as_of),
+            "indicator_bucket": status,
+            "instrument_key": current.get("instrument_key"),
+            "trading_symbol": current.get("trading_symbol"),
+        }
+        signal["priority_score"] = _round_or_none(_strategy1_snapshot_priority(signal), 4)
+        signals.append(signal)
+
+    signals.sort(key=lambda item: float(item.get("priority_score") or 0.0), reverse=True)
+    return signals[:limit]
+
+
 def _build_strategy1_watchlist_signals(agent_status: dict[str, Any]) -> list[dict[str, Any]]:
     strat = _find_strategy(agent_status, "macd_strategy")
     prepared_watchlist = (strat.get("meta", {}) or {}).get("prepared_watchlist") or []
@@ -512,6 +738,13 @@ def _build_strategy1_watchlist_signals(agent_status: dict[str, Any]) -> list[dic
             }
         )
     return signals
+
+
+async def _build_strategy1_watchlist_signals_live(agent_status: dict[str, Any]) -> list[dict[str, Any]]:
+    snapshot_watchlist = await _build_strategy1_snapshot_watchlist_signals()
+    if snapshot_watchlist:
+        return snapshot_watchlist
+    return _build_strategy1_watchlist_signals(agent_status)
 
 
 def _build_strategy2_live_signals(agent_status: dict[str, Any]) -> list[dict[str, Any]]:
@@ -978,7 +1211,7 @@ async def get_open_signals(underlying: str = "SENSEX") -> dict:
     await paper_strategy_agent.ensure_recovered_state()
     agent_status = paper_strategy_agent.get_status()
     live_positions = _build_strategy1_live_signals(agent_status)
-    strategy1_watchlist = _build_strategy1_watchlist_signals(agent_status)
+    strategy1_watchlist = await _build_strategy1_watchlist_signals_live(agent_status)
     strategy2_signals = _build_strategy2_live_signals(agent_status)
     strategy2_runtime = _find_strategy(agent_status, "index_mp_strategy")
 

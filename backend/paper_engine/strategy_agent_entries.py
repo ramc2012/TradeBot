@@ -60,6 +60,19 @@ class StrategyEntryMixin:
             return {}
 
         async with AsyncSessionLocal() as session:
+            trading_day = await session.scalar(
+                text(
+                    """
+                    SELECT MAX(timezone('Asia/Kolkata', time)::date)
+                    FROM atm_option_watchlist_snapshots
+                    WHERE instrument_key = ANY(:instrument_keys)
+                    """
+                ),
+                {"instrument_keys": instrument_keys},
+            )
+            if trading_day is None:
+                return {}
+
             result = await session.execute(
                 text(
                     """
@@ -119,7 +132,7 @@ class StrategyEntryMixin:
                     """
                 ),
                 {
-                    "trading_day": _now_ist().date(),
+                    "trading_day": trading_day,
                     "instrument_keys": instrument_keys,
                 },
             )

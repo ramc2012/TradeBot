@@ -405,7 +405,14 @@ function strategyUnderlyingFromSymbol(symbol?: string | null) {
 }
 
 function signalUnderlying(row: any) {
-  return String(row?.underlying || row?.symbol || "--").trim();
+  const explicit = String(row?.symbol || "").trim();
+  if (explicit && explicit !== "--") return explicit;
+  const underlying = String(row?.underlying || "--").trim();
+  const side = String(row?.direction || row?.option_type || "").trim().toUpperCase();
+  if (row?.strategy === "Strategy 1" && underlying !== "--" && (side === "CE" || side === "PE")) {
+    return `${underlying} ${side}`;
+  }
+  return underlying;
 }
 
 function tradeUnderlying(row: any) {

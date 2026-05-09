@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import asdict
 from datetime import date, datetime, time, timezone
 from time import monotonic
@@ -1196,76 +1196,18 @@ def _build_live_mp_row_from_fmp(snapshot: dict, profile_key: str = "daily_profil
     }
 
 
-async def _build_db_spot_mp_row(underlying: str) -> dict | None:
-    """Build a same-day MP row directly from durable 1-minute spot candles."""
-    normalized = underlying.upper()
-    try:
-        from sqlalchemy import text
-        from db.database import AsyncSessionLocal
-
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                text(
-                    """
-                    WITH latest_session AS (
-                        SELECT timezone('Asia/Kolkata', time)::date AS session_date
-                        FROM underlying_spot_candles
-                        WHERE underlying = :underlying
-                          AND interval = '1minute'
-                        GROUP BY timezone('Asia/Kolkata', time)::date
-                        HAVING COUNT(*) >= 20
-                        ORDER BY session_date DESC
-                        LIMIT 1
-                    )
-                    SELECT time, open, high, low, close, volume
-                    FROM underlying_spot_candles, latest_session
-                    WHERE underlying = :underlying
-                      AND interval = '1minute'
-                      AND timezone('Asia/Kolkata', time)::date = latest_session.session_date
-                    ORDER BY time ASC
-                    """
-                ),
-                {"underlying": normalized},
-            )
-            db_rows = result.mappings().all()
-    except Exception as exc:
-        logger.debug(f"[Auction MP] DB spot MP fallback unavailable for {normalized}: {exc}")
-        return None
-
-    bars: list[MarketBar] = []
-    for row in db_rows:
-        timestamp = row.get("time")
-        if not isinstance(timestamp, datetime):
-            continue
-        try:
-            bars.append(
-                MarketBar(
-                    timestamp=timestamp,
-                    open=float(row.get("open") or 0.0),
-                    high=float(row.get("high") or 0.0),
-                    low=float(row.get("low") or 0.0),
-                    close=float(row.get("close") or 0.0),
-                    volume=float(row.get("volume") or 0.0),
-                )
-            )
-        except (TypeError, ValueError):
-            continue
-
+def _build_mp_row_from_bars(normalized: str, bars: list[MarketBar]) -> dict | None:
     if len(bars) < 20:
         return None
 
-    try:
-        profile = MarketProfileEngine(
-            {
-                "period_minutes": 30,
-                "tick_size": _mp_tick_size(normalized),
-                "value_area_pct": 0.70,
-                "initial_balance_periods": 2,
-            }
-        ).build_profile(normalized, bars)
-    except Exception as exc:
-        logger.debug(f"[Auction MP] DB spot MP fallback failed for {normalized}: {exc}")
-        return None
+    profile = MarketProfileEngine(
+        {
+            "period_minutes": 30,
+            "tick_size": _mp_tick_size(normalized),
+            "value_area_pct": 0.70,
+            "initial_balance_periods": 2,
+        }
+    ).build_profile(normalized, bars)
 
     row = {
         "date": profile.session_date,
@@ -1310,6 +1252,81 @@ async def _build_db_spot_mp_row(underlying: str) -> dict | None:
     }
     row["day_type"] = _classify_day_type(row)
     return row
+
+
+async def _build_db_spot_mp_rows(underlying: str, *, limit: int = 60) -> list[dict]:
+    """Build recent daily MP rows directly from durable 1-minute spot candles."""
+    normalized = underlying.upper()
+    try:
+        from sqlalchemy import text
+        from db.database import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    """
+                    WITH recent_sessions AS (
+                        SELECT timezone('Asia/Kolkata', time)::date AS session_date
+                        FROM underlying_spot_candles
+                        WHERE underlying = :underlying
+                          AND interval = '1minute'
+                        GROUP BY timezone('Asia/Kolkata', time)::date
+                        HAVING COUNT(*) >= 20
+                        ORDER BY session_date DESC
+                        LIMIT :limit
+                    )
+                    SELECT timezone('Asia/Kolkata', time)::date AS session_date,
+                           time, open, high, low, close, volume
+                    FROM underlying_spot_candles
+                    WHERE underlying = :underlying
+                      AND interval = '1minute'
+                      AND timezone('Asia/Kolkata', time)::date IN (SELECT session_date FROM recent_sessions)
+                    ORDER BY session_date ASC, time ASC
+                    """
+                ),
+                {"underlying": normalized, "limit": limit},
+            )
+            db_rows = result.mappings().all()
+    except Exception as exc:
+        logger.debug(f"[Auction MP] DB spot MP fallback unavailable for {normalized}: {exc}")
+        return []
+
+    bars_by_session: dict[date, list[MarketBar]] = defaultdict(list)
+    for row in db_rows:
+        session_date = row.get("session_date")
+        if not isinstance(session_date, date):
+            continue
+        timestamp = row.get("time")
+        if not isinstance(timestamp, datetime):
+            continue
+        try:
+            bars_by_session[session_date].append(
+                MarketBar(
+                    timestamp=timestamp,
+                    open=float(row.get("open") or 0.0),
+                    high=float(row.get("high") or 0.0),
+                    low=float(row.get("low") or 0.0),
+                    close=float(row.get("close") or 0.0),
+                    volume=float(row.get("volume") or 0.0),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+
+    mp_rows: list[dict] = []
+    for session_date, bars in sorted(bars_by_session.items()):
+        try:
+            row = _build_mp_row_from_bars(normalized, bars)
+            if row and _plausible_mp_row(normalized, row):
+                mp_rows.append(row)
+        except Exception as exc:
+            logger.debug(f"[Auction MP] DB spot MP fallback failed for {normalized} {session_date}: {exc}")
+    return mp_rows
+
+
+async def _build_db_spot_mp_row(underlying: str) -> dict | None:
+    rows = await _build_db_spot_mp_rows(underlying, limit=1)
+    return rows[-1] if rows else None
 
 
 async def _collect_live_mp_candidate_rows(
@@ -1576,6 +1593,15 @@ async def _load_mp_rows(
         if durable_added:
             source = f"{source}+durable_cache"
 
+    db_spot_added = 0
+    if len(rows) < 30 and not live_refresh:
+        db_spot_rows = await _build_db_spot_mp_rows(underlying, limit=90)
+        if db_spot_rows:
+            rows, db_spot_added = _merge_mp_rows(rows, db_spot_rows)
+            if db_spot_added:
+                source = f"{source}+db_spot_cache"
+                await _persist_durable_mp_rows(underlying, db_spot_rows)
+
     latest_row_date = rows[-1].get("date") if rows else packaged_latest
     status: dict[str, object] = {
         "source": source,
@@ -1584,8 +1610,10 @@ async def _load_mp_rows(
         "live_appended": False,
         "live_refreshed": False,
         "durable_appended": durable_added > 0,
+        "db_spot_appended": db_spot_added > 0,
         "durable_merged": bool(durable_rows),
         "durable_rows": len(durable_rows),
+        "db_spot_rows": db_spot_added,
         "live_latest_date": None,
         "live_rejected": False,
         "live_bridge": None,
@@ -2091,10 +2119,11 @@ async def _build_mp_data_status() -> list[dict]:
         live_appended = bool(data_status.get("live_appended"))
         live_refreshed = bool(data_status.get("live_refreshed"))
         durable_appended = bool(data_status.get("durable_appended"))
+        db_spot_appended = bool(data_status.get("db_spot_appended"))
         latest_date = str(data_status.get("latest_date") or "—")
         if mp_rows:
             status = "ok"
-            if not live_appended and not live_refreshed and not durable_appended and isinstance(stale_days, int) and stale_days > 7:
+            if not live_appended and not live_refreshed and not durable_appended and not db_spot_appended and isinstance(stale_days, int) and stale_days > 7:
                 status = "warning"
             detail_parts = [f"{len(mp_rows)} sessions", f"source={source}"]
             if live_bridge:
@@ -2103,6 +2132,8 @@ async def _build_mp_data_status() -> list[dict]:
                 detail_parts.append("live_refreshed=true")
             if durable_appended:
                 detail_parts.append(f"durable_cache={data_status.get('durable_rows')}")
+            if db_spot_appended:
+                detail_parts.append(f"db_spot_cache={data_status.get('db_spot_rows')}")
             if isinstance(stale_days, int) and stale_days > 0:
                 detail_parts.append(f"packaged_lag={stale_days}d")
             sources.append({
@@ -2115,7 +2146,9 @@ async def _build_mp_data_status() -> list[dict]:
                 "live_appended": live_appended,
                 "live_refreshed": live_refreshed,
                 "durable_appended": durable_appended,
+                "db_spot_appended": db_spot_appended,
                 "durable_rows": data_status.get("durable_rows"),
+                "db_spot_rows": data_status.get("db_spot_rows"),
                 "live_latest_date": data_status.get("live_latest_date"),
             })
         else:
