@@ -1596,22 +1596,7 @@ async def _load_mp_rows(
     db_spot_added = 0
     db_spot_error: str | None = None
     if len(rows) < 30 and not live_refresh:
-        try:
-            db_spot_rows = await asyncio.wait_for(
-                _build_db_spot_mp_rows(underlying, limit=30),
-                timeout=4.0,
-            )
-        except asyncio.TimeoutError:
-            db_spot_rows = []
-            db_spot_error = "db_spot_cache build timed out"
-        except Exception as exc:
-            db_spot_rows = []
-            db_spot_error = str(exc)
-        if db_spot_rows:
-            rows, db_spot_added = _merge_mp_rows(rows, db_spot_rows)
-            if db_spot_added:
-                source = f"{source}+db_spot_cache"
-                await _persist_durable_mp_rows(underlying, db_spot_rows)
+        db_spot_error = "db_spot_cache deferred; history backfill must run outside status requests"
 
     latest_row_date = rows[-1].get("date") if rows else packaged_latest
     status: dict[str, object] = {
