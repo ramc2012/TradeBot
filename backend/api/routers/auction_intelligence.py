@@ -1594,8 +1594,19 @@ async def _load_mp_rows(
             source = f"{source}+durable_cache"
 
     db_spot_added = 0
+    db_spot_error: str | None = None
     if len(rows) < 30 and not live_refresh:
-        db_spot_rows = await _build_db_spot_mp_rows(underlying, limit=90)
+        try:
+            db_spot_rows = await asyncio.wait_for(
+                _build_db_spot_mp_rows(underlying, limit=30),
+                timeout=4.0,
+            )
+        except asyncio.TimeoutError:
+            db_spot_rows = []
+            db_spot_error = "db_spot_cache build timed out"
+        except Exception as exc:
+            db_spot_rows = []
+            db_spot_error = str(exc)
         if db_spot_rows:
             rows, db_spot_added = _merge_mp_rows(rows, db_spot_rows)
             if db_spot_added:
@@ -1614,6 +1625,8 @@ async def _load_mp_rows(
         "durable_merged": bool(durable_rows),
         "durable_rows": len(durable_rows),
         "db_spot_rows": db_spot_added,
+        "db_spot_error": db_spot_error,
+        "history_incomplete": len(rows) < 30,
         "live_latest_date": None,
         "live_rejected": False,
         "live_bridge": None,
@@ -2120,12 +2133,22 @@ async def _build_mp_data_status() -> list[dict]:
         live_refreshed = bool(data_status.get("live_refreshed"))
         durable_appended = bool(data_status.get("durable_appended"))
         db_spot_appended = bool(data_status.get("db_spot_appended"))
+        history_incomplete = bool(data_status.get("history_incomplete"))
         latest_date = str(data_status.get("latest_date") or "—")
         if mp_rows:
             status = "ok"
-            if not live_appended and not live_refreshed and not durable_appended and not db_spot_appended and isinstance(stale_days, int) and stale_days > 7:
+            if history_incomplete or (
+                not live_appended
+                and not live_refreshed
+                and not durable_appended
+                and not db_spot_appended
+                and isinstance(stale_days, int)
+                and stale_days > 7
+            ):
                 status = "warning"
             detail_parts = [f"{len(mp_rows)} sessions", f"source={source}"]
+            if history_incomplete:
+                detail_parts.append("history_incomplete<30")
             if live_bridge:
                 detail_parts.append(f"live_bridge={','.join(str(item) for item in live_bridge)}")
             if live_refreshed:
@@ -2134,6 +2157,8 @@ async def _build_mp_data_status() -> list[dict]:
                 detail_parts.append(f"durable_cache={data_status.get('durable_rows')}")
             if db_spot_appended:
                 detail_parts.append(f"db_spot_cache={data_status.get('db_spot_rows')}")
+            if data_status.get("db_spot_error"):
+                detail_parts.append(str(data_status.get("db_spot_error")))
             if isinstance(stale_days, int) and stale_days > 0:
                 detail_parts.append(f"packaged_lag={stale_days}d")
             sources.append({
@@ -2149,6 +2174,8 @@ async def _build_mp_data_status() -> list[dict]:
                 "db_spot_appended": db_spot_appended,
                 "durable_rows": data_status.get("durable_rows"),
                 "db_spot_rows": data_status.get("db_spot_rows"),
+                "history_incomplete": history_incomplete,
+                "db_spot_error": data_status.get("db_spot_error"),
                 "live_latest_date": data_status.get("live_latest_date"),
             })
         else:

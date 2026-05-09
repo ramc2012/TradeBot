@@ -701,8 +701,27 @@ async def _build_strategy1_snapshot_watchlist_signals(limit: int = 500) -> list[
         signal["priority_score"] = _round_or_none(_strategy1_snapshot_priority(signal), 4)
         signals.append(signal)
 
-    signals.sort(key=lambda item: float(item.get("priority_score") or 0.0), reverse=True)
-    return signals[:limit]
+    best_by_side: dict[tuple[str, str], dict[str, Any]] = {}
+    for signal in signals:
+        key = (str(signal.get("underlying") or ""), str(signal.get("direction") or ""))
+        existing = best_by_side.get(key)
+        if existing is None:
+            best_by_side[key] = signal
+            continue
+        current_rank = (
+            float(signal.get("priority_score") or 0.0),
+            _parse_dateish(signal.get("as_of")) or datetime.min.replace(tzinfo=IST),
+        )
+        existing_rank = (
+            float(existing.get("priority_score") or 0.0),
+            _parse_dateish(existing.get("as_of")) or datetime.min.replace(tzinfo=IST),
+        )
+        if current_rank > existing_rank:
+            best_by_side[key] = signal
+
+    deduped = list(best_by_side.values())
+    deduped.sort(key=lambda item: float(item.get("priority_score") or 0.0), reverse=True)
+    return deduped[:limit]
 
 
 def _build_strategy1_watchlist_signals(agent_status: dict[str, Any]) -> list[dict[str, Any]]:
