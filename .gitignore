@@ -4,6 +4,7 @@
 .env
 .env.*
 !.env.example
+credentials.json
 backend/credentials.json
 
 # Python caches and virtualenvs
@@ -19,6 +20,7 @@ venv/
 node_modules/
 .next/
 frontend/.next/
+*.tsbuildinfo
 
 # Logs and runtime state
 *.log

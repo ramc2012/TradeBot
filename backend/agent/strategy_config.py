@@ -28,7 +28,7 @@ WINDOW_BUFFER_DAYS = 7  # days before expiry to exit (avoid delivery margins)
 
 MAX_ENTRY_IV_PCT = 30.0       # prefer IV ≤ 30% (vol-adjusted return 3.4× better)
 HARD_MAX_IV_PCT = 45.0        # refuse entry above 45%
-MIN_TTE_DAYS = 14             # need ≥14 days for move to develop
+MIN_TTE_DAYS = 5              # need ≥5 days for move to develop without skipping viable weekly setups
 MIN_PREMIUM = 2.0             # avoid illiquid sub-₹2 options
 MAX_PREMIUM = 500.0           # overpriced entries fail 4/17 times
 MIN_CANDLE_BARS = 20          # minimum 30-min bars in window before signal
@@ -96,6 +96,9 @@ EXIT = ExitConfig()
 
 OPTION_MA20_TRAIL_ALLOWED = False  # do NOT use MA20 trail from entry
 FIRST_PULLBACK_IGNORE_BARS = 20   # ignore MA20 touch in first 20 bars (10 hrs)
+OPTION_ENTRY_MA_FAST = 20
+OPTION_ENTRY_MA_SLOW = 50
+OPTION_ENTRY_REQUIRE_ABOVE_MA20 = True
 
 
 # ── Spot MA Context at Entry ─────────────────────────────────────────────────

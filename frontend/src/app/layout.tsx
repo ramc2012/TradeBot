@@ -1,5 +1,6 @@
 import "./globals.css";
 import Providers from "@/components/Providers";
+import AppErrorBoundary from "@/components/errors/AppErrorBoundary";
 import Sidebar from "@/components/layout/Sidebar";
 import BrokerStatusBar from "@/components/layout/BrokerStatusBar";
 import RealTimeTicker from "@/components/layout/RealTimeTicker";
@@ -11,18 +12,50 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="bg-bg-primary text-text-primary min-h-screen">
         <Providers>
           <div className="flex flex-col h-screen overflow-hidden">
-            {/* Top ticker bar */}
-            <RealTimeTicker />
-            {/* Broker status bar */}
-            <BrokerStatusBar />
-            {/* Live mode warning */}
-            <LiveModeWarning />
-            {/* Main layout */}
+            <>
+              <AppErrorBoundary
+                compact
+                scopeLabel="Ticker Error"
+                title="The live ticker strip failed."
+                detail="The workspace can still run while the index ticker recovers."
+              >
+                <RealTimeTicker />
+              </AppErrorBoundary>
+              <AppErrorBoundary
+                compact
+                scopeLabel="Broker Error"
+                title="The broker status strip failed."
+                detail="The workspace can still run while broker and portfolio status recover."
+              >
+                <BrokerStatusBar />
+              </AppErrorBoundary>
+              <AppErrorBoundary
+                compact
+                scopeLabel="Mode Error"
+                title="The trading-mode warning failed."
+                detail="The workspace can still run while the mode warning recovers."
+              >
+                <LiveModeWarning />
+              </AppErrorBoundary>
+            </>
             <div className="flex flex-1 overflow-hidden">
-              <Sidebar />
-              <main className="flex-1 overflow-y-auto p-4">
-                {children}
-              </main>
+              <AppErrorBoundary
+                compact
+                scopeLabel="Navigation Error"
+                title="The sidebar failed."
+                detail="Navigation crashed while rendering the active workspace links. Retry the sidebar or return to the overview."
+              >
+                <Sidebar />
+              </AppErrorBoundary>
+              <AppErrorBoundary
+                scopeLabel="Workspace Error"
+                title="The workspace content failed to render."
+                detail="A component crashed while rendering this workspace. Retry the section without restarting the whole app shell."
+              >
+                <main className="relative z-0 min-w-0 flex-1 overflow-y-auto px-3 py-3 lg:px-4">
+                  {children}
+                </main>
+              </AppErrorBoundary>
             </div>
           </div>
         </Providers>

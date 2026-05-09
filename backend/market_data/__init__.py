@@ -2,4 +2,5 @@ from market_data.data_router import data_router, DataRouter
 from market_data.option_chain import option_chain_service, OptionChainService
 from market_data.market_profile import market_profile_builder, MarketProfileBuilder
 from market_data.atm_watchlist import atm_watchlist_service, ATMWatchlistService
+from market_data.market_intelligence_runtime import market_intelligence_runtime, MarketIntelligenceRuntime
 from market_data.option_history import option_history_service, OptionHistoryService

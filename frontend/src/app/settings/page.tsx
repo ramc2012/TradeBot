@@ -1,19 +1,29 @@
 "use client";
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   getBrokerStatus, getCredentialsStatus, saveCredentials, getFyersAuthUrl, getUpstoxAuthUrl, connectUpstox,
   getIciciLoginUrl, connectIciciBreeze, connectFivepaisa,
-  disconnectBroker, getRiskStatus, updateRiskConfig, getResearchCacheStatus,
+  disconnectBroker, getRiskStatus, updateRiskConfig,
   getTelegramSettings, saveTelegramSettings, discoverTelegramChats, sendTelegramTest,
+  describeApiError,
 } from "@/lib/api";
 import { api } from "@/lib/api";
+import { hasBrokerSession, isBrokerReady, type BrokerStatusEntry } from "@/lib/broker-status";
+import { resolveApiBaseUrl } from "@/lib/runtime-url";
+import PageTabs from "@/components/layout/PageTabs";
+import { useStore } from "@/store";
 import { clsx } from "clsx";
 import {
   CheckCircle2, XCircle, Eye, EyeOff, ExternalLink, RefreshCw,
   ChevronDown, ChevronUp, Loader2, Plug, Unplug, AlertCircle, Save,
   Copy, Info, Send,
 } from "lucide-react";
+
+const SETTINGS_TABS = [
+  { href: "/settings", label: "Settings" },
+  { href: "/health", label: "Health" },
+];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -77,41 +87,84 @@ function CopyableUrl({ url, label }: { url: string; label: string }) {
   );
 }
 
-function StatusBadge({ connected }: { connected: boolean }) {
+function StatusBadge({
+  connected,
+  warning = false,
+  label,
+}: {
+  connected: boolean;
+  warning?: boolean;
+  label?: string;
+}) {
   return (
     <span className={clsx(
       "flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded",
-      connected ? "bg-accent-green/15 text-accent-green" : "bg-text-muted/15 text-text-muted"
+      connected
+        ? "bg-accent-green/15 text-accent-green"
+        : warning
+          ? "bg-accent-amber/15 text-accent-amber"
+          : "bg-text-muted/15 text-text-muted"
     )}>
-      {connected ? <CheckCircle2 size={10} /> : <XCircle size={10} />}
-      {connected ? "CONNECTED" : "DISCONNECTED"}
+      {connected ? <CheckCircle2 size={10} /> : warning ? <AlertCircle size={10} /> : <XCircle size={10} />}
+      {label || (connected ? "CONNECTED" : "DISCONNECTED")}
     </span>
   );
 }
 
-function formatInteger(value?: number | null): string {
-  if (value == null || Number.isNaN(value)) return "—";
-  return new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(value);
+function brokerBadgeLabel(status?: Partial<BrokerStatusEntry> | null): string {
+  if (isBrokerReady(status)) return "CONNECTED";
+  if (status?.needs_reconnect) return "RECONNECT";
+  return "DISCONNECTED";
 }
 
-function formatDecimal(value?: number | null, digits = 1): string {
-  if (value == null || Number.isNaN(value)) return "—";
-  return new Intl.NumberFormat("en-IN", {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  }).format(value);
+function humanizeBrokerValue(value?: string | null): string | null {
+  const normalized = String(value || "").trim();
+  if (!normalized) return null;
+  return normalized.replace(/_/g, " ");
 }
 
-function formatDuration(seconds?: number | null): string {
-  if (seconds == null || Number.isNaN(seconds) || seconds < 0) return "—";
-  const total = Math.round(seconds);
-  const days = Math.floor(total / 86400);
-  const hours = Math.floor((total % 86400) / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m`;
-  return `${total}s`;
+function formatBrokerCheckedAt(value?: string | null): string | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return new Intl.DateTimeFormat("en-IN", {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(parsed);
+}
+
+function brokerStatusMeta(status?: Partial<BrokerStatusEntry> | null): string | null {
+  if (!status) return null;
+  const checkedAt = formatBrokerCheckedAt(status.checked_at);
+  const source = humanizeBrokerValue(status.source);
+  if (isBrokerReady(status)) {
+    const via = source ? `via ${source}` : "via broker validation";
+    return checkedAt ? `Verified ${via} at ${checkedAt}` : `Verified ${via}`;
+  }
+  const parts = [
+    humanizeBrokerValue(status.state),
+    source,
+    checkedAt ? `checked ${checkedAt}` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : null;
+}
+
+function mergeBrokerStatuses(
+  primary?: BrokerStatusEntry[],
+  fallback?: BrokerStatusEntry[],
+): BrokerStatusEntry[] {
+  const merged = new Map<string, BrokerStatusEntry>();
+  for (const status of fallback || []) {
+    merged.set(status.broker, status);
+  }
+  for (const status of primary || []) {
+    merged.set(status.broker, {
+      ...(merged.get(status.broker) || {}),
+      ...status,
+    });
+  }
+  return Array.from(merged.values());
 }
 
 function CredsSavedBadge({ fields }: { fields: Record<string, boolean> }) {
@@ -134,155 +187,12 @@ function useAllCredsStatus() {
   return useQuery({
     queryKey: ["allCredsStatus"],
     queryFn: () => api.get("/api/auth/all-credentials-status").then(r => r.data),
-    staleTime: 30_000,
+    staleTime: 300_000,
+    gcTime: 900_000,
+    refetchOnWindowFocus: false,
+    retry: 2,
+    retryDelay: (attempt) => Math.min(1000 * (attempt + 1), 3000),
   });
-}
-
-function UpstoxApiBudgetCard() {
-  const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ["settingsResearchCacheStatus"],
-    queryFn: () => getResearchCacheStatus().then((r) => r.data),
-    refetchInterval: 30000,
-    staleTime: 15000,
-  });
-
-  const budget = data?.api_budget;
-  const scheduler = data?.scheduler;
-
-  return (
-    <div className="card p-4 space-y-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="font-semibold text-sm">Upstox API Budget</div>
-          <p className="text-xs text-text-muted mt-1">
-            Rolling call usage, configured pacing, and theoretical useful-dataset ETA for the research sync.
-          </p>
-        </div>
-        <button onClick={() => refetch()} className="text-text-muted hover:text-text-primary p-1 rounded" title="Refresh">
-          <RefreshCw size={14} />
-        </button>
-      </div>
-
-      {isLoading && (
-        <div className="text-xs text-text-muted flex items-center gap-2">
-          <Loader2 size={12} className="animate-spin" /> Loading API budget…
-        </div>
-      )}
-
-      {isError && (
-        <div className="text-xs text-accent-red flex items-center gap-2">
-          <AlertCircle size={12} /> Could not load API budget telemetry.
-        </div>
-      )}
-
-      {!isLoading && !isError && budget && (
-        <>
-          <div className="grid gap-3 md:grid-cols-4">
-            <div className="rounded border border-bg-border bg-bg-secondary/40 p-3">
-              <div className="text-[11px] uppercase tracking-wide text-text-muted">Rolling 30m</div>
-              <div className="mt-1 text-lg font-semibold text-text-primary">
-                {formatInteger(budget.rolling_30m?.calls)} / {formatInteger(budget.limits?.per_30_minutes)}
-              </div>
-              <div className="text-xs text-text-muted">
-                {formatDecimal(budget.rolling_30m?.utilization_pct_of_doc_limit, 1)}% of documented cap
-              </div>
-            </div>
-            <div className="rounded border border-bg-border bg-bg-secondary/40 p-3">
-              <div className="text-[11px] uppercase tracking-wide text-text-muted">Configured Ceiling</div>
-              <div className="mt-1 text-lg font-semibold text-text-primary">
-                {formatInteger(budget.configured?.calls_per_30_minutes)} / {formatInteger(budget.limits?.per_30_minutes)}
-              </div>
-              <div className="text-xs text-text-muted">
-                gap {formatDecimal(budget.configured?.gap_seconds, 1)}s between calls
-              </div>
-            </div>
-            <div className="rounded border border-bg-border bg-bg-secondary/40 p-3">
-              <div className="text-[11px] uppercase tracking-wide text-text-muted">Last Run Rate</div>
-              <div className="mt-1 text-lg font-semibold text-text-primary">
-                {formatDecimal(budget.last_run?.avg_calls_per_second, 2)}/s
-              </div>
-              <div className="text-xs text-text-muted">
-                {formatInteger(budget.last_run?.calls)} calls in {formatDuration(budget.last_run?.elapsed_seconds)}
-              </div>
-            </div>
-            <div className="rounded border border-bg-border bg-bg-secondary/40 p-3">
-              <div className="text-[11px] uppercase tracking-wide text-text-muted">Full Useful Target</div>
-              <div className="mt-1 text-lg font-semibold text-text-primary">
-                {formatDuration(budget.theoretical?.full_seconds_at_configured_rate)}
-              </div>
-              <div className="text-xs text-text-muted">
-                configured-rate estimate from empty cache
-              </div>
-            </div>
-          </div>
-
-          <div className="grid gap-3 lg:grid-cols-2">
-            <div className="rounded border border-bg-border bg-bg-secondary/30 p-3 space-y-2">
-              <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Current Rates vs Limits</div>
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">Observed avg / min</div>
-                  <div className="font-semibold text-text-primary">{formatDecimal(budget.rolling_30m?.avg_calls_per_minute, 1)}</div>
-                </div>
-                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">Doc max / min</div>
-                  <div className="font-semibold text-text-primary">{formatInteger(budget.limits?.per_minute)}</div>
-                </div>
-                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">Observed avg / sec</div>
-                  <div className="font-semibold text-text-primary">{formatDecimal(budget.rolling_30m?.avg_calls_per_second, 3)}</div>
-                </div>
-                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">Configured / sec</div>
-                  <div className="font-semibold text-text-primary">{formatDecimal(budget.configured?.calls_per_second, 3)}</div>
-                </div>
-              </div>
-              <div className="text-xs text-text-muted">
-                Scheduler: <span className="text-text-primary">{scheduler?.label || "—"}</span>
-              </div>
-            </div>
-
-            <div className="rounded border border-bg-border bg-bg-secondary/30 p-3 space-y-2">
-              <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Useful-Dataset ETA</div>
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">Total estimated calls</div>
-                  <div className="font-semibold text-text-primary">{formatInteger(budget.theoretical?.total_calls)}</div>
-                </div>
-                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">Remaining estimated calls</div>
-                  <div className="font-semibold text-text-primary">{formatInteger(budget.theoretical?.remaining_calls)}</div>
-                </div>
-                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">Full ETA at observed rate</div>
-                  <div className="font-semibold text-text-primary">{formatDuration(budget.theoretical?.full_seconds_at_observed_rate)}</div>
-                </div>
-                <div className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">Remaining ETA at observed rate</div>
-                  <div className="font-semibold text-text-primary">{formatDuration(budget.theoretical?.remaining_seconds_at_observed_rate)}</div>
-                </div>
-              </div>
-              <div className="text-[11px] text-text-muted">
-                Model: 1 expiry fetch per underlying, 1 spot-history fetch per underlying, 1 contract-discovery fetch per expiry, and 1 historical-candle fetch per required CE/PE research contract.
-              </div>
-            </div>
-          </div>
-
-          <div className="rounded border border-bg-border bg-bg-secondary/30 p-3 space-y-2">
-            <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Call Mix In Last 30 Minutes</div>
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 text-xs">
-              {Object.entries(budget.rolling_30m?.by_endpoint || {}).map(([endpoint, count]) => (
-                <div key={endpoint} className="rounded bg-bg-primary/40 px-2 py-2 border border-bg-border">
-                  <div className="text-text-muted">{endpoint.replaceAll("_", " ")}</div>
-                  <div className="font-semibold text-text-primary">{formatInteger(Number(count))}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </>
-      )}
-    </div>
-  );
 }
 
 function TelegramCard() {
@@ -505,57 +415,72 @@ function TelegramCard() {
 
 // ── Fyers Card ────────────────────────────────────────────────────────────────
 
-const FYERS_DEFAULT_CALLBACK = "http://localhost:8000/api/auth/fyers/callback";
+const API_BASE_URL = resolveApiBaseUrl();
+const FYERS_FIXED_REDIRECT_URI = "https://trade.fyers.in/api-login/redirect-uri/index.html";
 
-function FyersCard({ status, onRefresh }: { status: any; onRefresh: () => void }) {
+function FyersCard({ status, onRefresh }: { status: BrokerStatusEntry | undefined; onRefresh: () => void }) {
   const qc = useQueryClient();
   const { data: allCreds } = useAllCredsStatus();
   const savedFields: Record<string, boolean> = allCreds?.fyers?.fields ?? {};
   const hasCreds = allCreds?.fyers?.has_credentials;
+  const brokerReady = isBrokerReady(status);
+  const sessionActive = hasBrokerSession(status);
+  const statusMeta = brokerStatusMeta(status);
+  const [expanded, setExpanded] = useState(false);
   const { data: fyersCreds } = useQuery({
     queryKey: ["credentialsStatus", "fyers"],
     queryFn: () => getCredentialsStatus("fyers").then((r) => r.data),
     staleTime: 15000,
+    enabled: expanded,
+    refetchOnWindowFocus: false,
+    retry: false,
   });
 
-  const [expanded, setExpanded] = useState(false);
   const [appId, setAppId] = useState("");
   const [secret, setSecret] = useState("");
-  const [redirectUri, setRedirectUri] = useState("");
+  const [pin, setPin] = useState("");
   const [authCode, setAuthCode] = useState("");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
 
-  const effectiveRedirectUri = String(fyersCreds?.display?.redirect_uri || redirectUri || FYERS_DEFAULT_CALLBACK);
+  const savedAppId = String(fyersCreds?.display?.app_id || "").trim();
+  const effectiveRedirectUri = String(
+    fyersCreds?.display?.redirect_uri || FYERS_FIXED_REDIRECT_URI
+  );
 
   useEffect(() => {
     if (fyersCreds?.display?.app_id && !appId) {
       setAppId(String(fyersCreds.display.app_id));
     }
-    if (fyersCreds?.display?.redirect_uri && !redirectUri) {
-      setRedirectUri(String(fyersCreds.display.redirect_uri));
-    }
-  }, [fyersCreds, appId, redirectUri]);
+  }, [fyersCreds, appId]);
 
   const handleSaveCreds = async () => {
-    const redirectToSave = redirectUri.trim();
-    const savedRedirect = String(fyersCreds?.display?.redirect_uri || "").trim();
-    if (!appId || !secret) { setMsg("Enter APP ID and Secret"); return; }
-    if (!redirectToSave && !savedRedirect) {
-      setMsg("Enter the Fyers redirect URI you actually registered in the app settings");
+    const appIdToSave = appId.trim() || savedAppId;
+    const secretToSave = secret.trim();
+    const pinToSave = pin.trim();
+    const hasSavedSecret = Boolean(savedFields["secret"]);
+    if (!appIdToSave) {
+      setMsg("Enter APP ID");
+      return;
+    }
+    if (!secretToSave && !hasSavedSecret) {
+      setMsg("Enter Secret Key");
       return;
     }
     setSaving(true); setMsg("");
     try {
       await saveCredentials("fyers", {
-        app_id: appId,
-        secret,
-        ...(redirectToSave ? { redirect_uri: redirectToSave } : {}),
+        app_id: appIdToSave,
+        ...(secretToSave ? { secret: secretToSave } : {}),
+        ...(pinToSave ? { pin: pinToSave } : {}),
+        redirect_uri: FYERS_FIXED_REDIRECT_URI,
       });
+      setSecret("");
+      setPin("");
       setMsg("✓ Credentials saved");
       qc.invalidateQueries({ queryKey: ["allCredsStatus"] });
       qc.invalidateQueries({ queryKey: ["credentialsStatus", "fyers"] });
-    } catch (e: any) { setMsg(e?.response?.data?.detail || "Failed to save"); }
+    } catch (e: any) { setMsg(describeApiError(e, "Failed to save Fyers credentials")); }
     finally { setSaving(false); }
   };
 
@@ -563,17 +488,17 @@ function FyersCard({ status, onRefresh }: { status: any; onRefresh: () => void }
     try {
       const r = await getFyersAuthUrl();
       window.open(r.data.auth_url, "_blank", "width=600,height=700");
-    } catch (e: any) { setMsg(e?.response?.data?.detail || "Save credentials first"); }
+    } catch (e: any) { setMsg(describeApiError(e, "Save credentials first")); }
   };
 
   const handleConnect = async () => {
-    if (!authCode) { setMsg("Paste the auth_code from the callback URL"); return; }
+    if (!authCode) { setMsg("Paste the auth_code from the Fyers redirect page"); return; }
     setSaving(true); setMsg("");
     try {
       const { connectBroker } = await import("@/lib/api");
       await connectBroker("fyers", { auth_code: authCode });
       setMsg("✓ Connected!"); setExpanded(false); onRefresh();
-    } catch (e: any) { setMsg(e?.response?.data?.detail || "Connection failed"); }
+    } catch (e: any) { setMsg(describeApiError(e, "Fyers connection failed")); }
     finally { setSaving(false); }
   };
 
@@ -596,13 +521,14 @@ function FyersCard({ status, onRefresh }: { status: any; onRefresh: () => void }
           </div>
           <div>
             <div className="font-semibold text-sm">Fyers</div>
-            {status?.connected && <div className="text-xs text-text-muted">{status.name}</div>}
+            {brokerReady && status?.name && <div className="text-xs text-text-muted">{status.name}</div>}
+            {statusMeta && <div className="text-[11px] text-text-muted">{statusMeta}</div>}
           </div>
-          <StatusBadge connected={status?.connected} />
-          {!status?.connected && <CredsSavedBadge fields={savedFields} />}
+          <StatusBadge connected={brokerReady} warning={Boolean(status?.needs_reconnect)} label={brokerBadgeLabel(status)} />
+          {!brokerReady && <CredsSavedBadge fields={savedFields} />}
         </div>
         <div className="flex items-center gap-1">
-          {status?.connected && (
+          {sessionActive && (
             <button onClick={() => disconnectBroker("fyers").then(onRefresh)}
               className="text-text-muted hover:text-accent-red p-1 rounded" title="Disconnect">
               <Unplug size={14} />
@@ -619,7 +545,7 @@ function FyersCard({ status, onRefresh }: { status: any; onRefresh: () => void }
           {/* Step 0: Redirect URL */}
           <div className="bg-accent-amber/5 border border-accent-amber/20 rounded p-3 space-y-2">
             <div className="text-xs font-bold text-accent-amber flex items-center gap-1">
-              <Info size={11} /> Register this Redirect URL in your Fyers app first
+              <Info size={11} /> Fyers uses this fixed redirect URL
             </div>
             <CopyableUrl url={effectiveRedirectUri} label="Saved Redirect URL (register this in myapi.fyers.in → App Settings)" />
             <p className="text-xs text-text-muted">
@@ -628,7 +554,7 @@ function FyersCard({ status, onRefresh }: { status: any; onRefresh: () => void }
                 className="text-accent-blue hover:underline inline-flex items-center gap-1">
                 myapi.fyers.in <ExternalLink size={9} />
               </a>
-              {" "}→ My Apps → Edit app → add the redirect URL above → Save.
+              {" "}→ My Apps → Edit app → set the redirect URL above once → Save.
             </p>
           </div>
 
@@ -637,13 +563,25 @@ function FyersCard({ status, onRefresh }: { status: any; onRefresh: () => void }
               <CheckCircle2 size={12} /> Credentials saved — go to Step 2 to login.
             </div>
           )}
+          {status?.detail && !brokerReady && (
+            <div className="bg-accent-amber/5 border border-accent-amber/20 rounded p-2 text-xs text-accent-amber flex items-start gap-2">
+              <AlertCircle size={12} className="mt-0.5 shrink-0" />
+              <span>{status.detail}</span>
+            </div>
+          )}
+          {savedFields["access_token"] && (
+            <div className="bg-accent-green/5 border border-accent-green/20 rounded p-2 text-xs text-accent-green flex items-center gap-2">
+              <CheckCircle2 size={12} /> Saved Fyers session found — the cloud app will reuse it until Fyers expires it.
+            </div>
+          )}
 
           <div className="space-y-2">
             <div className="text-xs font-bold text-text-secondary">Step 1 — API Credentials</div>
             <TextInput value={appId} onChange={setAppId} label="APP ID (Client ID)" placeholder="XXXXXXXX-100" saved={savedFields["app_id"]} />
             <PasswordInput value={secret} onChange={setSecret} label="Secret Key" placeholder="secret" saved={savedFields["secret"]} />
-            <TextInput value={redirectUri} onChange={setRedirectUri}
-              label="Redirect URI (must match app settings)" placeholder={FYERS_DEFAULT_CALLBACK} saved={savedFields["redirect_uri"]} />
+            <PasswordInput value={pin} onChange={setPin} label="PIN for refresh token reuse" placeholder="optional; stored encrypted" saved={savedFields["pin"]} />
+            <TextInput value={effectiveRedirectUri}
+              label="Redirect URI (fixed for Fyers login)" readOnly saved={savedFields["redirect_uri"]} />
             <button onClick={handleSaveCreds} disabled={saving}
               className="px-3 py-1.5 rounded text-xs bg-bg-hover border border-bg-border text-text-secondary hover:border-accent-amber/40 disabled:opacity-50 flex items-center gap-1">
               {saving ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />} Save Credentials
@@ -676,17 +614,21 @@ function FyersCard({ status, onRefresh }: { status: any; onRefresh: () => void }
 
 // ── Upstox Card ───────────────────────────────────────────────────────────────
 
-const UPSTOX_CALLBACK = "http://localhost:8000/api/auth/upstox/callback";
+const UPSTOX_CALLBACK = `${API_BASE_URL}/api/auth/upstox/callback`;
 
-function UpstoxCard({ status, onRefresh }: { status: any; onRefresh: () => void }) {
+function UpstoxCard({ status, onRefresh }: { status: BrokerStatusEntry | undefined; onRefresh: () => void }) {
   const qc = useQueryClient();
   const { data: allCreds } = useAllCredsStatus();
   const savedFields: Record<string, boolean> = allCreds?.upstox?.fields ?? {};
   const hasCreds = allCreds?.upstox?.has_credentials;
+  const brokerReady = isBrokerReady(status);
+  const sessionActive = hasBrokerSession(status);
+  const statusMeta = brokerStatusMeta(status);
 
   const [expanded, setExpanded] = useState(false);
   const [apiKey, setApiKey] = useState("");
   const [secret, setSecret] = useState("");
+  const [analyticsToken, setAnalyticsToken] = useState("");
   const [authCode, setAuthCode] = useState("");
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
@@ -695,13 +637,41 @@ function UpstoxCard({ status, onRefresh }: { status: any; onRefresh: () => void 
   const UPSTOX_REDIRECT = "https://www.google.com";
 
   const handleSaveCreds = async () => {
-    if (!apiKey || !secret) { setMsg("Enter both API Key and Secret"); return; }
+    const apiKeyToSave = apiKey.trim();
+    const secretToSave = secret.trim();
+    const analyticsTokenToSave = analyticsToken.trim();
+    const hasSavedApiKey = Boolean(savedFields["api_key"]);
+    const hasSavedSecret = Boolean(savedFields["secret"]);
+    const placeholderValues = new Set(["x", "xx", "xxx", "test", "dummy", "placeholder", "your_api_key", "your_secret"]);
+    if (apiKeyToSave && placeholderValues.has(apiKeyToSave.toLowerCase())) {
+      setMsg("Enter the real Upstox API Key. The saved value cannot be a placeholder like x.");
+      return;
+    }
+    if (secretToSave && placeholderValues.has(secretToSave.toLowerCase())) {
+      setMsg("Enter the real Upstox Secret. The saved value cannot be a placeholder like x.");
+      return;
+    }
+    if (!analyticsTokenToSave && !apiKeyToSave && !hasSavedApiKey) {
+      setMsg("Enter API Key or Analytics Token");
+      return;
+    }
+    if (!analyticsTokenToSave && !secretToSave && !hasSavedSecret) {
+      setMsg("Enter Secret or Analytics Token");
+      return;
+    }
     setSaving(true); setMsg("");
     try {
-      await saveCredentials("upstox", { api_key: apiKey, secret, redirect_uri: UPSTOX_REDIRECT });
+      await saveCredentials("upstox", {
+        ...(apiKeyToSave ? { api_key: apiKeyToSave } : {}),
+        ...(secretToSave ? { secret: secretToSave } : {}),
+        ...(analyticsTokenToSave ? { analytics_token: analyticsTokenToSave } : {}),
+        redirect_uri: UPSTOX_REDIRECT,
+      });
+      setSecret("");
+      setAnalyticsToken("");
       setMsg("✓ Credentials saved");
       qc.invalidateQueries({ queryKey: ["allCredsStatus"] });
-    } catch (e: any) { setMsg(e?.response?.data?.detail || "Failed"); }
+    } catch (e: any) { setMsg(describeApiError(e, "Failed to save Upstox credentials")); }
     finally { setSaving(false); }
   };
 
@@ -712,7 +682,7 @@ function UpstoxCard({ status, onRefresh }: { status: any; onRefresh: () => void 
       window.open(r.data.auth_url, "_blank");
       setMsg("Login page opened. After login, Google will open — copy the code= value from the URL and paste in Step 3.");
     } catch (e: any) {
-      setMsg(e?.response?.data?.detail || "Save credentials first");
+      setMsg(describeApiError(e, "Save credentials first"));
     } finally { setSaving(false); }
   };
 
@@ -731,7 +701,7 @@ function UpstoxCard({ status, onRefresh }: { status: any; onRefresh: () => void 
         typeof rawDetail === "string" ? rawDetail :
         Array.isArray(rawDetail) ? JSON.stringify(rawDetail) :
         resp?.data ? JSON.stringify(resp.data).slice(0, 200) :
-        e?.message || "Connection failed — check backend logs";
+        describeApiError(e, "Connection failed — check backend logs");
       const d = detail.toLowerCase();
       if (d.includes("udapi100068") || d.includes("redirect_uri")) {
         setMsg("Redirect URI mismatch — set your Upstox app Redirect URL to https://www.google.com");
@@ -752,10 +722,11 @@ function UpstoxCard({ status, onRefresh }: { status: any; onRefresh: () => void 
           </div>
           <div>
             <div className="font-semibold text-sm">Upstox</div>
-            {status?.connected && <div className="text-xs text-text-muted">{status.name}</div>}
+            {brokerReady && status?.name && <div className="text-xs text-text-muted">{status.name}</div>}
+            {statusMeta && <div className="text-[11px] text-text-muted">{statusMeta}</div>}
           </div>
-          <StatusBadge connected={status?.connected} />
-          {!status?.connected && <CredsSavedBadge fields={savedFields} />}
+          <StatusBadge connected={brokerReady} warning={Boolean(status?.needs_reconnect)} label={brokerBadgeLabel(status)} />
+          {!brokerReady && <CredsSavedBadge fields={savedFields} />}
           <span className="text-xs bg-accent-blue/10 text-accent-blue px-2 py-0.5 rounded border border-accent-blue/20">
             1yr F&O history
           </span>
@@ -764,7 +735,7 @@ function UpstoxCard({ status, onRefresh }: { status: any; onRefresh: () => void 
           </span>
         </div>
         <div className="flex items-center gap-1">
-          {status?.connected && (
+          {sessionActive && (
             <button onClick={() => disconnectBroker("upstox").then(onRefresh)}
               className="text-text-muted hover:text-accent-red p-1 rounded"><Unplug size={14} /></button>
           )}
@@ -790,6 +761,12 @@ function UpstoxCard({ status, onRefresh }: { status: any; onRefresh: () => void 
               <CheckCircle2 size={12} /> Credentials saved — proceed to Step 2.
             </div>
           )}
+          {status?.detail && !brokerReady && (
+            <div className="bg-accent-amber/5 border border-accent-amber/20 rounded p-2 text-xs text-accent-amber flex items-start gap-2">
+              <AlertCircle size={12} className="mt-0.5 shrink-0" />
+              <span>{status.detail}</span>
+            </div>
+          )}
 
           {/* Step 1 — Credentials */}
           <div className="space-y-2">
@@ -804,6 +781,7 @@ function UpstoxCard({ status, onRefresh }: { status: any; onRefresh: () => void 
             </p>
             <TextInput value={apiKey} onChange={setApiKey} label="API Key" placeholder="your_api_key" saved={savedFields["api_key"]} />
             <PasswordInput value={secret} onChange={setSecret} label="Secret" placeholder="your_secret" saved={savedFields["secret"]} />
+            <PasswordInput value={analyticsToken} onChange={setAnalyticsToken} label="Analytics Token for paper/backfill" placeholder="optional long-lived read-only token" saved={savedFields["analytics_token"]} />
             <button onClick={handleSaveCreds} disabled={saving}
               className="px-3 py-1.5 rounded text-xs bg-bg-hover border border-bg-border text-text-secondary hover:border-accent-blue/40 disabled:opacity-50 flex items-center gap-1">
               {saving ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />} Save Credentials
@@ -846,7 +824,7 @@ function UpstoxCard({ status, onRefresh }: { status: any; onRefresh: () => void 
               label="Auth code (from Google URL) or existing access token (eyJ...)"
               placeholder="paste code or eyJ... token here"
               saved={savedFields["access_token"]} />
-            {savedFields["access_token"] && !status?.connected && (
+            {savedFields["access_token"] && !brokerReady && (
               <p className="text-xs text-accent-green/80 flex items-center gap-1">
                 <CheckCircle2 size={11} /> Saved access token found — server will auto-connect on next restart. Or paste a fresh token and Connect now.
               </p>
@@ -866,12 +844,15 @@ function UpstoxCard({ status, onRefresh }: { status: any; onRefresh: () => void 
 
 // ── 5Paisa Card ───────────────────────────────────────────────────────────────
 
-function FivePaisaCard({ status, onRefresh }: { status: any; onRefresh: () => void }) {
+function FivePaisaCard({ status, onRefresh }: { status: BrokerStatusEntry | undefined; onRefresh: () => void }) {
   const qc = useQueryClient();
   const { data: allCreds } = useAllCredsStatus();
   const savedFields: Record<string, boolean> = allCreds?.fivepaisa?.fields ?? {};
   const hasCreds = allCreds?.fivepaisa?.has_credentials;
   const allFieldsSaved = hasCreds && Object.values(savedFields).filter(Boolean).length >= 7;
+
+  const brokerReady = isBrokerReady(status);
+  const sessionActive = hasBrokerSession(status);
 
   // Auto-expand when creds are saved so user sees TOTP section immediately
   const [expanded, setExpanded] = useState(false);
@@ -885,10 +866,10 @@ function FivePaisaCard({ status, onRefresh }: { status: any; onRefresh: () => vo
 
   // Auto-expand when all credentials are already saved
   useEffect(() => {
-    if (allFieldsSaved && !status?.connected) {
+    if (allFieldsSaved && !brokerReady) {
       setExpanded(true);
     }
-  }, [allFieldsSaved, status?.connected]);
+  }, [allFieldsSaved, brokerReady]);
 
   const setF = (k: string) => (v: string) => setFields(f => ({ ...f, [k]: v }));
 
@@ -931,13 +912,13 @@ function FivePaisaCard({ status, onRefresh }: { status: any; onRefresh: () => vo
           </div>
           <div>
             <div className="font-semibold text-sm">5Paisa</div>
-            {status?.connected && <div className="text-xs text-text-muted">{status.name}</div>}
+            {brokerReady && status?.name && <div className="text-xs text-text-muted">{status.name}</div>}
           </div>
-          <StatusBadge connected={status?.connected} />
-          {!status?.connected && <CredsSavedBadge fields={savedFields} />}
+          <StatusBadge connected={brokerReady} label={brokerBadgeLabel(status)} />
+          {!brokerReady && <CredsSavedBadge fields={savedFields} />}
         </div>
         <div className="flex items-center gap-1">
-          {status?.connected && (
+          {sessionActive && (
             <button onClick={() => disconnectBroker("fivepaisa").then(onRefresh)}
               className="text-text-muted hover:text-accent-red p-1 rounded"><Unplug size={14} /></button>
           )}
@@ -1027,11 +1008,13 @@ function FivePaisaCard({ status, onRefresh }: { status: any; onRefresh: () => vo
 
 // ── ICICI Breeze Card ─────────────────────────────────────────────────────────
 
-function ICICIBreezeCard({ status, onRefresh }: { status: any; onRefresh: () => void }) {
+function ICICIBreezeCard({ status, onRefresh }: { status: BrokerStatusEntry | undefined; onRefresh: () => void }) {
   const qc = useQueryClient();
   const { data: allCreds } = useAllCredsStatus();
   const savedFields: Record<string, boolean> = allCreds?.icici_breeze?.fields ?? {};
   const hasCreds = allCreds?.icici_breeze?.has_credentials;
+  const brokerReady = isBrokerReady(status);
+  const sessionActive = hasBrokerSession(status);
 
   const [expanded, setExpanded] = useState(false);
   const [apiKey, setApiKey] = useState("");
@@ -1111,16 +1094,16 @@ function ICICIBreezeCard({ status, onRefresh }: { status: any; onRefresh: () => 
           </div>
           <div>
             <div className="font-semibold text-sm">ICICI Direct <span className="text-xs text-text-muted font-normal">(Breeze)</span></div>
-            {status?.connected && <div className="text-xs text-text-muted">{status.name}</div>}
+            {brokerReady && status?.name && <div className="text-xs text-text-muted">{status.name}</div>}
           </div>
-          <StatusBadge connected={status?.connected} />
-          {!status?.connected && <CredsSavedBadge fields={savedFields} />}
+          <StatusBadge connected={brokerReady} label={brokerBadgeLabel(status)} />
+          {!brokerReady && <CredsSavedBadge fields={savedFields} />}
           <span className="text-xs bg-accent-green/10 text-accent-green px-2 py-0.5 rounded border border-accent-green/20">
             3yr F&O history
           </span>
         </div>
         <div className="flex items-center gap-1">
-          {status?.connected && (
+          {sessionActive && (
             <button onClick={() => disconnectBroker("icici_breeze").then(onRefresh)}
               className="text-text-muted hover:text-accent-red p-1 rounded"><Unplug size={14} /></button>
           )}
@@ -1216,18 +1199,27 @@ function ICICIBreezeCard({ status, onRefresh }: { status: any; onRefresh: () => 
 
 export default function SettingsPage() {
   const qc = useQueryClient();
+  const layoutBrokerStatuses = useStore((state) => state.brokerStatuses);
 
-  const { data: brokerStatuses, refetch: refetchBrokers } = useQuery({
+  const {
+    data: brokerStatuses,
+    isError: brokerStatusError,
+    refetch: refetchBrokers,
+  } = useQuery({
     queryKey: ["brokerStatus"],
     queryFn: () => getBrokerStatus().then(r => r.data),
-    refetchInterval: 30000,
-    staleTime: 15000,
+    refetchInterval: 120000,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
   });
 
   const { data: riskData } = useQuery({
     queryKey: ["riskStatus"],
     queryFn: () => getRiskStatus().then(r => r.data),
     staleTime: 30000,
+    refetchOnWindowFocus: false,
+    retry: false,
   });
 
   const [maxLoss, setMaxLoss] = useState("");
@@ -1239,31 +1231,48 @@ export default function SettingsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["riskStatus"] }),
   });
 
-  const statusMap = Object.fromEntries((brokerStatuses || []).map((s: any) => [s.broker, s]));
+  const effectiveBrokerStatuses = useMemo(
+    () => mergeBrokerStatuses(brokerStatuses, layoutBrokerStatuses),
+    [brokerStatuses, layoutBrokerStatuses],
+  );
+  const statusMap = Object.fromEntries(effectiveBrokerStatuses.map((s: any) => [s.broker, s]));
+  const showingBrokerFallback = Boolean((brokerStatusError || !brokerStatuses?.length) && layoutBrokerStatuses.length);
 
-  const handleRefresh = useCallback(() => {
-    refetchBrokers();
-    qc.invalidateQueries({ queryKey: ["brokerStatus"] });
+  const handleRefresh = useCallback(async () => {
+    try {
+      const response = await getBrokerStatus({ forceValidate: true });
+      qc.setQueryData(["brokerStatus"], response.data);
+    } catch {
+      await refetchBrokers();
+    }
     qc.invalidateQueries({ queryKey: ["allCredsStatus"] });
+    qc.invalidateQueries({ queryKey: ["riskStatus"] });
+    qc.invalidateQueries({ queryKey: ["researchCacheStatus"] });
   }, [refetchBrokers, qc]);
 
   return (
     <div className="max-w-2xl space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-lg font-bold font-mono text-text-primary">Settings</h1>
-        <button onClick={handleRefresh} className="text-text-muted hover:text-text-primary p-1 rounded" title="Refresh">
-          <RefreshCw size={14} />
-        </button>
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h1 className="text-lg font-bold font-mono text-text-primary">Settings</h1>
+          <button onClick={handleRefresh} className="text-text-muted hover:text-text-primary p-1 rounded" title="Refresh">
+            <RefreshCw size={14} />
+          </button>
+        </div>
+        <PageTabs tabs={SETTINGS_TABS} />
       </div>
 
       {/* Broker Connections */}
       <section className="space-y-3">
         <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">Broker Connections</h2>
         <p className="text-xs text-text-muted">
-          Credentials and access tokens are saved permanently to disk.
-          Upstox auto-reconnects on restart (JWT token is long-lived). Other brokers require re-auth each session.
+          API credentials are saved once. Same-day broker sessions are also persisted and auto-restored across refreshes and restarts until the broker expires them.
         </p>
-        <UpstoxApiBudgetCard />
+        {showingBrokerFallback && (
+          <div className="rounded border border-accent-amber/20 bg-accent-amber/5 px-3 py-2 text-xs text-accent-amber">
+            Live broker validation is temporarily unavailable. Showing the last broker state received by the layout bar.
+          </div>
+        )}
         <TelegramCard />
         <FyersCard status={statusMap["fyers"]} onRefresh={handleRefresh} />
         <UpstoxCard status={statusMap["upstox"]} onRefresh={handleRefresh} />

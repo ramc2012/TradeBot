@@ -9,15 +9,68 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Optional
 
-import asyncpg
-from loguru import logger
+from sqlalchemy import text
 
+from analysis.instruments import get_index_monthly_expiry, get_monthly_expiry
 from agent.strategy_config import WINDOW_BUFFER_DAYS
-from core.config import settings
+from db.database import AsyncSessionLocal
 
 
-async def _get_connection() -> asyncpg.Connection:
-    return await asyncpg.connect(str(settings.DATABASE_URL).replace("+asyncpg", ""))
+async def _fetch_expiry_rows(query: str, params: dict[str, object]) -> list[dict]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(text(query), params)
+        return [dict(row._mapping) for row in result.fetchall()]
+
+
+async def _fetch_underlying_rows(query: str, params: dict[str, object]) -> list[dict]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(text(query), params)
+        return [dict(row._mapping) for row in result.fetchall()]
+
+
+def _shift_months(year: int, month: int, delta: int) -> tuple[int, int]:
+    absolute = (year * 12) + (month - 1) + delta
+    return absolute // 12, (absolute % 12) + 1
+
+
+def _strategy1_monthly_expiry(underlying: str, kind: str, year: int, month: int) -> date:
+    if kind == "INDEX":
+        return get_index_monthly_expiry(underlying, year, month)
+    return get_monthly_expiry(year, month)
+
+
+def _generic_strategy1_scan_window(underlying: str, kind: str, today: date) -> dict:
+    candidates: list[dict] = []
+    for offset in range(0, 3):
+        year, month = _shift_months(today.year, today.month, offset)
+        prev_year, prev_month = _shift_months(year, month, -1)
+        expiry = _strategy1_monthly_expiry(underlying, kind, year, month)
+        prev_expiry = _strategy1_monthly_expiry(underlying, kind, prev_year, prev_month)
+        window_start = prev_expiry - timedelta(days=WINDOW_BUFFER_DAYS)
+        window_end = expiry - timedelta(days=WINDOW_BUFFER_DAYS)
+        state = "future"
+        if window_start <= today <= window_end:
+            state = "active"
+        elif today > window_end:
+            state = "past"
+        candidates.append(
+            {
+                "underlying": underlying,
+                "expiry": expiry,
+                "prev_expiry": prev_expiry,
+                "window_start": window_start,
+                "window_end": window_end,
+                "window_state": state,
+            }
+        )
+
+    for window in candidates:
+        if window["window_state"] == "active":
+            return window
+    for window in candidates:
+        if window["window_state"] == "future":
+            return window
+    return candidates[-1]
 
 
 async def get_trading_windows(
@@ -30,22 +83,17 @@ async def get_trading_windows(
         underlying, expiry, prev_expiry, window_start, window_end
     """
     today = as_of or date.today()
-    conn = await _get_connection()
-    try:
-        rows = await conn.fetch(
-            """
-            SELECT underlying, expiry, previous_monthly_expiry
-            FROM fo_expiry_catalog
-            WHERE underlying = $1
-              AND expiry >= $2
-              AND previous_monthly_expiry IS NOT NULL
-            ORDER BY expiry
-            """,
-            underlying,
-            today - timedelta(days=60),
-        )
-    finally:
-        await conn.close()
+    rows = await _fetch_expiry_rows(
+        """
+        SELECT underlying, expiry, previous_monthly_expiry
+        FROM fo_expiry_catalog
+        WHERE underlying = :underlying
+          AND expiry >= :min_expiry
+          AND previous_monthly_expiry IS NOT NULL
+        ORDER BY expiry
+        """,
+        {"underlying": underlying, "min_expiry": today - timedelta(days=60)},
+    )
 
     windows = []
     for r in rows:
@@ -97,22 +145,17 @@ async def get_all_active_windows(
     Used by the scanner to know which underlyings are currently tradeable.
     """
     today = as_of or date.today()
-    conn = await _get_connection()
-    try:
-        rows = await conn.fetch(
-            """
-            SELECT underlying, expiry, previous_monthly_expiry
-            FROM fo_expiry_catalog
-            WHERE previous_monthly_expiry IS NOT NULL
-              AND (previous_monthly_expiry - $1::int) <= $2::date
-              AND (expiry - $1::int) >= $2::date
-            ORDER BY underlying, expiry
-            """,
-            WINDOW_BUFFER_DAYS,
-            today,
-        )
-    finally:
-        await conn.close()
+    rows = await _fetch_expiry_rows(
+        """
+        SELECT underlying, expiry, previous_monthly_expiry
+        FROM fo_expiry_catalog
+        WHERE previous_monthly_expiry IS NOT NULL
+          AND (previous_monthly_expiry - (:buffer_days * INTERVAL '1 day')) <= :today
+          AND (expiry - (:buffer_days * INTERVAL '1 day')) >= :today
+        ORDER BY underlying, expiry
+        """,
+        {"buffer_days": WINDOW_BUFFER_DAYS, "today": today},
+    )
 
     windows = []
     seen = set()
@@ -139,6 +182,41 @@ async def get_all_active_windows(
             )
 
     return windows
+
+
+async def get_all_strategy1_scan_windows(
+    as_of: Optional[date] = None,
+) -> list[dict]:
+    """Return one Strategy 1 window per underlying for live scanning.
+
+    Selection rule:
+    - keep the currently active window while it is still valid
+    - otherwise roll to the next upcoming monthly window
+
+    This preserves the agreed expiry behavior for Strategy 1: do not change
+    the contract month early, but do not leave the lane idle once the current
+    window is exhausted.
+    """
+    today = as_of or date.today()
+    rows = await _fetch_underlying_rows(
+        """
+        SELECT symbol, kind
+        FROM fo_underlying_catalog
+        WHERE spot_instrument_key IS NOT NULL
+          AND underlying_key IS NOT NULL
+        ORDER BY CASE WHEN kind = 'INDEX' THEN 0 ELSE 1 END, symbol
+        """,
+        {},
+    )
+
+    return [
+        _generic_strategy1_scan_window(
+            underlying=str(row["symbol"]),
+            kind=str(row["kind"]),
+            today=today,
+        )
+        for row in rows
+    ]
 
 
 def days_remaining_in_window(window: dict, as_of: Optional[date] = None) -> int:

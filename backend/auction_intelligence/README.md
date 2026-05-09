@@ -2,11 +2,13 @@
 
 This package introduces a separate Market Profile + order-flow strategy module without changing the current strategy runtime. Nothing in this package is started from application lifespan hooks. The only integration point is an opt-in API router.
 
+Deployment and rollout planning for this module is documented in [DEPLOYMENT_BLUEPRINT.md](/Users/chinnadurairamachandran/Claude%20Projects/TradingBot/nomad-curie/backend/auction_intelligence/DEPLOYMENT_BLUEPRINT.md).
+
 ## MVP Scope
 
-- Primary deployment target: `NIFTY` futures
+- Primary live test underlyings: `NIFTY` and `SENSEX`
 - Secondary future scope: `BANKNIFTY`
-- Options are intentionally deferred to a later signal-to-instrument mapping layer
+- Live paper proposals now map sleeve signals into buy-only CE/PE contracts with expiry, strike, premium, and lot-size selection
 - Rollout target: deterministic rules, paper proposals, journaling, then supervised/RL extensions
 
 ## Package Layout
@@ -22,6 +24,8 @@ auction_intelligence/
 ├── risk/                Shared pre-trade governor
 ├── execution/           Execution-style planner
 ├── paper/               JSONL journaling for paper proposals
+├── shadow/              Persisted shadow-mode observations and divergence tracking
+├── validation/          Gate A/B/C validators and validation persistence
 └── service.py           End-to-end orchestration entry point
 ```
 
@@ -37,7 +41,7 @@ auction_intelligence/
 - `OrderFlowSnapshot`: timing/execution microstructure output
 - `RegimeAssessment`: explainable master-context label
 - `AgentDecision`: sleeve-local action proposal
-- `ExecutionInstruction`: broker-agnostic execution hint
+- `ExecutionInstruction`: broker-agnostic execution hint enriched with option contract details for the live paper path
 
 ## Deterministic Rules
 
@@ -58,11 +62,15 @@ auction_intelligence/
 - Top-of-book and multi-level imbalance
 - Aggressive buy/sell volume
 - Delta and cumulative delta
+- Signed trade imbalance
+- Best-book order flow imbalance from quote updates
 - VWAP drift
 - Queue pressure
+- Book pressure and micro-price offset
+- Trade intensity and quote repricing rate
 - Volatility burst
 - Passive/aggressive fill proxies
-- Adverse-selection proxy
+- Toxicity and adverse-selection proxies
 
 ### Regime Labels
 
@@ -102,8 +110,9 @@ auction_intelligence/
 4. Run agent sleeves independently
 5. Coordinate sleeves through the meta-controller
 6. Apply shared risk governor
-7. Build execution instructions
-8. Optionally write paper-trade journal entries
+7. Map approved sleeve direction into a buy-only CE/PE option contract with expiry and strike selection
+8. Build execution instructions
+9. Optionally write paper-trade journal entries
 
 ## Training Workflow
 
@@ -111,12 +120,17 @@ auction_intelligence/
 2. Supervised labels from regime/acceptance/timing outcomes
 3. Imitation learning from strong deterministic regions
 4. RL only for timing, sizing, and execution after paper validation
+5. RL state is built from Market Profile structure plus order-flow context
+6. RL reward must stay slippage-aware and adverse-selection-aware, not gross-PnL-only
+7. Automatic RL retraining runs only after market close on shadow data and promotes only if holdout checks improve
 
 ## Backtest / Paper Workflow
 
 - Bar-based backtests should reuse `MarketBar` and `MarketProfileEngine`
 - Event-driven replay should reuse `TradePrint`, `QuoteSnapshot`, and `OrderFlowEngine`
 - Paper proposals should flow through `AuctionIntelligenceService.analyze_and_record_paper`
+- Shadow observations should be captured through the `/api/auction-intelligence/shadow-record-live` endpoint
+- Gate C should be monitored through `/api/auction-intelligence/validate-gate-c`
 - JSONL journals land under `backend/runtime/auction_intelligence/`
 
 ## Test Strategy

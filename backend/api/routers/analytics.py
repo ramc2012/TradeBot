@@ -7,29 +7,15 @@ from fastapi import APIRouter, Query
 from analytics.performance import PerformanceAnalytics
 from analytics.sector import sector_tracker
 from analytics.greeks import aggregate_portfolio_greeks
-from api.routers.trading import _get_or_create_paper_session
+from api.routers.trading import _paper_position_rows, _paper_trade_rows
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
 _perf = PerformanceAnalytics()
 
 
-def _get_trades_as_dicts() -> list:
-    _, portfolio = _get_or_create_paper_session()
-    return [
-        {
-            "symbol": t.symbol,
-            "action": t.action,
-            "qty": t.qty,
-            "entry_price": t.entry_price,
-            "exit_price": t.exit_price,
-            "pnl": t.pnl,
-            "entry_time": t.entry_time.isoformat(),
-            "exit_time": t.exit_time.isoformat(),
-            "instrument_type": t.instrument_type,
-        }
-        for t in portfolio._trade_history
-    ]
+async def _get_trades_as_dicts() -> list:
+    return await _paper_trade_rows()
 
 
 @router.get("/performance")
@@ -37,7 +23,7 @@ async def get_performance(
     period: str = Query("today", regex="^(today|week|month|all)$"),
     session_id: Optional[str] = Query(None),
 ):
-    trades = _get_trades_as_dicts()
+    trades = await _get_trades_as_dicts()
     summary = _perf.summary(trades, period)
     return {
         "period": period,
@@ -55,27 +41,26 @@ async def get_performance(
 
 @router.get("/equity-curve")
 async def get_equity_curve():
-    trades = _get_trades_as_dicts()
+    trades = await _get_trades_as_dicts()
     curve = _perf.equity_curve(trades)
     return [{"timestamp": p.timestamp, "equity": p.equity, "pnl": p.cumulative_pnl} for p in curve]
 
 
 @router.get("/calendar-heatmap")
 async def get_calendar_heatmap():
-    trades = _get_trades_as_dicts()
+    trades = await _get_trades_as_dicts()
     return _perf.calendar_heatmap(trades)
 
 
 @router.get("/strategy-breakdown")
 async def get_strategy_breakdown():
-    trades = _get_trades_as_dicts()
+    trades = await _get_trades_as_dicts()
     return _perf.strategy_breakdown(trades)
 
 
 @router.get("/portfolio-greeks")
 async def get_portfolio_greeks():
-    _, portfolio = _get_or_create_paper_session()
-    positions = portfolio.get_positions_list()
+    positions = await _paper_position_rows()
     # Build position dicts with Greek inputs
     greek_inputs = []
     for pos in positions:
@@ -111,5 +96,5 @@ async def get_macro_dashboard():
 
 @router.get("/rolling-sharpe")
 async def get_rolling_sharpe(window: int = Query(20)):
-    trades = _get_trades_as_dicts()
+    trades = await _get_trades_as_dicts()
     return _perf.rolling_sharpe(trades, window)

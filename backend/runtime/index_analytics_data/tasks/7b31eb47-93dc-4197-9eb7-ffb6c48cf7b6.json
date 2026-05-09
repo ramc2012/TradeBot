@@ -1,0 +1,33 @@
+{
+  "task_id": "7b31eb47-93dc-4197-9eb7-ffb6c48cf7b6",
+  "status": "error",
+  "current_stage": "downloading_spot",
+  "underlyings": [
+    "BANKNIFTY"
+  ],
+  "interval": "1minute",
+  "total_spot_series": 1,
+  "processed_spot_series": 0,
+  "total_expiries": 0,
+  "processed_expiries": 0,
+  "total_contracts": 0,
+  "processed_contracts": 0,
+  "total_request_units": 0,
+  "processed_request_units": 0,
+  "skipped_contracts": 0,
+  "stored_files": 0,
+  "stored_spot_files": 0,
+  "stored_candles": 0,
+  "stored_spot_candles": 0,
+  "incomplete_contracts": 0,
+  "current_underlying": "BANKNIFTY",
+  "current_expiry": "",
+  "current_symbol": "BANKNIFTY SPOT",
+  "data_root": "/app/runtime/index_analytics_data",
+  "latest_file": "",
+  "error": "[SSL] record layer failure (_ssl.c:1016)",
+  "pct": 0.0,
+  "started_at": "2026-04-07T07:59:54.668980+00:00",
+  "finished_at": "2026-04-07T07:59:55.243135+00:00",
+  "elapsed_secs": 0
+}

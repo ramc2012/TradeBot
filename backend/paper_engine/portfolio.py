@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -23,6 +23,10 @@ class VirtualPosition:
     expiry: Optional[str] = None
     strike: Optional[float] = None
     option_type: Optional[str] = None
+    signal_id: Optional[str] = None
+    setup_type: Optional[str] = None
+    entry_iv_pct: Optional[float] = None
+    regime: Optional[str] = None
     opened_at: datetime = field(default_factory=datetime.utcnow)
 
     @property
@@ -49,19 +53,25 @@ class TradeRecord:
     expiry: Optional[str] = None
     strike: Optional[float] = None
     option_type: Optional[str] = None
+    signal_id: Optional[str] = None
+    setup_type: Optional[str] = None
+    entry_iv_pct: Optional[float] = None
+    regime: Optional[str] = None
 
 
 class PaperPortfolio:
     """Virtual portfolio that tracks positions, P&L, and performance metrics."""
 
     LOT_SIZES = {
-        "NIFTY": 50,
-        "BANKNIFTY": 15,
-        "FINNIFTY": 40,
-        "MIDCPNIFTY": 75,
-        "SENSEX": 10,
+        "NIFTY":       65,   # NSE-mandated (verified Apr 2026)
+        "BANKNIFTY":   30,
+        "FINNIFTY":    60,
+        "MIDCPNIFTY":  75,
+        "NIFTYNXT50":  25,
+        "SENSEX":      10,
+        "BANKEX":      15,
     }
-    DEFAULT_LOT_SIZE = 50
+    DEFAULT_LOT_SIZE = 1   # Emergency fallback only — all underlyings resolved from DB
 
     def __init__(self, initial_capital: float = 1_000_000.0, session_id: Optional[str] = None):
         self.initial_capital = initial_capital
@@ -78,7 +88,13 @@ class PaperPortfolio:
     def on_fill(self, order: PaperOrder):
         """Called by PaperOrderBook when an order fills."""
         fill_price = order.fill_price or 0
-        margin_used = self._estimate_margin(order.symbol, order.qty, fill_price)
+        margin_used = self._estimate_margin(
+            order.symbol,
+            order.qty,
+            fill_price,
+            instrument_type=order.instrument_type,
+            option_type=order.option_type,
+        )
 
         # Check if we have an existing position for this symbol in same direction
         existing_key = self._find_position_key(order.symbol, order.action)
@@ -108,7 +124,11 @@ class PaperPortfolio:
                 expiry=order.expiry,
                 strike=order.strike,
                 option_type=order.option_type,
-                opened_at=order.fill_time or datetime.utcnow(),
+                signal_id=order.signal_id,
+                setup_type=order.setup_type,
+                entry_iv_pct=order.entry_iv_pct,
+                regime=order.regime,
+                opened_at=order.fill_time or datetime.now(timezone.utc),
             )
             self.available_capital -= margin_used
             logger.info(f"[Portfolio] Opened position: {order.symbol} {order.action} {order.qty} @ {fill_price}")
@@ -127,18 +147,28 @@ class PaperPortfolio:
             exit_price=fill_price,
             pnl=pnl,
             entry_time=pos.opened_at,
-            exit_time=close_order.fill_time or datetime.utcnow(),
+            exit_time=close_order.fill_time or datetime.now(timezone.utc),
             instrument_type=pos.instrument_type,
             expiry=pos.expiry,
             strike=pos.strike,
             option_type=pos.option_type,
+            signal_id=pos.signal_id,
+            setup_type=pos.setup_type,
+            entry_iv_pct=pos.entry_iv_pct,
+            regime=pos.regime,
         )
         self._trade_history.append(trade)
 
-        today = date.today()
-        self._daily_pnl[today] = self._daily_pnl[today] + pnl
+        trade_day = trade.exit_time.date()
+        self._daily_pnl[trade_day] = self._daily_pnl[trade_day] + pnl
 
-        margin_released = self._estimate_margin(pos.symbol, close_order.qty, fill_price)
+        margin_released = self._estimate_margin(
+            pos.symbol,
+            close_order.qty,
+            pos.avg_price,
+            instrument_type=pos.instrument_type,
+            option_type=pos.option_type,
+        )
         self.available_capital += margin_released + pnl
 
         if close_order.qty >= pos.qty:
@@ -148,7 +178,7 @@ class PaperPortfolio:
 
         # Record equity
         equity = self.total_equity
-        self._equity_curve.append((datetime.utcnow(), equity))
+        self._equity_curve.append((datetime.now(timezone.utc), equity))
         if equity > self._peak_equity:
             self._peak_equity = equity
 
@@ -160,14 +190,42 @@ class PaperPortfolio:
             if pos.symbol in price_map:
                 pos.current_price = price_map[pos.symbol]
 
+    def reserved_margin(self) -> float:
+        """Capital reserved against currently open paper positions."""
+        return sum(
+            self._estimate_margin(
+                pos.symbol,
+                pos.qty,
+                pos.avg_price,
+                instrument_type=pos.instrument_type,
+                option_type=pos.option_type,
+            )
+            for pos in self._positions.values()
+        )
+
+    def reconcile_available_capital(self) -> None:
+        """Rebuild cash from realized P&L and currently reserved entry margin."""
+        self.available_capital = self.initial_capital + self.realized_pnl - self.reserved_margin()
+
     def _find_position_key(self, symbol: str, action: str) -> Optional[str]:
         for key, pos in self._positions.items():
             if pos.symbol == symbol and pos.action == action:
                 return key
         return None
 
-    def _estimate_margin(self, symbol: str, qty: int, price: float) -> float:
+    def _estimate_margin(
+        self,
+        symbol: str,
+        qty: int,
+        price: float,
+        *,
+        instrument_type: Optional[str] = None,
+        option_type: Optional[str] = None,
+    ) -> float:
         """Approximate SPAN margin = lot_size × price × margin_pct."""
+        token = str(option_type or instrument_type or "").upper()
+        if token in {"CE", "PE", "OPT"}:
+            return max(price, 0.0) * max(qty, 0)
         base = symbol.split(":")[1] if ":" in symbol else symbol[:10].rstrip("0123456789CEPEF")
         lot_size = self.LOT_SIZES.get(base, self.DEFAULT_LOT_SIZE)
         margin_pct = 0.15  # 15% approximate
@@ -278,3 +336,71 @@ class PaperPortfolio:
             "max_drawdown": safe_round(self.max_drawdown, 4),
             "sharpe_ratio": safe_round(self.sharpe_ratio(), 4),
         }
+
+    def snapshot_equity(self) -> None:
+        """Capture a timestamped equity snapshot (call after each strategy scan)."""
+        equity = self.total_equity
+        self._equity_curve.append((datetime.now(timezone.utc), equity))
+        if equity > self._peak_equity:
+            self._peak_equity = equity
+
+    async def persist_equity_to_redis(self) -> None:
+        """Persist the equity curve + key portfolio state to Redis for restart survival."""
+        try:
+            from db.redis_client import get_redis
+            import json
+            redis = await get_redis()
+            key = f"paper_portfolio:equity:{self.session_id}"
+            # Store last 2000 snapshots (covers ~33 hours at 60s interval)
+            data = {
+                "initial_capital": self.initial_capital,
+                "available_capital": self.available_capital,
+                "peak_equity": self._peak_equity,
+                "daily_pnl": {str(k): v for k, v in self._daily_pnl.items()},
+                "trade_count": len(self._trade_history),
+                "equity_curve": [
+                    {"time": t.isoformat(), "equity": round(v, 2)}
+                    for t, v in self._equity_curve[-2000:]
+                ],
+            }
+            await redis.set(key, json.dumps(data), ex=86400 * 7)  # 7 day TTL
+        except Exception as exc:
+            logger.debug(f"[Portfolio] Redis equity persist failed: {exc}")
+
+    async def restore_from_redis(self) -> bool:
+        """Restore equity curve from Redis after a restart. Returns True if restored."""
+        try:
+            from db.redis_client import get_redis
+            import json
+            redis = await get_redis()
+            key = f"paper_portfolio:equity:{self.session_id}"
+            cached = await redis.get(key)
+            if not cached:
+                return False
+            data = json.loads(cached)
+            self._peak_equity = float(data.get("peak_equity", self.initial_capital))
+            for item in data.get("equity_curve", []):
+                t = datetime.fromisoformat(item["time"])
+                v = float(item["equity"])
+                self._equity_curve.append((t, v))
+            # Restore daily P&L
+            for d_str, pnl in data.get("daily_pnl", {}).items():
+                try:
+                    d = date.fromisoformat(d_str)
+                    self._daily_pnl[d] = float(pnl)
+                except ValueError:
+                    pass
+            logger.info(
+                f"[Portfolio] Restored {len(self._equity_curve)} equity points from Redis"
+            )
+            return True
+        except Exception as exc:
+            logger.debug(f"[Portfolio] Redis equity restore failed: {exc}")
+            return False
+
+    def get_equity_curve(self) -> list[dict]:
+        """Return equity curve as list of {time, equity} dicts for charting."""
+        return [
+            {"time": t.isoformat(), "equity": round(v, 2)}
+            for t, v in self._equity_curve
+        ]

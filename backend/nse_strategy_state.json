@@ -1,0 +1,5304 @@
+{
+  "last_run_at": "2026-04-09T15:20:00+05:30",
+  "last_error": null,
+  "last_message": "Market closed. Showing last live strategy state from 2026-04-09T15:20:00+05:30.",
+  "last_expiry": "2026-04-28",
+  "last_candidate_expiries": [
+    "2026-04-28"
+  ],
+  "commentary": [
+    {
+      "time": "2026-05-08T17:02:20.291612+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-05-08T14:01:48.221958+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-05-08T14:00:45.741666+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Shared market-intelligence data is stale for the paper scan. Today rows=0, latest-session rows=171, mode=latest_session, execution mode=stale_latest_session, latest watchlist time=2026-04-24T09:29:55.977752+00:00, age=1209600s, max execution age=129600s."
+    },
+    {
+      "time": "2026-05-08T14:00:45.691134+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, execution mode=missing, latest watchlist time=none."
+    },
+    {
+      "time": "2026-05-08T14:00:45.674745+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-05-08T14:00:45.603364+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-05-08T14:00:45.138940+05:30",
+      "scope": "System",
+      "tone": "success",
+      "message": "Scan complete. 6 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-05-08T14:00:45.123542+05:30",
+      "scope": "System",
+      "tone": "success",
+      "message": "Scan complete. 1 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-05-08T14:00:45.123244+05:30",
+      "scope": "Strategy 1",
+      "tone": "warning",
+      "message": "Current monthly window is exhausted for 1 underlyings. Rolling scan to the next expiry: AUROPHARMA"
+    },
+    {
+      "time": "2026-05-08T13:58:48.119288+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-05-08T13:57:05.722705+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, latest watchlist time=none."
+    },
+    {
+      "time": "2026-05-08T13:57:05.703211+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-05-08T13:57:05.601571+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-05-08T13:57:04.909480+05:30",
+      "scope": "System",
+      "tone": "success",
+      "message": "Scan complete. 6 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-05-08T13:57:04.888088+05:30",
+      "scope": "System",
+      "tone": "success",
+      "message": "Scan complete. 1 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-05-08T13:57:04.887876+05:30",
+      "scope": "Strategy 1",
+      "tone": "warning",
+      "message": "Current monthly window is exhausted for 1 underlyings. Rolling scan to the next expiry: AUROPHARMA"
+    },
+    {
+      "time": "2026-05-08T10:45:29.884957+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-05-07T17:16:35.272175+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-05-07T14:54:42.174220+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-05-07T14:53:15.356205+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, latest watchlist time=none."
+    },
+    {
+      "time": "2026-05-07T14:53:15.306671+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-05-07T14:53:15.270515+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-05-07T14:53:14.718182+05:30",
+      "scope": "System",
+      "tone": "success",
+      "message": "Scan complete. 6 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-05-07T14:53:14.705208+05:30",
+      "scope": "System",
+      "tone": "success",
+      "message": "Scan complete. 1 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-05-07T14:53:14.705060+05:30",
+      "scope": "Strategy 1",
+      "tone": "warning",
+      "message": "Current monthly window is exhausted for 1 underlyings. Rolling scan to the next expiry: AUROPHARMA"
+    },
+    {
+      "time": "2026-05-07T14:17:20.871475+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-05-07T14:15:33.736029+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, latest watchlist time=none."
+    },
+    {
+      "time": "2026-05-07T14:15:33.721902+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-05-07T14:15:33.638721+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-05-07T14:15:33.007970+05:30",
+      "scope": "System",
+      "tone": "success",
+      "message": "Scan complete. 6 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-05-07T14:15:32.986958+05:30",
+      "scope": "System",
+      "tone": "success",
+      "message": "Scan complete. 1 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-05-07T14:15:32.986777+05:30",
+      "scope": "Strategy 1",
+      "tone": "warning",
+      "message": "Current monthly window is exhausted for 1 underlyings. Rolling scan to the next expiry: AUROPHARMA"
+    },
+    {
+      "time": "2026-05-07T14:14:20.745975+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-05-07T14:12:31.823596+05:30",
+      "scope": "System",
+      "tone": "warning",
+      "message": "Shared market-intelligence data is not ready for the paper scan. Today rows=0, latest-session rows=0, mode=missing, latest watchlist time=none."
+    },
+    {
+      "time": "2026-05-07T14:12:31.813223+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    },
+    {
+      "time": "2026-05-07T14:12:31.732899+05:30",
+      "scope": "System",
+      "tone": "idle",
+      "message": "Market closed. Agent idle."
+    },
+    {
+      "time": "2026-05-07T14:12:31.108492+05:30",
+      "scope": "System",
+      "tone": "success",
+      "message": "Scan complete. 6 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-05-07T14:12:31.090183+05:30",
+      "scope": "System",
+      "tone": "success",
+      "message": "Scan complete. 1 rows, S1=2, S2=0."
+    },
+    {
+      "time": "2026-05-07T14:12:31.090012+05:30",
+      "scope": "Strategy 1",
+      "tone": "warning",
+      "message": "Current monthly window is exhausted for 1 underlyings. Rolling scan to the next expiry: AUROPHARMA"
+    },
+    {
+      "time": "2026-05-07T13:59:20.149203+05:30",
+      "scope": "System",
+      "tone": "error",
+      "message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required."
+    }
+  ],
+  "strategies": {
+    "macd_strategy": {
+      "entries": 2,
+      "exits": 0,
+      "last_scan_at": "2026-04-09T15:20:00+05:30",
+      "last_message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required.",
+      "processed_signals": {
+        "AUROPHARMA:CE": "2026-04-09T14:15:00+05:30"
+      },
+      "signal_lane": [
+        {
+          "status": "active",
+          "underlying": "AUROPHARMA"
+        }
+      ],
+      "meta": {
+        "mode": "market_closed",
+        "updated_at": "2026-05-09T22:04:47.567029+05:30",
+        "market_state": "closed",
+        "scan_windows": 220,
+        "scan_interval": "30minute",
+        "active_windows": 216,
+        "watchlist_rows": 6,
+        "broker_snapshot": {
+          "connected_brokers": [],
+          "session_brokers": [],
+          "upstox_ready": false,
+          "fyers_ready": false,
+          "broker_ready": false,
+          "upstox_token_health": {
+            "connected": false,
+            "source": "saved_credentials",
+            "valid": false,
+            "status": "expired_reconnect_required",
+            "checked_at": "2026-05-08T09:31:07.958786+00:00",
+            "has_saved_token": true,
+            "needs_reconnect": true,
+            "message": "Saved Upstox access token is invalid. Upstox does not provide refresh tokens for this flow, so reconnect Upstox in Settings.",
+            "expires_at_ist": "2026-05-09T03:30:00+05:30"
+          },
+          "fyers_token_health": {
+            "connected": false,
+            "source": "saved_credentials",
+            "valid": false,
+            "status": "expired_reconnect_required",
+            "checked_at": "2026-05-08T09:31:07.868225+00:00",
+            "has_saved_token": true,
+            "needs_reconnect": true,
+            "message": "Saved Fyers access token is invalid. Reconnect Fyers in Settings."
+          }
+        },
+        "index_underlyings": 5,
+        "stock_underlyings": 213,
+        "prepared_watchlist": [
+          {
+            "ltp": 1101.05,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 32.07,
+            "reason": "CE premium strength versus PE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 34750.0,
+            "spot_price": 34695.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "PAGEIND",
+            "instruction": "PAGEIND: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 450.41,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 526.45,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 38.45,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 13400.0,
+            "spot_price": 13417.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "SOLARINDS",
+            "instruction": "SOLARINDS: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 126.4445,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 33.75,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 39.28,
+            "reason": "CE premium strength versus PE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 830.0,
+            "spot_price": 831.95,
+            "trade_date": "pre-market preparation",
+            "underlying": "FORTIS",
+            "instruction": "FORTIS: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 116.26,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 155.75,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 17.59,
+            "reason": "bearish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 23900.0,
+            "spot_price": 23922.1,
+            "trade_date": "pre-market preparation",
+            "underlying": "NIFTY",
+            "instruction": "NIFTY: PE is favoured by bearish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 109.9541,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 187.4,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 20.0,
+            "reason": "bearish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 26200.0,
+            "spot_price": 26194.5,
+            "trade_date": "pre-market preparation",
+            "underlying": "FINNIFTY",
+            "instruction": "FINNIFTY: PE is favoured by bearish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 101.0499,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 187.5,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 34.93,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 5400.0,
+            "spot_price": 5394.6,
+            "trade_date": "pre-market preparation",
+            "underlying": "PERSISTENT",
+            "instruction": "PERSISTENT: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 95.1286,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 262.55,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 39.4,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 7200.0,
+            "spot_price": 7158.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "OFSS",
+            "instruction": "OFSS: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 84.6706,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 18.45,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 42.44,
+            "reason": "CE premium strength versus PE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 445.0,
+            "spot_price": 444.2,
+            "trade_date": "pre-market preparation",
+            "underlying": "DELHIVERY",
+            "instruction": "DELHIVERY: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 70.4,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 886.75,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 36.5,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 23250.0,
+            "spot_price": 23310.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "SHREECEM",
+            "instruction": "SHREECEM: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 65.0838,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 8.68,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 38.56,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 247.5,
+            "spot_price": 247.45,
+            "trade_date": "pre-market preparation",
+            "underlying": "NYKAA",
+            "instruction": "NYKAA: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 63.53,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 38.0,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 39.9,
+            "reason": "CE premium strength versus PE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 1010.0,
+            "spot_price": 1005.45,
+            "trade_date": "pre-market preparation",
+            "underlying": "NAUKRI",
+            "instruction": "NAUKRI: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 61.02,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 277.1,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 36.39,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 7200.0,
+            "spot_price": 7224.5,
+            "trade_date": "pre-market preparation",
+            "underlying": "POLYCAB",
+            "instruction": "POLYCAB: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 60.7539,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 46.0,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 39.16,
+            "reason": "CE premium strength versus PE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 1230.0,
+            "spot_price": 1225.6,
+            "trade_date": "pre-market preparation",
+            "underlying": "HAVELLS",
+            "instruction": "HAVELLS: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 54.25,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 8.4,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 29.53,
+            "reason": "CE premium strength versus PE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 287.0,
+            "spot_price": 286.55,
+            "trade_date": "pre-market preparation",
+            "underlying": "ONGC",
+            "instruction": "ONGC: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 52.53,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 169.15,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 38.32,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 5000.0,
+            "spot_price": 5010.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "HEROMOTOCO",
+            "instruction": "HEROMOTOCO: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 51.3,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 40.65,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 23.26,
+            "reason": "CE premium strength versus PE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 1720.0,
+            "spot_price": 1718.4,
+            "trade_date": "pre-market preparation",
+            "underlying": "SUNPHARMA",
+            "instruction": "SUNPHARMA: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 49.44,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 137.0,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 37.24,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 3850.0,
+            "spot_price": 3836.3,
+            "trade_date": "pre-market preparation",
+            "underlying": "TRENT",
+            "instruction": "TRENT: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 47.9263,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 28.6,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 44.11,
+            "reason": "CE premium strength versus PE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 700.0,
+            "spot_price": 695.8,
+            "trade_date": "pre-market preparation",
+            "underlying": "MOTILALOFS",
+            "instruction": "MOTILALOFS: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 46.98,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 210.9,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 36.68,
+            "reason": "bearish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 6500.0,
+            "spot_price": 6510.5,
+            "trade_date": "pre-market preparation",
+            "underlying": "EICHERMOT",
+            "instruction": "EICHERMOT: PE is favoured by bearish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 45.9594,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 396.95,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 35.89,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 10900.0,
+            "spot_price": 10905.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "ULTRACEMCO",
+            "instruction": "ULTRACEMCO: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 45.3141,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 257.4,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 30.12,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 9100.0,
+            "spot_price": 9058.5,
+            "trade_date": "pre-market preparation",
+            "underlying": "BAJAJ-AUTO",
+            "instruction": "BAJAJ-AUTO: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 45.0006,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 40.25,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 44.63,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 1020.0,
+            "spot_price": 1022.9,
+            "trade_date": "pre-market preparation",
+            "underlying": "UNOMINDA",
+            "instruction": "UNOMINDA: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 41.79,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 171.55,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 37.52,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 4400.0,
+            "spot_price": 4410.3,
+            "trade_date": "pre-market preparation",
+            "underlying": "LTM",
+            "instruction": "LTM: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 41.2868,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 11.65,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 43.54,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 295.0,
+            "spot_price": 295.15,
+            "trade_date": "pre-market preparation",
+            "underlying": "EXIDEIND",
+            "instruction": "EXIDEIND: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 36.05,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 207.45,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 34.25,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 6300.0,
+            "spot_price": 6280.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "ABB",
+            "instruction": "ABB: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 35.6934,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 15.3,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 34.19,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 510.0,
+            "spot_price": 510.9,
+            "trade_date": "pre-market preparation",
+            "underlying": "LICHSGFIN",
+            "instruction": "LICHSGFIN: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 35.08,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 39.75,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 34.55,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 1320.0,
+            "spot_price": 1323.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "AUROPHARMA",
+            "instruction": "AUROPHARMA: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 34.78,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 456.7,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 33.71,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 12600.0,
+            "spot_price": 12650.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "MARUTI",
+            "instruction": "MARUTI: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 34.6031,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 114.5,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 21.7,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 13775.0,
+            "spot_price": 13786.45,
+            "trade_date": "pre-market preparation",
+            "underlying": "MIDCPNIFTY",
+            "instruction": "MIDCPNIFTY: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 34.53,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 1236.45,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 40.51,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 33250.0,
+            "spot_price": 33225.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "BOSCHLTD",
+            "instruction": "BOSCHLTD: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 30.64,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 134.25,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 36.72,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 3720.0,
+            "spot_price": 3713.9,
+            "trade_date": "pre-market preparation",
+            "underlying": "LT",
+            "instruction": "LT: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 30.2152,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 60.55,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 37.79,
+            "reason": "CE premium strength versus PE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 1580.0,
+            "spot_price": 1581.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "PHOENIXLTD",
+            "instruction": "PHOENIXLTD: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 29.09,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 194.0,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 43.17,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 4350.0,
+            "spot_price": 4362.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "TATAELXSI",
+            "instruction": "TATAELXSI: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 28.7175,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 122.3,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 34.87,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 3800.0,
+            "spot_price": 3778.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "HAL",
+            "instruction": "HAL: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 27.1158,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 2.68,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 23.38,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 145.0,
+            "spot_price": 145.66,
+            "trade_date": "pre-market preparation",
+            "underlying": "SAMMAANCAP",
+            "instruction": "SAMMAANCAP: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 23.11,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 49.15,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 30.49,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 1560.0,
+            "spot_price": 1561.4,
+            "trade_date": "pre-market preparation",
+            "underlying": "OBEROIRLTY",
+            "instruction": "OBEROIRLTY: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 22.1165,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 37.6,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 33.13,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 1230.0,
+            "spot_price": 1228.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "UNITDSPR",
+            "instruction": "UNITDSPR: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 20.72,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 82.1,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 33.45,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 2540.0,
+            "spot_price": 2532.7,
+            "trade_date": "pre-market preparation",
+            "underlying": "TCS",
+            "instruction": "TCS: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 20.4707,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 26.55,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 28.22,
+            "reason": "CE premium strength versus PE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 870.0,
+            "spot_price": 872.65,
+            "trade_date": "pre-market preparation",
+            "underlying": "ZYDUSLIFE",
+            "instruction": "ZYDUSLIFE: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 19.32,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 57.6,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 30.48,
+            "reason": "CE premium strength versus PE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 1840.0,
+            "spot_price": 1841.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "COLPAL",
+            "instruction": "COLPAL: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 18.64,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 122.7,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 39.53,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 3250.0,
+            "spot_price": 3238.4,
+            "trade_date": "pre-market preparation",
+            "underlying": "MUTHOOTFIN",
+            "instruction": "MUTHOOTFIN: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 18.0714,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 194.2,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 32.15,
+            "reason": "CE premium strength versus PE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 5850.0,
+            "spot_price": 5856.5,
+            "trade_date": "pre-market preparation",
+            "underlying": "DIVISLAB",
+            "instruction": "DIVISLAB: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 17.53,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 23.6,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 42.34,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 605.0,
+            "spot_price": 604.45,
+            "trade_date": "pre-market preparation",
+            "underlying": "UPL",
+            "instruction": "UPL: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 16.34,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 202.6,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 28.15,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 7350.0,
+            "spot_price": 7333.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "APOLLOHOSP",
+            "instruction": "APOLLOHOSP: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 15.9878,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 158.35,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 39.38,
+            "reason": "CE premium strength versus PE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 4250.0,
+            "spot_price": 4231.9,
+            "trade_date": "pre-market preparation",
+            "underlying": "KEI",
+            "instruction": "KEI: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 15.75,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 115.85,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 27.58,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 5150.0,
+            "spot_price": 5173.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "ALKEM",
+            "instruction": "ALKEM: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 14.7,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 54.2,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 38.84,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 1400.0,
+            "spot_price": 1399.3,
+            "trade_date": "pre-market preparation",
+            "underlying": "TORNTPOWER",
+            "instruction": "TORNTPOWER: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 14.1916,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 107.3,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 44.5,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 2340.0,
+            "spot_price": 2346.4,
+            "trade_date": "pre-market preparation",
+            "underlying": "HDFCAMC",
+            "instruction": "HDFCAMC: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 14.0696,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 85.0,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 31.83,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 2820.0,
+            "spot_price": 2810.6,
+            "trade_date": "pre-market preparation",
+            "underlying": "PIIND",
+            "instruction": "PIIND: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 13.82,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 36.25,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 24.0,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 1440.0,
+            "spot_price": 1440.9,
+            "trade_date": "pre-market preparation",
+            "underlying": "HCLTECH",
+            "instruction": "HCLTECH: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 13.6593,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 59.0,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 29.33,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 1820.0,
+            "spot_price": 1828.3,
+            "trade_date": "pre-market preparation",
+            "underlying": "SBILIFE",
+            "instruction": "SBILIFE: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 12.8011,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 28.65,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 34.32,
+            "reason": "bearish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 920.0,
+            "spot_price": 919.6,
+            "trade_date": "pre-market preparation",
+            "underlying": "MAXHEALTH",
+            "instruction": "MAXHEALTH: PE is favoured by bearish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 12.5764,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 154.1,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 39.7,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 3750.0,
+            "spot_price": 3759.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "SUPREMEIND",
+            "instruction": "SUPREMEIND: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 12.5154,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 32.45,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 27.06,
+            "reason": "bearish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 1300.0,
+            "spot_price": 1297.4,
+            "trade_date": "pre-market preparation",
+            "underlying": "RELIANCE",
+            "instruction": "RELIANCE: PE is favoured by bearish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 12.0815,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 47.05,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 31.75,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 1480.0,
+            "spot_price": 1478.8,
+            "trade_date": "pre-market preparation",
+            "underlying": "TECHM",
+            "instruction": "TECHM: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 12.007,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 52.9,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 36.02,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 1500.0,
+            "spot_price": 1491.5,
+            "trade_date": "pre-market preparation",
+            "underlying": "MFSL",
+            "instruction": "MFSL: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 11.25,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 10.65,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 27.33,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 465.0,
+            "spot_price": 466.4,
+            "trade_date": "pre-market preparation",
+            "underlying": "PATANJALI",
+            "instruction": "PATANJALI: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 11.08,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 35.0,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 36.77,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 950.0,
+            "spot_price": 949.7,
+            "trade_date": "pre-market preparation",
+            "underlying": "HINDALCO",
+            "instruction": "HINDALCO: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 11.035,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 9.0,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 40.16,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 235.0,
+            "spot_price": 234.11,
+            "trade_date": "pre-market preparation",
+            "underlying": "CROMPTON",
+            "instruction": "CROMPTON: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 11.03,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 72.6,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 35.05,
+            "reason": "CE premium strength versus PE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 2120.0,
+            "spot_price": 2115.5,
+            "trade_date": "pre-market preparation",
+            "underlying": "GLENMARK",
+            "instruction": "GLENMARK: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 10.71,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 123.5,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 39.5,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 3050.0,
+            "spot_price": 3055.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "SIEMENS",
+            "instruction": "SIEMENS: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 10.5644,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 360.0,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 39.03,
+            "reason": "CE premium strength versus PE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 9200.0,
+            "spot_price": 9199.5,
+            "trade_date": "pre-market preparation",
+            "underlying": "BAJAJHLDNG",
+            "instruction": "BAJAJHLDNG: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 10.48,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 43.7,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 36.76,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 1200.0,
+            "spot_price": 1198.7,
+            "trade_date": "pre-market preparation",
+            "underlying": "CDSL",
+            "instruction": "CDSL: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 10.3652,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 4.81,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 41.22,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 133.0,
+            "spot_price": 133.39,
+            "trade_date": "pre-market preparation",
+            "underlying": "IOC",
+            "instruction": "IOC: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 10.29,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 128.95,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 38.28,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 3460.0,
+            "spot_price": 3452.3,
+            "trade_date": "pre-market preparation",
+            "underlying": "TVSMOTOR",
+            "instruction": "TVSMOTOR: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 10.2283,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 45.0,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 34.28,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 1240.0,
+            "spot_price": 1243.8,
+            "trade_date": "pre-market preparation",
+            "underlying": "AXISBANK",
+            "instruction": "AXISBANK: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 9.9938,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 98.8,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 36.24,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 2600.0,
+            "spot_price": 2607.2,
+            "trade_date": "pre-market preparation",
+            "underlying": "GRASIM",
+            "instruction": "GRASIM: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 9.939,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 19.25,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 25.65,
+            "reason": "CE premium strength versus PE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 755.0,
+            "spot_price": 753.7,
+            "trade_date": "pre-market preparation",
+            "underlying": "MARICO",
+            "instruction": "MARICO: CE is favoured by CE premium strength versus PE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 9.47,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 43.0,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 34.98,
+            "reason": "bearish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 1290.0,
+            "spot_price": 1285.2,
+            "trade_date": "pre-market preparation",
+            "underlying": "PIDILITIND",
+            "instruction": "PIDILITIND: PE is favoured by bearish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 9.2083,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 23.65,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 44.04,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 630.0,
+            "spot_price": 633.7,
+            "trade_date": "pre-market preparation",
+            "underlying": "SBICARD",
+            "instruction": "SBICARD: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 9.17,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 70.0,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 34.87,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 2040.0,
+            "spot_price": 2036.6,
+            "trade_date": "pre-market preparation",
+            "underlying": "MANKIND",
+            "instruction": "MANKIND: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 9.1141,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 165.85,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 28.39,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 5500.0,
+            "spot_price": 5511.5,
+            "trade_date": "pre-market preparation",
+            "underlying": "BRITANNIA",
+            "instruction": "BRITANNIA: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 8.755,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 42.0,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 39.83,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 1060.0,
+            "spot_price": 1059.4,
+            "trade_date": "pre-market preparation",
+            "underlying": "LAURUSLABS",
+            "instruction": "LAURUSLABS: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 8.7078,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 56.9,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 41.78,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 1400.0,
+            "spot_price": 1397.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "CHOLAFIN",
+            "instruction": "CHOLAFIN: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 8.515,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 69.2,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 35.34,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 2180.0,
+            "spot_price": 2180.8,
+            "trade_date": "pre-market preparation",
+            "underlying": "ASIANPAINT",
+            "instruction": "ASIANPAINT: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 8.15,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 29.15,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 40.22,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 710.0,
+            "spot_price": 711.0,
+            "trade_date": "pre-market preparation",
+            "underlying": "VEDL",
+            "instruction": "VEDL: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 8.0041,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 33.75,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 44.34,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 920.0,
+            "spot_price": 927.8,
+            "trade_date": "pre-market preparation",
+            "underlying": "360ONE",
+            "instruction": "360ONE: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 7.82,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 37.1,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 35.65,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 1030.0,
+            "spot_price": 1030.15,
+            "trade_date": "pre-market preparation",
+            "underlying": "GODREJCP",
+            "instruction": "GODREJCP: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 7.6892,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 164.15,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 37.26,
+            "reason": "PE premium strength versus CE",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "PE",
+            "freshness": "prepared",
+            "atm_strike": 4550.0,
+            "spot_price": 4527.7,
+            "trade_date": "pre-market preparation",
+            "underlying": "DMART",
+            "instruction": "DMART: PE is favoured by PE premium strength versus CE; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 7.65,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          },
+          {
+            "ltp": 170.95,
+            "as_of": "2026-05-06T23:48:34.133269+05:30",
+            "expiry": "2026-04-28",
+            "iv_pct": 38.05,
+            "reason": "bullish ATM option MACD quadrant",
+            "source": "prepared_watchlist",
+            "status": "watching",
+            "strategy": "Strategy 1",
+            "strength": "monitoring",
+            "direction": "CE",
+            "freshness": "prepared",
+            "atm_strike": 4650.0,
+            "spot_price": 4637.1,
+            "trade_date": "pre-market preparation",
+            "underlying": "CUMMINSIND",
+            "instruction": "CUMMINSIND: CE is favoured by bullish ATM option MACD quadrant; wait for the live MACD zero-cross and risk gates after market open.",
+            "signal_date": "2026-05-06",
+            "priority_score": 7.6387,
+            "spot_last_time": "2026-05-06T23:48:34.133269+05:30",
+            "option_last_bar_time": "2026-05-06T23:48:34.133269+05:30"
+          }
+        ],
+        "instrument_universe": [
+          "BANKNIFTY",
+          "FINNIFTY",
+          "MIDCPNIFTY",
+          "NIFTY",
+          "NIFTYNXT50",
+          "360ONE",
+          "ABB",
+          "ABCAPITAL",
+          "ADANIENSOL",
+          "ADANIENT",
+          "ADANIGREEN",
+          "ADANIPORTS",
+          "ADANIPOWER",
+          "ALKEM",
+          "AMBER",
+          "AMBUJACEM",
+          "ANGELONE",
+          "APLAPOLLO",
+          "APOLLOHOSP",
+          "ASHOKLEY",
+          "ASIANPAINT",
+          "ASTRAL",
+          "AUBANK",
+          "AUROPHARMA",
+          "AXISBANK",
+          "BAJAJ-AUTO",
+          "BAJAJFINSV",
+          "BAJAJHLDNG",
+          "BAJFINANCE",
+          "BANDHANBNK",
+          "BANKBARODA",
+          "BANKINDIA",
+          "BDL",
+          "BEL",
+          "BHARATFORG",
+          "BHARTIARTL",
+          "BHEL",
+          "BIOCON",
+          "BLUESTARCO",
+          "BOSCHLTD",
+          "BPCL",
+          "BRITANNIA",
+          "BSE",
+          "CAMS",
+          "CANBK",
+          "CDSL",
+          "CGPOWER",
+          "CHOLAFIN",
+          "CIPLA",
+          "COALINDIA",
+          "COCHINSHIP",
+          "COFORGE",
+          "COLPAL",
+          "CONCOR",
+          "CROMPTON",
+          "CUMMINSIND",
+          "DABUR",
+          "DALBHARAT",
+          "DELHIVERY",
+          "DIVISLAB",
+          "DIXON",
+          "DLF",
+          "DMART",
+          "DRREDDY",
+          "EICHERMOT",
+          "ETERNAL",
+          "EXIDEIND",
+          "FEDERALBNK",
+          "FORCEMOT",
+          "FORTIS",
+          "GAIL",
+          "GLENMARK",
+          "GMRAIRPORT",
+          "GODFRYPHLP",
+          "GODREJCP",
+          "GODREJPROP",
+          "GRASIM",
+          "HAL",
+          "HAVELLS",
+          "HCLTECH",
+          "HDFCAMC",
+          "HDFCBANK",
+          "HDFCLIFE",
+          "HEROMOTOCO",
+          "HINDALCO",
+          "HINDPETRO",
+          "HINDUNILVR",
+          "HINDZINC",
+          "HUDCO",
+          "HYUNDAI",
+          "ICICIBANK",
+          "ICICIGI",
+          "ICICIPRULI",
+          "IDEA",
+          "IDFCFIRSTB",
+          "IEX",
+          "INDHOTEL",
+          "INDIANB",
+          "INDIGO",
+          "INDUSINDBK",
+          "INDUSTOWER",
+          "INFY",
+          "INOXWIND",
+          "IOC",
+          "IREDA",
+          "IRFC",
+          "ITC",
+          "JINDALSTEL",
+          "JIOFIN",
+          "JSWENERGY",
+          "JSWSTEEL",
+          "JUBLFOOD",
+          "KALYANKJIL",
+          "KAYNES",
+          "KEI",
+          "KFINTECH",
+          "KOTAKBANK",
+          "KPITTECH",
+          "LAURUSLABS",
+          "LICHSGFIN",
+          "LICI",
+          "LODHA",
+          "LT",
+          "LTF",
+          "LTM",
+          "LUPIN",
+          "M&M",
+          "MANAPPURAM",
+          "MANKIND",
+          "MARICO",
+          "MARUTI",
+          "MAXHEALTH",
+          "MAZDOCK",
+          "MCX",
+          "MFSL",
+          "MOTHERSON",
+          "MOTILALOFS",
+          "MPHASIS",
+          "MUTHOOTFIN",
+          "NAM-INDIA",
+          "NATIONALUM",
+          "NAUKRI",
+          "NBCC",
+          "NESTLEIND",
+          "NHPC",
+          "NMDC",
+          "NTPC",
+          "NUVAMA",
+          "NYKAA",
+          "OBEROIRLTY",
+          "OFSS",
+          "OIL",
+          "ONGC",
+          "PAGEIND",
+          "PATANJALI",
+          "PAYTM",
+          "PERSISTENT",
+          "PETRONET",
+          "PFC",
+          "PGEL",
+          "PHOENIXLTD",
+          "PIDILITIND",
+          "PIIND",
+          "PNB",
+          "PNBHOUSING",
+          "POLICYBZR",
+          "POLYCAB",
+          "POWERGRID",
+          "POWERINDIA",
+          "PPLPHARMA",
+          "PREMIERENE",
+          "PRESTIGE",
+          "RBLBANK",
+          "RECLTD",
+          "RELIANCE",
+          "RVNL",
+          "SAIL",
+          "SAMMAANCAP",
+          "SBICARD",
+          "SBILIFE",
+          "SBIN",
+          "SHREECEM",
+          "SHRIRAMFIN",
+          "SIEMENS",
+          "SOLARINDS",
+          "SONACOMS",
+          "SRF",
+          "SUNPHARMA",
+          "SUPREMEIND",
+          "SUZLON",
+          "SWIGGY",
+          "TATACONSUM",
+          "TATAELXSI",
+          "TATAPOWER",
+          "TATASTEEL",
+          "TATATECH",
+          "TCS",
+          "TECHM",
+          "TIINDIA",
+          "TITAN",
+          "TMPV",
+          "TORNTPHARM",
+          "TORNTPOWER",
+          "TRENT",
+          "TVSMOTOR",
+          "ULTRACEMCO",
+          "UNIONBANK",
+          "UNITDSPR",
+          "UNOMINDA",
+          "UPL",
+          "VBL",
+          "VEDL",
+          "VMM",
+          "VOLTAS",
+          "WAAREEENER",
+          "WIPRO",
+          "YESBANK",
+          "ZYDUSLIFE"
+        ],
+        "market_intelligence": {
+          "ready": true,
+          "execution_mode": "stale_latest_session",
+          "readiness_mode": "latest_session",
+          "execution_ready": false,
+          "watchlist_rows_today": 0,
+          "latest_watchlist_time": "2026-04-24T09:29:55.977752+00:00",
+          "watchlist_age_seconds": 1209600,
+          "watchlist_rows_latest": 171,
+          "max_execution_age_seconds": 129600
+        },
+        "latest_watchlist_time": "2026-04-24T09:29:55.977752+00:00",
+        "recovered_trading_day": "2026-04-09",
+        "historical_signal_count": 36
+      },
+      "recent_events": [
+        {
+          "time": "2026-04-24T11:54:44.208482+05:30",
+          "event": "exit",
+          "symbol": "OPT:LUPIN:2026-04-30:2300:CE",
+          "underlying": "LUPIN",
+          "option_type": "CE",
+          "strike": 2300.0,
+          "price": 131.65,
+          "qty": 1250,
+          "reason": "target_50pct",
+          "signal_strength": null,
+          "pnl": 95340.41,
+          "phase": "phase1"
+        },
+        {
+          "time": "2026-04-24T11:51:37.238989+05:30",
+          "event": "exit",
+          "symbol": "OPT:AUROPHARMA:2026-04-30:1340:CE",
+          "underlying": "AUROPHARMA",
+          "option_type": "CE",
+          "strike": 1340.0,
+          "price": 67.0,
+          "qty": 1250,
+          "reason": "target_50pct",
+          "signal_strength": null,
+          "pnl": 34913.09,
+          "phase": "phase1"
+        },
+        {
+          "time": "2026-04-09T14:18:28.200836+05:30",
+          "event": "entry",
+          "symbol": "OPT:AUROPHARMA:2026-04-30:1340:CE",
+          "underlying": "AUROPHARMA",
+          "option_type": "CE",
+          "strike": 1340.0,
+          "price": 39.069525,
+          "qty": 2500,
+          "reason": "recovered_position",
+          "signal_strength": null,
+          "pnl": null,
+          "phase": "phase1"
+        },
+        {
+          "time": "2026-04-09T14:59:07.612330+05:30",
+          "event": "entry",
+          "symbol": "OPT:LUPIN:2026-04-30:2300:CE",
+          "underlying": "LUPIN",
+          "option_type": "CE",
+          "strike": 2300.0,
+          "price": 55.377675,
+          "qty": 2500,
+          "reason": "recovered_position",
+          "signal_strength": null,
+          "pnl": null,
+          "phase": "phase1"
+        }
+      ],
+      "positions": [
+        {
+          "signal_id": "1e617eb6-e378-5940-93e9-f9bbae229f22",
+          "symbol": "OPT:AUROPHARMA:2026-04-30:1340:CE",
+          "underlying": "AUROPHARMA",
+          "expiry": "2026-04-30",
+          "strike": 1340.0,
+          "option_type": "CE",
+          "instrument_key": null,
+          "trading_symbol": null,
+          "qty": 1250,
+          "initial_qty": 2500,
+          "entry_price": 39.069525,
+          "current_price": 67.0,
+          "peak_price": 67.0,
+          "entry_bar_time": "2026-04-09T14:18:28.200836+05:30",
+          "entered_at": "2026-04-09T14:18:28.200836+05:30",
+          "signal_reason": "macd_zero_cross",
+          "signal_strength": null,
+          "latest_rsi": 39.73,
+          "phase": "phase2",
+          "trailing_stop": null,
+          "entry_iv_pct": null,
+          "spot_setup": null,
+          "regime": null,
+          "option_ma20": 37.81,
+          "option_ma50": null,
+          "above_option_ma20": true,
+          "above_option_ma50": false,
+          "first_pullback_ignored_at": null,
+          "window_end": null,
+          "lot_size": null,
+          "price_updated_at": "2026-04-24T15:28:35.730336+05:30",
+          "macd_line": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            -1.2090317001619795,
+            -1.2672521135931234,
+            -0.7838948635623311,
+            -0.40424009657452586,
+            -0.1819551355832303,
+            -0.037635520725856964,
+            0.09181871337295178,
+            0.03265244420964564,
+            -0.014075002504732481,
+            -0.1023762783920148,
+            -0.21027754835051837,
+            -0.2325901952029028,
+            -0.23146659720743656,
+            -0.10430176576133476,
+            -0.05533442755415052,
+            0.03152413574269275,
+            0.09921646726309774,
+            0.15112109774474192,
+            0.19006494102529103,
+            0.2184105169171744,
+            0.23812958045733978,
+            0.250865261801259,
+            0.11439475274818989,
+            0.5206996843704559,
+            0.5578821842526267,
+            0.4290891891830668,
+            0.5187346866165186,
+            0.3636850371798559,
+            0.3218235165422456,
+            0.3611420001846639,
+            0.627147740928045,
+            0.7606035464571548,
+            0.9322785673536629,
+            0.9684082439266746,
+            0.9856789792026674,
+            0.9560685412655872,
+            0.7943387845768157,
+            0.5947574790847341,
+            0.5951452599204572,
+            0.4809744869579049,
+            -0.1364638620806531,
+            -0.20783050178800977,
+            -0.5844530200568769,
+            -0.7571976936856828,
+            -0.8679555126975771,
+            -0.988714994684706,
+            -1.0042534492936,
+            -0.9172336806903871,
+            -0.7947283499535089,
+            -0.8532244201744348,
+            -0.9691033991774418,
+            -1.3360273468387476,
+            -1.52052870358947,
+            -1.6477530861880183,
+            -1.7286524960736287
+          ]
+        },
+        {
+          "signal_id": "05f08027-5d8f-5c0c-ab0a-4b1373b32bee",
+          "symbol": "OPT:LUPIN:2026-04-30:2300:CE",
+          "underlying": "LUPIN",
+          "expiry": "2026-04-30",
+          "strike": 2300.0,
+          "option_type": "CE",
+          "instrument_key": null,
+          "trading_symbol": null,
+          "qty": 1250,
+          "initial_qty": 2500,
+          "entry_price": 55.377675,
+          "current_price": 131.65,
+          "peak_price": 131.65,
+          "entry_bar_time": "2026-04-09T14:59:07.612330+05:30",
+          "entered_at": "2026-04-09T14:59:07.612330+05:30",
+          "signal_reason": "macd_zero_cross",
+          "signal_strength": null,
+          "latest_rsi": 45.51,
+          "phase": "trailing",
+          "trailing_stop": 105.32,
+          "entry_iv_pct": null,
+          "spot_setup": null,
+          "regime": null,
+          "option_ma20": 59.02,
+          "option_ma50": null,
+          "above_option_ma20": true,
+          "above_option_ma50": false,
+          "first_pullback_ignored_at": null,
+          "window_end": null,
+          "lot_size": null,
+          "price_updated_at": "2026-04-24T15:28:35.730336+05:30",
+          "macd_line": null
+        }
+      ],
+      "portfolio": {
+        "initial_capital": 1000000.0,
+        "available_capital": 1378317.6875,
+        "peak_equity": 1508571.1875,
+        "trade_history": [
+          {
+            "symbol": "OPT:AUROPHARMA:2026-04-30:1340:CE",
+            "action": "BUY",
+            "qty": 1250,
+            "entry_price": 39.069525,
+            "exit_price": 66.9665,
+            "pnl": 34871.21875,
+            "entry_time": "2026-04-09T14:18:28.200836+05:30",
+            "exit_time": "2026-04-24T06:21:37.238426+05:30",
+            "instrument_type": "CE",
+            "expiry": "2026-04-30",
+            "strike": 1340.0,
+            "option_type": "CE",
+            "signal_id": null,
+            "setup_type": null,
+            "entry_iv_pct": null,
+            "regime": null
+          },
+          {
+            "symbol": "OPT:LUPIN:2026-04-30:2300:CE",
+            "action": "BUY",
+            "qty": 1250,
+            "entry_price": 55.377675,
+            "exit_price": 131.58417500000002,
+            "pnl": 95258.125,
+            "entry_time": "2026-04-09T14:59:07.612330+05:30",
+            "exit_time": "2026-04-24T06:24:44.208172+05:30",
+            "instrument_type": "CE",
+            "expiry": "2026-04-30",
+            "strike": 2300.0,
+            "option_type": "CE",
+            "signal_id": null,
+            "setup_type": null,
+            "entry_iv_pct": null,
+            "regime": null
+          }
+        ],
+        "daily_pnl": {
+          "2026-04-24": 130129.34375
+        },
+        "equity_curve": [
+          {
+            "time": "2026-04-09T08:48:29.204817+05:30",
+            "equity": 985300.12
+          },
+          {
+            "time": "2026-04-09T08:49:43.435915+05:30",
+            "equity": 985300.12
+          },
+          {
+            "time": "2026-04-09T08:51:06.645096+05:30",
+            "equity": 985300.12
+          },
+          {
+            "time": "2026-04-09T08:54:08.317829+05:30",
+            "equity": 985300.12
+          },
+          {
+            "time": "2026-04-09T08:57:06.062055+05:30",
+            "equity": 985175.12
+          },
+          {
+            "time": "2026-04-09T08:58:16.257117+05:30",
+            "equity": 985175.12
+          },
+          {
+            "time": "2026-04-09T09:01:14.916279+05:30",
+            "equity": 985175.12
+          },
+          {
+            "time": "2026-04-09T09:02:23.564127+05:30",
+            "equity": 984050.12
+          },
+          {
+            "time": "2026-04-09T09:03:33.683739+05:30",
+            "equity": 984050.12
+          },
+          {
+            "time": "2026-04-09T09:06:49.374856+05:30",
+            "equity": 984050.12
+          },
+          {
+            "time": "2026-04-09T09:07:57.963110+05:30",
+            "equity": 984050.12
+          },
+          {
+            "time": "2026-04-09T09:09:08.486595+05:30",
+            "equity": 984050.12
+          },
+          {
+            "time": "2026-04-09T09:12:16.134618+05:30",
+            "equity": 986425.12
+          },
+          {
+            "time": "2026-04-09T09:13:23.757320+05:30",
+            "equity": 986425.12
+          },
+          {
+            "time": "2026-04-09T09:14:32.586168+05:30",
+            "equity": 986425.12
+          },
+          {
+            "time": "2026-04-09T09:15:40.640369+05:30",
+            "equity": 986425.12
+          },
+          {
+            "time": "2026-04-09T09:16:48.310434+05:30",
+            "equity": 986425.12
+          },
+          {
+            "time": "2026-04-09T09:20:45.689584+05:30",
+            "equity": 986425.12
+          },
+          {
+            "time": "2026-04-09T09:23:46.727312+05:30",
+            "equity": 985175.12
+          },
+          {
+            "time": "2026-04-09T09:24:54.225746+05:30",
+            "equity": 985175.12
+          },
+          {
+            "time": "2026-04-09T09:26:02.980966+05:30",
+            "equity": 985175.12
+          },
+          {
+            "time": "2026-04-09T09:29:07.615730+05:30",
+            "equity": 965089.3
+          },
+          {
+            "time": "2026-04-09T09:30:15.751958+05:30",
+            "equity": 965089.3
+          },
+          {
+            "time": "2026-04-09T09:31:22.908281+05:30",
+            "equity": 965089.3
+          },
+          {
+            "time": "2026-04-09T09:34:23.000163+05:30",
+            "equity": 974214.3
+          },
+          {
+            "time": "2026-04-09T09:35:29.259103+05:30",
+            "equity": 974214.3
+          },
+          {
+            "time": "2026-04-09T09:36:37.836840+05:30",
+            "equity": 974214.3
+          },
+          {
+            "time": "2026-04-09T09:37:47.627482+05:30",
+            "equity": 975339.3
+          },
+          {
+            "time": "2026-04-09T09:38:55.896712+05:30",
+            "equity": 975339.3
+          },
+          {
+            "time": "2026-04-09T09:42:54.347180+05:30",
+            "equity": 975339.3
+          },
+          {
+            "time": "2026-04-09T09:45:54.207057+05:30",
+            "equity": 974339.3
+          },
+          {
+            "time": "2026-04-09T09:47:01.526732+05:30",
+            "equity": 974339.3
+          },
+          {
+            "time": "2026-04-09T09:48:09.219475+05:30",
+            "equity": 974339.3
+          },
+          {
+            "time": "2026-04-09T09:49:23.334884+05:30",
+            "equity": 974339.3
+          },
+          {
+            "time": "2026-04-09T09:50:31.779937+05:30",
+            "equity": 974339.3
+          },
+          {
+            "time": "2026-04-09T09:51:39.816236+05:30",
+            "equity": 974339.3
+          },
+          {
+            "time": "2026-04-09T09:54:47.868230+05:30",
+            "equity": 974339.3
+          },
+          {
+            "time": "2026-04-09T09:55:48.641654+05:30",
+            "equity": 962977.37
+          },
+          {
+            "time": "2026-04-09T09:58:51.570520+05:30",
+            "equity": 962977.37
+          },
+          {
+            "time": "2026-04-09T10:01:48.028222+05:30",
+            "equity": 963477.37
+          },
+          {
+            "time": "2026-04-09T10:23:03.378991+05:30",
+            "equity": 962902.08
+          },
+          {
+            "time": "2026-04-09T10:23:13.950433+05:30",
+            "equity": 962902.08
+          },
+          {
+            "time": "2026-04-09T10:35:30.949224+05:30",
+            "equity": 962902.08
+          },
+          {
+            "time": "2026-04-09T10:42:27.883949+05:30",
+            "equity": 984566.06
+          },
+          {
+            "time": "2026-04-09T17:47:40.750290+05:30",
+            "equity": 897397.5
+          },
+          {
+            "time": "2026-04-10T03:47:48.438156+05:30",
+            "equity": 1018757.0
+          },
+          {
+            "time": "2026-04-10T03:48:53.409617+05:30",
+            "equity": 1018757.0
+          },
+          {
+            "time": "2026-04-10T03:49:53.555361+05:30",
+            "equity": 1018757.0
+          },
+          {
+            "time": "2026-04-10T03:50:54.689848+05:30",
+            "equity": 1018757.0
+          },
+          {
+            "time": "2026-04-10T03:51:54.809530+05:30",
+            "equity": 1018757.0
+          },
+          {
+            "time": "2026-04-10T03:52:55.464559+05:30",
+            "equity": 1018757.0
+          },
+          {
+            "time": "2026-04-10T03:53:55.605524+05:30",
+            "equity": 1018757.0
+          },
+          {
+            "time": "2026-04-10T03:54:56.270127+05:30",
+            "equity": 1018757.0
+          },
+          {
+            "time": "2026-04-10T03:57:48.485124+05:30",
+            "equity": 1019257.0
+          },
+          {
+            "time": "2026-04-10T03:58:49.136933+05:30",
+            "equity": 1019257.0
+          },
+          {
+            "time": "2026-04-10T03:59:49.272967+05:30",
+            "equity": 1019257.0
+          },
+          {
+            "time": "2026-04-10T04:00:49.878258+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:01:50.999502+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:02:51.655911+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:03:51.837949+05:30",
+            "equity": 1000882.0
+          },
+          {
+            "time": "2026-04-10T04:04:52.578267+05:30",
+            "equity": 1000882.0
+          },
+          {
+            "time": "2026-04-10T04:05:52.751798+05:30",
+            "equity": 1000882.0
+          },
+          {
+            "time": "2026-04-10T04:06:54.025384+05:30",
+            "equity": 1000882.0
+          },
+          {
+            "time": "2026-04-10T04:07:54.174028+05:30",
+            "equity": 1000882.0
+          },
+          {
+            "time": "2026-04-10T04:10:46.953457+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:11:47.588496+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:12:48.168976+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:13:48.801410+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:14:48.915316+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:15:49.540645+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:16:49.687405+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:17:51.820769+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:18:51.939609+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:19:52.649765+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:20:52.799537+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:21:53.519629+05:30",
+            "equity": 1014632.0
+          },
+          {
+            "time": "2026-04-10T04:24:50.802202+05:30",
+            "equity": 1007132.0
+          },
+          {
+            "time": "2026-04-10T04:25:51.414333+05:30",
+            "equity": 1007132.0
+          },
+          {
+            "time": "2026-04-10T04:26:51.541377+05:30",
+            "equity": 1007132.0
+          },
+          {
+            "time": "2026-04-10T04:27:52.126050+05:30",
+            "equity": 1007132.0
+          },
+          {
+            "time": "2026-04-10T04:28:52.916985+05:30",
+            "equity": 1007132.0
+          },
+          {
+            "time": "2026-04-10T04:29:53.643382+05:30",
+            "equity": 1007132.0
+          },
+          {
+            "time": "2026-04-10T04:30:53.855163+05:30",
+            "equity": 997882.0
+          },
+          {
+            "time": "2026-04-10T04:31:54.591635+05:30",
+            "equity": 997882.0
+          },
+          {
+            "time": "2026-04-10T04:34:44.693103+05:30",
+            "equity": 1000632.0
+          },
+          {
+            "time": "2026-04-10T04:37:35.633255+05:30",
+            "equity": 988257.0
+          },
+          {
+            "time": "2026-04-10T04:38:36.248797+05:30",
+            "equity": 988257.0
+          },
+          {
+            "time": "2026-04-10T04:39:36.388055+05:30",
+            "equity": 990257.0
+          },
+          {
+            "time": "2026-04-10T04:40:36.998261+05:30",
+            "equity": 990257.0
+          },
+          {
+            "time": "2026-04-10T04:43:27.682200+05:30",
+            "equity": 990257.0
+          },
+          {
+            "time": "2026-04-10T04:44:28.269490+05:30",
+            "equity": 990257.0
+          },
+          {
+            "time": "2026-04-10T04:45:28.411606+05:30",
+            "equity": 990257.0
+          },
+          {
+            "time": "2026-04-10T04:46:29.010980+05:30",
+            "equity": 990257.0
+          },
+          {
+            "time": "2026-04-10T04:49:21.593339+05:30",
+            "equity": 991257.0
+          },
+          {
+            "time": "2026-04-10T04:50:22.288987+05:30",
+            "equity": 991257.0
+          },
+          {
+            "time": "2026-04-10T04:51:22.472696+05:30",
+            "equity": 991257.0
+          },
+          {
+            "time": "2026-04-10T04:52:23.045807+05:30",
+            "equity": 991257.0
+          },
+          {
+            "time": "2026-04-10T04:55:14.149843+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T04:56:14.693596+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T04:57:14.823581+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T04:58:15.362637+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T04:59:16.104346+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T05:00:16.679716+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T05:01:16.846005+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T05:02:17.402673+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T05:05:07.435926+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T05:08:02.511855+05:30",
+            "equity": 995882.0
+          },
+          {
+            "time": "2026-04-10T05:09:03.122811+05:30",
+            "equity": 995882.0
+          },
+          {
+            "time": "2026-04-10T05:10:03.250258+05:30",
+            "equity": 995882.0
+          },
+          {
+            "time": "2026-04-10T05:11:03.813410+05:30",
+            "equity": 995882.0
+          },
+          {
+            "time": "2026-04-10T05:13:54.396184+05:30",
+            "equity": 993882.0
+          },
+          {
+            "time": "2026-04-10T05:14:55.017508+05:30",
+            "equity": 993882.0
+          },
+          {
+            "time": "2026-04-10T05:15:55.171758+05:30",
+            "equity": 993882.0
+          },
+          {
+            "time": "2026-04-10T05:16:55.728777+05:30",
+            "equity": 993882.0
+          },
+          {
+            "time": "2026-04-10T05:19:47.315703+05:30",
+            "equity": 993882.0
+          },
+          {
+            "time": "2026-04-10T05:22:37.786726+05:30",
+            "equity": 988757.0
+          },
+          {
+            "time": "2026-04-10T05:23:38.872639+05:30",
+            "equity": 988757.0
+          },
+          {
+            "time": "2026-04-10T05:24:39.009554+05:30",
+            "equity": 988757.0
+          },
+          {
+            "time": "2026-04-10T05:25:39.520913+05:30",
+            "equity": 990257.0
+          },
+          {
+            "time": "2026-04-10T05:26:39.647597+05:30",
+            "equity": 990257.0
+          },
+          {
+            "time": "2026-04-10T05:29:30.586254+05:30",
+            "equity": 998632.0
+          },
+          {
+            "time": "2026-04-10T05:32:21.607048+05:30",
+            "equity": 999632.0
+          },
+          {
+            "time": "2026-04-10T05:33:22.205342+05:30",
+            "equity": 999632.0
+          },
+          {
+            "time": "2026-04-10T05:34:22.373398+05:30",
+            "equity": 997132.0
+          },
+          {
+            "time": "2026-04-10T05:35:22.943600+05:30",
+            "equity": 997132.0
+          },
+          {
+            "time": "2026-04-10T05:38:13.600443+05:30",
+            "equity": 999007.0
+          },
+          {
+            "time": "2026-04-10T05:39:14.101018+05:30",
+            "equity": 999007.0
+          },
+          {
+            "time": "2026-04-10T05:40:14.258045+05:30",
+            "equity": 999007.0
+          },
+          {
+            "time": "2026-04-10T05:41:14.774351+05:30",
+            "equity": 999007.0
+          },
+          {
+            "time": "2026-04-10T05:42:15.495305+05:30",
+            "equity": 999007.0
+          },
+          {
+            "time": "2026-04-10T05:43:15.977088+05:30",
+            "equity": 999007.0
+          },
+          {
+            "time": "2026-04-10T05:44:16.093534+05:30",
+            "equity": 999007.0
+          },
+          {
+            "time": "2026-04-10T05:45:16.715473+05:30",
+            "equity": 999007.0
+          },
+          {
+            "time": "2026-04-10T05:48:07.175752+05:30",
+            "equity": 1000757.0
+          },
+          {
+            "time": "2026-04-10T05:49:08.420256+05:30",
+            "equity": 1000757.0
+          },
+          {
+            "time": "2026-04-10T05:50:09.340376+05:30",
+            "equity": 1000757.0
+          },
+          {
+            "time": "2026-04-10T05:51:13.645498+05:30",
+            "equity": 1009507.0
+          },
+          {
+            "time": "2026-04-10T05:52:13.775092+05:30",
+            "equity": 1009507.0
+          },
+          {
+            "time": "2026-04-10T05:53:14.415546+05:30",
+            "equity": 1009507.0
+          },
+          {
+            "time": "2026-04-10T05:54:15.049421+05:30",
+            "equity": 1009507.0
+          },
+          {
+            "time": "2026-04-10T05:55:15.551055+05:30",
+            "equity": 1009507.0
+          },
+          {
+            "time": "2026-04-10T05:56:15.690222+05:30",
+            "equity": 1009507.0
+          },
+          {
+            "time": "2026-04-10T05:57:16.113765+05:30",
+            "equity": 1009507.0
+          },
+          {
+            "time": "2026-04-10T05:58:16.233427+05:30",
+            "equity": 1009507.0
+          },
+          {
+            "time": "2026-04-10T06:01:07.248800+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:02:07.731034+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:03:07.858481+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:04:08.344626+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:05:09.031366+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:06:09.510912+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:07:09.641922+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:08:10.124723+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:09:10.242957+05:30",
+            "equity": 1009132.0
+          },
+          {
+            "time": "2026-04-10T06:12:01.098025+05:30",
+            "equity": 997007.0
+          },
+          {
+            "time": "2026-04-10T06:13:01.573175+05:30",
+            "equity": 997007.0
+          },
+          {
+            "time": "2026-04-10T06:14:01.763713+05:30",
+            "equity": 997007.0
+          },
+          {
+            "time": "2026-04-10T06:15:02.257456+05:30",
+            "equity": 991007.0
+          },
+          {
+            "time": "2026-04-10T06:17:52.759492+05:30",
+            "equity": 991007.0
+          },
+          {
+            "time": "2026-04-10T06:20:43.773011+05:30",
+            "equity": 986507.0
+          },
+          {
+            "time": "2026-04-10T06:21:44.880867+05:30",
+            "equity": 986507.0
+          },
+          {
+            "time": "2026-04-10T06:22:45.018876+05:30",
+            "equity": 986507.0
+          },
+          {
+            "time": "2026-04-10T06:23:45.492705+05:30",
+            "equity": 986507.0
+          },
+          {
+            "time": "2026-04-10T06:24:45.634203+05:30",
+            "equity": 986507.0
+          },
+          {
+            "time": "2026-04-10T06:27:35.998731+05:30",
+            "equity": 989507.0
+          },
+          {
+            "time": "2026-04-10T06:30:26.765238+05:30",
+            "equity": 989507.0
+          },
+          {
+            "time": "2026-04-10T06:33:17.188810+05:30",
+            "equity": 989507.0
+          },
+          {
+            "time": "2026-04-10T06:34:22.118667+05:30",
+            "equity": 989507.0
+          },
+          {
+            "time": "2026-04-10T06:37:12.339729+05:30",
+            "equity": 989507.0
+          },
+          {
+            "time": "2026-04-10T06:38:12.881036+05:30",
+            "equity": 989507.0
+          },
+          {
+            "time": "2026-04-10T06:41:02.777123+05:30",
+            "equity": 991132.0
+          },
+          {
+            "time": "2026-04-10T06:42:04.032190+05:30",
+            "equity": 991132.0
+          },
+          {
+            "time": "2026-04-10T06:44:53.993540+05:30",
+            "equity": 991757.0
+          },
+          {
+            "time": "2026-04-10T06:45:54.497105+05:30",
+            "equity": 991757.0
+          },
+          {
+            "time": "2026-04-10T06:48:44.475881+05:30",
+            "equity": 997382.0
+          },
+          {
+            "time": "2026-04-10T06:51:36.265574+05:30",
+            "equity": 997382.0
+          },
+          {
+            "time": "2026-04-10T06:54:26.646429+05:30",
+            "equity": 998507.0
+          },
+          {
+            "time": "2026-04-10T06:55:27.655012+05:30",
+            "equity": 998507.0
+          },
+          {
+            "time": "2026-04-10T06:58:17.659932+05:30",
+            "equity": 999257.0
+          },
+          {
+            "time": "2026-04-10T06:59:18.118861+05:30",
+            "equity": 999257.0
+          },
+          {
+            "time": "2026-04-10T07:00:18.292817+05:30",
+            "equity": 999257.0
+          },
+          {
+            "time": "2026-04-10T07:01:19.244682+05:30",
+            "equity": 999257.0
+          },
+          {
+            "time": "2026-04-10T07:04:09.305858+05:30",
+            "equity": 999257.0
+          },
+          {
+            "time": "2026-04-10T07:06:59.559265+05:30",
+            "equity": 999882.0
+          },
+          {
+            "time": "2026-04-10T07:08:00.515361+05:30",
+            "equity": 999882.0
+          },
+          {
+            "time": "2026-04-10T07:10:50.897359+05:30",
+            "equity": 1005382.0
+          },
+          {
+            "time": "2026-04-10T07:11:51.426820+05:30",
+            "equity": 1005382.0
+          },
+          {
+            "time": "2026-04-10T07:14:41.326741+05:30",
+            "equity": 1004757.0
+          },
+          {
+            "time": "2026-04-10T07:17:32.266377+05:30",
+            "equity": 1004757.0
+          },
+          {
+            "time": "2026-04-10T07:20:22.525909+05:30",
+            "equity": 1014132.0
+          },
+          {
+            "time": "2026-04-10T07:21:23.628827+05:30",
+            "equity": 1014132.0
+          },
+          {
+            "time": "2026-04-10T07:24:14.575710+05:30",
+            "equity": 1008882.0
+          },
+          {
+            "time": "2026-04-10T07:25:15.087696+05:30",
+            "equity": 1008882.0
+          },
+          {
+            "time": "2026-04-10T07:28:05.047381+05:30",
+            "equity": 1007007.0
+          },
+          {
+            "time": "2026-04-10T07:30:56.213507+05:30",
+            "equity": 1007007.0
+          },
+          {
+            "time": "2026-04-10T07:33:46.575510+05:30",
+            "equity": 987882.0
+          },
+          {
+            "time": "2026-04-10T07:34:47.511645+05:30",
+            "equity": 987882.0
+          },
+          {
+            "time": "2026-04-10T07:37:41.465664+05:30",
+            "equity": 987007.0
+          },
+          {
+            "time": "2026-04-10T07:38:41.946263+05:30",
+            "equity": 987007.0
+          },
+          {
+            "time": "2026-04-10T07:41:32.224071+05:30",
+            "equity": 991382.0
+          },
+          {
+            "time": "2026-04-10T07:44:23.031018+05:30",
+            "equity": 991382.0
+          },
+          {
+            "time": "2026-04-10T07:47:13.239766+05:30",
+            "equity": 980632.0
+          },
+          {
+            "time": "2026-04-10T07:48:14.270982+05:30",
+            "equity": 980632.0
+          },
+          {
+            "time": "2026-04-10T07:51:04.316807+05:30",
+            "equity": 1007507.0
+          },
+          {
+            "time": "2026-04-10T07:52:04.961431+05:30",
+            "equity": 1007507.0
+          },
+          {
+            "time": "2026-04-10T07:53:05.128706+05:30",
+            "equity": 1007507.0
+          },
+          {
+            "time": "2026-04-10T07:54:06.313831+05:30",
+            "equity": 1007507.0
+          },
+          {
+            "time": "2026-04-10T07:56:57.401453+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T07:57:57.922478+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T07:58:58.049170+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T07:59:59.647331+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T08:00:59.794138+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T08:02:00.338460+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T08:03:00.475670+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T08:04:00.953300+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T08:05:01.797910+05:30",
+            "equity": 1005257.0
+          },
+          {
+            "time": "2026-04-10T08:07:52.181399+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:08:52.940547+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:09:53.085273+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:10:54.315268+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:11:54.445034+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:12:55.005116+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:13:55.182848+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:14:55.763497+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:15:56.555349+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:16:57.033001+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:17:57.151323+05:30",
+            "equity": 1006257.0
+          },
+          {
+            "time": "2026-04-10T08:20:51.720888+05:30",
+            "equity": 1006007.0
+          },
+          {
+            "time": "2026-04-10T08:21:52.860718+05:30",
+            "equity": 1006007.0
+          },
+          {
+            "time": "2026-04-10T08:22:53.009395+05:30",
+            "equity": 1006007.0
+          },
+          {
+            "time": "2026-04-10T08:23:53.484859+05:30",
+            "equity": 982507.0
+          },
+          {
+            "time": "2026-04-10T08:24:53.593448+05:30",
+            "equity": 982507.0
+          },
+          {
+            "time": "2026-04-10T08:25:54.087020+05:30",
+            "equity": 982507.0
+          },
+          {
+            "time": "2026-04-10T08:26:54.729473+05:30",
+            "equity": 982507.0
+          },
+          {
+            "time": "2026-04-10T08:27:55.977144+05:30",
+            "equity": 982507.0
+          },
+          {
+            "time": "2026-04-10T08:30:47.238011+05:30",
+            "equity": 980757.0
+          },
+          {
+            "time": "2026-04-10T08:31:47.793480+05:30",
+            "equity": 980757.0
+          },
+          {
+            "time": "2026-04-10T08:32:48.522079+05:30",
+            "equity": 980757.0
+          },
+          {
+            "time": "2026-04-10T08:33:49.063535+05:30",
+            "equity": 980757.0
+          },
+          {
+            "time": "2026-04-10T08:34:49.181438+05:30",
+            "equity": 980757.0
+          },
+          {
+            "time": "2026-04-10T08:35:49.764404+05:30",
+            "equity": 980757.0
+          },
+          {
+            "time": "2026-04-10T08:36:49.904507+05:30",
+            "equity": 979257.0
+          },
+          {
+            "time": "2026-04-10T08:37:51.047531+05:30",
+            "equity": 979257.0
+          },
+          {
+            "time": "2026-04-10T08:38:51.195279+05:30",
+            "equity": 979257.0
+          },
+          {
+            "time": "2026-04-10T08:39:51.770589+05:30",
+            "equity": 979257.0
+          },
+          {
+            "time": "2026-04-10T08:42:41.778131+05:30",
+            "equity": 1003007.0
+          },
+          {
+            "time": "2026-04-10T08:45:32.757635+05:30",
+            "equity": 1003007.0
+          },
+          {
+            "time": "2026-04-10T08:48:23.212611+05:30",
+            "equity": 989007.0
+          },
+          {
+            "time": "2026-04-10T08:49:24.699763+05:30",
+            "equity": 989007.0
+          },
+          {
+            "time": "2026-04-10T08:52:14.652122+05:30",
+            "equity": 987757.0
+          },
+          {
+            "time": "2026-04-10T08:53:15.256867+05:30",
+            "equity": 987757.0
+          },
+          {
+            "time": "2026-04-10T08:56:05.598285+05:30",
+            "equity": 1003632.0
+          },
+          {
+            "time": "2026-04-10T08:58:57.304432+05:30",
+            "equity": 1003632.0
+          },
+          {
+            "time": "2026-04-10T09:01:47.840783+05:30",
+            "equity": 994382.0
+          },
+          {
+            "time": "2026-04-10T09:02:49.108944+05:30",
+            "equity": 994382.0
+          },
+          {
+            "time": "2026-04-10T09:05:39.179829+05:30",
+            "equity": 995132.0
+          },
+          {
+            "time": "2026-04-10T09:06:39.739942+05:30",
+            "equity": 995132.0
+          },
+          {
+            "time": "2026-04-10T09:09:33.995273+05:30",
+            "equity": 994507.0
+          },
+          {
+            "time": "2026-04-10T09:12:25.641674+05:30",
+            "equity": 994507.0
+          },
+          {
+            "time": "2026-04-10T09:15:16.188230+05:30",
+            "equity": 991507.0
+          },
+          {
+            "time": "2026-04-10T09:16:17.284067+05:30",
+            "equity": 991507.0
+          },
+          {
+            "time": "2026-04-10T09:19:07.190737+05:30",
+            "equity": 993257.0
+          },
+          {
+            "time": "2026-04-10T09:20:07.771807+05:30",
+            "equity": 993257.0
+          },
+          {
+            "time": "2026-04-10T09:22:57.805571+05:30",
+            "equity": 981257.0
+          },
+          {
+            "time": "2026-04-10T09:25:48.879923+05:30",
+            "equity": 981257.0
+          },
+          {
+            "time": "2026-04-10T09:28:39.348296+05:30",
+            "equity": 980132.0
+          },
+          {
+            "time": "2026-04-10T09:29:41.352373+05:30",
+            "equity": 980132.0
+          },
+          {
+            "time": "2026-04-10T09:32:31.352120+05:30",
+            "equity": 979382.0
+          },
+          {
+            "time": "2026-04-10T09:33:31.882622+05:30",
+            "equity": 979382.0
+          },
+          {
+            "time": "2026-04-10T09:36:21.894276+05:30",
+            "equity": 981882.0
+          },
+          {
+            "time": "2026-04-10T09:39:12.944589+05:30",
+            "equity": 981882.0
+          },
+          {
+            "time": "2026-04-10T09:42:04.106932+05:30",
+            "equity": 975382.0
+          },
+          {
+            "time": "2026-04-10T09:43:05.248494+05:30",
+            "equity": 975382.0
+          },
+          {
+            "time": "2026-04-10T09:45:55.361364+05:30",
+            "equity": 977882.0
+          },
+          {
+            "time": "2026-04-10T09:46:55.897338+05:30",
+            "equity": 977882.0
+          },
+          {
+            "time": "2026-04-10T09:49:45.894861+05:30",
+            "equity": 976257.0
+          },
+          {
+            "time": "2026-04-10T09:52:36.838137+05:30",
+            "equity": 976257.0
+          },
+          {
+            "time": "2026-04-10T09:55:27.266201+05:30",
+            "equity": 973007.0
+          },
+          {
+            "time": "2026-04-10T09:56:28.527019+05:30",
+            "equity": 973007.0
+          },
+          {
+            "time": "2026-04-10T09:59:18.553003+05:30",
+            "equity": 974757.0
+          },
+          {
+            "time": "2026-04-11T15:52:57.481425+05:30",
+            "equity": 1017632.0
+          },
+          {
+            "time": "2026-04-11T15:56:26.192980+05:30",
+            "equity": 1017632.0
+          },
+          {
+            "time": "2026-04-11T15:58:59.263434+05:30",
+            "equity": 1017632.0
+          },
+          {
+            "time": "2026-04-11T16:00:58.738330+05:30",
+            "equity": 1017632.0
+          },
+          {
+            "time": "2026-04-24T06:20:36.721889+05:30",
+            "equity": 1002757.0
+          },
+          {
+            "time": "2026-04-24T06:21:37.238866+05:30",
+            "equity": 1127048.25
+          },
+          {
+            "time": "2026-04-24T06:21:40.903045+05:30",
+            "equity": 1167673.25
+          },
+          {
+            "time": "2026-04-24T06:22:41.728098+05:30",
+            "equity": 1167673.25
+          },
+          {
+            "time": "2026-04-24T06:23:44.110635+05:30",
+            "equity": 1167673.25
+          },
+          {
+            "time": "2026-04-24T06:24:44.208406+05:30",
+            "equity": 1420321.1875
+          },
+          {
+            "time": "2026-04-24T06:24:45.480227+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:25:48.251288+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:26:49.476478+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:27:51.297217+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:28:51.929087+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:29:54.145732+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:30:57.576990+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:31:59.803827+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:33:00.962938+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:34:03.572473+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:35:04.927149+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:36:12.984605+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:37:16.465233+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:38:20.637439+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:39:22.066746+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:40:23.924776+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:41:25.692352+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:42:28.966147+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:43:30.135661+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:44:32.312266+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:45:34.673478+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:46:42.297551+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:47:44.775804+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:48:49.735792+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:50:05.365119+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:51:11.444284+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:52:19.874034+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:53:27.429596+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:54:28.988423+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:55:31.943143+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:56:32.649855+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:57:36.001336+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:58:38.072116+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T06:59:40.433498+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:00:42.282892+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:01:44.009419+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:02:45.518248+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:03:50.848265+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:04:57.420001+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:06:00.477533+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:07:02.746321+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:08:08.541489+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:09:11.116275+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:10:13.903316+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:11:15.828645+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:12:22.814489+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:13:24.953854+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:14:30.442450+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:17:12.490858+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:36:47.243559+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:46:17.311511+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T07:55:35.463435+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T08:04:41.260361+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T08:13:08.051132+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T08:22:32.960972+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T08:31:15.415624+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T08:39:03.926708+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T08:47:38.372598+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T09:03:22.279211+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T09:11:09.387080+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T09:20:29.632067+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T09:29:53.994073+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T09:38:17.690042+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T09:47:12.644690+05:30",
+            "equity": 1508571.1875
+          },
+          {
+            "time": "2026-04-24T09:58:38.664849+05:30",
+            "equity": 1508571.1875
+          }
+        ]
+      }
+    },
+    "index_mp_strategy": {
+      "entries": 0,
+      "exits": 0,
+      "last_scan_at": "2026-04-09T15:20:00+05:30",
+      "last_message": "No valid NSE broker session is available for the paper scan. Upstox=expired reconnect required, Fyers=expired reconnect required.",
+      "processed_signals": {},
+      "signal_lane": [
+        {
+          "status": "trend-aligned",
+          "freshness": "live",
+          "underlying": "NIFTY",
+          "instruction": "NIFTY aligned"
+        }
+      ],
+      "meta": {
+        "mode": "market_closed",
+        "pipeline": [
+          {
+            "name": "Strategy 2 NIFTY",
+            "rows": 45,
+            "status": "ok",
+            "last_date": "2026-04-09 15:20"
+          }
+        ],
+        "updated_at": "2026-05-09T22:04:47.567029+05:30",
+        "market_state": "closed",
+        "scan_interval": "5minute",
+        "watchlist_rows": 0,
+        "broker_snapshot": {
+          "connected_brokers": [],
+          "session_brokers": [],
+          "upstox_ready": false,
+          "fyers_ready": false,
+          "broker_ready": false,
+          "upstox_token_health": {
+            "connected": false,
+            "source": "saved_credentials",
+            "valid": false,
+            "status": "expired_reconnect_required",
+            "checked_at": "2026-05-08T09:31:07.958786+00:00",
+            "has_saved_token": true,
+            "needs_reconnect": true,
+            "message": "Saved Upstox access token is invalid. Upstox does not provide refresh tokens for this flow, so reconnect Upstox in Settings.",
+            "expires_at_ist": "2026-05-09T03:30:00+05:30"
+          },
+          "fyers_token_health": {
+            "connected": false,
+            "source": "saved_credentials",
+            "valid": false,
+            "status": "expired_reconnect_required",
+            "checked_at": "2026-05-08T09:31:07.868225+00:00",
+            "has_saved_token": true,
+            "needs_reconnect": true,
+            "message": "Saved Fyers access token is invalid. Reconnect Fyers in Settings."
+          }
+        },
+        "market_intelligence": {
+          "ready": true,
+          "execution_mode": "stale_latest_session",
+          "readiness_mode": "latest_session",
+          "execution_ready": false,
+          "watchlist_rows_today": 0,
+          "latest_watchlist_time": "2026-04-24T09:29:55.977752+00:00",
+          "watchlist_age_seconds": 1209600,
+          "watchlist_rows_latest": 171,
+          "max_execution_age_seconds": 129600
+        }
+      },
+      "recent_events": [],
+      "positions": [],
+      "portfolio": {
+        "initial_capital": 1000000.0,
+        "available_capital": 1000000.0,
+        "peak_equity": 1000000.0,
+        "trade_history": [],
+        "daily_pnl": {},
+        "equity_curve": [
+          {
+            "time": "2026-04-09T10:23:03.379987+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-09T10:23:13.951493+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-09T10:35:30.951353+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-09T10:42:27.885642+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-09T17:47:40.755619+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:47:48.439209+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:48:53.410285+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:49:53.555634+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:50:54.690328+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:51:54.809840+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:52:55.464881+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:53:55.605891+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:54:56.270786+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:57:48.485562+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:58:49.137388+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T03:59:49.273238+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:00:49.878781+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:01:50.999898+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:02:51.656197+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:03:51.838389+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:04:52.578921+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:05:52.752076+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:06:54.025743+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:07:54.174431+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:10:46.954094+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:11:47.588973+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:12:48.169529+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:13:48.801879+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:14:48.916038+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:15:49.543498+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:16:49.687861+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:17:51.821913+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:18:51.939989+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:19:52.650253+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:20:52.800104+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:21:53.520558+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:24:50.802557+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:25:51.415138+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:26:51.541794+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:27:52.126742+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:28:52.917391+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:29:53.644187+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:30:53.856448+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:31:54.592754+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:34:44.693562+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:37:35.633997+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:38:36.249350+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:39:36.388494+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:40:36.999064+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:43:27.682698+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:44:28.274119+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:45:28.412037+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:46:29.011478+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:49:21.594660+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:50:22.315194+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:51:22.473129+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:52:23.046700+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:55:14.150250+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:56:14.694376+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:57:14.824103+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:58:15.363228+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T04:59:16.104844+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:00:16.680273+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:01:16.846574+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:02:17.403763+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:05:07.436539+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:08:02.512724+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:09:03.123345+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:10:03.250832+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:11:03.814201+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:13:54.396721+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:14:55.019409+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:15:55.172269+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:16:55.729683+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:19:47.318047+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:22:37.787630+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:23:38.873131+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:24:39.010130+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:25:39.521791+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:26:39.648133+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:29:30.588781+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:32:21.607677+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:33:22.206527+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:34:22.374515+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:35:22.944419+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:38:13.601019+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:39:14.103432+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:40:14.258639+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:41:14.775082+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:42:15.495892+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:43:15.977635+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:44:16.094351+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:45:16.716088+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:48:07.176365+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:49:08.420963+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:50:09.340974+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:51:13.646315+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:52:13.775841+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:53:14.415954+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:54:15.049934+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:55:15.551994+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:56:15.690844+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:57:16.114522+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T05:58:16.234070+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:01:07.249606+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:02:07.732067+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:03:07.859353+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:04:08.345373+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:05:09.031979+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:06:09.511648+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:07:09.642523+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:08:10.125452+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:09:10.243680+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:12:01.098696+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:13:01.574034+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:14:01.773151+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:15:02.258166+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:17:52.760151+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:20:43.775392+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:21:44.881566+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:22:45.019477+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:23:45.493469+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:24:45.634895+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:27:35.999341+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:30:26.766079+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:33:17.189511+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:34:22.119257+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:37:12.340387+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:38:12.881669+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:41:02.777842+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:42:04.032738+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:44:53.994243+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:45:54.497746+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:48:44.476633+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:51:36.267740+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:54:26.647560+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:55:27.655805+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:58:17.660534+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T06:59:18.119573+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:00:18.293400+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:01:19.245523+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:04:09.306557+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:06:59.560333+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:08:00.516199+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:10:50.898172+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:11:51.427556+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:14:41.327868+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:17:32.267470+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:20:22.526705+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:21:23.629417+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:24:14.576611+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:25:15.088283+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:28:05.048150+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:30:56.214394+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:33:46.576653+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:34:47.512429+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:37:41.466176+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:38:41.946941+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:41:32.224848+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:44:23.031921+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:47:13.240676+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:48:14.271645+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:51:04.317478+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:52:04.962259+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:53:05.129543+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:54:06.314487+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:56:57.403926+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:57:57.923818+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:58:58.049972+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T07:59:59.647857+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:00:59.795149+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:02:00.339659+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:03:00.476307+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:04:00.954503+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:05:01.798599+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:07:52.182286+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:08:52.941722+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:09:53.086166+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:10:54.316059+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:11:54.445805+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:12:55.006287+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:13:55.183646+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:14:55.766380+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:15:56.555851+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:16:57.033625+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:17:57.152012+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:20:51.721848+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:21:52.861503+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:22:53.010132+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:23:53.485922+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:24:53.594445+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:25:54.087739+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:26:54.730221+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:27:55.979264+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:30:47.243308+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:31:47.794808+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:32:48.522967+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:33:49.064720+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:34:49.182281+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:35:49.765173+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:36:49.905476+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:37:51.048555+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:38:51.196047+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:39:51.771528+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:42:41.778949+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:45:32.758514+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:48:23.213804+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:49:24.700538+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:52:14.653068+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:53:15.257656+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:56:05.599206+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T08:58:57.306764+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:01:47.841682+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:02:49.109822+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:05:39.180705+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:06:39.740929+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:09:33.996138+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:12:25.643248+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:15:16.189451+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:16:17.284970+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:19:07.191465+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:20:07.772546+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:22:57.806409+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:25:48.881176+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:28:39.349351+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:29:41.353587+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:32:31.353042+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:33:31.883599+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:36:21.895069+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:39:12.945668+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:42:04.107819+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:43:05.249464+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:45:55.361980+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:46:55.898305+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:49:45.895768+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:52:36.839049+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:55:27.267406+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:56:28.528018+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-10T09:59:18.556527+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-11T15:52:57.483173+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-11T15:56:26.196844+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-11T15:58:59.266727+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-11T16:00:58.742608+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:20:36.723463+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:21:40.905493+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:22:41.729779+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:23:44.115647+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:24:45.481681+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:25:48.268109+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:26:49.478400+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:27:51.299896+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:28:51.932649+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:29:54.148738+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:30:57.581992+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:31:59.806435+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:33:00.966692+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:34:03.575450+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:35:04.928969+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:36:12.988114+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:37:16.482324+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:38:20.639896+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:39:22.068378+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:40:23.934990+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:41:25.694097+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:42:28.968866+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:43:30.138229+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:44:32.314608+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:45:35.068215+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:46:42.301556+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:47:44.780119+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:48:49.819657+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:50:06.134043+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:51:11.481997+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:52:19.877725+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:53:27.493584+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:54:28.992624+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:55:31.948581+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:56:32.651978+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:57:36.004287+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:58:38.075698+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T06:59:40.447354+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:00:42.285908+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:01:44.011501+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:02:45.520486+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:03:50.853298+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:04:57.450402+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:06:00.548526+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:07:02.748736+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:08:08.550368+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:09:11.123867+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:10:13.906799+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:11:15.837326+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:12:22.817427+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:13:24.956222+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:14:30.446869+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:17:12.524807+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:36:47.289145+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:46:17.319961+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T07:55:35.469968+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T08:04:41.277105+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T08:13:08.069846+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T08:22:33.030303+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T08:31:15.419621+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T08:39:03.934616+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T08:47:38.378205+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T09:03:22.289962+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T09:11:09.389589+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T09:20:29.634356+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T09:29:54.020150+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T09:38:17.694636+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T09:47:12.665715+05:30",
+            "equity": 1000000.0
+          },
+          {
+            "time": "2026-04-24T09:58:38.669040+05:30",
+            "equity": 1000000.0
+          }
+        ]
+      }
+    }
+  }
+}

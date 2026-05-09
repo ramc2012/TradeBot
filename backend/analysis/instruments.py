@@ -6,9 +6,24 @@ from datetime import date, timedelta
 from typing import List
 
 
-# ── NSE F&O Indices ───────────────────────────────────────────────────────────
+# ── NSE/BSE F&O Indices ───────────────────────────────────────────────────────
 
 NSE_FO_INDICES: list[str] = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"]
+BSE_FO_INDICES: list[str] = ["SENSEX", "BANKEX"]
+ALL_FO_INDICES: list[str] = NSE_FO_INDICES + BSE_FO_INDICES
+
+# Per-index expiry weekday (Python weekday: Mon=0, Tue=1, Wed=2, Thu=3, Fri=4)
+# NSE equity derivatives currently use Tuesday expiry for index and stock
+# contracts. BSE index contracts keep their native weekday schedules.
+INDEX_EXPIRY_WEEKDAY: dict[str, int] = {
+    "NIFTY":      1,   # Tuesday
+    "NIFTYNXT50": 1,   # Tuesday
+    "BANKNIFTY":  1,   # Tuesday
+    "FINNIFTY":   1,   # Tuesday
+    "MIDCPNIFTY": 1,   # Tuesday
+    "SENSEX":     4,   # Friday  (BSE)
+    "BANKEX":     0,   # Monday  (BSE)
+}
 
 # ── Strike step sizes ─────────────────────────────────────────────────────────
 # Index options
@@ -77,6 +92,14 @@ INDEX_INSTRUMENT_KEYS: dict[str, str] = {
     "SENSEX":     "BSE_INDEX|SENSEX",
     "BANKEX":     "BSE_INDEX|BSE-BANKEX",
 }
+
+
+def get_fo_market(underlying: str | None) -> str:
+    """Return the exchange market code used by the F&O catalogs."""
+    symbol = str(underlying or "").upper()
+    if symbol in BSE_FO_INDICES:
+        return "BSE"
+    return "NSE"
 
 # ICICI Breeze stock_code / exchange_code mapping for F&O historical data
 # Breeze uses different codes than Upstox trading symbols
@@ -147,24 +170,43 @@ def _is_trading_day(d: date) -> bool:
     return True
 
 
-def _last_thursday_of_month(year: int, month: int) -> date:
-    """Return the last Thursday of the given month."""
-    # Find last day of month
+def _last_weekday_of_month(year: int, month: int, weekday: int) -> date:
+    """Return the last occurrence of a given weekday (0=Mon … 6=Sun) in the month."""
     last_day = monthrange(year, month)[1]
     d = date(year, month, last_day)
-    # Walk back to Thursday (weekday 3)
-    while d.weekday() != 3:
+    while d.weekday() != weekday:
         d -= timedelta(days=1)
     return d
 
 
 def get_monthly_expiry(year: int, month: int) -> date:
     """
-    Return the actual monthly expiry date for a given month.
+    Return the actual NSE monthly expiry date, adjusted for holidays.
 
-    Monthly expiry is the last Thursday, adjusted backward for holidays.
+    NSE stock and NSE index derivatives currently share Tuesday monthly expiry.
+    For BSE index contracts use get_index_monthly_expiry().
     """
-    candidate = _last_thursday_of_month(year, month)
+    candidate = _last_weekday_of_month(year, month, 1)
+    while not _is_trading_day(candidate):
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def get_index_monthly_expiry(symbol: str, year: int, month: int) -> date:
+    """
+    Return the actual monthly expiry for any F&O index, based on its native expiry weekday.
+
+    NSE indices currently share Tuesday monthly expiry:
+      NIFTY/NIFTYNXT50/BANKNIFTY/FINNIFTY/MIDCPNIFTY → Tuesday (1)
+
+    BSE indices keep their native weekday:
+      SENSEX           → Friday (4) [BSE]
+      BANKEX           → Monday (0) [BSE]
+
+    The result is adjusted backward past any known market holidays.
+    """
+    weekday = INDEX_EXPIRY_WEEKDAY.get(symbol, 1)
+    candidate = _last_weekday_of_month(year, month, weekday)
     while not _is_trading_day(candidate):
         candidate -= timedelta(days=1)
     return candidate
@@ -174,9 +216,8 @@ def get_monthly_expiries(from_date: date, to_date: date) -> list[date]:
     """
     Return all monthly NSE F&O expiry dates between from_date and to_date.
 
-    Monthly expiry = last Thursday of each month.
-    If that Thursday is a market holiday, expiry moves to Wednesday.
-    If Wednesday is also a holiday, move to Tuesday (and so on).
+    Monthly expiry = last Tuesday of each month for NSE derivatives.
+    If that Tuesday is a market holiday, expiry moves backward to the prior trading day.
 
     Parameters
     ----------

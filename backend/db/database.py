@@ -1,14 +1,32 @@
 from __future__ import annotations
+
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
+
 from core.config import settings
+
+
+def _database_pool_config() -> dict[str, int | bool]:
+    is_development = settings.APP_ENV == "development"
+    # Keep per-instance connection demand conservative. Cloud Run may run
+    # several API instances during market hours; large pools per instance can
+    # exhaust Postgres before individual requests see local pool pressure.
+    pool_size = settings.DATABASE_POOL_SIZE or (5 if is_development else 3)
+    max_overflow = settings.DATABASE_MAX_OVERFLOW or (5 if is_development else 2)
+    return {
+        "pool_pre_ping": True,
+        "pool_size": max(pool_size, 1),
+        "max_overflow": max(max_overflow, 0),
+        "pool_timeout": max(int(settings.DATABASE_POOL_TIMEOUT_SECONDS), 1),
+        "pool_recycle": max(int(settings.DATABASE_POOL_RECYCLE_SECONDS), 30),
+        "pool_use_lifo": not is_development,
+    }
+
 
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.APP_ENV == "development",
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
+    **_database_pool_config(),
 )
 
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)

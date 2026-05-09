@@ -2,7 +2,7 @@
 from __future__ import annotations
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
@@ -24,15 +24,24 @@ class DataRouter:
         self._ws_client: Any = None
         self._subscribed_symbols: List[str] = []
         self._callbacks: Dict[str, List[Callable[[Tick], None]]] = {}
+        self._global_callbacks: List[Callable[[Tick], None]] = []
         self._tick_buffer: Dict[str, Tick] = {}  # latest tick per symbol
         self._mock_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._source_policy: dict[str, Any] = {}
 
     def set_broker(self, broker: BrokerAdapter):
         self._broker = broker
 
+    def set_source_policy(self, policy: dict[str, Any]):
+        self._source_policy = dict(policy or {})
+
     def register_callback(self, symbol: str, callback: Callable[[Tick], None]):
         self._callbacks.setdefault(symbol, []).append(callback)
+
+    def register_global_callback(self, callback: Callable[[Tick], None]):
+        if callback not in self._global_callbacks:
+            self._global_callbacks.append(callback)
 
     async def subscribe(self, symbols: List[str]):
         if not self._broker:
@@ -72,6 +81,7 @@ class DataRouter:
     def _on_tick(self, tick: Tick):
         """Handle an incoming tick synchronously, publish to Redis async."""
         tick.symbol = to_app_symbol(tick.symbol)
+        tick.timestamp = self._ensure_utc_timestamp(tick.timestamp)
         self._tick_buffer[tick.symbol] = tick
         # Dispatch to local callbacks
         for cb in self._callbacks.get(tick.symbol, []):
@@ -79,6 +89,11 @@ class DataRouter:
                 cb(tick)
             except Exception as e:
                 logger.error(f"[DataRouter] Callback error for {tick.symbol}: {e}")
+        for cb in self._global_callbacks:
+            try:
+                cb(tick)
+            except Exception as e:
+                logger.error(f"[DataRouter] Global callback error for {tick.symbol}: {e}")
         # Fyers websocket callbacks can arrive on a non-async thread.
         try:
             running_loop = asyncio.get_running_loop()
@@ -92,6 +107,7 @@ class DataRouter:
     async def _publish_tick(self, tick: Tick):
         try:
             redis = await get_redis()
+            timestamp = self._ensure_utc_timestamp(tick.timestamp)
             payload = json.dumps({
                 "symbol": tick.symbol,
                 "ltp": tick.ltp,
@@ -103,7 +119,7 @@ class DataRouter:
                 "oi": tick.oi,
                 "bid": tick.bid,
                 "ask": tick.ask,
-                "timestamp": (tick.timestamp or datetime.utcnow()).isoformat(),
+                "timestamp": timestamp.isoformat(),
             })
             await redis.publish(f"ticks:{tick.symbol}", payload)
         except Exception as e:
@@ -115,6 +131,52 @@ class DataRouter:
     def get_ltp(self, symbol: str) -> float:
         tick = self._tick_buffer.get(symbol)
         return tick.ltp if tick else 0.0
+
+    def get_status(self) -> dict[str, Any]:
+        source_policy = dict(self._source_policy)
+        if not source_policy:
+            from market_data.source_policy import source_policy_snapshot
+
+            source_policy = source_policy_snapshot()
+        broker_name = getattr(self._broker, "broker_name", None) if self._broker else None
+        mock_running = bool(self._mock_task and not self._mock_task.done())
+        last_tick_times = [
+            self._ensure_utc_timestamp(tick.timestamp)
+            for tick in self._tick_buffer.values()
+            if tick.timestamp is not None
+        ]
+        last_tick_at = max(last_tick_times) if last_tick_times else None
+        last_tick_age_seconds = None
+        if last_tick_at is not None:
+            last_tick_age_seconds = max(
+                0.0,
+                (datetime.now(timezone.utc) - last_tick_at).total_seconds(),
+            )
+        callback_count = sum(len(callbacks) for callbacks in self._callbacks.values())
+
+        if mock_running:
+            mode = "mock"
+        elif broker_name:
+            mode = "broker"
+        else:
+            mode = "idle"
+
+        return {
+            "mode": mode,
+            "broker": broker_name,
+            "subscribed_symbols": list(self._subscribed_symbols),
+            "subscribed_symbol_count": len(self._subscribed_symbols),
+            "tick_buffer_size": len(self._tick_buffer),
+            "callback_count": callback_count,
+            "ws_connected": bool(self._ws_client) and (
+                last_tick_age_seconds is None or last_tick_age_seconds <= 30.0
+            ),
+            "ws_client_present": bool(self._ws_client),
+            "mock_running": mock_running,
+            "last_tick_at": last_tick_at.isoformat() if last_tick_at else None,
+            "last_tick_age_seconds": last_tick_age_seconds,
+            "source_policy": source_policy,
+        }
 
     # ── Mock tick feed for testing ───────────────────────────────────────────
 
@@ -138,12 +200,20 @@ class DataRouter:
                         low=round(prices[sym] * 0.998, 2),
                         close=round(price, 2),
                         volume=random.randint(100, 10000),
-                        timestamp=datetime.utcnow(),
+                        timestamp=datetime.now(timezone.utc),
                     )
                     self._on_tick(tick)
                 await asyncio.sleep(interval_secs)
         finally:
             self._mock_task = None
+
+    @staticmethod
+    def _ensure_utc_timestamp(value: Optional[datetime]) -> datetime:
+        if value is None:
+            return datetime.now(timezone.utc)
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
 
 # ── Singleton ────────────────────────────────────────────────────────────────

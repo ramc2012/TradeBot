@@ -2,22 +2,46 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from loguru import logger
 
 from api.routers.auth import ensure_fyers_session, get_active_adapter
 from brokers.base import BrokerAdapter, OptionChainEntry
+from core.config import settings
+from market_data.commodity_contract_specs import (
+    canonicalize_commodity_root,
+    extract_commodity_root,
+    get_commodity_contract_spec,
+)
+from market_data.upstox_commodity import load_upstox_mcx_quotes
 
 
 UTC = timezone.utc
-_MCX_FUTURE_SYMBOL_RE = re.compile(r"^(?P<exchange>MCX):(?P<root>[A-Z0-9]+)\d{2}[A-Z]{3}FUT$")
-_MCX_FUTURE_PARTS_RE = re.compile(r"^(?P<exchange>MCX):(?P<root>[A-Z0-9]+)(?P<year>\d{2})(?P<month>[A-Z]{3})FUT$")
+_MCX_FUTURE_PARTS_RE = re.compile(
+    r"^(?P<exchange>MCX):(?P<root>[A-Z0-9]+?)(?P<year>\d{2})(?P<month>[A-Z]{3})FUT$"
+)
+_MONTH_CODES = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
+_MONTH_TO_NUMBER = {code: index + 1 for index, code in enumerate(_MONTH_CODES)}
 _MCX_OPTION_ROOT_ALIASES: dict[str, tuple[str, ...]] = {
     "SILVERMIC": ("SILVERM",),
 }
+# MCX option expiries can extend well beyond the saved future's contract month.
+# Scan a wider futures ladder so far-month option expiries do not collapse onto
+# the last nearby future we happened to discover.
+_MCX_DISCOVERY_MONTH_OFFSETS = tuple(range(-1, 10))
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _is_rate_limit_error(exc: Exception | str) -> bool:
+    text = str(exc).lower()
+    return "429" in text or "limit reached" in text or "too many requests" in text
 
 
 def _normalize_commodity_symbols(symbols: list[str]) -> list[str]:
@@ -35,11 +59,7 @@ def _normalize_commodity_symbols(symbols: list[str]) -> list[str]:
 
 
 def _extract_commodity_root(symbol: str) -> str:
-    match = _MCX_FUTURE_SYMBOL_RE.match(str(symbol or "").strip().upper())
-    if match:
-        return str(match.group("root"))
-    token = str(symbol or "").strip().upper().split(":")[-1]
-    return token or str(symbol or "").strip().upper()
+    return extract_commodity_root(symbol)
 
 
 def _expand_option_lookup_candidates(symbol: str) -> list[str]:
@@ -52,11 +72,112 @@ def _expand_option_lookup_candidates(symbol: str) -> list[str]:
     year = str(match.group("year"))
     month = str(match.group("month"))
     candidates = [raw_symbol]
-    for alias_root in _MCX_OPTION_ROOT_ALIASES.get(root, ()):
+    alias_candidates = _MCX_OPTION_ROOT_ALIASES.get(root, ())
+    if not alias_candidates:
+        alias_candidates = _MCX_OPTION_ROOT_ALIASES.get(canonicalize_commodity_root(root), ())
+    for alias_root in alias_candidates:
         alias_symbol = f"MCX:{alias_root}{year}{month}FUT"
         if alias_symbol not in candidates:
             candidates.append(alias_symbol)
     return candidates
+
+
+def _parse_iso_date(value: str) -> Optional[date]:
+    try:
+        return date.fromisoformat(str(value or "").strip())
+    except ValueError:
+        return None
+
+
+def _filter_upcoming_expiries(expiries: list[str], *, as_of: Optional[date] = None) -> list[str]:
+    current = as_of or date.today()
+    filtered = []
+    for expiry in expiries:
+        parsed = _parse_iso_date(expiry)
+        if parsed is None or parsed < current:
+            continue
+        filtered.append(parsed.isoformat())
+    return sorted(set(filtered))
+
+
+def _parse_future_contract_month(symbol: str) -> Optional[tuple[str, str, int, int]]:
+    raw_symbol = str(symbol or "").strip().upper()
+    match = _MCX_FUTURE_PARTS_RE.match(raw_symbol)
+    if not match:
+        return None
+    exchange = str(match.group("exchange"))
+    root = str(match.group("root"))
+    year = 2000 + int(match.group("year"))
+    month = _MONTH_TO_NUMBER.get(str(match.group("month")))
+    if month is None:
+        return None
+    return exchange, root, year, month
+
+
+def _add_months(year: int, month: int, offset: int) -> tuple[int, int]:
+    total = (year * 12) + (month - 1) + offset
+    return total // 12, (total % 12) + 1
+
+
+def _format_future_contract_symbol(exchange: str, root: str, year: int, month: int) -> str:
+    return f"{exchange}:{root}{year % 100:02d}{_MONTH_CODES[month - 1]}FUT"
+
+
+def _build_contract_discovery_candidates(symbol: str) -> list[str]:
+    parsed = _parse_future_contract_month(symbol)
+    if parsed is None:
+        return _expand_option_lookup_candidates(symbol)
+
+    exchange, root, year, month = parsed
+    candidate_roots = [root]
+    alias_roots = _MCX_OPTION_ROOT_ALIASES.get(root, ())
+    if not alias_roots:
+        alias_roots = _MCX_OPTION_ROOT_ALIASES.get(canonicalize_commodity_root(root), ())
+    for alias_root in alias_roots:
+        if alias_root not in candidate_roots:
+            candidate_roots.append(alias_root)
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for candidate_root in candidate_roots:
+        for offset in _MCX_DISCOVERY_MONTH_OFFSETS:
+            candidate_year, candidate_month = _add_months(year, month, offset)
+            candidate = _format_future_contract_symbol(exchange, candidate_root, candidate_year, candidate_month)
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            candidates.append(candidate)
+    return candidates
+
+
+def _expiry_lookup_priority(lookup_symbol: str, expiry: str, *, preferred_symbol: str) -> tuple[int, int, int, str]:
+    parsed_expiry = _parse_iso_date(expiry)
+    parsed_lookup = _parse_future_contract_month(lookup_symbol)
+    if parsed_expiry is None or parsed_lookup is None:
+        return (9_999, 9_999, 1 if lookup_symbol != preferred_symbol else 0, lookup_symbol)
+
+    _, _, contract_year, contract_month = parsed_lookup
+    expiry_serial = parsed_expiry.year * 12 + parsed_expiry.month
+    contract_serial = contract_year * 12 + contract_month
+    if contract_serial < expiry_serial:
+        month_gap = expiry_serial - contract_serial
+        return (1, month_gap, 1 if lookup_symbol != preferred_symbol else 0, lookup_symbol)
+
+    month_gap = contract_serial - expiry_serial
+    return (0, month_gap, 1 if lookup_symbol != preferred_symbol else 0, lookup_symbol)
+
+
+def _resolve_expiry_lookup_symbol(
+    expiry_mappings: list[dict[str, Any]],
+    expiry: Optional[str],
+    *,
+    default_symbol: Optional[str] = None,
+) -> Optional[str]:
+    if expiry:
+        for item in expiry_mappings:
+            if str(item.get("expiry")) == expiry:
+                return str(item.get("lookup_symbol") or "").strip() or default_symbol
+    return default_symbol
 
 
 def _select_default_expiry(expiries: list[str], *, as_of: Optional[date] = None) -> Optional[str]:
@@ -78,6 +199,14 @@ def _resolve_active_expiry(
     if selected_expiry and selected_expiry in expiries:
         return selected_expiry
     return _select_default_expiry(expiries)
+
+
+def _selection_is_still_active(expiry: Optional[str], *, as_of: Optional[date] = None) -> bool:
+    parsed = _parse_iso_date(str(expiry or "").strip())
+    if parsed is None:
+        return False
+    current = as_of or date.today()
+    return parsed >= current
 
 
 def _serialize_option(entry: Optional[OptionChainEntry]) -> Optional[dict[str, Any]]:
@@ -119,6 +248,92 @@ def _serialize_option(entry: Optional[OptionChainEntry]) -> Optional[dict[str, A
     }
 
 
+def _spread_ratio(entry: OptionChainEntry) -> float:
+    bid = float(entry.bid or 0.0)
+    ask = float(entry.ask or 0.0)
+    ltp = float(entry.ltp or 0.0)
+    anchor = ltp or max(bid, ask, 1.0)
+    if anchor <= 0:
+        return 1.0
+    spread = max(ask - bid, 0.0)
+    return spread / anchor
+
+
+def _liquidity_score(entry: OptionChainEntry) -> float:
+    volume = float(entry.volume or 0.0)
+    oi = float(entry.oi or 0.0)
+    bid = float(entry.bid or 0.0)
+    ask = float(entry.ask or 0.0)
+    score = (volume * 1.0) + (oi * 0.35)
+    if bid > 0 and ask > 0:
+        score += 50.0
+    score -= _spread_ratio(entry) * 200.0
+    return score
+
+
+def _is_liquid_entry(entry: OptionChainEntry) -> bool:
+    volume = int(entry.volume or 0)
+    oi = int(entry.oi or 0)
+    bid = float(entry.bid or 0.0)
+    ask = float(entry.ask or 0.0)
+    spread_ok = bid > 0 and ask > 0 and _spread_ratio(entry) <= 0.08
+    depth_ok = volume >= 20 or oi >= 100
+    return (
+        spread_ok
+        and depth_ok
+    )
+
+
+def _strike_step(strikes: list[float]) -> float:
+    positive_steps = sorted(
+        {
+            round(abs(right - left), 6)
+            for left, right in zip(strikes, strikes[1:])
+            if abs(right - left) > 0
+        }
+    )
+    return positive_steps[0] if positive_steps else 1.0
+
+
+def _select_nearest_liquid_entry(
+    entries: list[OptionChainEntry],
+    *,
+    spot_price: float,
+    reference_strike: float,
+    strike_step: float,
+) -> tuple[Optional[OptionChainEntry], dict[str, Any]]:
+    if not entries:
+        return None, {
+            "selection_mode": "missing",
+            "liquidity_score": None,
+            "distance_steps": None,
+            "distance_from_atm": None,
+            "is_liquid": False,
+        }
+
+    ranked = sorted(
+        entries,
+        key=lambda entry: (
+            abs(float(entry.strike) - spot_price),
+            -_liquidity_score(entry),
+        ),
+    )
+    liquid_ranked = [entry for entry in ranked if _is_liquid_entry(entry)]
+    chosen = liquid_ranked[0] if liquid_ranked else ranked[0]
+    distance_from_atm = abs(float(chosen.strike) - reference_strike)
+    distance_steps = distance_from_atm / max(strike_step, 1e-9)
+    mode = "nearest_liquid" if chosen.strike != reference_strike else "atm"
+    if not liquid_ranked:
+        mode = "atm_fallback" if chosen.strike == reference_strike else "nearest_available"
+    return chosen, {
+        "selection_mode": mode,
+        "liquidity_score": round(_liquidity_score(chosen), 2),
+        "distance_steps": round(distance_steps, 2),
+        "distance_from_atm": round(distance_from_atm, 2),
+        "is_liquid": _is_liquid_entry(chosen),
+    }
+
+
 def _build_detail_message(
     *,
     unsupported_symbols: list[str],
@@ -146,10 +361,207 @@ def _build_detail_message(
 class CommodityATMWatchlistService:
     """Build an MCX ATM watchlist from the commodity page's saved symbols."""
 
+    def __init__(self) -> None:
+        self._contract_catalog_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._watchlist_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._fyers_backoff_until: datetime | None = None
+        self._last_rate_limit_error: str | None = None
+
+    def _catalog_cache_key(
+        self,
+        symbols: list[str],
+        selected_option_expiries: dict[str, str],
+        selected_option_lookup_symbols: dict[str, str],
+    ) -> tuple[Any, ...]:
+        return (
+            tuple(symbols),
+            tuple(sorted(selected_option_expiries.items())),
+            tuple(sorted(selected_option_lookup_symbols.items())),
+        )
+
+    def _watchlist_cache_key(
+        self,
+        symbols: list[str],
+        selected_option_expiries: dict[str, str],
+        selected_option_lookup_symbols: dict[str, str],
+        expiry: str | None,
+    ) -> tuple[Any, ...]:
+        return (
+            *self._catalog_cache_key(symbols, selected_option_expiries, selected_option_lookup_symbols),
+            str(expiry or ""),
+        )
+
+    def _in_backoff(self) -> bool:
+        return self._fyers_backoff_until is not None and _utc_now() < self._fyers_backoff_until
+
+    def _mark_rate_limit(self, error: Exception | str) -> None:
+        self._last_rate_limit_error = str(error)
+        self._fyers_backoff_until = _utc_now() + timedelta(
+            seconds=max(int(settings.COMMODITY_FYERS_RATE_LIMIT_BACKOFF_SECONDS), 15)
+        )
+
+    def _clear_rate_limit(self) -> None:
+        self._fyers_backoff_until = None
+        self._last_rate_limit_error = None
+
+    def _cached_payload(
+        self,
+        cache: dict[tuple[Any, ...], dict[str, Any]],
+        key: tuple[Any, ...],
+        *,
+        label: str,
+    ) -> dict[str, Any] | None:
+        cached = cache.get(key)
+        if cached is None:
+            return None
+        payload = deepcopy(cached)
+        detail_parts = [str(payload.get("detail") or "").strip()]
+        if self._last_rate_limit_error:
+            detail_parts.append(
+                f"Reusing the last good {label} while Fyers rate limits cool down. ({self._last_rate_limit_error})"
+            )
+        else:
+            detail_parts.append(f"Reusing the last good {label} while Fyers rate limits cool down.")
+        payload["detail"] = " ".join(part for part in detail_parts if part).strip()
+        payload["cache_reused"] = True
+        payload["timestamp"] = _utc_now().isoformat()
+        if self._fyers_backoff_until is not None:
+            payload["backoff_until"] = self._fyers_backoff_until.isoformat()
+        return payload
+
+    def _store_cache(
+        self,
+        cache: dict[tuple[Any, ...], dict[str, Any]],
+        key: tuple[Any, ...],
+        payload: dict[str, Any],
+    ) -> None:
+        cache[key] = deepcopy(payload)
+
+    def _static_contract_catalog(
+        self,
+        symbols: list[str],
+        selected_option_expiries: dict[str, str],
+        selected_option_lookup_symbols: dict[str, str],
+        *,
+        detail: str,
+        source: str,
+    ) -> dict[str, Any]:
+        contracts: list[dict[str, Any]] = []
+        for symbol in symbols:
+            spec = get_commodity_contract_spec(symbol)
+            underlying = _extract_commodity_root(symbol)
+            selected_expiry = selected_option_expiries.get(symbol)
+            selected_lookup_symbol = selected_option_lookup_symbols.get(symbol) or symbol
+            expiry_mappings = (
+                [{"expiry": selected_expiry, "lookup_symbol": selected_lookup_symbol}]
+                if selected_expiry
+                else []
+            )
+            contracts.append(
+                {
+                    "symbol": symbol,
+                    "underlying": underlying or spec.root,
+                    "lookup_symbol": symbol,
+                    "expiries": [selected_expiry] if selected_expiry else [],
+                    "selected_expiry": selected_expiry,
+                    "suggested_expiry": selected_expiry,
+                    "active_expiry": selected_expiry,
+                    "has_options": bool(selected_expiry),
+                    "active_lookup_symbol": selected_lookup_symbol,
+                    "default_lookup_symbol": symbol,
+                    "expiry_mappings": expiry_mappings,
+                    "selected_lookup_symbol": selected_lookup_symbol if selected_expiry else None,
+                    "selection_policy": "saved_static_fallback" if selected_expiry else "static_metadata_only",
+                    "selection_locked": bool(selected_expiry),
+                    "lot_size": spec.futures_lot_size,
+                    "contract_unit_label": spec.contract_unit_label,
+                    "quote_unit_label": spec.quote_unit_label,
+                    "strategy_title": spec.options_label,
+                    "detail": "Live MCX expiry discovery is unavailable; showing saved/static contract metadata.",
+                }
+            )
+        payload: dict[str, Any] = {
+            "contracts": contracts,
+            "summary": {
+                "total_symbols": len(contracts),
+                "contracts_ready": sum(1 for item in contracts if item.get("has_options")),
+                "active_selections": sum(1 for item in contracts if item.get("active_expiry")),
+            },
+            "source": source,
+            "detail": detail,
+            "timestamp": _utc_now().isoformat(),
+        }
+        if self._fyers_backoff_until is not None:
+            payload["backoff_until"] = self._fyers_backoff_until.isoformat()
+        return payload
+
+    def get_cached_contract_catalog(
+        self,
+        symbols: list[str],
+        selected_option_expiries: Optional[dict[str, str]] = None,
+        selected_option_lookup_symbols: Optional[dict[str, str]] = None,
+    ) -> dict[str, Any] | None:
+        normalized = _normalize_commodity_symbols(symbols)
+        if not normalized:
+            return None
+        cache_key = self._catalog_cache_key(
+            normalized,
+            {
+                str(symbol).strip().upper(): str(expiry).strip()
+                for symbol, expiry in dict(selected_option_expiries or {}).items()
+                if str(symbol).strip() and str(expiry).strip()
+            },
+            {
+                str(symbol).strip().upper(): str(lookup_symbol).strip().upper()
+                for symbol, lookup_symbol in dict(selected_option_lookup_symbols or {}).items()
+                if str(symbol).strip() and str(lookup_symbol).strip()
+            },
+        )
+        cached = self._contract_catalog_cache.get(cache_key)
+        if cached is None:
+            return None
+        payload = deepcopy(cached)
+        payload["cache_reused"] = True
+        payload["timestamp"] = _utc_now().isoformat()
+        return payload
+
+    def get_cached_watchlist(
+        self,
+        symbols: list[str],
+        selected_option_expiries: Optional[dict[str, str]] = None,
+        selected_option_lookup_symbols: Optional[dict[str, str]] = None,
+        expiry: Optional[str] = None,
+    ) -> dict[str, Any] | None:
+        normalized = _normalize_commodity_symbols(symbols)
+        if not normalized:
+            return None
+        cache_key = self._watchlist_cache_key(
+            normalized,
+            {
+                str(symbol).strip().upper(): str(selected_expiry).strip()
+                for symbol, selected_expiry in dict(selected_option_expiries or {}).items()
+                if str(symbol).strip() and str(selected_expiry).strip()
+            },
+            {
+                str(symbol).strip().upper(): str(lookup_symbol).strip().upper()
+                for symbol, lookup_symbol in dict(selected_option_lookup_symbols or {}).items()
+                if str(symbol).strip() and str(lookup_symbol).strip()
+            },
+            expiry,
+        )
+        cached = self._watchlist_cache.get(cache_key)
+        if cached is None:
+            return None
+        payload = deepcopy(cached)
+        payload["cache_reused"] = True
+        payload["timestamp"] = _utc_now().isoformat()
+        return payload
+
     async def get_contract_catalog(
         self,
         symbols: list[str],
         selected_option_expiries: Optional[dict[str, str]] = None,
+        selected_option_lookup_symbols: Optional[dict[str, str]] = None,
     ) -> dict[str, Any]:
         normalized = _normalize_commodity_symbols(symbols)
         if not normalized:
@@ -176,13 +588,43 @@ class CommodityATMWatchlistService:
             for symbol, expiry in dict(selected_option_expiries or {}).items()
             if str(symbol).strip() and str(expiry).strip()
         }
+        selected_option_lookup_symbols = {
+            str(symbol).strip().upper(): str(lookup_symbol).strip().upper()
+            for symbol, lookup_symbol in dict(selected_option_lookup_symbols or {}).items()
+            if str(symbol).strip() and str(lookup_symbol).strip()
+        }
+        cache_key = self._catalog_cache_key(normalized, selected_option_expiries, selected_option_lookup_symbols)
+        if self._in_backoff():
+            cached_payload = self._cached_payload(
+                self._contract_catalog_cache,
+                cache_key,
+                label="commodity contract catalog",
+            )
+            if cached_payload is not None:
+                return cached_payload
+            return self._static_contract_catalog(
+                normalized,
+                selected_option_expiries,
+                selected_option_lookup_symbols,
+                detail=(
+                    "Fyers contract discovery is cooling down after rate limits. "
+                    "Showing saved MCX futures with static contract metadata."
+                ),
+                source="fyers_rate_limit_static",
+            )
         symbol_contracts: list[dict[str, Any] | Exception] = []
+        rate_limit_errors: list[str] = []
         for index, symbol in enumerate(normalized):
             if index:
                 await asyncio.sleep(0.15)
             try:
                 symbol_contracts.append(await self._load_symbol_contracts(adapter, symbol))
             except Exception as exc:
+                if _is_rate_limit_error(exc):
+                    rate_limit_errors.append(str(exc))
+                    symbol_contracts.append(exc)
+                    symbol_contracts.extend(RuntimeError(str(exc)) for _ in normalized[index + 1 :])
+                    break
                 symbol_contracts.append(exc)
 
         contracts: list[dict[str, Any]] = []
@@ -190,8 +632,10 @@ class CommodityATMWatchlistService:
 
         for symbol, contract_result in zip(normalized, symbol_contracts):
             underlying = _extract_commodity_root(symbol)
+            spec = get_commodity_contract_spec(symbol)
             lookup_symbol = symbol
             alias_note: Optional[str] = None
+            expiry_mappings: list[dict[str, Any]] = []
             if isinstance(contract_result, Exception):
                 logger.debug(f"[Commodity ATM] Expiry discovery failed for {symbol}: {contract_result}")
                 row_expiries: list[str] = []
@@ -199,12 +643,40 @@ class CommodityATMWatchlistService:
                 lookup_symbol = str(contract_result.get("lookup_symbol") or symbol)
                 alias_note = contract_result.get("alias_note")
                 row_expiries = sorted({str(item) for item in contract_result.get("expiries", []) if item})
+                expiry_mappings = [
+                    {
+                        "expiry": str(item.get("expiry")),
+                        "lookup_symbol": str(item.get("lookup_symbol") or lookup_symbol),
+                    }
+                    for item in list(contract_result.get("expiry_mappings") or [])
+                    if item.get("expiry")
+                ]
 
             selected_expiry = selected_option_expiries.get(symbol)
+            selected_lookup_symbol = selected_option_lookup_symbols.get(symbol)
+            pinned_selection = bool(selected_expiry and _selection_is_still_active(selected_expiry))
+            contract_expiries = list(row_expiries)
+            if pinned_selection and selected_expiry not in contract_expiries:
+                contract_expiries.append(selected_expiry)
+                contract_expiries = sorted(set(contract_expiries))
             suggested_expiry = _select_default_expiry(row_expiries)
-            active_expiry = _resolve_active_expiry(
-                row_expiries,
-                selected_expiry=selected_expiry,
+            active_expiry = (
+                selected_expiry
+                if pinned_selection
+                else _resolve_active_expiry(
+                    contract_expiries,
+                    selected_expiry=selected_expiry,
+                )
+            )
+            resolved_lookup_symbol = _resolve_expiry_lookup_symbol(
+                expiry_mappings,
+                active_expiry,
+                default_symbol=lookup_symbol,
+            ) or symbol
+            active_lookup_symbol = (
+                selected_lookup_symbol
+                if pinned_selection and selected_lookup_symbol
+                else resolved_lookup_symbol
             )
             if not row_expiries:
                 unsupported_symbols.append(symbol)
@@ -214,11 +686,21 @@ class CommodityATMWatchlistService:
                     "symbol": symbol,
                     "underlying": underlying,
                     "lookup_symbol": lookup_symbol,
-                    "expiries": row_expiries,
-                    "selected_expiry": selected_expiry if selected_expiry in row_expiries else None,
+                    "expiries": contract_expiries,
+                    "selected_expiry": selected_expiry if pinned_selection else (selected_expiry if selected_expiry in row_expiries else None),
                     "suggested_expiry": suggested_expiry,
                     "active_expiry": active_expiry,
                     "has_options": bool(row_expiries),
+                    "active_lookup_symbol": active_lookup_symbol,
+                    "default_lookup_symbol": lookup_symbol,
+                    "expiry_mappings": expiry_mappings,
+                    "selected_lookup_symbol": active_lookup_symbol if pinned_selection else None,
+                    "selection_policy": "pinned_until_expiry" if pinned_selection else "exchange_ladder",
+                    "selection_locked": pinned_selection,
+                    "lot_size": spec.futures_lot_size,
+                    "contract_unit_label": spec.contract_unit_label,
+                    "quote_unit_label": spec.quote_unit_label,
+                    "strategy_title": spec.options_label,
                     "detail": alias_note or (None if row_expiries else "No option expiries returned by Fyers for this contract."),
                 }
             )
@@ -230,7 +712,7 @@ class CommodityATMWatchlistService:
             chain_failures=[],
             row_count=sum(1 for item in contracts if item["has_options"]),
         )
-        return {
+        payload = {
             "contracts": contracts,
             "summary": {
                 "total_symbols": len(normalized),
@@ -239,8 +721,43 @@ class CommodityATMWatchlistService:
             },
             "source": "fyers",
             "detail": detail,
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": _utc_now().isoformat(),
         }
+        if rate_limit_errors and payload["summary"]["contracts_ready"] == 0:
+            self._mark_rate_limit(rate_limit_errors[-1])
+            cached_payload = self._cached_payload(
+                self._contract_catalog_cache,
+                cache_key,
+                label="commodity contract catalog",
+            )
+            if cached_payload is not None:
+                return cached_payload
+        if payload["summary"]["contracts_ready"] > 0:
+            self._store_cache(self._contract_catalog_cache, cache_key, payload)
+            if rate_limit_errors:
+                self._mark_rate_limit(rate_limit_errors[-1])
+            else:
+                self._clear_rate_limit()
+        elif rate_limit_errors:
+            self._mark_rate_limit(rate_limit_errors[-1])
+            cached_payload = self._cached_payload(
+                self._contract_catalog_cache,
+                cache_key,
+                label="commodity contract catalog",
+            )
+            if cached_payload is not None:
+                return cached_payload
+            return self._static_contract_catalog(
+                normalized,
+                selected_option_expiries,
+                selected_option_lookup_symbols,
+                detail=(
+                    "Fyers contract discovery hit rate limits. "
+                    "Showing saved MCX futures with static contract metadata until cooldown ends."
+                ),
+                source="fyers_rate_limit_static",
+            )
+        return payload
 
     async def get_expiries(self, symbols: list[str]) -> dict[str, Any]:
         catalog = await self.get_contract_catalog(symbols)
@@ -256,11 +773,16 @@ class CommodityATMWatchlistService:
                     "symbol": item["symbol"],
                     "underlying": item["underlying"],
                     "expiries": item["expiries"],
-                        "selected_expiry": item.get("selected_expiry"),
-                        "suggested_expiry": item.get("suggested_expiry"),
-                        "active_expiry": item.get("active_expiry"),
-                        "lookup_symbol": item.get("lookup_symbol"),
-                    }
+                    "selected_expiry": item.get("selected_expiry"),
+                    "suggested_expiry": item.get("suggested_expiry"),
+                    "active_expiry": item.get("active_expiry"),
+                    "lookup_symbol": item.get("lookup_symbol"),
+                    "active_lookup_symbol": item.get("active_lookup_symbol"),
+                    "expiry_mappings": item.get("expiry_mappings"),
+                    "selected_lookup_symbol": item.get("selected_lookup_symbol"),
+                    "selection_policy": item.get("selection_policy"),
+                    "selection_locked": item.get("selection_locked"),
+                }
                 for item in contracts
             ],
             "timestamp": catalog.get("timestamp"),
@@ -270,12 +792,42 @@ class CommodityATMWatchlistService:
         self,
         symbols: list[str],
         selected_option_expiries: Optional[dict[str, str]] = None,
+        selected_option_lookup_symbols: Optional[dict[str, str]] = None,
         expiry: Optional[str] = None,
     ) -> dict[str, Any]:
         if isinstance(selected_option_expiries, str) and expiry is None:
             expiry = selected_option_expiries
             selected_option_expiries = None
-        catalog = await self.get_contract_catalog(symbols, selected_option_expiries)
+        selected_option_expiries = {
+            str(symbol).strip().upper(): str(selected_expiry).strip()
+            for symbol, selected_expiry in dict(selected_option_expiries or {}).items()
+            if str(symbol).strip() and str(selected_expiry).strip()
+        }
+        selected_option_lookup_symbols = {
+            str(symbol).strip().upper(): str(lookup_symbol).strip().upper()
+            for symbol, lookup_symbol in dict(selected_option_lookup_symbols or {}).items()
+            if str(symbol).strip() and str(lookup_symbol).strip()
+        }
+        normalized_symbols = _normalize_commodity_symbols(symbols)
+        cache_key = self._watchlist_cache_key(
+            normalized_symbols,
+            selected_option_expiries,
+            selected_option_lookup_symbols,
+            expiry,
+        )
+        if self._in_backoff():
+            cached_payload = self._cached_payload(
+                self._watchlist_cache,
+                cache_key,
+                label="commodity ATM watchlist",
+            )
+            if cached_payload is not None:
+                return cached_payload
+        catalog = await self.get_contract_catalog(
+            normalized_symbols,
+            selected_option_expiries,
+            selected_option_lookup_symbols,
+        )
         contracts = list(catalog.get("contracts") or [])
         if not contracts:
             return {
@@ -312,11 +864,30 @@ class CommodityATMWatchlistService:
                 selected_expiry=item.get("selected_expiry"),
                 override_expiry=expiry,
             )
+            if not expiry and item.get("selection_locked") and item.get("selected_expiry"):
+                active_expiry = str(item.get("selected_expiry"))
             if not active_expiry:
                 if row_expiries:
                     skipped_symbols.append(str(item.get("symbol")))
                 continue
-            selected_contracts.append({**item, "active_expiry": active_expiry})
+            active_lookup_symbol = (
+                str(item.get("selected_lookup_symbol") or "").strip()
+                if not expiry and item.get("selection_locked") and item.get("selected_lookup_symbol")
+                else ""
+            )
+            if not active_lookup_symbol:
+                active_lookup_symbol = _resolve_expiry_lookup_symbol(
+                    list(item.get("expiry_mappings") or []),
+                    active_expiry,
+                    default_symbol=str(item.get("default_lookup_symbol") or item.get("lookup_symbol") or item.get("symbol") or ""),
+                ) or str(item.get("symbol") or "")
+            selected_contracts.append(
+                {
+                    **item,
+                    "active_expiry": active_expiry,
+                    "active_lookup_symbol": active_lookup_symbol,
+                }
+            )
 
         if not selected_contracts:
             return {
@@ -346,21 +917,33 @@ class CommodityATMWatchlistService:
 
         rows: list[dict[str, Any]] = []
         chain_failures: list[str] = []
+        rate_limit_errors: list[str] = []
+        active_lookup_symbols = [
+            str(item.get("active_lookup_symbol") or item.get("lookup_symbol") or item.get("symbol") or "")
+            for item in selected_contracts
+        ]
+        live_quote_map = await self._get_live_spot_quotes(adapter, active_lookup_symbols)
 
         for index, item in enumerate(selected_contracts):
             if index:
                 await asyncio.sleep(0.25)
+            lookup_symbol = str(item.get("active_lookup_symbol") or item.get("lookup_symbol") or item.get("symbol") or "")
+            quote_payload = live_quote_map.get(lookup_symbol) or {}
             try:
                 result = await self._build_row(
                     adapter=adapter,
                     symbol=str(item["symbol"]),
                     underlying=str(item["underlying"]),
-                    lookup_symbol=str(item.get("lookup_symbol") or item["symbol"]),
+                    lookup_symbol=lookup_symbol,
                     expiry=str(item["active_expiry"]),
+                    live_spot_price=quote_payload.get("price"),
+                    live_quote_source=str(quote_payload.get("source") or ""),
                 )
             except Exception as exc:
                 symbol = str(item["symbol"])
                 chain_failures.append(f"{symbol} ({item['active_expiry']})")
+                if _is_rate_limit_error(exc):
+                    rate_limit_errors.append(str(exc))
                 logger.warning(f"[Commodity ATM] Failed to build {symbol} {item['active_expiry']}: {exc}")
                 continue
             if result:
@@ -371,7 +954,11 @@ class CommodityATMWatchlistService:
                         "suggested_expiry": item.get("suggested_expiry"),
                         "active_expiry": item.get("active_expiry"),
                         "available_expiries": list(item.get("expiries") or []),
-                        "lookup_symbol": item.get("lookup_symbol"),
+                        "lookup_symbol": item.get("active_lookup_symbol") or item.get("lookup_symbol"),
+                        "expiry_mappings": list(item.get("expiry_mappings") or []),
+                        "selected_lookup_symbol": item.get("selected_lookup_symbol"),
+                        "selection_policy": item.get("selection_policy"),
+                        "selection_locked": item.get("selection_locked"),
                     }
                 )
 
@@ -394,15 +981,32 @@ class CommodityATMWatchlistService:
                 chain_failures=chain_failures,
                 row_count=len(rows),
             ),
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": _utc_now().isoformat(),
         }
+        if rate_limit_errors and payload["summary"]["total_rows"] == 0:
+            self._mark_rate_limit(rate_limit_errors[-1])
+            cached_payload = self._cached_payload(
+                self._watchlist_cache,
+                cache_key,
+                label="commodity ATM watchlist",
+            )
+            if cached_payload is not None:
+                return cached_payload
+        if payload["summary"]["total_rows"] > 0:
+            self._store_cache(self._watchlist_cache, cache_key, payload)
+            if rate_limit_errors:
+                self._mark_rate_limit(rate_limit_errors[-1])
+            else:
+                self._clear_rate_limit()
+        elif rate_limit_errors:
+            self._mark_rate_limit(rate_limit_errors[-1])
         return payload
 
     async def _get_fyers_adapter(self) -> Optional[BrokerAdapter]:
         adapter = get_active_adapter("fyers")
         if adapter:
             return adapter
-        if await ensure_fyers_session():
+        if await ensure_fyers_session(force_validate=True):
             return get_active_adapter("fyers")
         return None
 
@@ -410,29 +1014,91 @@ class CommodityATMWatchlistService:
         contracts = await adapter.get_option_contracts(symbol)
         return [str(item.get("expiry")) for item in contracts if item.get("expiry")]
 
+    async def _get_live_spot_quotes(self, adapter: BrokerAdapter, symbols: list[str]) -> dict[str, dict[str, Any]]:
+        requested_symbols = [symbol for symbol in _normalize_commodity_symbols(symbols) if symbol]
+        if not requested_symbols:
+            return {}
+
+        quotes: dict[str, dict[str, Any]] = {}
+        upstox_quotes = await load_upstox_mcx_quotes(requested_symbols)
+        for symbol, value in upstox_quotes.items():
+            if value > 0:
+                quotes[symbol] = {"price": value, "source": "upstox"}
+
+        remaining_symbols = [symbol for symbol in requested_symbols if symbol not in quotes]
+        if not remaining_symbols:
+            return quotes
+
+        try:
+            payload = await adapter.get_ltp(remaining_symbols)
+        except Exception as exc:
+            logger.warning(f"[Commodity ATM] Live MCX quote fetch failed: {exc}")
+            if _is_rate_limit_error(exc):
+                self._mark_rate_limit(exc)
+            return quotes
+
+        for symbol in remaining_symbols:
+            try:
+                value = float(payload.get(symbol, 0) or 0)
+            except (TypeError, ValueError):
+                value = 0.0
+            if value > 0:
+                quotes[symbol] = {"price": value, "source": "fyers"}
+        if quotes:
+            self._clear_rate_limit()
+        return quotes
+
     async def _load_symbol_contracts(self, adapter: BrokerAdapter, symbol: str) -> dict[str, Any]:
         failures: list[str] = []
-        candidates = _expand_option_lookup_candidates(symbol)
+        candidates = _build_contract_discovery_candidates(symbol)
+        expiry_candidates: dict[str, list[dict[str, str]]] = {}
         for index, candidate in enumerate(candidates):
             if index:
                 await asyncio.sleep(0.1)
             try:
                 expiries = await self._get_symbol_expiries(adapter, candidate)
             except Exception as exc:
+                if _is_rate_limit_error(exc):
+                    raise
                 failures.append(str(exc))
                 continue
-            if expiries:
-                alias_note = None
-                if candidate != symbol:
-                    alias_note = f"Using {candidate} option chain for {symbol}."
-                return {
-                    "lookup_symbol": candidate,
-                    "expiries": expiries,
-                    "alias_note": alias_note,
-                }
+            upcoming_expiries = _filter_upcoming_expiries(expiries)
+            for expiry in upcoming_expiries:
+                expiry_candidates.setdefault(expiry, []).append(
+                    {
+                        "lookup_symbol": candidate,
+                    }
+                )
+        if expiry_candidates:
+            expiry_mappings: list[dict[str, str]] = []
+            mapped_notes: list[str] = []
+            for expiry in sorted(expiry_candidates):
+                chosen = min(
+                    expiry_candidates[expiry],
+                    key=lambda item: _expiry_lookup_priority(
+                        str(item["lookup_symbol"]),
+                        expiry,
+                        preferred_symbol=symbol,
+                    ),
+                )
+                lookup_symbol = str(chosen["lookup_symbol"])
+                expiry_mappings.append({"expiry": expiry, "lookup_symbol": lookup_symbol})
+                if lookup_symbol != symbol:
+                    mapped_notes.append(f"{expiry} -> {lookup_symbol}")
+            alias_note = None
+            if mapped_notes:
+                alias_note = "Resolved MCX expiry map via underlying futures: " + "; ".join(mapped_notes[:4])
+                if len(mapped_notes) > 4:
+                    alias_note += "..."
+            return {
+                "lookup_symbol": expiry_mappings[0]["lookup_symbol"],
+                "expiries": [item["expiry"] for item in expiry_mappings],
+                "expiry_mappings": expiry_mappings,
+                "alias_note": alias_note,
+            }
         if failures:
             raise ValueError(failures[-1])
-        raise ValueError("There are no expiry contracts.")
+        raise ValueError("There are no upcoming expiry contracts.")
 
     async def _build_row(
         self,
@@ -442,39 +1108,53 @@ class CommodityATMWatchlistService:
         underlying: str,
         lookup_symbol: str,
         expiry: str,
+        live_spot_price: Optional[float] = None,
+        live_quote_source: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         chain = await adapter.get_option_chain(lookup_symbol, expiry)
-        strikes = sorted(
-            {
-                float(entry.strike)
-                for entry in chain.entries
-                if str(entry.option_type).upper() in {"CE", "PE"}
-            }
-        )
+        spec = get_commodity_contract_spec(symbol)
+        ce_entries = [
+            entry for entry in chain.entries if str(entry.option_type).upper() == "CE"
+        ]
+        pe_entries = [
+            entry for entry in chain.entries if str(entry.option_type).upper() == "PE"
+        ]
+        strikes = sorted({float(entry.strike) for entry in [*ce_entries, *pe_entries]})
         if not strikes:
             return None
 
-        spot_price = float(chain.spot_price or 0.0)
+        try:
+            spot_price = float(live_spot_price or 0.0)
+        except (TypeError, ValueError):
+            spot_price = 0.0
+        if spot_price <= 0:
+            spot_price = float(chain.spot_price or 0.0)
         if spot_price <= 0:
             return None
 
         atm_strike = min(strikes, key=lambda strike: abs(strike - spot_price))
-        ce_entry = next(
-            (
-                entry for entry in chain.entries
-                if str(entry.option_type).upper() == "CE" and float(entry.strike) == atm_strike
-            ),
-            None,
+        strike_step = _strike_step(strikes)
+        ce_entry, ce_selection = _select_nearest_liquid_entry(
+            ce_entries,
+            spot_price=spot_price,
+            reference_strike=atm_strike,
+            strike_step=strike_step,
         )
-        pe_entry = next(
-            (
-                entry for entry in chain.entries
-                if str(entry.option_type).upper() == "PE" and float(entry.strike) == atm_strike
-            ),
-            None,
+        pe_entry, pe_selection = _select_nearest_liquid_entry(
+            pe_entries,
+            spot_price=spot_price,
+            reference_strike=atm_strike,
+            strike_step=strike_step,
         )
         if ce_entry is None and pe_entry is None:
             return None
+
+        ce_payload = _serialize_option(ce_entry)
+        pe_payload = _serialize_option(pe_entry)
+        if ce_payload is not None:
+            ce_payload.update(ce_selection)
+        if pe_payload is not None:
+            pe_payload.update(pe_selection)
 
         return {
             "underlying": underlying,
@@ -483,10 +1163,16 @@ class CommodityATMWatchlistService:
             "spot_price": round(spot_price, 2),
             "expiry": str(chain.expiry or expiry),
             "atm_strike": atm_strike,
-            "live_source": "fyers",
+            "live_source": str(live_quote_source or "fyers"),
             "fyers_symbol": lookup_symbol,
-            "ce": _serialize_option(ce_entry),
-            "pe": _serialize_option(pe_entry),
+            "lot_size": spec.futures_lot_size,
+            "contract_unit_label": spec.contract_unit_label,
+            "quote_unit_label": spec.quote_unit_label,
+            "strategy_title": spec.options_label,
+            "contract_notes": spec.notes,
+            "selection_policy": "nearest_liquid_contract",
+            "ce": ce_payload,
+            "pe": pe_payload,
         }
 
 

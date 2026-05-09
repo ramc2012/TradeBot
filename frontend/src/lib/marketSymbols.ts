@@ -3,6 +3,7 @@ export const MARKET_INDEX_SYMBOLS = [
   "NSE:BANKNIFTY-INDEX",
   "NSE:FINNIFTY-INDEX",
   "NSE:MIDCPNIFTY-INDEX",
+  "BSE:SENSEX-INDEX",
 ] as const;
 
 export const SECTOR_INDEX_SYMBOLS = [
@@ -23,6 +24,15 @@ export const MARKET_INDEX_LABELS: Record<MarketIndexSymbol, string> = {
   "NSE:BANKNIFTY-INDEX": "BANKNIFTY",
   "NSE:FINNIFTY-INDEX": "FINNIFTY",
   "NSE:MIDCPNIFTY-INDEX": "MIDCPNIFTY",
+  "BSE:SENSEX-INDEX": "SENSEX",
+};
+
+export const MARKET_INDEX_PRICE_BANDS: Record<MarketIndexSymbol, readonly [number, number]> = {
+  "NSE:NIFTY50-INDEX": [10_000, 50_000],
+  "NSE:BANKNIFTY-INDEX": [20_000, 100_000],
+  "NSE:FINNIFTY-INDEX": [10_000, 60_000],
+  "NSE:MIDCPNIFTY-INDEX": [5_000, 40_000],
+  "BSE:SENSEX-INDEX": [30_000, 150_000],
 };
 
 export const MARKET_SYMBOL_LABELS: Record<string, string> = {

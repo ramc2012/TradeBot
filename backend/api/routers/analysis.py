@@ -215,6 +215,14 @@ def _utc_naive(value: Any) -> Optional[datetime]:
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def _utc_aware(value: Any) -> Optional[datetime]:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _get_int_env(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -504,6 +512,8 @@ def _build_research_scheduler_summary(
         ),
     )
     active_grace_minutes = max(1, _get_int_env("RESEARCH_ACTIVE_GRACE_MINUTES", 2))
+    now_utc = _utc_aware(now_utc) or datetime.now(timezone.utc)
+    recent_activity_at = _utc_aware(recent_activity_at)
 
     state = "idle"
     label = "Aggregation idle"
@@ -518,6 +528,7 @@ def _build_research_scheduler_summary(
     runtime_completed_at = _parse_iso_datetime(runtime_state.get("run_completed_at"))
     runtime_next_run_at = _parse_iso_datetime(runtime_state.get("next_run_at"))
     runtime_error = str(runtime_state.get("error") or "").strip()
+    runtime_detail = str(runtime_state.get("detail") or "").strip()
 
     if contracts_pending > 0 and runtime_name:
         runtime_overdue = (
@@ -526,7 +537,11 @@ def _build_research_scheduler_summary(
             and runtime_next_run_at <= now_utc
             and active_recent_symbols == 0
         )
-        if runtime_name == "running":
+        if "valid saved Upstox token" in runtime_detail:
+            state = "stalled"
+            label = "Waiting for broker reconnect"
+            detail = runtime_detail
+        elif runtime_name == "running":
             state = "running"
             label = "Aggregation in progress"
             detail = (

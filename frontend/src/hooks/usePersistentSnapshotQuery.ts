@@ -38,8 +38,20 @@ function loadSnapshot<TData>(storageKey: string): SnapshotEnvelope<TData> | null
   try {
     const raw = window.localStorage.getItem(storageKey);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as SnapshotEnvelope<TData>;
-    if (!parsed?.savedAt) return null;
+    const parsed = JSON.parse(raw) as SnapshotEnvelope<TData> | null;
+    if (!parsed || typeof parsed !== "object" || !parsed.savedAt || !("data" in parsed)) {
+      window.localStorage.removeItem(storageKey);
+      return null;
+    }
+
+    // Invalidate snapshots older than 4 hours to prevent showing stale data
+    const savedTime = new Date(parsed.savedAt).getTime();
+    const fourHoursMs = 4 * 60 * 60 * 1000;
+    if (Date.now() - savedTime > fourHoursMs) {
+      window.localStorage.removeItem(storageKey);
+      return null;
+    }
+
     return parsed;
   } catch {
     return null;
@@ -63,6 +75,10 @@ export function usePersistentSnapshotQuery<TData, TError = Error>({
   ...options
 }: PersistentSnapshotQueryOptions<TData, TError>): PersistentSnapshotQueryResult<TData, TError> {
   const [snapshot, setSnapshot] = useState<SnapshotEnvelope<TData> | null>(() => loadSnapshot<TData>(storageKey));
+
+  useEffect(() => {
+    setSnapshot(loadSnapshot<TData>(storageKey));
+  }, [storageKey]);
 
   const query = useQuery<TData, TError, TData, QueryKey>({
     ...options,

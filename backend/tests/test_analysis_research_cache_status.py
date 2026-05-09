@@ -158,6 +158,28 @@ def test_research_scheduler_keeps_future_waiting_runtime_as_waiting() -> None:
     assert scheduler["seconds_until_next_batch"] == 1500
 
 
+def test_research_scheduler_accepts_naive_recent_activity() -> None:
+    now = datetime(2026, 3, 29, 12, 0, tzinfo=timezone.utc)
+    naive_recent_activity = (now - timedelta(minutes=5)).replace(tzinfo=None)
+
+    scheduler = analysis._build_research_scheduler_summary(
+        now_utc=now,
+        recent_activity_at=naive_recent_activity,
+        contracts_pending=42,
+        active_recent_symbols=0,
+        runtime_state={
+            "state": "waiting",
+            "run_started_at": (now - timedelta(minutes=10)).isoformat(),
+            "run_completed_at": (now - timedelta(minutes=5)).isoformat(),
+            "next_run_at": (now + timedelta(minutes=25)).isoformat(),
+        },
+    )
+
+    assert scheduler["state"] == "waiting"
+    assert scheduler["seconds_until_next_batch"] == 1500
+    assert scheduler["last_batch_activity_at"] == (now - timedelta(minutes=5)).isoformat()
+
+
 def test_api_budget_summary_uses_runtime_history_and_research_target() -> None:
     now = datetime(2026, 3, 29, 12, 0, tzinfo=timezone.utc)
     budget = analysis._build_api_budget_summary(

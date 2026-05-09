@@ -2,7 +2,8 @@
 from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+from threading import RLock
 from typing import Callable, Dict, List, Optional
 from loguru import logger
 from brokers.base import Tick
@@ -28,11 +29,15 @@ class PaperOrder:
     strike: Optional[float] = None
     option_type: Optional[str] = None
     session_id: Optional[str] = None
+    signal_id: Optional[str] = None
+    setup_type: Optional[str] = None
+    entry_iv_pct: Optional[float] = None
+    regime: Optional[str] = None
     # Bracket legs
     sl_order_id: Optional[str] = None
     target_order_id: Optional[str] = None
     parent_order_id: Optional[str] = None
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ─── Callbacks ───────────────────────────────────────────────────────────────
@@ -50,6 +55,7 @@ class PaperOrderBook:
     def __init__(self, on_fill: Optional[FillCallback] = None):
         self._orders: Dict[str, PaperOrder] = {}
         self._on_fill = on_fill
+        self._lock = RLock()
 
     def place_order(
         self,
@@ -65,6 +71,10 @@ class PaperOrderBook:
         strike: Optional[float] = None,
         option_type: Optional[str] = None,
         session_id: Optional[str] = None,
+        signal_id: Optional[str] = None,
+        setup_type: Optional[str] = None,
+        entry_iv_pct: Optional[float] = None,
+        regime: Optional[str] = None,
         ltp: Optional[float] = None,
     ) -> PaperOrder:
         order_id = str(uuid.uuid4())
@@ -82,13 +92,18 @@ class PaperOrderBook:
             strike=strike,
             option_type=option_type,
             session_id=session_id,
+            signal_id=signal_id,
+            setup_type=setup_type,
+            entry_iv_pct=entry_iv_pct,
+            regime=regime,
         )
 
         # Market orders fill immediately if LTP provided
         if order_type == "MARKET" and ltp is not None:
             self._fill_market(order, ltp)
         else:
-            self._orders[order_id] = order
+            with self._lock:
+                self._orders[order_id] = order
             logger.debug(f"[PaperOB] Queued order {order_id[:8]} {action} {qty} {symbol}")
 
         return order
@@ -130,18 +145,21 @@ class PaperOrderBook:
         return entry, sl_order, target_order
 
     def cancel_order(self, order_id: str) -> bool:
-        order = self._orders.get(order_id)
-        if not order or order.status != "OPEN":
-            return False
-        order.status = "CANCELLED"
-        self._orders.pop(order_id, None)
-        return True
+        with self._lock:
+            order = self._orders.get(order_id)
+            if not order or order.status != "OPEN":
+                return False
+            order.status = "CANCELLED"
+            self._orders.pop(order_id, None)
+            return True
 
     def get_order(self, order_id: str) -> Optional[PaperOrder]:
-        return self._orders.get(order_id)
+        with self._lock:
+            return self._orders.get(order_id)
 
     def get_open_orders(self, session_id: Optional[str] = None) -> List[PaperOrder]:
-        orders = [o for o in self._orders.values() if o.status == "OPEN"]
+        with self._lock:
+            orders = [o for o in self._orders.values() if o.status == "OPEN"]
         if session_id:
             orders = [o for o in orders if o.session_id == session_id]
         return orders
@@ -149,25 +167,31 @@ class PaperOrderBook:
     def try_fill(self, tick: Tick) -> List[PaperOrder]:
         """Called on each market tick. Returns list of newly filled orders."""
         filled = []
-        for order in list(self._orders.values()):
+        with self._lock:
+            orders = list(self._orders.values())
+        for order in orders:
             if order.symbol != tick.symbol or order.status != "OPEN":
                 continue
             ltp = tick.ltp
             fill_price = self._check_fill(order, ltp)
             if fill_price is not None:
-                order.fill_price = fill_price
-                order.fill_time = tick.timestamp or datetime.utcnow()
-                order.status = "FILLED"
-                del self._orders[order.order_id]
-                filled.append(order)
+                with self._lock:
+                    current = self._orders.get(order.order_id)
+                    if not current or current.status != "OPEN":
+                        continue
+                    current.fill_price = fill_price
+                    current.fill_time = tick.timestamp or datetime.now(timezone.utc)
+                    current.status = "FILLED"
+                    del self._orders[current.order_id]
+                filled.append(current)
                 logger.info(
-                    f"[PaperOB] FILLED {order.order_id[:8]} "
-                    f"{order.action} {order.qty} {order.symbol} @ {fill_price:.2f}"
+                    f"[PaperOB] FILLED {current.order_id[:8]} "
+                    f"{current.action} {current.qty} {current.symbol} @ {fill_price:.2f}"
                 )
                 if self._on_fill:
-                    self._on_fill(order)
+                    self._on_fill(current)
                 # Cancel opposing bracket leg
-                self._cancel_bracket_sibling(order)
+                self._cancel_bracket_sibling(current)
         return filled
 
     def _check_fill(self, order: PaperOrder, ltp: float) -> Optional[float]:
@@ -199,7 +223,7 @@ class PaperOrderBook:
 
     def _fill_market(self, order: PaperOrder, ltp: float):
         order.fill_price = self._apply_slippage(ltp, order.action)
-        order.fill_time = datetime.utcnow()
+        order.fill_time = datetime.now(timezone.utc)
         order.status = "FILLED"
         logger.info(
             f"[PaperOB] INSTANT FILL {order.order_id[:8]} "
@@ -214,7 +238,9 @@ class PaperOrderBook:
         if not parent_id:
             return
         parent = None
-        for o in list(self._orders.values()):
+        with self._lock:
+            orders = list(self._orders.values())
+        for o in orders:
             if o.order_id == parent_id or o.parent_order_id == parent_id:
                 if o.order_id != filled_order.order_id:
                     self.cancel_order(o.order_id)

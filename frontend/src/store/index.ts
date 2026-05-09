@@ -53,14 +53,23 @@ export interface Tick {
   volume: number;
   oi: number;
   timestamp: string;
+  source?: string;
+  stale?: boolean;
+  stale_seconds?: number | null;
 }
 
 interface BrokerStatus {
   broker: BrokerName;
   connected: boolean;
-  user_id?: string;
-  name?: string;
-  connected_at?: string;
+  ready?: boolean;
+  session_active?: boolean;
+  state?: string | null;
+  detail?: string | null;
+  source?: string | null;
+  needs_reconnect?: boolean;
+  user_id?: string | null;
+  name?: string | null;
+  connected_at?: string | null;
 }
 
 // ── Tick store (isolated to prevent full re-renders on every tick) ─────────
