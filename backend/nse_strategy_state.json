@@ -265,7 +265,7 @@
       ],
       "meta": {
         "mode": "market_closed",
-        "updated_at": "2026-05-09T22:04:47.567029+05:30",
+        "updated_at": "2026-05-09T22:06:47.630952+05:30",
         "market_state": "closed",
         "scan_windows": 220,
         "scan_interval": "30minute",
@@ -3996,7 +3996,7 @@
             "last_date": "2026-04-09 15:20"
           }
         ],
-        "updated_at": "2026-05-09T22:04:47.567029+05:30",
+        "updated_at": "2026-05-09T22:06:47.630952+05:30",
         "market_state": "closed",
         "scan_interval": "5minute",
         "watchlist_rows": 0,
