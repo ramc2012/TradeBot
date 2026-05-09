@@ -373,7 +373,7 @@ class StrategyLearningService:
                                last_signal_at, last_trade_at, metadata
                         FROM strategy_learning_scores
                         WHERE market = 'NSE'
-                          AND (:strategy_key IS NULL OR strategy_key = :strategy_key)
+                          AND (CAST(:strategy_key AS TEXT) IS NULL OR strategy_key = CAST(:strategy_key AS TEXT))
                         ORDER BY score DESC, updated_at DESC
                         """
                     ),
