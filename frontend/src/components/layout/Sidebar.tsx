@@ -82,19 +82,19 @@ export default function Sidebar() {
   return (
     <nav
       className={clsx(
-        "relative z-20 h-full shrink-0 overflow-y-auto border-r border-bg-border bg-bg-secondary/70 px-3 py-4 backdrop-blur-sm transition-[width] duration-200",
-        collapsed ? "w-[78px]" : "w-[236px]",
+        "relative z-20 h-full shrink-0 overflow-y-auto border-r border-bg-border bg-bg-secondary/70 px-2 py-2.5 backdrop-blur-sm transition-[width] duration-200",
+        collapsed ? "w-[58px]" : "w-[204px]",
       )}
     >
-      <div className={clsx("mb-5 flex items-start gap-2", collapsed ? "flex-col items-center" : "justify-between")}>
+      <div className={clsx("mb-2 flex items-start gap-2", collapsed ? "flex-col items-center" : "justify-between")}>
         <div className={clsx(collapsed ? "text-center" : "")}>
-          <div className="text-[10px] uppercase tracking-[0.24em] text-text-muted">{collapsed ? "NC" : "Nomad Curie"}</div>
-          {!collapsed ? <div className="mt-1 text-sm font-semibold text-text-primary">Trader Workspace</div> : null}
+          <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">{collapsed ? "NC" : "Nomad Curie"}</div>
+          {!collapsed ? <div className="text-xs font-semibold text-text-primary">Trader Workspace</div> : null}
         </div>
         <button
           type="button"
           onClick={toggleCollapsed}
-          className="rounded-xl border border-bg-border bg-bg-primary/30 p-2 text-text-secondary transition-colors hover:border-bg-active hover:text-text-primary"
+          className="rounded-lg border border-bg-border bg-bg-primary/30 p-1.5 text-text-secondary transition-colors hover:border-bg-active hover:text-text-primary"
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
         >
@@ -102,17 +102,17 @@ export default function Sidebar() {
         </button>
       </div>
 
-      <div className="space-y-5">
+      <div className="space-y-2">
         {NAV_GROUPS.map((group) => (
           <div key={group.title}>
             {collapsed ? (
-              <div className="mb-2 border-t border-bg-border/70" />
+              <div className="mb-1 border-t border-bg-border/70" />
             ) : (
-              <div className="px-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-text-muted">
+              <div className="px-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">
                 {group.title}
               </div>
             )}
-            <div className={clsx("mt-2 space-y-1", collapsed ? "mt-0" : "")}>
+            <div className={clsx("mt-1 space-y-0.5", collapsed ? "mt-0" : "")}>
               {group.items.map(({ href, label, icon: Icon, matchers }) => {
                 const activeMatchers = matchers || [href];
                 const active = activeMatchers.some((matcher) =>
@@ -126,8 +126,8 @@ export default function Sidebar() {
                     href={href}
                     title={label}
                     className={clsx(
-                      "group relative flex rounded-xl text-sm transition-colors",
-                      collapsed ? "justify-center px-0 py-2.5" : "items-center gap-3 px-3 py-2.5",
+                      "group relative flex rounded-lg text-xs transition-colors",
+                      collapsed ? "justify-center px-0 py-1.5" : "items-center gap-2 px-2 py-1.5",
                       active
                         ? "bg-accent-blue/14 text-accent-blue"
                         : "text-text-secondary hover:bg-bg-hover hover:text-text-primary",
@@ -135,13 +135,13 @@ export default function Sidebar() {
                   >
                     <div
                       className={clsx(
-                        "flex h-8 w-8 items-center justify-center rounded-lg border transition-colors",
+                        "flex h-7 w-7 items-center justify-center rounded-md border transition-colors",
                         active
                           ? "border-accent-blue/35 bg-accent-blue/12"
                           : "border-transparent bg-bg-primary/25 group-hover:border-bg-active",
                       )}
                     >
-                      <Icon size={16} />
+                      <Icon size={15} />
                     </div>
                     {!collapsed ? (
                       <>

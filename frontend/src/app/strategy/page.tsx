@@ -266,7 +266,7 @@ function StatusBadge({
   return (
     <span
       className={clsx(
-        "inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em]",
+        "inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em]",
         badgeTone(tone || label),
       )}
     >
@@ -287,19 +287,54 @@ function MetricTile({
   tone?: string;
 }) {
   return (
-    <div className="rounded-2xl border border-bg-border bg-bg-secondary/35 px-4 py-3">
-      <div className="text-[11px] uppercase tracking-[0.16em] text-text-muted">{label}</div>
-      <div className={clsx("mt-2 font-mono text-lg font-semibold text-text-primary", tone)}>{value}</div>
-      {detail ? <div className="mt-1 text-[11px] text-text-muted">{detail}</div> : null}
+    <div className="rounded-lg border border-bg-border bg-bg-secondary/35 px-3 py-2" title={detail || label}>
+      <div className="text-[10px] uppercase tracking-[0.1em] text-text-muted">{label}</div>
+      <div className={clsx("mt-1 font-mono text-base font-semibold text-text-primary", tone)}>{value}</div>
+      {detail ? <div className="truncate text-[10px] text-text-muted">{detail}</div> : null}
     </div>
   );
 }
 
 function MiniMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div>
-      <div className="text-[10px] uppercase tracking-[0.14em] text-text-muted">{label}</div>
-      <div className="mt-1 font-mono text-sm font-semibold text-text-primary">{value}</div>
+    <div title={label}>
+      <div className="text-[9px] uppercase tracking-[0.08em] text-text-muted">{label}</div>
+      <div className="font-mono text-sm font-semibold text-text-primary">{value}</div>
+    </div>
+  );
+}
+
+function CandidateDistributionStrip({
+  met,
+  watch,
+  avoid,
+}: {
+  met: number;
+  watch: number;
+  avoid: number;
+}) {
+  const total = Math.max(met + watch + avoid, 1);
+  const segments = [
+    { label: "Met", value: met, className: "bg-accent-green" },
+    { label: "Watch", value: watch, className: "bg-accent-amber" },
+    { label: "Avoid", value: avoid, className: "bg-accent-red" },
+  ];
+  return (
+    <div className="rounded-lg border border-bg-border bg-bg-secondary/25 px-3 py-2" title="Instrument bucket split: met, watch, avoid">
+      <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-[0.08em] text-text-muted">
+        <span>Signal Split</span>
+        <span className="font-mono">{met}/{watch}/{avoid}</span>
+      </div>
+      <div className="flex h-2 overflow-hidden rounded-full bg-bg-primary">
+        {segments.map((segment) => (
+          <div
+            key={segment.label}
+            className={segment.className}
+            style={{ width: `${(segment.value / total) * 100}%` }}
+            title={`${segment.label}: ${segment.value}`}
+          />
+        ))}
+      </div>
     </div>
   );
 }
@@ -316,13 +351,12 @@ function PanelHeader({
   meta?: string;
 }) {
   return (
-    <div className="flex flex-wrap items-start justify-between gap-3">
+    <div className="flex flex-wrap items-center justify-between gap-2">
       <div>
-        <div className="flex items-center gap-2 text-sm font-semibold text-text-primary">
+        <div className="flex items-center gap-2 text-sm font-semibold text-text-primary" title={detail}>
           {icon}
           {title}
         </div>
-        <div className="mt-1 text-xs text-text-muted">{detail}</div>
       </div>
       {meta ? <div className="text-xs text-text-muted">{meta}</div> : null}
     </div>
@@ -345,14 +379,14 @@ function TabButton({
       type="button"
       onClick={onClick}
       className={clsx(
-        "rounded-2xl border px-4 py-3 text-left transition-colors",
+        "rounded-lg border px-3 py-2 text-left transition-colors",
         active
           ? "border-accent-blue/40 bg-accent-blue/10 text-text-primary"
           : "border-bg-border bg-bg-secondary/25 text-text-secondary hover:border-bg-active hover:text-text-primary",
       )}
     >
-      <div className="text-xs font-semibold uppercase tracking-[0.16em]">{label}</div>
-      <div className="mt-1 text-[11px] leading-5 text-text-muted">{detail}</div>
+      <div className="text-xs font-semibold uppercase tracking-[0.1em]" title={detail}>{label}</div>
+      <div className="truncate text-[10px] text-text-muted">{detail}</div>
     </button>
   );
 }
@@ -373,7 +407,7 @@ function DetailTabButton({
       type="button"
       onClick={onClick}
       className={clsx(
-        "inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-semibold transition-colors",
+        "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-colors",
         active
           ? "border-accent-blue/40 bg-accent-blue/10 text-accent-blue"
           : "border-bg-border bg-bg-secondary/25 text-text-secondary hover:border-bg-active hover:text-text-primary",
@@ -974,21 +1008,18 @@ export default function StrategyPage() {
   const marketDataTone = currentLiveRows > 0 ? "text-accent-green" : okPipelineRows > 0 ? "text-accent-amber" : "text-accent-red";
 
   return (
-    <div className="mx-auto max-w-[1680px] space-y-6 pb-10">
-      <section className="rounded-[28px] border border-bg-active/60 bg-bg-secondary/30 px-5 py-5">
-        <div className="flex flex-wrap items-start justify-between gap-4">
+    <div className="mx-auto max-w-[1680px] space-y-3 pb-6">
+      <section className="rounded-xl border border-bg-active/60 bg-bg-secondary/30 px-3 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="max-w-4xl">
             <div className="flex items-center gap-2 text-lg font-bold font-mono text-text-primary">
               <Bot size={18} className="text-accent-blue" />
               NSE Options Strategy Desk
             </div>
-            <p className="mt-2 text-sm leading-6 text-text-secondary">
-              Strategy 1 trades 30-minute ATM option MACD zero-cross setups, while Strategy 2 trades 5-minute index options only when MACD and Market Profile confirmation align. This desk is organized around live option exposure first, then signals, then runtime operations.
-            </p>
           </div>
-          <div className="rounded-[22px] border border-bg-border bg-bg-secondary/35 px-4 py-4">
-            <div className="text-sm font-semibold text-text-primary">Runtime Rail</div>
-            <div className="mt-4 flex flex-wrap gap-2">
+          <div className="rounded-lg border border-bg-border bg-bg-secondary/35 px-3 py-2" title="Loop state, broker gate, scan timestamps, target expiry, and cadence">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-semibold text-text-primary">Runtime</span>
               <StatusBadge label={agentStatus?.running ? "Loop Active" : "Idle"} tone={agentStatus?.running ? "ready" : "idle"} />
               <StatusBadge
                 label={agentStatus?.kill_switch_active ? "Kill Switch On" : "Kill Switch Off"}
@@ -1005,16 +1036,16 @@ export default function StrategyPage() {
                 />
               ) : null}
             </div>
-            <div className="mt-4 space-y-2 text-xs text-text-secondary">
-              <div>Last scan: <span className="font-mono text-text-primary">{formatTimestamp(agentStatus?.last_run_at)}</span></div>
-              <div>Next scan: <span className="font-mono text-text-primary">{formatTimestamp(agentStatus?.next_scan_at)}</span></div>
-              <div>Expiry: <span className="font-mono text-text-primary">{agentStatus?.target_expiry || "--"}</span></div>
-              <div>Cadence: <span className="font-mono text-text-primary">{agentStatus?.scan_interval_seconds || 60}s</span></div>
+            <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-text-secondary">
+              <div>Last <span className="font-mono text-text-primary">{formatTimestamp(agentStatus?.last_run_at)}</span></div>
+              <div>Next <span className="font-mono text-text-primary">{formatTimestamp(agentStatus?.next_scan_at)}</span></div>
+              <div>Expiry <span className="font-mono text-text-primary">{agentStatus?.target_expiry || "--"}</span></div>
+              <div>{agentStatus?.scan_interval_seconds || 60}s</div>
             </div>
           </div>
         </div>
 
-        <div className="mt-5 grid gap-3 md:grid-cols-3 xl:grid-cols-8">
+        <div className="mt-3 grid gap-2 md:grid-cols-3 xl:grid-cols-9">
           <MetricTile label="Live Strategies" value={String(liveStrategyCount)} detail={`${activeScanCount} scan-capable`} tone="text-accent-blue" />
           <MetricTile label="Market Data" value={marketDataLabel} detail={`${okPipelineRows}/${pipelineRows.length || 0} feeds OK`} tone={marketDataTone} />
           <MetricTile label="Open Positions" value={String(allPositions.length)} />
@@ -1023,72 +1054,77 @@ export default function StrategyPage() {
           <MetricTile label="Open P&L" value={formatSigned(totalOpenPnl, 0)} tone={pnlTone(totalOpenPnl)} />
           <MetricTile label="Realized" value={formatSigned(totalRealized, 0)} tone={pnlTone(totalRealized)} />
           <MetricTile label="Win Rate" value={totalTrades ? `${combinedWinRate.toFixed(1)}%` : "--"} detail={`${totalTrades} closed trades`} />
+          <CandidateDistributionStrip
+            met={candidatesByCategory.conditions_met.length}
+            watch={candidatesByCategory.watch.length}
+            avoid={candidatesByCategory.avoid.length}
+          />
         </div>
       </section>
 
-      <section className="rounded-[28px] border border-bg-border bg-bg-secondary/20 p-4">
+      <section className="rounded-xl border border-bg-border bg-bg-secondary/20 p-3">
         <PanelHeader
           icon={<Bot size={16} className="text-accent-green" />}
           title="Strategy Agent Readiness"
           detail="Every strategy agent is shown with its visible instrument scope and tomorrow-open preparation state. Upstox analytics history is treated as valid paper-trading data; live broker reconnect is still shown separately."
           meta={`${deskStrategies.length} strategy lanes`}
         />
-        <div className="mt-4 grid gap-3 lg:grid-cols-2 xl:grid-cols-4">
-          <div className="rounded-2xl border border-bg-border bg-bg-primary/25 p-4">
+        <div className="mt-3 grid gap-2 lg:grid-cols-2 xl:grid-cols-4">
+          <div className="rounded-lg border border-bg-border bg-bg-primary/25 p-3">
             <div className="flex items-center justify-between gap-3">
               <div className="text-sm font-semibold text-text-primary">NSE CE/PE MACD + MP</div>
               <StatusBadge label={marketIntelligenceHealth?.ready ? "prepared" : "checking"} tone={marketIntelligenceHealth?.ready ? "ready" : "warning"} />
             </div>
-            <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
+            <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
               <MiniMetric label="F&O Rows" value={String(marketIntelligenceHealth?.watchlist_rows_latest || 0)} />
               <MiniMetric label="CE Ready" value={String(marketIntelligenceHealth?.latest_ce_ready || 0)} />
               <MiniMetric label="PE Ready" value={String(marketIntelligenceHealth?.latest_pe_ready || 0)} />
             </div>
-            <div className="mt-3 text-xs text-text-muted">{marketIntelligenceHealth?.latest_watchlist_session || "session pending"} · {prettify(marketIntelligenceHealth?.readiness_mode)}</div>
+            <div className="mt-2 truncate text-xs text-text-muted" title={`${marketIntelligenceHealth?.latest_watchlist_session || "session pending"} · ${prettify(marketIntelligenceHealth?.readiness_mode)}`}>{marketIntelligenceHealth?.latest_watchlist_session || "session pending"} · {prettify(marketIntelligenceHealth?.readiness_mode)}</div>
           </div>
 
-          <div className="rounded-2xl border border-bg-border bg-bg-primary/25 p-4">
+          <div className="rounded-lg border border-bg-border bg-bg-primary/25 p-3">
             <div className="flex items-center justify-between gap-3">
               <div className="text-sm font-semibold text-text-primary">Directional Options</div>
               <StatusBadge label={directionalDataStatus.execution_ready ? "prepared" : "monitoring"} tone={directionalDataStatus.execution_ready ? "ready" : "warning"} />
             </div>
-            <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
+            <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
               <MiniMetric label="Universe" value={String(strategyDesk?.directionalSummary?.underlyings?.length || 0)} />
               <MiniMetric label="Watch Rows" value={String(directionalDataStatus.watchlist_rows_latest || directionalDataStatus.watchlist_rows_today || 0)} />
               <MiniMetric label="Mode" value={prettify(directionalDataStatus.readiness_mode || "armed")} />
             </div>
-            <div className="mt-3 text-xs text-text-muted">{strategyDesk?.directionalLive?.snapshot?.selection_reason || strategyDesk?.directionalSummary?.automation?.last_message || "Awaiting next scan."}</div>
+            <div className="mt-2 truncate text-xs text-text-muted" title={strategyDesk?.directionalLive?.snapshot?.selection_reason || strategyDesk?.directionalSummary?.automation?.last_message || "Awaiting next scan."}>{strategyDesk?.directionalLive?.snapshot?.selection_reason || strategyDesk?.directionalSummary?.automation?.last_message || "Awaiting next scan."}</div>
           </div>
 
-          <div className="rounded-2xl border border-bg-border bg-bg-primary/25 p-4">
+          <div className="rounded-lg border border-bg-border bg-bg-primary/25 p-3">
             <div className="flex items-center justify-between gap-3">
               <div className="text-sm font-semibold text-text-primary">Commodity</div>
               <StatusBadge label={commodityWatchRows ? "prepared" : "needs feed"} tone={commodityWatchRows ? "ready" : "warning"} />
             </div>
-            <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
+            <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
               <MiniMetric label="Agents" value={String(strategyDesk?.commodityStatus?.strategy_agents?.length || 0)} />
               <MiniMetric label="Watch Rows" value={String(commodityWatchRows)} />
               <MiniMetric label="Open" value={String(strategyDesk?.commodityStatus?.strategy_agents?.reduce?.((sum: number, item: any) => sum + Number(item.open_positions || 0), 0) || 0)} />
             </div>
-            <div className="mt-3 text-xs text-text-muted">{strategyDesk?.commodityStatus?.last_message || strategyDesk?.commodityWatchlist?.detail || "Waiting for MCX market hours."}</div>
+            <div className="mt-2 truncate text-xs text-text-muted" title={strategyDesk?.commodityStatus?.last_message || strategyDesk?.commodityWatchlist?.detail || "Waiting for MCX market hours."}>{strategyDesk?.commodityStatus?.last_message || strategyDesk?.commodityWatchlist?.detail || "Waiting for MCX market hours."}</div>
           </div>
 
-          <div className="rounded-2xl border border-bg-border bg-bg-primary/25 p-4">
+          <div className="rounded-lg border border-bg-border bg-bg-primary/25 p-3">
             <div className="flex items-center justify-between gap-3">
               <div className="text-sm font-semibold text-text-primary">MP / FMP</div>
               <StatusBadge label={fmpAutomation.loop_active ? "armed" : "idle"} tone={fmpAutomation.loop_active ? "ready" : "warning"} />
             </div>
-            <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
+            <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
               <MiniMetric label="Symbols" value={String(strategyDesk?.fmpSummary?.supported_symbols?.length || 0)} />
               <MiniMetric label="Open" value={String(strategyDesk?.fmpSummary?.paper_summary?.open_positions || 0)} />
               <MiniMetric label="Replay" value={String(strategyDesk?.fmpSummary?.replay_reports?.length || 0)} />
             </div>
-            <div className="mt-3 text-xs text-text-muted">{fmpAutomation.last_message || "Armed for next session."}</div>
+            <div className="mt-2 truncate text-xs text-text-muted" title={fmpAutomation.last_message || "Armed for next session."}>{fmpAutomation.last_message || "Armed for next session."}</div>
           </div>
         </div>
       </section>
 
-      <section className="rounded-[28px] border border-bg-border bg-bg-secondary/20 p-4">
+      <section className="rounded-xl border border-bg-border bg-bg-secondary/20 p-3">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <PanelHeader
             icon={<Shield size={16} className="text-accent-blue" />}
@@ -1137,39 +1173,42 @@ export default function StrategyPage() {
         {activeStrategyTab === "instruments" ? (
           <div className="mt-4 grid gap-4 xl:grid-cols-3">
             {(["conditions_met", "watch", "avoid"] as InstrumentCategory[]).map((category) => (
-              <div key={category} className="rounded-2xl border border-bg-border bg-bg-primary/25 p-3">
-                <div className={clsx("text-sm font-semibold", categoryTone(category))}>{categoryLabel(category)}</div>
-                <div className="mt-1 text-xs text-text-muted">
-                  {category === "conditions_met"
+              <div
+                key={category}
+                className="rounded-lg border border-bg-border bg-bg-primary/25 p-2"
+                title={
+                  category === "conditions_met"
                     ? "Can be acted on only if risk engine and broker state approve."
                     : category === "watch"
                       ? "Historically favourable or aligned, but final condition is pending."
-                      : "No signal, stale inputs, or negative strategy history."}
-                </div>
-                <div className="mt-3 max-h-[420px] space-y-2 overflow-y-auto pr-1">
+                      : "No signal, stale inputs, or negative strategy history."
+                }
+              >
+                <div className={clsx("text-sm font-semibold", categoryTone(category))}>{categoryLabel(category)} · {candidatesByCategory[category].length}</div>
+                <div className="mt-2 max-h-[420px] space-y-1.5 overflow-y-auto pr-1">
                   {candidatesByCategory[category].length ? (
                     candidatesByCategory[category].map((candidate) => (
-                      <div key={`${category}-${candidate.symbol}`} className="rounded-xl border border-bg-border bg-bg-secondary/25 px-3 py-3">
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
+                      <div key={`${category}-${candidate.symbol}`} className="rounded-lg border border-bg-border bg-bg-secondary/25 px-2 py-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
                             <div className="font-semibold text-text-primary">{candidate.symbol}</div>
-                            <div className="mt-1 text-[11px] text-text-muted">{candidate.reason}</div>
+                            <div className="mt-0.5 truncate text-[11px] text-text-muted" title={candidate.reason}>{candidate.reason}</div>
                           </div>
                           <div className="text-right">
                             <StatusBadge label={candidate.direction || candidate.statusLabel} tone={candidate.category === "avoid" ? "error" : candidate.direction || candidate.statusLabel} />
-                            <div className="mt-2 font-mono text-[11px] text-text-muted">score {formatNumber(candidate.priorityScore, 1)}</div>
+                            <div className="mt-1 font-mono text-[11px] text-text-muted">score {formatNumber(candidate.priorityScore, 1)}</div>
                           </div>
                         </div>
-                        <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
-                          <div className="rounded-lg border border-bg-border bg-bg-primary/30 px-2 py-2">
+                        <div className="mt-2 grid grid-cols-3 gap-1.5 text-[11px]">
+                          <div className="rounded-md border border-bg-border bg-bg-primary/30 px-2 py-1.5">
                             <div className="text-text-muted">Hist P&L</div>
                             <div className={clsx("mt-1 font-mono", pnlTone(candidate.historyPnl))}>{formatSigned(candidate.historyPnl, 0)}</div>
                           </div>
-                          <div className="rounded-lg border border-bg-border bg-bg-primary/30 px-2 py-2">
+                          <div className="rounded-md border border-bg-border bg-bg-primary/30 px-2 py-1.5">
                             <div className="text-text-muted">Win Rate</div>
                             <div className="mt-1 font-mono text-text-primary">{candidate.winRate != null ? `${(candidate.winRate * 100).toFixed(0)}%` : "--"}</div>
                           </div>
-                          <div className="rounded-lg border border-bg-border bg-bg-primary/30 px-2 py-2">
+                          <div className="rounded-md border border-bg-border bg-bg-primary/30 px-2 py-1.5">
                             <div className="text-text-muted">Last Seen</div>
                             <div className="mt-1 font-mono text-text-primary">{formatTimestamp(candidate.lastSeen)}</div>
                           </div>
@@ -1314,13 +1353,10 @@ export default function StrategyPage() {
         ) : null}
       </section>
 
-      <section className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
+      <section className="rounded-xl border border-bg-border bg-bg-secondary/20 p-3">
         <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
+          <div title="Portfolio stays first. Signal lanes stay separate from operations, and performance lives under operations so the live options book is not buried under research panels.">
             <div className="text-sm font-semibold text-text-primary">Workspace Tabs</div>
-            <div className="mt-1 text-xs text-text-muted">
-              Portfolio stays first. Signal lanes stay separate from operations, and performance lives under operations so the live options book is not buried under research panels.
-            </div>
           </div>
           <div className="text-xs text-text-muted">
             {activeTab === "portfolio"
@@ -1331,7 +1367,7 @@ export default function StrategyPage() {
           </div>
         </div>
 
-        <div className="mt-4 grid gap-3 md:grid-cols-3">
+        <div className="mt-3 grid gap-2 md:grid-cols-3">
           <TabButton
             active={activeTab === "portfolio"}
             label="Portfolio"

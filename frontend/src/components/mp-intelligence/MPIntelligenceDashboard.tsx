@@ -96,10 +96,9 @@ function SectionHeader({
   sub?: string;
 }) {
   return (
-    <div className="flex items-center gap-2 mb-3">
+    <div className="flex items-center gap-2 mb-2" title={sub}>
       <Icon className="w-4 h-4 text-blue-400 shrink-0" />
       <span className="text-sm font-semibold text-zinc-200">{title}</span>
-      {sub && <span className="text-xs text-zinc-500 ml-1">{sub}</span>}
     </div>
   );
 }
@@ -138,15 +137,45 @@ function StatCard({
   accent?: string;
 }) {
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3">
-      <p className="text-[11px] text-zinc-500 mb-1">{label}</p>
+    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-2" title={sub || label}>
+      <p className="text-[10px] text-zinc-500">{label}</p>
       <p
-        className="text-xl font-bold font-mono"
+        className="text-base font-bold font-mono"
         style={{ color: accent ?? "#e4e4e7" }}
       >
         {value}
       </p>
-      {sub && <p className="text-[10px] text-zinc-600 mt-0.5">{sub}</p>}
+      {sub && <p className="truncate text-[9px] text-zinc-600">{sub}</p>}
+    </div>
+  );
+}
+
+function AvailabilityStrip({ data }: { data: any }) {
+  const sessions = Number(data?.total_sessions || 0);
+  const lookback = Number(data?.lookback_days || sessions || 1);
+  const coverage = Math.max(0, Math.min(100, (sessions / Math.max(lookback, 1)) * 100));
+  const drift = data?.concept_drift?.current_state || "unknown";
+  const wr = data?.setup_performance?.overall_next_day_win_rate;
+  const migration = data?.value_migration?.summary?.upward_migration_pct;
+  return (
+    <div className="grid gap-2 md:grid-cols-[1.2fr_0.8fr_0.8fr]">
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2" title={`${sessions}/${lookback} sessions available`}>
+        <div className="flex items-center justify-between text-[10px] uppercase tracking-wide text-zinc-500">
+          <span>Session Coverage</span>
+          <span className="font-mono">{sessions}/{lookback}</span>
+        </div>
+        <div className="mt-1 h-2 overflow-hidden rounded-full bg-zinc-950">
+          <div className="h-full bg-emerald-400" style={{ width: `${coverage}%` }} />
+        </div>
+      </div>
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2" title="Overall next-day historical win rate">
+        <div className="text-[10px] uppercase tracking-wide text-zinc-500">Win Rate</div>
+        <div className="font-mono text-sm font-semibold text-zinc-100">{pct(wr)} <span className="text-[10px] text-zinc-500">1d</span></div>
+      </div>
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2" title="Current drift state and upward value migration">
+        <div className="text-[10px] uppercase tracking-wide text-zinc-500">Drift / Migration</div>
+        <div className="font-mono text-sm font-semibold text-zinc-100">{String(drift).toUpperCase()} · {pct(migration)}</div>
+      </div>
     </div>
   );
 }
@@ -1289,20 +1318,14 @@ export default function MPIntelligenceDashboard() {
           : null;
 
   return (
-    <div className="space-y-4 text-zinc-100">
-      <section className="rounded-[28px] border border-bg-active/60 bg-bg-secondary/30 px-5 py-5">
+    <div className="space-y-3 text-zinc-100">
+      <section className="rounded-xl border border-bg-active/60 bg-bg-secondary/30 px-3 py-3">
         <div className="flex items-center justify-between flex-wrap gap-3">
-          <div className="max-w-3xl">
-            <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.2em] text-text-muted">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-semibold text-text-primary" title="Live market-profile structure with drift and setup diagnostics">
               <Brain className="h-4 w-4 text-accent-blue" />
               MP Intelligence
             </div>
-            <h1 className="mt-2 text-2xl font-semibold text-text-primary">
-              Live market-profile structure with drift and setup diagnostics.
-            </h1>
-            <p className="mt-2 max-w-3xl text-sm leading-6 text-text-secondary line-clamp-2">
-              Multi-timeframe profiles, regime migration, setup performance, and order-flow proxy stay on a faster refresh so the desk reflects the latest MP state.
-            </p>
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
@@ -1313,7 +1336,7 @@ export default function MPIntelligenceDashboard() {
                 key={u}
                 onClick={() => setUnderlying(u)}
                 className={clsx(
-                  "rounded-full px-3 py-1.5 text-xs font-semibold transition-colors",
+                  "rounded-lg px-2.5 py-1 text-xs font-semibold transition-colors",
                   underlying === u
                     ? "border border-accent-blue/35 bg-accent-blue/12 text-accent-blue"
                     : "border border-bg-border bg-bg-primary/20 text-text-secondary hover:border-bg-active hover:text-text-primary",
@@ -1328,7 +1351,7 @@ export default function MPIntelligenceDashboard() {
           <select
             value={lookback}
             onChange={(e) => setLookback(Number(e.target.value))}
-            className="cursor-pointer appearance-none rounded-full border border-bg-border bg-bg-primary/20 px-3 py-1.5 text-xs font-semibold text-text-primary transition-colors hover:border-bg-active hover:text-text-primary"
+            className="cursor-pointer appearance-none rounded-lg border border-bg-border bg-bg-primary/20 px-2.5 py-1 text-xs font-semibold text-text-primary transition-colors hover:border-bg-active hover:text-text-primary"
           >
             {[30, 45, 60, 90, 120, 180].map((l) => (
               <option key={l} value={l}>
@@ -1340,7 +1363,7 @@ export default function MPIntelligenceDashboard() {
           {/* Drift badge */}
           {driftBadge && (
             <span
-              className="rounded-full px-2.5 py-1 text-[10px] font-bold"
+              className="rounded-lg px-2 py-1 text-[10px] font-bold"
               style={{
                 background: `${driftBadge.color}22`,
                 color: driftBadge.color,
@@ -1359,7 +1382,7 @@ export default function MPIntelligenceDashboard() {
             }}
             disabled={isFetching || marketContextQuery.isFetching}
             aria-label="Refresh MP analytics data"
-            className="flex items-center gap-1.5 rounded-full border border-bg-border bg-bg-primary/20 px-3 py-1.5 text-xs font-semibold text-text-secondary transition-colors hover:border-bg-active hover:text-text-primary disabled:opacity-50"
+            className="flex items-center gap-1.5 rounded-lg border border-bg-border bg-bg-primary/20 px-2.5 py-1 text-xs font-semibold text-text-secondary transition-colors hover:border-bg-active hover:text-text-primary disabled:opacity-50"
           >
             <RefreshCw className={clsx("h-3 w-3", (isFetching || marketContextQuery.isFetching) && "animate-spin")} />
             {isFetching || marketContextQuery.isFetching ? "Refreshing…" : "Refresh"}
@@ -1376,7 +1399,7 @@ export default function MPIntelligenceDashboard() {
       )}
 
       {isShowingSnapshot && (
-        <div className="rounded-lg border border-amber-400/25 bg-amber-400/10 p-4 text-sm text-amber-100">
+        <div className="rounded-lg border border-amber-400/25 bg-amber-400/10 p-2 text-xs text-amber-100">
           Live refresh missed the last window. Showing the last saved MP analytics snapshot for {underlying} until the backend responds again.
         </div>
       )}
@@ -1396,6 +1419,7 @@ export default function MPIntelligenceDashboard() {
 
       {/* Top stat strip */}
       {data && (
+        <div className="space-y-2">
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
           <StatCard
             label="Sessions Analysed"
@@ -1437,18 +1461,20 @@ export default function MPIntelligenceDashboard() {
             accent={driftBadge?.color}
           />
         </div>
+        <AvailabilityStrip data={{ ...data, lookback_days: lookback }} />
+        </div>
       )}
 
       {/* Tabs */}
       {data && (
-        <div className="space-y-4">
+        <div className="space-y-3">
           <div className="flex gap-1 flex-wrap border-b border-zinc-800">
             {TABS.map(({ id, label, icon: Icon }) => (
               <button
                 key={id}
                 onClick={() => setActiveTab(id)}
                 className={clsx(
-                  "flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-t transition-colors",
+                  "flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-t transition-colors",
                   activeTab === id
                     ? "-mb-px bg-zinc-800 text-zinc-100 border border-zinc-700 border-b-2 border-b-blue-500"
                     : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50",

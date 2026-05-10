@@ -202,7 +202,7 @@ export default function BrokerStatusBar() {
   const hasAnyBrokerState = Boolean(effectiveStatuses?.length);
 
   return (
-    <div className="h-8 bg-bg-secondary border-b border-bg-border flex items-center px-4 gap-6 text-xs font-mono shrink-0">
+    <div className="h-7 bg-bg-secondary border-b border-bg-border flex items-center px-3 gap-3 text-[11px] font-mono shrink-0" suppressHydrationWarning>
       {/* Mode badge */}
       <span
         className={clsx(
@@ -218,15 +218,15 @@ export default function BrokerStatusBar() {
       {/* Broker */}
       <span className="text-text-muted">
         {connectedBroker ? (
-          <span className="text-text-primary">
-            <span className="text-accent-green">●</span> {connectedBrokerLabel} — {connectedBrokerName}
+          <span className="text-text-primary" title={connectedBrokerName}>
+            <span className="text-accent-green">●</span> {connectedBrokerLabel}
           </span>
         ) : isLoadingFreshState ? (
-          <span className="text-accent-amber">◌ Connecting broker state…</span>
+          <span className="text-accent-amber">◌ Connecting</span>
         ) : hasAnyBrokerState ? (
-          <span className="text-accent-amber">◌ Broker session not ready</span>
+          <span className="text-accent-amber">◌ Broker not ready</span>
         ) : (
-          <span className="text-text-muted">◌ Awaiting broker state…</span>
+          <span className="text-text-muted">◌ Awaiting broker</span>
         )}
       </span>
 
@@ -239,9 +239,9 @@ export default function BrokerStatusBar() {
       {/* Day P&L */}
       {hasPortfolio && (
         <>
-          <span className="text-text-muted">Equity:</span>
+          <span className="text-text-muted">Eq</span>
           <span className="text-text-primary">₹{totalEquity.toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span>
-          <span className="text-text-muted">Day P&L:</span>
+          <span className="text-text-muted">Day</span>
           <span className={dayPnl >= 0 ? "text-accent-green" : "text-accent-red"}>
             {dayPnl >= 0 ? "+" : ""}₹{dayPnl.toLocaleString("en-IN", { maximumFractionDigits: 0 })}
           </span>
