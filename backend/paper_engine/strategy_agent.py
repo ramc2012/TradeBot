@@ -931,7 +931,13 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     [day for day in (latest_snapshot_day, latest_position_day) if day is not None],
                     default=None,
                 )
-                if latest_required_day is None or current_prepared_day >= latest_required_day:
+                prepared_snapshot_is_useful = (
+                    self._strategy1_saved_snapshot_is_useful()
+                    or self._strategy2_saved_snapshot_is_useful()
+                )
+                if prepared_snapshot_is_useful and (
+                    latest_required_day is None or current_prepared_day >= latest_required_day
+                ):
                     return
             needs_strategy1 = latest_position_day is not None and (
                 not self._strategy1.positions
@@ -952,6 +958,23 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             )
         except Exception as exc:
             logger.warning(f"[Strategy] Historical recovery skipped: {exc}")
+
+    def _strategy1_saved_snapshot_is_useful(self) -> bool:
+        meta = self._strategy1.meta or {}
+        prepared_watchlist = meta.get("prepared_watchlist") or []
+        try:
+            watchlist_rows = int(meta.get("watchlist_rows") or 0)
+        except (TypeError, ValueError):
+            watchlist_rows = 0
+        return bool(self._strategy1.positions or prepared_watchlist or watchlist_rows > 0)
+
+    def _strategy2_saved_snapshot_is_useful(self) -> bool:
+        meta = self._strategy2.meta or {}
+        pipeline = meta.get("pipeline") or []
+        if any(int((item or {}).get("rows") or 0) > 0 for item in pipeline if isinstance(item, dict)):
+            return True
+        signals = [row for row in self._strategy2.signal_lane if isinstance(row, dict)]
+        return any(str(row.get("freshness") or "").lower() != "missing" for row in signals)
 
     async def _restore_from_historical_state(
         self,
@@ -1160,6 +1183,20 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             self._scan_windows = await get_all_strategy1_scan_windows(as_of=started_at.date())
         except Exception as exc:
             logger.debug(f"[Strategy] closed-market window preparation skipped: {exc}")
+
+        if not rows:
+            await self.ensure_recovered_state()
+            last_live_scan = self._last_run_at or self._strategy2.last_scan_at or self._strategy1.last_scan_at
+            self._last_message = (
+                f"Market closed. Showing saved NSE strategy state from {last_live_scan}; "
+                "closed-market watchlist returned 0 rows."
+            )
+            for lane in self._lane_agents():
+                lane.on_market_closed(started_at, last_live_scan)
+                if _looks_like_stale_blocking_message(lane.runtime.last_message):
+                    lane.runtime.last_message = self._last_message
+            self._append_commentary("System", self._last_message, tone="idle")
+            return
 
         all_underlyings = [
             str(row.get("underlying") or "").strip()

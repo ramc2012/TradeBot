@@ -723,6 +723,78 @@ def test_market_closed_keeps_strategy2_last_signal_snapshot(monkeypatch) -> None
     assert status["strategies"][1]["meta"]["market_state"] == "closed"
 
 
+def test_closed_market_empty_watchlist_preserves_saved_strategy_state(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    agent._last_run_at = "2026-05-08T15:29:54+05:30"
+    agent._strategy1.meta = {
+        "mode": "prepared_market_closed",
+        "watchlist_rows": 171,
+        "prepared_watchlist": [
+            {
+                "underlying": "NIFTY",
+                "direction": "PE",
+                "status": "watching",
+                "freshness": "prepared",
+            }
+        ],
+    }
+    agent._strategy2.signal_lane = [
+        {
+            "underlying": "NIFTY",
+            "status": "trend-aligned",
+            "freshness": "session-close",
+        }
+    ]
+    agent._strategy2.meta = {
+        "mode": "historical_recovery",
+        "pipeline": [{"name": "Strategy 2 NIFTY", "status": "ok", "rows": 45}],
+        "watchlist_rows": 1,
+    }
+
+    async def fake_market_intelligence_health():
+        return {
+            "ready": True,
+            "execution_ready": False,
+            "watchlist_rows_today": 0,
+            "watchlist_rows_latest": 171,
+            "latest_watchlist_time": "2026-05-08T09:59:54+00:00",
+        }
+
+    async def fake_broker_snapshot(*, force_validate: bool = False):
+        return {"broker_ready": False, "fyers_ready": False, "upstox_ready": False}
+
+    async def fake_expiries(_expiry: str | None = None, *, live_refresh: bool = False):
+        return {"default_expiry": "2026-05-26", "expiries": ["2026-05-26"]}
+
+    async def fake_watchlist(*_args, **_kwargs):
+        return {"rows": [], "detail": "holiday/offline"}
+
+    async def fake_noop(*_args, **_kwargs):
+        return None
+
+    async def fake_empty_list(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(strategy_agent_module, "_in_market_hours", lambda _: False)
+    monkeypatch.setattr(strategy_agent_module.market_intelligence_runtime, "get_strategy_health", fake_market_intelligence_health)
+    monkeypatch.setattr(strategy_agent_module, "get_broker_connection_snapshot", fake_broker_snapshot)
+    monkeypatch.setattr(strategy_agent_module.atm_watchlist_service, "get_expiries", fake_expiries)
+    monkeypatch.setattr(strategy_agent_module.atm_watchlist_service, "get_watchlist", fake_watchlist)
+    monkeypatch.setattr(strategy_agent_module, "get_all_active_windows", fake_empty_list)
+    monkeypatch.setattr(strategy_agent_module, "get_all_strategy1_scan_windows", fake_empty_list)
+    monkeypatch.setattr(agent, "ensure_recovered_state", fake_noop)
+    monkeypatch.setattr(strategy_agent_module.option_history_service, "reset_health", lambda: None)
+    monkeypatch.setattr(strategy_agent_module.option_history_service, "get_health_snapshot", lambda: {})
+
+    status = asyncio.run(agent.run_once(force=False))
+
+    assert "closed-market watchlist returned 0 rows" in status["last_message"]
+    assert status["strategies"][0]["meta"]["prepared_watchlist"][0]["underlying"] == "NIFTY"
+    assert status["strategies"][0]["meta"]["watchlist_rows"] == 171
+    assert status["strategies"][1]["signals"][0]["underlying"] == "NIFTY"
+    assert status["strategies"][1]["meta"]["pipeline"][0]["rows"] == 45
+
+
 def test_latest_session_rows_use_most_recent_trading_day() -> None:
     rows = [
         {"time": "2026-04-08T09:15:00Z", "close": 100},
