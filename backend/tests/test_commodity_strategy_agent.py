@@ -768,6 +768,120 @@ def test_analyze_futures_symbol_uses_continuation_signal_when_mp_aligns(monkeypa
     assert "continuation" in row["signal_validation_detail"]
 
 
+def test_analyze_futures_symbol_blocks_continuation_without_trend_day_mp(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    async def fake_load_history(self, symbol: str, *, interval: str, lookback_days: int = 0):
+        return _build_candles([8700.0 + (index * 2.0) for index in range(40)])
+
+    def fake_evaluate(*args, **kwargs):
+        return {
+            "signal": None,
+            "reason": "no_cross",
+            "regime": "bullish",
+            "latest_close": 8800.0,
+            "previous_close": 8790.0,
+            "macd": 18.2,
+            "macd_signal": 16.5,
+            "macd_histogram": 1.7,
+            "atr": 72.0,
+            "bar_time": "2026-04-16T19:00:00+05:30",
+            "recent_cross_signal": "BUY",
+            "recent_cross_bars_ago": 2,
+            "continuation_signal": "BUY",
+            "continuation_reason": "macd_continuation_breakout_up",
+        }
+
+    monkeypatch.setattr(CommodityStrategyAgent, "_load_history", fake_load_history)
+    monkeypatch.setattr(commodity_module, "evaluate_commodity_signal", fake_evaluate)
+    monkeypatch.setattr(
+        commodity_module,
+        "_latest_session_rows",
+        lambda candles: (list(candles), datetime(2026, 4, 16, 19, 0, tzinfo=UTC).date()),
+    )
+    monkeypatch.setattr(CommodityStrategyAgent, "_build_market_profile", lambda self, symbol, rows: object())
+    monkeypatch.setattr(
+        CommodityStrategyAgent,
+        "_classify_market_profile",
+        lambda self, **kwargs: ("BUY", "balance_above_poc", "holding_above_poc"),
+    )
+
+    agent = CommodityStrategyAgent()
+
+    row = asyncio.run(agent._analyze_futures_symbol("MCX:CRUDEOIL26MAYFUT", 8805.0))
+
+    assert row is not None
+    assert row["signal"] is None
+    assert row["entry_style"] == "continuation"
+    assert "trend-day MP gate" in row["signal_validation_detail"]
+
+
+def test_futures_entry_uses_minimum_half_percent_stop(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    agent = CommodityStrategyAgent()
+    rows = [
+        {
+            "symbol": "MCX:CRUDEOIL26MAYFUT",
+            "underlying": "CRUDEOIL",
+            "signal": "BUY",
+            "signal_validation": "ready",
+            "price": 10000.0,
+            "atr": 10.0,
+            "mp_day_type": "trend_up",
+            "mp_val": 9995.0,
+            "mp_ib_low": 9990.0,
+            "bar_time": "2026-04-16T10:00:00+05:30",
+            "reason": "macd_zero_cross_up_mp_trend_up",
+        }
+    ]
+
+    asyncio.run(agent._open_new_futures_positions(rows))
+
+    position = agent._runtime.positions["commodity_futures:MCX:CRUDEOIL26MAYFUT"]  # type: ignore[attr-defined]
+    assert position.stop_price == pytest.approx(9950.0)
+    assert position.target_price == pytest.approx(10100.0)
+
+
+def test_futures_signal_blocks_after_recent_stop_cooldown(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+    now = datetime(2026, 4, 16, 10, 30, tzinfo=commodity_module.IST)
+    monkeypatch.setattr(commodity_module, "_now_ist", lambda: now)
+
+    agent = CommodityStrategyAgent()
+    agent._runtime.orders.insert(  # type: ignore[attr-defined]
+        0,
+        {
+            "time": (now - timedelta(minutes=20)).isoformat(),
+            "symbol": "MCX:CRUDEOIL26MAYFUT",
+            "flow": "exit",
+            "reason": "stop_loss",
+        },
+    )
+
+    decorated = agent._decorate_futures_rows(
+        [
+            {
+                "symbol": "MCX:CRUDEOIL26MAYFUT",
+                "underlying": "CRUDEOIL",
+                "signal": "BUY",
+                "raw_signal": "BUY",
+                "price": 10000.0,
+                "atr": 100.0,
+                "bar_time": "2026-04-16T10:30:00+05:30",
+                "mp_status": "ready",
+                "mp_direction": "BUY",
+            }
+        ]
+    )
+
+    assert decorated[0]["signal_validation"] == "stop_cooldown"
+    assert "cooldown" in decorated[0]["signal_validation_detail"]
+
+
 def test_futures_reversal_exit_waits_for_min_hold_bars(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "commodity_strategy.json"
     monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)

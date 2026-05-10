@@ -33,6 +33,7 @@ from core.config import settings
 from core.runtime_state import load_runtime_state, save_runtime_state
 from market_data.commodity_atm_watchlist import commodity_atm_watchlist_service
 from market_data.commodity_contract_specs import (
+    extract_commodity_root,
     get_commodity_contract_spec,
     get_commodity_display_name,
 )
@@ -75,6 +76,11 @@ FUTURES_CONTINUATION_BREAKOUT_LOOKBACK = 4
 FUTURES_TRAIL_ATR_MULTIPLIER = 1.25
 FUTURES_BREAK_EVEN_R_MULTIPLIER = 1.0
 FUTURES_TARGET_ARM_R_MULTIPLIER = 2.0
+FUTURES_MIN_STOP_PCT = 0.005
+COMMODITY_DAILY_LOSS_LIMIT = 25_000.0
+COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT = 15_000.0
+COMMODITY_STOP_COOLDOWN_MINUTES = 60
+COMMODITY_EVENT_BLOCK_MINUTES = 90
 
 OPTIONS_MACD_FAST = 12
 OPTIONS_MACD_SLOW = 26
@@ -86,8 +92,11 @@ OPTIONS_TARGET_PCT = 50.0
 OPTIONS_RUNNER_ARM_PCT = 100.0
 OPTIONS_RUNNER_TRAIL_PCT = 20.0
 OPTIONS_RUNNER_MACD_EXIT_PROFIT_PCT = 30.0
-OPTIONS_CAPITAL_FRACTION = 0.20
+OPTIONS_CAPITAL_FRACTION = 0.05
 OPTIONS_MAX_POSITIONS = 2
+OPTIONS_MIN_TTE_DAYS = 5
+OPTIONS_IV_HALF_SIZE_PCT = 40.0
+OPTIONS_IV_REJECT_PCT = 55.0
 
 
 def _resolve_commodity_config_file() -> Path:
@@ -118,6 +127,51 @@ def _in_commodity_hours(now: Optional[datetime] = None) -> bool:
     return time(9, 0) <= current.time() <= time(23, 30)
 
 
+def _normalize_iv_pct(value: Any) -> Optional[float]:
+    try:
+        iv_pct = float(value)
+    except (TypeError, ValueError):
+        return None
+    if iv_pct <= 0:
+        return None
+    if iv_pct <= 1:
+        iv_pct *= 100.0
+    return round(iv_pct, 2)
+
+
+def _is_within_minutes(current_time: time, event_time: time, minutes: int) -> bool:
+    current_minutes = current_time.hour * 60 + current_time.minute
+    event_minutes = event_time.hour * 60 + event_time.minute
+    return abs(current_minutes - event_minutes) <= minutes
+
+
+def _commodity_event_block_reason(symbol_or_underlying: str, now: Optional[datetime] = None) -> Optional[str]:
+    current = (now or _now_ist()).astimezone(IST)
+    underlying = extract_commodity_root(str(symbol_or_underlying or ""))
+    if underlying == "CRUDEOIL" and current.weekday() == 2 and _is_within_minutes(
+        current.time(),
+        time(20, 30),
+        COMMODITY_EVENT_BLOCK_MINUTES,
+    ):
+        return "scheduled_crude_inventory_window"
+    if underlying == "NATURALGAS" and current.weekday() == 3 and _is_within_minutes(
+        current.time(),
+        time(20, 30),
+        COMMODITY_EVENT_BLOCK_MINUTES,
+    ):
+        return "scheduled_ng_storage_window"
+    return None
+
+
+def _symbol_matches_underlying(symbol: str, underlying: str) -> bool:
+    normalized_underlying = extract_commodity_root(str(underlying or ""))
+    if not normalized_underlying:
+        return False
+    normalized_symbol = str(symbol or "").upper()
+    extracted = extract_commodity_root(normalized_symbol)
+    return extracted == normalized_underlying or normalized_underlying in normalized_symbol
+
+
 def _parse_datetime(value: Any) -> Optional[datetime]:
     return _parse_iso_timestamp(value)
 
@@ -132,7 +186,6 @@ def _order_fill_time_ist(order: PaperOrder) -> datetime:
 def _repair_portfolio_ledger(portfolio: PaperPortfolio) -> None:
     """Normalize commodity ledger timestamps and rebuild cash from realized P&L."""
     repaired_history = []
-    ist_offset = timedelta(hours=5, minutes=30)
     for trade in getattr(portfolio, "_trade_history", []):
         entry_time = trade.entry_time
         exit_time = trade.exit_time
@@ -144,11 +197,6 @@ def _repair_portfolio_ledger(portfolio: PaperPortfolio) -> None:
             exit_time = exit_time.replace(tzinfo=IST)
         else:
             exit_time = exit_time.astimezone(IST)
-
-        if exit_time < entry_time:
-            candidate = exit_time + ist_offset
-            if candidate >= entry_time:
-                exit_time = candidate
 
         trade.entry_time = entry_time
         trade.exit_time = exit_time
@@ -630,6 +678,7 @@ class CommodityPositionState:
     expiry: Optional[str] = None
     strike: Optional[float] = None
     option_type: Optional[str] = None
+    entry_iv_pct: Optional[float] = None
     entry_style: Optional[str] = None
     last_reviewed_bar_time: Optional[str] = None
 
@@ -894,6 +943,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     expiry=row.get("expiry"),
                     strike=float(row["strike"]) if row.get("strike") is not None else None,
                     option_type=row.get("option_type"),
+                    entry_iv_pct=_round_or_none(row.get("entry_iv_pct"), 1),
                     entry_style=str(row.get("entry_style") or "") or None,
                     last_reviewed_bar_time=str(row.get("last_reviewed_bar_time") or row.get("entry_bar_time") or "") or None,
                 )
@@ -956,6 +1006,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 expiry=position.expiry,
                 strike=position.strike,
                 option_type=position.option_type,
+                entry_iv_pct=position.entry_iv_pct,
                 opened_at=_parse_datetime(position.entered_at) or datetime.now(timezone.utc),
             )
             for position in self._runtime.positions.values()
@@ -1218,6 +1269,80 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             for position in self._runtime.positions.values()
         )
 
+    def _has_any_underlying_position(self, underlying: str) -> bool:
+        normalized = extract_commodity_root(underlying)
+        return any(
+            extract_commodity_root(position.underlying) == normalized
+            for position in self._runtime.positions.values()
+        )
+
+    def _today_realized_pnl(self, now: Optional[datetime] = None) -> float:
+        current = now or _now_ist()
+        total = 0.0
+        for trade in getattr(self._runtime.portfolio, "_trade_history", []):
+            exit_time = trade.exit_time
+            if exit_time.tzinfo is None:
+                exit_time = exit_time.replace(tzinfo=IST)
+            else:
+                exit_time = exit_time.astimezone(IST)
+            if exit_time.date() == current.date():
+                total += float(trade.pnl)
+        return total
+
+    def _underlying_today_realized_pnl(self, underlying: str, now: Optional[datetime] = None) -> float:
+        current = now or _now_ist()
+        total = 0.0
+        for trade in getattr(self._runtime.portfolio, "_trade_history", []):
+            exit_time = trade.exit_time
+            if exit_time.tzinfo is None:
+                exit_time = exit_time.replace(tzinfo=IST)
+            else:
+                exit_time = exit_time.astimezone(IST)
+            if exit_time.date() != current.date():
+                continue
+            if _symbol_matches_underlying(trade.symbol, underlying):
+                total += float(trade.pnl)
+        return total
+
+    def _recent_stop_cooldown_reason(self, underlying: str, now: Optional[datetime] = None) -> Optional[str]:
+        current = now or _now_ist()
+        stop_reasons = {"stop_loss", "hard_stop", "trail_stop", "runner_trail_stop", "trailing_stoploss"}
+        for order in self._runtime.orders:
+            if str(order.get("flow") or "") != "exit":
+                continue
+            reason = str(order.get("reason") or "")
+            if reason not in stop_reasons:
+                continue
+            if not _symbol_matches_underlying(str(order.get("symbol") or ""), underlying):
+                continue
+            exit_time = _parse_datetime(order.get("time"))
+            if exit_time is None:
+                continue
+            minutes_since_stop = (current - exit_time.astimezone(IST)).total_seconds() / 60.0
+            if 0 <= minutes_since_stop < COMMODITY_STOP_COOLDOWN_MINUTES:
+                remaining = max(1, int(COMMODITY_STOP_COOLDOWN_MINUTES - minutes_since_stop))
+                return f"recent stop-out on {extract_commodity_root(underlying)}; cooldown {remaining}m remaining"
+        return None
+
+    def _entry_risk_block(self, underlying: str, now: Optional[datetime] = None) -> Optional[dict[str, str]]:
+        current = now or _now_ist()
+        daily_pnl = self._today_realized_pnl(current)
+        if daily_pnl <= -COMMODITY_DAILY_LOSS_LIMIT:
+            return {
+                "code": "daily_loss_limit",
+                "detail": f"Commodity desk daily loss is {daily_pnl:.0f}; new entries are blocked.",
+            }
+        underlying_pnl = self._underlying_today_realized_pnl(underlying, current)
+        if underlying_pnl <= -COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT:
+            return {
+                "code": "underlying_loss_limit",
+                "detail": f"{extract_commodity_root(underlying)} daily loss is {underlying_pnl:.0f}; new entries are blocked.",
+            }
+        cooldown_reason = self._recent_stop_cooldown_reason(underlying, current)
+        if cooldown_reason:
+            return {"code": "stop_cooldown", "detail": cooldown_reason}
+        return None
+
     def _strategy_catalog(self) -> list[dict[str, Any]]:
         option_contracts_ready = sum(1 for expiry in self._selected_option_expiries.values() if expiry)
         lane_map = {lane.descriptor.key: lane for lane in self._strategy_agents()}
@@ -1237,7 +1362,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "position_cap": lane_map["commodity_futures"].descriptor.position_cap,
                 "lots_per_trade": self._lots_per_trade,
                 "broker": "upstox primary · fyers fallback",
-                "notes": "Entries use closed 15-minute bars only, accept fresh zero-crosses plus continuation breakouts after a recent cross, and keep hard stops live while delaying soft exits until the trade has had time to work. MCX futures quotes/history prefer Upstox and fall back to FYERS.",
+                "notes": "Entries use closed 15-minute bars only, accept fresh zero-crosses plus continuation breakouts only on trend-day MP, and keep hard stops live while delaying soft exits until the trade has had time to work. MCX futures quotes/history prefer Upstox and fall back to FYERS.",
             },
             {
                 "key": "commodity_options",
@@ -1252,7 +1377,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "execution_mode": lane_map["commodity_options"].descriptor.execution_mode,
                 "position_cap": lane_map["commodity_options"].descriptor.position_cap,
                 "broker": "fyers chain · upstox spot assist",
-                "notes": "Entries use liquid near-ATM contracts, 30-minute MACD zero-cross, 25% hard stop, and 20% capital budget per trade. Underlying MCX spot quotes prefer Upstox before FYERS.",
+                "notes": f"Entries use liquid near-ATM contracts, 30-minute MACD zero-cross, 25% hard stop, and {OPTIONS_CAPITAL_FRACTION:.0%} capital budget per trade. Underlying MCX spot quotes prefer Upstox before FYERS.",
             },
         ]
 
@@ -1262,6 +1387,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         at_capacity = futures_positions >= FUTURES_MAX_POSITIONS
         for row in watch_rows:
             symbol = str(row.get("symbol") or "")
+            underlying = str(row.get("underlying") or get_commodity_contract_spec(symbol).root)
             signal = str(row.get("signal") or "")
             raw_signal = str(row.get("raw_signal") or "")
             continuation_signal = str(row.get("continuation_signal") or "")
@@ -1270,6 +1396,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             spec = get_commodity_contract_spec(symbol)
             price = float(row.get("price") or 0.0)
             qty = spec.futures_lot_size * self._lots_per_trade
+            event_reason = _commodity_event_block_reason(underlying)
+            risk_block = self._entry_risk_block(underlying)
             validation = "waiting_cross"
             validation_detail = "Waiting for a closed 15-minute MACD cross or a continuation breakout."
             if row.get("reason") == "insufficient_data":
@@ -1290,9 +1418,15 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             elif signal in {"BUY", "SELL"} and self._kill_switch_active:
                 validation = "blocked_kill_switch"
                 validation_detail = "Kill switch is active. Signal is recorded but the execution lane is paused."
-            elif self._has_underlying_position("commodity_futures", str(row.get("underlying") or spec.root)):
+            elif signal in {"BUY", "SELL"} and self._has_any_underlying_position(underlying):
                 validation = "position_open"
-                validation_detail = "A futures position is already open for this underlying."
+                validation_detail = "A commodity position is already open for this underlying."
+            elif signal in {"BUY", "SELL"} and event_reason:
+                validation = "event_window"
+                validation_detail = f"{event_reason.replace('_', ' ')} is active; entries are blocked around scheduled data releases."
+            elif signal in {"BUY", "SELL"} and risk_block:
+                validation = risk_block["code"]
+                validation_detail = risk_block["detail"]
             elif signal in {"BUY", "SELL"} and self._runtime.processed_signals.get(f"commodity_futures:{symbol}") == bar_time:
                 validation = "bar_consumed"
                 validation_detail = "This 15-minute bar already triggered an entry."
@@ -1342,6 +1476,14 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             signal_side = str(row.get("signal_side") or "")
             trade_symbol = str(row.get("trade_symbol") or "")
             bar_time = str(row.get("trade_bar_time") or "")
+            underlying = str(row.get("underlying") or row.get("symbol") or "")
+            event_reason = _commodity_event_block_reason(underlying)
+            risk_block = self._entry_risk_block(underlying)
+            entry_iv_pct = row.get("entry_iv_pct")
+            try:
+                days_to_expiry = (date.fromisoformat(str(row.get("expiry") or "")) - _now_ist().date()).days
+            except ValueError:
+                days_to_expiry = None
             validation = "waiting_cross"
             validation_detail = "Waiting for a fresh 30-minute option MACD cross."
             if row.get("regime") == "warmup":
@@ -1353,9 +1495,24 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             elif signal_side and self._kill_switch_active:
                 validation = "blocked_kill_switch"
                 validation_detail = "Kill switch is active. Option entries are paused."
-            elif signal_side and self._has_underlying_position("commodity_options", str(row.get("underlying") or "")):
+            elif signal_side and self._has_any_underlying_position(underlying):
                 validation = "position_open"
-                validation_detail = "An options position is already open for this underlying."
+                validation_detail = "A commodity position is already open for this underlying."
+            elif signal_side and event_reason:
+                validation = "event_window"
+                validation_detail = f"{event_reason.replace('_', ' ')} is active; entries are blocked around scheduled data releases."
+            elif signal_side and risk_block:
+                validation = risk_block["code"]
+                validation_detail = risk_block["detail"]
+            elif signal_side and days_to_expiry is not None and days_to_expiry < OPTIONS_MIN_TTE_DAYS:
+                validation = "tte_filter"
+                validation_detail = f"Only {days_to_expiry} day(s) to expiry; minimum is {OPTIONS_MIN_TTE_DAYS}."
+            elif signal_side and entry_iv_pct is None:
+                validation = "iv_unavailable"
+                validation_detail = "Entry IV is unavailable, so the documented IV filter cannot approve the trade."
+            elif signal_side and float(entry_iv_pct or 0.0) > OPTIONS_IV_REJECT_PCT:
+                validation = "iv_reject"
+                validation_detail = f"Entry IV {float(entry_iv_pct):.1f}% is above the {OPTIONS_IV_REJECT_PCT:.0f}% hard cap."
             elif signal_side and self._runtime.processed_signals.get(f"commodity_options:{trade_symbol}") == bar_time:
                 validation = "bar_consumed"
                 validation_detail = "This 30-minute option bar already triggered an entry."
@@ -1364,7 +1521,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 validation_detail = "The options sleeve is already at max open-position capacity."
             elif signal_side and int(row.get("lots_affordable") or 0) <= 0:
                 validation = "insufficient_capital"
-                validation_detail = "The 20% capital budget cannot fund one option lot at the current premium."
+                validation_detail = f"The {OPTIONS_CAPITAL_FRACTION:.0%} capital budget cannot fund one option lot at the current premium."
             elif signal_side:
                 validation = "ready"
                 validation_detail = "The selected CE/PE contract has a fresh 30-minute MACD trigger and passes the liquidity check."
@@ -1594,7 +1751,15 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 current_price=price or float(latest_close or 0.0),
                 session_rows=session_rows,
             )
-            if candidate_signal in {"BUY", "SELL"} and candidate_signal == mp_direction:
+            if (
+                candidate_signal in {"BUY", "SELL"}
+                and entry_style == "continuation"
+                and mp_day_type not in {"trend_up", "trend_down"}
+            ):
+                validation_detail = (
+                    f"15-minute continuation fired {candidate_signal}, but continuation entries require a trend-day MP gate."
+                )
+            elif candidate_signal in {"BUY", "SELL"} and candidate_signal == mp_direction:
                 signal = candidate_signal
                 signal_reason = f"{candidate_reason}_{mp_reason}"
                 validation_detail = (
@@ -2012,6 +2177,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         trade_symbol = ""
         trade_strike: Optional[float] = None
         trade_bar_time: Optional[str] = None
+        entry_iv_pct: Optional[float] = None
+        iv_sizing_mode = "unknown"
         lots_affordable = 0
         capital_per_trade = self._runtime.portfolio.available_capital * OPTIONS_CAPITAL_FRACTION
         is_trade_contract_liquid = False
@@ -2027,8 +2194,20 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             trade_symbol = str(selected_side.get("instrument_key") or selected_side.get("trading_symbol") or "")
             trade_strike = float(selected_side.get("strike")) if selected_side.get("strike") is not None else None
             trade_bar_time = str(selected_side.get("bar_time") or "")
+            entry_iv_pct = _normalize_iv_pct(
+                selected_side.get("iv")
+                or selected_side.get("iv_pct")
+                or selected_side.get("implied_volatility")
+                or selected_side.get("implied_vol")
+                or selected_side.get("atm_iv")
+            )
             cost_per_lot = trade_price * max(spec.futures_lot_size, 1)
             lots_affordable = int(capital_per_trade // cost_per_lot) if cost_per_lot > 0 else 0
+            if entry_iv_pct is not None and entry_iv_pct > OPTIONS_IV_HALF_SIZE_PCT:
+                iv_sizing_mode = "reject" if entry_iv_pct > OPTIONS_IV_REJECT_PCT else "half_size"
+                lots_affordable = max(0, lots_affordable // 2)
+            elif entry_iv_pct is not None:
+                iv_sizing_mode = "normal"
             is_trade_contract_liquid = bool(selected_side.get("is_liquid"))
 
         return {
@@ -2045,6 +2224,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "trade_strike": trade_strike,
             "trade_price": _round_or_none(trade_price, 2),
             "trade_bar_time": trade_bar_time,
+            "entry_iv_pct": entry_iv_pct,
+            "iv_sizing_mode": iv_sizing_mode,
             "ce_symbol": ce_symbol,
             "pe_symbol": pe_symbol,
             "ce_trade_price": _round_or_none(ce_trade_price, 2),
@@ -2502,6 +2683,13 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 continue
 
             spec = get_commodity_contract_spec(symbol)
+            underlying = str(row.get("underlying") or spec.root)
+            if self._has_any_underlying_position(underlying):
+                continue
+            if _commodity_event_block_reason(underlying):
+                continue
+            if self._entry_risk_block(underlying):
+                continue
             price = float(row.get("price") or 0.0)
             atr = float(row.get("atr") or 0.0)
             if price <= 0 or atr <= 0:
@@ -2511,18 +2699,23 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             if required_margin > self._runtime.portfolio.available_capital:
                 continue
 
+            min_stop_distance = max(atr, price * FUTURES_MIN_STOP_PCT)
             if row.get("signal") == "BUY":
-                stop_candidates = [price - atr]
+                stop_candidates = [price - min_stop_distance]
                 for level in (row.get("mp_val"), row.get("mp_ib_low")):
-                    if level is not None and float(level) < price:
-                        stop_candidates.append(float(level))
+                    if level is not None:
+                        level_value = float(level)
+                        if level_value < price and (price - level_value) >= min_stop_distance:
+                            stop_candidates.append(level_value)
                 stop_price = max(stop_candidates)
                 target_price = price + ((price - stop_price) * 2.0)
             else:
-                stop_candidates = [price + atr]
+                stop_candidates = [price + min_stop_distance]
                 for level in (row.get("mp_vah"), row.get("mp_ib_high")):
-                    if level is not None and float(level) > price:
-                        stop_candidates.append(float(level))
+                    if level is not None:
+                        level_value = float(level)
+                        if level_value > price and (level_value - price) >= min_stop_distance:
+                            stop_candidates.append(level_value)
                 stop_price = min(stop_candidates)
                 target_price = price - ((stop_price - price) * 2.0)
 
@@ -2610,6 +2803,13 @@ class CommodityStrategyAgent(BaseStrategyAgent):
 
             symbol = str(row.get("symbol") or "")
             spec = get_commodity_contract_spec(symbol)
+            underlying = str(row.get("underlying") or spec.root)
+            if self._has_any_underlying_position(underlying):
+                continue
+            if _commodity_event_block_reason(underlying):
+                continue
+            if self._entry_risk_block(underlying):
+                continue
             qty = spec.futures_lot_size * lots
             side = row.get("ce") if signal_side == "CE" else row.get("pe")
             if not side:
@@ -2625,6 +2825,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 strike=float(side.get("strike") or 0.0),
                 option_type=signal_side,
                 session_id=self._runtime.portfolio.session_id,
+                entry_iv_pct=_round_or_none(row.get("entry_iv_pct"), 1),
+                regime=str(row.get("regime") or "neutral"),
                 ltp=trade_price,
             )
             self._record_order(
@@ -2673,12 +2875,13 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 expiry=row.get("expiry"),
                 strike=float(side.get("strike") or 0.0),
                 option_type=signal_side,
+                entry_iv_pct=_round_or_none(row.get("entry_iv_pct"), 1),
             )
             self._runtime.processed_signals[f"commodity_options:{trade_symbol}"] = trade_bar_time
             self._append_commentary(
                 "trade",
                 f"ENTRY {spec.display_name} {signal_side} @{fill_price:.2f} | {lots} lot | "
-                f"20% capital budget | stop {stop_price:.2f}",
+                f"{OPTIONS_CAPITAL_FRACTION:.0%} capital budget | stop {stop_price:.2f}",
             )
 
     def _record_order(
@@ -2705,6 +2908,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "order_type": order.order_type,
                 "status": order.status,
                 "fill_price": _round_or_none(order.fill_price, 2),
+                "entry_iv_pct": _round_or_none(order.entry_iv_pct, 1),
                 "reason": reason,
                 "flow": flow,
                 "strategy_key": strategy_key,
@@ -2869,10 +3073,17 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "lots_per_trade": self._lots_per_trade,
                 "futures_min_hold_bars": FUTURES_MIN_HOLD_BARS,
                 "futures_continuation_lookback_bars": FUTURES_CONTINUATION_LOOKBACK_BARS,
+                "futures_min_stop_pct": FUTURES_MIN_STOP_PCT,
                 "futures_trail_atr_multiplier": FUTURES_TRAIL_ATR_MULTIPLIER,
                 "futures_target_arm_r_multiplier": FUTURES_TARGET_ARM_R_MULTIPLIER,
                 "option_capital_fraction": OPTIONS_CAPITAL_FRACTION,
                 "option_hard_stop_pct": OPTIONS_HARD_STOP_PCT,
+                "option_min_tte_days": OPTIONS_MIN_TTE_DAYS,
+                "option_iv_half_size_pct": OPTIONS_IV_HALF_SIZE_PCT,
+                "option_iv_reject_pct": OPTIONS_IV_REJECT_PCT,
+                "commodity_daily_loss_limit": COMMODITY_DAILY_LOSS_LIMIT,
+                "commodity_underlying_daily_loss_limit": COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT,
+                "commodity_stop_cooldown_minutes": COMMODITY_STOP_COOLDOWN_MINUTES,
             },
             "strategy_agents": [lane.build_status_payload() for lane in lane_agents],
             "strategies": self._strategy_catalog(),
