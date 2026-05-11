@@ -522,6 +522,29 @@ async def set_strategy_agent_auto_run(enabled: bool):
     return await paper_strategy_agent.set_auto_run(enabled)
 
 
+class StrategyResetPaperRequest(BaseModel):
+    confirm: str
+    actor: Optional[str] = None
+
+
+@router.post("/strategy-agent/reset-paper")
+async def reset_nse_paper_account(body: StrategyResetPaperRequest):
+    """Archive NSE paper state and reset all strategy runtimes to ₹10L.
+
+    Destructive — requires `{"confirm": "RESET"}` body. Audit-logged.
+    """
+    if (body.confirm or "").strip().upper() != "RESET":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Paper reset is destructive. POST `{\"confirm\": \"RESET\"}` "
+                "in the body to proceed."
+            ),
+        )
+    actor = (body.actor or "manual").strip() or "manual"
+    return await paper_strategy_agent.archive_and_reset_paper_account(actor=actor)
+
+
 @router.get("/risk-status")
 async def risk_status():
     return _risk_manager.get_status()

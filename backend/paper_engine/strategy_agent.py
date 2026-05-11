@@ -16,6 +16,7 @@ import json
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
@@ -4304,6 +4305,98 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 }
                 for runtime in self._runtimes()
             ],
+        }
+
+    async def archive_and_reset_paper_account(self, *, actor: str = "manual") -> dict[str, Any]:
+        """Archive current NSE paper state, then reset each strategy runtime
+        to a fresh ₹10L paper account. Mirrors the commodity reset endpoint.
+        """
+        try:
+            from agentic_rag.audit_agent import record_audit_event
+        except Exception:  # noqa: BLE001
+            record_audit_event = None  # type: ignore[assignment]
+
+        archived_at = _now_ist()
+        archive_dir = Path(__file__).resolve().parent.parent / "runtime" / "nse_archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        stamp = archived_at.strftime("%Y%m%dT%H%M%S%f%z")
+        archive_path = archive_dir / f"{stamp}_pre_reset.json"
+
+        prior_realized: dict[str, float] = {}
+        prior_trades: dict[str, int] = {}
+        snapshot: dict[str, Any] = {}
+        try:
+            snapshot = self.get_status(refresh=False)
+        except Exception:  # noqa: BLE001
+            snapshot = {}
+        archive_payload = {
+            "archived_at": archived_at.isoformat(),
+            "reason": "manual_paper_reset",
+            "snapshot": snapshot,
+        }
+        archive_path.write_text(json.dumps(archive_payload, indent=2, default=str))
+
+        for runtime in self._runtimes():
+            try:
+                summary = runtime.portfolio.get_summary()
+                prior_realized[runtime.key] = float(summary.get("realized_pnl") or 0.0)
+                prior_trades[runtime.key] = int(summary.get("total_trades") or 0)
+            except Exception:  # noqa: BLE001
+                prior_realized[runtime.key] = 0.0
+                prior_trades[runtime.key] = 0
+            session_id = f"{runtime.key}-paper"
+            runtime.portfolio = PaperPortfolio(initial_capital=1_000_000.0, session_id=session_id)
+            runtime.order_book = PaperOrderBook(on_fill=runtime.portfolio.on_fill)
+            runtime.positions = []
+            runtime.signal_lane = []
+            runtime.processed_signals = {}
+            runtime.recent_events = []
+            runtime.entries = 0
+            runtime.exits = 0
+            runtime.commentary = []
+            runtime.meta = None
+            runtime.last_scan_at = None
+            runtime.last_message = (
+                f"{runtime.label} reset to ₹1,000,000. Prior state archived."
+            )
+
+        self._last_run_at = None
+        self._last_error = None
+        self._last_message = (
+            "NSE paper account reset to ₹1,000,000 across all strategies. "
+            "Archived prior state."
+        )
+        try:
+            self._persist_state()
+        except Exception:  # noqa: BLE001
+            pass
+
+        if record_audit_event is not None:
+            try:
+                await record_audit_event(
+                    market="nse",
+                    event_type="paper_account_reset",
+                    actor=actor,
+                    severity="warning",
+                    message=self._last_message,
+                    previous_state="damaged",
+                    new_state="fresh",
+                    payload={
+                        "archive_path": str(archive_path),
+                        "prior_realized_pnl_by_strategy": prior_realized,
+                        "prior_total_trades_by_strategy": prior_trades,
+                        "new_initial_capital": 1_000_000.0,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        return {
+            "archived": True,
+            "archive_path": str(archive_path),
+            "initial_capital": 1_000_000.0,
+            "prior_realized_pnl_by_strategy": prior_realized,
+            "prior_total_trades_by_strategy": prior_trades,
         }
 
 
