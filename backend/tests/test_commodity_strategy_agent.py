@@ -394,6 +394,55 @@ def test_commodity_agent_runs_automatically_until_kill_then_requires_restart(tmp
         loop.close()
 
 
+def test_commodity_kill_switch_release_blocked_when_drawdown_still_breaches_cap(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+    monkeypatch.setattr(commodity_module.settings, "COMMODITY_KILL_LOCK", False)
+
+    agent = CommodityStrategyAgent()
+    agent._runtime.portfolio._peak_equity = 1_000_000.0
+    agent._runtime.portfolio.available_capital = 500_000.0
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        activated = loop.run_until_complete(agent.set_kill_switch(True))
+        assert activated["kill_switch_active"] is True
+
+        release = loop.run_until_complete(agent.set_kill_switch(False))
+
+        assert release["kill_switch_active"] is True
+        assert release["start_required"] is True
+        assert release["release_blocked"] is True
+        assert "drawdown" in release["release_block_reason"]
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+def test_commodity_kill_switch_release_blocked_by_deployment_lock(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+    monkeypatch.setattr(commodity_module.settings, "COMMODITY_KILL_LOCK", True)
+
+    agent = CommodityStrategyAgent()
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        activated = loop.run_until_complete(agent.set_kill_switch(True))
+        assert activated["kill_switch_active"] is True
+
+        release = loop.run_until_complete(agent.set_kill_switch(False))
+
+        assert release["kill_switch_active"] is True
+        assert release["release_blocked"] is True
+        assert "deployment commodity kill lock" in release["release_block_reason"]
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
 def test_commodity_watchlist_reports_signal_validation_and_strategy_metadata(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "commodity_strategy.json"
     monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
@@ -1144,3 +1193,124 @@ def test_signal_audit_persists_across_instances(tmp_path: Path, monkeypatch) -> 
     assert status["signal_audit"][0]["symbol"] == "MCX:GOLD26JUNFUT"
     assert status["signal_audit"][0]["validation"] == "mp_conflict"
     assert "audit_key" not in status["signal_audit"][0]
+
+
+def test_option_budget_uses_stricter_of_initial_and_available_capital(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    agent = CommodityStrategyAgent()
+    agent._runtime.portfolio.available_capital = 418_501.60  # type: ignore[attr-defined]
+    row = {
+        "symbol": "MCX:SILVERM26JUNFUT",
+        "underlying": "SILVERM",
+        "expiry": "2099-05-26",
+        "ce": {
+            "instrument_key": "MCX_FO|SILVERM_CE",
+            "trading_symbol": "SILVERM CE",
+            "strike": 262000.0,
+            "option_type": "CE",
+            "ltp": 9090.54,
+            "iv": 0.32,
+            "is_liquid": True,
+        },
+        "pe": {
+            "instrument_key": "MCX_FO|SILVERM_PE",
+            "trading_symbol": "SILVERM PE",
+            "strike": 262000.0,
+            "option_type": "PE",
+            "ltp": 8128.5,
+            "iv": 0.31,
+            "is_liquid": True,
+        },
+    }
+
+    async def fake_load_candles(**kwargs):
+        option_type = kwargs["option_type"]
+        closes = [180.0 - (index * 1.5) for index in range(40)] if option_type == "CE" else [100.0 + (index * 4.0) for index in range(20)] + [176.0 - ((index + 1) * 2.0) for index in range(20)]
+        return _build_candles(closes)
+
+    monkeypatch.setattr(commodity_module.option_history_service, "load_candles", fake_load_candles)
+
+    analyzed = asyncio.run(agent._analyze_option_row(row))
+
+    assert analyzed is not None
+    assert analyzed["capital_per_trade"] == pytest.approx(20_925.08)
+    assert analyzed["lots_affordable"] == 0
+
+
+def test_option_watchlist_blocks_vol_spike_entries(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    agent = CommodityStrategyAgent()
+    decorated = agent._decorate_option_rows(
+        [
+            {
+                "symbol": "MCX:SILVERM26JUNFUT",
+                "underlying": "SILVERM",
+                "signal_side": "PE",
+                "trade_symbol": "MCX_FO|SILVERM_PE",
+                "trade_bar_time": "2026-05-11T12:30:00+05:30",
+                "trade_price": 8128.5,
+                "lots_affordable": 1,
+                "entry_iv_pct": 32.0,
+                "expiry": "2099-05-26",
+                "regime": "vol_spike",
+                "is_trade_contract_liquid": True,
+            }
+        ]
+    )
+
+    assert decorated[0]["signal_validation"] == "regime_blocked"
+
+
+def test_entry_risk_block_triggers_on_cumulative_drawdown(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    agent = CommodityStrategyAgent()
+    agent._runtime.portfolio.available_capital = 418_501.60  # type: ignore[attr-defined]
+    agent._runtime.portfolio._peak_equity = 1_000_000.0  # type: ignore[attr-defined]
+
+    block = agent._entry_risk_block("SILVERM")
+
+    assert block is not None
+    assert block["code"] == "max_drawdown_limit"
+
+
+def test_drawdown_kill_switch_does_not_cancel_current_loop_task(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    async def engage_from_current_task() -> CommodityStrategyAgent:
+        agent = CommodityStrategyAgent()
+        agent._task = asyncio.current_task()
+        await agent._engage_drawdown_kill_switch(drawdown_pct=15.0)
+        return agent
+
+    agent = asyncio.run(engage_from_current_task())
+
+    assert agent._kill_switch_active is True
+    assert agent._start_required is True
+    assert agent._task is None
+
+
+def test_archive_and_reset_paper_account_writes_snapshot(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    archive_dir = tmp_path / "archive"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+    monkeypatch.setattr(commodity_module, "DEFAULT_COMMODITY_ARCHIVE_DIR", archive_dir)
+
+    agent = CommodityStrategyAgent()
+    agent._runtime.portfolio.available_capital = 418_501.60  # type: ignore[attr-defined]
+    result = asyncio.run(agent.archive_and_reset_paper_account())
+    second_result = asyncio.run(agent.archive_and_reset_paper_account())
+
+    assert result["archived"] is True
+    assert Path(result["archive_path"]).exists()
+    assert Path(second_result["archive_path"]).exists()
+    assert second_result["archive_path"] != result["archive_path"]
+    status = agent.get_status()
+    assert status["summary"]["initial_capital"] == pytest.approx(1_000_000.0)
+    assert status["summary"]["realized_pnl"] == pytest.approx(0.0)

@@ -18,6 +18,7 @@ from fastapi.encoders import jsonable_encoder
 from loguru import logger
 from sqlalchemy import text
 
+from analysis.signal_classifier import classify_status_bucket
 from analytics.sector import sector_tracker
 from auction_intelligence.market_profile import MarketProfileEngine
 from auction_intelligence.order_flow import OrderFlowEngine
@@ -1467,6 +1468,15 @@ class FractalMarketProfileService:
             else min(float(current_hour_profile["poc"]), float(current_hour_profile["initial_balance_low"]))
         ) if action != "FLAT" else last_price
         target_level = _target_level(last_price, action if action != "FLAT" else "LONG", current_hour_profile, prior_daily_profile)
+        if actionable:
+            lane_status = "entry-ready"
+        elif action != "FLAT" and confidence >= float(SCAN_CONFIG["actionable_confidence_min"]) * 0.85 and not filters:
+            lane_status = "trend-aligned"
+        elif filters:
+            lane_status = "avoid"
+        else:
+            lane_status = "waiting"
+        bucket_info = classify_status_bucket(has_position=False, status=lane_status)
         return {
             "underlying": symbol_code,
             "signal_time": signal_timestamp.isoformat(),
@@ -1497,6 +1507,7 @@ class FractalMarketProfileService:
                 "order_flow_alignment": round(order_flow_alignment, 4),
                 "advisories": advisories,
             },
+            **bucket_info,
         }
 
     async def _build_live_order_flow(self, symbol_code: str, current_rows: list[dict[str, Any]]) -> dict[str, Any]:

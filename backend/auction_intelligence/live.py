@@ -12,12 +12,38 @@ import httpx
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import text
 
+from analysis.signal_classifier import classify_status_bucket
 from api.routers.auth import (
     ensure_fyers_session,
     ensure_upstox_session,
     get_active_adapter,
     get_broker_token,
 )
+
+
+def _decorate_bundle_for_client(analysis: dict[str, Any]) -> dict[str, Any]:
+    """Attach bucket classification to every agent_decision in the bundle so
+    each Auction Intelligence row renders into the three-list workspace.
+    """
+    decisions = list(analysis.get("agent_decisions") or [])
+    risk_allowed = bool((analysis.get("risk") or {}).get("allowed", True))
+    for decision in decisions:
+        action = str(decision.get("action") or "FLAT").upper()
+        confidence = float(decision.get("confidence") or 0.0)
+        if action == "FLAT":
+            lane_status = "waiting"
+        elif risk_allowed and confidence >= 0.70:
+            lane_status = "entry-ready"
+        elif risk_allowed and confidence >= 0.55:
+            lane_status = "trend-aligned"
+        elif not risk_allowed:
+            lane_status = "avoid"
+        else:
+            lane_status = "watching"
+        bucket_info = classify_status_bucket(has_position=False, status=lane_status)
+        decision.update(bucket_info)
+    analysis["agent_decisions"] = decisions
+    return analysis
 from auction_intelligence.config import clone_default_config
 from auction_intelligence.service import AuctionIntelligenceService
 from auction_intelligence.schemas import (
@@ -439,7 +465,7 @@ async def _build_analysis_from_session_rows(
         "available_scenarios": [],
         "request": request,
         "data_status": data_status,
-        "analysis": jsonable_encoder(asdict(bundle)),
+        "analysis": _decorate_bundle_for_client(jsonable_encoder(asdict(bundle))),
     }
 
 

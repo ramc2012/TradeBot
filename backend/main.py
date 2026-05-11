@@ -1,10 +1,12 @@
 """Nomad Curie — FastAPI application entry point."""
 from __future__ import annotations
 import asyncio
+import hmac
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from loguru import logger
 
 from core.config import settings
@@ -19,6 +21,8 @@ from api.routers import auction_intelligence as auction_intelligence_router
 from api.routers import directional_options as directional_options_router
 from api.routers import fractal_market_profile as fractal_market_profile_router
 from api.routers import system as system_router
+from api.routers import audit as audit_router
+from api.routers import data_quality as data_quality_router
 from directional_options import mount_directional_options_dashboard
 from directional_options.service import directional_options_service
 from api.websockets.ticks import (
@@ -42,6 +46,9 @@ from market_data.symbols import LIVE_INDEX_APP_SYMBOLS
 from auction_intelligence.rl.automation import rl_auto_trainer
 from paper_engine.commodity_strategy_agent import commodity_strategy_agent
 from paper_engine.strategy_agent import paper_strategy_agent
+
+
+OAUTH_CALLBACK_PATHS = {"/api/auth/fyers/callback", "/api/auth/upstox/callback"}
 
 
 @asynccontextmanager
@@ -173,6 +180,42 @@ app = FastAPI(
 )
 mount_directional_options_dashboard(app, directional_options_service)
 
+
+def _extract_write_token(request: Request) -> str:
+    header_token = str(request.headers.get("x-nomad-write-token") or "").strip()
+    if header_token:
+        return header_token
+    authorization = str(request.headers.get("authorization") or "").strip()
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() == "bearer" and token.strip():
+        return token.strip()
+    return str(request.cookies.get("nomad_write_token") or "").strip()
+
+
+def _api_guard_active() -> bool:
+    return bool(settings.APP_TOKEN_AUTH_ENABLED)
+
+
+@app.middleware("http")
+async def require_api_token(request: Request, call_next):
+    if not request.url.path.startswith("/api/"):
+        return await call_next(request)
+    if not _api_guard_active():
+        return await call_next(request)
+    if request.url.path in OAUTH_CALLBACK_PATHS:
+        return await call_next(request)
+
+    expected = settings.APP_WRITE_TOKEN.strip()
+    if not expected:
+        return JSONResponse(
+            {"detail": "APP_WRITE_TOKEN must be configured before API access is enabled in production."},
+            status_code=503,
+        )
+    supplied = _extract_write_token(request)
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        return JSONResponse({"detail": "API token is required."}, status_code=403)
+    return await call_next(request)
+
 # ── CORS ─────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
@@ -201,6 +244,8 @@ app.include_router(auction_intelligence_router.router)
 app.include_router(directional_options_router.router)
 app.include_router(fractal_market_profile_router.router)
 app.include_router(system_router.router)
+app.include_router(audit_router.router)
+app.include_router(data_quality_router.router)
 
 
 # ── WebSocket Endpoints ───────────────────────────────────────────────────────

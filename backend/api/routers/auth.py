@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import os
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
@@ -72,6 +73,7 @@ BROKER_STATUS_LABELS = {
 }
 AUTO_RESTORE_TIMEOUT_SECONDS = 10
 WS_TOKEN_TTL_SECONDS = 300
+OAUTH_STATE_TTL_SECONDS = 900
 _ENCRYPTED_VALUE_PREFIX = "fernet::"
 _ENCRYPTED_CREDENTIALS_VERSION = "fernet-v1"
 _credentials_require_migration = False
@@ -1228,6 +1230,31 @@ def _mint_websocket_token(subject: str) -> tuple[str, str]:
     return token, expires_at.isoformat()
 
 
+def _append_query_param(url: str, key: str, value: str) -> str:
+    parts = urlsplit(url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    query.append((key, value))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def _mint_oauth_state(broker: str) -> str:
+    return issue_ephemeral_token(
+        scope=f"oauth:{broker}",
+        subject="browser-client",
+        ttl_seconds=OAUTH_STATE_TTL_SECONDS,
+    )
+
+
+def _verify_oauth_state(broker: str, state: str | None) -> None:
+    token = str(state or "").strip()
+    if not token:
+        raise HTTPException(status_code=403, detail="Missing OAuth state.")
+    try:
+        verify_ephemeral_token(token, expected_scope=f"oauth:{broker}")
+    except Exception as exc:
+        raise HTTPException(status_code=403, detail=f"Invalid OAuth state: {exc}")
+
+
 def authenticate_websocket_client(websocket: WebSocket) -> dict[str, Any]:
     token = str(
         websocket.query_params.get("auth")
@@ -1597,14 +1624,16 @@ async def fyers_auth_url():
     if not settings.FYERS_APP_ID:
         raise HTTPException(400, "FYERS_APP_ID not configured. Save credentials first.")
     from brokers.fyers import FyersAdapter
-    return {"auth_url": FyersAdapter().get_auth_url()}
+    auth_url = _append_query_param(FyersAdapter().get_auth_url(), "state", _mint_oauth_state("fyers"))
+    return {"auth_url": auth_url}
 
 
 @router.get("/fyers/callback")
-async def fyers_callback(auth_code: str = None, code: str = None):
+async def fyers_callback(auth_code: str = None, code: str = None, state: str = None):
     """Fyers OAuth callback — accepts both auth_code= and code= query params."""
     from brokers.fyers import FyersAdapter
     from fastapi.responses import HTMLResponse
+    _verify_oauth_state("fyers", state)
     actual_code = auth_code or code
     if not actual_code:
         from fastapi.responses import HTMLResponse
@@ -1645,7 +1674,8 @@ async def upstox_auth_url():
             "Saved Upstox API Key is a placeholder. Replace it with the real API key from account.upstox.com → Developer Apps.",
         )
     from brokers.upstox import UpstoxAdapter
-    return {"auth_url": UpstoxAdapter().get_auth_url()}
+    auth_url = _append_query_param(UpstoxAdapter().get_auth_url(), "state", _mint_oauth_state("upstox"))
+    return {"auth_url": auth_url}
 
 
 @router.post("/upstox/connect")
@@ -1692,10 +1722,11 @@ async def upstox_connect_manual(body: dict):
 
 
 @router.get("/upstox/callback")
-async def upstox_callback(code: str):
+async def upstox_callback(code: str, state: str = None):
     from brokers.upstox import UpstoxAdapter
     from brokers.base import UserProfile
     from fastapi.responses import HTMLResponse
+    _verify_oauth_state("upstox", state)
     adapter = UpstoxAdapter()
     token = await adapter.authenticate({"code": code})
     try:

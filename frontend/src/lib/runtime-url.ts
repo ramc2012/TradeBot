@@ -45,6 +45,9 @@ export function resolveApiBaseUrlCandidates(): string[] {
   const hostname = window.location.hostname || "localhost";
   const cloudRunBackendHost = deriveCloudRunBackendHost(hostname);
   if (cloudRunBackendHost) {
+    pushUnique(candidates, origin);
+  }
+  if (cloudRunBackendHost) {
     pushUnique(candidates, `${protocol}//${cloudRunBackendHost}`);
   }
   if (isLocalHostname(hostname)) {

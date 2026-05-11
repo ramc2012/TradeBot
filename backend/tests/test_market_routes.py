@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 
@@ -28,13 +28,14 @@ def test_market_symbol_helpers_accept_display_and_fyers_aliases() -> None:
 
 
 def test_fno_360_statistics_aggregate_persisted_watchlist_snapshots(monkeypatch) -> None:
-    snapshot_time = datetime(2026, 5, 7, 9, 30, tzinfo=timezone.utc)
+    snapshot_time = datetime.now(timezone.utc).replace(microsecond=0)
+    expiry = snapshot_time.date() + timedelta(days=21)
     rows = [
         {
             "time": snapshot_time,
             "underlying": "RELIANCE",
             "kind": "stock",
-            "expiry": date(2026, 5, 28),
+            "expiry": expiry,
             "strike": 1400,
             "option_type": "CE",
             "underlying_price": 1412.5,
@@ -50,7 +51,7 @@ def test_fno_360_statistics_aggregate_persisted_watchlist_snapshots(monkeypatch)
             "time": snapshot_time,
             "underlying": "RELIANCE",
             "kind": "stock",
-            "expiry": date(2026, 5, 28),
+            "expiry": expiry,
             "strike": 1400,
             "option_type": "PE",
             "underlying_price": 1412.5,
@@ -66,7 +67,7 @@ def test_fno_360_statistics_aggregate_persisted_watchlist_snapshots(monkeypatch)
             "time": snapshot_time,
             "underlying": "NIFTY",
             "kind": "index",
-            "expiry": date(2026, 5, 28),
+            "expiry": expiry,
             "strike": 24000,
             "option_type": "CE",
             "underlying_price": 24020.0,
@@ -82,7 +83,7 @@ def test_fno_360_statistics_aggregate_persisted_watchlist_snapshots(monkeypatch)
             "time": snapshot_time,
             "underlying": "NIFTY",
             "kind": "index",
-            "expiry": date(2026, 5, 28),
+            "expiry": expiry,
             "strike": 24000,
             "option_type": "PE",
             "underlying_price": 24020.0,
@@ -144,12 +145,14 @@ def test_fno_360_statistics_aggregate_persisted_watchlist_snapshots(monkeypatch)
 
 
 def test_fno_360_statistics_rejects_stale_snapshot_rows(monkeypatch) -> None:
+    stale_time = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=2)
+    stale_expiry = stale_time.date() + timedelta(days=21)
     rows = [
         {
-            "time": datetime(2026, 4, 24, 6, 26, tzinfo=timezone.utc),
+            "time": stale_time,
             "underlying": "VEDL",
             "kind": "stock",
-            "expiry": date(2026, 5, 26),
+            "expiry": stale_expiry,
             "strike": 710,
             "option_type": "CE",
             "underlying_price": 711.0,
@@ -162,10 +165,10 @@ def test_fno_360_statistics_rejects_stale_snapshot_rows(monkeypatch) -> None:
             "iv": 0.1714,
         },
         {
-            "time": datetime(2026, 4, 24, 6, 27, tzinfo=timezone.utc),
+            "time": stale_time + timedelta(minutes=1),
             "underlying": "VEDL",
             "kind": "stock",
-            "expiry": date(2026, 5, 26),
+            "expiry": stale_expiry,
             "strike": 710,
             "option_type": "PE",
             "underlying_price": 711.0,
@@ -204,7 +207,7 @@ def test_fno_360_statistics_rejects_stale_snapshot_rows(monkeypatch) -> None:
     payload = asyncio.run(market_router._fno_360_statistics(limit=5))
 
     assert payload["status"] == "stale"
-    assert payload["latest_time"].startswith("2026-04-24T06:27:00")
+    assert payload["latest_time"].startswith((stale_time + timedelta(minutes=1)).isoformat())
     assert payload["market"]["total_underlyings"] == 0
     assert payload["analytics"] == {}
     assert payload["top_gainers"] == []

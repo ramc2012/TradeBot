@@ -29,6 +29,7 @@ import {
 } from "recharts";
 
 import { StreamStatus } from "@/components/live/StreamStatus";
+import SignalBucketLists from "@/components/strategy/SignalBucketLists";
 import {
   getCommodityOverview,
   getCommodityWatchlistSnapshot,
@@ -177,6 +178,10 @@ type CommodityWatchRow = {
   execution_lane?: string | null;
   required_margin?: number | null;
   bias_side?: "CE" | "PE" | null;
+  bucket?: "active" | "ready" | "favourable" | "drifting" | "neutral" | null;
+  trajectory?: "improving" | "stalled" | "deteriorating" | null;
+  proximity_pct?: number | null;
+  bucket_rationale?: string | null;
 };
 
 type ATMWatchlistOptionSide = {
@@ -256,6 +261,10 @@ type CommodityOptionRow = {
   is_trade_contract_liquid?: boolean;
   ce?: ATMWatchlistOptionSide | null;
   pe?: ATMWatchlistOptionSide | null;
+  bucket?: "active" | "ready" | "favourable" | "drifting" | "neutral" | null;
+  trajectory?: "improving" | "stalled" | "deteriorating" | null;
+  proximity_pct?: number | null;
+  bucket_rationale?: string | null;
 };
 
 type CommodityContractCatalogPayload = {
@@ -1212,6 +1221,36 @@ export default function CommodityPage() {
   const optionsLane = useMemo(() => strategies.find((lane) => lane.key === "commodity_options"), [strategies]);
   const actionableFutures = useMemo(() => futuresRows.filter((row) => row.signal_validation === "ready"), [futuresRows]);
   const actionableOptions = useMemo(() => optionRows.filter((row) => row.signal_validation === "ready"), [optionRows]);
+
+  // Three-list classification powered by analysis.signal_classifier on the
+  // backend. Each watchlist row now carries a `bucket` field that maps to one
+  // of: active/ready (already met or traded), favourable (close to trigger and
+  // tracked), drifting (moving away from favourable). The frontend simply
+  // filters once and presents three lists per strategy desk.
+  const futuresMet = useMemo(
+    () => futuresRows.filter((row) => row.bucket === "active" || row.bucket === "ready"),
+    [futuresRows],
+  );
+  const futuresFavourable = useMemo(
+    () => futuresRows.filter((row) => row.bucket === "favourable"),
+    [futuresRows],
+  );
+  const futuresDrifting = useMemo(
+    () => futuresRows.filter((row) => row.bucket === "drifting"),
+    [futuresRows],
+  );
+  const optionsMet = useMemo(
+    () => optionRows.filter((row) => row.bucket === "active" || row.bucket === "ready"),
+    [optionRows],
+  );
+  const optionsFavourable = useMemo(
+    () => optionRows.filter((row) => row.bucket === "favourable"),
+    [optionRows],
+  );
+  const optionsDrifting = useMemo(
+    () => optionRows.filter((row) => row.bucket === "drifting"),
+    [optionRows],
+  );
   const portfolioRows = useMemo(
     () => buildCommodityPortfolioRows(positionRows, tradeHistoryRows, status?.last_run_at),
     [positionRows, status?.last_run_at, tradeHistoryRows],
@@ -1720,6 +1759,17 @@ export default function CommodityPage() {
             detail={`${Math.round(optionCapitalFraction * 100)}% budget · ${optionHardStopPct}% stop`}
           />
         </div>
+
+        <SignalBucketLists
+          title="Strategy 2 · Futures · Bucketed View"
+          rows={futuresRows as unknown as Parameters<typeof SignalBucketLists>[0]["rows"]}
+          emptyHint="No futures rows on the desk yet."
+        />
+        <SignalBucketLists
+          title="Strategy 1 · Options · Bucketed View"
+          rows={optionRows as unknown as Parameters<typeof SignalBucketLists>[0]["rows"]}
+          emptyHint="No option rows on the desk yet."
+        />
 
         <div className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
           <PanelHeader

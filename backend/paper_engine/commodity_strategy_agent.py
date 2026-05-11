@@ -17,7 +17,9 @@ from typing import Any, Optional
 
 from loguru import logger
 
+from agentic_rag.audit_agent import record_audit_event
 from analysis.macd_engine import compute_ema, compute_macd
+from analysis.signal_classifier import classify_signal_bucket
 from analytics.technicals import latest_macd_rsi
 from api.routers.auth import (
     ensure_fyers_session,
@@ -62,6 +64,7 @@ DEFAULT_COMMODITY_ORDERS_MAX = 80
 DEFAULT_COMMODITY_COMMENTARY_MAX = 80
 DEFAULT_COMMODITY_SIGNAL_AUDIT_MAX = 120
 DEFAULT_COMMODITY_INITIAL_CAPITAL = 1_000_000.0
+DEFAULT_COMMODITY_ARCHIVE_DIR = Path(__file__).resolve().parent.parent / "runtime" / "commodity_archive"
 
 FUTURES_MACD_FAST = 12
 FUTURES_MACD_SLOW = 26
@@ -81,6 +84,7 @@ COMMODITY_DAILY_LOSS_LIMIT = 25_000.0
 COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT = 15_000.0
 COMMODITY_STOP_COOLDOWN_MINUTES = 60
 COMMODITY_EVENT_BLOCK_MINUTES = 90
+COMMODITY_MAX_DRAWDOWN_PCT = 15.0
 
 OPTIONS_MACD_FAST = 12
 OPTIONS_MACD_SLOW = 26
@@ -137,6 +141,13 @@ def _normalize_iv_pct(value: Any) -> Optional[float]:
     if iv_pct <= 1:
         iv_pct *= 100.0
     return round(iv_pct, 2)
+
+
+def _normalized_option_budget_cap(initial_capital: float, available_capital: float) -> float:
+    safe_initial = max(float(initial_capital or 0.0), 0.0)
+    safe_available = max(float(available_capital or 0.0), 0.0)
+    budget_base = min(safe_initial, safe_available)
+    return round(budget_base * OPTIONS_CAPITAL_FRACTION, 2)
 
 
 def _is_within_minutes(current_time: time, event_time: time, minutes: int) -> bool:
@@ -607,6 +618,7 @@ def evaluate_commodity_signal(
             continuation_signal = "SELL"
             continuation_reason = "macd_continuation_breakdown_down"
 
+    prev_hist = histogram[-2] if len(histogram) >= 2 else None
     return {
         "signal": signal,
         "reason": reason,
@@ -616,6 +628,8 @@ def evaluate_commodity_signal(
         "macd": _round_or_none(latest_macd, 4),
         "macd_signal": _round_or_none(latest_signal, 4),
         "macd_histogram": _round_or_none(latest_hist, 4),
+        "prev_macd_histogram": _round_or_none(prev_hist, 4),
+        "prev_macd": _round_or_none(previous_macd, 4),
         "atr": _round_or_none(latest_atr, 4),
         "bar_time": str(candles[-1].get("time") or ""),
         "recent_cross_signal": recent_cross_signal,
@@ -623,6 +637,10 @@ def evaluate_commodity_signal(
         "continuation_signal": continuation_signal,
         "continuation_reason": continuation_reason,
     }
+
+
+# classify_signal_bucket is imported from analysis.signal_classifier so all
+# strategy agents bucket their lane rows the same way.
 
 
 @dataclass
@@ -1064,6 +1082,9 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._task = None
         if not task:
             return
+        if task is asyncio.current_task():
+            self._running = False
+            return
         task.cancel()
         try:
             await task
@@ -1326,6 +1347,15 @@ class CommodityStrategyAgent(BaseStrategyAgent):
 
     def _entry_risk_block(self, underlying: str, now: Optional[datetime] = None) -> Optional[dict[str, str]]:
         current = now or _now_ist()
+        drawdown_pct = self._current_drawdown_pct()
+        if drawdown_pct >= COMMODITY_MAX_DRAWDOWN_PCT:
+            return {
+                "code": "max_drawdown_limit",
+                "detail": (
+                    f"Commodity desk drawdown is {drawdown_pct:.1f}% from peak; "
+                    "new entries are blocked pending manual review."
+                ),
+            }
         daily_pnl = self._today_realized_pnl(current)
         if daily_pnl <= -COMMODITY_DAILY_LOSS_LIMIT:
             return {
@@ -1342,6 +1372,45 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         if cooldown_reason:
             return {"code": "stop_cooldown", "detail": cooldown_reason}
         return None
+
+    def _current_drawdown_pct(self) -> float:
+        equity = float(self._runtime.portfolio.total_equity or 0.0)
+        peak_equity = float(getattr(self._runtime.portfolio, "_peak_equity", 0.0) or 0.0)
+        if peak_equity <= 0:
+            return 0.0
+        return max(0.0, ((peak_equity - equity) / peak_equity) * 100.0)
+
+    async def _engage_drawdown_kill_switch(self, *, drawdown_pct: Optional[float] = None) -> None:
+        drawdown = float(drawdown_pct if drawdown_pct is not None else self._current_drawdown_pct())
+        if self._kill_switch_active:
+            return
+        self._kill_switch_active = True
+        self._start_required = True
+        await self._stop_loop()
+        self._last_message = (
+            f"Commodity kill switch engaged: drawdown {drawdown:.1f}% exceeded "
+            f"the {COMMODITY_MAX_DRAWDOWN_PCT:.1f}% cap."
+        )
+        # Persist immediately so the next _refresh_state_from_store cannot
+        # overwrite the trip with the stale `kill_switch_active: false` from
+        # the saved control state. Without this, the desk oscillated trip→release
+        # ~once per hour as catch-up reloads clobbered in-memory state.
+        self._persist_state()
+        await record_audit_event(
+            market="commodity",
+            event_type="kill_switch_engaged",
+            actor="auto_drawdown",
+            severity="error",
+            message=self._last_message,
+            previous_state="active",
+            new_state="killed",
+            payload={
+                "drawdown_pct": round(drawdown, 4),
+                "cap_pct": COMMODITY_MAX_DRAWDOWN_PCT,
+                "total_equity": float(self._runtime.portfolio.total_equity or 0.0),
+            },
+        )
+        self._append_commentary("error", self._last_message)
 
     def _strategy_catalog(self) -> list[dict[str, Any]]:
         option_contracts_ready = sum(1 for expiry in self._selected_option_expiries.values() if expiry)
@@ -1449,6 +1518,17 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                         )
                     )
 
+            bucket_info = classify_signal_bucket(
+                has_position=self._has_any_underlying_position(underlying),
+                signal_validation=validation,
+                macd=row.get("macd"),
+                macd_histogram=row.get("macd_histogram"),
+                prev_macd=row.get("prev_macd"),
+                prev_macd_histogram=row.get("prev_macd_histogram"),
+                recent_cross_signal=row.get("recent_cross_signal"),
+                recent_cross_bars_ago=row.get("recent_cross_bars_ago"),
+            )
+
             decorated.append(
                 {
                     **row,
@@ -1464,6 +1544,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     "execution_lane": "paper_futures",
                     "required_margin": _round_or_none(self._estimate_futures_margin_required(price, qty), 2),
                     "bias_side": "CE" if signal == "BUY" else "PE" if signal == "SELL" else None,
+                    **bucket_info,
                 }
             )
         return decorated
@@ -1504,6 +1585,9 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             elif signal_side and risk_block:
                 validation = risk_block["code"]
                 validation_detail = risk_block["detail"]
+            elif signal_side and row.get("regime") == "vol_spike":
+                validation = "regime_blocked"
+                validation_detail = "Vol-spike regime is evaluation-only for options; automatic entries are blocked."
             elif signal_side and days_to_expiry is not None and days_to_expiry < OPTIONS_MIN_TTE_DAYS:
                 validation = "tte_filter"
                 validation_detail = f"Only {days_to_expiry} day(s) to expiry; minimum is {OPTIONS_MIN_TTE_DAYS}."
@@ -1529,28 +1613,53 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 validation = "trend_aligned"
                 validation_detail = "Option MACD context is available, but a fresh CE/PE zero-cross has not fired yet."
 
+            side_payload = (row.get("ce") or {}) if signal_side == "CE" else (row.get("pe") or {})
+            side_macd = side_payload.get("macd")
+            side_hist = side_payload.get("macd_histogram")
+            side_prev_hist = side_payload.get("prev_macd_histogram")
+            side_prev_macd = side_payload.get("prev_macd")
+            side_recent_cross = side_payload.get("recent_cross_signal")
+            side_recent_bars_ago = side_payload.get("recent_cross_bars_ago")
+            bucket_info = classify_signal_bucket(
+                has_position=self._has_any_underlying_position(underlying),
+                signal_validation=validation,
+                macd=side_macd,
+                macd_histogram=side_hist,
+                prev_macd=side_prev_macd,
+                prev_macd_histogram=side_prev_hist,
+                recent_cross_signal=side_recent_cross,
+                recent_cross_bars_ago=side_recent_bars_ago,
+            )
+
             decorated.append(
                 {
                     **row,
                     "signal_validation": validation,
                     "signal_validation_detail": validation_detail,
                     "strategy_title": get_commodity_contract_spec(str(row.get("symbol") or "")).options_label,
+                    **bucket_info,
                 }
             )
         return decorated
 
     async def _loop(self) -> None:
-        while True:
-            try:
-                await self.run_once(force=False)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self._last_error = str(exc)
-                self._last_message = f"Commodity strategy error: {exc}"
-                self._append_commentary("error", f"Loop failure: {exc}")
-                logger.exception("[CommodityStrategy] loop failure")
-            await asyncio.sleep(self.scan_interval_seconds)
+        try:
+            while self._enabled and not self._kill_switch_active and not self._start_required:
+                try:
+                    await self.run_once(force=False)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self._last_error = str(exc)
+                    self._last_message = f"Commodity strategy error: {exc}"
+                    self._append_commentary("error", f"Loop failure: {exc}")
+                    logger.exception("[CommodityStrategy] loop failure")
+                if not self._enabled or self._kill_switch_active or self._start_required:
+                    break
+                await asyncio.sleep(self.scan_interval_seconds)
+        finally:
+            if self._task is asyncio.current_task():
+                self._task = None
 
     async def _get_fyers_adapter(self) -> Optional[BrokerAdapter]:
         adapter = get_active_adapter("fyers")
@@ -2180,7 +2289,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         entry_iv_pct: Optional[float] = None
         iv_sizing_mode = "unknown"
         lots_affordable = 0
-        capital_per_trade = self._runtime.portfolio.available_capital * OPTIONS_CAPITAL_FRACTION
+        capital_per_trade = _normalized_option_budget_cap(
+            self._runtime.portfolio.initial_capital,
+            self._runtime.portfolio.available_capital,
+        )
         is_trade_contract_liquid = False
         ce_symbol = str(ce.get("instrument_key") or ce.get("trading_symbol") or "")
         pe_symbol = str(pe.get("instrument_key") or pe.get("trading_symbol") or "")
@@ -2330,6 +2442,9 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     self._runtime.portfolio.update_prices(latest_prices)
 
                 await self._manage_positions(adapter, futures_rows, option_rows, option_quote_map=option_quote_map)
+                current_drawdown_pct = self._current_drawdown_pct()
+                if current_drawdown_pct >= COMMODITY_MAX_DRAWDOWN_PCT:
+                    await self._engage_drawdown_kill_switch(drawdown_pct=current_drawdown_pct)
                 if self._kill_switch_active:
                     actionable_futures = [row for row in futures_rows if row.get("signal_validation") == "ready"]
                     actionable_options = [row for row in option_rows if row.get("signal_validation") == "ready"]
@@ -2810,10 +2925,42 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 continue
             if self._entry_risk_block(underlying):
                 continue
+            if str(row.get("regime") or "") == "vol_spike":
+                continue
+            try:
+                days_to_expiry = (date.fromisoformat(str(row.get("expiry") or "")) - _now_ist().date()).days
+            except ValueError:
+                days_to_expiry = None
+            if days_to_expiry is None or days_to_expiry < OPTIONS_MIN_TTE_DAYS:
+                continue
             qty = spec.futures_lot_size * lots
             side = row.get("ce") if signal_side == "CE" else row.get("pe")
             if not side:
                 continue
+            entry_iv_pct = _normalize_iv_pct(
+                row.get("entry_iv_pct")
+                or side.get("iv")
+                or side.get("iv_pct")
+                or side.get("implied_volatility")
+                or side.get("implied_vol")
+                or side.get("atm_iv")
+            )
+            if entry_iv_pct is None or entry_iv_pct > OPTIONS_IV_REJECT_PCT:
+                continue
+            max_capital = _normalized_option_budget_cap(
+                self._runtime.portfolio.initial_capital,
+                self._runtime.portfolio.available_capital,
+            )
+            cost_per_lot = trade_price * max(spec.futures_lot_size, 1)
+            if cost_per_lot <= 0:
+                continue
+            allowed_lots = int(max_capital // cost_per_lot)
+            if entry_iv_pct > OPTIONS_IV_HALF_SIZE_PCT:
+                allowed_lots = max(0, allowed_lots // 2)
+            lots = min(lots, allowed_lots)
+            if lots <= 0:
+                continue
+            qty = spec.futures_lot_size * lots
 
             order = self._runtime.order_book.place_order(
                 symbol=trade_symbol,
@@ -2825,7 +2972,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 strike=float(side.get("strike") or 0.0),
                 option_type=signal_side,
                 session_id=self._runtime.portfolio.session_id,
-                entry_iv_pct=_round_or_none(row.get("entry_iv_pct"), 1),
+                entry_iv_pct=_round_or_none(entry_iv_pct, 1),
                 regime=str(row.get("regime") or "neutral"),
                 ltp=trade_price,
             )
@@ -2875,7 +3022,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 expiry=row.get("expiry"),
                 strike=float(side.get("strike") or 0.0),
                 option_type=signal_side,
-                entry_iv_pct=_round_or_none(row.get("entry_iv_pct"), 1),
+                entry_iv_pct=_round_or_none(entry_iv_pct, 1),
             )
             self._runtime.processed_signals[f"commodity_options:{trade_symbol}"] = trade_bar_time
             self._append_commentary(
@@ -3008,6 +3155,44 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             )
 
     async def set_kill_switch(self, active: bool) -> dict[str, Any]:
+        previous = self._kill_switch_active
+        if not active:
+            current_drawdown = self._current_drawdown_pct()
+            release_blocked = bool(settings.COMMODITY_KILL_LOCK) or current_drawdown >= COMMODITY_MAX_DRAWDOWN_PCT
+            if release_blocked:
+                self._kill_switch_active = True
+                self._start_required = True
+                await self._stop_loop()
+                if settings.COMMODITY_KILL_LOCK:
+                    reason = "deployment commodity kill lock is enabled"
+                else:
+                    reason = (
+                        f"drawdown {current_drawdown:.1f}% still exceeds "
+                        f"the {COMMODITY_MAX_DRAWDOWN_PCT:.1f}% cap"
+                    )
+                self._last_message = f"Commodity kill switch release blocked: {reason}."
+                self._append_commentary("warning", self._last_message)
+                self._persist_state()
+                await record_audit_event(
+                    market="commodity",
+                    event_type="kill_switch_release_blocked",
+                    actor="manual",
+                    severity="warning",
+                    message=self._last_message,
+                    previous_state="killed",
+                    new_state="killed",
+                    payload={
+                        "reason": reason,
+                        "current_drawdown_pct": _round_or_none(current_drawdown, 2),
+                    },
+                )
+                return {
+                    **self.get_control_state(),
+                    "release_blocked": True,
+                    "release_block_reason": reason,
+                    "current_drawdown_pct": _round_or_none(current_drawdown, 2),
+                }
+
         self._kill_switch_active = bool(active)
         cancelled_orders = 0
         for order in list(self._runtime.order_book.get_open_orders(self._runtime.portfolio.session_id)):
@@ -3025,6 +3210,17 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             self._append_commentary("success", self._last_message)
 
         self._persist_state()
+        if previous != self._kill_switch_active:
+            await record_audit_event(
+                market="commodity",
+                event_type="kill_switch_toggled",
+                actor="manual",
+                severity="warning" if self._kill_switch_active else "success",
+                message=self._last_message,
+                previous_state="killed" if previous else "active",
+                new_state="killed" if self._kill_switch_active else "active",
+                payload={"cancelled_orders": cancelled_orders},
+            )
         return self.get_control_state(cancelled_orders=cancelled_orders)
 
     def get_control_state(self, *, cancelled_orders: int = 0) -> dict[str, Any]:
@@ -3083,6 +3279,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "option_iv_reject_pct": OPTIONS_IV_REJECT_PCT,
                 "commodity_daily_loss_limit": COMMODITY_DAILY_LOSS_LIMIT,
                 "commodity_underlying_daily_loss_limit": COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT,
+                "commodity_max_drawdown_pct": COMMODITY_MAX_DRAWDOWN_PCT,
                 "commodity_stop_cooldown_minutes": COMMODITY_STOP_COOLDOWN_MINUTES,
             },
             "strategy_agents": [lane.build_status_payload() for lane in lane_agents],
@@ -3132,6 +3329,69 @@ class CommodityStrategyAgent(BaseStrategyAgent):
     def get_reports(self) -> list[dict[str, Any]]:
         self._refresh_state_from_store()
         return [asdict(report) for report in self._runtime.reports]
+
+    async def archive_and_reset_paper_account(self, *, actor: str = "manual") -> dict[str, Any]:
+        self._refresh_state_from_store(force=True)
+        await self._stop_loop()
+        snapshot = self.get_status(refresh=False)
+        prior_realized = float((snapshot.get("summary") or {}).get("realized_pnl") or 0.0)
+        prior_trades = int((snapshot.get("summary") or {}).get("total_trades") or 0)
+        archived_at = _now_ist()
+        archive_dir = DEFAULT_COMMODITY_ARCHIVE_DIR
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_stamp = archived_at.strftime("%Y%m%dT%H%M%S%f%z")
+        archive_path = archive_dir / f"{archive_stamp}_pre_reset.json"
+        archive_payload = {
+            "archived_at": archived_at.isoformat(),
+            "reason": "manual_paper_reset",
+            "snapshot": snapshot,
+        }
+        archive_path.write_text(json.dumps(archive_payload, indent=2))
+
+        self._runtime = CommodityRuntime(
+            portfolio=PaperPortfolio(
+                initial_capital=DEFAULT_COMMODITY_INITIAL_CAPITAL,
+                session_id="commodity-strategy-paper",
+            ),
+            order_book=PaperOrderBook(on_fill=None),
+        )
+        self._runtime.order_book._on_fill = self._runtime.portfolio.on_fill
+        self._commentary = []
+        self._runtime.processed_signals = {}
+        self._kill_switch_active = False
+        self._start_required = True
+        self._last_error = None
+        self._last_run_at = None
+        self._last_message = (
+            "Commodity paper account reset to ₹1,000,000. "
+            "Archived prior state and require an explicit start before scanning resumes."
+        )
+        self._append_commentary("warning", self._last_message)
+        self._persist_state()
+        await record_audit_event(
+            market="commodity",
+            event_type="paper_account_reset",
+            actor=actor,
+            severity="warning",
+            message=self._last_message,
+            previous_state="damaged",
+            new_state="fresh",
+            payload={
+                "archive_path": str(archive_path),
+                "prior_realized_pnl": prior_realized,
+                "prior_total_trades": prior_trades,
+                "new_initial_capital": DEFAULT_COMMODITY_INITIAL_CAPITAL,
+            },
+        )
+        return {
+            "archived": True,
+            "archive_path": str(archive_path),
+            "initial_capital": DEFAULT_COMMODITY_INITIAL_CAPITAL,
+            "kill_switch_active": self._kill_switch_active,
+            "start_required": self._start_required,
+            "prior_realized_pnl": prior_realized,
+            "prior_total_trades": prior_trades,
+        }
 
 
 commodity_strategy_agent = CommodityStrategyAgent()

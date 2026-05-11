@@ -2,7 +2,7 @@
 from __future__ import annotations
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
@@ -29,6 +29,9 @@ class DataRouter:
         self._mock_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._source_policy: dict[str, Any] = {}
+        self._reconnect_task: Optional[asyncio.Task] = None
+        self._last_reconnect_attempt_at: Optional[datetime] = None
+        self._reconnect_backoff = timedelta(seconds=60)
 
     def set_broker(self, broker: BrokerAdapter):
         self._broker = broker
@@ -83,6 +86,29 @@ class DataRouter:
         tick.symbol = to_app_symbol(tick.symbol)
         tick.timestamp = self._ensure_utc_timestamp(tick.timestamp)
         self._tick_buffer[tick.symbol] = tick
+        # Notify the DataQualityAgent so strategy agents can short-circuit
+        # on stale data. Producers are encouraged to feed this agent on every
+        # observed tick or quote.
+        try:
+            from market_data.data_quality_agent import data_quality_agent
+
+            broker_name = (
+                getattr(self._broker, "broker_name", "unknown")
+                if self._broker
+                else "unknown"
+            )
+            data_quality_agent.record_tick(
+                symbol=tick.symbol,
+                source=f"{broker_name or 'unknown'}_tick",
+                observed_at=tick.timestamp,
+                last_value=float(
+                    getattr(tick, "ltp", None)
+                    or getattr(tick, "price", None)
+                    or 0.0
+                ) or None,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         # Dispatch to local callbacks
         for cb in self._callbacks.get(tick.symbol, []):
             try:
@@ -161,6 +187,12 @@ class DataRouter:
         else:
             mode = "idle"
 
+        ws_connected = bool(self._ws_client) and (
+            last_tick_age_seconds is None or last_tick_age_seconds <= 30.0
+        )
+        if mode == "broker" and self._subscribed_symbols and not ws_connected:
+            self._schedule_reconnect()
+
         return {
             "mode": mode,
             "broker": broker_name,
@@ -168,15 +200,44 @@ class DataRouter:
             "subscribed_symbol_count": len(self._subscribed_symbols),
             "tick_buffer_size": len(self._tick_buffer),
             "callback_count": callback_count,
-            "ws_connected": bool(self._ws_client) and (
-                last_tick_age_seconds is None or last_tick_age_seconds <= 30.0
-            ),
+            "ws_connected": ws_connected,
             "ws_client_present": bool(self._ws_client),
             "mock_running": mock_running,
             "last_tick_at": last_tick_at.isoformat() if last_tick_at else None,
             "last_tick_age_seconds": last_tick_age_seconds,
             "source_policy": source_policy,
         }
+
+    def _schedule_reconnect(self) -> None:
+        if not self._loop or not self._loop.is_running():
+            return
+        if self._reconnect_task and not self._reconnect_task.done():
+            return
+        now = datetime.now(timezone.utc)
+        if (
+            self._last_reconnect_attempt_at is not None
+            and now - self._last_reconnect_attempt_at < self._reconnect_backoff
+        ):
+            return
+        self._last_reconnect_attempt_at = now
+        self._reconnect_task = self._loop.create_task(self._reconnect_if_stale())
+
+    async def _reconnect_if_stale(self) -> None:
+        try:
+            if not self._broker or not self._subscribed_symbols:
+                return
+            logger.warning("[DataRouter] Tick feed stale. Reconnecting websocket subscription.")
+            await self.unsubscribe()
+            broker_name = getattr(self._broker, "broker_name", "")
+            if broker_name == "fyers":
+                broker_symbols = [to_fyers_symbol(symbol) for symbol in self._subscribed_symbols]
+            else:
+                broker_symbols = [to_broker_symbol(symbol) for symbol in self._subscribed_symbols]
+            self._ws_client = await self._broker.subscribe_websocket(broker_symbols, self._on_tick)
+        except Exception as exc:
+            logger.warning(f"[DataRouter] Websocket reconnect failed: {exc}")
+        finally:
+            self._reconnect_task = None
 
     # ── Mock tick feed for testing ───────────────────────────────────────────
 

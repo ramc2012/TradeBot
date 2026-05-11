@@ -62,7 +62,25 @@ class TradingAgent:
     def __init__(self, mode: str = "paper"):
         self.mode = mode  # paper | live
         self.rules_engine = RulesEngine()
-        self._client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        # The Anthropic SDK can raise at construction time when the API key is
+        # missing/invalid. Read-only endpoints (e.g. GET /api/agent/proposals)
+        # must keep working even when the LLM client is unavailable — they
+        # only read self._proposals, they don't call the LLM. Defer client
+        # construction so the read endpoints stay green.
+        self._client_factory_error: Optional[str] = None
+        try:
+            api_key = (settings.ANTHROPIC_API_KEY or "").strip()
+            self._client = (
+                anthropic.AsyncAnthropic(api_key=api_key) if api_key else None
+            )
+            if self._client is None:
+                self._client_factory_error = "ANTHROPIC_API_KEY is not configured."
+        except Exception as exc:  # noqa: BLE001
+            logger.opt(exception=True).warning(
+                f"[Agent] Anthropic client init failed: {exc}"
+            )
+            self._client = None
+            self._client_factory_error = str(exc)
         self._portfolio = None
         self._proposals: List[TradeProposal] = []
         self._agent_logs: List[dict] = []
@@ -335,11 +353,17 @@ Return a TradeProposal with these exact fields:
         return True
 
     def get_pending_proposals(self) -> List[dict]:
-        return [
-            p.__dict__ | {"created_at": p.created_at.isoformat()}
-            for p in self._proposals
-            if p.status == "PENDING"
-        ]
+        try:
+            return [
+                p.__dict__ | {"created_at": p.created_at.isoformat()}
+                for p in self._proposals
+                if p.status == "PENDING"
+            ]
+        except Exception as exc:  # noqa: BLE001
+            logger.opt(exception=True).warning(
+                f"[Agent] get_pending_proposals failed: {exc}"
+            )
+            return []
 
     def get_agent_logs(self, limit: int = 50) -> List[dict]:
         return self._agent_logs[-limit:]
@@ -380,4 +404,37 @@ Return a TradeProposal with these exact fields:
 
 
 # ── Singleton ────────────────────────────────────────────────────────────────
-trading_agent = TradingAgent(mode="paper")
+try:
+    trading_agent = TradingAgent(mode="paper")
+except Exception as _agent_init_exc:  # noqa: BLE001
+    # Module import must never crash the FastAPI app. If TradingAgent fails
+    # to construct (e.g. broken anthropic SDK install), expose a stub that
+    # returns empty proposals so the /api/agent endpoints serve 200s with no
+    # data rather than 500s.
+    logger.opt(exception=True).error(
+        f"[Agent] TradingAgent singleton init failed: {_agent_init_exc}; "
+        "exposing inert stub"
+    )
+
+    class _InertTradingAgent:
+        mode = "disabled"
+
+        def get_pending_proposals(self) -> List[dict]:
+            return []
+
+        def get_agent_logs(self, limit: int = 50) -> List[dict]:
+            return []
+
+        async def approve_proposal(self, proposal_id: str) -> bool:  # noqa: ARG002
+            return False
+
+        async def reject_proposal(self, proposal_id: str) -> bool:  # noqa: ARG002
+            return False
+
+        async def run_scan(self, *_args, **_kwargs):  # noqa: D401
+            return []
+
+        async def chat(self, *_args, **_kwargs) -> str:  # noqa: D401
+            return "Trading agent is offline: initialization failed."
+
+    trading_agent = _InertTradingAgent()  # type: ignore[assignment]

@@ -84,10 +84,13 @@ class Settings(BaseSettings):
     DIRECTIONAL_OPTIONS_AUTO_ENABLED: bool = True
     DIRECTIONAL_OPTIONS_AUTO_INTERVAL_SECONDS: int = 300
     COMMODITY_FYERS_RATE_LIMIT_BACKOFF_SECONDS: int = 90
+    COMMODITY_KILL_LOCK: bool = False
     SECTOR_INTERACTION_DURABLE_STATE_ENABLED: bool = False
 
     # Security
     SECRET_KEY: str = "change-me-to-a-random-secret-key"
+    APP_TOKEN_AUTH_ENABLED: bool = False
+    APP_WRITE_TOKEN: str = ""
 
     # Fyers
     FYERS_APP_ID: str = ""

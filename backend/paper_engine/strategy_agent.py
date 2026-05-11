@@ -30,6 +30,7 @@ from analysis.macd_engine import (
     check_iv_filter,
 )
 from analysis.instruments import get_monthly_expiry
+from analysis.signal_classifier import classify_signal_bucket, classify_status_bucket
 from agent.macd_quadrant import QuadrantResult
 from agent.strategy_config import (
     MACD_FAST,
@@ -1126,6 +1127,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     "priority_score": _round_or_none(score, 4),
                     "option_last_bar_time": started_at.isoformat(),
                     "spot_last_time": started_at.isoformat(),
+                    **classify_status_bucket(has_position=False, status="watching"),
                 }
             )
 
@@ -1814,6 +1816,28 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 trend_aligned_count += 1
                 instruction = f"{underlying}: MP {day_type} gate is aligned; waiting for the next fresh trigger."
 
+            side_closes = ce_closes if direction == "CE" else pe_closes
+            latest_hist_val: Optional[float] = None
+            prev_hist_val: Optional[float] = None
+            try:
+                if len(side_closes) >= MACD_MIN_BARS:
+                    _, _, side_hist = compute_macd(side_closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+                    if side_hist:
+                        latest_hist_val = side_hist[-1]
+                        if len(side_hist) >= 2:
+                            prev_hist_val = side_hist[-2]
+            except Exception:
+                pass
+            bucket_info = classify_signal_bucket(
+                has_position=any(p.underlying == underlying for p in runtime.positions),
+                signal_validation="ready" if status == "entry-ready" else status,
+                macd=macd_value,
+                macd_histogram=latest_hist_val,
+                prev_macd_histogram=prev_hist_val,
+                recent_cross_signal=("BUY" if direction == "CE" and fresh_cross else "SELL" if direction == "PE" and fresh_cross else None),
+                recent_cross_bars_ago=0 if fresh_cross else None,
+            )
+
             signal = {
                 "strategy": "Strategy 2",
                 "source": "historical_replay",
@@ -1836,6 +1860,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 "spot_last_time": session_rows[-1].get("time"),
                 "spot_source": "historical",
                 "spot_session_date": session_date.isoformat() if session_date else trading_day.isoformat(),
+                **bucket_info,
             }
             latest_signals[underlying] = signal
             latest_pipeline[underlying] = {
@@ -2417,6 +2442,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "expiry": row.get("expiry"),
             "atm_strike": row.get("atm_strike"),
             "spot_price": _round_or_none(row.get("spot_price"), 2),
+            **classify_status_bucket(has_position=False, status="waiting"),
         }
         return {
             "direction": None,
@@ -2503,6 +2529,10 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "ltp": signal.get("ltp") if signal.get("ltp") is not None else ltp,
             "iv_pct": signal.get("iv_pct") if signal.get("iv_pct") is not None else iv_pct,
             "priority_score": signal.get("priority_score") if signal.get("priority_score") is not None else priority_score,
+            **classify_status_bucket(
+                has_position=False,
+                status=status,
+            ),
         }
         return prepared
 
@@ -2686,6 +2716,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "status": "waiting",
             "freshness": "missing",
             "instruction": f"{underlying}: waiting for live 1-minute spot rows and 5-minute option candles.",
+            **classify_status_bucket(has_position=False, status="waiting"),
         }
         empty_pipeline = {
             "name": f"Strategy 2 {underlying}",
@@ -2782,6 +2813,29 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 freshness = "stale"
             can_enter = can_enter and freshness == "live"
 
+            side_macd_val = ce_macd_value if direction == "CE" else pe_macd_value if direction == "PE" else None
+            side_closes_live = ce_closes if direction == "CE" else pe_closes if direction == "PE" else []
+            latest_hist_val: Optional[float] = None
+            prev_hist_val: Optional[float] = None
+            try:
+                if len(side_closes_live) >= MACD_MIN_BARS:
+                    _, _, side_hist = compute_macd(side_closes_live, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+                    if side_hist:
+                        latest_hist_val = side_hist[-1]
+                        if len(side_hist) >= 2:
+                            prev_hist_val = side_hist[-2]
+            except Exception:
+                pass
+            bucket_info = classify_signal_bucket(
+                has_position=False,
+                signal_validation="ready" if status == "entry-ready" else status,
+                macd=side_macd_val,
+                macd_histogram=latest_hist_val,
+                prev_macd_histogram=prev_hist_val,
+                recent_cross_signal=("BUY" if direction == "CE" and fresh_ce else "SELL" if direction == "PE" and fresh_pe else None),
+                recent_cross_bars_ago=0 if (fresh_ce or fresh_pe) else None,
+            )
+
             signal = {
                 "strategy": "Strategy 2",
                 "source": "live_scan",
@@ -2806,6 +2860,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 "spot_last_time": spot_last_time,
                 "spot_source": spot_source,
                 "spot_session_date": session_date.isoformat(),
+                **bucket_info,
             }
             pipeline = {
                 "name": f"Strategy 2 {underlying}",
@@ -2933,6 +2988,29 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             freshness = "stale"
         can_enter = can_enter and freshness == "live"
 
+        side_macd_val = ce_macd_value if direction == "CE" else pe_macd_value if direction == "PE" else None
+        side_closes_live = ce_closes if direction == "CE" else pe_closes if direction == "PE" else []
+        latest_hist_val: Optional[float] = None
+        prev_hist_val: Optional[float] = None
+        try:
+            if len(side_closes_live) >= MACD_MIN_BARS:
+                _, _, side_hist = compute_macd(side_closes_live, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+                if side_hist:
+                    latest_hist_val = side_hist[-1]
+                    if len(side_hist) >= 2:
+                        prev_hist_val = side_hist[-2]
+        except Exception:
+            pass
+        bucket_info = classify_signal_bucket(
+            has_position=False,
+            signal_validation="ready" if status == "entry-ready" else status,
+            macd=side_macd_val,
+            macd_histogram=latest_hist_val,
+            prev_macd_histogram=prev_hist_val,
+            recent_cross_signal=("BUY" if direction == "CE" and fresh_ce else "SELL" if direction == "PE" and fresh_pe else None),
+            recent_cross_bars_ago=0 if (fresh_ce or fresh_pe) else None,
+        )
+
         signal = {
             "strategy": "Strategy 2",
             "source": "live_scan",
@@ -2957,6 +3035,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "spot_last_time": spot_last_time,
             "spot_source": spot_source,
             "spot_session_date": session_date.isoformat() if session_date else None,
+            **bucket_info,
         }
         pipeline = {
             "name": f"Strategy 2 {underlying}",
@@ -3996,6 +4075,133 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
 
     # ── Status API ───────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _signal_audit_bucket(signal: dict[str, Any]) -> str:
+        status = str(signal.get("status") or "").lower().replace("_", "-")
+        strength = str(signal.get("strength") or "").lower()
+        freshness = str(signal.get("freshness") or "").lower()
+        blocked = bool(signal.get("learning_blocked"))
+
+        if blocked:
+            return "drifting_away"
+        if status in {"active", "open", "entry-ready", "candidate", "filled"}:
+            return "conditions_met_traded"
+        if status in {"trend-aligned", "watching", "monitoring", "research-only"}:
+            return "favourable_tracking"
+        if strength in {"strong", "monitoring"} and freshness not in {"missing", "stale"}:
+            return "favourable_tracking"
+        return "drifting_away"
+
+    @staticmethod
+    def _serialize_signal_for_audit(runtime: StrategyRuntime, signal: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "kind": "signal",
+            "strategy_key": runtime.key,
+            "strategy_label": runtime.label,
+            "source": signal.get("source") or "strategy_signal_lane",
+            "underlying": signal.get("underlying"),
+            "symbol": signal.get("symbol") or signal.get("trading_symbol"),
+            "direction": signal.get("direction"),
+            "status": signal.get("status"),
+            "reason": signal.get("reason"),
+            "freshness": signal.get("freshness"),
+            "instruction": signal.get("instruction"),
+            "as_of": signal.get("as_of") or signal.get("option_last_bar_time") or signal.get("signal_date"),
+            "expiry": signal.get("expiry"),
+            "strike": signal.get("strike") or signal.get("atm_strike"),
+            "ltp": signal.get("ltp"),
+            "iv_pct": signal.get("iv_pct"),
+            "macd": signal.get("macd"),
+            "previous_macd": signal.get("previous_macd"),
+            "macd_histogram": signal.get("macd_histogram"),
+            "rsi": signal.get("rsi"),
+            "priority_score": signal.get("priority_score") or signal.get("learning_score"),
+        }
+
+    def _build_strategy_audit_lanes(self, runtime: StrategyRuntime) -> dict[str, list[dict[str, Any]]]:
+        lanes: dict[str, list[dict[str, Any]]] = {
+            "conditions_met_traded": [],
+            "favourable_tracking": [],
+            "drifting_away": [],
+        }
+
+        for pos in runtime.positions.values():
+            lanes["conditions_met_traded"].append(
+                {
+                    "kind": "position",
+                    "strategy_key": runtime.key,
+                    "strategy_label": runtime.label,
+                    "source": "open_position",
+                    "underlying": pos.underlying,
+                    "symbol": pos.symbol,
+                    "direction": pos.option_type,
+                    "status": f"open:{pos.phase}",
+                    "reason": pos.signal_reason,
+                    "freshness": "live",
+                    "instruction": (
+                        f"{pos.underlying} {pos.option_type} {int(pos.strike)} "
+                        f"entry {pos.entry_price:.2f}, last {pos.current_price:.2f}, "
+                        f"return {pos.return_pct:+.2f}%"
+                    ),
+                    "as_of": pos.price_updated_at or pos.entered_at,
+                    "expiry": pos.expiry,
+                    "strike": pos.strike,
+                    "ltp": _round_or_none(pos.current_price, 2),
+                    "entry_price": _round_or_none(pos.entry_price, 2),
+                    "qty": pos.qty,
+                    "pnl": _round_or_none(pos.unrealized_pnl, 2),
+                    "return_pct": _round_or_none(pos.return_pct, 2),
+                    "iv_pct": pos.entry_iv_pct,
+                    "rsi": pos.latest_rsi,
+                    "priority_score": pos.signal_strength,
+                }
+            )
+
+        for trade in reversed(runtime.portfolio._trade_history[-20:]):
+            lanes["conditions_met_traded"].append(
+                {
+                    "kind": "trade",
+                    "strategy_key": runtime.key,
+                    "strategy_label": runtime.label,
+                    "source": "closed_trade",
+                    "underlying": trade.symbol.split(":")[1] if ":" in trade.symbol else trade.symbol,
+                    "symbol": trade.symbol,
+                    "direction": trade.option_type or trade.instrument_type,
+                    "status": "closed",
+                    "reason": trade.setup_type or trade.signal_id or "trade_closed",
+                    "freshness": "ledger",
+                    "instruction": (
+                        f"Closed {trade.qty} @ {trade.exit_price:.2f}; "
+                        f"P&L {trade.pnl:+.2f}"
+                    ),
+                    "as_of": trade.exit_time.isoformat(),
+                    "expiry": trade.expiry,
+                    "strike": trade.strike,
+                    "entry_price": _round_or_none(trade.entry_price, 2),
+                    "exit_price": _round_or_none(trade.exit_price, 2),
+                    "qty": trade.qty,
+                    "pnl": _round_or_none(trade.pnl, 2),
+                    "iv_pct": trade.entry_iv_pct,
+                }
+            )
+
+        signal_rows = list(runtime.signal_lane or [])
+        if not signal_rows and runtime.key == "macd_strategy":
+            signal_rows = [
+                row for row in list((runtime.meta or {}).get("prepared_watchlist") or [])
+                if isinstance(row, dict)
+            ]
+
+        for signal in signal_rows:
+            if not isinstance(signal, dict):
+                continue
+            bucket = self._signal_audit_bucket(signal)
+            lanes[bucket].append(self._serialize_signal_for_audit(runtime, signal))
+
+        for key in lanes:
+            lanes[key] = lanes[key][:30]
+        return lanes
+
     def get_status(self, *, refresh: bool = True) -> dict[str, Any]:
         if refresh:
             self._refresh_state_from_store()
@@ -4083,7 +4289,16 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     ],
                     "last_scan_at": runtime.last_scan_at,
                     "last_message": runtime.last_message,
-                    "signals": runtime.signal_lane,
+                    "signals": runtime.signal_lane
+                    or (
+                        [
+                            row for row in list((runtime.meta or {}).get("prepared_watchlist") or [])
+                            if isinstance(row, dict)
+                        ]
+                        if runtime.key == "macd_strategy"
+                        else []
+                    ),
+                    "audit_lanes": self._build_strategy_audit_lanes(runtime),
                     "meta": runtime.meta,
                     "instrument_universe": (runtime.meta or {}).get("instrument_universe") or [],
                 }

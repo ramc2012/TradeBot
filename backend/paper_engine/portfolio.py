@@ -235,7 +235,7 @@ class PaperPortfolio:
 
     @property
     def total_equity(self) -> float:
-        return self.available_capital + self.unrealized_pnl
+        return self.available_capital + self.reserved_margin() + self.unrealized_pnl
 
     @property
     def unrealized_pnl(self) -> float:

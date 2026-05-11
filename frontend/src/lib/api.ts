@@ -8,7 +8,7 @@ let reachableApiBaseUrlPromise: Promise<string> | null = null;
 const API_PROBE_TIMEOUT_MS = 2500;
 const BROKER_STATUS_TIMEOUT_MS = 6_000;
 const BROKER_STATUS_FORCE_TIMEOUT_MS = 15_000;
-const LATEST_TICKS_TIMEOUT_MS = 4_000;
+const LATEST_TICKS_TIMEOUT_MS = 60_000;
 
 async function probeApiBaseUrl(candidate: string): Promise<boolean> {
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
@@ -31,6 +31,17 @@ async function probeApiBaseUrl(candidate: string): Promise<boolean> {
   }
 }
 
+function isCurrentOrigin(candidate: string): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  try {
+    return new URL(candidate).origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
 async function getReachableApiBaseUrl(): Promise<string> {
   if (reachableApiBaseUrl) {
     return reachableApiBaseUrl;
@@ -45,7 +56,7 @@ async function getReachableApiBaseUrl(): Promise<string> {
   const candidates = resolveApiBaseUrlCandidates();
   reachableApiBaseUrlPromise = (async () => {
     for (const candidate of candidates) {
-      if (candidates.length === 1 || await probeApiBaseUrl(candidate)) {
+      if (candidates.length === 1 || isCurrentOrigin(candidate) || await probeApiBaseUrl(candidate)) {
         reachableApiBaseUrl = candidate;
         return candidate;
       }
@@ -58,6 +69,29 @@ async function getReachableApiBaseUrl(): Promise<string> {
 
 function currentApiTarget(): string {
   return reachableApiBaseUrl || API_URL;
+}
+
+function readCookie(name: string): string {
+  if (typeof document === "undefined") {
+    return "";
+  }
+  const prefix = `${name}=`;
+  const match = document.cookie
+    .split(";")
+    .map((item) => item.trim())
+    .find((item) => item.startsWith(prefix));
+  return match ? decodeURIComponent(match.slice(prefix.length)) : "";
+}
+
+function readWriteToken(): string {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  return (
+    window.localStorage.getItem("nomad_write_token")?.trim()
+    || readCookie("nomad_write_token").trim()
+    || ""
+  );
 }
 
 export function describeApiError(error: any, fallback = "Request failed"): string {
@@ -88,6 +122,10 @@ export const api = axios.create({
 
 api.interceptors.request.use(async (config) => {
   config.baseURL = await getReachableApiBaseUrl();
+  const writeToken = readWriteToken();
+  if (writeToken) {
+    config.headers.set("x-nomad-write-token", writeToken);
+  }
   return config;
 });
 

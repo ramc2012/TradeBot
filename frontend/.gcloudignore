@@ -1,7 +1,9 @@
-.git
-.gitignore
-.next
-node_modules
-coverage
-*.log
-tsconfig.tsbuildinfo
+.env
+.env.*
+node_modules/
+.next/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+

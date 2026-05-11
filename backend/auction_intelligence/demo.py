@@ -7,6 +7,7 @@ from typing import Any
 from fastapi.encoders import jsonable_encoder
 
 from auction_intelligence.config import clone_default_config
+from auction_intelligence.live import _decorate_bundle_for_client
 from auction_intelligence.options.ntm_volx import NTMVolXAnalyzer
 from auction_intelligence.service import AuctionIntelligenceService
 from auction_intelligence.schemas import (
@@ -263,7 +264,7 @@ def build_demo_analysis(symbol_code: str = "NIFTY", scenario: str = "acceptance_
         "available_symbols": available_symbols(),
         "available_scenarios": available_scenarios(),
         "request": payload,
-        "analysis": jsonable_encoder(asdict(bundle)),
+        "analysis": _decorate_bundle_for_client(jsonable_encoder(asdict(bundle))),
     }
 
 

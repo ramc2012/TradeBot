@@ -11,6 +11,7 @@ from typing import Any, Optional
 import pandas as pd
 
 from agentic_rag import ContextGateRequest, rag_service
+from analysis.signal_classifier import classify_status_bucket
 from core.config import settings
 from directional_options.backtest import DirectionalOptionsBacktester
 from directional_options.config import clone_default_config
@@ -355,6 +356,16 @@ class DirectionalOptionsService:
                 )
                 self._apply_rag_context_to_risk(rag_context, risk_payload)
 
+        risk_approved = bool((risk_payload or {}).get("approved"))
+        if risk_approved and candidate_payload is not None:
+            lane_status = "entry-ready"
+        elif signal is not None and candidate_payload is not None:
+            lane_status = "trend-aligned"
+        elif signal is not None:
+            lane_status = "watching"
+        else:
+            lane_status = "waiting"
+        bucket_info = classify_status_bucket(has_position=False, status=lane_status)
         return {
             "as_of": timestamp.isoformat(),
             "underlying": underlying,
@@ -368,6 +379,7 @@ class DirectionalOptionsService:
             "risk": risk_payload,
             "rag_context": rag_context,
             "selection_reason": selection_reason,
+            **bucket_info,
         }
 
     async def _live_snapshot(

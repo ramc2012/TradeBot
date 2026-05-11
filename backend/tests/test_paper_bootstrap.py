@@ -154,8 +154,8 @@ def test_bootstrap_paper_trading_runtime_normalizes_supervisors(monkeypatch: pyt
     assert payload["trading_mode"]["mode"] == "paper"
     assert payload["nse"]["kill_switch_active"] is False
     assert payload["nse"]["loop_active"] is True
-    assert payload["commodity"]["kill_switch_active"] is False
-    assert payload["commodity"]["loop_active"] is True
-    assert payload["commodity"]["start_required"] is False
+    assert payload["commodity"]["kill_switch_active"] is True
+    assert payload["commodity"]["loop_active"] is False
+    assert payload["commodity"]["start_required"] is True
     assert fake_nse.recovered is True
-    assert fake_commodity.started_with_force is True
+    assert fake_commodity.started_with_force is False

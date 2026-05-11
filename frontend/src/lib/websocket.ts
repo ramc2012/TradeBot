@@ -15,6 +15,29 @@ let cachedWebSocketToken: string | null = null;
 let cachedWebSocketTokenExpiry = 0;
 let webSocketTokenPromise: Promise<string> | null = null;
 
+function readCookie(name: string): string {
+  if (typeof document === "undefined") {
+    return "";
+  }
+  const prefix = `${name}=`;
+  const match = document.cookie
+    .split(";")
+    .map((item) => item.trim())
+    .find((item) => item.startsWith(prefix));
+  return match ? decodeURIComponent(match.slice(prefix.length)) : "";
+}
+
+function readApiToken(): string {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  return (
+    window.localStorage.getItem("nomad_write_token")?.trim()
+    || readCookie("nomad_write_token").trim()
+    || ""
+  );
+}
+
 async function getWebSocketToken(): Promise<string> {
   const now = Date.now();
   if (cachedWebSocketToken && now < cachedWebSocketTokenExpiry - 30_000) {
@@ -26,7 +49,10 @@ async function getWebSocketToken(): Promise<string> {
 
   webSocketTokenPromise = fetch(`${resolveApiBaseUrl()}/api/auth/ws-token`, {
     method: "GET",
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      ...(readApiToken() ? { "x-nomad-write-token": readApiToken() } : {}),
+    },
   })
     .then(async (response) => {
       if (!response.ok) {

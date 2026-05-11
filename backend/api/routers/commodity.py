@@ -5,7 +5,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from market_data.commodity_contract_specs import get_commodity_contract_spec
@@ -178,6 +178,25 @@ class CommodityExpirySelectionRequest(BaseModel):
 
 class KillSwitchRequest(BaseModel):
     active: bool
+
+
+class ResetPaperRequest(BaseModel):
+    confirm: str
+    actor: Optional[str] = None
+
+
+@router.post("/strategy-agent/reset-paper")
+async def reset_commodity_paper_account(body: ResetPaperRequest):
+    if (body.confirm or "").strip().upper() != "RESET":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Paper reset is destructive. POST `{\"confirm\": \"RESET\"}` "
+                "in the body to proceed."
+            ),
+        )
+    actor = (body.actor or "manual").strip() or "manual"
+    return await commodity_strategy_agent.archive_and_reset_paper_account(actor=actor)
 
 
 @router.get("/strategy-agent/status")

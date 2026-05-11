@@ -39,8 +39,8 @@ async def bootstrap_paper_trading_runtime() -> dict[str, Any]:
 
     commodity_control = commodity_strategy_agent.get_control_state()
     if commodity_control.get("kill_switch_active"):
-        commodity_control = await commodity_strategy_agent.set_kill_switch(False)
-    if commodity_control.get("start_required") or not commodity_control.get("loop_active"):
+        logger.warning("[Paper Bootstrap] Commodity kill switch is active; preserving lock until an explicit reset or safe manual release.")
+    elif commodity_control.get("start_required") or not commodity_control.get("loop_active"):
         await commodity_strategy_agent.start(force=True)
     commodity_status = commodity_strategy_agent.get_status()
 

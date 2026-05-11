@@ -153,6 +153,13 @@ async def test_rl_auto_trainer_promotes_candidate_when_holdout_improves(monkeypa
     policy = QLearningPolicy()
     policy._cache_loaded = True
 
+    async def _fake_activate_snapshot(snapshot):
+        policy._q_cache = snapshot.get("q_values", {})
+        policy._visit_cache = snapshot.get("visits", {})
+        policy._cache_loaded = True
+
+    policy.activate_snapshot = _fake_activate_snapshot  # type: ignore[method-assign]
+
     trainer = RLAutoTrainer(
         config={
             "mvp_scope": {"session": {"open": "09:15", "close": "15:30"}},
@@ -182,6 +189,7 @@ async def test_rl_auto_trainer_promotes_candidate_when_holdout_improves(monkeypa
         "auction_intelligence.rl.automation.fetch_training_records",
         _fake_fetch_training_records,
     )
+    monkeypatch.setattr("auction_intelligence.rl.policy.random.choice", lambda items: items[0])
 
     result = await trainer.run_cycle(source="manual", promote_if_eligible=True)
 

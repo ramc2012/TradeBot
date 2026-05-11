@@ -4,9 +4,12 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const DEFAULT_BACKEND_PORT = process.env.NEXT_PUBLIC_BACKEND_PORT || "8000";
+const APP_TOKEN_AUTH_ENABLED = process.env.APP_TOKEN_AUTH_ENABLED === "true";
+const APP_WRITE_TOKEN = (process.env.APP_WRITE_TOKEN || "").trim();
+const OAUTH_CALLBACK_PATHS = new Set(["auth/fyers/callback", "auth/upstox/callback"]);
 const BOOTSTRAP_PROXY_TIMEOUTS_MS: Record<string, number> = {
   "auth/broker-status": 8_000,
-  "market/latest-ticks": 5_000,
+  "market/latest-ticks": 60_000,
 };
 
 function trimTrailingSlash(value: string): string {
@@ -43,6 +46,39 @@ function buildHeaders(request: NextRequest): Headers {
   return headers;
 }
 
+function extractBearerToken(value: string | null): string {
+  const raw = String(value || "").trim();
+  const [scheme, token] = raw.split(/\s+/, 2);
+  return scheme?.toLowerCase() === "bearer" ? String(token || "").trim() : "";
+}
+
+function clientWriteToken(request: NextRequest): string {
+  return (
+    String(request.headers.get("x-nomad-write-token") || "").trim()
+    || extractBearerToken(request.headers.get("authorization"))
+    || String(request.cookies.get("nomad_write_token")?.value || "").trim()
+  );
+}
+
+function apiGuardResponse(request: NextRequest, path: string): Response | null {
+  if (!APP_TOKEN_AUTH_ENABLED) {
+    return null;
+  }
+  if (OAUTH_CALLBACK_PATHS.has(path)) {
+    return null;
+  }
+  if (!APP_WRITE_TOKEN) {
+    return Response.json(
+      { detail: "APP_WRITE_TOKEN must be configured before API access is enabled in production." },
+      { status: 503 },
+    );
+  }
+  if (clientWriteToken(request) !== APP_WRITE_TOKEN) {
+    return Response.json({ detail: "API token is required." }, { status: 403 });
+  }
+  return null;
+}
+
 function timeoutForRequest(path: string, request: NextRequest): number | null {
   if (path === "auth/broker-status" && request.nextUrl.searchParams.get("force_validate") === "true") {
     return null;
@@ -52,6 +88,11 @@ function timeoutForRequest(path: string, request: NextRequest): number | null {
 
 async function proxy(request: NextRequest, { params }: { params: { path?: string[] } }) {
   const path = params.path?.join("/") || "";
+  const guard = apiGuardResponse(request, path);
+  if (guard) {
+    return guard;
+  }
+
   const target = new URL(`/api/${path}`, deriveBackendBaseUrl(request));
   target.search = request.nextUrl.search;
 
@@ -64,9 +105,14 @@ async function proxy(request: NextRequest, { params }: { params: { path?: string
     : null;
   let upstream: Response;
   try {
+    const headers = buildHeaders(request);
+    const token = clientWriteToken(request);
+    if (token) {
+      headers.set("x-nomad-write-token", token);
+    }
     upstream = await fetch(target, {
       method,
-      headers: buildHeaders(request),
+      headers,
       body: hasBody ? await request.arrayBuffer() : undefined,
       redirect: "manual",
       signal: controller?.signal,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import {
@@ -14,9 +14,21 @@ import {
   WifiOff,
 } from "lucide-react";
 
-import { getBrokerStatus, getStrategyAgentStatus } from "@/lib/api";
+import {
+  getATMWatchlist,
+  getBrokerStatus,
+  getOptionChain,
+  getOptionExpiries,
+  getSectorRotation,
+  getStrategyAgentStatus,
+} from "@/lib/api";
 import { isBrokerReady, type BrokerStatusEntry } from "@/lib/broker-status";
-import { useStore } from "@/store";
+import {
+  MARKET_INDEX_SYMBOLS,
+  type MarketIndexSymbol,
+  getMarketIndexLabel,
+} from "@/lib/marketSymbols";
+import { useStore, useTickSymbol } from "@/store";
 
 type StrategySummary = {
   available_capital?: number | null;
@@ -113,6 +125,94 @@ type StrategyAgentStatus = {
   strategies?: StrategyPayload[];
 };
 
+type ChainEntry = {
+  strike: number;
+  option_type: "CE" | "PE";
+  ltp?: number | null;
+  oi?: number | null;
+  volume?: number | null;
+  iv?: number | null;
+  delta?: number | null;
+  theta?: number | null;
+  oi_change?: number | null;
+  ltp_change_pct?: number | null;
+};
+
+type OptionChainPayload = {
+  symbol?: string | null;
+  expiry?: string | null;
+  spot_price?: number | null;
+  entries?: ChainEntry[];
+  pcr_oi?: number | null;
+  pcr_volume?: number | null;
+  max_pain?: number | null;
+  atm_strike?: number | null;
+  atm_iv?: number | null;
+  total_ce_oi?: number | null;
+  total_pe_oi?: number | null;
+  error?: string | null;
+};
+
+type ExpiryPayload = {
+  expiries?: string[];
+  default_expiry?: string | null;
+};
+
+type AtmOptionLeg = {
+  ltp?: number | null;
+  change_pct?: number | null;
+  oi?: number | null;
+  oi_change?: number | null;
+  iv?: number | null;
+  rsi?: number | null;
+  macd_histogram?: number | null;
+};
+
+type AtmWatchlistRow = {
+  underlying?: string | null;
+  kind?: string | null;
+  spot_price?: number | null;
+  atm_strike?: number | null;
+  expiry?: string | null;
+  live_source?: string | null;
+  ce?: AtmOptionLeg | null;
+  pe?: AtmOptionLeg | null;
+};
+
+type AtmWatchlistPayload = {
+  expiry?: string | null;
+  rows?: AtmWatchlistRow[];
+  detail?: string | null;
+};
+
+type SectorWatchlistRow = {
+  code: string;
+  name: string;
+  symbol?: string;
+  price?: number | null;
+  tracked_change_pct?: number | null;
+  relative_strength_pct?: number | null;
+  rrg_ratio?: number | null;
+  rrg_momentum?: number | null;
+  quadrant?: string | null;
+  trend?: string | null;
+  trail?: Array<{ ratio: number; momentum: number }>;
+};
+
+type SectorRotationPayload = {
+  benchmark?: {
+    name?: string | null;
+    tracked_change_pct?: number | null;
+  } | null;
+  watchlist?: SectorWatchlistRow[];
+  rrg?: {
+    points?: SectorWatchlistRow[];
+  };
+  detail?: string | null;
+};
+
+type LiveMarketTab = "chain" | "watchlist" | "sectors" | "rrg";
+
 const TRADING_BROKERS = ["fyers", "upstox"];
 const BROKER_LABEL: Record<string, string> = {
   fyers: "Fyers",
@@ -137,6 +237,27 @@ function formatMoney(value?: number | null) {
   if (abs >= 10_00_000) return `${sign}Rs ${(abs / 10_00_000).toFixed(2)}L`;
   if (abs >= 1_000) return `${sign}Rs ${(abs / 1_000).toFixed(1)}K`;
   return `${sign}Rs ${abs.toFixed(0)}`;
+}
+
+function formatCompact(value?: number | null) {
+  if (value == null || Number.isNaN(value)) return "--";
+  const abs = Math.abs(value);
+  const sign = value < 0 ? "-" : "";
+  if (abs >= 10_00_000) return `${sign}${(abs / 10_00_000).toFixed(1)}L`;
+  if (abs >= 1_000) return `${sign}${(abs / 1_000).toFixed(1)}K`;
+  return `${value.toFixed(0)}`;
+}
+
+function formatPercent(value?: number | null, digits = 2) {
+  if (value == null || Number.isNaN(value)) return "--";
+  const prefix = value > 0 ? "+" : "";
+  return `${prefix}${value.toFixed(digits)}%`;
+}
+
+function formatIv(value?: number | null) {
+  if (value == null || Number.isNaN(value)) return "--";
+  const normalized = value > 5 ? value : value * 100;
+  return `${normalized.toFixed(1)}%`;
 }
 
 function formatTimestamp(value?: string | null) {
@@ -168,6 +289,23 @@ function pnlTone(value?: number | null) {
   if (value > 0) return "text-accent-green";
   if (value < 0) return "text-accent-red";
   return "text-text-secondary";
+}
+
+function quadrantTone(value?: string | null) {
+  const quadrant = String(value || "").toLowerCase();
+  if (quadrant === "leading") return "border-accent-green/30 bg-accent-green/10 text-accent-green";
+  if (quadrant === "improving") return "border-accent-blue/30 bg-accent-blue/10 text-accent-blue";
+  if (quadrant === "weakening") return "border-accent-amber/30 bg-accent-amber/10 text-accent-amber";
+  return "border-accent-red/30 bg-accent-red/10 text-accent-red";
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function positionPct(value: number | null | undefined, min: number, max: number) {
+  if (value == null || !Number.isFinite(value) || max <= min) return 50;
+  return clamp(((value - min) / (max - min)) * 100, 7, 93);
 }
 
 function badgeTone(value?: string | null) {
@@ -279,6 +417,481 @@ function BucketBar({ rows }: { rows: StrategySignal[] }) {
   );
 }
 
+function LiveIndexButton({
+  symbol,
+  active,
+  onSelect,
+}: {
+  symbol: MarketIndexSymbol;
+  active: boolean;
+  onSelect: (symbol: MarketIndexSymbol) => void;
+}) {
+  const tick = useTickSymbol(symbol);
+  const positive = tick && tick.close > 0 ? tick.ltp >= tick.close : undefined;
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(symbol)}
+      className={clsx(
+        "rounded-lg border px-3 py-2 text-left transition-colors",
+        active
+          ? "border-accent-blue bg-accent-blue/10"
+          : "border-bg-border bg-bg-secondary/35 hover:border-bg-active",
+      )}
+    >
+      <div className="text-[10px] uppercase tracking-[0.14em] text-text-muted">{getMarketIndexLabel(symbol)}</div>
+      <div className="mt-1 flex items-end justify-between gap-3">
+        <span className="font-mono text-base font-semibold text-text-primary">{tick ? tick.ltp.toFixed(2) : "--"}</span>
+        <span
+          className={clsx(
+            "rounded-md px-1.5 py-0.5 text-[10px] font-semibold",
+            positive === undefined
+              ? "bg-bg-primary text-text-muted"
+              : positive
+                ? "bg-accent-green/12 text-accent-green"
+                : "bg-accent-red/12 text-accent-red",
+          )}
+        >
+          {tick && tick.close ? formatPercent(((tick.ltp - tick.close) / tick.close) * 100) : "Waiting"}
+        </span>
+      </div>
+    </button>
+  );
+}
+
+function OptionLegCell({ leg }: { leg?: AtmOptionLeg | null }) {
+  return (
+    <div className="grid grid-cols-4 gap-2 text-right font-mono text-[11px]">
+      <span className="font-semibold text-text-primary">{formatNumber(leg?.ltp)}</span>
+      <span className={pnlTone(leg?.change_pct)}>{formatPercent(leg?.change_pct)}</span>
+      <span>{formatCompact(leg?.oi)}</span>
+      <span className={pnlTone(leg?.oi_change)}>{formatCompact(leg?.oi_change)}</span>
+    </div>
+  );
+}
+
+function AtmWatchlistTable({ rows }: { rows: AtmWatchlistRow[] }) {
+  return (
+    <div className="overflow-auto rounded-lg border border-bg-border">
+      <table className="w-full min-w-[980px] text-xs">
+        <thead className="bg-bg-primary/70 text-text-muted">
+          <tr>
+            <th className="px-3 py-2 text-left">Underlying</th>
+            <th className="px-3 py-2 text-right">Spot</th>
+            <th className="px-3 py-2 text-right">ATM</th>
+            <th className="px-3 py-2 text-right">CE LTP / Chg / OI / OI Chg</th>
+            <th className="px-3 py-2 text-right">PE LTP / Chg / OI / OI Chg</th>
+            <th className="px-3 py-2 text-left">Source</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={`${row.underlying}-${row.expiry}-${row.atm_strike}`} className="border-t border-bg-border/60">
+              <td className="px-3 py-2 font-semibold text-text-primary">{row.underlying || "--"}</td>
+              <td className="px-3 py-2 text-right font-mono">{formatNumber(row.spot_price)}</td>
+              <td className="px-3 py-2 text-right font-mono">{formatNumber(row.atm_strike, 0)}</td>
+              <td className="px-3 py-2"><OptionLegCell leg={row.ce} /></td>
+              <td className="px-3 py-2"><OptionLegCell leg={row.pe} /></td>
+              <td className="px-3 py-2 text-text-muted">{row.live_source || row.kind || "--"}</td>
+            </tr>
+          ))}
+          {!rows.length ? (
+            <tr><td colSpan={6} className="px-3 py-6 text-center text-text-muted">No CE/PE ATM watchlist rows returned.</td></tr>
+          ) : null}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RrgMap({ points }: { points: SectorWatchlistRow[] }) {
+  const xValues = points.map((point) => point.rrg_ratio ?? 100);
+  const yValues = points.map((point) => point.rrg_momentum ?? 100);
+  const xMin = Math.min(95, ...xValues) - 1;
+  const xMax = Math.max(105, ...xValues) + 1;
+  const yMin = Math.min(95, ...yValues) - 1;
+  const yMax = Math.max(105, ...yValues) + 1;
+
+  return (
+    <div className="relative min-h-[340px] overflow-hidden rounded-lg border border-bg-border bg-bg-primary/50">
+      <div className="absolute inset-0 grid grid-cols-2 grid-rows-2 text-[10px] uppercase tracking-[0.14em] text-text-muted">
+        <div className="border-b border-r border-bg-border/60 p-3">Lagging</div>
+        <div className="border-b border-bg-border/60 p-3 text-right">Improving</div>
+        <div className="border-r border-bg-border/60 p-3">Weakening</div>
+        <div className="p-3 text-right">Leading</div>
+      </div>
+      <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+        <line x1="50" y1="0" x2="50" y2="100" stroke="#26344d" strokeWidth="0.35" />
+        <line x1="0" y1="50" x2="100" y2="50" stroke="#26344d" strokeWidth="0.35" />
+      </svg>
+      {points.slice(0, 28).map((point) => {
+        const left = positionPct(point.rrg_ratio, xMin, xMax);
+        const top = 100 - positionPct(point.rrg_momentum, yMin, yMax);
+        return (
+          <div
+            key={point.code}
+            title={`${point.name} · ${point.quadrant || "unknown"}`}
+            className={clsx(
+              "absolute -translate-x-1/2 -translate-y-1/2 rounded-md border px-1.5 py-1 text-[10px] font-semibold uppercase shadow-lg",
+              quadrantTone(point.quadrant),
+            )}
+            style={{ left: `${left}%`, top: `${top}%` }}
+          >
+            {point.code.replaceAll("_", " ").split(" ").map((part) => part[0]).join("").slice(0, 4)}
+          </div>
+        );
+      })}
+      {!points.length ? (
+        <div className="absolute inset-0 flex items-center justify-center text-sm text-text-muted">No RRG points available.</div>
+      ) : null}
+    </div>
+  );
+}
+
+function LiveTabButton({
+  active,
+  label,
+  detail,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  detail: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={clsx(
+        "min-h-[58px] rounded-lg border px-3 py-2 text-left transition-colors",
+        active
+          ? "border-accent-blue bg-accent-blue/10 text-text-primary"
+          : "border-bg-border bg-bg-primary/25 text-text-muted hover:border-bg-active hover:text-text-primary",
+      )}
+    >
+      <div className="text-xs font-semibold uppercase tracking-[0.12em]">{label}</div>
+      <div className="mt-1 text-[11px] leading-snug">{detail}</div>
+    </button>
+  );
+}
+
+function LiveMarketTools() {
+  const [symbol, setSymbol] = useState<MarketIndexSymbol>("NSE:NIFTY50-INDEX");
+  const [expiry, setExpiry] = useState("");
+  const [activeTab, setActiveTab] = useState<LiveMarketTab>("chain");
+  const selectedTick = useTickSymbol(symbol);
+
+  const expiriesQuery = useQuery<ExpiryPayload>({
+    queryKey: ["marketOptionExpiries", symbol],
+    queryFn: () => getOptionExpiries(symbol).then((response) => response.data),
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+  });
+
+  const chainQuery = useQuery<OptionChainPayload>({
+    queryKey: ["marketOptionChain", symbol, expiry],
+    queryFn: () => getOptionChain(symbol, expiry || undefined).then((response) => response.data),
+    staleTime: 10_000,
+    refetchInterval: 30_000,
+  });
+
+  const watchlistQuery = useQuery<AtmWatchlistPayload>({
+    queryKey: ["marketAtmWatchlist", expiry],
+    queryFn: () => getATMWatchlist(expiry || undefined).then((response) => response.data),
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  });
+
+  const sectorQuery = useQuery<SectorRotationPayload>({
+    queryKey: ["marketSectorRotation", "daily"],
+    queryFn: () => getSectorRotation("daily").then((response) => response.data),
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  });
+
+  useEffect(() => {
+    const available = expiriesQuery.data?.expiries || [];
+    const nextExpiry = expiriesQuery.data?.default_expiry || available[0] || watchlistQuery.data?.expiry || "";
+    if (nextExpiry && (!expiry || !available.includes(expiry))) {
+      setExpiry(nextExpiry);
+    }
+  }, [expiry, expiriesQuery.data, watchlistQuery.data?.expiry]);
+
+  const chain = chainQuery.data;
+  const entries = chain?.entries || [];
+  const ceEntries = entries.filter((entry) => entry.option_type === "CE");
+  const peEntries = entries.filter((entry) => entry.option_type === "PE");
+  const strikes = Array.from(new Set(entries.map((entry) => entry.strike))).sort((left, right) => left - right);
+  const atmIndex = Math.max(0, strikes.findIndex((strike) => strike === chain?.atm_strike));
+  const visibleStrikes = strikes.length
+    ? strikes.slice(Math.max(0, atmIndex - 6), Math.min(strikes.length, atmIndex + 7))
+    : [];
+  const watchlistRows = watchlistQuery.data?.rows || [];
+  const sectorRows = sectorQuery.data?.watchlist || [];
+  const rrgPoints = sectorQuery.data?.rrg?.points || sectorRows;
+  const spot = selectedTick?.ltp || chain?.spot_price || 0;
+
+  return (
+    <section className="rounded-xl border border-bg-active/60 bg-bg-secondary/25 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2 font-mono text-lg font-semibold text-text-primary">
+            <BarChart3 size={17} className="text-accent-green" />
+            Live Market Intelligence
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={expiry}
+            onChange={(event) => setExpiry(event.target.value)}
+            className="terminal-input min-w-[150px] py-1.5 text-xs"
+          >
+            {(expiriesQuery.data?.expiries || []).map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+            {!expiriesQuery.data?.expiries?.length ? <option value={watchlistQuery.data?.expiry || ""}>{watchlistQuery.data?.expiry || "Expiry loading"}</option> : null}
+          </select>
+          <button
+            type="button"
+            onClick={() => {
+              void expiriesQuery.refetch();
+              void chainQuery.refetch();
+              void watchlistQuery.refetch();
+              void sectorQuery.refetch();
+            }}
+            className="inline-flex items-center gap-2 rounded-lg border border-bg-border bg-bg-secondary/35 px-3 py-2 text-xs text-text-secondary transition-colors hover:text-text-primary"
+          >
+            <RefreshCw size={14} className={chainQuery.isFetching || sectorQuery.isFetching ? "animate-spin" : ""} />
+            Refresh live tools
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-3 grid gap-2 xl:grid-cols-5">
+        {MARKET_INDEX_SYMBOLS.map((item) => (
+          <LiveIndexButton key={item} symbol={item} active={symbol === item} onSelect={setSymbol} />
+        ))}
+      </div>
+
+      <div className="mt-3 grid gap-2 md:grid-cols-4">
+        <LiveTabButton
+          active={activeTab === "chain"}
+          label="Option Chain"
+          detail="Strike ladder, PCR, ATM IV, max pain, CE/PE OI."
+          onClick={() => setActiveTab("chain")}
+        />
+        <LiveTabButton
+          active={activeTab === "watchlist"}
+          label="CE/PE Watchlist"
+          detail="Full ATM board across index and stock underlyings."
+          onClick={() => setActiveTab("watchlist")}
+        />
+        <LiveTabButton
+          active={activeTab === "sectors"}
+          label="Sector Rotation"
+          detail="Relative strength, momentum, and quadrant ranking."
+          onClick={() => setActiveTab("sectors")}
+        />
+        <LiveTabButton
+          active={activeTab === "rrg"}
+          label="RRG"
+          detail="Full-width relative rotation map with ranked context."
+          onClick={() => setActiveTab("rrg")}
+        />
+      </div>
+
+      {activeTab === "chain" ? (
+        <div className="mt-3 rounded-xl border border-bg-border bg-bg-primary/20 p-3">
+          <PanelHeader
+            icon={<Activity size={16} className="text-accent-green" />}
+            title="Option Chain"
+            detail="Live/cached chain with CE and PE ladders around ATM."
+            meta={`${getMarketIndexLabel(symbol)} · ${expiry || chain?.expiry || "--"}`}
+          />
+          <div className="mt-3 grid gap-2 md:grid-cols-6 xl:grid-cols-9">
+            <MetricTile label="Spot" value={spot > 0 ? formatNumber(spot) : "--"} />
+            <MetricTile label="PCR OI" value={formatNumber(chain?.pcr_oi)} />
+            <MetricTile label="PCR Vol" value={formatNumber(chain?.pcr_volume)} />
+            <MetricTile label="ATM" value={formatNumber(chain?.atm_strike, 0)} />
+            <MetricTile label="ATM IV" value={formatIv(chain?.atm_iv)} />
+            <MetricTile label="Max Pain" value={formatNumber(chain?.max_pain, 0)} />
+            <MetricTile label="CE OI" value={formatCompact(chain?.total_ce_oi)} />
+            <MetricTile label="PE OI" value={formatCompact(chain?.total_pe_oi)} />
+            <MetricTile label="ATM Rows" value={String(watchlistRows.length)} detail={watchlistQuery.data?.detail || undefined} />
+          </div>
+          <div className="mt-3 max-h-[62vh] overflow-auto rounded-lg border border-bg-border">
+            <table className="w-full min-w-[1220px] text-xs">
+              <thead className="sticky top-0 bg-bg-primary/95 text-text-muted">
+                <tr>
+                  <th className="px-3 py-2 text-right">CE OI</th>
+                  <th className="px-3 py-2 text-right">CE Chg OI</th>
+                  <th className="px-3 py-2 text-right">CE Vol</th>
+                  <th className="px-3 py-2 text-right">CE IV</th>
+                  <th className="px-3 py-2 text-right">CE Delta</th>
+                  <th className="px-3 py-2 text-right">CE Theta</th>
+                  <th className="px-3 py-2 text-right">CE LTP</th>
+                  <th className="px-3 py-2 text-center text-accent-amber">Strike</th>
+                  <th className="px-3 py-2 text-left">PE LTP</th>
+                  <th className="px-3 py-2 text-left">PE Theta</th>
+                  <th className="px-3 py-2 text-left">PE Delta</th>
+                  <th className="px-3 py-2 text-left">PE IV</th>
+                  <th className="px-3 py-2 text-left">PE Vol</th>
+                  <th className="px-3 py-2 text-left">PE Chg OI</th>
+                  <th className="px-3 py-2 text-left">PE OI</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleStrikes.map((strike) => {
+                  const ce = ceEntries.find((entry) => entry.strike === strike);
+                  const pe = peEntries.find((entry) => entry.strike === strike);
+                  const isAtm = chain?.atm_strike === strike;
+                  return (
+                    <tr key={strike} className={clsx("border-t border-bg-border/60", isAtm && "bg-accent-amber/8")}>
+                      <td className="px-3 py-2 text-right font-mono text-accent-green">{formatCompact(ce?.oi)}</td>
+                      <td className={clsx("px-3 py-2 text-right font-mono", pnlTone(ce?.oi_change))}>{formatCompact(ce?.oi_change)}</td>
+                      <td className="px-3 py-2 text-right font-mono">{formatCompact(ce?.volume)}</td>
+                      <td className="px-3 py-2 text-right font-mono">{formatIv(ce?.iv)}</td>
+                      <td className="px-3 py-2 text-right font-mono">{formatNumber(ce?.delta, 3)}</td>
+                      <td className={clsx("px-3 py-2 text-right font-mono", pnlTone(ce?.theta))}>{formatNumber(ce?.theta)}</td>
+                      <td className="px-3 py-2 text-right font-mono font-semibold text-accent-green">{formatNumber(ce?.ltp)}</td>
+                      <td className={clsx("px-3 py-2 text-center font-mono font-semibold", isAtm ? "text-accent-amber" : "text-text-primary")}>{formatNumber(strike, 0)}</td>
+                      <td className="px-3 py-2 text-left font-mono font-semibold text-accent-red">{formatNumber(pe?.ltp)}</td>
+                      <td className={clsx("px-3 py-2 text-left font-mono", pnlTone(pe?.theta))}>{formatNumber(pe?.theta)}</td>
+                      <td className="px-3 py-2 text-left font-mono">{formatNumber(pe?.delta, 3)}</td>
+                      <td className="px-3 py-2 text-left font-mono">{formatIv(pe?.iv)}</td>
+                      <td className="px-3 py-2 text-left font-mono">{formatCompact(pe?.volume)}</td>
+                      <td className={clsx("px-3 py-2 text-left font-mono", pnlTone(pe?.oi_change))}>{formatCompact(pe?.oi_change)}</td>
+                      <td className="px-3 py-2 text-left font-mono text-accent-red">{formatCompact(pe?.oi)}</td>
+                    </tr>
+                  );
+                })}
+                {!visibleStrikes.length ? (
+                  <tr><td colSpan={15} className="px-3 py-8 text-center text-text-muted">{chain?.error || "No option-chain ladder available for this index/expiry."}</td></tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
+      {activeTab === "watchlist" ? (
+        <div className="mt-3 rounded-xl border border-bg-border bg-bg-primary/20 p-3">
+          <PanelHeader
+            icon={<Database size={16} className="text-accent-blue" />}
+            title="CE/PE ATM Watchlist"
+            detail="Prepared ATM CE and PE rows from the market watchlist service."
+            meta={`${watchlistRows.length} rows · ${watchlistQuery.data?.expiry || expiry || "--"}`}
+          />
+          <div className="mt-3 grid gap-2 md:grid-cols-4">
+            <MetricTile label="Expiry" value={watchlistQuery.data?.expiry || expiry || "--"} />
+            <MetricTile label="Rows" value={String(watchlistRows.length)} detail={watchlistQuery.data?.detail || undefined} />
+            <MetricTile label="Index Rows" value={String(watchlistRows.filter((row) => String(row.kind || "").toLowerCase() === "index").length)} />
+            <MetricTile label="Stock Rows" value={String(watchlistRows.filter((row) => String(row.kind || "").toLowerCase() !== "index").length)} />
+          </div>
+          <div className="mt-3 max-h-[64vh] overflow-auto">
+            <AtmWatchlistTable rows={watchlistRows} />
+          </div>
+        </div>
+      ) : null}
+
+      {activeTab === "sectors" ? (
+        <div className="mt-3 rounded-xl border border-bg-border bg-bg-primary/20 p-3">
+          <PanelHeader
+            icon={<BarChart3 size={16} className="text-accent-blue" />}
+            title="Sector Rotation"
+            detail="Sector relative strength and momentum versus NIFTY 50."
+            meta={sectorQuery.data?.benchmark?.name || "NIFTY 50"}
+          />
+          <div className="mt-3 grid gap-2 md:grid-cols-4">
+            <MetricTile label="Benchmark" value={sectorQuery.data?.benchmark?.name || "NIFTY 50"} detail={formatPercent(sectorQuery.data?.benchmark?.tracked_change_pct)} />
+            <MetricTile label="Sectors" value={String(sectorRows.length)} />
+            <MetricTile label="Leading" value={String(sectorRows.filter((sector) => sector.quadrant === "leading").length)} />
+            <MetricTile label="Improving" value={String(sectorRows.filter((sector) => sector.quadrant === "improving").length)} />
+          </div>
+          <div className="mt-3 max-h-[64vh] overflow-auto rounded-lg border border-bg-border">
+            <table className="w-full min-w-[860px] text-xs">
+              <thead className="sticky top-0 bg-bg-primary/95 text-text-muted">
+                <tr>
+                  <th className="px-3 py-2 text-left">Sector</th>
+                  <th className="px-3 py-2 text-left">Symbol</th>
+                  <th className="px-3 py-2 text-right">Price</th>
+                  <th className="px-3 py-2 text-right">Tracked</th>
+                  <th className="px-3 py-2 text-right">RS</th>
+                  <th className="px-3 py-2 text-right">Ratio</th>
+                  <th className="px-3 py-2 text-right">Momentum</th>
+                  <th className="px-3 py-2 text-left">Quadrant</th>
+                  <th className="px-3 py-2 text-left">Trend</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sectorRows.map((sector) => (
+                  <tr key={sector.code} className="border-t border-bg-border/60">
+                    <td className="px-3 py-2 font-semibold text-text-primary">{sector.name}</td>
+                    <td className="px-3 py-2 text-text-muted">{sector.symbol || sector.code}</td>
+                    <td className="px-3 py-2 text-right font-mono">{formatNumber(sector.price)}</td>
+                    <td className={clsx("px-3 py-2 text-right font-mono", pnlTone(sector.tracked_change_pct))}>{formatPercent(sector.tracked_change_pct)}</td>
+                    <td className={clsx("px-3 py-2 text-right font-mono", pnlTone(sector.relative_strength_pct))}>{formatPercent(sector.relative_strength_pct)}</td>
+                    <td className="px-3 py-2 text-right font-mono">{formatNumber(sector.rrg_ratio)}</td>
+                    <td className="px-3 py-2 text-right font-mono">{formatNumber(sector.rrg_momentum)}</td>
+                    <td className="px-3 py-2"><StatusBadge label={prettify(sector.quadrant)} tone={sector.quadrant} /></td>
+                    <td className="px-3 py-2 text-text-secondary">{prettify(sector.trend)}</td>
+                  </tr>
+                ))}
+                {!sectorRows.length ? (
+                  <tr><td colSpan={9} className="px-3 py-8 text-center text-text-muted">{sectorQuery.data?.detail || "No sector rotation rows available."}</td></tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
+      {activeTab === "rrg" ? (
+        <div className="mt-3 grid gap-3 xl:grid-cols-[1.45fr_0.75fr]">
+          <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
+            <PanelHeader
+              icon={<Shield size={16} className="text-accent-green" />}
+              title="RRG"
+              detail="Relative Rotation Graph: ratio on X-axis, momentum on Y-axis."
+              meta={`${rrgPoints.length} points`}
+            />
+            <div className="mt-3 [&>div]:min-h-[560px]">
+              <RrgMap points={rrgPoints} />
+            </div>
+          </div>
+          <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
+            <PanelHeader
+              icon={<BarChart3 size={16} className="text-accent-blue" />}
+              title="RRG Ranking"
+              detail="Sorted by quadrant, relative strength, and momentum."
+              meta={sectorQuery.data?.benchmark?.name || "NIFTY 50"}
+            />
+            <div className="mt-3 max-h-[560px] space-y-2 overflow-auto">
+              {sectorRows.map((sector) => (
+                <div key={sector.code} className="rounded-lg border border-bg-border bg-bg-secondary/25 px-3 py-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold text-text-primary">{sector.name}</div>
+                      <div className="mt-1 text-[11px] text-text-muted">{prettify(sector.trend)} · RS {formatPercent(sector.relative_strength_pct)}</div>
+                    </div>
+                    <StatusBadge label={prettify(sector.quadrant)} tone={sector.quadrant} />
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2 font-mono text-[11px] text-text-secondary">
+                    <span>Ratio {formatNumber(sector.rrg_ratio)}</span>
+                    <span>Momentum {formatNumber(sector.rrg_momentum)}</span>
+                  </div>
+                </div>
+              ))}
+              {!sectorRows.length ? <div className="text-sm text-text-muted">{sectorQuery.data?.detail || "No RRG ranking available."}</div> : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function MarketBrokerState() {
   const layoutBrokerStatuses = useStore((state) => state.brokerStatuses);
   const statusQuery = useQuery<BrokerStatusEntry[]>({
@@ -383,6 +996,8 @@ export default function MarketPage() {
           <MetricTile label="Realized" value={formatMoney(totalRealized)} tone={pnlTone(totalRealized)} />
         </div>
       </section>
+
+      <LiveMarketTools />
 
       <section className="grid gap-3 xl:grid-cols-2">
         <div className="rounded-xl border border-bg-border bg-bg-secondary/20 p-3">

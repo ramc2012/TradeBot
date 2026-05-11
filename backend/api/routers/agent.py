@@ -17,7 +17,7 @@ class ScanRequest(BaseModel):
 
 
 def _get_trading_agent():
-    from agent import trading_agent
+    from agent.trading_agent import trading_agent
 
     return trading_agent
 

@@ -1,6 +1,36 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import { clsx } from "clsx";
+
+type StrategyAuditBucket = "conditions_met_traded" | "favourable_tracking" | "drifting_away";
+
+type StrategyAuditRow = {
+  kind?: string | null;
+  source?: string | null;
+  underlying?: string | null;
+  symbol?: string | null;
+  direction?: string | null;
+  status?: string | null;
+  reason?: string | null;
+  freshness?: string | null;
+  instruction?: string | null;
+  as_of?: string | null;
+  expiry?: string | null;
+  strike?: number | null;
+  ltp?: number | null;
+  entry_price?: number | null;
+  exit_price?: number | null;
+  qty?: number | null;
+  pnl?: number | null;
+  return_pct?: number | null;
+  iv_pct?: number | null;
+  macd?: number | null;
+  previous_macd?: number | null;
+  macd_histogram?: number | null;
+  rsi?: number | null;
+  priority_score?: number | null;
+};
 
 export type StrategyAgentStatus = {
   running: boolean;
@@ -73,7 +103,20 @@ export type StrategyAgentStatus = {
       freshness?: string | null;
       instruction?: string | null;
       mp_day_type?: string | null;
+      source?: string | null;
+      as_of?: string | null;
+      expiry?: string | null;
+      strike?: number | null;
+      atm_strike?: number | null;
+      ltp?: number | null;
+      iv_pct?: number | null;
+      macd?: number | null;
+      previous_macd?: number | null;
+      macd_histogram?: number | null;
+      rsi?: number | null;
+      priority_score?: number | null;
     }>;
+    audit_lanes?: Partial<Record<StrategyAuditBucket, StrategyAuditRow[]>>;
     meta?: {
       mode?: string | null;
       scan_interval?: string | null;
@@ -189,6 +232,113 @@ function formatTimestamp(value?: string | null) {
 function prettifyToken(value?: string | null) {
   if (!value) return "--";
   return value.replaceAll("_", " ");
+}
+
+function prettifyAuditLabel(value?: string | null) {
+  if (!value) return "--";
+  return value.replaceAll("_", " ").replaceAll("-", " ");
+}
+
+function signalBucket(signal: StrategyAuditRow): StrategyAuditBucket {
+  const status = String(signal.status || "").toLowerCase().replaceAll("_", "-");
+  const freshness = String(signal.freshness || "").toLowerCase();
+  if (["active", "open", "entry-ready", "candidate", "filled"].includes(status)) {
+    return "conditions_met_traded";
+  }
+  if (["trend-aligned", "watching", "monitoring", "research-only"].includes(status) && !["missing", "stale"].includes(freshness)) {
+    return "favourable_tracking";
+  }
+  return "drifting_away";
+}
+
+function buildFallbackAuditLanes(strategy: StrategyAgentStatus["strategies"][number]): Record<StrategyAuditBucket, StrategyAuditRow[]> {
+  const lanes: Record<StrategyAuditBucket, StrategyAuditRow[]> = {
+    conditions_met_traded: [],
+    favourable_tracking: [],
+    drifting_away: [],
+  };
+
+  for (const position of strategy.positions || []) {
+    lanes.conditions_met_traded.push({
+      kind: "position",
+      source: "open_position",
+      underlying: position.underlying,
+      symbol: position.symbol,
+      direction: position.option_type,
+      status: `open:${position.phase || "phase1"}`,
+      reason: position.signal_reason,
+      freshness: "live",
+      instruction: `${position.underlying} ${position.option_type} ${position.strike} entry ${position.entry_price.toFixed(2)}, last ${position.current_price.toFixed(2)}, return ${formatSigned(position.return_pct, 2, "%")}`,
+      as_of: position.price_updated_at || position.entered_at,
+      expiry: position.expiry,
+      strike: position.strike,
+      ltp: position.current_price,
+      entry_price: position.entry_price,
+      qty: position.qty,
+      pnl: position.unrealized_pnl,
+      return_pct: position.return_pct,
+      iv_pct: position.entry_iv_pct,
+      rsi: position.latest_rsi,
+    });
+  }
+
+  for (const trade of strategy.trade_history || []) {
+    lanes.conditions_met_traded.push({
+      kind: "trade",
+      source: "closed_trade",
+      underlying: trade.symbol?.split(":")[1] || trade.symbol,
+      symbol: trade.symbol,
+      direction: trade.option_type,
+      status: "closed",
+      reason: trade.action,
+      freshness: "ledger",
+      instruction: `Closed ${trade.qty} @ ${trade.exit_price?.toFixed(2)}; P&L ${formatSigned(trade.pnl, 2)}`,
+      as_of: trade.exit_time,
+      expiry: trade.expiry,
+      strike: trade.strike,
+      entry_price: trade.entry_price,
+      exit_price: trade.exit_price,
+      qty: trade.qty,
+      pnl: trade.pnl,
+    });
+  }
+
+  for (const signal of strategy.signals || []) {
+    const row: StrategyAuditRow = {
+      kind: "signal",
+      source: signal.source || "signal_lane",
+      underlying: signal.underlying,
+      symbol: signal.underlying,
+      direction: signal.direction,
+      status: signal.status,
+      reason: signal.reason,
+      freshness: signal.freshness,
+      instruction: signal.instruction,
+      as_of: signal.as_of,
+      expiry: signal.expiry,
+      strike: signal.strike ?? signal.atm_strike,
+      ltp: signal.ltp,
+      iv_pct: signal.iv_pct,
+      macd: signal.macd,
+      previous_macd: signal.previous_macd,
+      macd_histogram: signal.macd_histogram,
+      rsi: signal.rsi,
+      priority_score: signal.priority_score,
+    };
+    lanes[signalBucket(row)].push(row);
+  }
+
+  return lanes;
+}
+
+function auditLanesForStrategy(strategy: StrategyAgentStatus["strategies"][number]): Record<StrategyAuditBucket, StrategyAuditRow[]> {
+  const fallback = buildFallbackAuditLanes(strategy);
+  const apiLanes = strategy.audit_lanes || {};
+  return {
+    conditions_met_traded: apiLanes.conditions_met_traded?.length ? apiLanes.conditions_met_traded : fallback.conditions_met_traded,
+    favourable_tracking: apiLanes.favourable_tracking?.length ? apiLanes.favourable_tracking : fallback.favourable_tracking,
+    drifting_away: apiLanes.drifting_away?.length ? apiLanes.drifting_away : fallback.drifting_away,
+  };
 }
 
 function tokenTone(value?: string | null, valid?: boolean) {
@@ -393,6 +543,101 @@ export function AgentCommentaryFeed({ agentStatus }: { agentStatus?: StrategyAge
   );
 }
 
+const AUDIT_TABS: Array<{ key: StrategyAuditBucket; label: string }> = [
+  { key: "conditions_met_traded", label: "Met / Traded" },
+  { key: "favourable_tracking", label: "Close Watch" },
+  { key: "drifting_away", label: "Drifting" },
+];
+
+function fmtNumber(value?: number | null, digits = 2) {
+  if (value == null || Number.isNaN(Number(value))) return "--";
+  return Number(value).toFixed(digits);
+}
+
+function StrategyAuditTabs({ strategy }: { strategy: StrategyAgentStatus["strategies"][number] }) {
+  const [activeTab, setActiveTab] = useState<StrategyAuditBucket>("conditions_met_traded");
+  const lanes = useMemo(() => auditLanesForStrategy(strategy), [strategy]);
+  const rows = lanes[activeTab] || [];
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap gap-2">
+        {AUDIT_TABS.map((tab) => (
+          <button
+            key={tab.key}
+            type="button"
+            onClick={() => setActiveTab(tab.key)}
+            className={clsx(
+              "rounded border px-3 py-2 text-left text-xs font-semibold transition",
+              activeTab === tab.key
+                ? "border-accent-blue bg-accent-blue/15 text-text-primary"
+                : "border-bg-border bg-bg-secondary/20 text-text-muted hover:text-text-primary",
+            )}
+          >
+            <span>{tab.label}</span>
+            <span className="ml-2 font-mono text-[11px] text-text-muted">{lanes[tab.key]?.length || 0}</span>
+          </button>
+        ))}
+      </div>
+
+      {rows.length ? (
+        <div className="overflow-x-auto rounded border border-bg-border">
+          <table className="w-full min-w-[920px] text-xs">
+            <thead className="bg-bg-secondary/40 text-text-muted">
+              <tr>
+                <th className="px-3 py-2 text-left">Instrument</th>
+                <th className="px-3 py-2 text-left">State</th>
+                <th className="px-3 py-2 text-right">LTP</th>
+                <th className="px-3 py-2 text-right">MACD</th>
+                <th className="px-3 py-2 text-right">RSI</th>
+                <th className="px-3 py-2 text-right">IV</th>
+                <th className="px-3 py-2 text-right">P&L</th>
+                <th className="px-3 py-2 text-left">Trace</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.slice(0, 12).map((row, index) => (
+                <tr key={`${row.kind}-${row.symbol}-${row.as_of}-${index}`} className="border-t border-bg-border/60 align-top">
+                  <td className="px-3 py-2">
+                    <div className="font-semibold text-text-primary">
+                      {row.underlying || row.symbol || "--"} {row.direction || ""}
+                    </div>
+                    <div className="mt-1 font-mono text-[11px] text-text-muted">
+                      {row.expiry || "--"} {row.strike != null ? ` | ${fmtNumber(row.strike, 0)}` : ""}
+                    </div>
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="text-text-primary">{prettifyAuditLabel(row.status)}</div>
+                    <div className="mt-1 text-text-muted">{prettifyAuditLabel(row.reason)}</div>
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-text-primary">{fmtNumber(row.ltp ?? row.exit_price ?? row.entry_price)}</td>
+                  <td className="px-3 py-2 text-right font-mono text-text-primary">
+                    {fmtNumber(row.macd, 4)}
+                    {row.previous_macd != null ? <div className="text-[11px] text-text-muted">prev {fmtNumber(row.previous_macd, 4)}</div> : null}
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-text-primary">{fmtNumber(row.rsi, 1)}</td>
+                  <td className="px-3 py-2 text-right font-mono text-text-primary">{fmtNumber(row.iv_pct, 1)}</td>
+                  <td className={clsx("px-3 py-2 text-right font-mono", (row.pnl || 0) >= 0 ? "text-accent-green" : "text-accent-red")}>
+                    {row.pnl != null ? formatSigned(row.pnl, 2) : row.return_pct != null ? formatSigned(row.return_pct, 2, "%") : "--"}
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="max-w-[340px] text-text-muted">{row.instruction || prettifyAuditLabel(row.source)}</div>
+                    <div className="mt-1 font-mono text-[11px] text-text-muted">{formatTimestamp(row.as_of)}</div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="rounded border border-dashed border-bg-border px-3 py-5 text-xs text-text-muted text-center">
+          No rows in this lane.
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function StrategyCard({ strategy }: { strategy: StrategyAgentStatus["strategies"][number] }) {
   const tradeHistory = strategy.trade_history || [];
   const signals = strategy.signals || [];
@@ -445,6 +690,11 @@ export function StrategyCard({ strategy }: { strategy: StrategyAgentStatus["stra
         <span>Last scan {formatTimestamp(strategy.last_scan_at)}</span>
         <span className="mx-2">|</span>
         <span>{strategy.last_message || "Waiting for first scan."}</span>
+      </div>
+
+      <div className="space-y-2">
+        <div className="text-xs font-semibold text-text-secondary uppercase tracking-wide">Actionability Audit</div>
+        <StrategyAuditTabs strategy={strategy} />
       </div>
 
       <div className="space-y-2">

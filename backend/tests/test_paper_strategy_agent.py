@@ -99,6 +99,24 @@ def test_paper_portfolio_summary_sanitizes_infinite_profit_factor() -> None:
     assert summary["profit_factor"] is None
 
 
+def test_paper_portfolio_total_equity_includes_reserved_capital() -> None:
+    portfolio = PaperPortfolio(initial_capital=1_000_000.0, session_id="equity")
+    order_book = PaperOrderBook(on_fill=portfolio.on_fill)
+
+    order_book.place_order(
+        symbol="OPT:NIFTY:2026-04-30:24000:CE",
+        action="BUY",
+        order_type="MARKET",
+        qty=100,
+        instrument_type="CE",
+        option_type="CE",
+        ltp=100.0,
+    )
+
+    assert portfolio.available_capital < portfolio.initial_capital
+    assert portfolio.total_equity == pytest.approx(portfolio.initial_capital)
+
+
 def test_trade_history_persists_signal_metadata() -> None:
     portfolio = PaperPortfolio(initial_capital=1_000_000.0, session_id="meta")
     order_book = PaperOrderBook(on_fill=portfolio.on_fill)
@@ -711,7 +729,15 @@ def test_market_closed_keeps_strategy2_last_signal_snapshot(monkeypatch) -> None
         "pipeline": [{"name": "Strategy 2 NIFTY", "status": "ok", "rows": 45, "last_date": "2026-04-09 15:20"}],
     }
 
+    async def fake_market_intelligence_health():
+        return {"ready": False, "execution_ready": False}
+
+    async def fake_broker_snapshot(*, force_validate: bool = False):
+        return {"broker_ready": False, "fyers_ready": False, "upstox_ready": False}
+
     monkeypatch.setattr(strategy_agent_module, "_in_market_hours", lambda _: False)
+    monkeypatch.setattr(strategy_agent_module.market_intelligence_runtime, "get_strategy_health", fake_market_intelligence_health)
+    monkeypatch.setattr(strategy_agent_module, "get_broker_connection_snapshot", fake_broker_snapshot)
 
     status = asyncio.run(agent.run_once(force=False))
 
