@@ -17,6 +17,7 @@ import {
 import {
   getATMWatchlist,
   getBrokerStatus,
+  getFnoAnalytics,
   getOptionChain,
   getOptionExpiries,
   getSectorRotation,
@@ -211,7 +212,117 @@ type SectorRotationPayload = {
   detail?: string | null;
 };
 
-type LiveMarketTab = "chain" | "watchlist" | "sectors" | "rrg";
+type LiveMarketTab = "chain" | "watchlist" | "sectors" | "rrg" | "research";
+
+type FnoAnalyticsPayload = {
+  status?: string;
+  as_of?: string;
+  nse?: {
+    status?: string;
+    contract_master?: {
+      summary?: Record<string, any>;
+      sample?: Array<Record<string, any>>;
+    };
+    option_chain?: Record<string, any>;
+    risk?: Record<string, any>;
+  };
+  mcx?: {
+    status?: string;
+    contract_master?: {
+      summary?: Record<string, any>;
+      sample?: Array<Record<string, any>>;
+    };
+    option_chain?: Record<string, any>;
+    risk?: Record<string, any>;
+    source?: Record<string, any>;
+  };
+  quality_checks?: Array<{ key?: string; label?: string; status?: string; detail?: string }>;
+  stage_status?: Array<{ stage?: number; name?: string; status?: string; detail?: string }>;
+  signals?: {
+    nse?: Record<string, any[]>;
+    mcx?: Record<string, any[]>;
+  };
+};
+
+const RESEARCH_PRINCIPLES = [
+  "Contract correctness first",
+  "Data quality second",
+  "Risk context third",
+  "Analytics fourth",
+  "Signals fifth",
+  "Trading last, if at all",
+];
+
+const CONTRACT_MASTER_FIELDS = [
+  "exchange",
+  "segment",
+  "instrument_type",
+  "underlying",
+  "expiry_date",
+  "strike_price",
+  "option_type",
+  "lot_size",
+  "tick_size",
+  "price_unit",
+  "exercise_style",
+  "settlement_type",
+  "delivery/tender flags",
+  "margin/circular refs",
+];
+
+const RESEARCH_MODULES = [
+  {
+    title: "Contract Master",
+    detail: "Canonical NSE and MCX instrument identity, lot sizes, expiries, strikes, settlement, devolvement and circular references.",
+    items: ["FUTIDX / OPTIDX / FUTSTK / OPTSTK", "FUTCOM / FUTIDX / OPTCOM / OPTFUT / OPTIDX", "zero duplicate active contracts"],
+  },
+  {
+    title: "Data Ingestion",
+    detail: "EOD, live, option-chain, bhavcopy, margin, calendar and circular ingestion with source checksums and replayable raw archives.",
+    items: ["NSE contract price-volume and option chains", "MCX bhavcopy, option chain and market watch", "licensed live/delayed feed ready"],
+  },
+  {
+    title: "Option Intelligence",
+    detail: "Strike ladder, OI, change in OI, PCR, ATM straddle, expected move, IV smile, IV rank, Greeks and gamma concentration.",
+    items: ["NSE chain workbench", "MCX option devolvement map", "exchange-comparable and internal-risk IV modes"],
+  },
+  {
+    title: "Futures Curve",
+    detail: "Near/mid/far futures, basis, annualized basis, rollover, OI migration, contango/backwardation and calendar-spread behavior.",
+    items: ["NSE three-month futures cycle", "MCX curve and roll yield", "spot/reference basis audit"],
+  },
+  {
+    title: "Risk & Margin",
+    detail: "SPAN, exposure, ELM, delivery, tender, MWPL/ban, physical settlement, deep OTM short option and MCX devolvement risk.",
+    items: ["margin snapshot by contract", "expiry-day scenario P&L", "no alert without risk context"],
+  },
+  {
+    title: "Research Assistant",
+    detail: "Explains alerts, cites source snapshots, refuses stale data and links every explanation to contract, market, margin or circular data.",
+    items: ["daily NSE F&O summary", "daily MCX summary", "source-cited alert explanation"],
+  },
+];
+
+const DASHBOARD_BLUEPRINT = [
+  ["Market Overview", "NIFTY, BANKNIFTY, India VIX, MCX majors, top OI/volume moves, expiry calendar and events."],
+  ["NSE Option Chain", "Underlying/expiry selector, OI bars, change-OI, IV smile, ATM straddle, expected move, PCR and max OI zones."],
+  ["MCX Option Chain", "Commodity selector, underlying future, devolvement warning, bid-ask spread, IV smile and expiry P&L scenario."],
+  ["Futures Curve", "Near/next/far prices, curve shape, calendar spread, basis, OI by expiry and rollover migration."],
+  ["Risk & Margin", "SPAN, exposure, ELM, tender/delivery margin, portfolio Greeks, stress P&L, MWPL/ban and devolvement risk."],
+  ["Alerts", "Unusual OI, IV spike, spread widening, stale feed, expiry risk, margin spike, circular detected and delivery/tender warning."],
+];
+
+const BUILD_STAGES = [
+  ["1", "Contract Master", "99.9% mapping accuracy, no duplicate active contracts, daily contract refresh works."],
+  ["2", "EOD Pipeline", "OHLC/OI validation, checksum, idempotent re-runs, missing-contract report and raw file archive."],
+  ["3", "Option Chain", "ATM, PCR, OI totals, call/put mapping, bid-ask spread and ITM/OTM checks trace to raw snapshot."],
+  ["4", "Greeks & Vol", "Black-Scholes tests, IV solver convergence, near-expiry stability and visible assumptions."],
+  ["5", "Curve & Rollover", "Expiry ordering, basis source, rollover percent, spread sign convention and expired-contract pruning."],
+  ["6", "Risk & Margin", "Margin field mapping, portfolio exposure, stock physical settlement, MCX devolvement and margin-spike alerts."],
+  ["7", "Live Alerts", "Latency monitor, stale data block, duplicate/out-of-order tick handling and synthetic alert tests."],
+  ["8", "Strategy Lab", "No look-ahead bias, transaction cost, slippage, expiry, settlement, devolvement and reproducible replay."],
+  ["9", "Research Assistant", "No invented data, source-cited answers, stale-data refusal and uncertainty explanation."],
+];
 
 const TRADING_BROKERS = ["fyers", "upstox"];
 const BROKER_LABEL: Record<string, string> = {
@@ -548,6 +659,258 @@ function RrgMap({ points }: { points: SectorWatchlistRow[] }) {
   );
 }
 
+function SignalList({ title, rows }: { title: string; rows: Array<Record<string, any>> }) {
+  return (
+    <div className="rounded-lg border border-bg-border/70 bg-bg-primary/30 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-text-primary">{title}</div>
+        <div className="font-mono text-[11px] text-text-muted">{rows.length}</div>
+      </div>
+      <div className="mt-2 max-h-[150px] space-y-1.5 overflow-auto">
+        {rows.slice(0, 6).map((row, index) => (
+          <div key={`${title}-${row.symbol || row.underlying || row.contract_id || index}`} className="rounded-md bg-bg-secondary/35 px-2.5 py-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate text-[11px] font-semibold text-text-primary">
+                {row.symbol || row.underlying || row.contract_id || "--"}
+              </span>
+              <span className="font-mono text-[10px] text-text-muted">
+                {row.side || row.option_type || row.buildup || row.risk || ""}
+              </span>
+            </div>
+            <div className="mt-1 truncate font-mono text-[10px] text-text-muted">
+              OI {formatCompact(row.oi ?? row.total_oi ?? row.oi_change)} · Vol {formatCompact(row.volume ?? row.total_volume)} · IV {formatNumber(row.iv ?? row.avg_iv)}
+            </div>
+          </div>
+        ))}
+        {!rows.length ? <div className="text-[11px] text-text-muted">No rows currently flagged.</div> : null}
+      </div>
+    </div>
+  );
+}
+
+function qualityTone(value?: string | null) {
+  const status = String(value || "").toLowerCase();
+  if (["ok", "ready", "existing"].includes(status)) return "text-accent-green";
+  if (["partial", "attention", "watch"].includes(status)) return "text-accent-amber";
+  if (["missing", "unavailable", "error"].includes(status)) return "text-accent-red";
+  return "text-text-secondary";
+}
+
+function ResearchAnalyticsBlueprint({
+  payload,
+  isLoading,
+  error,
+}: {
+  payload?: FnoAnalyticsPayload;
+  isLoading: boolean;
+  error?: unknown;
+}) {
+  const nseSummary = payload?.nse?.contract_master?.summary || {};
+  const mcxSummary = payload?.mcx?.contract_master?.summary || {};
+  const nseOptionSummary = payload?.nse?.option_chain?.summary || {};
+  const mcxOptionSummary = payload?.mcx?.option_chain || {};
+  const nseSignals = payload?.signals?.nse || {};
+  const mcxSignals = payload?.signals?.mcx || {};
+
+  return (
+    <div className="mt-3 space-y-3">
+      <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
+        <PanelHeader
+          icon={<Activity size={16} className="text-accent-green" />}
+          title="Live F&O Analytics"
+          detail="Contract master, option-chain, data-quality and risk analytics generated from local NSE/MCX data sources."
+          meta={payload?.as_of ? `as of ${formatTimestamp(payload.as_of)}` : isLoading ? "loading" : "local"}
+        />
+        {error ? (
+          <div className="mt-3 rounded-lg border border-accent-red/25 bg-accent-red/8 px-3 py-2 text-xs text-accent-red">
+            Unable to load `/api/market/fno-analytics`.
+          </div>
+        ) : null}
+        <div className="mt-3 grid gap-2 md:grid-cols-4 xl:grid-cols-8">
+          <MetricTile label="NSE Contracts" value={String(nseSummary.total_contracts ?? "--")} detail={`${nseSummary.underlyings ?? 0} underlyings`} />
+          <MetricTile label="NSE Options" value={String(nseSummary.option_contracts ?? "--")} detail={`${nseSummary.ce_contracts ?? 0}/${nseSummary.pe_contracts ?? 0} CE/PE`} />
+          <MetricTile label="NSE PCR OI" value={formatNumber(nseOptionSummary.pcr_oi)} detail={`${nseOptionSummary.total_underlyings ?? 0} underlyings`} />
+          <MetricTile label="NSE Avg IV" value={formatNumber(nseOptionSummary.average_iv)} detail={String(payload?.nse?.option_chain?.status || "snapshot")} />
+          <MetricTile label="MCX Contracts" value={String(mcxSummary.total_contracts ?? "--")} detail={`${mcxSummary.underlyings ?? 0} underlyings`} />
+          <MetricTile label="MCX Options" value={String(mcxSummary.option_contracts ?? "--")} detail={`${mcxSummary.ce_contracts ?? 0}/${mcxSummary.pe_contracts ?? 0} CE/PE`} />
+          <MetricTile label="MCX ATM Rows" value={String(mcxOptionSummary.rows ?? "--")} detail={`CE ${mcxOptionSummary.ce_ready ?? 0} · PE ${mcxOptionSummary.pe_ready ?? 0}`} />
+          <MetricTile label="Quality" value={payload?.status || (isLoading ? "loading" : "--")} tone={qualityTone(payload?.status)} />
+        </div>
+        <div className="mt-3 grid gap-3 xl:grid-cols-[0.85fr_1.15fr]">
+          <div className="rounded-lg border border-bg-border bg-bg-secondary/25 p-3">
+            <div className="text-sm font-semibold text-text-primary">Data Quality Checks</div>
+            <div className="mt-3 space-y-2">
+              {(payload?.quality_checks || []).map((check) => (
+                <div key={check.key || check.label} className="rounded-lg border border-bg-border/70 bg-bg-primary/30 px-3 py-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-xs font-semibold text-text-primary">{check.label}</span>
+                    <span className={clsx("font-mono text-[11px] uppercase", qualityTone(check.status))}>{check.status || "--"}</span>
+                  </div>
+                  <div className="mt-1 text-[11px] leading-5 text-text-muted">{check.detail}</div>
+                </div>
+              ))}
+              {!payload?.quality_checks?.length ? (
+                <div className="text-xs text-text-muted">{isLoading ? "Loading local F&O analytics..." : "No quality checks returned."}</div>
+              ) : null}
+            </div>
+          </div>
+          <div className="rounded-lg border border-bg-border bg-bg-secondary/25 p-3">
+            <div className="text-sm font-semibold text-text-primary">Risk And Signal Watch</div>
+            <div className="mt-3 grid gap-2 md:grid-cols-2">
+              <SignalList title="NSE OI Change" rows={nseSignals.oi_change_contracts || []} />
+              <SignalList title="NSE Volatility" rows={nseSignals.volatility_watch || []} />
+              <SignalList title="MCX Devolvement" rows={mcxSignals.devolvement_watch || []} />
+              <SignalList title="MCX Spread" rows={mcxSignals.spread_watch || []} />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
+        <PanelHeader
+          icon={<Brain size={16} className="text-accent-blue" />}
+          title="NSE + MCX F&O Research Blueprint"
+          detail="Analytics, risk and research system design for NSE equity derivatives and MCX commodity derivatives."
+          meta="research first"
+        />
+        <div className="mt-3 grid gap-2 md:grid-cols-3 xl:grid-cols-6">
+          {RESEARCH_PRINCIPLES.map((item, index) => (
+            <div key={item} className="rounded-lg border border-bg-border bg-bg-secondary/30 px-3 py-2">
+              <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-text-muted">Priority {index + 1}</div>
+              <div className="mt-1 text-sm font-semibold text-text-primary">{item}</div>
+            </div>
+          ))}
+        </div>
+        <div className="mt-3 grid gap-3 xl:grid-cols-[1.1fr_0.9fr]">
+          <div className="rounded-lg border border-bg-border bg-bg-secondary/25 p-3">
+            <div className="text-sm font-semibold text-text-primary">Questions the platform must answer</div>
+            <div className="mt-3 grid gap-2 md:grid-cols-5">
+              {[
+                ["What is happening?", "Price, volume, OI, IV, Greeks, spread, depth, rollover and volatility."],
+                ["Where is the risk?", "Margin, expiry, gamma, delivery/devolvement, MWPL/ban and liquidity risk."],
+                ["What changed today?", "OI buildup, IV spike, basis movement, roll move, unusual volume and volatility breakout."],
+                ["Is it tradeable?", "Liquidity, bid-ask, depth, slippage, margin, lot size and expiry proximity."],
+                ["Why was it flagged?", "Every alert carries the transparent data snapshot and explanation."],
+              ].map(([title, detail]) => (
+                <div key={title} className="rounded-lg border border-bg-border/70 bg-bg-primary/30 p-3">
+                  <div className="text-xs font-semibold text-text-primary">{title}</div>
+                  <div className="mt-2 text-[11px] leading-5 text-text-muted">{detail}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="rounded-lg border border-bg-border bg-bg-secondary/25 p-3">
+            <div className="text-sm font-semibold text-text-primary">Canonical IDs</div>
+            <div className="mt-3 space-y-2 font-mono text-[11px] text-text-secondary">
+              <div className="rounded-md bg-bg-primary/50 px-3 py-2">NSE:FO:OPTIDX:NIFTY:2026-05-26:23700:CE</div>
+              <div className="rounded-md bg-bg-primary/50 px-3 py-2">NSE:FO:FUTSTK:RELIANCE:2026-05-26</div>
+              <div className="rounded-md bg-bg-primary/50 px-3 py-2">MCX:COM:OPTFUT:CRUDEOIL:2026-06-17:8300:PE</div>
+              <div className="rounded-md bg-bg-primary/50 px-3 py-2">MCX:COM:FUTCOM:GOLD:2026-06-05</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid gap-3 xl:grid-cols-[0.82fr_1.18fr]">
+        <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
+          <PanelHeader
+            icon={<Database size={16} className="text-accent-green" />}
+            title="Contract Master Foundation"
+            detail="Start with contract correctness before charts, strategy or alerts."
+            meta={`${CONTRACT_MASTER_FIELDS.length} fields`}
+          />
+          <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-text-secondary md:grid-cols-3">
+            {CONTRACT_MASTER_FIELDS.map((field) => (
+              <div key={field} className="rounded-md border border-bg-border/70 bg-bg-secondary/25 px-2.5 py-2 font-mono">
+                {field}
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 rounded-lg border border-accent-amber/25 bg-accent-amber/8 p-3 text-xs leading-5 text-text-secondary">
+            MCX options must map to the underlying futures contract because ITM options can devolve into futures. NSE stock F&O must carry
+            physical-settlement, MWPL/ban, corporate-action and deep-OTM short-option risk flags.
+          </div>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          {RESEARCH_MODULES.map((module) => (
+            <div key={module.title} className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
+              <div className="text-sm font-semibold text-text-primary">{module.title}</div>
+              <div className="mt-2 min-h-[58px] text-xs leading-5 text-text-muted">{module.detail}</div>
+              <div className="mt-3 space-y-1.5">
+                {module.items.map((item) => (
+                  <div key={item} className="flex items-start gap-2 text-[11px] leading-5 text-text-secondary">
+                    <CheckCircle2 size={12} className="mt-1 shrink-0 text-accent-green" />
+                    <span>{item}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid gap-3 xl:grid-cols-[1fr_1fr]">
+        <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
+          <PanelHeader
+            icon={<BarChart3 size={16} className="text-accent-blue" />}
+            title="Dashboard Plan"
+            detail="Dedicated workbenches to keep NSE, MCX, risk and alerts inspectable."
+            meta="6 dashboards"
+          />
+          <div className="mt-3 overflow-auto rounded-lg border border-bg-border">
+            <table className="w-full min-w-[760px] text-xs">
+              <thead className="bg-bg-primary/70 text-text-muted">
+                <tr>
+                  <th className="px-3 py-2 text-left">Dashboard</th>
+                  <th className="px-3 py-2 text-left">Scope</th>
+                </tr>
+              </thead>
+              <tbody>
+                {DASHBOARD_BLUEPRINT.map(([name, scope]) => (
+                  <tr key={name} className="border-t border-bg-border/60">
+                    <td className="px-3 py-2 font-semibold text-text-primary">{name}</td>
+                    <td className="px-3 py-2 leading-5 text-text-secondary">{scope}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
+          <PanelHeader
+            icon={<Shield size={16} className="text-accent-amber" />}
+            title="Build And Test Gates"
+            detail="Stage-by-stage exit criteria for a data-quality-first analytics system."
+            meta="9 stages"
+          />
+          <div className="mt-3 max-h-[460px] overflow-auto rounded-lg border border-bg-border">
+            <table className="w-full min-w-[820px] text-xs">
+              <thead className="sticky top-0 bg-bg-primary/95 text-text-muted">
+                <tr>
+                  <th className="px-3 py-2 text-left">Stage</th>
+                  <th className="px-3 py-2 text-left">Build</th>
+                  <th className="px-3 py-2 text-left">Exit Criteria</th>
+                </tr>
+              </thead>
+              <tbody>
+                {BUILD_STAGES.map(([stage, build, criteria]) => (
+                  <tr key={stage} className="border-t border-bg-border/60 align-top">
+                    <td className="px-3 py-2 font-mono text-accent-blue">{stage}</td>
+                    <td className="px-3 py-2 font-semibold text-text-primary">{build}</td>
+                    <td className="px-3 py-2 leading-5 text-text-secondary">{criteria}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function LiveTabButton({
   active,
   label,
@@ -597,8 +960,8 @@ function LiveMarketTools() {
   });
 
   const watchlistQuery = useQuery<AtmWatchlistPayload>({
-    queryKey: ["marketAtmWatchlist", expiry],
-    queryFn: () => getATMWatchlist(expiry || undefined).then((response) => response.data),
+    queryKey: ["marketAtmWatchlist", expiry, "live-refresh"],
+    queryFn: () => getATMWatchlist(expiry || undefined, true).then((response) => response.data),
     staleTime: 30_000,
     refetchInterval: 60_000,
   });
@@ -608,6 +971,14 @@ function LiveMarketTools() {
     queryFn: () => getSectorRotation("daily").then((response) => response.data),
     staleTime: 30_000,
     refetchInterval: 60_000,
+  });
+
+  const fnoAnalyticsQuery = useQuery<FnoAnalyticsPayload>({
+    queryKey: ["marketFnoAnalytics"],
+    queryFn: () => getFnoAnalytics(20).then((response) => response.data),
+    staleTime: 60_000,
+    refetchInterval: activeTab === "research" ? 120_000 : false,
+    enabled: activeTab === "research",
   });
 
   useEffect(() => {
@@ -640,6 +1011,9 @@ function LiveMarketTools() {
             <BarChart3 size={17} className="text-accent-green" />
             Live Market Intelligence
           </div>
+          <div className="mt-1 text-xs text-text-muted">
+            Option chain, CE/PE ATM watchlist, sector rotation, RRG and NSE + MCX research architecture are separate detailed modules.
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <select
@@ -659,6 +1033,9 @@ function LiveMarketTools() {
               void chainQuery.refetch();
               void watchlistQuery.refetch();
               void sectorQuery.refetch();
+              if (activeTab === "research") {
+                void fnoAnalyticsQuery.refetch();
+              }
             }}
             className="inline-flex items-center gap-2 rounded-lg border border-bg-border bg-bg-secondary/35 px-3 py-2 text-xs text-text-secondary transition-colors hover:text-text-primary"
           >
@@ -674,30 +1051,36 @@ function LiveMarketTools() {
         ))}
       </div>
 
-      <div className="mt-3 grid gap-2 md:grid-cols-4">
+      <div className="mt-3 grid gap-2 md:grid-cols-5">
         <LiveTabButton
           active={activeTab === "chain"}
           label="Option Chain"
-          detail="Strike ladder, PCR, ATM IV, max pain, CE/PE OI."
+          detail={`${visibleStrikes.length || 0} strikes · PCR ${formatNumber(chain?.pcr_oi)} · ATM ${formatNumber(chain?.atm_strike, 0)}`}
           onClick={() => setActiveTab("chain")}
         />
         <LiveTabButton
           active={activeTab === "watchlist"}
           label="CE/PE Watchlist"
-          detail="Full ATM board across index and stock underlyings."
+          detail={`${watchlistRows.length} rows · live refresh · expiry ${watchlistQuery.data?.expiry || expiry || "--"}`}
           onClick={() => setActiveTab("watchlist")}
         />
         <LiveTabButton
           active={activeTab === "sectors"}
           label="Sector Rotation"
-          detail="Relative strength, momentum, and quadrant ranking."
+          detail={`${sectorRows.length} sectors · leading ${sectorRows.filter((sector) => sector.quadrant === "leading").length}`}
           onClick={() => setActiveTab("sectors")}
         />
         <LiveTabButton
           active={activeTab === "rrg"}
           label="RRG"
-          detail="Full-width relative rotation map with ranked context."
+          detail={`${rrgPoints.length} points · ratio x momentum map`}
           onClick={() => setActiveTab("rrg")}
+        />
+        <LiveTabButton
+          active={activeTab === "research"}
+          label="NSE + MCX Research"
+          detail="Contract master, data quality, risk, analytics, signals and staged test gates"
+          onClick={() => setActiveTab("research")}
         />
       </div>
 
@@ -887,6 +1270,14 @@ function LiveMarketTools() {
             </div>
           </div>
         </div>
+      ) : null}
+
+      {activeTab === "research" ? (
+        <ResearchAnalyticsBlueprint
+          payload={fnoAnalyticsQuery.data}
+          isLoading={fnoAnalyticsQuery.isLoading || fnoAnalyticsQuery.isFetching}
+          error={fnoAnalyticsQuery.error}
+        />
       ) : null}
     </section>
   );

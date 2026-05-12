@@ -181,6 +181,15 @@ def _resolve_expiry_lookup_symbol(
 
 
 _MIN_TTE_DAYS_FOR_AUTO_SELECT = 5
+_DURABLE_CACHE_KEY = "commodity_atm_watchlist_cache_v1"
+
+
+def _freeze_cache_key(value: Any) -> Any:
+    if isinstance(value, list):
+        return tuple(_freeze_cache_key(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze_cache_key(item) for item in value)
+    return value
 
 
 def _select_default_expiry(expiries: list[str], *, as_of: Optional[date] = None) -> Optional[str]:
@@ -402,6 +411,52 @@ class CommodityATMWatchlistService:
         self._watchlist_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
         self._fyers_backoff_until: datetime | None = None
         self._last_rate_limit_error: str | None = None
+        self._durable_cache_restored = False
+
+    def _restore_durable_cache(self) -> None:
+        if self._durable_cache_restored:
+            return
+        self._durable_cache_restored = True
+        try:
+            from core.runtime_state import load_runtime_state
+
+            payload, _ = load_runtime_state(_DURABLE_CACHE_KEY)
+        except Exception as exc:
+            logger.debug(f"[Commodity ATM] Durable cache restore skipped: {exc}")
+            return
+        if not isinstance(payload, dict):
+            return
+        for item in list(payload.get("contract_catalog") or []):
+            if not isinstance(item, dict) or not isinstance(item.get("payload"), dict):
+                continue
+            key = _freeze_cache_key(item.get("key"))
+            if isinstance(key, tuple):
+                self._contract_catalog_cache[key] = dict(item["payload"])
+        for item in list(payload.get("watchlist") or []):
+            if not isinstance(item, dict) or not isinstance(item.get("payload"), dict):
+                continue
+            key = _freeze_cache_key(item.get("key"))
+            if isinstance(key, tuple):
+                self._watchlist_cache[key] = dict(item["payload"])
+
+    def _persist_durable_cache(self) -> None:
+        try:
+            from core.runtime_state import save_runtime_state
+
+            payload = {
+                "contract_catalog": [
+                    {"key": list(key), "payload": value}
+                    for key, value in list(self._contract_catalog_cache.items())[-20:]
+                ],
+                "watchlist": [
+                    {"key": list(key), "payload": value}
+                    for key, value in list(self._watchlist_cache.items())[-20:]
+                ],
+                "updated_at": _utc_now().isoformat(),
+            }
+            save_runtime_state(_DURABLE_CACHE_KEY, payload)
+        except Exception as exc:
+            logger.debug(f"[Commodity ATM] Durable cache persist skipped: {exc}")
 
     def _catalog_cache_key(
         self,
@@ -447,6 +502,7 @@ class CommodityATMWatchlistService:
         *,
         label: str,
     ) -> dict[str, Any] | None:
+        self._restore_durable_cache()
         cached = cache.get(key)
         if cached is None:
             return None
@@ -472,6 +528,7 @@ class CommodityATMWatchlistService:
         payload: dict[str, Any],
     ) -> None:
         cache[key] = deepcopy(payload)
+        self._persist_durable_cache()
 
     def _static_contract_catalog(
         self,
@@ -540,6 +597,7 @@ class CommodityATMWatchlistService:
         normalized = _normalize_commodity_symbols(symbols)
         if not normalized:
             return None
+        self._restore_durable_cache()
         cache_key = self._catalog_cache_key(
             normalized,
             {
@@ -571,6 +629,7 @@ class CommodityATMWatchlistService:
         normalized = _normalize_commodity_symbols(symbols)
         if not normalized:
             return None
+        self._restore_durable_cache()
         cache_key = self._watchlist_cache_key(
             normalized,
             {
@@ -609,16 +668,6 @@ class CommodityATMWatchlistService:
                 "timestamp": datetime.now(UTC).isoformat(),
             }
 
-        adapter = await self._get_fyers_adapter()
-        if adapter is None:
-            return {
-                "contracts": [],
-                "summary": {"total_symbols": len(normalized), "contracts_ready": 0, "active_selections": 0},
-                "source": "none",
-                "detail": "Fyers is not connected, so commodity option contracts are unavailable.",
-                "timestamp": datetime.now(UTC).isoformat(),
-            }
-
         selected_option_expiries = {
             str(symbol).strip().upper(): str(expiry).strip()
             for symbol, expiry in dict(selected_option_expiries or {}).items()
@@ -630,6 +679,27 @@ class CommodityATMWatchlistService:
             if str(symbol).strip() and str(lookup_symbol).strip()
         }
         cache_key = self._catalog_cache_key(normalized, selected_option_expiries, selected_option_lookup_symbols)
+        self._restore_durable_cache()
+        adapter = await self._get_fyers_adapter()
+        if adapter is None:
+            cached_payload = self._cached_payload(
+                self._contract_catalog_cache,
+                cache_key,
+                label="commodity contract catalog",
+            )
+            if cached_payload is not None:
+                cached_payload["source"] = str(cached_payload.get("source") or "durable_cache")
+                return cached_payload
+            return self._static_contract_catalog(
+                normalized,
+                selected_option_expiries,
+                selected_option_lookup_symbols,
+                detail=(
+                    "Fyers is not connected. Showing saved MCX futures with "
+                    "static contract metadata until live expiry discovery returns."
+                ),
+                source="static_without_broker",
+            )
         if self._in_backoff():
             cached_payload = self._cached_payload(
                 self._contract_catalog_cache,
@@ -657,22 +727,11 @@ class CommodityATMWatchlistService:
                 # within ~0.6s and all four 429'd. 0.6s spreads to ~2.4s,
                 # well under Fyers burst budget.
                 await asyncio.sleep(0.6)
-            attempt = 0
-            max_attempts = 3
             while True:
                 try:
                     symbol_contracts.append(await self._load_symbol_contracts(adapter, symbol))
                     break
                 except Exception as exc:
-                    if _is_rate_limit_error(exc) and attempt < max_attempts - 1:
-                        backoff = 0.75 * (2 ** attempt)
-                        logger.warning(
-                            f"[Commodity ATM] 429 on expiry discovery for {symbol} "
-                            f"(attempt {attempt + 1}/{max_attempts}); retrying in {backoff:.2f}s"
-                        )
-                        await asyncio.sleep(backoff)
-                        attempt += 1
-                        continue
                     if _is_rate_limit_error(exc):
                         rate_limit_errors.append(str(exc))
                         symbol_contracts.append(exc)
@@ -785,28 +844,6 @@ class CommodityATMWatchlistService:
             "detail": detail,
             "timestamp": _utc_now().isoformat(),
         }
-        if rate_limit_errors and payload["summary"]["contracts_ready"] == 0:
-            self._mark_rate_limit(rate_limit_errors[-1])
-            cached_payload = self._cached_payload(
-                self._contract_catalog_cache,
-                cache_key,
-                label="commodity contract catalog",
-            )
-            if cached_payload is not None:
-                return cached_payload
-            # No cache available (fresh container revision or expired cache).
-            # Build a static catalog from the user-saved expiries so the
-            # rest of the scan pipeline has something to work with.
-            return self._static_contract_catalog(
-                normalized,
-                selected_option_expiries,
-                selected_option_lookup_symbols,
-                detail=(
-                    "Fyers contract discovery hit rate limits and no cache is "
-                    "available; using saved MCX expiry selections as fallback."
-                ),
-                source="fyers_rate_limit_static",
-            )
         if payload["summary"]["contracts_ready"] > 0:
             self._store_cache(self._contract_catalog_cache, cache_key, payload)
             if rate_limit_errors:
@@ -829,16 +866,6 @@ class CommodityATMWatchlistService:
                 detail=(
                     "Fyers contract discovery hit rate limits and no cache is "
                     "available; using saved MCX expiry selections as fallback."
-                ),
-                source="fyers_rate_limit_static",
-            )
-            return self._static_contract_catalog(
-                normalized,
-                selected_option_expiries,
-                selected_option_lookup_symbols,
-                detail=(
-                    "Fyers contract discovery hit rate limits. "
-                    "Showing saved MCX futures with static contract metadata until cooldown ends."
                 ),
                 source="fyers_rate_limit_static",
             )
@@ -926,12 +953,20 @@ class CommodityATMWatchlistService:
 
         adapter = await self._get_fyers_adapter()
         if adapter is None:
+            cached_payload = self._cached_payload(
+                self._watchlist_cache,
+                cache_key,
+                label="commodity ATM watchlist",
+            )
+            if cached_payload is not None:
+                cached_payload["source"] = str(cached_payload.get("source") or "durable_cache")
+                return cached_payload
             return {
                 "expiry": expiry,
                 "rows": [],
                 "summary": {"total_rows": 0, "ce_ready": 0, "pe_ready": 0},
                 "source": "none",
-                "detail": "Fyers is not connected, so the commodity ATM watchlist cannot be built.",
+                "detail": "Fyers is not connected and no saved commodity ATM watchlist cache is available.",
                 "timestamp": datetime.now(UTC).isoformat(),
             }
 

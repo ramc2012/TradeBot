@@ -26,6 +26,7 @@ from analytics.sector import sector_tracker
 from macro_research import macro_research_service
 from sector_interaction.india_live import india_live_sector_service
 from market_data.source_policy import route_order, source_policy_snapshot
+from market_data.fno_analytics import build_fno_analytics
 from api.routers.auth import (
     ensure_fyers_session,
     ensure_upstox_session,
@@ -517,6 +518,13 @@ async def market_intelligence_context() -> dict:
         "market_read": macro_research.get("market_read", {}),
         "source_policy": source_policy_snapshot(active_brokers=active_brokers),
     }
+
+
+@router.get("/fno-analytics")
+async def fno_analytics(limit: int = Query(20, ge=1, le=100)) -> dict:
+    """Contract-first NSE + MCX F&O analytics and data-quality context."""
+    fno_360 = await _fno_360_statistics(limit=limit)
+    return await build_fno_analytics(fno_360=fno_360, limit=limit)
 
 
 @dataclass(frozen=True)

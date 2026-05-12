@@ -24,9 +24,8 @@ import pandas as pd
 from loguru import logger
 from sqlalchemy import text
 
+from analysis.indicators_agent import IndicatorContext, indicators_agent
 from analysis.macd_engine import (
-    compute_ema,
-    compute_macd,
     compute_spot_ma_context,
     check_iv_filter,
 )
@@ -190,7 +189,65 @@ def _strategy2_is_regular_session(started_at: datetime) -> bool:
     return time(9, 15) <= started_at.time() <= time(15, 30)
 
 
-def detect_macd_zero_cross(closes: list[float], option_type: str = "CE") -> tuple[bool, Optional[float], Optional[str]]:
+def _indicator_cache_symbol(symbol: Optional[str], closes: list[float]) -> str:
+    if symbol:
+        return str(symbol)
+    first_close = closes[0] if closes else 0.0
+    last_close = closes[-1] if closes else 0.0
+    return f"nse_option:{len(closes)}:{first_close:.6f}:{last_close:.6f}"
+
+
+def _strategy_macd(
+    closes: list[float],
+    *,
+    symbol: Optional[str] = None,
+    timeframe: str = "5minute",
+    last_bar_time: Optional[str] = None,
+) -> tuple[list[Optional[float]], list[Optional[float]], list[Optional[float]]]:
+    ctx = IndicatorContext(
+        symbol=_indicator_cache_symbol(symbol, closes),
+        timeframe=timeframe,
+        last_bar_time=last_bar_time,
+    )
+    result = indicators_agent.macd(ctx=ctx, closes=closes, fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
+    return result.macd, result.signal, result.histogram
+
+
+def _data_quality_observation_block_reason(
+    *,
+    symbol: str,
+    source: str,
+    observed_at: Optional[str],
+    now: Optional[datetime] = None,
+) -> Optional[str]:
+    if not settings.DATA_QUALITY_SCAN_GATE_ENABLED:
+        return None
+    symbol = str(symbol or "").strip()
+    observed = _parse_iso_timestamp(observed_at)
+    try:
+        from market_data.data_quality_agent import data_quality_agent
+
+        verdict = data_quality_agent.assess_observation(
+            symbol=symbol,
+            source=source,
+            observed_at=observed,
+            now=now or _now_ist(),
+        )
+    except Exception as exc:
+        return f"Data quality gate could not verify {symbol or 'option snapshot'}: {exc}"
+    if verdict.stale:
+        return verdict.reason or f"Data quality gate blocked stale {source} for {symbol}."
+    return None
+
+
+def detect_macd_zero_cross(
+    closes: list[float],
+    option_type: str = "CE",
+    *,
+    symbol: Optional[str] = None,
+    timeframe: str = "5minute",
+    last_bar_time: Optional[str] = None,
+) -> tuple[bool, Optional[float], Optional[str]]:
     """Detect MACD zero-line crossover on option premium closes.
 
     CE: MACD crosses from ≤0 to >0 (bullish)
@@ -198,7 +255,12 @@ def detect_macd_zero_cross(closes: list[float], option_type: str = "CE") -> tupl
     """
     if len(closes) < MACD_MIN_BARS:
         return False, None, None
-    macd_line, _, _ = compute_macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+    macd_line, _, _ = _strategy_macd(
+        closes,
+        symbol=symbol,
+        timeframe=timeframe,
+        last_bar_time=last_bar_time,
+    )
     current = macd_line[-1]
     previous = macd_line[-2]
     if current is None or previous is None:
@@ -1827,18 +1889,32 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             pe_candles = option_history_service._aggregate_rows(pe_slice, 5)
             ce_closes = [float(item["close"]) for item in ce_candles if item.get("close") is not None]
             pe_closes = [float(item["close"]) for item in pe_candles if item.get("close") is not None]
+            ce_symbol = str(ce.get("instrument_key") or ce.get("trading_symbol") or f"{underlying}:CE")
+            pe_symbol = str(pe.get("instrument_key") or pe.get("trading_symbol") or f"{underlying}:PE")
+            ce_last_bar_time = str(ce_candles[-1].get("time") or "") if ce_candles else None
+            pe_last_bar_time = str(pe_candles[-1].get("time") or "") if pe_candles else None
             if direction == "CE":
-                fresh_cross, _, _ = detect_macd_zero_cross(ce_closes, "CE")
-                macd_line, _, _ = compute_macd(ce_closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL) if len(ce_closes) >= MACD_MIN_BARS else ([], [], [])
+                fresh_cross, _, _ = detect_macd_zero_cross(
+                    ce_closes,
+                    "CE",
+                    symbol=ce_symbol,
+                    last_bar_time=ce_last_bar_time,
+                )
+                macd_line, _, _ = _strategy_macd(ce_closes, symbol=ce_symbol, last_bar_time=ce_last_bar_time) if len(ce_closes) >= MACD_MIN_BARS else ([], [], [])
                 macd_value = macd_line[-1] if macd_line else None
                 aligned = macd_value is not None and macd_value > 0
-                option_last_bar_time = ce_candles[-1].get("time") if ce_candles else None
+                option_last_bar_time = ce_last_bar_time
             else:
-                fresh_cross, _, _ = detect_macd_zero_cross(pe_closes, "PE")
-                macd_line, _, _ = compute_macd(pe_closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL) if len(pe_closes) >= MACD_MIN_BARS else ([], [], [])
+                fresh_cross, _, _ = detect_macd_zero_cross(
+                    pe_closes,
+                    "PE",
+                    symbol=pe_symbol,
+                    last_bar_time=pe_last_bar_time,
+                )
+                macd_line, _, _ = _strategy_macd(pe_closes, symbol=pe_symbol, last_bar_time=pe_last_bar_time) if len(pe_closes) >= MACD_MIN_BARS else ([], [], [])
                 macd_value = macd_line[-1] if macd_line else None
                 aligned = macd_value is not None and macd_value < 0
-                option_last_bar_time = pe_candles[-1].get("time") if pe_candles else None
+                option_last_bar_time = pe_last_bar_time
             if not option_last_bar_time:
                 continue
 
@@ -1858,7 +1934,8 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             prev_hist_val: Optional[float] = None
             try:
                 if len(side_closes) >= MACD_MIN_BARS:
-                    _, _, side_hist = compute_macd(side_closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+                    side_symbol = ce_symbol if direction == "CE" else pe_symbol
+                    _, _, side_hist = _strategy_macd(side_closes, symbol=side_symbol, last_bar_time=option_last_bar_time)
                     if side_hist:
                         latest_hist_val = side_hist[-1]
                         if len(side_hist) >= 2:
@@ -2672,6 +2749,19 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             latest_price = float(side.get("ltp") or (closes[-1] if closes else 0.0) or 0.0)
             if latest_price <= 0:
                 continue
+            data_quality_block = _data_quality_observation_block_reason(
+                symbol=str(side.get("instrument_key") or side.get("trading_symbol") or f"{row['underlying']}:{direction}"),
+                source="option_history_5m",
+                observed_at=context.get("option_last_bar_time"),
+                now=started_at,
+            )
+            if data_quality_block:
+                self._append_commentary(
+                    runtime.label,
+                    f"{row['underlying']} {direction} skipped by data quality gate: {data_quality_block}",
+                    tone="warning",
+                )
+                continue
 
             candidate = {
                 "row": row,
@@ -2750,7 +2840,12 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             pos.current_price = latest_close
             pos.peak_price = max(pos.peak_price, latest_close)
             if len(closes) >= MACD_MIN_BARS:
-                macd_line, _, _ = compute_macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+                last_bar_time = str(candles[-1].get("time") or "") if candles else None
+                macd_line, _, _ = _strategy_macd(
+                    closes,
+                    symbol=pos.instrument_key or pos.trading_symbol or pos.symbol,
+                    last_bar_time=last_bar_time,
+                )
                 pos.macd_line = macd_line
                 pos.latest_rsi = _round_or_none(latest_macd_rsi(closes).get("rsi"), 2)
 
@@ -2839,13 +2934,17 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             (ce_candles[-1].get("time") if ce_candles else None)
             or (pe_candles[-1].get("time") if pe_candles else None)
         )
+        ce_symbol = str(ce_side.get("instrument_key") or ce_side.get("trading_symbol") or f"{underlying}:CE")
+        pe_symbol = str(pe_side.get("instrument_key") or pe_side.get("trading_symbol") or f"{underlying}:PE")
+        ce_last_bar_time = str(ce_candles[-1].get("time") or "") if ce_candles else None
+        pe_last_bar_time = str(pe_candles[-1].get("time") or "") if pe_candles else None
 
-        ce_macd_line, _, _ = compute_macd(ce_closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL) if len(ce_closes) >= MACD_MIN_BARS else ([], [], [])
-        pe_macd_line, _, _ = compute_macd(pe_closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL) if len(pe_closes) >= MACD_MIN_BARS else ([], [], [])
+        ce_macd_line, _, _ = _strategy_macd(ce_closes, symbol=ce_symbol, last_bar_time=ce_last_bar_time) if len(ce_closes) >= MACD_MIN_BARS else ([], [], [])
+        pe_macd_line, _, _ = _strategy_macd(pe_closes, symbol=pe_symbol, last_bar_time=pe_last_bar_time) if len(pe_closes) >= MACD_MIN_BARS else ([], [], [])
         ce_macd_value = ce_macd_line[-1] if ce_macd_line else None
         pe_macd_value = pe_macd_line[-1] if pe_macd_line else None
-        fresh_ce, _, _ = detect_macd_zero_cross(ce_closes, "CE")
-        fresh_pe, _, _ = detect_macd_zero_cross(pe_closes, "PE")
+        fresh_ce, _, _ = detect_macd_zero_cross(ce_closes, "CE", symbol=ce_symbol, last_bar_time=ce_last_bar_time)
+        fresh_pe, _, _ = detect_macd_zero_cross(pe_closes, "PE", symbol=pe_symbol, last_bar_time=pe_last_bar_time)
         ce_aligned = ce_macd_value is not None and ce_macd_value > 0
         pe_aligned = pe_macd_value is not None and pe_macd_value < 0
 
@@ -2916,7 +3015,13 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             prev_hist_val: Optional[float] = None
             try:
                 if len(side_closes_live) >= MACD_MIN_BARS:
-                    _, _, side_hist = compute_macd(side_closes_live, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+                    side_symbol = ce_symbol if direction == "CE" else pe_symbol
+                    side_last_bar_time = ce_last_bar_time if direction == "CE" else pe_last_bar_time
+                    _, _, side_hist = _strategy_macd(
+                        side_closes_live,
+                        symbol=side_symbol,
+                        last_bar_time=side_last_bar_time,
+                    )
                     if side_hist:
                         latest_hist_val = side_hist[-1]
                         if len(side_hist) >= 2:
@@ -3091,7 +3196,13 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         prev_hist_val: Optional[float] = None
         try:
             if len(side_closes_live) >= MACD_MIN_BARS:
-                _, _, side_hist = compute_macd(side_closes_live, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+                side_symbol = ce_symbol if direction == "CE" else pe_symbol
+                side_last_bar_time = ce_last_bar_time if direction == "CE" else pe_last_bar_time
+                _, _, side_hist = _strategy_macd(
+                    side_closes_live,
+                    symbol=side_symbol,
+                    last_bar_time=side_last_bar_time,
+                )
                 if side_hist:
                     latest_hist_val = side_hist[-1]
                     if len(side_hist) >= 2:

@@ -18,7 +18,8 @@ from typing import Any, Optional
 from loguru import logger
 
 from agentic_rag.audit_agent import record_audit_event
-from analysis.macd_engine import compute_ema, compute_macd
+from analysis.indicators_agent import IndicatorContext, indicators_agent
+from analysis.macd_engine import compute_ema
 from analysis.signal_classifier import classify_signal_bucket
 from analytics.technicals import latest_macd_rsi
 from api.routers.auth import (
@@ -529,9 +530,28 @@ def _recent_zero_cross(macd_line: list[Optional[float]], *, lookback_bars: int) 
     return None, None
 
 
+def _indicator_context(
+    *,
+    symbol: Optional[str],
+    timeframe: str,
+    candles: list[dict[str, Any]],
+    closes: list[float],
+) -> IndicatorContext:
+    last_bar_time = str(candles[-1].get("time") or "") if candles else None
+    if symbol:
+        cache_symbol = str(symbol)
+    else:
+        first_close = closes[0] if closes else 0.0
+        last_close = closes[-1] if closes else 0.0
+        cache_symbol = f"commodity_signal:{len(candles)}:{first_close:.6f}:{last_close:.6f}"
+    return IndicatorContext(symbol=cache_symbol, timeframe=timeframe, last_bar_time=last_bar_time)
+
+
 def evaluate_commodity_signal(
     candles: list[dict[str, Any]],
     *,
+    symbol: Optional[str] = None,
+    timeframe: str = FUTURES_TIMEFRAME,
     fast: int = FUTURES_MACD_FAST,
     slow: int = FUTURES_MACD_SLOW,
     signal_period: int = FUTURES_MACD_SIGNAL,
@@ -552,7 +572,11 @@ def evaluate_commodity_signal(
         }
 
     closes = [float(candle.get("close") or 0.0) for candle in candles]
-    macd_line, signal_line, histogram = compute_macd(closes, fast, slow, signal_period)
+    ctx = _indicator_context(symbol=symbol, timeframe=timeframe, candles=candles, closes=closes)
+    macd_result = indicators_agent.macd(ctx=ctx, closes=closes, fast=fast, slow=slow, signal=signal_period)
+    macd_line = macd_result.macd
+    signal_line = macd_result.signal
+    histogram = macd_result.histogram
     latest_macd = macd_line[-1]
     previous_macd = macd_line[-2]
     latest_signal = signal_line[-1]
@@ -641,6 +665,23 @@ def evaluate_commodity_signal(
 
 # classify_signal_bucket is imported from analysis.signal_classifier so all
 # strategy agents bucket their lane rows the same way.
+
+
+def _data_quality_block_reason(symbol: str, source: str) -> Optional[str]:
+    if not settings.DATA_QUALITY_SCAN_GATE_ENABLED:
+        return None
+    symbol = str(symbol or "").strip()
+    if not symbol:
+        return "Data quality gate blocked entry because no tradable symbol was available."
+    try:
+        from market_data.data_quality_agent import data_quality_agent
+
+        verdict = data_quality_agent.assess_freshness(symbol=symbol, source=source)
+    except Exception as exc:
+        return f"Data quality gate could not verify {symbol}: {exc}"
+    if verdict.stale:
+        return verdict.reason or f"Data quality gate blocked stale {source} for {symbol}."
+    return None
 
 
 @dataclass
@@ -1503,20 +1544,25 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 validation = "max_positions"
                 validation_detail = "The futures sleeve is already at max open-position capacity."
             elif signal in {"BUY", "SELL"}:
-                required_margin = self._estimate_futures_margin_required(price, qty)
-                if required_margin > self._runtime.portfolio.available_capital:
-                    validation = "insufficient_margin"
-                    validation_detail = "Available paper capital cannot fund the next futures lot."
+                data_quality_block = _data_quality_block_reason(symbol, "broker_quote")
+                if data_quality_block:
+                    validation = "data_stale"
+                    validation_detail = data_quality_block
                 else:
-                    validation = "ready"
-                    validation_detail = str(
-                        row.get("signal_validation_detail")
-                        or (
-                            "15-minute continuation setup and Market Profile are aligned for entry."
-                            if row.get("entry_style") == "continuation"
-                            else "15-minute MACD and Market Profile are aligned for entry."
+                    required_margin = self._estimate_futures_margin_required(price, qty)
+                    if required_margin > self._runtime.portfolio.available_capital:
+                        validation = "insufficient_margin"
+                        validation_detail = "Available paper capital cannot fund the next futures lot."
+                    else:
+                        validation = "ready"
+                        validation_detail = str(
+                            row.get("signal_validation_detail")
+                            or (
+                                "15-minute continuation setup and Market Profile are aligned for entry."
+                                if row.get("entry_style") == "continuation"
+                                else "15-minute MACD and Market Profile are aligned for entry."
+                            )
                         )
-                    )
 
             bucket_info = classify_signal_bucket(
                 has_position=self._has_any_underlying_position(underlying),
@@ -1607,8 +1653,13 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 validation = "insufficient_capital"
                 validation_detail = f"The {OPTIONS_CAPITAL_FRACTION:.0%} capital budget cannot fund one option lot at the current premium."
             elif signal_side:
-                validation = "ready"
-                validation_detail = "The selected CE/PE contract has a fresh 30-minute MACD trigger and passes the liquidity check."
+                data_quality_block = _data_quality_block_reason(trade_symbol, "broker_quote")
+                if data_quality_block:
+                    validation = "data_stale"
+                    validation_detail = data_quality_block
+                else:
+                    validation = "ready"
+                    validation_detail = "The selected CE/PE contract has a fresh 30-minute MACD trigger and passes the liquidity check."
             elif row.get("regime") in {"bullish", "bearish", "dead_zone", "vol_spike"}:
                 validation = "trend_aligned"
                 validation_detail = "Option MACD context is available, but a fresh CE/PE zero-cross has not fired yet."
@@ -1829,7 +1880,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             self._append_commentary("warning", f"{symbol}: no futures candles returned by broker.")
             return None
 
-        analysis = evaluate_commodity_signal(candles)
+        analysis = evaluate_commodity_signal(candles, symbol=symbol, timeframe=FUTURES_TIMEFRAME)
         latest_close = analysis.get("latest_close")
         previous_close = analysis.get("previous_close")
         price = float(live_ltp or latest_close or 0.0)
@@ -2232,8 +2283,22 @@ class CommodityStrategyAgent(BaseStrategyAgent):
 
         ce_closes = [float(item["close"]) for item in ce_candles if item.get("close") is not None]
         pe_closes = [float(item["close"]) for item in pe_candles if item.get("close") is not None]
-        ce_analysis = evaluate_commodity_signal(ce_candles, fast=OPTIONS_MACD_FAST, slow=OPTIONS_MACD_SLOW, signal_period=OPTIONS_MACD_SIGNAL) if ce_candles else {"signal": None, "reason": "missing", "regime": "unknown", "bar_time": None}
-        pe_analysis = evaluate_commodity_signal(pe_candles, fast=OPTIONS_MACD_FAST, slow=OPTIONS_MACD_SLOW, signal_period=OPTIONS_MACD_SIGNAL) if pe_candles else {"signal": None, "reason": "missing", "regime": "unknown", "bar_time": None}
+        ce_analysis = evaluate_commodity_signal(
+            ce_candles,
+            symbol=str(ce.get("instrument_key") or ce.get("trading_symbol") or f"{underlying}:CE"),
+            timeframe=OPTIONS_TIMEFRAME,
+            fast=OPTIONS_MACD_FAST,
+            slow=OPTIONS_MACD_SLOW,
+            signal_period=OPTIONS_MACD_SIGNAL,
+        ) if ce_candles else {"signal": None, "reason": "missing", "regime": "unknown", "bar_time": None}
+        pe_analysis = evaluate_commodity_signal(
+            pe_candles,
+            symbol=str(pe.get("instrument_key") or pe.get("trading_symbol") or f"{underlying}:PE"),
+            timeframe=OPTIONS_TIMEFRAME,
+            fast=OPTIONS_MACD_FAST,
+            slow=OPTIONS_MACD_SLOW,
+            signal_period=OPTIONS_MACD_SIGNAL,
+        ) if pe_candles else {"signal": None, "reason": "missing", "regime": "unknown", "bar_time": None}
         ce_indicators = latest_macd_rsi(ce_closes) if ce_closes else {"macd": None, "macd_signal": None, "macd_histogram": None, "rsi": None}
         pe_indicators = latest_macd_rsi(pe_closes) if pe_closes else {"macd": None, "macd_signal": None, "macd_histogram": None, "rsi": None}
 
@@ -2393,6 +2458,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     return self.get_status(refresh=False)
 
                 quote_map = await self._safe_get_ltp(adapter, self._symbols)
+                data_quality_snapshot: dict[str, Any] | None = None
                 try:
                     from market_data.data_quality_agent import data_quality_agent
 
@@ -2400,13 +2466,29 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                         if quote is not None:
                             data_quality_agent.record_tick(
                                 symbol=symbol,
-                                source="fyers_quote",
+                                source="broker_quote",
                                 observed_at=started_at,
                                 last_value=float(quote),
                             )
-                    self._last_data_health["data_quality"] = data_quality_agent.snapshot()
-                except Exception:
-                    pass
+                    data_quality_snapshot = data_quality_agent.snapshot()
+                    self._last_data_health["data_quality"] = data_quality_snapshot
+                except Exception as exc:
+                    data_quality_snapshot = {"overall": "unknown", "error": str(exc)}
+                    self._last_data_health["data_quality"] = data_quality_snapshot
+                if (
+                    settings.DATA_QUALITY_SCAN_GATE_ENABLED
+                    and data_quality_snapshot is not None
+                    and int(data_quality_snapshot.get("symbol_count") or 0) > 0
+                    and data_quality_snapshot.get("overall") in {"degraded", "critical"}
+                ):
+                    message = (
+                        "Data quality gate blocked the commodity scan: "
+                        f"{data_quality_snapshot.get('overall')} market-data freshness."
+                    )
+                    self._last_error = message
+                    self._last_message = message
+                    self._append_commentary("warning", message)
+                    return self.get_status(refresh=False)
                 futures_rows: list[dict[str, Any]] = []
                 for symbol in self._symbols:
                     row = await self._analyze_futures_symbol(symbol, quote_map.get(symbol))
@@ -2439,6 +2521,21 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     if option_symbols_to_quote
                     else {}
                 )
+                if option_quote_map:
+                    try:
+                        from market_data.data_quality_agent import data_quality_agent
+
+                        for symbol, quote in option_quote_map.items():
+                            if quote is not None:
+                                data_quality_agent.record_tick(
+                                    symbol=symbol,
+                                    source="broker_quote",
+                                    observed_at=started_at,
+                                    last_value=float(quote),
+                                )
+                        data_quality_snapshot = data_quality_agent.snapshot()
+                    except Exception as exc:
+                        data_quality_snapshot = {"overall": "unknown", "error": str(exc)}
                 option_rows = self._overlay_live_option_quotes(option_rows, option_quote_map)
 
                 latest_prices = {
@@ -2486,6 +2583,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     "fyers_token_health": fyers_health,
                     "upstox_token_health": upstox_health,
                     "option_history": option_history_health,
+                    "data_quality": data_quality_snapshot,
                 }
                 self._last_message = (
                     f"Scanned {len(futures_rows)} futures rows and {len(option_rows)} option rows. "

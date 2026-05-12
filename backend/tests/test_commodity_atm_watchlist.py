@@ -237,7 +237,7 @@ def test_contract_catalog_reuses_last_good_payload_on_rate_limit() -> None:
     assert "last good commodity contract catalog" in str(second["detail"])
 
 
-def test_contract_catalog_enters_static_cooldown_without_cached_payload_on_rate_limit() -> None:
+def test_contract_catalog_enters_static_cooldown_without_cached_payload_on_rate_limit(monkeypatch) -> None:
     service = CommodityATMWatchlistService()
 
     class _RateLimitAdapter(_FakeCommodityAdapter):
@@ -254,6 +254,8 @@ def test_contract_catalog_enters_static_cooldown_without_cached_payload_on_rate_
     async def _get_adapter():
         return adapter
 
+    monkeypatch.setattr("core.runtime_state.load_runtime_state", lambda _key: (None, None))
+    monkeypatch.setattr("core.runtime_state.save_runtime_state", lambda _key, _payload: None)
     service._get_fyers_adapter = _get_adapter  # type: ignore[method-assign]
 
     first = asyncio.run(
@@ -275,6 +277,62 @@ def test_contract_catalog_enters_static_cooldown_without_cached_payload_on_rate_
     assert first["contracts"][0]["active_expiry"] == "2099-05-27"
     assert second["source"] == "fyers_rate_limit_static"
     assert adapter.contract_requests == 1
+
+
+def test_contract_catalog_uses_static_saved_selection_without_broker(monkeypatch) -> None:
+    service = CommodityATMWatchlistService()
+
+    async def _get_adapter():
+        return None
+
+    monkeypatch.setattr("core.runtime_state.load_runtime_state", lambda _key: (None, None))
+    service._get_fyers_adapter = _get_adapter  # type: ignore[method-assign]
+
+    payload = asyncio.run(
+        service.get_contract_catalog(
+            ["MCX:GOLD26JUNFUT", "MCX:CRUDEOIL26MAYFUT"],
+            {"MCX:GOLD26JUNFUT": "2099-05-27"},
+        )
+    )
+
+    assert payload["source"] == "static_without_broker"
+    assert payload["summary"]["total_symbols"] == 2
+    assert payload["summary"]["contracts_ready"] == 1
+    assert payload["contracts"][0]["active_expiry"] == "2099-05-27"
+
+
+def test_contract_catalog_restores_durable_cache_without_broker(monkeypatch) -> None:
+    state_store: dict[str, object] = {}
+    first_service = CommodityATMWatchlistService()
+    adapter = _FakeCommodityAdapter()
+
+    async def _get_adapter():
+        return adapter
+
+    def _save_state(key: str, payload: object):
+        state_store[key] = payload
+        return None
+
+    def _load_state(key: str):
+        return state_store.get(key), None
+
+    monkeypatch.setattr("core.runtime_state.save_runtime_state", _save_state)
+    monkeypatch.setattr("core.runtime_state.load_runtime_state", _load_state)
+    first_service._get_fyers_adapter = _get_adapter  # type: ignore[method-assign]
+
+    first = asyncio.run(first_service.get_contract_catalog(["MCX:GOLD26JUNFUT"]))
+    assert first["summary"]["contracts_ready"] == 1
+
+    second_service = CommodityATMWatchlistService()
+
+    async def _get_missing_adapter():
+        return None
+
+    second_service._get_fyers_adapter = _get_missing_adapter  # type: ignore[method-assign]
+    restored = asyncio.run(second_service.get_contract_catalog(["MCX:GOLD26JUNFUT"]))
+
+    assert restored["contracts"] == first["contracts"]
+    assert restored["cache_reused"] is True
 
 
 def test_watchlist_reuses_last_good_payload_on_rate_limit() -> None:
@@ -491,8 +549,15 @@ def test_pinned_selection_holds_until_selected_expiry(monkeypatch) -> None:
     assert adapter.chain_requests == [("MCX:NATURALGAS26MAYFUT", "2099-05-21")]
 
 
-def test_watchlist_prefers_live_lookup_quote_over_chain_spot_price() -> None:
+def test_watchlist_prefers_live_lookup_quote_over_chain_spot_price(monkeypatch) -> None:
     service = CommodityATMWatchlistService()
+    monkeypatch.setattr("core.runtime_state.load_runtime_state", lambda _key: (None, None))
+    monkeypatch.setattr("core.runtime_state.save_runtime_state", lambda _key, _payload: None)
+
+    async def _empty_upstox_quotes(_symbols: list[str]) -> dict[str, float]:
+        return {}
+
+    monkeypatch.setattr("market_data.commodity_atm_watchlist.load_upstox_mcx_quotes", _empty_upstox_quotes)
 
     class _StaleChainAdapter(_FakeCommodityAdapter):
         async def get_ltp(self, symbols: list[str]) -> dict[str, float]:
@@ -612,8 +677,15 @@ def test_watchlist_prefers_upstox_lookup_quote_before_fyers() -> None:
     assert adapter.ltp_requests == []
 
 
-def test_watchlist_prefers_nearest_liquid_contract_when_atm_is_thin() -> None:
+def test_watchlist_prefers_nearest_liquid_contract_when_atm_is_thin(monkeypatch) -> None:
     service = CommodityATMWatchlistService()
+    monkeypatch.setattr("core.runtime_state.load_runtime_state", lambda _key: (None, None))
+    monkeypatch.setattr("core.runtime_state.save_runtime_state", lambda _key, _payload: None)
+
+    async def _empty_upstox_quotes(_symbols: list[str]) -> dict[str, float]:
+        return {}
+
+    monkeypatch.setattr("market_data.commodity_atm_watchlist.load_upstox_mcx_quotes", _empty_upstox_quotes)
 
     class _ThinAtmAdapter(_FakeCommodityAdapter):
         async def get_option_chain(self, symbol: str, expiry: str) -> OptionChain:

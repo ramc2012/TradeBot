@@ -32,7 +32,7 @@ from analytics.technicals import latest_macd_rsi
 from core.config import settings
 from market_data import market_profile_builder, option_history_service
 from db.database import AsyncSessionLocal
-from paper_engine.base_strategy_agent import _latest_session_rows, _now_ist, _round_or_none
+from paper_engine.base_strategy_agent import _latest_session_rows, _now_ist, _parse_iso_timestamp, _round_or_none
 from paper_engine.portfolio import PaperPortfolio
 from paper_engine.strategy_learning import strategy_learning_service
 from paper_engine.strategy_agent_state import StrategyEvent, StrategyPosition, StrategyRuntime
@@ -40,6 +40,32 @@ from paper_engine.strategy_agent_state import StrategyEvent, StrategyPosition, S
 if TYPE_CHECKING:
     from paper_engine.strategy_agent import PaperStrategyAgent
     from paper_engine.strategy_agent import detect_macd_zero_cross
+
+
+def _data_quality_observation_block_reason(
+    *,
+    symbol: str,
+    source: str,
+    observed_at: str,
+) -> Optional[str]:
+    if not settings.DATA_QUALITY_SCAN_GATE_ENABLED:
+        return None
+    symbol = str(symbol or "").strip()
+    observed = _parse_iso_timestamp(observed_at)
+    try:
+        from market_data.data_quality_agent import data_quality_agent
+
+        verdict = data_quality_agent.assess_observation(
+            symbol=symbol,
+            source=source,
+            observed_at=observed,
+            now=_now_ist(),
+        )
+    except Exception as exc:
+        return f"Data quality gate could not verify {symbol or 'option snapshot'}: {exc}"
+    if verdict.stale:
+        return verdict.reason or f"Data quality gate blocked stale {source} for {symbol}."
+    return None
 
 
 class StrategyEntryMixin:
@@ -415,6 +441,20 @@ class StrategyEntryMixin:
                 )
 
             await persist_raw_signal("observed", raw_stage="pre_filter")
+
+            data_quality_block = _data_quality_observation_block_reason(
+                symbol=str(side.get("instrument_key") or side.get("trading_symbol") or signal_key),
+                source="option_history_30m",
+                observed_at=latest_bar_time,
+            )
+            if data_quality_block:
+                await persist_raw_signal(
+                    "blocked",
+                    "data_stale",
+                    freshness="stale",
+                    data_quality_reason=data_quality_block,
+                )
+                continue
 
             if self._has_underlying_position(runtime, underlying):
                 await persist_raw_signal("blocked", "existing_underlying_position")

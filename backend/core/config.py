@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     MARKET_DATA_OPTION_CHAIN_ORDER: str = "fyers,upstox,catalog"
     MARKET_DATA_HISTORICAL_ORDER: str = "postgres,upstox_analytics,upstox,fyers"
     MARKET_DATA_ANALYTICS_ORDER: str = "postgres,upstox_analytics,upstox"
-    DATA_QUALITY_SCAN_GATE_ENABLED: bool = False
+    DATA_QUALITY_SCAN_GATE_ENABLED: bool = True
     AUCTION_INTELLIGENCE_AUTO_ENABLED: bool = True
     AUCTION_INTELLIGENCE_AUTO_INTERVAL_SECONDS: int = 180
     FRACTAL_MARKET_PROFILE_AUTO_ENABLED: bool = True

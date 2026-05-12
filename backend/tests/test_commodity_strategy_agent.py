@@ -446,6 +446,16 @@ def test_commodity_kill_switch_release_blocked_by_deployment_lock(tmp_path: Path
 def test_commodity_watchlist_reports_signal_validation_and_strategy_metadata(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "commodity_strategy.json"
     monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+    from market_data.data_quality_agent import DataQualityAgent
+
+    data_quality_agent = DataQualityAgent()
+    data_quality_agent.record_tick(
+        symbol="MCX:GOLD26JUNFUT",
+        source="broker_quote",
+        observed_at=datetime.now(timezone.utc),
+        last_value=152000.0,
+    )
+    monkeypatch.setattr("market_data.data_quality_agent.data_quality_agent", data_quality_agent)
 
     agent = CommodityStrategyAgent()
     agent.update_symbols(["MCX:GOLD26JUNFUT"])
@@ -487,6 +497,60 @@ def test_commodity_watchlist_reports_signal_validation_and_strategy_metadata(tmp
     assert status["watchlist"][0]["lot_size"] == 10
     assert status["watchlist"][0]["default_qty"] == 10
     assert status["watchlist"][0]["signal_validation"] == "ready"
+
+
+def test_commodity_futures_signal_is_blocked_when_data_quality_gate_has_no_fresh_quote(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+    monkeypatch.setattr(commodity_module.settings, "DATA_QUALITY_SCAN_GATE_ENABLED", True)
+
+    agent = CommodityStrategyAgent()
+    decorated = agent._decorate_futures_rows(
+        [
+            {
+                "symbol": "MCX:GOLD26JUNFUT",
+                "underlying": "GOLD",
+                "signal": "BUY",
+                "raw_signal": "BUY",
+                "price": 152000.0,
+                "atr": 350.0,
+                "bar_time": "2026-04-09T10:30:00+05:30",
+                "mp_status": "ready",
+                "mp_direction": "BUY",
+            }
+        ]
+    )
+
+    assert decorated[0]["signal_validation"] == "data_stale"
+    assert "No observation" in decorated[0]["signal_validation_detail"]
+
+
+def test_commodity_options_signal_is_blocked_when_data_quality_gate_has_no_fresh_quote(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+    monkeypatch.setattr(commodity_module.settings, "DATA_QUALITY_SCAN_GATE_ENABLED", True)
+
+    agent = CommodityStrategyAgent()
+    decorated = agent._decorate_option_rows(
+        [
+            {
+                "symbol": "MCX:SILVERM26JUNFUT",
+                "underlying": "SILVERM",
+                "signal_side": "PE",
+                "trade_symbol": "MCX_FO|SILVERM_PE",
+                "trade_bar_time": "2026-05-11T12:30:00+05:30",
+                "trade_price": 8128.5,
+                "lots_affordable": 1,
+                "entry_iv_pct": 32.0,
+                "expiry": "2099-05-26",
+                "regime": "bearish",
+                "is_trade_contract_liquid": True,
+            }
+        ]
+    )
+
+    assert decorated[0]["signal_validation"] == "data_stale"
+    assert "No observation" in decorated[0]["signal_validation_detail"]
 
 
 def test_commodity_run_once_stops_on_invalid_fyers_session(monkeypatch, tmp_path: Path) -> None:

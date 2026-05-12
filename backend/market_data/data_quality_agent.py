@@ -69,11 +69,14 @@ class DataQualityAgent:
     DEFAULT_BUDGETS: dict[str, int] = {
         "fyers_tick": 30,
         "fyers_quote": 30,
+        "broker_quote": 30,
         "upstox_tick": 30,
         "upstox_quote": 30,
         "postgres_minute": 120,
         "broker_history_15m": 1200,
         "broker_history_30m": 2400,
+        "option_history_5m": 900,
+        "option_history_30m": 2400,
         "mcx_tick": 60,
         "default": 60,
     }
@@ -182,6 +185,47 @@ class DataQualityAgent:
                 reason=reason,
                 last_value=health.last_value,
             )
+
+    def assess_observation(
+        self,
+        *,
+        symbol: str,
+        source: str,
+        observed_at: Optional[datetime],
+        now: Optional[datetime] = None,
+        last_value: Optional[float] = None,
+    ) -> FreshnessVerdict:
+        symbol = str(symbol or "").strip()
+        source = str(source or "").strip() or "default"
+        if observed_at is None:
+            return FreshnessVerdict(
+                symbol=symbol,
+                source=source,
+                age_seconds=float("inf"),
+                stale=True,
+                reason=f"No observation timestamp available for {source}.",
+                last_value=last_value,
+            )
+        when = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        observed = observed_at
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=timezone.utc)
+        observed = observed.astimezone(timezone.utc)
+        budget = self._budget_for(source)
+        age = max((when - observed).total_seconds(), 0.0)
+        stale = age > budget
+        return FreshnessVerdict(
+            symbol=symbol,
+            source=source,
+            age_seconds=round(age, 2),
+            stale=stale,
+            reason=(
+                f"Last {source} observation is {int(age)}s old, beyond the {budget}s budget."
+                if stale
+                else None
+            ),
+            last_value=last_value,
+        )
 
     def is_ready(self, *, symbol: str, source: str) -> bool:
         return not self.assess_freshness(symbol=symbol, source=source).stale

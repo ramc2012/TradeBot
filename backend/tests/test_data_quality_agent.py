@@ -57,3 +57,25 @@ def test_data_quality_marks_stale_nse_ticks_idle_outside_market_hours(monkeypatc
     assert snapshot["overall"] == "idle"
     assert snapshot["market_state"] == "nse_closed"
     assert snapshot["stale_count"] == 1
+
+
+def test_data_quality_assesses_direct_observation_timestamp() -> None:
+    agent = DataQualityAgent()
+    now = datetime(2026, 5, 12, 10, 0, tzinfo=timezone.utc)
+
+    fresh = agent.assess_observation(
+        symbol="NSE_FO|12345",
+        source="option_history_5m",
+        observed_at=now - timedelta(minutes=5),
+        now=now,
+    )
+    stale = agent.assess_observation(
+        symbol="NSE_FO|12345",
+        source="option_history_5m",
+        observed_at=now - timedelta(minutes=30),
+        now=now,
+    )
+
+    assert fresh.stale is False
+    assert stale.stale is True
+    assert "beyond" in str(stale.reason)

@@ -248,6 +248,7 @@ export const getLTP = (symbols: string[]) => api.post("/api/market/ltp", { symbo
 export const getLatestTicks = (symbols: string[]) =>
   api.post("/api/market/latest-ticks", { symbols }, { timeout: LATEST_TICKS_TIMEOUT_MS });
 export const getMarketIntelligenceContext = () => api.get("/api/market/intelligence-context");
+export const getFnoAnalytics = (limit = 20) => api.get("/api/market/fno-analytics", { params: { limit } });
 export const getGreeks = (symbol: string, strike: number, expiry: string, optionType: string, spot: number, iv = 0.2) =>
   api.get(`/api/market/greeks/${encodeURIComponent(symbol)}/${strike}/${expiry}/${optionType}`, {
     params: { spot, iv },

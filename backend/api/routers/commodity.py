@@ -117,8 +117,18 @@ async def _bounded_contract_catalog(
     selected_option_expiries: dict[str, str],
     selected_option_lookup_symbols: dict[str, str],
     *,
-    timeout: float = 4.0,
+    timeout: float = 30.0,
 ) -> dict[str, object]:
+    """Fetch the commodity contract catalog with a generous timeout.
+
+    The service runs Fyers expiry discovery for each symbol with 0.6s inter-
+    call spacing + 3-attempt exponential backoff on 429. Worst-case ~6-8s
+    for 4 commodities under rate-limit pressure, plus a static-catalog
+    fallback. A 4s ceiling here used to time out the endpoint while the
+    underlying service was still recovering, leaving the dashboard showing
+    "degraded · 0 rows" even though the strategy scan that uses the same
+    service was getting valid data on the slower internal path.
+    """
     try:
         payload = await asyncio.wait_for(
             commodity_atm_watchlist_service.get_contract_catalog(
@@ -151,8 +161,16 @@ async def _bounded_atm_watchlist(
     selected_option_lookup_symbols: dict[str, str],
     expiry: Optional[str],
     *,
-    timeout: float = 4.0,
+    timeout: float = 30.0,
 ) -> dict[str, object]:
+    """Fetch the commodity ATM watchlist with a generous timeout.
+
+    Same reasoning as _bounded_contract_catalog: the chain build runs 4
+    Fyers `get_option_chain` calls with 0.6s spacing + 3-attempt backoff
+    on 429. Realistic worst case ~10s; the previous 4s ceiling was
+    truncating the call mid-flight and returning a degraded payload even
+    while the strategy scan path (no timeout) was succeeding.
+    """
     try:
         return await asyncio.wait_for(
             commodity_atm_watchlist_service.get_watchlist(
