@@ -185,9 +185,17 @@ class TelegramAgent:
         title: str,
         sections: list[tuple[str, list[str]]],
         dedup_key: Optional[str] = None,
+        respect_reports_enabled: bool = True,
     ) -> bool:
-        """Push a cross-desk heartbeat. `sections` = [(heading, [lines]), ...]"""
-        if not settings.TELEGRAM_REPORTS_ENABLED:
+        """Push a cross-desk heartbeat. `sections` = [(heading, [lines]), ...]
+
+        `respect_reports_enabled` controls whether
+        TELEGRAM_REPORTS_ENABLED gates this send. Periodic reports set it
+        True (so the operator can mute the cadence); manual heartbeats
+        from the dashboard set it False because the operator explicitly
+        asked for delivery in that moment.
+        """
+        if respect_reports_enabled and not settings.TELEGRAM_REPORTS_ENABLED:
             return False
         lines: list[str] = [f"<b>{self._escape_html(title)}</b>"]
         for heading, items in sections:

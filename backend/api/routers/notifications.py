@@ -95,6 +95,17 @@ async def fire_telegram_heartbeat() -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
 
+    # Refresh persistent credentials from DB so the Telegram token/chat ID
+    # picked up from a settings.json/env override is current. Without this,
+    # a brand-new container revision may have TELEGRAM_REPORTS_ENABLED=False
+    # even though the saved credentials say enabled=True.
+    try:
+        from api.routers.auth import refresh_persistent_credentials
+
+        refresh_persistent_credentials(force=True)
+    except Exception:  # noqa: BLE001
+        pass
+
     title = f"Nomad Curie · Heartbeat · {now.strftime('%d %b %Y %I:%M %p IST')}"
     sent = False
     if settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID:
@@ -102,6 +113,7 @@ async def fire_telegram_heartbeat() -> dict[str, Any]:
             title=title,
             sections=sections,
             dedup_key=f"manual_heartbeat:{now.strftime('%Y%m%d%H%M%S')}",
+            respect_reports_enabled=False,
         )
     return {
         "sent": sent,
