@@ -180,12 +180,27 @@ def _resolve_expiry_lookup_symbol(
     return default_symbol
 
 
+_MIN_TTE_DAYS_FOR_AUTO_SELECT = 5
+
+
 def _select_default_expiry(expiries: list[str], *, as_of: Optional[date] = None) -> Optional[str]:
+    """Return the nearest expiry that gives at least
+    ``_MIN_TTE_DAYS_FOR_AUTO_SELECT`` days of time to expiry. This prevents
+    auto-selecting a 0-3 day TTE contract (which the strategy's TTE filter
+    would reject anyway), wasting a watchlist slot on something that cannot
+    trade. Falls back to the first non-expired expiry if no viable one is
+    found, and to the first listed expiry as a last resort.
+    """
     if not expiries:
         return None
     current = as_of or date.today()
     current_iso = current.isoformat()
-    return next((expiry for expiry in expiries if expiry >= current_iso), expiries[0])
+    min_iso = (current + timedelta(days=_MIN_TTE_DAYS_FOR_AUTO_SELECT)).isoformat()
+    viable = next((expiry for expiry in expiries if expiry >= min_iso), None)
+    if viable:
+        return viable
+    not_expired = next((expiry for expiry in expiries if expiry >= current_iso), None)
+    return not_expired or expiries[0]
 
 
 def _resolve_active_expiry(
@@ -193,10 +208,31 @@ def _resolve_active_expiry(
     *,
     selected_expiry: Optional[str] = None,
     override_expiry: Optional[str] = None,
+    auto_rotate_below_min_tte: bool = True,
 ) -> Optional[str]:
+    """Resolve the expiry the watchlist should load.
+
+    Honours an explicit override or a user-selected expiry, but if that
+    selection has TTE < ``_MIN_TTE_DAYS_FOR_AUTO_SELECT`` and a viable
+    further-out expiry exists, auto-rotate to it. Prevents the watchlist
+    from carrying a "selected" 1-2 day expiry that the strategy will refuse
+    to trade.
+    """
     if override_expiry and override_expiry in expiries:
         return override_expiry
+
+    current = date.today()
+    min_iso = (current + timedelta(days=_MIN_TTE_DAYS_FOR_AUTO_SELECT)).isoformat()
+
     if selected_expiry and selected_expiry in expiries:
+        if not auto_rotate_below_min_tte or selected_expiry >= min_iso:
+            return selected_expiry
+        # Selected expiry is below TTE minimum — try to find a viable one.
+        viable = next((expiry for expiry in expiries if expiry >= min_iso), None)
+        if viable:
+            return viable
+        # No viable expiry exists; honour the user's selection rather than
+        # silently swapping it for one that already expired.
         return selected_expiry
     return _select_default_expiry(expiries)
 
@@ -926,25 +962,45 @@ class CommodityATMWatchlistService:
 
         for index, item in enumerate(selected_contracts):
             if index:
-                await asyncio.sleep(0.25)
+                # Spread chain calls across ~2.4s for 4 commodities to keep
+                # well under the Fyers data-API burst limit (~10 req/sec but
+                # burst-sensitive). At the previous 0.25s spacing all four
+                # calls landed in ~1s and routinely triggered 429s, leaving
+                # the watchlist incomplete.
+                await asyncio.sleep(0.6)
             lookup_symbol = str(item.get("active_lookup_symbol") or item.get("lookup_symbol") or item.get("symbol") or "")
             quote_payload = live_quote_map.get(lookup_symbol) or {}
-            try:
-                result = await self._build_row(
-                    adapter=adapter,
-                    symbol=str(item["symbol"]),
-                    underlying=str(item["underlying"]),
-                    lookup_symbol=lookup_symbol,
-                    expiry=str(item["active_expiry"]),
-                    live_spot_price=quote_payload.get("price"),
-                    live_quote_source=str(quote_payload.get("source") or ""),
-                )
-            except Exception as exc:
-                symbol = str(item["symbol"])
-                chain_failures.append(f"{symbol} ({item['active_expiry']})")
-                if _is_rate_limit_error(exc):
-                    rate_limit_errors.append(str(exc))
-                logger.warning(f"[Commodity ATM] Failed to build {symbol} {item['active_expiry']}: {exc}")
+            result = None
+            symbol = str(item["symbol"])
+            chain_attempts = 3
+            for attempt in range(chain_attempts):
+                try:
+                    result = await self._build_row(
+                        adapter=adapter,
+                        symbol=symbol,
+                        underlying=str(item["underlying"]),
+                        lookup_symbol=lookup_symbol,
+                        expiry=str(item["active_expiry"]),
+                        live_spot_price=quote_payload.get("price"),
+                        live_quote_source=str(quote_payload.get("source") or ""),
+                    )
+                    break
+                except Exception as exc:
+                    if _is_rate_limit_error(exc) and attempt < chain_attempts - 1:
+                        backoff = 0.75 * (2 ** attempt)
+                        logger.warning(
+                            f"[Commodity ATM] 429 on {symbol} chain (attempt {attempt + 1}/{chain_attempts}); "
+                            f"retrying in {backoff:.2f}s"
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
+                    chain_failures.append(f"{symbol} ({item['active_expiry']})")
+                    if _is_rate_limit_error(exc):
+                        rate_limit_errors.append(str(exc))
+                    logger.warning(f"[Commodity ATM] Failed to build {symbol} {item['active_expiry']}: {exc}")
+                    result = None
+                    break
+            if result is None:
                 continue
             if result:
                 rows.append(
