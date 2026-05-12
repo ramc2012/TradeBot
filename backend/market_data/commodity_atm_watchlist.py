@@ -794,6 +794,19 @@ class CommodityATMWatchlistService:
             )
             if cached_payload is not None:
                 return cached_payload
+            # No cache available (fresh container revision or expired cache).
+            # Build a static catalog from the user-saved expiries so the
+            # rest of the scan pipeline has something to work with.
+            return self._static_contract_catalog(
+                normalized,
+                selected_option_expiries,
+                selected_option_lookup_symbols,
+                detail=(
+                    "Fyers contract discovery hit rate limits and no cache is "
+                    "available; using saved MCX expiry selections as fallback."
+                ),
+                source="fyers_rate_limit_static",
+            )
         if payload["summary"]["contracts_ready"] > 0:
             self._store_cache(self._contract_catalog_cache, cache_key, payload)
             if rate_limit_errors:
@@ -809,6 +822,16 @@ class CommodityATMWatchlistService:
             )
             if cached_payload is not None:
                 return cached_payload
+            return self._static_contract_catalog(
+                normalized,
+                selected_option_expiries,
+                selected_option_lookup_symbols,
+                detail=(
+                    "Fyers contract discovery hit rate limits and no cache is "
+                    "available; using saved MCX expiry selections as fallback."
+                ),
+                source="fyers_rate_limit_static",
+            )
             return self._static_contract_catalog(
                 normalized,
                 selected_option_expiries,
