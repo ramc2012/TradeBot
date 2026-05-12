@@ -99,6 +99,10 @@ async def candle_gaps(
     overall_with_gaps = 0
     try:
         async with AsyncSessionLocal() as session:
+            # Cap at 8 seconds so the request fails fast on db-f1-micro
+            # rather than hanging an SSL connection for 90s and pinning a
+            # pool slot. Returns "error" in the payload so the caller knows.
+            await session.execute(text("SET LOCAL statement_timeout = '8s'"))
             result = await session.execute(
                 sql,
                 {
