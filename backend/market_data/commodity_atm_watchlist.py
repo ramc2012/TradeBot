@@ -652,16 +652,42 @@ class CommodityATMWatchlistService:
         rate_limit_errors: list[str] = []
         for index, symbol in enumerate(normalized):
             if index:
-                await asyncio.sleep(0.15)
-            try:
-                symbol_contracts.append(await self._load_symbol_contracts(adapter, symbol))
-            except Exception as exc:
-                if _is_rate_limit_error(exc):
-                    rate_limit_errors.append(str(exc))
-                    symbol_contracts.append(exc)
-                    symbol_contracts.extend(RuntimeError(str(exc)) for _ in normalized[index + 1 :])
+                # Inter-call spacing for expiry discovery. Previously 0.15s
+                # — too aggressive; the 4 MCX symbols hit Fyers data API
+                # within ~0.6s and all four 429'd. 0.6s spreads to ~2.4s,
+                # well under Fyers burst budget.
+                await asyncio.sleep(0.6)
+            attempt = 0
+            max_attempts = 3
+            while True:
+                try:
+                    symbol_contracts.append(await self._load_symbol_contracts(adapter, symbol))
                     break
-                symbol_contracts.append(exc)
+                except Exception as exc:
+                    if _is_rate_limit_error(exc) and attempt < max_attempts - 1:
+                        backoff = 0.75 * (2 ** attempt)
+                        logger.warning(
+                            f"[Commodity ATM] 429 on expiry discovery for {symbol} "
+                            f"(attempt {attempt + 1}/{max_attempts}); retrying in {backoff:.2f}s"
+                        )
+                        await asyncio.sleep(backoff)
+                        attempt += 1
+                        continue
+                    if _is_rate_limit_error(exc):
+                        rate_limit_errors.append(str(exc))
+                        symbol_contracts.append(exc)
+                        # Skip remaining symbols this cycle — we're hard-limited
+                        # right now and further calls will also 429.
+                        symbol_contracts.extend(
+                            RuntimeError(str(exc)) for _ in normalized[index + 1 :]
+                        )
+                        break
+                    symbol_contracts.append(exc)
+                    break
+            # If we broke out of the inner loop with a rate-limit cascade,
+            # the outer loop has also been hydrated with placeholders.
+            if rate_limit_errors and len(symbol_contracts) >= len(normalized):
+                break
 
         contracts: list[dict[str, Any]] = []
         unsupported_symbols: list[str] = []
