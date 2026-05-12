@@ -8,11 +8,18 @@ from core.config import settings
 
 def _database_pool_config() -> dict[str, int | bool]:
     is_development = settings.APP_ENV == "development"
-    # Keep per-instance connection demand conservative. Cloud Run may run
-    # several API instances during market hours; large pools per instance can
-    # exhaust Postgres before individual requests see local pool pressure.
-    pool_size = settings.DATABASE_POOL_SIZE or (5 if is_development else 3)
-    max_overflow = settings.DATABASE_MAX_OVERFLOW or (5 if is_development else 2)
+    # Production was sized at pool_size=3 / max_overflow=2 (5 connections max
+    # per Cloud Run instance). That was exhausted by the new agents (audit
+    # writes, paper bootstrap, data-quality, AI/FMP/DO paper cycles, NSE +
+    # commodity scans) running together — observed
+    # "QueuePool limit of size 6 overflow 4 reached, connection timed out"
+    # on /api/commodity/overview and /api/system/health under load.
+    # Cloud SQL standard tiers tolerate well above 25 connections; budget
+    # 16 per Cloud Run instance and rely on Cloud Run scaling to bound the
+    # global footprint. DATABASE_POOL_SIZE/DATABASE_MAX_OVERFLOW env vars
+    # still override, so the cap can be tightened without a code change.
+    pool_size = settings.DATABASE_POOL_SIZE or (8 if is_development else 8)
+    max_overflow = settings.DATABASE_MAX_OVERFLOW or (8 if is_development else 8)
     return {
         "pool_pre_ping": True,
         "pool_size": max(pool_size, 1),

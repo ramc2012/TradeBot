@@ -1866,7 +1866,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             except Exception:
                 pass
             bucket_info = classify_signal_bucket(
-                has_position=any(p.underlying == underlying for p in runtime.positions),
+                has_position=self._has_underlying_position(runtime, underlying),
                 signal_validation="ready" if status == "entry-ready" else status,
                 macd=macd_value,
                 macd_histogram=latest_hist_val,

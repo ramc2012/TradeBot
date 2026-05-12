@@ -27,6 +27,9 @@ from db.database import AsyncSessionLocal
 _VALID_SEVERITY = {"info", "success", "warning", "error", "trade"}
 
 
+_AUDIT_WRITE_TIMEOUT_SECONDS = 3.0
+
+
 async def record_audit_event(
     *,
     market: str,
@@ -41,10 +44,15 @@ async def record_audit_event(
     new_state: Optional[str] = None,
     payload: Optional[dict[str, Any]] = None,
 ) -> None:
-    """Append a single audit event. Swallow exceptions — never block callers."""
+    """Append a single audit event. Swallow exceptions — never block callers.
+
+    Wrapped in asyncio.wait_for so the write can't tie up a strategy agent
+    when the DB pool is saturated. Audit failure is logged but never raised.
+    """
     if severity not in _VALID_SEVERITY:
         severity = "info"
-    try:
+
+    async def _write() -> None:
         async with AsyncSessionLocal() as session:
             await session.execute(
                 text(
@@ -74,6 +82,14 @@ async def record_audit_event(
                 },
             )
             await session.commit()
+
+    try:
+        await asyncio.wait_for(_write(), timeout=_AUDIT_WRITE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"[AuditAgent] write timed out after {_AUDIT_WRITE_TIMEOUT_SECONDS}s "
+            f"({event_type} {market}/{strategy_key}); event dropped to keep trading path alive."
+        )
     except Exception as exc:  # noqa: BLE001
         logger.opt(exception=True).warning(
             f"[AuditAgent] failed to record event {event_type} for {market}/{strategy_key}: {exc}"
