@@ -4084,38 +4084,99 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         if self._telegram_last_sent_at and (now - self._telegram_last_sent_at).total_seconds() < interval:
             return
 
-        lines = [
-            f"Nomad Curie | {now.strftime('%d %b %Y %I:%M %p IST')}",
-            f"Windows: {len(self._active_windows)} active",
-        ]
-        total_equity = 0.0
-        total_realized = 0.0
-        total_open = 0
+        # Pull cross-desk state at report time. Each section is optional —
+        # if a desk isn't loaded or errors, that section is just empty.
+        from notifications.telegram_agent import telegram_agent
+
+        sections: list[tuple[str, list[str]]] = []
+
+        # NSE strategies (this agent's own runtimes)
+        nse_lines: list[str] = []
+        nse_equity = 0.0
+        nse_realized = 0.0
+        nse_open = 0
         for runtime in self._runtimes():
             summary = runtime.portfolio.get_summary()
-            total_equity += float(summary.get("total_equity") or 0.0)
-            total_realized += float(summary.get("realized_pnl") or 0.0)
-            total_open += len(runtime.positions)
-        lines.extend(
-            [
-                f"Equity: ₹{total_equity:,.0f}",
-                f"Realized PnL: ₹{total_realized:,.0f}",
-                f"Open Positions: {total_open}",
-            ]
-        )
-        for runtime in self._runtimes():
-            lines.append(
-                f"{runtime.label}: {len(runtime.positions)} open | Entries {runtime.entries} | Exits {runtime.exits}"
+            equity = float(summary.get("total_equity") or 0.0)
+            realized = float(summary.get("realized_pnl") or 0.0)
+            open_count = len(runtime.positions)
+            nse_equity += equity
+            nse_realized += realized
+            nse_open += open_count
+            nse_lines.append(
+                f"{runtime.label}: equity ₹{equity:,.0f}; realized ₹{realized:,.0f}; "
+                f"open {open_count}; entries {runtime.entries}; exits {runtime.exits}"
             )
-            for pos in runtime.positions.values():
-                lines.append(
-                    f"  {pos.underlying} {pos.option_type} {int(pos.strike)} "
-                    f"@{pos.entry_price:.2f} → {pos.current_price:.2f} "
-                    f"({pos.return_pct:.1f}%) [{pos.phase}]"
+            for pos in list(runtime.positions.values())[:3]:
+                strike_label = f" {int(pos.strike)}" if getattr(pos, "strike", None) else ""
+                nse_lines.append(
+                    f"  · {pos.underlying} {pos.option_type or ''}{strike_label} "
+                    f"@{pos.entry_price:.2f} → {pos.current_price:.2f} ({pos.return_pct:.1f}%)"
                 )
+        nse_lines.insert(
+            0,
+            f"NSE total — equity ₹{nse_equity:,.0f}; realized ₹{nse_realized:,.0f}; open {nse_open}",
+        )
+        sections.append(("NSE Desk", nse_lines))
+
+        # Commodity desk
         try:
-            await self._send_telegram_text("\n".join(lines))
-            self._telegram_last_sent_at = now
+            from paper_engine.commodity_strategy_agent import commodity_strategy_agent
+
+            cstatus = commodity_strategy_agent.get_status(refresh=False)
+            csum = cstatus.get("summary") or {}
+            kill_label = "KILL" if cstatus.get("kill_switch_active") else "live"
+            commodity_lines = [
+                f"Commodity [{kill_label}] — equity ₹{float(csum.get('total_equity') or 0):,.0f}; "
+                f"realized ₹{float(csum.get('realized_pnl') or 0):,.0f}; "
+                f"day ₹{float(csum.get('day_pnl') or 0):,.0f}; "
+                f"open {int(csum.get('open_positions') or 0)}; "
+                f"win {float(csum.get('win_rate') or 0):.0%}",
+            ]
+            buckets = {"favourable": 0, "drifting": 0, "ready": 0, "active": 0, "neutral": 0}
+            for row in (cstatus.get("watchlist") or []):
+                b = str(row.get("bucket") or "")
+                if b in buckets:
+                    buckets[b] += 1
+            commodity_lines.append(
+                f"Buckets — ready {buckets['ready']}; active {buckets['active']}; "
+                f"favourable {buckets['favourable']}; drifting {buckets['drifting']}"
+            )
+            sections.append(("Commodity Desk", commodity_lines))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[Telegram] commodity section skipped: {exc}")
+
+        # Data quality
+        try:
+            from market_data.data_quality_agent import data_quality_agent
+
+            dq = data_quality_agent.snapshot()
+            dq_lines = [
+                f"overall {dq.get('overall')}; market {dq.get('market_state')}; "
+                f"{dq.get('symbol_count')} symbols; stale {dq.get('stale_count')}; "
+                f"flagged {dq.get('flagged_count')}"
+            ]
+            sections.append(("Data Quality", dq_lines))
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Active windows + broker health
+        broker_status = await self._get_broker_status_summary()
+        header_extras: list[str] = [f"windows {len(self._active_windows)}"]
+        if broker_status:
+            header_extras.append(broker_status.replace("\n", " · "))
+        title = (
+            f"Nomad Curie · {now.strftime('%d %b %Y %I:%M %p IST')}\n"
+            + " · ".join(header_extras)
+        )
+        try:
+            sent = await telegram_agent.notify_summary(
+                title=title,
+                sections=sections,
+                dedup_key=f"nse_periodic:{now.strftime('%Y%m%d%H%M')}",
+            )
+            if sent:
+                self._telegram_last_sent_at = now
         except Exception:
             pass
 

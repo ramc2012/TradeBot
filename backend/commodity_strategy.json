@@ -2363,6 +2363,376 @@
     ],
     "commentary": [
       {
+        "time": "2026-05-12T08:59:49.030339+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:59:49.012582+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:59:18.975636+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:59:18.619239+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:58:48.596120+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:58:48.571221+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:58:18.542870+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:58:18.168753+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:57:48.147761+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:57:48.131601+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:57:18.102755+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:57:17.646328+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:56:47.627747+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:56:47.627369+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:56:17.596469+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:56:17.212657+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:55:47.197531+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:55:47.197221+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:55:17.179493+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:55:16.770818+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:54:46.749298+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:54:46.749001+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:54:16.725002+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:54:15.931229+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:53:45.896845+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:53:45.896303+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:53:15.866466+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:53:15.502105+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:52:45.490053+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:52:45.475361+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:52:15.446707+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:52:15.070187+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:51:45.053030+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:51:45.038430+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:51:15.003081+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:51:14.561033+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:50:44.541567+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:50:44.526279+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:50:14.513475+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:50:14.513297+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:49:44.496395+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:49:44.478967+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:49:14.451777+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:49:14.451393+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:48:44.427482+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:48:44.412323+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:48:14.390865+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:48:14.390120+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:47:44.369669+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:47:44.354374+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:47:14.322360+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:47:13.942624+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:46:43.927781+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:46:43.910387+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:46:13.880613+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:46:13.401333+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:45:43.387615+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:45:43.370691+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:45:13.340755+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:45:12.532049+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:44:42.508576+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:44:42.508224+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:44:12.478209+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:44:12.111201+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:43:42.089423+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:43:42.089031+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:43:12.060408+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:43:10.140013+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:42:40.117396+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:42:40.116426+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:42:10.085534+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:42:09.616931+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
+        "time": "2026-05-12T08:41:39.600249+05:30",
+        "tone": "error",
+        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
+      },
+      {
+        "time": "2026-05-12T08:41:39.583999+05:30",
+        "tone": "idle",
+        "message": "Commodity market closed. Refreshing next-session preparation state."
+      },
+      {
         "time": "2026-05-12T08:41:09.540124+05:30",
         "tone": "error",
         "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
@@ -2389,376 +2759,6 @@
       },
       {
         "time": "2026-05-12T08:40:08.416853+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:39:38.399675+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:39:38.382817+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:39:08.370545+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:39:08.370422+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:38:38.358803+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:38:38.342209+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:38:08.316741+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:38:08.316354+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:37:38.302127+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:37:38.286000+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:37:08.258683+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:37:07.832411+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:36:37.815331+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:36:37.800464+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:36:07.768510+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:36:07.243708+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:35:37.226819+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:35:37.211499+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:35:07.181093+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:35:06.835096+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:34:36.817876+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:34:36.800976+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:34:06.776844+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:34:06.344811+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:33:36.328911+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:33:36.328777+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:33:06.303845+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:33:05.785933+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:32:35.762303+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:32:35.762033+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:32:05.733110+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:32:05.319862+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:31:35.302417+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:31:35.288111+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:31:05.262122+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:31:04.845752+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:30:34.831552+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:30:34.814853+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:30:04.790418+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:30:04.036045+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:29:34.021090+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:29:34.004765+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:29:03.975206+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:29:03.557898+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:28:33.545019+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:28:33.528779+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:28:03.511840+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:28:03.511570+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:27:33.499877+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:27:33.485587+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:27:03.461936+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:27:03.461592+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:26:33.446461+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:26:33.429639+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:26:03.401133+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:26:03.025681+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:25:33.011046+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:25:32.994917+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:25:02.962979+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:25:02.592573+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:24:32.581265+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:24:32.565554+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:24:02.543706+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:24:02.055928+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:23:32.029110+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:23:32.028568+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:23:02.002390+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:23:01.633871+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:22:31.603406+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:22:31.602817+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:22:01.579710+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:22:00.925598+05:30",
-        "tone": "idle",
-        "message": "Commodity market closed. Refreshing next-session preparation state."
-      },
-      {
-        "time": "2026-05-12T08:21:30.888808+05:30",
-        "tone": "error",
-        "message": "No valid Fyers session is available for the commodity scan. Fyers=expired reconnect required."
-      },
-      {
-        "time": "2026-05-12T08:21:30.888397+05:30",
         "tone": "idle",
         "message": "Commodity market closed. Refreshing next-session preparation state."
       }

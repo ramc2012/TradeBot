@@ -126,6 +126,9 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID: str = ""
     TELEGRAM_REPORTS_ENABLED: bool = False
     TELEGRAM_REPORT_INTERVAL: str = "1h"
+    TELEGRAM_EVENT_ALERTS_ENABLED: bool = True
+    TELEGRAM_EVENT_MIN_SEVERITY: str = "warning"
+    TELEGRAM_RATE_LIMIT_PER_MINUTE: int = 12
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod

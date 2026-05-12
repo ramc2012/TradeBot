@@ -95,6 +95,27 @@ async def record_audit_event(
             f"[AuditAgent] failed to record event {event_type} for {market}/{strategy_key}: {exc}"
         )
 
+    # Fan out to Telegram. Independent of the DB write — even if the write
+    # times out, the operator should still get the alert. Severity gate
+    # and rate limiting are handled inside telegram_agent.
+    try:
+        from notifications.telegram_agent import telegram_agent
+
+        await telegram_agent.notify_event(
+            market=market,
+            event_type=event_type,
+            severity=severity,
+            message=message,
+            symbol=symbol,
+            underlying=underlying,
+            previous_state=previous_state,
+            new_state=new_state,
+            payload=payload,
+            actor=actor,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.opt(exception=True).debug(f"[AuditAgent] telegram fan-out skipped: {exc}")
+
 
 def record_audit_event_sync(**kwargs: Any) -> None:
     """Fire-and-forget wrapper. Schedules the coroutine on the current loop or

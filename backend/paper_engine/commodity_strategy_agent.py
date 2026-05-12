@@ -2675,6 +2675,32 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                         "trade",
                         f"EXIT {position.display_name} {exit_action} @{current_price:.2f} ({reason}) | {position.lots} lot",
                     )
+                    multiplier = 1 if position.action == "BUY" else -1
+                    realized_pnl = multiplier * (current_price - position.entry_price) * position.qty
+                    await record_audit_event(
+                        market="commodity",
+                        strategy_key=position.strategy_key,
+                        event_type="position_exit",
+                        actor="strategy_agent",
+                        symbol=position.symbol,
+                        underlying=position.underlying,
+                        severity="trade",
+                        message=(
+                            f"{position.display_name} {exit_action} @ ₹{current_price:,.2f} "
+                            f"({reason}); P&L ₹{realized_pnl:,.0f}"
+                        ),
+                        previous_state="open",
+                        new_state="closed",
+                        payload={
+                            "reason": reason,
+                            "entry_price": round(position.entry_price, 2),
+                            "exit_price": round(current_price, 2),
+                            "qty": position.qty,
+                            "lots": position.lots,
+                            "realized_pnl": round(realized_pnl, 2),
+                            "return_pct": round(position.return_pct, 2),
+                        },
+                    )
                     self._runtime.positions.pop(position_key, None)
                 continue
 
@@ -2773,6 +2799,33 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         )
         multiplier = 1 if position.action == "BUY" else -1
         pnl = multiplier * (current_price - position.entry_price) * qty
+        partial_close = bool(keep_open and qty < position.qty)
+        await record_audit_event(
+            market="commodity",
+            strategy_key=position.strategy_key,
+            event_type="position_exit_partial" if partial_close else "position_exit",
+            actor="strategy_agent",
+            symbol=position.symbol,
+            underlying=position.underlying,
+            severity="trade",
+            message=(
+                f"{position.display_name} {position.option_type or ''} @ ₹{current_price:,.2f} "
+                f"({reason}); {exit_lots} lot; P&L ₹{pnl:,.0f}"
+            ),
+            previous_state="open",
+            new_state="open_runner" if partial_close else "closed",
+            payload={
+                "reason": reason,
+                "entry_price": round(position.entry_price, 2),
+                "exit_price": round(current_price, 2),
+                "qty_closed": qty,
+                "lots_closed": exit_lots,
+                "realized_pnl": round(pnl, 2),
+                "return_pct": round(position.return_pct, 2),
+                "option_type": position.option_type,
+                "strike": position.strike,
+            },
+        )
         from agentic_rag.trade_memory import build_strategy_trade_case, record_trade_case
 
         trade_case = build_strategy_trade_case(
@@ -2906,6 +2959,30 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "trade",
                 f"ENTRY {spec.display_name} {row.get('signal')} @{fill_price:.2f} | {self._lots_per_trade} lot | "
                 f"{str(row.get('entry_style') or 'fresh_cross').replace('_', ' ')} | MP {row.get('mp_day_type')} | stop {stop_price:.2f}",
+            )
+            await record_audit_event(
+                market="commodity",
+                strategy_key="commodity_futures",
+                event_type="position_entry",
+                actor="strategy_agent",
+                symbol=symbol,
+                underlying=spec.root,
+                severity="trade",
+                message=(
+                    f"{spec.display_name} {row.get('signal')} @ ₹{fill_price:,.2f} "
+                    f"({self._lots_per_trade} lot; MP {row.get('mp_day_type')}; stop ₹{stop_price:,.2f})"
+                ),
+                new_state="open",
+                payload={
+                    "side": str(row.get("signal") or ""),
+                    "fill_price": round(fill_price, 2),
+                    "stop_price": round(stop_price, 2),
+                    "target_price": round(target_price, 2),
+                    "qty": qty,
+                    "lots": self._lots_per_trade,
+                    "regime": str(row.get("mp_day_type") or row.get("regime") or ""),
+                    "entry_style": str(row.get("entry_style") or "fresh_cross"),
+                },
             )
 
     async def _open_new_option_positions(self, option_rows: list[dict[str, Any]]) -> None:
@@ -3043,6 +3120,31 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "trade",
                 f"ENTRY {spec.display_name} {signal_side} @{fill_price:.2f} | {lots} lot | "
                 f"{OPTIONS_CAPITAL_FRACTION:.0%} capital budget | stop {stop_price:.2f}",
+            )
+            await record_audit_event(
+                market="commodity",
+                strategy_key="commodity_options",
+                event_type="position_entry",
+                actor="strategy_agent",
+                symbol=trade_symbol,
+                underlying=str(row.get("underlying") or spec.root),
+                severity="trade",
+                message=(
+                    f"{spec.display_name} {signal_side} @ ₹{fill_price:,.2f} "
+                    f"({lots} lot; {OPTIONS_CAPITAL_FRACTION:.0%} budget; stop ₹{stop_price:,.2f})"
+                ),
+                new_state="open",
+                payload={
+                    "option_type": signal_side,
+                    "strike": float(side.get("strike") or 0.0),
+                    "expiry": str(row.get("expiry") or ""),
+                    "fill_price": round(fill_price, 2),
+                    "stop_price": round(stop_price, 2),
+                    "target_price": round(target_price, 2),
+                    "qty": qty,
+                    "lots": lots,
+                    "entry_iv_pct": _round_or_none(entry_iv_pct, 1),
+                },
             )
 
     def _record_order(

@@ -23,6 +23,7 @@ from api.routers import fractal_market_profile as fractal_market_profile_router
 from api.routers import system as system_router
 from api.routers import audit as audit_router
 from api.routers import data_quality as data_quality_router
+from api.routers import notifications as notifications_router
 from directional_options import mount_directional_options_dashboard
 from directional_options.service import directional_options_service
 from api.websockets.ticks import (
@@ -246,6 +247,7 @@ app.include_router(fractal_market_profile_router.router)
 app.include_router(system_router.router)
 app.include_router(audit_router.router)
 app.include_router(data_quality_router.router)
+app.include_router(notifications_router.router)
 
 
 # ── WebSocket Endpoints ───────────────────────────────────────────────────────
