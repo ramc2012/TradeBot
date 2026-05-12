@@ -20,11 +20,25 @@ Design rules:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from threading import RLock
 from typing import Any, Optional
 
 from loguru import logger
+
+IST = timezone(timedelta(hours=5, minutes=30))
+NSE_MARKET_OPEN = time(9, 15)
+NSE_MARKET_CLOSE = time(15, 30)
+
+
+def _is_nse_market_hours(now: datetime) -> bool:
+    local = now.astimezone(IST)
+    return local.weekday() < 5 and NSE_MARKET_OPEN <= local.time() <= NSE_MARKET_CLOSE
+
+
+def _is_nse_realtime_symbol(symbol: str) -> bool:
+    text = str(symbol or "").upper()
+    return text.startswith("NSE:") or text.startswith("BSE:")
 
 
 @dataclass
@@ -85,6 +99,10 @@ class DataQualityAgent:
         last_value: Optional[float] = None,
     ) -> None:
         """Producer hook — called whenever fresh market data is observed."""
+        symbol = str(symbol or "").strip()
+        source = str(source or "").strip() or "default"
+        if not symbol:
+            return
         when = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
         key = (symbol, source)
         with self._lock:
@@ -103,6 +121,10 @@ class DataQualityAgent:
             )
 
     def flag(self, *, symbol: str, source: str, reason: str) -> None:
+        symbol = str(symbol or "").strip()
+        source = str(source or "").strip() or "default"
+        if not symbol:
+            return
         key = (symbol, source)
         with self._lock:
             existing = self._ledger.get(key)
@@ -123,6 +145,8 @@ class DataQualityAgent:
         source: str,
         now: Optional[datetime] = None,
     ) -> FreshnessVerdict:
+        symbol = str(symbol or "").strip()
+        source = str(source or "").strip() or "default"
         when = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         budget = self._budget_for(source)
         key = (symbol, source)
@@ -166,42 +190,73 @@ class DataQualityAgent:
         with self._lock:
             now = datetime.now(timezone.utc)
             entries = []
-            stale_count = 0
+            stale_entry_count = 0
             flagged_count = 0
+            by_symbol: dict[str, list[dict[str, Any]]] = {}
             for (symbol, source), health in self._ledger.items():
                 age = (now - health.last_seen_at).total_seconds()
                 budget = self._budget_for(source)
                 stale = age > budget or health.flagged
                 if stale:
-                    stale_count += 1
+                    stale_entry_count += 1
                 if health.flagged:
                     flagged_count += 1
-                entries.append(
+                entry = {
+                    "symbol": symbol,
+                    "source": source,
+                    "last_seen_at": health.last_seen_at.isoformat(),
+                    "age_seconds": round(age, 2),
+                    "budget_seconds": budget,
+                    "stale": stale,
+                    "flagged": health.flagged,
+                    "flag_reason": health.flag_reason,
+                    "consecutive_stale_checks": health.consecutive_stale_checks,
+                    "last_value": health.last_value,
+                }
+                entries.append(entry)
+                by_symbol.setdefault(symbol, []).append(entry)
+            entries.sort(key=lambda item: (-item["stale"], item["symbol"]))
+            symbol_health: list[dict[str, Any]] = []
+            stale_symbol_count = 0
+            for symbol, source_entries in sorted(by_symbol.items()):
+                symbol_stale = all(bool(item["stale"]) for item in source_entries)
+                symbol_flagged = any(bool(item["flagged"]) for item in source_entries)
+                if symbol_stale:
+                    stale_symbol_count += 1
+                freshest = min(source_entries, key=lambda item: float(item["age_seconds"]))
+                symbol_health.append(
                     {
                         "symbol": symbol,
-                        "source": source,
-                        "last_seen_at": health.last_seen_at.isoformat(),
-                        "age_seconds": round(age, 2),
-                        "budget_seconds": budget,
-                        "stale": stale,
-                        "flagged": health.flagged,
-                        "flag_reason": health.flag_reason,
-                        "consecutive_stale_checks": health.consecutive_stale_checks,
-                        "last_value": health.last_value,
+                        "stale": symbol_stale,
+                        "flagged": symbol_flagged,
+                        "freshest_source": freshest["source"],
+                        "freshest_age_seconds": freshest["age_seconds"],
+                        "sources": len(source_entries),
                     }
                 )
-            entries.sort(key=lambda item: (-item["stale"], item["symbol"]))
             overall = "healthy"
             if flagged_count:
                 overall = "critical"
-            elif stale_count:
-                overall = "degraded"
+            elif stale_symbol_count:
+                stale_symbols = [
+                    row["symbol"]
+                    for row in symbol_health
+                    if bool(row.get("stale"))
+                ]
+                if stale_symbols and all(_is_nse_realtime_symbol(symbol) for symbol in stale_symbols) and not _is_nse_market_hours(now):
+                    overall = "idle"
+                else:
+                    overall = "degraded"
             return {
                 "overall": overall,
-                "symbol_count": len(entries),
-                "stale_count": stale_count,
+                "market_state": "nse_open" if _is_nse_market_hours(now) else "nse_closed",
+                "symbol_count": len(symbol_health),
+                "entry_count": len(entries),
+                "stale_count": stale_symbol_count,
+                "stale_entry_count": stale_entry_count,
                 "flagged_count": flagged_count,
                 "budgets": dict(self._budgets),
+                "symbol_health": symbol_health,
                 "entries": entries,
             }
 

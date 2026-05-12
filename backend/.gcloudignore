@@ -11,8 +11,9 @@ venv/
 logs/
 runtime/
 reports/
+commodity_strategy.json
+nse_strategy_state.json
 *.log
 *.sqlite
 *.sqlite3
 *.db
-

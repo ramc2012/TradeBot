@@ -2393,6 +2393,20 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     return self.get_status(refresh=False)
 
                 quote_map = await self._safe_get_ltp(adapter, self._symbols)
+                try:
+                    from market_data.data_quality_agent import data_quality_agent
+
+                    for symbol, quote in quote_map.items():
+                        if quote is not None:
+                            data_quality_agent.record_tick(
+                                symbol=symbol,
+                                source="fyers_quote",
+                                observed_at=started_at,
+                                last_value=float(quote),
+                            )
+                    self._last_data_health["data_quality"] = data_quality_agent.snapshot()
+                except Exception:
+                    pass
                 futures_rows: list[dict[str, Any]] = []
                 for symbol in self._symbols:
                     row = await self._analyze_futures_symbol(symbol, quote_map.get(symbol))

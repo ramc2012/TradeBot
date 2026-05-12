@@ -576,6 +576,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         self._kill_switch_active = False
         self._running = False
         self._last_run_at: Optional[str] = None
+        self._last_paper_reset_at: Optional[str] = None
         self._last_error: Optional[str] = None
         self._last_message: str = "Waiting for first strategy scan."
         self._last_expiry: Optional[str] = None
@@ -618,6 +619,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             return
 
         self._last_run_at = payload.get("last_run_at") or self._last_run_at
+        self._last_paper_reset_at = payload.get("last_paper_reset_at") or self._last_paper_reset_at
         self._last_error = payload.get("last_error") or self._last_error
         self._last_message = payload.get("last_message") or self._last_message
         self._last_expiry = payload.get("last_expiry") or self._last_expiry
@@ -794,6 +796,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         self._sync_state_file_override()
         payload = {
             "last_run_at": self._last_run_at,
+            "last_paper_reset_at": self._last_paper_reset_at,
             "last_error": self._last_error,
             "last_message": self._last_message,
             "last_expiry": self._last_expiry,
@@ -890,20 +893,20 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         self._historical_recovery_attempted = True
         try:
             async with AsyncSessionLocal() as session:
-                latest_snapshot_day = await session.scalar(
+                latest_snapshot_at = await session.scalar(
                     text(
                         """
-                        SELECT MAX(timezone('Asia/Kolkata', time)::date)
+                        SELECT MAX(timezone('Asia/Kolkata', time))
                         FROM atm_option_watchlist_snapshots
                         WHERE timezone('Asia/Kolkata', time)::date < :today
                            OR timezone('Asia/Kolkata', time)::time >= TIME '15:15'
                         """
                     ).bindparams(today=_now_ist().date())
                 )
-                latest_position_day = await session.scalar(
+                latest_position_at = await session.scalar(
                     text(
                         """
-                        SELECT MAX(timezone('Asia/Kolkata', created_at)::date)
+                        SELECT MAX(timezone('Asia/Kolkata', created_at))
                         FROM positions
                         WHERE qty > 0
                           AND symbol LIKE 'OPT:%'
@@ -911,6 +914,16 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     )
                 )
 
+            reset_at = _parse_iso_timestamp(self._last_paper_reset_at)
+            latest_snapshot_day = self._historical_recovery_day_after_reset(latest_snapshot_at, reset_at)
+            latest_position_day = self._historical_recovery_day_after_reset(latest_position_at, reset_at)
+            if (
+                reset_at is not None
+                and latest_snapshot_day is None
+                and latest_position_day is None
+                and not self._last_run_at
+            ):
+                return
             current_strategy1_day = _latest_runtime_day(
                 [position.entered_at for position in self._strategy1.positions.values()]
             )
@@ -960,6 +973,26 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             )
         except Exception as exc:
             logger.warning(f"[Strategy] Historical recovery skipped: {exc}")
+
+    @staticmethod
+    def _historical_recovery_day_after_reset(value: Any, reset_at: Optional[datetime]) -> Optional[date]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            timestamp = _ensure_ist_datetime(value)
+            if reset_at is not None and timestamp is not None and timestamp <= reset_at:
+                return None
+            return timestamp.date() if timestamp is not None else None
+        if isinstance(value, date):
+            if reset_at is not None and value <= reset_at.astimezone(IST).date():
+                return None
+            return value
+        timestamp = _parse_iso_timestamp(str(value))
+        if timestamp is None:
+            return None
+        if reset_at is not None and timestamp <= reset_at:
+            return None
+        return timestamp.date()
 
     def _strategy1_saved_snapshot_is_useful(self) -> bool:
         meta = self._strategy1.meta or {}
@@ -1128,7 +1161,10 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     "priority_score": _round_or_none(score, 4),
                     "option_last_bar_time": started_at.isoformat(),
                     "spot_last_time": started_at.isoformat(),
-                    **classify_status_bucket(has_position=False, status="watching"),
+                    **classify_status_bucket(
+                        has_position=self._has_underlying_position(self._strategy1, underlying),
+                        status="watching",
+                    ),
                 }
             )
 
@@ -1912,6 +1948,13 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             self._last_error = None
             option_history_service.reset_health()
             try:
+                try:
+                    from market_data.data_quality_agent import data_quality_agent
+
+                    data_quality_snapshot = data_quality_agent.snapshot()
+                except Exception as exc:
+                    data_quality_snapshot = {"overall": "unknown", "error": str(exc)}
+
                 if not force and not _in_market_hours(started_at):
                     local_only_mode = settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY
                     try:
@@ -1925,6 +1968,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     self._last_data_health = {
                         **({"broker_snapshot": broker_snapshot} if broker_snapshot is not None else {}),
                         "market_intelligence": market_intelligence_health,
+                        "data_quality": data_quality_snapshot,
                         "option_history": option_history_service.get_health_snapshot(),
                     }
                     if market_intelligence_health.get("ready") or (broker_snapshot or {}).get("broker_ready"):
@@ -1955,8 +1999,31 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     market_intelligence_health = await market_intelligence_runtime.get_strategy_health()
                     self._last_data_health = {
                         "market_intelligence": market_intelligence_health,
+                        "data_quality": data_quality_snapshot,
                         "option_history": option_history_service.get_health_snapshot(),
                     }
+                    if (
+                        settings.DATA_QUALITY_SCAN_GATE_ENABLED
+                        and
+                        int(data_quality_snapshot.get("symbol_count") or 0) > 0
+                        and data_quality_snapshot.get("overall") in {"degraded", "critical"}
+                    ):
+                        message = (
+                            "Data quality gate blocked the NSE paper scan: "
+                            f"{data_quality_snapshot.get('overall')} market-data freshness."
+                        )
+                        self._last_error = message
+                        self._last_message = message
+                        for lane in self._lane_agents():
+                            lane.runtime.last_message = message
+                            lane.runtime.meta = {
+                                **(lane.runtime.meta or {}),
+                                "mode": "data_quality_blocked",
+                                "updated_at": started_at.isoformat(),
+                                "data_quality": data_quality_snapshot,
+                            }
+                        self._append_commentary("System", message, tone="warning")
+                        return await self._status_with_risk_snapshot()
                     if not self._market_intelligence_execution_ready(market_intelligence_health):
                         message = self._local_data_failure_message(market_intelligence_health)
                         self._last_error = message
@@ -1980,8 +2047,31 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     broker_snapshot = await get_broker_connection_snapshot(force_validate=False)
                     self._last_data_health = {
                         "broker_snapshot": broker_snapshot,
+                        "data_quality": data_quality_snapshot,
                         "option_history": option_history_service.get_health_snapshot(),
                     }
+                    if (
+                        settings.DATA_QUALITY_SCAN_GATE_ENABLED
+                        and
+                        int(data_quality_snapshot.get("symbol_count") or 0) > 0
+                        and data_quality_snapshot.get("overall") in {"degraded", "critical"}
+                    ):
+                        message = (
+                            "Data quality gate blocked the NSE paper scan: "
+                            f"{data_quality_snapshot.get('overall')} market-data freshness."
+                        )
+                        self._last_error = message
+                        self._last_message = message
+                        for lane in self._lane_agents():
+                            lane.runtime.last_message = message
+                            lane.runtime.meta = {
+                                **(lane.runtime.meta or {}),
+                                "mode": "data_quality_blocked",
+                                "updated_at": started_at.isoformat(),
+                                "data_quality": data_quality_snapshot,
+                            }
+                        self._append_commentary("System", message, tone="warning")
+                        return await self._status_with_risk_snapshot()
                     if not broker_snapshot.get("broker_ready"):
                         message = self._broker_failure_message(broker_snapshot)
                         self._last_error = message
@@ -2443,7 +2533,10 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "expiry": row.get("expiry"),
             "atm_strike": row.get("atm_strike"),
             "spot_price": _round_or_none(row.get("spot_price"), 2),
-            **classify_status_bucket(has_position=False, status="waiting"),
+            **classify_status_bucket(
+                has_position=self._has_underlying_position(self._strategy2, underlying),
+                status="waiting",
+            ),
         }
         return {
             "direction": None,
@@ -2531,7 +2624,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "iv_pct": signal.get("iv_pct") if signal.get("iv_pct") is not None else iv_pct,
             "priority_score": signal.get("priority_score") if signal.get("priority_score") is not None else priority_score,
             **classify_status_bucket(
-                has_position=False,
+                has_position=self._has_underlying_position(self._strategy2, underlying),
                 status=status,
             ),
         }
@@ -2717,7 +2810,10 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "status": "waiting",
             "freshness": "missing",
             "instruction": f"{underlying}: waiting for live 1-minute spot rows and 5-minute option candles.",
-            **classify_status_bucket(has_position=False, status="waiting"),
+            **classify_status_bucket(
+                has_position=self._has_underlying_position(self._strategy2, underlying),
+                status="waiting",
+            ),
         }
         empty_pipeline = {
             "name": f"Strategy 2 {underlying}",
@@ -2828,7 +2924,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             except Exception:
                 pass
             bucket_info = classify_signal_bucket(
-                has_position=False,
+                has_position=self._has_underlying_position(self._strategy2, underlying),
                 signal_validation="ready" if status == "entry-ready" else status,
                 macd=side_macd_val,
                 macd_histogram=latest_hist_val,
@@ -3003,7 +3099,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         except Exception:
             pass
         bucket_info = classify_signal_bucket(
-            has_position=False,
+            has_position=self._has_underlying_position(runtime, underlying),
             signal_validation="ready" if status == "entry-ready" else status,
             macd=side_macd_val,
             macd_histogram=latest_hist_val,
@@ -4347,20 +4443,20 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             session_id = f"{runtime.key}-paper"
             runtime.portfolio = PaperPortfolio(initial_capital=1_000_000.0, session_id=session_id)
             runtime.order_book = PaperOrderBook(on_fill=runtime.portfolio.on_fill)
-            runtime.positions = []
+            runtime.positions = {}
             runtime.signal_lane = []
             runtime.processed_signals = {}
             runtime.recent_events = []
             runtime.entries = 0
             runtime.exits = 0
-            runtime.commentary = []
-            runtime.meta = None
+            runtime.meta = {}
             runtime.last_scan_at = None
             runtime.last_message = (
                 f"{runtime.label} reset to ₹1,000,000. Prior state archived."
             )
 
         self._last_run_at = None
+        self._last_paper_reset_at = archived_at.isoformat()
         self._last_error = None
         self._last_message = (
             "NSE paper account reset to ₹1,000,000 across all strategies. "

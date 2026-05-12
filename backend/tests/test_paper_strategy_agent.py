@@ -890,6 +890,59 @@ def test_strategy_agent_persists_and_restores_runtime_state(monkeypatch, tmp_pat
     assert restored.get_status()["strategies"][0]["summary"]["open_positions"] == 1
 
 
+def test_strategy_agent_reset_keeps_positions_dict_and_status_readable(monkeypatch, tmp_path) -> None:
+    state_file = tmp_path / "nse_strategy_state.json"
+    module_file = tmp_path / "paper_engine" / "strategy_agent.py"
+    module_file.parent.mkdir(parents=True, exist_ok=True)
+    module_file.write_text("")
+    persisted: dict[str, object] = {}
+
+    def fake_save_state(payload: dict[str, object]):
+        persisted["payload"] = payload
+        state_file.write_text("{}")
+        return None
+
+    async def fake_record_audit_event(**_kwargs):
+        return None
+
+    monkeypatch.setattr(strategy_agent_module, "__file__", str(module_file))
+    monkeypatch.setattr(strategy_agent_module, "_NSE_STRATEGY_STATE_FILE", state_file)
+    monkeypatch.setattr(strategy_agent_module, "_save_strategy_state", fake_save_state)
+    monkeypatch.setattr(strategy_agent_module, "_load_saved_strategy_state", lambda: ({}, None))
+    monkeypatch.setattr(strategy_agent_module, "_load_saved_strategy_state_from_database", lambda: (None, None))
+    monkeypatch.setattr("agentic_rag.audit_agent.record_audit_event", fake_record_audit_event)
+
+    agent = PaperStrategyAgent()
+    runtime = agent._strategy1
+    runtime.positions["OPT:NIFTY:2026-05-26:24000:CE"] = StrategyPosition(
+        symbol="OPT:NIFTY:2026-05-26:24000:CE",
+        underlying="NIFTY",
+        expiry="2026-05-26",
+        strike=24000.0,
+        option_type="CE",
+        instrument_key="NSE_FO|1",
+        trading_symbol="NIFTY 24000 CE",
+        qty=75,
+        initial_qty=75,
+        entry_price=100.0,
+        current_price=95.0,
+        peak_price=110.0,
+        entry_bar_time="2026-05-11T10:00:00+05:30",
+        entered_at="2026-05-11T10:00:00+05:30",
+        signal_reason="test",
+    )
+
+    result = asyncio.run(agent.archive_and_reset_paper_account(actor="test"))
+    status = agent.get_status(refresh=False)
+
+    assert result["archived"] is True
+    assert isinstance(agent._strategy1.positions, dict)
+    assert isinstance(agent._strategy2.positions, dict)
+    assert status["strategies"][0]["summary"]["open_positions"] == 0
+    assert status["strategies"][0]["summary"]["total_equity"] == 1_000_000.0
+    assert persisted["payload"]["strategies"]["macd_strategy"]["positions"] == []
+
+
 def test_strategy_agent_refreshes_runtime_state_from_database(monkeypatch) -> None:
     agent = PaperStrategyAgent()
     updated_at = datetime(2026, 4, 16, 6, 0, tzinfo=UTC)
@@ -1020,6 +1073,41 @@ def test_ensure_recovered_state_refreshes_stale_strategy2_signal_lane(monkeypatc
         "latest_snapshot_day": date(2026, 4, 10),
         "latest_position_day": None,
     }
+
+
+def test_ensure_recovered_state_ignores_rows_before_paper_reset(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    agent._last_run_at = None
+    agent._last_paper_reset_at = "2026-05-11T20:00:00+05:30"
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        async def scalar(self, _query):
+            self.calls += 1
+            if self.calls == 1:
+                return datetime(2026, 5, 11, 15, 20)
+            return datetime(2026, 5, 11, 14, 40)
+
+    called = False
+
+    async def fake_restore_from_historical_state(*, latest_snapshot_day=None, latest_position_day=None):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(strategy_agent_module, "AsyncSessionLocal", lambda: FakeSession())
+    monkeypatch.setattr(agent, "_restore_from_historical_state", fake_restore_from_historical_state)
+
+    asyncio.run(agent.ensure_recovered_state())
+
+    assert called is False
 
 
 def test_run_once_stops_when_no_valid_broker_session_is_available(monkeypatch) -> None:
