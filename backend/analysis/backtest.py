@@ -681,6 +681,20 @@ class MACDBacktester:
             Candles as dicts {time, open, high, low, close, volume, oi}, sorted
             chronologically. Empty on error or no data.
         """
+        # Defensive guard: callers occasionally pass None for one of the
+        # window endpoints when the source row hasn't backfilled candle
+        # boundaries yet. Without this guard the f-string below raises
+        # `'NoneType' object has no attribute 'isoformat'`, which then
+        # propagates up to the recurring research_sync runner and writes
+        # `state="error"` to the runtime file — turning a single bad row
+        # into a desk-wide critical health status.
+        if from_date is None or to_date is None:
+            logger.debug(
+                f"_fetch_candles_from_upstox: skipping {instrument_key} "
+                f"because from_date={from_date} or to_date={to_date} is None"
+            )
+            return []
+
         encoded_key = urllib.parse.quote(instrument_key, safe="")
         is_expired_key = instrument_key.count("|") >= 2
         if is_expired_key:

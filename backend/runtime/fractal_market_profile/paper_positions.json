@@ -1,5 +1,5 @@
 {
-  "last_synced_at": "2026-05-11T09:48:41.167833+00:00",
+  "last_synced_at": "2026-05-13T09:23:09.424242+00:00",
   "open_positions": [],
   "closed_positions": [
     {
@@ -29,6 +29,35 @@
       "confidence": 0.68,
       "daily_shape": "Elongated",
       "hourly_shape": "Elongated",
+      "close_reason": "flat_snapshot"
+    },
+    {
+      "position_id": "a28f119c154842afb621d6e53e998574",
+      "status": "closed",
+      "opened_at": "2026-05-13T08:22:48.281341+00:00",
+      "updated_at": "2026-05-13T08:26:48.186635+00:00",
+      "closed_at": "2026-05-13T08:26:48.186635+00:00",
+      "underlying": "NIFTY",
+      "setup_name": "trend_pullback_call",
+      "action": "LONG",
+      "horizon": "swing",
+      "trading_symbol": "NIFTY 23550 CE 26 MAY 26",
+      "instrument_key": "NSE_FO|72141",
+      "option_type": "CE",
+      "strike": 23550.0,
+      "expiry": "2026-05-26",
+      "quantity": 65,
+      "lot_size": 65,
+      "entry_premium": 349.5,
+      "latest_premium": 349.5,
+      "exit_premium": 349.5,
+      "realized_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "stop_level": 23538.95,
+      "target_level": 23588.55,
+      "confidence": 0.65,
+      "daily_shape": "D-shape",
+      "hourly_shape": "D-shape",
       "close_reason": "flat_snapshot"
     }
   ]

@@ -282,6 +282,15 @@ class UpstoxFODownloader:
 
         Returns list of [timestamp, open, high, low, close, volume, oi]
         """
+        # Same defensive guard as analysis/backtest._fetch_candles_from_upstox:
+        # None dates would otherwise raise inside the f-string and bubble up
+        # to the research-sync supervisor as a critical state.
+        if from_date is None or to_date is None:
+            logger.debug(
+                f"fetch_candles: skipping {instrument_key} ({interval}) "
+                f"because from_date={from_date} or to_date={to_date} is None"
+            )
+            return []
         await self._throttle()
         url = (
             f"{UPSTOX_BASE}/historical-candle"

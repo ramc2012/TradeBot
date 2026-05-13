@@ -17,6 +17,7 @@ import {
   getCommodityOverview,
   getCommodityPositions,
   getCommodityOrders,
+  getCommodityWatchlistSnapshot,
 } from "@/lib/api";
 
 const REFRESH_MS = 4_000;
@@ -45,6 +46,40 @@ type WatchRow = {
   trajectory?: Trajectory;
   proximity_pct?: number | null;
   bucket_rationale?: string | null;
+};
+
+type CommoditySnapshotContract = {
+  symbol?: string | null;
+  underlying?: string | null;
+  lookup_symbol?: string | null;
+  active_lookup_symbol?: string | null;
+  selected_lookup_symbol?: string | null;
+  default_lookup_symbol?: string | null;
+  active_expiry?: string | null;
+  selected_expiry?: string | null;
+  suggested_expiry?: string | null;
+  lot_size?: number | null;
+  has_options?: boolean | null;
+  quote_unit_label?: string | null;
+  contract_unit_label?: string | null;
+  strategy_title?: string | null;
+  selection_policy?: string | null;
+  detail?: string | null;
+};
+
+type CommodityWatchlistSnapshot = {
+  contract_catalog?: {
+    contracts?: CommoditySnapshotContract[];
+    source?: string | null;
+    detail?: string | null;
+    timestamp?: string | null;
+  };
+  atm_watchlist?: {
+    rows?: WatchRow[];
+    source?: string | null;
+    detail?: string | null;
+    timestamp?: string | null;
+  };
 };
 
 type CommodityPosition = {
@@ -191,6 +226,45 @@ function severityColor(sev: string | undefined): string {
   }
 }
 
+function snapshotContractToWatchRow(contract: CommoditySnapshotContract): WatchRow {
+  const symbol =
+    contract.selected_lookup_symbol ||
+    contract.active_lookup_symbol ||
+    contract.lookup_symbol ||
+    contract.default_lookup_symbol ||
+    contract.symbol ||
+    null;
+  const expiry =
+    contract.selected_expiry ||
+    contract.active_expiry ||
+    contract.suggested_expiry ||
+    null;
+  const detail = contract.detail || "Runtime scan rows are empty; showing the saved MCX contract catalog.";
+  const unitParts = [contract.contract_unit_label, contract.quote_unit_label].filter(Boolean);
+  return {
+    symbol,
+    underlying: contract.underlying || contract.symbol || null,
+    display_name: [contract.underlying || contract.symbol, expiry].filter(Boolean).join(" · "),
+    price: null,
+    previous_close: null,
+    change_pct: null,
+    macd: null,
+    macd_signal: null,
+    macd_histogram: null,
+    atr: null,
+    regime: contract.selection_policy || "catalog",
+    mp_day_type: unitParts.join(" · ") || null,
+    mp_status: contract.has_options ? "options mapped" : "futures only",
+    bar_time: null,
+    signal_validation: contract.has_options ? "catalog_ready" : "catalog_only",
+    signal_validation_detail: detail,
+    bucket: "neutral",
+    trajectory: "stalled",
+    proximity_pct: null,
+    bucket_rationale: detail,
+  };
+}
+
 export default function CommodityLivePage() {
   const overviewQuery = useQuery({
     queryKey: ["commodity-live", "overview"],
@@ -210,6 +284,14 @@ export default function CommodityLivePage() {
     queryKey: ["commodity-live", "orders"],
     queryFn: async () => (await getCommodityOrders(40)).data,
     refetchInterval: REFRESH_MS * 2,
+    refetchIntervalInBackground: true,
+  });
+
+  const watchlistSnapshotQuery = useQuery({
+    queryKey: ["commodity-live", "watchlist-snapshot"],
+    queryFn: async () =>
+      (await getCommodityWatchlistSnapshot()).data as CommodityWatchlistSnapshot,
+    refetchInterval: REFRESH_MS * 3,
     refetchIntervalInBackground: true,
   });
 
@@ -235,15 +317,41 @@ export default function CommodityLivePage() {
 
   const status = overviewQuery.data?.status ?? {};
   const summary = status?.summary ?? {};
-  const watchlist: WatchRow[] = useMemo(
-    () =>
-      (status?.futures_watchlist ?? status?.watchlist ?? []) as WatchRow[],
+  const runtimeFuturesWatchlist = useMemo(
+    () => (status?.futures_watchlist ?? status?.watchlist ?? []) as WatchRow[],
     [status?.futures_watchlist, status?.watchlist],
   );
-  const optionWatchlist: WatchRow[] = useMemo(
+  const snapshotFuturesWatchlist = useMemo(
+    () =>
+      (
+        watchlistSnapshotQuery.data?.contract_catalog?.contracts ?? []
+      ).map(snapshotContractToWatchRow),
+    [watchlistSnapshotQuery.data?.contract_catalog?.contracts],
+  );
+  const watchlist: WatchRow[] = useMemo(
+    () =>
+      runtimeFuturesWatchlist.length > 0
+        ? runtimeFuturesWatchlist
+        : snapshotFuturesWatchlist,
+    [runtimeFuturesWatchlist, snapshotFuturesWatchlist],
+  );
+  const runtimeOptionWatchlist = useMemo(
     () => (status?.option_watchlist ?? []) as WatchRow[],
     [status?.option_watchlist],
   );
+  const snapshotOptionWatchlist = useMemo(
+    () => (watchlistSnapshotQuery.data?.atm_watchlist?.rows ?? []) as WatchRow[],
+    [watchlistSnapshotQuery.data?.atm_watchlist?.rows],
+  );
+  const optionWatchlist: WatchRow[] = useMemo(
+    () =>
+      runtimeOptionWatchlist.length > 0
+        ? runtimeOptionWatchlist
+        : snapshotOptionWatchlist,
+    [runtimeOptionWatchlist, snapshotOptionWatchlist],
+  );
+  const usingSnapshotFutures = runtimeFuturesWatchlist.length === 0 && snapshotFuturesWatchlist.length > 0;
+  const usingSnapshotOptions = runtimeOptionWatchlist.length === 0 && snapshotOptionWatchlist.length > 0;
 
   const positions: CommodityPosition[] = useMemo(
     () => (positionsQuery.data as CommodityPosition[] | undefined) ?? [],
@@ -348,7 +456,7 @@ export default function CommodityLivePage() {
               Instruments · futures ({watchlist.length})
             </h2>
             <span className="text-[11px] text-text-muted">
-              MCX · 15m MACD + Market Profile
+              {usingSnapshotFutures ? "MCX · contract catalog fallback" : "MCX · 15m MACD + Market Profile"}
             </span>
           </div>
           <table className="w-full text-xs">
@@ -418,6 +526,11 @@ export default function CommodityLivePage() {
                       <span className="text-[10px] text-text-muted">
                         {row.proximity_pct != null ? `${Math.round(row.proximity_pct)}%` : ""}
                       </span>
+                      {row.signal_validation ? (
+                        <div className="mt-0.5 text-[10px] text-text-muted">
+                          {row.signal_validation}
+                        </div>
+                      ) : null}
                     </td>
                     <td className="text-right text-[10px] text-text-muted">
                       {formatIST(row.bar_time)}
@@ -431,6 +544,11 @@ export default function CommodityLivePage() {
             <div className="mt-3">
               <h2 className="mb-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-text-muted">
                 Options · ATM contracts ({optionWatchlist.length})
+                {usingSnapshotOptions ? (
+                  <span className="ml-2 normal-case tracking-normal text-text-muted">
+                    · snapshot
+                  </span>
+                ) : null}
               </h2>
               <table className="w-full text-xs">
                 <thead className="text-[10.5px] uppercase tracking-wide text-text-muted">

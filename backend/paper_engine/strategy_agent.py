@@ -2079,11 +2079,16 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                         "data_quality": data_quality_snapshot,
                         "option_history": option_history_service.get_health_snapshot(),
                     }
+                    # Gate only on hard "critical" (flagged data, broker outage).
+                    # "degraded" is informational — happens routinely at boot,
+                    # right after broker reconnect, on intraday slow ticks, and
+                    # whenever NSE market is between sessions. Blocking on
+                    # degraded turns benign warmups into desk-wide outages.
                     if (
                         settings.DATA_QUALITY_SCAN_GATE_ENABLED
                         and
                         int(data_quality_snapshot.get("symbol_count") or 0) > 0
-                        and data_quality_snapshot.get("overall") in {"degraded", "critical"}
+                        and data_quality_snapshot.get("overall") == "critical"
                     ):
                         message = (
                             "Data quality gate blocked the NSE paper scan: "
@@ -2127,11 +2132,16 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                         "data_quality": data_quality_snapshot,
                         "option_history": option_history_service.get_health_snapshot(),
                     }
+                    # Gate only on hard "critical" (flagged data, broker outage).
+                    # "degraded" is informational — happens routinely at boot,
+                    # right after broker reconnect, on intraday slow ticks, and
+                    # whenever NSE market is between sessions. Blocking on
+                    # degraded turns benign warmups into desk-wide outages.
                     if (
                         settings.DATA_QUALITY_SCAN_GATE_ENABLED
                         and
                         int(data_quality_snapshot.get("symbol_count") or 0) > 0
-                        and data_quality_snapshot.get("overall") in {"degraded", "critical"}
+                        and data_quality_snapshot.get("overall") == "critical"
                     ):
                         message = (
                             "Data quality gate blocked the NSE paper scan: "
@@ -3210,7 +3220,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         except Exception:
             pass
         bucket_info = classify_signal_bucket(
-            has_position=self._has_underlying_position(runtime, underlying),
+            has_position=self._has_underlying_position(self._strategy2, underlying),
             signal_validation="ready" if status == "entry-ready" else status,
             macd=side_macd_val,
             macd_histogram=latest_hist_val,

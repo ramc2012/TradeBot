@@ -1033,6 +1033,9 @@ def test_restore_from_historical_state_uses_separate_days_for_strategy1_and_stra
 
 
 def test_ensure_recovered_state_refreshes_stale_strategy2_signal_lane(monkeypatch) -> None:
+    monkeypatch.setattr(strategy_agent_module, "_load_saved_strategy_state", lambda: ({}, None))
+    monkeypatch.setattr(strategy_agent_module, "_load_saved_strategy_state_from_database", lambda: (None, None))
+
     agent = PaperStrategyAgent()
     agent._last_run_at = "2026-04-10T15:29:18.552610+05:30"
     agent._strategy1.meta = {}

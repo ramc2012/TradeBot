@@ -4,7 +4,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Optional
 
-from analysis.macd_engine import compute_ema, compute_macd
+from analysis.indicators_agent import IndicatorContext, indicators_agent
+from analysis.macd_engine import compute_ema, compute_macd  # noqa: F401  (back-compat; calls now go via indicators_agent)
 from agent.macd_quadrant import check_macd_death_signal
 from agent.strategy_config import EXIT, FIRST_PULLBACK_IGNORE_BARS, MACD_FAST, MACD_MIN_BARS, MACD_SIGNAL, MACD_SLOW, OPTION_ENTRY_MA_FAST, REGIME_DEAD
 from analytics.technicals import latest_macd_rsi
@@ -69,13 +70,32 @@ class StrategyExitMixin:
             pos.current_price = latest_close
             pos.peak_price = max(pos.peak_price, latest_close)
 
+            # Cache MACD + EMA via indicators_agent so the entries side and
+            # exit side of the same scan cycle don't recompute on the same
+            # closes. Key includes symbol + interval + last bar time, so
+            # subsequent bars correctly invalidate.
+            ind_ctx = IndicatorContext(
+                symbol=str(pos.symbol or pos.live_symbol or pos.underlying or ""),
+                timeframe="30minute",
+                last_bar_time=str((candles[-1] if candles else {}).get("time") or ""),
+            )
             if len(closes) >= MACD_MIN_BARS:
-                macd_line, _, _ = compute_macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-                pos.macd_line = macd_line
+                macd_result = indicators_agent.macd(
+                    ctx=ind_ctx,
+                    closes=closes,
+                    fast=MACD_FAST,
+                    slow=MACD_SLOW,
+                    signal=MACD_SIGNAL,
+                )
+                pos.macd_line = macd_result.macd
 
             indicators = latest_macd_rsi(closes)
             pos.latest_rsi = _round_or_none(indicators.get("rsi"), 2)
-            option_ma20 = compute_ema(closes, OPTION_ENTRY_MA_FAST)[-1] if len(closes) >= OPTION_ENTRY_MA_FAST else None
+            option_ma20 = (
+                indicators_agent.ema(ctx=ind_ctx, closes=closes, period=OPTION_ENTRY_MA_FAST)[-1]
+                if len(closes) >= OPTION_ENTRY_MA_FAST
+                else None
+            )
             pos.option_ma20 = _round_or_none(option_ma20, 2)
             pos.above_option_ma20 = bool(option_ma20 is not None and latest_close >= option_ma20)
             bars_open = self._bars_since_entry(candles, pos.entered_at)
