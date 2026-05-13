@@ -636,6 +636,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         self._enabled = True
         self._auto_run_enabled = True   # enabled by default; paper mode is safe
         self._kill_switch_active = False
+        self._manual_restart_required = False
         self._running = False
         self._last_run_at: Optional[str] = None
         self._last_paper_reset_at: Optional[str] = None
@@ -684,6 +685,16 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         self._last_paper_reset_at = payload.get("last_paper_reset_at") or self._last_paper_reset_at
         self._last_error = payload.get("last_error") or self._last_error
         self._last_message = payload.get("last_message") or self._last_message
+        control_payload = payload.get("control") or {}
+        if isinstance(control_payload, dict):
+            self._auto_run_enabled = bool(control_payload.get("auto_run_enabled", self._auto_run_enabled))
+            self._kill_switch_active = bool(control_payload.get("kill_switch_active", self._kill_switch_active))
+            self._manual_restart_required = bool(
+                control_payload.get(
+                    "manual_restart_required",
+                    self._kill_switch_active,
+                )
+            )
         self._last_expiry = payload.get("last_expiry") or self._last_expiry
         self._last_candidate_expiries = [
             str(item)
@@ -863,6 +874,11 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "last_message": self._last_message,
             "last_expiry": self._last_expiry,
             "last_candidate_expiries": self._last_candidate_expiries,
+            "control": {
+                "auto_run_enabled": self._auto_run_enabled,
+                "kill_switch_active": self._kill_switch_active,
+                "manual_restart_required": self._manual_restart_required,
+            },
             "commentary": [asdict(entry) for entry in self._commentary],
             "strategies": {
                 runtime.key: self._serialize_runtime_state(runtime)
@@ -924,7 +940,12 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 logger.debug(f"[Strategy] Equity curve restore skipped for {runtime.key}: {exc}")
         await self.ensure_recovered_state()
         self._persist_state()
-        if not self._auto_run_enabled or (self._task and not self._task.done()):
+        if (
+            not self._auto_run_enabled
+            or self._kill_switch_active
+            or self._manual_restart_required
+            or (self._task and not self._task.done())
+        ):
             return
         self._task = asyncio.create_task(self._loop(), name="paper-strategy-agent")
 
@@ -4310,19 +4331,80 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     cancelled_orders += 1
 
         if self._kill_switch_active:
-            self._last_message = "NSE kill switch active. New entries are blocked until it is released."
+            self._manual_restart_required = True
+            self._last_message = "NSE kill switch active. New entries are blocked until a manual restart."
             self._append_commentary("System", self._last_message, tone="warning")
         else:
-            self._last_message = "NSE kill switch released. Manual scans can open new entries again."
+            self._last_message = "NSE kill switch released. Use auto-run restart to resume scanning."
             self._append_commentary("System", self._last_message, tone="success")
 
         self._persist_state()
         return self.get_control_state(cancelled_orders=cancelled_orders)
 
+    async def engage_manual_kill_switch(self) -> dict[str, Any]:
+        """Operator kill switch: flatten paper strategy positions and stop auto scans."""
+        self._refresh_state_from_store()
+        self._kill_switch_active = True
+        self._manual_restart_required = True
+        self._auto_run_enabled = False
+        cancelled_orders = 0
+        closed_positions: list[dict[str, Any]] = []
+
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+
+        for runtime in self._runtimes():
+            for order in list(runtime.order_book.get_open_orders(runtime.portfolio.session_id)):
+                if runtime.order_book.cancel_order(order.order_id):
+                    cancelled_orders += 1
+            for symbol, position in list(runtime.positions.items()):
+                exit_price = float(position.current_price or position.entry_price or 0.0)
+                if exit_price <= 0:
+                    continue
+                qty = int(position.qty or 0)
+                await self._close_position(
+                    runtime,
+                    position,
+                    exit_price,
+                    "manual_kill_switch",
+                    qty=qty,
+                    partial=False,
+                )
+                closed_positions.append(
+                    {
+                        "strategy_key": runtime.key,
+                        "symbol": symbol,
+                        "qty": qty,
+                        "exit_price": round(exit_price, 2),
+                    }
+                )
+
+        self._last_message = (
+            f"NSE kill switch active. Closed {len(closed_positions)} position(s), "
+            f"cancelled {cancelled_orders} order(s), and stopped auto-run."
+        )
+        self._append_commentary("System", self._last_message, tone="warning")
+        self._persist_state()
+        return self.get_control_state(
+            cancelled_orders=cancelled_orders,
+            closed_positions=closed_positions,
+        )
+
     async def set_auto_run(self, enabled: bool) -> dict[str, Any]:
         """Enable or disable the recurring background scan loop."""
+        if enabled and self._kill_switch_active:
+            self._last_message = "NSE kill switch is active. Release it before restarting auto-run."
+            self._append_commentary("System", self._last_message, tone="warning")
+            self._persist_state()
+            return self.get_control_state()
         self._auto_run_enabled = bool(enabled)
         if self._auto_run_enabled:
+            self._manual_restart_required = False
             # Start background loop if not already running
             if not self._task or self._task.done():
                 self._task = asyncio.create_task(self._loop(), name="paper-strategy-agent")
@@ -4342,14 +4424,21 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         self._persist_state()
         return self.get_control_state()
 
-    def get_control_state(self, *, cancelled_orders: int = 0) -> dict[str, Any]:
+    def get_control_state(
+        self,
+        *,
+        cancelled_orders: int = 0,
+        closed_positions: Optional[list[dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
         self._refresh_state_from_store()
         return {
             "market": "nse",
             "auto_run_enabled": self._auto_run_enabled,
             "kill_switch_active": self._kill_switch_active,
+            "manual_restart_required": self._manual_restart_required,
             "loop_active": bool(self._task and not self._task.done()),
             "cancelled_orders": cancelled_orders,
+            "closed_positions": closed_positions or [],
         }
 
     # ── Status API ───────────────────────────────────────────────────────────
@@ -4497,6 +4586,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "enabled": self._enabled,
             "auto_run_enabled": self._auto_run_enabled,
             "kill_switch_active": self._kill_switch_active,
+            "manual_restart_required": self._manual_restart_required,
             "loop_active": bool(self._task and not self._task.done()),
             "running": self._running,
             "scan_interval_seconds": self.scan_interval_seconds,

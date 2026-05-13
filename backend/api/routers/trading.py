@@ -441,7 +441,7 @@ async def get_trades():
 
 @router.post("/kill-switch")
 async def kill_switch():
-    control = paper_strategy_agent.set_kill_switch(True)
+    control = await paper_strategy_agent.engage_manual_kill_switch()
     mode, _, live_manager = await _get_trading_state_snapshot()
     if mode == "live" and live_manager:
         cancelled = await live_manager.kill_switch()
@@ -468,7 +468,9 @@ async def get_kill_switch_state():
 
 @router.put("/kill-switch")
 async def update_kill_switch(body: KillSwitchRequest):
-    return paper_strategy_agent.set_kill_switch(body.active)
+    if body.active:
+        return await paper_strategy_agent.engage_manual_kill_switch()
+    return paper_strategy_agent.set_kill_switch(False)
 
 
 @router.get("/portfolio-summary")

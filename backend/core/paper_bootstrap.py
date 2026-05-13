@@ -8,13 +8,6 @@ from loguru import logger
 from core.config import settings
 
 async def bootstrap_paper_trading_runtime() -> dict[str, Any]:
-    if not settings.PAPER_TRADING_ONLY:
-        return {
-            "enabled": False,
-            "paper_only": False,
-            "reason": "Paper-only bootstrap disabled.",
-        }
-
     from api.routers.auth import get_broker_connection_snapshot
     from api.routers.trading import ensure_paper_trading_mode
     from market_data.commodity_atm_watchlist import commodity_atm_watchlist_service
@@ -31,16 +24,20 @@ async def bootstrap_paper_trading_runtime() -> dict[str, Any]:
     await paper_strategy_agent.ensure_recovered_state()
     nse_control = paper_strategy_agent.get_control_state()
     if nse_control.get("kill_switch_active"):
-        paper_strategy_agent.set_kill_switch(False)
+        logger.warning("[Paper Bootstrap] NSE kill switch is active; preserving manual stop until operator restart.")
     nse_control = paper_strategy_agent.get_control_state()
-    if not nse_control.get("auto_run_enabled") or not nse_control.get("loop_active"):
+    if not nse_control.get("kill_switch_active") and not nse_control.get("manual_restart_required") and (
+        not nse_control.get("auto_run_enabled") or not nse_control.get("loop_active")
+    ):
         await paper_strategy_agent.set_auto_run(True)
     nse_status = paper_strategy_agent.get_status()
 
     commodity_control = commodity_strategy_agent.get_control_state()
     if commodity_control.get("kill_switch_active"):
-        logger.warning("[Paper Bootstrap] Commodity kill switch is active; preserving lock until an explicit reset or safe manual release.")
-    elif commodity_control.get("start_required") or not commodity_control.get("loop_active"):
+        logger.warning("[Paper Bootstrap] Commodity kill switch is active; preserving manual stop until operator restart.")
+    elif commodity_control.get("manual_restart_required"):
+        logger.warning("[Paper Bootstrap] Commodity restart is waiting for an explicit operator start.")
+    elif not commodity_control.get("loop_active"):
         await commodity_strategy_agent.start(force=True)
     commodity_status = commodity_strategy_agent.get_status()
 

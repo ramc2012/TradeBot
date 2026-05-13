@@ -289,6 +289,7 @@ def _default_saved_state() -> dict[str, Any]:
         "control": {
             "kill_switch_active": False,
             "start_required": False,
+            "manual_restart_required": False,
             "last_run_at": None,
             "last_error": None,
             "last_message": None,
@@ -345,14 +346,12 @@ def _normalize_saved_state(payload: Optional[dict[str, Any]]) -> dict[str, Any]:
         "selected_option_lookup_symbols": selected_option_lookup_symbols,
         "lots_per_trade": max(1, int(config_payload.get("lots_per_trade") or DEFAULT_COMMODITY_LOTS_PER_TRADE)),
     }
+    kill_switch_active = bool(control_payload.get("kill_switch_active", False))
+    manual_restart_required = bool(control_payload.get("manual_restart_required", kill_switch_active))
     default_state["control"] = {
-        "kill_switch_active": bool(control_payload.get("kill_switch_active", False)),
-        "start_required": bool(
-            control_payload.get(
-                "start_required",
-                control_payload.get("kill_switch_active", False),
-            )
-        ),
+        "kill_switch_active": kill_switch_active,
+        "start_required": bool(kill_switch_active or manual_restart_required),
+        "manual_restart_required": manual_restart_required,
         "last_run_at": control_payload.get("last_run_at"),
         "last_error": control_payload.get("last_error"),
         "last_message": control_payload.get("last_message"),
@@ -887,6 +886,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         saved_control = saved_state["control"]
         self._kill_switch_active = bool(saved_control.get("kill_switch_active", False))
         self._start_required = bool(saved_control.get("start_required", self._kill_switch_active))
+        self._manual_restart_required = bool(saved_control.get("manual_restart_required", self._start_required))
         self._last_run_at = saved_control.get("last_run_at")
         self._last_error = saved_control.get("last_error")
         self._last_message = (
@@ -1084,6 +1084,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "control": {
                 "kill_switch_active": self._kill_switch_active,
                 "start_required": self._start_required,
+                "manual_restart_required": self._manual_restart_required,
                 "last_run_at": self._last_run_at,
                 "last_error": self._last_error,
                 "last_message": self._last_message,
@@ -1140,12 +1141,13 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         if not self._auto_run_enabled or self._kill_switch_active:
             self._persist_state()
             return
-        if self._start_required and not force:
+        if self._manual_restart_required and not force:
             self._persist_state()
             return
         if self._loop_active():
             return
         self._start_required = False
+        self._manual_restart_required = False
         self._last_error = None
         if self._symbols:
             self._last_message = "Commodity agent running continuously."
@@ -1166,6 +1168,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             self._persist_state()
             return self.get_status(refresh=False)
         await self.start(force=True)
+        self._manual_restart_required = False
+        self._start_required = False
         if self._symbols:
             self._last_message = "Commodity agent started. Futures and options sleeves are armed."
         else:
@@ -1421,37 +1425,29 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             return 0.0
         return max(0.0, ((peak_equity - equity) / peak_equity) * 100.0)
 
-    async def _engage_drawdown_kill_switch(self, *, drawdown_pct: Optional[float] = None) -> None:
+    async def _record_drawdown_risk_block(self, *, drawdown_pct: Optional[float] = None) -> None:
         drawdown = float(drawdown_pct if drawdown_pct is not None else self._current_drawdown_pct())
-        if self._kill_switch_active:
-            return
-        self._kill_switch_active = True
-        self._start_required = True
-        await self._stop_loop()
         self._last_message = (
-            f"Commodity kill switch engaged: drawdown {drawdown:.1f}% exceeded "
-            f"the {COMMODITY_MAX_DRAWDOWN_PCT:.1f}% cap."
+            f"Commodity drawdown risk block observed: drawdown {drawdown:.1f}% exceeded "
+            f"the {COMMODITY_MAX_DRAWDOWN_PCT:.1f}% cap. Entries remain blocked by risk rules; "
+            "the kill switch is reserved for manual operator action."
         )
-        # Persist immediately so the next _refresh_state_from_store cannot
-        # overwrite the trip with the stale `kill_switch_active: false` from
-        # the saved control state. Without this, the desk oscillated trip→release
-        # ~once per hour as catch-up reloads clobbered in-memory state.
         self._persist_state()
         await record_audit_event(
             market="commodity",
-            event_type="kill_switch_engaged",
-            actor="auto_drawdown",
-            severity="error",
+            event_type="risk_block_observed",
+            actor="risk_governor",
+            severity="warning",
             message=self._last_message,
             previous_state="active",
-            new_state="killed",
+            new_state="active",
             payload={
                 "drawdown_pct": round(drawdown, 4),
                 "cap_pct": COMMODITY_MAX_DRAWDOWN_PCT,
                 "total_equity": float(self._runtime.portfolio.total_equity or 0.0),
             },
         )
-        self._append_commentary("error", self._last_message)
+        self._append_commentary("warning", self._last_message)
 
     def _strategy_catalog(self) -> list[dict[str, Any]]:
         option_contracts_ready = sum(1 for expiry in self._selected_option_expiries.values() if expiry)
@@ -1486,7 +1482,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "timeframe": lane_map["commodity_options"].descriptor.timeframe,
                 "execution_mode": lane_map["commodity_options"].descriptor.execution_mode,
                 "position_cap": lane_map["commodity_options"].descriptor.position_cap,
-                "broker": "fyers chain · upstox spot assist",
+                "broker": "upstox primary · fyers fallback",
                 "notes": f"Entries use liquid near-ATM contracts, 30-minute MACD zero-cross, 25% hard stop, and {OPTIONS_CAPITAL_FRACTION:.0%} capital budget per trade. Underlying MCX spot quotes prefer Upstox before FYERS.",
             },
         ]
@@ -1735,6 +1731,52 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "No valid Fyers session is available for the commodity scan. "
             f"Fyers={status.replace('_', ' ')}."
         )
+
+    @staticmethod
+    def _commodity_broker_failure_message(
+        fyers_health: dict[str, Any],
+        upstox_health: dict[str, Any],
+    ) -> str:
+        fyers_status = str(fyers_health.get("status") or "disconnected").replace("_", " ")
+        upstox_status = str(upstox_health.get("status") or "disconnected").replace("_", " ")
+        return (
+            "No valid commodity broker session is available for the commodity scan. "
+            f"Upstox={upstox_status}; Fyers={fyers_status}."
+        )
+
+    async def _get_scan_adapter(self) -> Optional[BrokerAdapter]:
+        """Use the healthiest commodity-capable broker; Upstox is preferred for MCX data."""
+        return await self._get_upstox_adapter() or await self._get_fyers_adapter()
+
+    def _commodity_futures_quality_blocked(
+        self,
+        data_quality_snapshot: Optional[dict[str, Any]],
+        quote_map: dict[str, float],
+    ) -> tuple[bool, str]:
+        if not data_quality_snapshot:
+            return False, ""
+        health_rows = {
+            str(row.get("symbol") or ""): row
+            for row in list(data_quality_snapshot.get("symbol_health") or [])
+            if isinstance(row, dict)
+        }
+        stale_symbols: list[str] = []
+        missing_symbols: list[str] = []
+        for symbol in self._symbols:
+            if float(quote_map.get(symbol) or 0.0) <= 0:
+                missing_symbols.append(symbol)
+                continue
+            row = health_rows.get(symbol)
+            if row and bool(row.get("stale")):
+                stale_symbols.append(symbol)
+        if not missing_symbols and not stale_symbols:
+            return False, ""
+        parts: list[str] = []
+        if missing_symbols:
+            parts.append(f"missing quotes for {', '.join(missing_symbols)}")
+        if stale_symbols:
+            parts.append(f"stale quotes for {', '.join(stale_symbols)}")
+        return True, "; ".join(parts)
 
     @staticmethod
     def _option_history_warning(health: dict[str, Any]) -> Optional[str]:
@@ -2147,16 +2189,16 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "option_history": option_history_service.get_health_snapshot(),
             "mode": "closed_market_preparation",
         }
-        if not fyers_health.get("valid"):
-            message = self._fyers_failure_message(fyers_health)
+        if not fyers_health.get("valid") and not upstox_health.get("valid"):
+            message = self._commodity_broker_failure_message(fyers_health, upstox_health)
             self._last_error = message
             self._last_message = message
             self._append_commentary("error", message)
             return self.get_status(refresh=False)
 
-        adapter = await self._get_fyers_adapter()
+        adapter = await self._get_scan_adapter()
         if not adapter:
-            self._last_message = "Fyers adapter is unavailable. Commodity preparation cannot refresh watchlists."
+            self._last_message = "No commodity broker adapter is available. Commodity preparation cannot refresh watchlists."
             self._last_error = self._last_message
             self._append_commentary("error", self._last_message)
             return self.get_status(refresh=False)
@@ -2443,16 +2485,16 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     "upstox_token_health": upstox_health,
                     "option_history": option_history_service.get_health_snapshot(),
                 }
-                if not fyers_health.get("valid"):
-                    message = self._fyers_failure_message(fyers_health)
+                if not fyers_health.get("valid") and not upstox_health.get("valid"):
+                    message = self._commodity_broker_failure_message(fyers_health, upstox_health)
                     self._last_error = message
                     self._last_message = message
                     self._append_commentary("error", message)
                     return self.get_status(refresh=False)
 
-                adapter = await self._get_fyers_adapter()
+                adapter = await self._get_scan_adapter()
                 if not adapter:
-                    self._last_message = "Fyers adapter is unavailable. Commodity agent cannot scan."
+                    self._last_message = "No commodity broker adapter is available. Commodity agent cannot scan."
                     self._last_error = self._last_message
                     self._append_commentary("error", self._last_message)
                     return self.get_status(refresh=False)
@@ -2475,15 +2517,14 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 except Exception as exc:
                     data_quality_snapshot = {"overall": "unknown", "error": str(exc)}
                     self._last_data_health["data_quality"] = data_quality_snapshot
-                if (
-                    settings.DATA_QUALITY_SCAN_GATE_ENABLED
-                    and data_quality_snapshot is not None
-                    and int(data_quality_snapshot.get("symbol_count") or 0) > 0
-                    and data_quality_snapshot.get("overall") in {"degraded", "critical"}
-                ):
+                commodity_quality_blocked, commodity_quality_reason = self._commodity_futures_quality_blocked(
+                    data_quality_snapshot,
+                    quote_map,
+                )
+                if settings.DATA_QUALITY_SCAN_GATE_ENABLED and commodity_quality_blocked:
                     message = (
                         "Data quality gate blocked the commodity scan: "
-                        f"{data_quality_snapshot.get('overall')} market-data freshness."
+                        f"{commodity_quality_reason}."
                     )
                     self._last_error = message
                     self._last_message = message
@@ -2555,7 +2596,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 await self._manage_positions(adapter, futures_rows, option_rows, option_quote_map=option_quote_map)
                 current_drawdown_pct = self._current_drawdown_pct()
                 if current_drawdown_pct >= COMMODITY_MAX_DRAWDOWN_PCT:
-                    await self._engage_drawdown_kill_switch(drawdown_pct=current_drawdown_pct)
+                    await self._record_drawdown_risk_block(drawdown_pct=current_drawdown_pct)
                 if self._kill_switch_active:
                     actionable_futures = [row for row in futures_rows if row.get("signal_validation") == "ready"]
                     actionable_options = [row for row in option_rows if row.get("signal_validation") == "ready"]
@@ -2859,6 +2900,66 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             if reason:
                 await self._close_option_position(position_key, position, current_price, reason, position.qty)
 
+    async def _close_futures_position(
+        self,
+        position_key: str,
+        position: CommodityPositionState,
+        current_price: float,
+        reason: str,
+        *,
+        actor: str = "strategy_agent",
+    ) -> None:
+        exit_action = "SELL" if position.action == "BUY" else "BUY"
+        order = self._runtime.order_book.place_order(
+            symbol=position.live_symbol,
+            action=exit_action,
+            order_type="MARKET",
+            qty=position.qty,
+            instrument_type="FUT",
+            session_id=self._runtime.portfolio.session_id,
+            ltp=current_price,
+        )
+        self._record_order(
+            order,
+            reason,
+            flow="exit",
+            lot_size=position.lot_size,
+            lots=position.lots,
+            strategy_key=position.strategy_key,
+            strategy_title=position.strategy_title,
+        )
+        self._append_commentary(
+            "trade",
+            f"EXIT {position.display_name} {exit_action} @{current_price:.2f} ({reason}) | {position.lots} lot",
+        )
+        multiplier = 1 if position.action == "BUY" else -1
+        realized_pnl = multiplier * (current_price - position.entry_price) * position.qty
+        await record_audit_event(
+            market="commodity",
+            strategy_key=position.strategy_key,
+            event_type="position_exit",
+            actor=actor,
+            symbol=position.symbol,
+            underlying=position.underlying,
+            severity="trade",
+            message=(
+                f"{position.display_name} {exit_action} @ ₹{current_price:,.2f} "
+                f"({reason}); P&L ₹{realized_pnl:,.0f}"
+            ),
+            previous_state="open",
+            new_state="closed",
+            payload={
+                "reason": reason,
+                "entry_price": round(position.entry_price, 2),
+                "exit_price": round(current_price, 2),
+                "qty": position.qty,
+                "lots": position.lots,
+                "realized_pnl": round(realized_pnl, 2),
+                "return_pct": round(position.return_pct, 2),
+            },
+        )
+        self._runtime.positions.pop(position_key, None)
+
     async def _close_option_position(
         self,
         position_key: str,
@@ -2868,6 +2969,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         qty: int,
         *,
         keep_open: bool = False,
+        actor: str = "strategy_agent",
     ) -> None:
         order = self._runtime.order_book.place_order(
             symbol=position.live_symbol,
@@ -2902,7 +3004,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             market="commodity",
             strategy_key=position.strategy_key,
             event_type="position_exit_partial" if partial_close else "position_exit",
-            actor="strategy_agent",
+            actor=actor,
             symbol=position.symbol,
             underlying=position.underlying,
             severity="trade",
@@ -3376,6 +3478,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             if release_blocked:
                 self._kill_switch_active = True
                 self._start_required = True
+                self._manual_restart_required = True
                 await self._stop_loop()
                 if settings.COMMODITY_KILL_LOCK:
                     reason = "deployment commodity kill lock is enabled"
@@ -3409,18 +3512,54 @@ class CommodityStrategyAgent(BaseStrategyAgent):
 
         self._kill_switch_active = bool(active)
         cancelled_orders = 0
+        closed_positions: list[dict[str, Any]] = []
         for order in list(self._runtime.order_book.get_open_orders(self._runtime.portfolio.session_id)):
             if self._runtime.order_book.cancel_order(order.order_id):
                 cancelled_orders += 1
 
         if self._kill_switch_active:
             self._start_required = True
+            self._manual_restart_required = True
+            for position_key, position in list(self._runtime.positions.items()):
+                current_price = float(position.current_price or position.entry_price or 0.0)
+                if current_price <= 0:
+                    continue
+                if position.instrument_type == "FUT":
+                    await self._close_futures_position(
+                        position_key,
+                        position,
+                        current_price,
+                        "manual_kill_switch",
+                        actor="manual",
+                    )
+                else:
+                    await self._close_option_position(
+                        position_key,
+                        position,
+                        current_price,
+                        "manual_kill_switch",
+                        position.qty,
+                        actor="manual",
+                    )
+                closed_positions.append(
+                    {
+                        "position_key": position_key,
+                        "symbol": position.live_symbol,
+                        "qty": position.qty,
+                        "exit_price": round(current_price, 2),
+                    }
+                )
             await self._stop_loop()
-            self._last_message = "Commodity kill switch active. Agent stopped. Release it and start the agent to resume scanning."
+            self._last_message = (
+                f"Commodity kill switch active. Closed {len(closed_positions)} position(s), "
+                f"cancelled {cancelled_orders} order(s), and stopped the agent. "
+                "Release it and start the agent manually to resume scanning."
+            )
             self._append_commentary("warning", self._last_message)
         else:
             self._start_required = True
-            self._last_message = "Commodity kill switch released. Start the commodity agent to resume scanning."
+            self._manual_restart_required = True
+            self._last_message = "Commodity kill switch released. Start the commodity agent manually to resume scanning."
             self._append_commentary("success", self._last_message)
 
         self._persist_state()
@@ -3433,11 +3572,19 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 message=self._last_message,
                 previous_state="killed" if previous else "active",
                 new_state="killed" if self._kill_switch_active else "active",
-                payload={"cancelled_orders": cancelled_orders},
+                payload={
+                    "cancelled_orders": cancelled_orders,
+                    "closed_positions": closed_positions,
+                },
             )
-        return self.get_control_state(cancelled_orders=cancelled_orders)
+        return self.get_control_state(cancelled_orders=cancelled_orders, closed_positions=closed_positions)
 
-    def get_control_state(self, *, cancelled_orders: int = 0) -> dict[str, Any]:
+    def get_control_state(
+        self,
+        *,
+        cancelled_orders: int = 0,
+        closed_positions: Optional[list[dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
         self._refresh_state_from_store()
         return {
             "market": "commodity",
@@ -3445,7 +3592,9 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "kill_switch_active": self._kill_switch_active,
             "loop_active": self._loop_active(),
             "start_required": self._start_required,
+            "manual_restart_required": self._manual_restart_required,
             "cancelled_orders": cancelled_orders,
+            "closed_positions": closed_positions or [],
         }
 
     def get_status(self, *, refresh: bool = True) -> dict[str, Any]:
@@ -3462,6 +3611,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "kill_switch_active": self._kill_switch_active,
             "loop_active": self._loop_active(),
             "start_required": self._start_required,
+            "manual_restart_required": self._manual_restart_required,
             "running": self._running,
             "scan_interval_seconds": self.scan_interval_seconds,
             "last_run_at": self._last_run_at,
@@ -3573,12 +3723,13 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._commentary = []
         self._runtime.processed_signals = {}
         self._kill_switch_active = False
-        self._start_required = True
+        self._start_required = False
+        self._manual_restart_required = False
         self._last_error = None
         self._last_run_at = None
         self._last_message = (
             "Commodity paper account reset to ₹1,000,000. "
-            "Archived prior state and require an explicit start before scanning resumes."
+            "Archived prior state; automatic scanning can resume on the next supervisor/startup cycle."
         )
         self._append_commentary("warning", self._last_message)
         self._persist_state()
@@ -3603,6 +3754,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "initial_capital": DEFAULT_COMMODITY_INITIAL_CAPITAL,
             "kill_switch_active": self._kill_switch_active,
             "start_required": self._start_required,
+            "manual_restart_required": self._manual_restart_required,
             "prior_realized_pnl": prior_realized,
             "prior_total_trades": prior_trades,
         }
