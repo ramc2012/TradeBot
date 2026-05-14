@@ -20,7 +20,16 @@ import {
 
 const REFRESH_MS = 4_000;
 
+type TabKey = "watchlist" | "positions" | "history" | "research" | "expiry";
 type Bucket = "active" | "ready" | "favourable" | "drifting" | "neutral" | null;
+
+const TABS: { key: TabKey; label: string }[] = [
+  { key: "watchlist", label: "Watchlist" },
+  { key: "positions", label: "Open Positions" },
+  { key: "history", label: "Trade History" },
+  { key: "research", label: "Research" },
+  { key: "expiry", label: "Expiry Setup" },
+];
 type Trajectory = "improving" | "stalled" | "deteriorating" | null;
 
 type WatchRow = {
@@ -380,6 +389,109 @@ function OptionLegSummary({ leg }: { leg?: Record<string, unknown> }) {
   );
 }
 
+// Tighter helpers used by the Bloomberg-style table.
+const POS = "text-emerald-400";
+const NEG = "text-rose-400";
+const NEU = "text-text-muted";
+
+function colorForDelta(n: number | null | undefined): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return NEU;
+  if (n > 0) return POS;
+  if (n < 0) return NEG;
+  return NEU;
+}
+
+function compactNumber(n: number | null | undefined): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  const abs = Math.abs(n);
+  if (abs >= 1_00_00_000) return `${(n / 1_00_00_000).toFixed(2)}Cr`;
+  if (abs >= 1_00_000) return `${(n / 1_00_000).toFixed(2)}L`;
+  if (abs >= 1_000) return `${(n / 1_000).toFixed(2)}k`;
+  return n.toLocaleString("en-IN", { maximumFractionDigits: 0 });
+}
+
+function bucketCode(b?: Bucket): string {
+  if (b === "active") return "ACT";
+  if (b === "ready") return "RDY";
+  if (b === "favourable") return "FAV";
+  if (b === "drifting") return "DRF";
+  if (b === "neutral") return "NEU";
+  return "—";
+}
+
+function bucketCellClass(b?: Bucket): string {
+  if (b === "active" || b === "ready") return "text-emerald-300";
+  if (b === "favourable") return "text-amber-300";
+  if (b === "drifting") return "text-rose-300";
+  return "text-slate-400";
+}
+
+function regimeShort(r?: string | null): string {
+  if (!r) return "—";
+  const t = String(r).toLowerCase();
+  if (t.startsWith("bull")) return "BULL";
+  if (t.startsWith("bear")) return "BEAR";
+  if (t.startsWith("neutral")) return "NTRL";
+  if (t === "dead_zone") return "DEAD";
+  if (t === "vol_spike") return "VLSP";
+  if (t === "warmup") return "WARM";
+  return t.slice(0, 4).toUpperCase();
+}
+
+function mpShort(s?: string | null): string {
+  if (!s) return "—";
+  const t = String(s).toLowerCase();
+  // Common MP day types: trend_up, trend_down, balance, balance_above_poc,
+  // balance_below_poc, failed_auction_high, failed_auction_low
+  if (t === "trend_up") return "↑TRND";
+  if (t === "trend_down") return "↓TRND";
+  if (t === "balance") return "BAL";
+  if (t === "balance_above_poc") return "BAL↑";
+  if (t === "balance_below_poc") return "BAL↓";
+  if (t === "failed_auction_high") return "FA-H";
+  if (t === "failed_auction_low") return "FA-L";
+  return t.slice(0, 5).toUpperCase();
+}
+
+function sigShort(v?: string | null): string {
+  if (!v) return "—";
+  const t = String(v).toLowerCase();
+  if (t === "ready") return "READY";
+  if (t === "waiting_cross") return "WAIT";
+  if (t === "mp_conflict") return "MP-X";
+  if (t === "mp_pending") return "MP-P";
+  if (t === "mp_warming_up") return "MP-W";
+  if (t === "warming_up") return "WARM";
+  if (t === "position_open") return "OPEN";
+  if (t === "data_stale") return "STALE";
+  if (t === "blocked_kill_switch") return "KILL";
+  if (t === "iv_reject") return "IV✗";
+  if (t === "iv_unavailable") return "IV?";
+  if (t === "tte_filter") return "TTE✗";
+  if (t === "event_window") return "EVT";
+  return t.slice(0, 5).toUpperCase();
+}
+
+function daysToExpiry(expiry?: string | null): number | null {
+  if (!expiry) return null;
+  try {
+    const d = new Date(`${expiry}T00:00:00+05:30`);
+    const today = new Date();
+    return Math.max(0, Math.floor((d.getTime() - today.getTime()) / 86_400_000));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Bloomberg-style data-rich watchlist for the commodity desk. Single dense
+ * table, monospace numerics, every column visible at once, color-coded by
+ * direction. Designed for traders scanning multiple instruments at a glance.
+ *
+ * Layout: futures + options merged into ONE wide row per underlying. Sub-row
+ * below each futures row shows the ATM CE/PE quotes. Header sticks while
+ * scrolling. Bucket and signal codes are abbreviated to fit (FAV/RDY/DRF/etc).
+ */
 function InstrumentWatchlist({
   futuresRows,
   optionRows,
@@ -388,71 +500,163 @@ function InstrumentWatchlist({
   optionRows: WatchRow[];
 }) {
   if (futuresRows.length === 0 && optionRows.length === 0) {
-    return <div className="px-2 py-8 text-center text-xs text-text-muted">No commodity instruments available.</div>;
+    return (
+      <div className="px-2 py-8 text-center text-xs text-text-muted">
+        No commodity instruments available.
+      </div>
+    );
   }
   const optionsBySymbol = new Map(
     optionRows.map((row) => [String(row.symbol || ""), row]),
   );
+
+  const TH = "py-1 px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-text-muted bg-bg-secondary/40 sticky top-0 z-10";
+  const THR = `${TH} text-right`;
+  const TD = "px-2 py-1 align-middle whitespace-nowrap font-mono";
+  const TDR = `${TD} text-right`;
+
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[1120px] text-xs">
-        <thead className="text-[10.5px] uppercase tracking-wide text-text-muted">
+    <div className="overflow-x-auto rounded-md border border-bg-active/30">
+      <table className="w-full min-w-[1480px] border-collapse text-[11.5px]">
+        <thead>
           <tr>
-            <th className="py-1 text-left">Instrument</th>
-            <th className="text-right">Future</th>
-            <th className="text-left">Signal</th>
-            <th className="text-left">Context</th>
-            <th className="text-right">CE</th>
-            <th className="text-right">PE</th>
-            <th className="text-right">Option Ref</th>
+            <th className={TH}>Symbol</th>
+            <th className={TH}>Bkt</th>
+            <th className={THR}>Last</th>
+            <th className={THR}>Chg</th>
+            <th className={THR}>Δ%</th>
+            <th className={THR}>ATR</th>
+            <th className={THR}>MACD</th>
+            <th className={THR}>Signal</th>
+            <th className={THR}>Hist</th>
+            <th className={THR}>Prox</th>
+            <th className={TH}>Regime</th>
+            <th className={TH}>MP</th>
+            <th className={TH}>Sig</th>
+            <th className={THR}>CE.K</th>
+            <th className={THR}>CE.LTP</th>
+            <th className={THR}>CE.MACD</th>
+            <th className={THR}>CE.OI</th>
+            <th className={THR}>CE.ΔOI</th>
+            <th className={THR}>PE.K</th>
+            <th className={THR}>PE.LTP</th>
+            <th className={THR}>PE.MACD</th>
+            <th className={THR}>PE.OI</th>
+            <th className={THR}>PE.ΔOI</th>
+            <th className={THR}>DTE</th>
+            <th className={THR}>Bar</th>
           </tr>
         </thead>
         <tbody>
           {futuresRows.map((row) => {
             const optionRow = optionsBySymbol.get(String(row.symbol || ""));
-            const ce = (optionRow as Record<string, unknown> | undefined)?.ce as Record<string, unknown> | undefined;
-            const pe = (optionRow as Record<string, unknown> | undefined)?.pe as Record<string, unknown> | undefined;
-            const optionAsOf = String((optionRow as Record<string, unknown> | undefined)?.as_of || ce?.as_of || pe?.as_of || "");
+            const ce = (optionRow as Record<string, unknown> | undefined)?.ce as
+              | Record<string, unknown>
+              | undefined;
+            const pe = (optionRow as Record<string, unknown> | undefined)?.pe as
+              | Record<string, unknown>
+              | undefined;
+            const ceLtp = Number(ce?.live_ltp ?? ce?.ltp);
+            const peLtp = Number(pe?.live_ltp ?? pe?.ltp);
+            const ceMacd = Number(ce?.macd);
+            const peMacd = Number(pe?.macd);
+            const ceOi = Number(ce?.oi);
+            const peOi = Number(pe?.oi);
+            const ceOiDelta = ce?.oi_change != null ? Number(ce.oi_change) : null;
+            const peOiDelta = pe?.oi_change != null ? Number(pe.oi_change) : null;
+            const optionExpiry = (optionRow as Record<string, unknown> | undefined)?.expiry as
+              | string
+              | undefined;
+            const dte = daysToExpiry(optionExpiry);
+            const chg =
+              row.price != null && row.previous_close != null
+                ? Number(row.price) - Number(row.previous_close)
+                : null;
+            const sigVal = row.signal_validation || row.reason;
             return (
-              <tr key={`${row.symbol || row.underlying}-instrument`} className={QUIET_ROW}>
-                <td className="py-3 align-top">
-                  <div className="font-medium text-text-primary">{row.display_name || row.underlying || row.symbol}</div>
-                  <div className="mt-0.5 font-mono text-[10px] text-text-muted">{row.symbol}</div>
-                  <div className="mt-1 text-[10.5px] text-text-muted">last bar {formatIST(row.bar_time)}</div>
+              <tr
+                key={`${row.symbol || row.underlying}-bberg`}
+                className="border-t border-bg-active/20 hover:bg-bg-secondary/25"
+                title={
+                  row.bucket_rationale ||
+                  row.signal_validation_detail ||
+                  row.signal_validation ||
+                  ""
+                }
+              >
+                <td className="px-2 py-1 align-middle whitespace-nowrap">
+                  <span className="font-semibold text-text-primary">
+                    {row.display_name || row.underlying || row.symbol}
+                  </span>
+                  <span className="ml-1 font-mono text-[10px] text-text-muted">
+                    {(row.symbol || "").replace(/^MCX:/, "").replace(/FUT$/, "")}
+                  </span>
                 </td>
-                <td className="py-3 text-right align-top">
-                  <div className="font-mono text-sm text-text-primary">{formatNumber(row.price, 2)}</div>
-                  <div className={`mt-0.5 font-mono text-[11px] ${(row.change_pct ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                    {formatPct(row.change_pct, 2)}
-                  </div>
-                  <div className="mt-1 text-[10.5px] text-text-muted">ATR {formatNumber(row.atr, 1)}</div>
+                <td className={`px-2 py-1 align-middle text-[10px] font-semibold ${bucketCellClass(row.bucket ?? null)}`}>
+                  {bucketCode(row.bucket ?? null)}
                 </td>
-                <td className="py-3 align-top">
-                  <BucketPill bucket={row.bucket} />
-                  <span className={`ml-1 ${trajectoryColor(row.trajectory ?? null)}`}>{trajectoryGlyph(row.trajectory ?? null)}</span>
-                  {row.proximity_pct != null ? (
-                    <span className="ml-1 text-[10px] text-text-muted">{Math.round(row.proximity_pct)}%</span>
-                  ) : null}
-                  <div className="mt-1 text-[10.5px] text-text-muted">{row.signal_validation || row.reason || "--"}</div>
+                <td className={`${TDR} text-text-primary`}>{formatNumber(row.price, 2)}</td>
+                <td className={`${TDR} ${colorForDelta(chg)}`}>
+                  {chg == null ? "—" : (chg >= 0 ? "+" : "") + formatNumber(chg, 2)}
                 </td>
-                <td className="py-3 align-top text-[11px] text-text-muted">
-                  <div>{row.regime || "--"} · {row.mp_day_type || row.mp_status || "--"}</div>
-                  <div className="mt-1 font-mono">MACD {formatNumber(row.macd, 2)} / {formatNumber(row.macd_signal, 2)}</div>
-                  <div className={(row.macd_histogram ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}>
-                    Hist {formatNumber(row.macd_histogram, 2)}
-                  </div>
+                <td className={`${TDR} ${colorForDelta(row.change_pct)}`}>
+                  {formatPct(row.change_pct, 2)}
                 </td>
-                <td className="py-3 text-right align-top">
-                  <OptionLegSummary leg={ce} />
+                <td className={`${TDR} text-text-muted`}>{formatNumber(row.atr, 1)}</td>
+                <td className={`${TDR} ${colorForDelta(row.macd)}`}>{formatNumber(row.macd, 2)}</td>
+                <td className={`${TDR} text-text-muted`}>{formatNumber(row.macd_signal, 2)}</td>
+                <td className={`${TDR} ${colorForDelta(row.macd_histogram)}`}>
+                  {formatNumber(row.macd_histogram, 2)}
                 </td>
-                <td className="py-3 text-right align-top">
-                  <OptionLegSummary leg={pe} />
+                <td className={`${TDR} text-text-muted`}>
+                  {row.proximity_pct == null ? "—" : `${Math.round(row.proximity_pct)}%`}
                 </td>
-                <td className="py-3 text-right align-top text-[10.5px] text-text-muted">
-                  <div>spot {formatNumber(Number((optionRow as Record<string, unknown> | undefined)?.spot_price ?? 0), 2)}</div>
-                  <div>ATM {String((optionRow as Record<string, unknown> | undefined)?.atm_strike ?? "--")}</div>
-                  <div>{String((optionRow as Record<string, unknown> | undefined)?.expiry ?? "--")}</div>
-                  <div className="mt-1">chain {formatIST(optionAsOf)}</div>
+                <td className="px-2 py-1 align-middle text-[10px] uppercase text-text-secondary">
+                  {regimeShort(row.regime)}
+                </td>
+                <td className="px-2 py-1 align-middle text-[10px] uppercase text-text-secondary">
+                  {mpShort(row.mp_day_type || row.mp_status)}
+                </td>
+                <td className="px-2 py-1 align-middle text-[10px] uppercase text-text-secondary">
+                  {sigShort(sigVal)}
+                </td>
+                <td className={`${TDR} text-text-muted`}>
+                  {ce?.strike != null ? String(ce.strike) : "—"}
+                </td>
+                <td className={`${TDR} text-text-primary`}>
+                  {Number.isFinite(ceLtp) ? formatNumber(ceLtp, 2) : "—"}
+                </td>
+                <td className={`${TDR} ${colorForDelta(ceMacd)}`}>
+                  {Number.isFinite(ceMacd) ? formatNumber(ceMacd, 2) : "—"}
+                </td>
+                <td className={`${TDR} text-text-muted`}>
+                  {Number.isFinite(ceOi) ? compactNumber(ceOi) : "—"}
+                </td>
+                <td className={`${TDR} ${colorForDelta(ceOiDelta)}`}>
+                  {ceOiDelta == null
+                    ? "—"
+                    : (ceOiDelta >= 0 ? "+" : "") + compactNumber(ceOiDelta)}
+                </td>
+                <td className={`${TDR} text-text-muted`}>
+                  {pe?.strike != null ? String(pe.strike) : "—"}
+                </td>
+                <td className={`${TDR} text-text-primary`}>
+                  {Number.isFinite(peLtp) ? formatNumber(peLtp, 2) : "—"}
+                </td>
+                <td className={`${TDR} ${colorForDelta(peMacd)}`}>
+                  {Number.isFinite(peMacd) ? formatNumber(peMacd, 2) : "—"}
+                </td>
+                <td className={`${TDR} text-text-muted`}>
+                  {Number.isFinite(peOi) ? compactNumber(peOi) : "—"}
+                </td>
+                <td className={`${TDR} ${colorForDelta(peOiDelta)}`}>
+                  {peOiDelta == null
+                    ? "—"
+                    : (peOiDelta >= 0 ? "+" : "") + compactNumber(peOiDelta)}
+                </td>
+                <td className={`${TDR} text-text-muted`}>{dte == null ? "—" : dte}</td>
+                <td className={`${TDR} text-[10px] text-text-muted`}>
+                  {formatIST(row.bar_time)}
                 </td>
               </tr>
             );
@@ -742,6 +946,7 @@ function AuditFeed({ events }: { events: AuditEvent[] }) {
 }
 
 export default function CommodityLivePage() {
+  const [activeTab, setActiveTab] = useState<TabKey>("watchlist");
   const [expiryDraft, setExpiryDraft] = useState<Record<string, string>>({});
   const queryClient = useQueryClient();
 
@@ -965,6 +1170,25 @@ export default function CommodityLivePage() {
             </Link>
           </div>
         </div>
+        {/* Tab navigation — single source of truth for which subview is visible.
+            The Decision Bar above stays always-on so the trader sees P&L /
+            risk gauges regardless of which tab is selected. */}
+        <nav className="mt-3 flex gap-1 overflow-x-auto rounded-md bg-bg-secondary/15 p-1">
+          {TABS.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setActiveTab(tab.key)}
+              className={`whitespace-nowrap rounded px-3 py-1.5 text-xs font-medium transition-colors ${
+                activeTab === tab.key
+                  ? "bg-bg-secondary/55 text-text-primary"
+                  : "text-text-muted hover:bg-bg-secondary/30 hover:text-text-primary"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </nav>
       </header>
 
       {/* 1) DECISION BAR — equity / P&L / risk / DQ at-a-glance. Always on. */}
@@ -1023,89 +1247,171 @@ export default function CommodityLivePage() {
         />
       </section>
 
-      {/* 2) HERO — action queue (what to enter) + open positions (what's at risk). */}
-      <div className="mb-3 grid grid-cols-12 gap-3">
-        <Section
-          title="Action Queue"
-          detail={`${watchlist.length} symbols · bucketed by signal proximity`}
-          className="col-span-12 xl:col-span-5"
-        >
-          <ActionQueue rows={watchlist} />
-        </Section>
-        <Section
-          title="Open Positions"
-          detail={
-            positions.length === 0
-              ? "no exposure"
-              : `${positions.length} live · stop/target tracked`
-          }
-          className="col-span-12 xl:col-span-7"
-        >
-          {positions.length === 0 ? (
-            <div className="px-2 py-8 text-center text-xs text-text-muted">
-              Desk is flat. Scan output will populate the action queue when signals fire.
+      {/* WATCHLIST tab — Bloomberg-style dense table + action queue side panel. */}
+      {activeTab === "watchlist" ? (
+        <>
+          <div className="mb-3 grid grid-cols-12 gap-3">
+            <Section
+              title="Action Queue"
+              detail={`${watchlist.length} symbols · bucketed by signal proximity`}
+              className="col-span-12 xl:col-span-4"
+            >
+              <ActionQueue rows={watchlist} />
+            </Section>
+            <Section
+              title="Live Instruments"
+              detail={
+                usingSnapshotFutures
+                  ? "catalog fallback · scanner offline"
+                  : `${watchlist.length} futures · ${optionWatchlist.length} option pairs · runtime rows`
+              }
+              className="col-span-12 xl:col-span-8"
+            >
+              <InstrumentWatchlist futuresRows={watchlist} optionRows={optionWatchlist} />
+            </Section>
+          </div>
+        </>
+      ) : null}
+
+      {/* POSITIONS tab — open exposure cards + risk controls + strategy agents. */}
+      {activeTab === "positions" ? (
+        <div className="mb-3 grid grid-cols-12 gap-3">
+          <Section
+            title="Open Positions"
+            detail={
+              positions.length === 0
+                ? "no exposure"
+                : `${positions.length} live · stop/target tracked`
+            }
+            className="col-span-12"
+          >
+            {positions.length === 0 ? (
+              <div className="px-2 py-8 text-center text-xs text-text-muted">
+                Desk is flat. Scan output will populate the action queue when signals fire.
+              </div>
+            ) : (
+              <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                {positions.map((p) => (
+                  <MiniPositionCard key={p.position_key || p.live_symbol} p={p} />
+                ))}
+              </div>
+            )}
+          </Section>
+          <Section
+            title="Risk Controls"
+            detail="commodity limits"
+            className="col-span-12 xl:col-span-4"
+          >
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <StatTile label="Daily Loss" value={formatINR(config.commodity_daily_loss_limit)} />
+              <StatTile
+                label="Underlying Loss"
+                value={formatINR(config.commodity_underlying_daily_loss_limit)}
+              />
+              <StatTile
+                label="Max Drawdown"
+                value={formatPct(Number(config.commodity_max_drawdown_pct ?? 0), 1)}
+              />
+              <StatTile label="Cooldown" value={`${config.commodity_stop_cooldown_minutes ?? "--"}m`} />
+              <StatTile label="Lots / Trade" value={String(config.lots_per_trade ?? "--")} />
+              <StatTile
+                label="Option Budget"
+                value={formatPct(Number(config.option_capital_fraction ?? 0) * 100, 1)}
+              />
             </div>
-          ) : (
+          </Section>
+          <Section
+            title="Strategy Agents"
+            detail="commodity sleeves"
+            className="col-span-12 xl:col-span-8"
+          >
             <div className="grid gap-2 sm:grid-cols-2">
-              {positions.map((p) => (
-                <MiniPositionCard key={p.position_key || p.live_symbol} p={p} />
+              {(status.strategy_agents ?? []).map((agent) => (
+                <div key={String(agent.key)} className={`${QUIET_TILE} px-3 py-2 text-xs`}>
+                  <div className="flex items-baseline justify-between gap-2">
+                    <div className="font-semibold text-text-primary">
+                      {String(agent.title || agent.key)}
+                    </div>
+                    <div className="text-text-muted">{String(agent.execution_mode || "--")}</div>
+                  </div>
+                  <div className="mt-1 grid grid-cols-2 gap-2 text-[11px] text-text-muted">
+                    <span>{String(agent.instrument_scope || "--")}</span>
+                    <span>{String(agent.timeframe || "--")}</span>
+                    <span>tracked {String(agent.tracked_symbols ?? "--")}</span>
+                    <span>ready {String(agent.ready_signals ?? 0)}</span>
+                  </div>
+                </div>
               ))}
             </div>
-          )}
-        </Section>
-      </div>
+          </Section>
+        </div>
+      ) : null}
 
-      {/* 3) LIVE INSTRUMENTS — full per-symbol table with MACD/regime/MP/option legs. */}
-      <div className="mb-3 grid grid-cols-12 gap-3">
-        <Section
-          title="Live Instruments"
-          detail={usingSnapshotFutures ? "catalog fallback · scanner offline" : "runtime rows"}
-          className="col-span-12"
-        >
-          <InstrumentWatchlist futuresRows={watchlist} optionRows={optionWatchlist} />
-        </Section>
-      </div>
+      {/* HISTORY tab — closed trades, orders, audit feed. */}
+      {activeTab === "history" ? (
+        <div className="mb-3 grid grid-cols-12 gap-3">
+          <Section
+            title="Portfolio Summary"
+            detail="paper commodity book"
+            className="col-span-12 xl:col-span-4"
+          >
+            <div className="grid grid-cols-2 gap-2">
+              <StatTile label="Initial" value={formatINR(initialCapital)} />
+              <StatTile label="Available" value={formatINR(summary.available_capital)} />
+              <StatTile
+                label="Equity"
+                value={formatINR(totalEquity)}
+                tone={equityPct >= 0 ? "text-emerald-400" : "text-rose-400"}
+              />
+              <StatTile
+                label="Realized"
+                value={formatINR(realizedPnl)}
+                tone={realizedPnl >= 0 ? "text-emerald-400" : "text-rose-400"}
+              />
+              <StatTile
+                label="Unrealized"
+                value={formatINR(unrealizedPnl)}
+                tone={unrealizedPnl >= 0 ? "text-emerald-400" : "text-rose-400"}
+              />
+              <StatTile
+                label="Profit Factor"
+                value={summary.profit_factor ? Number(summary.profit_factor).toFixed(2) : "--"}
+              />
+            </div>
+          </Section>
+          <Section
+            title="Closed Trades"
+            detail={`${trades.length} rows · last ${formatIST(trades[0]?.exit_time)}`}
+            className="col-span-12 xl:col-span-8"
+          >
+            <div className="max-h-[360px] overflow-y-auto">
+              <TradesTable trades={trades.slice(0, 50)} />
+            </div>
+          </Section>
+          <Section
+            title="Order Flow"
+            detail={`${orders.length} rows`}
+            className="col-span-12 xl:col-span-7"
+          >
+            <div className="max-h-[320px] overflow-y-auto">
+              <OrdersTable orders={orders.slice(0, 50)} />
+            </div>
+          </Section>
+          <Section
+            title="Audit Feed"
+            detail="state transitions"
+            className="col-span-12 xl:col-span-5"
+          >
+            <div className="max-h-[320px] overflow-y-auto">
+              <AuditFeed events={auditEvents.slice(0, 40)} />
+            </div>
+          </Section>
+        </div>
+      ) : null}
 
-      {/* 4) RECENT ACTIVITY — trades, orders, audit feed. */}
-      <div className="mb-3 grid grid-cols-12 gap-3">
-        <Section
-          title="Closed Trades"
-          detail={`${trades.length} rows · last ${formatIST(trades[0]?.exit_time)}`}
-          className="col-span-12 xl:col-span-6"
-        >
-          <div className="max-h-[280px] overflow-y-auto">
-            <TradesTable trades={trades.slice(0, 30)} />
-          </div>
-        </Section>
-        <Section
-          title="Order Flow"
-          detail={`${orders.length} rows`}
-          className="col-span-12 xl:col-span-6"
-        >
-          <div className="max-h-[280px] overflow-y-auto">
-            <OrdersTable orders={orders.slice(0, 30)} />
-          </div>
-        </Section>
-        <Section
-          title="Audit Feed"
-          detail="state transitions"
-          className="col-span-12"
-        >
-          <div className="max-h-[260px] overflow-y-auto">
-            <AuditFeed events={auditEvents.slice(0, 40)} />
-          </div>
-        </Section>
-      </div>
-
-      {/* 5) SETUP & RISK — collapsible. Out of the way during the session. */}
-      <details className="mb-3 rounded-lg border border-bg-active/40 bg-bg-secondary/20 px-3 py-2 text-xs">
-        <summary className="cursor-pointer text-[11px] font-semibold uppercase tracking-[0.18em] text-text-muted">
-          Setup · Expiry &amp; Risk
-          <span className="ml-2 normal-case tracking-normal text-text-muted">
-            ({contracts.length} contracts · {(status.strategy_agents ?? []).length} agents)
-          </span>
-        </summary>
-        <div className="mt-3 grid grid-cols-12 gap-3">
+      {/* EXPIRY tab — contract catalog + per-symbol expiry selection. */}
+      {activeTab === "expiry" ? (
+        <div className="mb-3 grid grid-cols-12 gap-3">
           <Section
             title="Risk Controls"
             detail="commodity limits"
@@ -1258,17 +1564,11 @@ export default function CommodityLivePage() {
             </div>
           </Section>
         </div>
-      </details>
+      ) : null}
 
-      {/* 6) RESEARCH — collapsed by default. Strategy notes + signal audit JSON. */}
-      <details className="rounded-lg border border-bg-active/40 bg-bg-secondary/20 px-3 py-2 text-xs">
-        <summary className="cursor-pointer text-[11px] font-semibold uppercase tracking-[0.18em] text-text-muted">
-          Research · Strategy notes &amp; full signal audit
-          <span className="ml-2 normal-case tracking-normal text-text-muted">
-            ({(status.commentary ?? []).length} commentary · {(status.signal_audit ?? []).length} audit rows)
-          </span>
-        </summary>
-        <div className="mt-3 grid grid-cols-12 gap-3">
+      {/* RESEARCH tab — Strategy notes + commentary + signal audit JSON. */}
+      {activeTab === "research" ? (
+        <div className="grid grid-cols-12 gap-3">
           <Section
             title="Commodity Research Context"
             detail="strategy assumptions"
@@ -1331,7 +1631,7 @@ export default function CommodityLivePage() {
             )}
           </Section>
         </div>
-      </details>
+      ) : null}
     </div>
   );
 }
