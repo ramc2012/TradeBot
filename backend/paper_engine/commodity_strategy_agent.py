@@ -1540,7 +1540,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 validation = "max_positions"
                 validation_detail = "The futures sleeve is already at max open-position capacity."
             elif signal in {"BUY", "SELL"}:
-                data_quality_block = _data_quality_block_reason(symbol, "broker_quote")
+                data_quality_block = _data_quality_block_reason(symbol, "broker_futures_quote")
                 if data_quality_block:
                     validation = "data_stale"
                     validation_detail = data_quality_block
@@ -1649,7 +1649,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 validation = "insufficient_capital"
                 validation_detail = f"The {OPTIONS_CAPITAL_FRACTION:.0%} capital budget cannot fund one option lot at the current premium."
             elif signal_side:
-                data_quality_block = _data_quality_block_reason(trade_symbol, "broker_quote")
+                data_quality_block = _data_quality_block_reason(trade_symbol, "broker_option_quote")
                 if data_quality_block:
                     validation = "data_stale"
                     validation_detail = data_quality_block
@@ -2506,9 +2506,12 @@ class CommodityStrategyAgent(BaseStrategyAgent):
 
                     for symbol, quote in quote_map.items():
                         if quote is not None:
+                            # MCX futures use a dedicated source so the
+                            # 90s budget matches the 30s scan cadence
+                            # without false-flagging stale every cycle.
                             data_quality_agent.record_tick(
                                 symbol=symbol,
-                                source="broker_quote",
+                                source="broker_futures_quote",
                                 observed_at=started_at,
                                 last_value=float(quote),
                             )
@@ -2568,9 +2571,12 @@ class CommodityStrategyAgent(BaseStrategyAgent):
 
                         for symbol, quote in option_quote_map.items():
                             if quote is not None:
+                                # Use a separate source name for option contracts so
+                                # the freshness budget (5 min) matches the watchlist
+                                # refresh cadence rather than the 30s futures budget.
                                 data_quality_agent.record_tick(
                                     symbol=symbol,
-                                    source="broker_quote",
+                                    source="broker_option_quote",
                                     observed_at=started_at,
                                     last_value=float(quote),
                                 )

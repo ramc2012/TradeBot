@@ -146,12 +146,38 @@ class MarketHoursPaperSupervisor:
             for symbol in SUPPORTED_SYMBOLS:
                 try:
                     snapshot = await fmp_service.record_paper_snapshot(symbol)
+                    sig = snapshot.get("current_signal") or {}
+                    data_status = snapshot.get("data_status") or {}
+                    rationale = list(sig.get("rationale") or [])
+                    filters = list(sig.get("filters") or [])
+                    not_actionable_because: list[str] = []
+                    if sig.get("action") == "FLAT":
+                        not_actionable_because.append("action is FLAT")
+                    if filters:
+                        not_actionable_because.extend(f"filter: {f}" for f in filters[:3])
+                    if not bool(data_status.get("execution_ready", True)):
+                        not_actionable_because.append(
+                            f"data not ready ({data_status.get('degraded_reason') or 'unknown'})"
+                        )
+                    confidence = sig.get("confidence")
+                    if confidence is not None and float(confidence) < 0.55:
+                        not_actionable_because.append(
+                            f"confidence {float(confidence):.2f} < 0.55 threshold"
+                        )
                     results.append(
                         {
                             "symbol_code": snapshot.get("symbol_code"),
                             "session_date": snapshot.get("session", {}).get("session_date"),
-                            "signal_action": snapshot.get("current_signal", {}).get("action"),
-                            "actionable": snapshot.get("current_signal", {}).get("actionable"),
+                            "signal_action": sig.get("action"),
+                            "actionable": sig.get("actionable"),
+                            "confidence": confidence,
+                            "setup": sig.get("setup_name"),
+                            "rationale": rationale[:3],
+                            "rejection_reasons": not_actionable_because,
+                            "data_status": {
+                                "execution_ready": data_status.get("execution_ready"),
+                                "reason": data_status.get("degraded_reason"),
+                            },
                             "paper_summary": snapshot.get("paper_summary"),
                         }
                     )
@@ -182,14 +208,41 @@ class MarketHoursPaperSupervisor:
                         lookback_sessions,
                     )
                     current_snapshot = dict(snapshot.get("snapshot") or {})
+                    signal = current_snapshot.get("signal") or {}
+                    risk = current_snapshot.get("risk") or {}
+                    data_status = current_snapshot.get("data_status") or {}
+                    regime = current_snapshot.get("regime") or {}
+                    contract = current_snapshot.get("selected_contract") or {}
+                    approved = bool(risk.get("approved"))
+                    execution_ready = bool(data_status.get("execution_ready"))
+                    # Surface the *why-not* so the summary view is self-explanatory
+                    # instead of "signal=None actionable=False" for every desk.
+                    rejection_reasons = list(risk.get("reasons") or [])
+                    if not execution_ready:
+                        rejection_reasons.insert(
+                            0,
+                            f"data_status not ready: {data_status.get('degraded_reason') or 'unknown'}",
+                        )
                     results.append(
                         {
                             "underlying": underlying,
                             "as_of": current_snapshot.get("as_of"),
-                            "direction": (current_snapshot.get("signal") or {}).get("direction"),
-                            "approved": bool((current_snapshot.get("risk") or {}).get("approved")),
-                            "execution_ready": bool((current_snapshot.get("data_status") or {}).get("execution_ready")),
-                            "trading_symbol": (current_snapshot.get("selected_contract") or {}).get("trading_symbol"),
+                            "spot_price": current_snapshot.get("spot_price"),
+                            "direction": signal.get("direction"),
+                            "confidence": signal.get("confidence"),
+                            "expected_move": signal.get("expected_move"),
+                            "expected_move_pct": signal.get("expected_move_pct"),
+                            "sleeve": signal.get("sleeve"),
+                            "thesis": signal.get("thesis"),
+                            "regime_label": regime.get("label"),
+                            "regime_confidence": regime.get("confidence"),
+                            "approved": approved,
+                            "actionable": approved and execution_ready and signal.get("direction") is not None,
+                            "execution_ready": execution_ready,
+                            "selection_reason": current_snapshot.get("selection_reason"),
+                            "rejection_reasons": rejection_reasons,
+                            "trading_symbol": contract.get("trading_symbol"),
+                            "bucket": current_snapshot.get("bucket"),
                         }
                     )
                 except Exception as exc:
@@ -352,6 +405,7 @@ class MarketHoursPaperSupervisor:
             runtime.last_message = str(exc)
             runtime.last_result_meta = {"error": str(exc)}
             logger.warning(f"[MarketHoursSupervisor] {runtime.config.key} failed: {exc}")
+            await self._emit_scan_audit(runtime.config.key, result=None, error=str(exc))
         else:
             runtime.last_success_at = self._now_fn()
             runtime.last_finished_at = runtime.last_success_at
@@ -365,8 +419,123 @@ class MarketHoursPaperSupervisor:
             else:
                 runtime.last_message = "Completed automated paper cycle."
             logger.info(f"[MarketHoursSupervisor] {runtime.config.key} completed")
+            await self._emit_scan_audit(runtime.config.key, result=result, error=None)
         finally:
             runtime.running = False
+
+    # State carried across scan cycles to dedupe audit emits — we only want
+    # to push to the audit log on actionable signals, transitions, errors,
+    # or a 30-minute heartbeat. Otherwise the log would store 1000+ "nothing
+    # actionable" rows per day per desk.
+    _last_audit_state: dict[str, dict[str, Any]] = {}
+
+    async def _emit_scan_audit(
+        self,
+        runner_key: str,
+        *,
+        result: dict[str, Any] | None,
+        error: str | None,
+    ) -> None:
+        market_map = {
+            "auction_intelligence": "auction_intelligence",
+            "fractal_market_profile": "fmp",
+            "directional_options": "directional_options",
+            "market_intelligence": "market_intelligence",
+        }
+        market = market_map.get(runner_key)
+        if market is None:
+            return
+        try:
+            from agentic_rag.audit_agent import record_audit_event
+        except Exception:  # noqa: BLE001
+            return
+        if error is not None:
+            await record_audit_event(
+                market=market,
+                strategy_key=runner_key,
+                event_type="scan_cycle_failed",
+                actor="supervisor",
+                severity="warning",
+                message=error[:200],
+            )
+            self._last_audit_state[runner_key] = {
+                "fingerprint": "error",
+                "at": self._now_fn(),
+            }
+            return
+
+        results = list((result or {}).get("results") or [])
+        actionable_count = sum(
+            1
+            for r in results
+            if (r.get("actionable") is True)
+            or (r.get("actionable_count") is not None and int(r.get("actionable_count") or 0) > 0)
+        )
+        # Fingerprint = compact representation of what each underlying
+        # decided this cycle. Changes when a new signal appears, a regime
+        # flips, or an actionable transition happens.
+        fingerprint_parts: list[str] = []
+        per_symbol: list[dict[str, Any]] = []
+        for r in results[:8]:
+            sym = str(r.get("symbol_code") or r.get("underlying") or r.get("symbol") or "")
+            action = (
+                r.get("signal_action")
+                or r.get("direction")
+                or ("trade" if r.get("actionable") else "—")
+            )
+            fingerprint_parts.append(f"{sym}:{action}:{'1' if r.get('actionable') else '0'}")
+            summary: dict[str, Any] = {"symbol": sym, "actionable": r.get("actionable")}
+            for k in ("signal_action", "direction", "confidence", "regime_label", "setup"):
+                if k in r:
+                    summary[k] = r.get(k)
+            rejection = r.get("rejection_reasons") or r.get("filters")
+            if rejection:
+                summary["rejection"] = (rejection[0] if isinstance(rejection, list) else rejection)
+            per_symbol.append(summary)
+        fingerprint = "|".join(fingerprint_parts)
+        now = self._now_fn()
+
+        prev = self._last_audit_state.get(runner_key, {})
+        prev_fp = prev.get("fingerprint")
+        prev_at = prev.get("at")
+        heartbeat_due = (
+            prev_at is None
+            or (now - prev_at).total_seconds() >= 1800  # 30 min
+        )
+        state_changed = fingerprint != prev_fp
+        should_emit = actionable_count > 0 or state_changed or heartbeat_due
+        if not should_emit:
+            return
+
+        severity = "trade" if actionable_count else "info"
+        if not actionable_count and heartbeat_due and not state_changed:
+            event_type = "scan_cycle_heartbeat"
+        elif state_changed and not actionable_count:
+            event_type = "scan_cycle_change"
+        else:
+            event_type = "scan_cycle"
+
+        await record_audit_event(
+            market=market,
+            strategy_key=runner_key,
+            event_type=event_type,
+            actor="supervisor",
+            severity=severity,
+            message=(
+                f"{runner_key} scanned {len(results)} symbol(s); "
+                f"{actionable_count} actionable"
+            ),
+            payload={
+                "result_count": int(result.get("result_count") or 0) if result else 0,
+                "failure_count": int(result.get("failure_count") or 0) if result else 0,
+                "actionable_count": actionable_count,
+                "per_symbol": per_symbol,
+            },
+        )
+        self._last_audit_state[runner_key] = {
+            "fingerprint": fingerprint,
+            "at": now,
+        }
 
     def get_runner_status(self, key: str) -> dict[str, Any]:
         now = self._now_fn()

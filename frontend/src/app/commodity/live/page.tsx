@@ -20,7 +20,6 @@ import {
 
 const REFRESH_MS = 4_000;
 
-type TabKey = "watchlist" | "positions" | "history" | "research" | "expiry";
 type Bucket = "active" | "ready" | "favourable" | "drifting" | "neutral" | null;
 type Trajectory = "improving" | "stalled" | "deteriorating" | null;
 
@@ -196,14 +195,6 @@ type StatusPayload = {
   signal_audit?: Record<string, any>[];
   data_health?: Record<string, any>;
 };
-
-const TABS: { key: TabKey; label: string }[] = [
-  { key: "watchlist", label: "Watchlist" },
-  { key: "positions", label: "Open Positions" },
-  { key: "history", label: "Trade History / Portfolio" },
-  { key: "research", label: "Research" },
-  { key: "expiry", label: "Expiry Setup" },
-];
 
 const BUCKET_COLOR: Record<string, string> = {
   active: "bg-emerald-500/15 text-emerald-300",
@@ -601,6 +592,137 @@ function TradesTable({ trades }: { trades: TradeRow[] }) {
   );
 }
 
+function ActionQueue({ rows }: { rows: WatchRow[] }) {
+  const order: Bucket[] = ["ready", "active", "favourable", "drifting", "neutral"];
+  const grouped = order.map((bucket) => ({
+    bucket,
+    rows: rows.filter((r) => r.bucket === bucket),
+  }));
+  const titles: Record<NonNullable<Bucket>, string> = {
+    ready: "Ready · execute",
+    active: "Active · in position",
+    favourable: "Favourable · tracking",
+    drifting: "Drifting · risk",
+    neutral: "Neutral · idle",
+  };
+  return (
+    <div className="space-y-2">
+      {grouped.map(({ bucket, rows: bucketRows }) => {
+        if (!bucket) return null;
+        const label = titles[bucket];
+        const tone =
+          bucket === "ready" || bucket === "active"
+            ? "border-emerald-500/40 bg-emerald-500/5"
+            : bucket === "favourable"
+              ? "border-amber-500/40 bg-amber-500/5"
+              : bucket === "drifting"
+                ? "border-rose-500/40 bg-rose-500/5"
+                : "border-slate-500/30 bg-slate-500/5";
+        return (
+          <div key={bucket} className={`rounded-md border ${tone} px-2 py-1.5`}>
+            <div className="flex items-baseline justify-between text-[10.5px] uppercase tracking-[0.18em] text-text-muted">
+              <span>{label}</span>
+              <span>{bucketRows.length}</span>
+            </div>
+            {bucketRows.length === 0 ? (
+              <div className="mt-1 text-[11px] italic text-text-muted">—</div>
+            ) : (
+              <ul className="mt-1.5 space-y-1 text-xs">
+                {bucketRows.map((r) => (
+                  <li
+                    key={`${bucket}-${r.symbol || r.underlying}`}
+                    className="flex items-baseline justify-between gap-2 leading-tight"
+                  >
+                    <span className="min-w-0 truncate">
+                      <span className="font-medium text-text-primary">
+                        {r.display_name || r.underlying || r.symbol}
+                      </span>
+                      <span className="ml-1 text-[10px] text-text-muted">
+                        {r.signal_validation || r.reason || "--"}
+                      </span>
+                    </span>
+                    <span className="shrink-0 font-mono text-[10.5px] text-text-muted">
+                      <span className={trajectoryColor(r.trajectory ?? null)}>
+                        {trajectoryGlyph(r.trajectory ?? null)}
+                      </span>{" "}
+                      {r.proximity_pct != null ? `${Math.round(r.proximity_pct)}%` : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function MiniPositionCard({ p }: { p: CommodityPosition }) {
+  const pnl = Number(p.unrealized_pnl ?? 0);
+  const ret = Number(p.return_pct ?? 0);
+  const ageSec = p.entered_at
+    ? Math.max(0, (Date.now() - new Date(p.entered_at).getTime()) / 1000)
+    : null;
+  const ageLabel = (() => {
+    if (ageSec === null) return "—";
+    const m = Math.floor(ageSec / 60);
+    if (m < 60) return `${m}m`;
+    const h = Math.floor(m / 60);
+    const rm = m % 60;
+    return rm ? `${h}h ${rm}m` : `${h}h`;
+  })();
+  return (
+    <div className={`${QUIET_TILE} rounded-md px-3 py-2`}>
+      <div className="flex items-baseline justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate font-medium text-text-primary">
+            {p.display_name || p.symbol}
+          </div>
+          <div className="truncate text-[10px] text-text-muted">{p.live_symbol}</div>
+        </div>
+        <div className="shrink-0 text-right">
+          <div
+            className={`font-mono text-sm font-semibold ${pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}
+          >
+            {formatINR(pnl)}
+          </div>
+          <div className={`font-mono text-[10.5px] ${ret >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+            {formatPct(ret, 2)}
+          </div>
+        </div>
+      </div>
+      <div className="mt-1.5 grid grid-cols-3 gap-1 text-[10.5px] text-text-muted">
+        <div>
+          <div className="uppercase tracking-wider">side</div>
+          <div className="font-mono text-text-primary">
+            {p.action} {p.qty}
+          </div>
+        </div>
+        <div>
+          <div className="uppercase tracking-wider">entry → now</div>
+          <div className="font-mono text-text-primary">
+            {formatNumber(p.entry_price, 2)} → {formatNumber(p.current_price, 2)}
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="uppercase tracking-wider">age</div>
+          <div className="font-mono text-text-primary">{ageLabel}</div>
+        </div>
+      </div>
+      <div className="mt-1 flex items-baseline justify-between text-[10.5px]">
+        <span className="text-rose-300 font-mono">stop {formatNumber(p.stop_price, 2)}</span>
+        <span className="text-emerald-300 font-mono">tgt {formatNumber(p.target_price, 2)}</span>
+      </div>
+      {p.regime || p.expiry || p.strategy_title ? (
+        <div className="mt-1 truncate text-[10px] text-text-muted">
+          {[p.strategy_title, p.regime, p.expiry].filter(Boolean).join(" · ")}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function AuditFeed({ events }: { events: AuditEvent[] }) {
   if (events.length === 0) {
     return <div className="px-2 py-6 text-center text-xs text-text-muted">No audit events yet.</div>;
@@ -620,7 +742,6 @@ function AuditFeed({ events }: { events: AuditEvent[] }) {
 }
 
 export default function CommodityLivePage() {
-  const [activeTab, setActiveTab] = useState<TabKey>("watchlist");
   const [expiryDraft, setExpiryDraft] = useState<Record<string, string>>({});
   const queryClient = useQueryClient();
 
@@ -844,60 +965,179 @@ export default function CommodityLivePage() {
             </Link>
           </div>
         </div>
-        <nav className="mt-3 flex gap-1 overflow-x-auto rounded-md bg-bg-secondary/10 p-1">
-          {TABS.map((tab) => (
-            <button
-              key={tab.key}
-              type="button"
-              onClick={() => setActiveTab(tab.key)}
-              className={`whitespace-nowrap rounded px-3 py-1.5 text-xs font-medium ${
-                activeTab === tab.key
-                  ? "bg-bg-secondary/45 text-text-primary"
-                  : "text-text-muted hover:bg-bg-secondary/25 hover:text-text-primary"
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </nav>
       </header>
 
-      {activeTab === "watchlist" ? (
-        <div className="grid grid-cols-12 gap-3">
-          <Section
-            title="Instruments"
-            detail={usingSnapshotFutures ? "catalog fallback" : "runtime rows"}
-            className="col-span-12"
-          >
-            <InstrumentWatchlist futuresRows={watchlist} optionRows={optionWatchlist} />
-          </Section>
-        </div>
-      ) : null}
+      {/* 1) DECISION BAR — equity / P&L / risk / DQ at-a-glance. Always on. */}
+      <section className="mb-3 grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-8">
+        <StatTile
+          label="Equity"
+          value={formatINR(totalEquity)}
+          detail={`init ${formatINR(initialCapital)}`}
+          tone={equityPct >= 0 ? "text-emerald-400" : "text-rose-400"}
+        />
+        <StatTile
+          label="Day P&L"
+          value={formatINR(dayPnl)}
+          detail={`open ${formatINR(unrealizedPnl)}`}
+          tone={dayPnl >= 0 ? "text-emerald-400" : "text-rose-400"}
+        />
+        <StatTile
+          label="Realized"
+          value={formatINR(realizedPnl)}
+          detail={`${totalTrades} trades · win ${(winRate * 100).toFixed(0)}%`}
+          tone={realizedPnl >= 0 ? "text-emerald-400" : "text-rose-400"}
+        />
+        <StatTile
+          label="Drawdown"
+          value={formatPct(maxDrawdown * 100, 1)}
+          detail={`cap ${formatPct(Number(config.commodity_max_drawdown_pct ?? 0), 1)}`}
+          tone={maxDrawdown > 0.1 ? "text-amber-300" : "text-text-primary"}
+        />
+        <StatTile
+          label="Open"
+          value={String(positions.length)}
+          detail={`${summary.open_orders ?? 0} working`}
+        />
+        <StatTile
+          label="Ready"
+          value={`${summary.ready_futures_signals ?? 0}/${summary.ready_option_signals ?? 0}`}
+          detail="fut / opt"
+          tone={(summary.ready_futures_signals ?? 0) + (summary.ready_option_signals ?? 0) > 0 ? "text-emerald-300" : undefined}
+        />
+        <StatTile
+          label="Daily Loss Cap"
+          value={formatINR(config.commodity_daily_loss_limit)}
+          detail={`/und ${formatINR(config.commodity_underlying_daily_loss_limit)}`}
+        />
+        <StatTile
+          label="Data Quality"
+          value={dataQuality.overall || "—"}
+          detail={`MCX ${mcxQuality.length} · cooldown ${config.commodity_stop_cooldown_minutes ?? "—"}m`}
+          tone={
+            dataQuality.overall === "healthy"
+              ? "text-emerald-400"
+              : dataQuality.overall === "critical"
+                ? "text-rose-400"
+                : "text-amber-300"
+          }
+        />
+      </section>
 
-      {activeTab === "positions" ? (
-        <div className="grid grid-cols-12 gap-3">
-          <Section title="Open Positions" detail={`${positions.length} positions`} className="col-span-12">
-            <PositionsTable positions={positions} />
-          </Section>
-          <Section title="Risk Controls" detail="current commodity limits" className="col-span-12 xl:col-span-6">
-            <div className="grid grid-cols-2 gap-2 text-xs md:grid-cols-3">
+      {/* 2) HERO — action queue (what to enter) + open positions (what's at risk). */}
+      <div className="mb-3 grid grid-cols-12 gap-3">
+        <Section
+          title="Action Queue"
+          detail={`${watchlist.length} symbols · bucketed by signal proximity`}
+          className="col-span-12 xl:col-span-5"
+        >
+          <ActionQueue rows={watchlist} />
+        </Section>
+        <Section
+          title="Open Positions"
+          detail={
+            positions.length === 0
+              ? "no exposure"
+              : `${positions.length} live · stop/target tracked`
+          }
+          className="col-span-12 xl:col-span-7"
+        >
+          {positions.length === 0 ? (
+            <div className="px-2 py-8 text-center text-xs text-text-muted">
+              Desk is flat. Scan output will populate the action queue when signals fire.
+            </div>
+          ) : (
+            <div className="grid gap-2 sm:grid-cols-2">
+              {positions.map((p) => (
+                <MiniPositionCard key={p.position_key || p.live_symbol} p={p} />
+              ))}
+            </div>
+          )}
+        </Section>
+      </div>
+
+      {/* 3) LIVE INSTRUMENTS — full per-symbol table with MACD/regime/MP/option legs. */}
+      <div className="mb-3 grid grid-cols-12 gap-3">
+        <Section
+          title="Live Instruments"
+          detail={usingSnapshotFutures ? "catalog fallback · scanner offline" : "runtime rows"}
+          className="col-span-12"
+        >
+          <InstrumentWatchlist futuresRows={watchlist} optionRows={optionWatchlist} />
+        </Section>
+      </div>
+
+      {/* 4) RECENT ACTIVITY — trades, orders, audit feed. */}
+      <div className="mb-3 grid grid-cols-12 gap-3">
+        <Section
+          title="Closed Trades"
+          detail={`${trades.length} rows · last ${formatIST(trades[0]?.exit_time)}`}
+          className="col-span-12 xl:col-span-6"
+        >
+          <div className="max-h-[280px] overflow-y-auto">
+            <TradesTable trades={trades.slice(0, 30)} />
+          </div>
+        </Section>
+        <Section
+          title="Order Flow"
+          detail={`${orders.length} rows`}
+          className="col-span-12 xl:col-span-6"
+        >
+          <div className="max-h-[280px] overflow-y-auto">
+            <OrdersTable orders={orders.slice(0, 30)} />
+          </div>
+        </Section>
+        <Section
+          title="Audit Feed"
+          detail="state transitions"
+          className="col-span-12"
+        >
+          <div className="max-h-[260px] overflow-y-auto">
+            <AuditFeed events={auditEvents.slice(0, 40)} />
+          </div>
+        </Section>
+      </div>
+
+      {/* 5) SETUP & RISK — collapsible. Out of the way during the session. */}
+      <details className="mb-3 rounded-lg border border-bg-active/40 bg-bg-secondary/20 px-3 py-2 text-xs">
+        <summary className="cursor-pointer text-[11px] font-semibold uppercase tracking-[0.18em] text-text-muted">
+          Setup · Expiry &amp; Risk
+          <span className="ml-2 normal-case tracking-normal text-text-muted">
+            ({contracts.length} contracts · {(status.strategy_agents ?? []).length} agents)
+          </span>
+        </summary>
+        <div className="mt-3 grid grid-cols-12 gap-3">
+          <Section
+            title="Risk Controls"
+            detail="commodity limits"
+            className="col-span-12 xl:col-span-4"
+          >
+            <div className="grid grid-cols-2 gap-2 text-xs">
               <StatTile label="Daily Loss" value={formatINR(config.commodity_daily_loss_limit)} />
               <StatTile label="Underlying Loss" value={formatINR(config.commodity_underlying_daily_loss_limit)} />
               <StatTile label="Max Drawdown" value={formatPct(Number(config.commodity_max_drawdown_pct ?? 0), 1)} />
               <StatTile label="Cooldown" value={`${config.commodity_stop_cooldown_minutes ?? "--"}m`} />
               <StatTile label="Lots / Trade" value={String(config.lots_per_trade ?? "--")} />
-              <StatTile label="Option Budget" value={formatPct(Number(config.option_capital_fraction ?? 0) * 100, 1)} />
+              <StatTile
+                label="Option Budget"
+                value={formatPct(Number(config.option_capital_fraction ?? 0) * 100, 1)}
+              />
             </div>
           </Section>
-          <Section title="Strategy Agents" detail="commodity sleeves" className="col-span-12 xl:col-span-6">
-            <div className="grid gap-2">
+          <Section
+            title="Strategy Agents"
+            detail="commodity sleeves"
+            className="col-span-12 xl:col-span-8"
+          >
+            <div className="grid gap-2 sm:grid-cols-2">
               {(status.strategy_agents ?? []).map((agent) => (
                 <div key={String(agent.key)} className={`${QUIET_TILE} px-3 py-2 text-xs`}>
                   <div className="flex items-baseline justify-between gap-2">
-                    <div className="font-semibold text-text-primary">{String(agent.title || agent.key)}</div>
+                    <div className="font-semibold text-text-primary">
+                      {String(agent.title || agent.key)}
+                    </div>
                     <div className="text-text-muted">{String(agent.execution_mode || "--")}</div>
                   </div>
-                  <div className="mt-1 grid grid-cols-2 gap-2 text-[11px] text-text-muted md:grid-cols-4">
+                  <div className="mt-1 grid grid-cols-2 gap-2 text-[11px] text-text-muted">
                     <span>{String(agent.instrument_scope || "--")}</span>
                     <span>{String(agent.timeframe || "--")}</span>
                     <span>tracked {String(agent.tracked_symbols ?? "--")}</span>
@@ -907,216 +1147,91 @@ export default function CommodityLivePage() {
               ))}
             </div>
           </Section>
-        </div>
-      ) : null}
-
-      {activeTab === "history" ? (
-        <div className="grid grid-cols-12 gap-3">
-          <Section title="Portfolio Summary" detail="paper commodity book" className="col-span-12 xl:col-span-4">
-            <div className="grid grid-cols-2 gap-2">
-              <StatTile label="Initial" value={formatINR(initialCapital)} />
-              <StatTile label="Available" value={formatINR(summary.available_capital)} />
-              <StatTile label="Equity" value={formatINR(totalEquity)} tone={equityPct >= 0 ? "text-emerald-400" : "text-rose-400"} />
-              <StatTile label="Realized" value={formatINR(realizedPnl)} tone={realizedPnl >= 0 ? "text-emerald-400" : "text-rose-400"} />
-              <StatTile label="Unrealized" value={formatINR(unrealizedPnl)} tone={unrealizedPnl >= 0 ? "text-emerald-400" : "text-rose-400"} />
-              <StatTile label="Profit Factor" value={summary.profit_factor ? Number(summary.profit_factor).toFixed(2) : "--"} />
-            </div>
-          </Section>
-          <Section title="Recent Reports" detail={`${reports.length} snapshots`} className="col-span-12 xl:col-span-8">
-            {reports.length === 0 ? (
-              <div className="px-2 py-6 text-center text-xs text-text-muted">No portfolio report snapshots yet.</div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[720px] text-xs">
-                  <thead className="text-[10.5px] uppercase tracking-wide text-text-muted">
-                    <tr>
-                      <th className="text-left">Time</th>
-                      <th className="text-right">Equity</th>
-                      <th className="text-right">Realized</th>
-                      <th className="text-right">Open</th>
-                      <th className="text-right">Day</th>
-                      <th className="text-right">Trades</th>
-                      <th className="text-right">DD</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {reports.map((r, idx) => (
-                      <tr key={`${r.timestamp}-${idx}`} className={QUIET_ROW}>
-                        <td className="py-1 font-mono text-[10.5px] text-text-muted">{formatIST(r.timestamp)}</td>
-                        <td className="text-right font-mono">{formatINR(r.total_equity)}</td>
-                        <td className="text-right font-mono">{formatINR(r.realized_pnl)}</td>
-                        <td className="text-right font-mono">{formatINR(r.unrealized_pnl)}</td>
-                        <td className="text-right font-mono">{formatINR(r.day_pnl)}</td>
-                        <td className="text-right font-mono">{r.total_trades ?? "--"}</td>
-                        <td className="text-right font-mono">{formatPct(Number(r.max_drawdown ?? 0) * 100, 1)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </Section>
-          <Section title="Closed Trades" detail={`${trades.length} rows`} className="col-span-12">
-            <TradesTable trades={trades} />
-          </Section>
-          <Section title="Order Flow" detail={`${orders.length} rows`} className="col-span-12">
-            <OrdersTable orders={orders} />
-          </Section>
-        </div>
-      ) : null}
-
-      {activeTab === "research" ? (
-        <div className="grid grid-cols-12 gap-3">
-          <Section title="Commodity Research Context" detail="strategy assumptions and traceability" className="col-span-12 xl:col-span-5">
-            <div className="space-y-3 text-xs text-text-secondary">
-              {(status.strategies ?? []).map((strategy) => (
-                <div key={String(strategy.key)} className={`${QUIET_TILE} px-3 py-2`}>
-                  <div className="font-semibold text-text-primary">{String(strategy.title || strategy.key)}</div>
-                  <div className="mt-1 text-[11px] text-text-muted">
-                    {[strategy.instrument, strategy.timeframe, strategy.broker].filter(Boolean).map(String).join(" · ")}
-                  </div>
-                  <p className="mt-2 leading-relaxed">{String(strategy.notes || "")}</p>
-                </div>
-              ))}
-              <div className={`${QUIET_TILE} px-3 py-2`}>
-                <div className="font-semibold text-text-primary">Data Flow</div>
-                <p className="mt-2 leading-relaxed">
-                  Futures rows come from the runtime scan when active. If the scanner has not produced rows yet, the page falls back to the saved MCX contract catalog and ATM option snapshot so missing instruments are visible instead of hidden.
-                </p>
-              </div>
-            </div>
-          </Section>
-          <Section title="Audit Feed" detail="/api/audit/events?market=commodity" className="col-span-12 xl:col-span-7">
-            <AuditFeed events={auditEvents} />
-          </Section>
-          <Section title="Commentary" detail={`${status.commentary?.length ?? 0} messages`} className="col-span-12">
-            {(status.commentary ?? []).length === 0 ? (
-              <div className="px-2 py-6 text-center text-xs text-text-muted">No commentary yet.</div>
-            ) : (
-              <ul className="space-y-0.5 text-xs">
-                {(status.commentary ?? []).map((entry, idx) => (
-                  <li key={`${entry.time}-${idx}`} className="flex gap-3 border-b border-transparent py-1 hover:bg-bg-secondary/15">
-                    <span className="w-[92px] shrink-0 font-mono text-[10.5px] text-text-muted">{formatIST(entry.time)}</span>
-                    <span className={`w-[70px] shrink-0 text-[10.5px] uppercase ${severityColor(entry.tone)}`}>{entry.tone || "--"}</span>
-                    <span className="text-text-secondary">{entry.message}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Section>
-          <Section title="Signal Audit" detail={`${status.signal_audit?.length ?? 0} rows`} className="col-span-12">
-            {(status.signal_audit ?? []).length === 0 ? (
-              <div className="px-2 py-6 text-center text-xs text-text-muted">No signal audit rows yet.</div>
-            ) : (
-              <pre className="max-h-[360px] overflow-auto rounded-md bg-bg-primary/60 p-3 text-[11px] text-text-secondary">
-                {JSON.stringify(status.signal_audit, null, 2)}
-              </pre>
-            )}
-          </Section>
-        </div>
-      ) : null}
-
-      {activeTab === "expiry" ? (
-        <div className="grid grid-cols-12 gap-3">
-          <Section title="Setup Summary" detail="agent state and mapped contracts" className="col-span-12">
-            <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-8">
-              <StatTile label="Tracked" value={String(summary.tracked_symbols ?? contracts.length ?? 0)} detail={`${watchlist.length} futures · ${optionWatchlist.length} options`} />
-              <StatTile label="Ready" value={`${summary.ready_futures_signals ?? 0}/${summary.ready_option_signals ?? 0}`} detail="futures / options" tone="text-emerald-300" />
-              <StatTile label="Open" value={String(positions.length)} detail={`${summary.open_orders ?? 0} open orders`} />
-              <StatTile label="Day P&L" value={formatINR(dayPnl)} tone={dayPnl >= 0 ? "text-emerald-400" : "text-rose-400"} />
-              <StatTile label="Trades" value={String(totalTrades)} detail={`win ${(winRate * 100).toFixed(0)}%`} />
-              <StatTile label="Drawdown" value={formatPct(maxDrawdown * 100, 1)} tone={maxDrawdown > 0.1 ? "text-amber-300" : "text-text-primary"} />
-              <StatTile label="Data" value={dataQuality.overall || "--"} detail={`MCX ${mcxQuality.length} symbols`} tone={dataQuality.overall === "healthy" ? "text-emerald-400" : dataQuality.overall === "critical" ? "text-rose-400" : "text-amber-300"} />
-              <StatTile label="Expiry" value={String(contracts.filter((c) => c.active_expiry).length)} detail="contracts mapped" />
-            </div>
-          </Section>
           <Section
-            title="Expiry Selection Setup"
-            detail={`${contracts.length} MCX contracts · ${contractsQuery.data?.source || watchlistSnapshotQuery.data?.contract_catalog?.source || "--"}`}
+            title="Expiry Selection"
+            detail={`${contracts.length} contracts · ${contractsQuery.data?.source || watchlistSnapshotQuery.data?.contract_catalog?.source || "--"}`}
             className="col-span-12"
           >
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-              <div className="text-xs text-text-muted">
-                Select the option expiry each commodity scanner should use. The backend maps that expiry to the correct underlying future lookup symbol.
-              </div>
-              <button
-                type="button"
-                onClick={saveExpiries}
-                disabled={saveExpiriesMutation.isPending || contracts.length === 0}
-                className="inline-flex items-center gap-1 rounded-md bg-accent-blue/10 px-2 py-1 text-xs text-accent-blue hover:bg-accent-blue/20 disabled:cursor-not-allowed disabled:opacity-50"
-                title="Save expiry selections"
-              >
-                <Save className="h-3.5 w-3.5" />
-                Save Expiries
-              </button>
-            </div>
-            {saveExpiriesMutation.isError ? (
-              <div className="mb-3 rounded-md bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
-                Failed to save expiry selections.
-              </div>
-            ) : null}
-            {saveExpiriesMutation.isSuccess ? (
-              <div className="mb-3 rounded-md bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
-                Expiry selections saved.
-              </div>
-            ) : null}
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[980px] text-xs">
+              <table className="w-full min-w-[840px] text-xs">
                 <thead className="text-[10.5px] uppercase tracking-wide text-text-muted">
                   <tr>
-                    <th className="text-left">Commodity</th>
-                    <th className="text-left">Active Lookup</th>
-                    <th className="text-left">Selected Expiry</th>
+                    <th className="text-left">Symbol</th>
+                    <th className="text-left">Lookup</th>
+                    <th className="text-left">Expiry</th>
                     <th className="text-left">Suggested</th>
-                    <th className="text-left">Mapped Future</th>
+                    <th className="text-left">Mapped</th>
                     <th className="text-right">Lot</th>
                     <th className="text-left">Policy</th>
-                    <th className="text-left">Units</th>
+                    <th className="text-left">Unit</th>
                   </tr>
                 </thead>
                 <tbody>
                   {contracts.length === 0 ? (
-                    <tr><td colSpan={8} className="py-6 text-center text-text-muted">No contract catalog rows available.</td></tr>
+                    <tr>
+                      <td colSpan={8} className="py-4 text-center text-text-muted">
+                        No contracts loaded.
+                      </td>
+                    </tr>
                   ) : (
                     contracts.map((contract) => {
                       const symbol = String(contract.symbol || "");
-                      const value = expiryDraft[symbol] || contract.selected_expiry || contract.active_expiry || contract.suggested_expiry || "";
-                      const mapped = contract.expiry_mappings?.find((m) => m.expiry === value)?.lookup_symbol
-                        || contract.selected_lookup_symbol
-                        || contract.active_lookup_symbol
-                        || contract.lookup_symbol
-                        || "--";
+                      const fallback =
+                        contract.selected_expiry ||
+                        contract.active_expiry ||
+                        contract.suggested_expiry ||
+                        "";
+                      const value = expiryDraft[symbol] ?? fallback;
+                      const mapped =
+                        contract.selected_lookup_symbol ||
+                        contract.active_lookup_symbol ||
+                        contract.lookup_symbol ||
+                        "—";
                       return (
                         <tr key={symbol} className={QUIET_ROW}>
                           <td className="py-2 font-medium">
                             {contract.underlying || symbol}
                             <div className="text-[10px] text-text-muted">{symbol}</div>
                           </td>
-                          <td className="font-mono text-[10.5px] text-text-muted">{contract.active_lookup_symbol || contract.lookup_symbol || "--"}</td>
+                          <td className="font-mono text-[10.5px] text-text-muted">
+                            {contract.active_lookup_symbol || contract.lookup_symbol || "--"}
+                          </td>
                           <td>
                             <select
                               value={value}
-                              onChange={(event) => setExpiryDraft((draft) => ({ ...draft, [symbol]: event.target.value }))}
+                              onChange={(event) =>
+                                setExpiryDraft((draft) => ({ ...draft, [symbol]: event.target.value }))
+                              }
                               className="w-full min-w-[150px] rounded-md bg-bg-primary/70 px-2 py-1 text-xs text-text-primary outline-none ring-1 ring-transparent focus:ring-accent-blue/40"
                             >
                               {(contract.expiries ?? []).map((expiry) => (
-                                <option key={expiry} value={expiry}>{expiry}</option>
+                                <option key={expiry} value={expiry}>
+                                  {expiry}
+                                </option>
                               ))}
                               {value && !(contract.expiries ?? []).includes(value) ? (
                                 <option value={value}>{value}</option>
                               ) : null}
                             </select>
                           </td>
-                          <td className="font-mono text-[10.5px] text-text-muted">{contract.suggested_expiry || "--"}</td>
+                          <td className="font-mono text-[10.5px] text-text-muted">
+                            {contract.suggested_expiry || "--"}
+                          </td>
                           <td className="font-mono text-[10.5px] text-text-muted">{mapped}</td>
                           <td className="text-right font-mono">{contract.lot_size ?? "--"}</td>
                           <td>
-                            <span className={contract.selection_locked ? "text-amber-300" : "text-emerald-300"}>
+                            <span
+                              className={
+                                contract.selection_locked ? "text-amber-300" : "text-emerald-300"
+                              }
+                            >
                               {contract.selection_policy || "--"}
                             </span>
                           </td>
                           <td className="text-text-muted">
-                            {[contract.contract_unit_label, contract.quote_unit_label].filter(Boolean).join(" · ") || "--"}
+                            {[contract.contract_unit_label, contract.quote_unit_label]
+                              .filter(Boolean)
+                              .join(" · ") || "--"}
                           </td>
                         </tr>
                       );
@@ -1125,20 +1240,98 @@ export default function CommodityLivePage() {
                 </tbody>
               </table>
             </div>
-          </Section>
-          <Section title="Contract Catalog Detail" detail="diagnostic payload" className="col-span-12">
-            <div className="grid gap-2 text-xs md:grid-cols-2 xl:grid-cols-4">
-              <StatTile label="Total Symbols" value={String(contractsQuery.data?.summary?.total_symbols ?? contracts.length)} />
-              <StatTile label="Ready" value={String(contractsQuery.data?.summary?.contracts_ready ?? contracts.filter((c) => c.has_options).length)} />
-              <StatTile label="Active Selections" value={String(contractsQuery.data?.summary?.active_selections ?? contracts.filter((c) => c.active_expiry).length)} />
-              <StatTile label="Snapshot" value={formatIST(contractsQuery.data?.timestamp || watchlistSnapshotQuery.data?.contract_catalog?.timestamp)} />
-            </div>
-            <div className={`${QUIET_TILE} mt-3 px-3 py-2 text-xs text-text-muted`}>
-              {contractsQuery.data?.detail || watchlistSnapshotQuery.data?.contract_catalog?.detail || "Contract catalog loaded."}
+            <div className="mt-2 flex flex-wrap items-baseline justify-between gap-2">
+              <span className="text-[10.5px] text-text-muted">
+                {contractsQuery.data?.detail ||
+                  watchlistSnapshotQuery.data?.contract_catalog?.detail ||
+                  "Contract catalog loaded."}
+              </span>
+              <button
+                type="button"
+                onClick={saveExpiries}
+                disabled={saveExpiriesMutation.isPending}
+                className="inline-flex items-center gap-1 rounded-md bg-bg-secondary/25 px-2 py-1 text-xs text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Save className="h-3.5 w-3.5" />
+                Save expiry selection
+              </button>
             </div>
           </Section>
         </div>
-      ) : null}
+      </details>
+
+      {/* 6) RESEARCH — collapsed by default. Strategy notes + signal audit JSON. */}
+      <details className="rounded-lg border border-bg-active/40 bg-bg-secondary/20 px-3 py-2 text-xs">
+        <summary className="cursor-pointer text-[11px] font-semibold uppercase tracking-[0.18em] text-text-muted">
+          Research · Strategy notes &amp; full signal audit
+          <span className="ml-2 normal-case tracking-normal text-text-muted">
+            ({(status.commentary ?? []).length} commentary · {(status.signal_audit ?? []).length} audit rows)
+          </span>
+        </summary>
+        <div className="mt-3 grid grid-cols-12 gap-3">
+          <Section
+            title="Commodity Research Context"
+            detail="strategy assumptions"
+            className="col-span-12 xl:col-span-5"
+          >
+            <div className="space-y-3 text-xs text-text-secondary">
+              {(status.strategies ?? []).map((strategy) => (
+                <div key={String(strategy.key)} className={`${QUIET_TILE} px-3 py-2`}>
+                  <div className="font-semibold text-text-primary">
+                    {String(strategy.title || strategy.key)}
+                  </div>
+                  <div className="mt-1 text-[11px] text-text-muted">
+                    {[strategy.instrument, strategy.timeframe, strategy.broker]
+                      .filter(Boolean)
+                      .map(String)
+                      .join(" · ")}
+                  </div>
+                  <p className="mt-2 leading-relaxed">{String(strategy.notes || "")}</p>
+                </div>
+              ))}
+            </div>
+          </Section>
+          <Section
+            title="Commentary"
+            detail={`${status.commentary?.length ?? 0} messages`}
+            className="col-span-12 xl:col-span-7"
+          >
+            {(status.commentary ?? []).length === 0 ? (
+              <div className="px-2 py-6 text-center text-xs text-text-muted">No commentary yet.</div>
+            ) : (
+              <ul className="max-h-[320px] space-y-0.5 overflow-y-auto text-xs">
+                {(status.commentary ?? []).map((entry, idx) => (
+                  <li
+                    key={`${entry.time}-${idx}`}
+                    className="flex gap-3 border-b border-transparent py-1 hover:bg-bg-secondary/15"
+                  >
+                    <span className="w-[92px] shrink-0 font-mono text-[10.5px] text-text-muted">
+                      {formatIST(entry.time)}
+                    </span>
+                    <span className={`w-[70px] shrink-0 text-[10.5px] uppercase ${severityColor(entry.tone)}`}>
+                      {entry.tone || "--"}
+                    </span>
+                    <span className="text-text-secondary">{entry.message}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Section>
+          <Section
+            title="Signal Audit"
+            detail={`${status.signal_audit?.length ?? 0} rows`}
+            className="col-span-12"
+          >
+            {(status.signal_audit ?? []).length === 0 ? (
+              <div className="px-2 py-6 text-center text-xs text-text-muted">No signal audit rows yet.</div>
+            ) : (
+              <pre className="max-h-[320px] overflow-auto rounded-md bg-bg-primary/60 p-3 text-[11px] text-text-secondary">
+                {JSON.stringify(status.signal_audit, null, 2)}
+              </pre>
+            )}
+          </Section>
+        </div>
+      </details>
     </div>
   );
 }

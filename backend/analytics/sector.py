@@ -424,7 +424,12 @@ class SectorRotationTracker:
         config = TIMEFRAME_CONFIG[timeframe]
         from_date = date.today() - timedelta(days=config["history_days"])
         to_date = date.today()
-        semaphore = asyncio.Semaphore(6)
+        # Serialize with a 0.4s inter-call gap. Previously this fan-out used
+        # asyncio.Semaphore(6) which let 6 sector indices hit Fyers in the
+        # same second and burst-tripped the 10 req/s rate limit, dumping
+        # half the sector series into the Upstox fallback path on every
+        # refresh. We're well under the 10/s aggregate limit; the only
+        # constraint was burst grouping.
         symbols = [(BENCHMARK_APP_SYMBOL, BENCHMARK_APP_SYMBOL, UPSTOX_BENCHMARK_SYMBOL), *[
             (sector.code, sector.app_symbol, sector.upstox_symbol)
             for sector in SECTOR_CONFIGS
@@ -432,20 +437,25 @@ class SectorRotationTracker:
         ]]
 
         async def fetch_series(cache_key: str, app_symbol: str, instrument_key: str) -> tuple[str, list[tuple[datetime, float]]]:
-            async with semaphore:
-                rows = await self._fetch_cached_market_series(
-                    app_symbol=app_symbol,
-                    instrument_key=instrument_key,
-                    interval=config["upstox_interval"],
-                    from_date=from_date,
-                    to_date=to_date,
-                    bucket=timeframe,
-                )
-                return cache_key, rows
+            rows = await self._fetch_cached_market_series(
+                app_symbol=app_symbol,
+                instrument_key=instrument_key,
+                interval=config["upstox_interval"],
+                from_date=from_date,
+                to_date=to_date,
+                bucket=timeframe,
+            )
+            return cache_key, rows
 
-        results = await asyncio.gather(
-            *(fetch_series(cache_key, app_symbol, instrument_key) for cache_key, app_symbol, instrument_key in symbols)
-        )
+        results: list[tuple[str, list[tuple[datetime, float]]]] = []
+        for index, (cache_key, app_symbol, instrument_key) in enumerate(symbols):
+            if index:
+                await asyncio.sleep(0.4)
+            try:
+                results.append(await fetch_series(cache_key, app_symbol, instrument_key))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[Sector] series fetch failed for {cache_key}: {exc}")
+                results.append((cache_key, []))
         series_map = {cache_key: rows for cache_key, rows in results if rows}
         if not series_map:
             return {}, "none", "Fyers or Upstox connection is required for sector index history."

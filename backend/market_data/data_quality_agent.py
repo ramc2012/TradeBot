@@ -70,6 +70,15 @@ class DataQualityAgent:
         "fyers_tick": 30,
         "fyers_quote": 30,
         "broker_quote": 30,
+        # MCX futures quotes refresh on the commodity scan cadence (every
+        # 30s) so a 30s budget falsely flags them stale on every cycle.
+        # 90s gives ~3 scan windows of slack before flagging.
+        "broker_futures_quote": 90,
+        # Option contract quotes refresh only when the option watchlist
+        # rebuilds (~every 3 min) — not via the live WS feed. A 30s budget
+        # would mark every option contract stale immediately after refresh.
+        # 300s gives ~5 watchlist cycles of slack before flagging.
+        "broker_option_quote": 300,
         "upstox_tick": 30,
         "upstox_quote": 30,
         "postgres_minute": 120,
