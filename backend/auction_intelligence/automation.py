@@ -175,9 +175,21 @@ async def capture_live_paper_cycle(
 ) -> dict[str, Any]:
     snapshot = await build_live_analysis(symbol_code=symbol)
     request = snapshot["request"]
+    # Paper mode bypasses live-execution data-quality gates. The live-snapshot
+    # builder sets session.broker_connected = data_status.execution_ready and
+    # inflates stale_data_seconds past the budget whenever the order-flow path
+    # is bar_inference (which is the only path in live_session mode without a
+    # tick subscription). For real-money trading those gates are correct, but
+    # they make paper trades impossible on bar-inferred sessions even though
+    # the regime + agent logic is perfectly valid on bar data. Override only
+    # for the paper cycle so the risk governor judges the trade on regime,
+    # exposure, and confidence — not on tick freshness.
+    session_payload = dict(request["session"])
+    session_payload["broker_connected"] = True
+    session_payload["stale_data_seconds"] = 0.0
     service = AuctionIntelligenceService()
     bundle, journal_paths, paper_positions = await service.analyze_and_record_option_paper(
-        session=SessionContext(**request["session"]),
+        session=SessionContext(**session_payload),
         bars=[MarketBar(**_parse_bar(item)) for item in request.get("bars", [])],
         quote=QuoteSnapshot(**_parse_quote(request["quote"])),
         trades=[TradePrint(**_parse_trade(item)) for item in request.get("trades", [])],

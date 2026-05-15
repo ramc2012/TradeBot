@@ -57,7 +57,21 @@ class PositionalAgent(StrategyAgent):
         # not ticks) can still emit decisions — risk + confidence still
         # gate execution downstream.
         enable_trend_follow = bool(self.config.get("enable_trend_follow", True))
-        trend_follow_labels = set(self.config.get("trend_follow_regime_labels", ["trend_day"]))
+        # Single-direction regimes — the regime engine has already verified
+        # there's a clear bias. We trust it for the trend-follow setup.
+        trend_follow_labels = set(
+            self.config.get(
+                "trend_follow_regime_labels",
+                [
+                    "trend_day",
+                    "trend_continuation",
+                    "breakout_acceptance",
+                    "failed_auction",
+                    "breakout_rejection",
+                    "reversal",
+                ],
+            )
+        )
         delta_strength = min(abs(float(flow.delta or 0.0)) / 10.0, 1.0)
         book_unavailable = abs(flow.book_pressure) < 0.02 and abs(flow.order_flow_imbalance) < 0.02
 
