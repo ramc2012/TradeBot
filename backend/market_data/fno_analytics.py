@@ -17,9 +17,12 @@ from typing import Any, Iterable
 from loguru import logger
 from sqlalchemy import text
 
+from analysis.option_greeks import GreeksMode, compute_greeks
+from analysis.signal_library import classify_oi_price, classify_strike_positioning, max_pain
 from db.database import AsyncSessionLocal
 from market_data.commodity_atm_watchlist import commodity_atm_watchlist_service
 from market_data.commodity_contract_specs import get_commodity_contract_spec
+from market_data.futures_curve import build_curve
 from paper_engine.commodity_strategy_agent import commodity_strategy_agent
 
 
@@ -437,6 +440,89 @@ def _load_mcx_saved_state_snapshot() -> tuple[dict[str, Any], dict[str, Any]]:
     )
 
 
+def _greeks_for_leg(
+    *,
+    option_type: str,
+    spot: float | None,
+    strike: float | None,
+    expiry: str | None,
+    ltp: float | None,
+) -> dict[str, Any] | None:
+    """Return a compact Greeks payload for one option leg.
+
+    Uses ``GreeksMode.EXCHANGE`` (10% risk-free rate) so values are
+    comparable with NSE/MCX exchange-published numbers. Returns None when
+    inputs are insufficient (no spot/strike/expiry/premium).
+    """
+    if spot is None or strike is None or expiry is None or ltp is None or ltp <= 0:
+        return None
+    tte = _days_to_expiry(expiry)
+    if tte is None or tte < 0:
+        return None
+    tte_years = max(tte, 1) / 365.0
+    try:
+        result = compute_greeks(
+            option_type=option_type,
+            spot=float(spot),
+            strike=float(strike),
+            tte_years=tte_years,
+            market_premium=float(ltp),
+            mode=GreeksMode.EXCHANGE,
+        )
+    except Exception as exc:
+        logger.debug(f"[FNOAnalytics] Greeks failed ({option_type} {strike} @ {ltp}): {exc}")
+        return None
+    return {
+        "iv": _round(result.iv, 4),
+        "delta": _round(result.delta, 4),
+        "gamma": _round(result.gamma, 6),
+        "theta": _round(result.theta, 4),
+        "vega": _round(result.vega, 4),
+        "intrinsic_value": _round(result.intrinsic_value, 2),
+        "time_value": _round(result.time_value, 2),
+        "probability_itm": _round(result.probability_itm, 4),
+        "break_even": _round(result.break_even, 2),
+        "days_to_expiry": result.days_to_expiry,
+    }
+
+
+def _build_mcx_curves(contract_catalog: dict[str, Any]) -> list[dict[str, Any]]:
+    """Group MCX futures by underlying and run the curve analytics on each."""
+    by_root: dict[str, list[dict[str, Any]]] = {}
+    futures_rows = list(contract_catalog.get("futures_rows") or [])
+    for row in futures_rows:
+        if not isinstance(row, dict):
+            continue
+        root = str(row.get("underlying") or "").upper()
+        symbol = str(row.get("symbol") or "").upper()
+        expiry = row.get("active_expiry") or row.get("expiry")
+        price = row.get("price") or row.get("ltp") or row.get("close")
+        if not root or expiry is None or price is None:
+            continue
+        by_root.setdefault(root, []).append(
+            {
+                "contract_id": symbol or f"{root}:{expiry}",
+                "expiry": expiry,
+                "price": price,
+                "open_interest": row.get("open_interest") or row.get("oi"),
+                "volume": row.get("volume"),
+            }
+        )
+
+    curves: list[dict[str, Any]] = []
+    for root, contracts in by_root.items():
+        if not contracts:
+            continue
+        spot = None
+        for c in contracts:
+            if c.get("spot_price"):
+                spot = c.get("spot_price")
+                break
+        analysis = build_curve(underlying=root, contracts=contracts, spot_price=spot)
+        curves.append(analysis.as_dict())
+    return curves
+
+
 def _analyze_mcx(contract_catalog: dict[str, Any], atm_watchlist: dict[str, Any]) -> dict[str, Any]:
     contracts: list[CanonicalContract] = []
     for item in list(contract_catalog.get("contracts") or []):
@@ -452,31 +538,84 @@ def _analyze_mcx(contract_catalog: dict[str, Any], atm_watchlist: dict[str, Any]
     ce_ready = sum(1 for row in rows if (row.get("ce") or {}).get("ltp") is not None)
     pe_ready = sum(1 for row in rows if (row.get("pe") or {}).get("ltp") is not None)
     devolvement_watch: list[dict[str, Any]] = []
-    spread_watch: list[dict[str, Any]] = []
+    bid_ask_watch: list[dict[str, Any]] = []
+    greeks_rows: list[dict[str, Any]] = []
+    strike_positioning: list[dict[str, Any]] = []
     for row in rows:
         expiry = row.get("active_expiry") or row.get("expiry") or atm_watchlist.get("expiry")
         tte = _days_to_expiry(expiry)
-        for side in ("ce", "pe"):
+        underlying = str(row.get("underlying") or row.get("symbol") or "").upper()
+        spot = _safe_float(row.get("spot_price") or row.get("underlying_price"))
+        ce_leg = row.get("ce") or {}
+        pe_leg = row.get("pe") or {}
+        ce_strike = _safe_float(ce_leg.get("strike") or row.get("ce_strike") or row.get("trade_strike") or row.get("atm_strike"))
+        pe_strike = _safe_float(pe_leg.get("strike") or row.get("pe_strike") or row.get("trade_strike") or row.get("atm_strike"))
+        for side, strike in (("ce", ce_strike), ("pe", pe_strike)):
             leg = row.get(side) or {}
             bid = _safe_float(leg.get("bid"))
             ask = _safe_float(leg.get("ask"))
             ltp = _safe_float(leg.get("ltp"))
             spread_pct = ((ask - bid) / ltp * 100.0) if bid is not None and ask is not None and ltp and ask >= bid else None
             if spread_pct is not None:
-                spread_watch.append(
+                bid_ask_watch.append(
                     {
-                        "underlying": row.get("underlying") or row.get("symbol"),
+                        "underlying": underlying or row.get("symbol"),
                         "option_type": side.upper(),
                         "expiry": expiry,
-                        "strike": row.get(f"{side}_strike") or row.get("trade_strike") or row.get("atm_strike"),
-                        "spread_pct": _round(spread_pct, 2),
+                        "strike": strike,
+                        "bid_ask_spread_pct": _round(spread_pct, 2),
                         "ltp": _round(ltp, 2),
+                    }
+                )
+            greeks_payload = _greeks_for_leg(
+                option_type=side.upper(),
+                spot=spot,
+                strike=strike,
+                expiry=expiry,
+                ltp=ltp,
+            )
+            if greeks_payload is not None:
+                greeks_rows.append(
+                    {
+                        "underlying": underlying,
+                        "option_type": side.upper(),
+                        "expiry": expiry,
+                        "strike": strike,
+                        "ltp": _round(ltp, 2),
+                        **greeks_payload,
+                    }
+                )
+        if (
+            ce_strike is not None
+            and pe_strike is not None
+            and abs((ce_strike or 0) - (pe_strike or 0)) < 1e-6
+        ):
+            positioning = classify_strike_positioning(
+                underlying=underlying,
+                expiry=str(expiry or ""),
+                strike=float(ce_strike),
+                spot=spot,
+                call_oi=_safe_float(ce_leg.get("oi")),
+                put_oi=_safe_float(pe_leg.get("oi")),
+                call_oi_change=_safe_float(ce_leg.get("oi_change")),
+                put_oi_change=_safe_float(pe_leg.get("oi_change")),
+                call_price_change_pct=_safe_float(ce_leg.get("change_pct")),
+                put_price_change_pct=_safe_float(pe_leg.get("change_pct")),
+            )
+            if positioning.bias != "neutral":
+                strike_positioning.append(
+                    {
+                        "underlying": positioning.underlying,
+                        "expiry": positioning.expiry,
+                        "strike": positioning.strike,
+                        "bias": positioning.bias,
+                        "note": positioning.note,
                     }
                 )
         if tte is not None and tte <= NEAR_EXPIRY_WARNING_DAYS:
             devolvement_watch.append(
                 {
-                    "underlying": row.get("underlying") or row.get("symbol"),
+                    "underlying": underlying or row.get("symbol"),
                     "expiry": expiry,
                     "days_to_expiry": tte,
                     "signal_side": row.get("signal_side"),
@@ -484,6 +623,32 @@ def _analyze_mcx(contract_catalog: dict[str, Any], atm_watchlist: dict[str, Any]
                     "risk": "near_expiry_devolvement_review",
                 }
             )
+
+    futures_curves = _build_mcx_curves(contract_catalog)
+    # Calendar-spread roll-up across all curves (top by abs annualized basis)
+    calendar_spreads: list[dict[str, Any]] = []
+    for curve in futures_curves:
+        for spread in curve.get("calendar_spreads") or []:
+            calendar_spreads.append(
+                {
+                    "underlying": curve.get("underlying"),
+                    **{k: spread.get(k) for k in (
+                        "near_contract_id",
+                        "far_contract_id",
+                        "near_expiry",
+                        "far_expiry",
+                        "near_price",
+                        "far_price",
+                        "spread",
+                        "spread_pct",
+                        "annualized_basis_pct",
+                    )},
+                }
+            )
+    calendar_spreads.sort(
+        key=lambda item: abs(item.get("annualized_basis_pct") or 0.0),
+        reverse=True,
+    )
 
     return {
         "status": "ready" if contracts or rows else "missing",
@@ -504,12 +669,31 @@ def _analyze_mcx(contract_catalog: dict[str, Any], atm_watchlist: dict[str, Any]
             "pcr_ready": _ratio(pe_ready, ce_ready),
             "timestamp": atm_watchlist.get("timestamp"),
         },
+        "greeks": {
+            "rows": greeks_rows,
+            "mode": "exchange_10pct",
+            "count": len(greeks_rows),
+        },
+        "futures_curve": {
+            "curves": futures_curves,
+            "calendar_spreads": calendar_spreads[:20],
+            "count": len(futures_curves),
+        },
+        "positioning": {
+            "strikes": strike_positioning,
+        },
         "risk": {
             "devolvement_watch": devolvement_watch[:20],
-            "spread_watch": sorted(spread_watch, key=lambda row: row.get("spread_pct") or -1, reverse=True)[:20],
+            "spread_watch": calendar_spreads[:20],
+            "bid_ask_watch": sorted(
+                bid_ask_watch,
+                key=lambda item: item.get("bid_ask_spread_pct") or -1,
+                reverse=True,
+            )[:20],
             "notes": [
                 "MCX ITM commodity options can devolve into underlying futures.",
                 "Tender, delivery and post-devolvement margin must be visible before expiry.",
+                "spread_watch now lists futures calendar spreads (was bid-ask) — see bid_ask_watch for option microstructure.",
             ],
         },
     }
@@ -552,17 +736,144 @@ def _stage_status(nse: dict[str, Any], mcx: dict[str, Any], fno_360: dict[str, A
     mcx_contracts = ((mcx.get("contract_master") or {}).get("summary") or {}).get("total_contracts", 0)
     nse_snapshot_ready = (fno_360 or {}).get("status") == "ready"
     mcx_rows = ((mcx.get("option_chain") or {}).get("rows") or 0) > 0
+    nse_greeks_count = ((nse.get("greeks") or {}).get("count") or 0)
+    mcx_greeks_count = ((mcx.get("greeks") or {}).get("count") or 0)
+    greeks_ready = nse_greeks_count > 0 or mcx_greeks_count > 0
+    mcx_curves = ((mcx.get("futures_curve") or {}).get("count") or 0)
+    nse_signals = ((nse.get("oi_price_signals") or {}).get("count") or 0)
     return [
         {"stage": 1, "name": "Contract Master", "status": "ready" if nse_contracts or mcx_contracts else "missing"},
         {"stage": 2, "name": "EOD Pipeline", "status": "partial", "detail": "Existing research cache tables are present; MCX bhavcopy EOD ingestion is not yet a first-class table."},
         {"stage": 3, "name": "Option Chain", "status": "ready" if nse_snapshot_ready or mcx_rows else "missing"},
-        {"stage": 4, "name": "Greeks & Vol", "status": "partial", "detail": "NSE option-chain IV/Greeks are surfaced where broker snapshots provide them; IV rank/percentile pipeline still needs history."},
-        {"stage": 5, "name": "Futures Curve", "status": "partial", "detail": "Contract master supports expiry ordering; near/mid/far curve analytics need futures EOD/live rows."},
+        {
+            "stage": 4,
+            "name": "Greeks & Vol",
+            "status": "ready" if greeks_ready else "partial",
+            "detail": (
+                f"Black-Scholes engine live (mode=exchange_10pct); "
+                f"nse_greeks={nse_greeks_count} mcx_greeks={mcx_greeks_count}; "
+                "IV rank/percentile pipeline still needs full history."
+            ),
+        },
+        {
+            "stage": 5,
+            "name": "Futures Curve",
+            "status": "ready" if mcx_curves > 0 else "partial",
+            "detail": (
+                f"Curve module live (contango/backwardation/calendar spread/rollover); "
+                f"mcx_curves={mcx_curves}; "
+                "NSE futures need a live price source to surface curves."
+            ),
+        },
         {"stage": 6, "name": "Risk & Margin", "status": "partial", "detail": "Physical settlement and devolvement flags are live; margin file ingestion remains pending."},
-        {"stage": 7, "name": "Live Alerts", "status": "partial", "detail": "Data freshness checks exist; alert review and notification rules need promotion."},
+        {
+            "stage": 7,
+            "name": "Live Alerts",
+            "status": "partial",
+            "detail": (
+                "Data freshness checks exist; OI-price participant signals "
+                f"({nse_signals} classified) feed the dashboard; notification rules pending."
+            ),
+        },
         {"stage": 8, "name": "Strategy Lab", "status": "existing", "detail": "Backtest/replay modules exist but must consume the normalized contract/risk model."},
         {"stage": 9, "name": "Research Assistant", "status": "partial", "detail": "Research tab is now data-backed; source-cited natural language layer is pending."},
     ]
+
+
+def _nse_oi_price_signals(fno_360: dict[str, Any] | None, limit: int) -> dict[str, Any]:
+    """Classify NSE ATM CE/PE instruments via the OI–price matrix.
+
+    Uses the fno_360 instrument list which carries per-leg ``oi_change_pct``
+    and ``change_pct``. Returns top items per label so the UI can render
+    "long buildup / short covering / short buildup / long unwinding" cards.
+    """
+    instruments = ((fno_360 or {}).get("analytics") or {}).get("oi_change_contracts") or []
+    if not instruments:
+        instruments = (fno_360 or {}).get("top_volume", [])
+    signals: list[dict[str, Any]] = []
+    for item in instruments:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or item.get("underlying") or "")
+        if not symbol:
+            continue
+        for side in ("ce", "pe"):
+            side_data = item.get(side) if isinstance(item.get(side), dict) else None
+            price_pct = (
+                _safe_float(side_data.get("change_pct")) if side_data else _safe_float(item.get("change_pct"))
+            )
+            oi_pct = (
+                _safe_float(side_data.get("oi_change_pct")) if side_data else _safe_float(item.get("oi_change_pct"))
+            )
+            if price_pct is None and oi_pct is None:
+                continue
+            classified = classify_oi_price(
+                contract_id=f"{symbol}:{side.upper()}",
+                price_change_pct=price_pct,
+                oi_change_pct=oi_pct,
+            )
+            signals.append(
+                {
+                    "underlying": symbol,
+                    "option_type": side.upper(),
+                    "label": classified.label,
+                    "direction": classified.direction,
+                    "conviction": classified.conviction,
+                    "price_change_pct": classified.price_change_pct,
+                    "oi_change_pct": classified.oi_change_pct,
+                    "notes": classified.notes,
+                }
+            )
+
+    by_label: dict[str, list[dict[str, Any]]] = {}
+    for sig in signals:
+        by_label.setdefault(sig["label"], []).append(sig)
+
+    return {
+        "count": len(signals),
+        "by_label": {
+            label: sorted(rows, key=lambda r: abs(r.get("oi_change_pct") or 0.0), reverse=True)[:limit]
+            for label, rows in by_label.items()
+        },
+        "top": sorted(
+            signals,
+            key=lambda r: (
+                {"high": 0, "medium": 1, "low": 2}.get(r.get("conviction") or "low", 3),
+                -abs(r.get("oi_change_pct") or 0.0),
+            ),
+        )[:limit],
+    }
+
+
+def _nse_option_greeks(fno_360: dict[str, Any] | None, limit: int) -> dict[str, Any]:
+    """Compute Greeks for each ATM instrument that has spot+strike+expiry+premium."""
+    instruments = ((fno_360 or {}).get("analytics") or {}).get("oi_change_contracts") or []
+    if not instruments:
+        instruments = (fno_360 or {}).get("top_volume", [])
+    rows: list[dict[str, Any]] = []
+    for item in instruments:
+        if not isinstance(item, dict):
+            continue
+        spot = _safe_float(item.get("spot_price") or item.get("underlying_price"))
+        strike = _safe_float(item.get("strike"))
+        expiry = item.get("expiry")
+        for side in ("ce", "pe"):
+            leg = item.get(side) if isinstance(item.get(side), dict) else None
+            ltp = _safe_float((leg or {}).get("ltp") or item.get(f"{side}_ltp"))
+            payload = _greeks_for_leg(option_type=side.upper(), spot=spot, strike=strike, expiry=expiry, ltp=ltp)
+            if payload is None:
+                continue
+            rows.append(
+                {
+                    "underlying": item.get("symbol") or item.get("underlying"),
+                    "expiry": expiry,
+                    "strike": strike,
+                    "option_type": side.upper(),
+                    "ltp": _round(ltp, 2),
+                    **payload,
+                }
+            )
+    return {"rows": rows[:limit * 4], "mode": "exchange_10pct", "count": len(rows)}
 
 
 async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: int = 20) -> dict[str, Any]:
@@ -571,6 +882,8 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
     nse_contracts, nse_source = await _load_nse_contracts(limit=max(limit * 100, 10_000))
     contract_catalog, atm_watchlist = await _load_mcx_snapshot()
     mcx = _analyze_mcx(contract_catalog, atm_watchlist)
+    nse_oi_signals = _nse_oi_price_signals(fno_360, limit)
+    nse_greeks = _nse_option_greeks(fno_360, limit)
     nse = {
         "status": "ready" if nse_contracts or (fno_360 or {}).get("status") == "ready" else "missing",
         "source": nse_source,
@@ -596,6 +909,8 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
                 "MWPL/ban, SPAN and deep-OTM short-option margin need exchange margin/circular feeds.",
             ],
         },
+        "greeks": nse_greeks,
+        "oi_price_signals": nse_oi_signals,
     }
     quality_checks = _build_quality_checks(nse, mcx, fno_360)
     return {
@@ -612,10 +927,16 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
                 "top_volume": (fno_360 or {}).get("top_volume", [])[:limit],
                 "oi_change_contracts": ((fno_360 or {}).get("analytics") or {}).get("oi_change_contracts", [])[:limit],
                 "volatility_watch": ((fno_360 or {}).get("analytics") or {}).get("volatility_watch", [])[:limit],
+                "oi_price_matrix": nse_oi_signals,
+                "greeks": nse_greeks,
             },
             "mcx": {
                 "devolvement_watch": (mcx.get("risk") or {}).get("devolvement_watch", [])[:limit],
                 "spread_watch": (mcx.get("risk") or {}).get("spread_watch", [])[:limit],
+                "calendar_spreads": (mcx.get("futures_curve") or {}).get("calendar_spreads", [])[:limit],
+                "futures_curves": (mcx.get("futures_curve") or {}).get("curves", []),
+                "positioning": (mcx.get("positioning") or {}).get("strikes", [])[:limit],
+                "greeks": (mcx.get("greeks") or {}).get("rows", [])[:limit * 4],
             },
         },
     }
