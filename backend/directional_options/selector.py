@@ -339,10 +339,25 @@ class OptionSelectionEngine:
                 - min(spread_pct / 0.15, 0.4),
             ),
         )
+        # Hard liquidity/spread filter — relaxed for commodities and for
+        # learning sleeves (same logic as _score_snapshot_contract; this
+        # path uses meta.trading_symbol because it's iterating local
+        # ContractMeta records rather than live snapshot dicts).
+        _trading_symbol = str(getattr(meta, "trading_symbol", "") or "").upper()
+        _is_commodity = _trading_symbol.startswith("MCX:") or _trading_symbol.startswith("MCX_")
+        _learning_sleeve = str(signal.sleeve or "").lower() in {
+            "intraday_exploration", "intraday_micro_trend",
+        }
+        _relax = _is_commodity or _learning_sleeve
+        _max_spread = float(
+            self.config["fallback_spread_pct"] if _relax else self.config["max_spread_pct"]
+        )
+        _min_vol = 0.0 if _relax else float(self.config["min_volume"])
+        _min_oi = 0.0 if _relax else float(self.config["min_oi"])
         if (
-            volume < float(self.config["min_volume"])
-            or oi < float(self.config["min_oi"])
-            or spread_pct > float(self.config["max_spread_pct"])
+            volume < _min_vol
+            or oi < _min_oi
+            or spread_pct > _max_spread
         ):
             return None
 
@@ -511,10 +526,26 @@ class OptionSelectionEngine:
                 - min(spread_pct / 0.15, 0.4),
             ),
         )
+        # Hard liquidity/spread filter — relaxed for commodities and for
+        # learning sleeves so the agent can take small bets on thinly-traded
+        # MCX option chains (typical commodity weeklies have low explicit
+        # volume/OI in the cached watchlist row even when broker liquidity
+        # is acceptable). Capital gates downstream still keep size honest.
+        _trading_symbol = str(snapshot.get("trading_symbol") or "").upper()
+        _is_commodity = _trading_symbol.startswith("MCX:") or _trading_symbol.startswith("MCX_")
+        _learning_sleeve = str(signal.sleeve or "").lower() in {
+            "intraday_exploration", "intraday_micro_trend",
+        }
+        _relax = _is_commodity or _learning_sleeve
+        _max_spread = float(
+            self.config["fallback_spread_pct"] if _relax else self.config["max_spread_pct"]
+        )
+        _min_vol = 0.0 if _relax else float(self.config["min_volume"])
+        _min_oi = 0.0 if _relax else float(self.config["min_oi"])
         if (
-            volume < float(self.config["min_volume"])
-            or oi < float(self.config["min_oi"])
-            or spread_pct > float(self.config["max_spread_pct"])
+            volume < _min_vol
+            or oi < _min_oi
+            or spread_pct > _max_spread
         ):
             return None
 
