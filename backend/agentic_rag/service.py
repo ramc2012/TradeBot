@@ -248,16 +248,42 @@ class AgenticRAGService:
         case_stats: dict[str, Any],
         doc_hits: list[RAGSearchHit],
     ) -> tuple[str, list[str]]:
-        reasons: list[str] = []
-        if not request.hard_risk_passed:
-            return "block", ["hard_risk_failed"]
+        """RAG is an evidence accumulator, not a pre-trade veto.
 
+        The risk governor already owns the hard pre-trade veto. RAG's job is
+        to attach case-base context (similar trades, expectancy, policies)
+        so the system can *learn* — and only veto when there is strong
+        evidence the setup loses repeatedly. Until that evidence exists,
+        every trade goes through and gets recorded for future retrieval.
+
+        Thresholds:
+          * resolved_cases ≥ 8  before negative-expectancy alone can block
+          * resolved_cases ≥ 10 before low-win-rate alone can block
+          * Both signals together require resolved_cases ≥ 6 to block
+        Below those thresholds, reasons are surfaced as `warn` so they show
+        in the audit trail but never gate the trade.
+        """
+        reasons: list[str] = []
         expectancy = case_stats.get("expectancy")
         resolved_cases = int(case_stats.get("resolved_cases") or 0)
         win_rate = case_stats.get("win_rate")
-        if resolved_cases >= 3 and expectancy is not None and expectancy < 0:
+
+        # Hard-risk rejection from the risk governor — RAG echoes it as an
+        # advisory note, not a second veto. The trade is already blocked
+        # upstream; adding "hard_risk_failed" twice just spams the rejection
+        # list and made the dashboard read as if RAG itself was restrictive.
+        if not request.hard_risk_passed:
+            reasons.append("hard_risk_inherited")
+
+        negative_expectancy = (
+            resolved_cases >= 1 and expectancy is not None and expectancy < 0
+        )
+        low_win_rate = (
+            resolved_cases >= 1 and win_rate is not None and win_rate < 0.35
+        )
+        if negative_expectancy:
             reasons.append("negative_retrieval_conditional_expectancy")
-        if resolved_cases >= 4 and win_rate is not None and win_rate < 0.35:
+        if low_win_rate:
             reasons.append("low_similar_case_win_rate")
 
         severe_policy = [
@@ -267,8 +293,15 @@ class AgenticRAGService:
         if severe_policy:
             reasons.append("policy_context_attached")
 
-        if "negative_retrieval_conditional_expectancy" in reasons and "low_similar_case_win_rate" in reasons:
+        # Only block when there is *enough* evidence the setup is broken.
+        both_signals_block = (
+            negative_expectancy and low_win_rate and resolved_cases >= 6
+        )
+        negative_only_block = negative_expectancy and resolved_cases >= 8
+        low_winrate_only_block = low_win_rate and resolved_cases >= 10
+        if both_signals_block or negative_only_block or low_winrate_only_block:
             return "block", reasons
+
         if reasons:
             return "warn", reasons
         if resolved_cases == 0:
