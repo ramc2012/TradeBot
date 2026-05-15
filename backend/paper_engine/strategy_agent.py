@@ -2148,8 +2148,19 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                         return await self._status_with_risk_snapshot()
                 else:
                     broker_snapshot = await get_broker_connection_snapshot(force_validate=False)
+                    # Populate market_intelligence health in broker mode too —
+                    # the dashboard's "NSE CE/PE MACD + MP" readiness card reads
+                    # `data_health.market_intelligence.{watchlist_rows_latest,
+                    # latest_ce_ready, latest_pe_ready, ready, readiness_mode}`.
+                    # Skipping this branch leaves it perpetually "CHECKING" with
+                    # 0/0/0 even while the strategy is actively scanning.
+                    try:
+                        market_intelligence_health = await market_intelligence_runtime.get_strategy_health()
+                    except Exception as exc:
+                        market_intelligence_health = {"ready": False, "error": str(exc)}
                     self._last_data_health = {
                         "broker_snapshot": broker_snapshot,
+                        "market_intelligence": market_intelligence_health,
                         "data_quality": data_quality_snapshot,
                         "option_history": option_history_service.get_health_snapshot(),
                     }
