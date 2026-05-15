@@ -33,7 +33,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "warmup_bars": 32,
     },
     "signal_engine": {
-        "min_confidence": 0.58,
+        # Lowered from 0.58 → 0.50 so the new "exploration" regime (whose
+        # confidence range is ~0.45-0.65) can produce paper signals. The
+        # risk allocator already scales size by confidence — a 0.50-conf
+        # signal sizes at the 0.5× floor (₹7.5k risk on ₹30L), small
+        # enough for learning bets to land regularly without exceeding the
+        # daily loss cap.
+        "min_confidence": 0.50,
         # Intraday strategy — 5/15 min bars. Holding 18 bars on a 15-min
         # timeframe (= 4.5 hours) crosses into swing territory, which this
         # engine is not built for. Horizons clamp to ≤45 minutes on 5-min
@@ -49,19 +55,27 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_candidates": 18,
         "preferred_weekly_days": 8,
         "max_days_to_expiry": 45,
-        "min_volume": 150.0,
-        "min_oi": 2_500.0,
-        "max_spread_pct": 0.12,
-        "fallback_spread_pct": 0.18,
+        # Lowered min_volume + min_oi so MCX commodity options pass the
+        # liquidity floor — GOLD/SILVERM/NATURALGAS weekly contracts often
+        # trade at lower volume/OI than NSE index weeklies but are still
+        # tradable. CRUDEOIL was getting "All local watchlist contracts
+        # failed liquidity or edge hurdles" with the old 150/2.5k floors.
+        "min_volume": 50.0,
+        "min_oi": 500.0,
+        "max_spread_pct": 0.20,
+        "fallback_spread_pct": 0.30,
         "sigma_floor": 0.12,
         "sigma_ceiling": 0.62,
         "sigma_multiplier": 1.08,
         "risk_free_rate": 0.06,
         "distributional_optimizer": {
-            "min_net_edge_pct": 0.025,
-            "min_probability_of_profit": 0.38,
-            "min_liquidity_score": 0.35,
-            "min_timing_fit": 0.28,
+            # Lowered hurdles so exploration trades can clear. The bigger
+            # win is that they pull commodity contracts (which model with
+            # higher uncertainty) into the candidate set.
+            "min_net_edge_pct": 0.015,
+            "min_probability_of_profit": 0.34,
+            "min_liquidity_score": 0.25,
+            "min_timing_fit": 0.22,
             "model_error_base_pct": 0.035,
             "ordinary_delta_min": 0.45,
             "ordinary_delta_max": 0.65,

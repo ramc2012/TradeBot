@@ -45,7 +45,14 @@ class DirectionalSignalEngine:
 
         direction = "CE" if bull_score >= bear_score else "PE"
         direction_score = bull_score if direction == "CE" else bear_score
-        if direction_score <= 0.15:
+        # Direction-score floor: stricter for trend/breakout (we want a clear
+        # tape), looser for exploration/micro_trend (the whole point is to
+        # take a small bet and learn). Empty-score signals are still
+        # filtered.
+        min_direction_score = (
+            0.04 if regime.label in {"exploration", "micro_trend"} else 0.15
+        )
+        if direction_score <= min_direction_score:
             return None
 
         confidence = min(
@@ -74,6 +81,13 @@ class DirectionalSignalEngine:
             horizon_bars = int(self.config["short_horizon_bars"])
             sleeve = "intraday_micro_trend"
             iv_change = 0.0
+        elif regime.label == "exploration":
+            # Low-conviction exploratory bet so the agent learns. Smallest
+            # horizon, neutral IV expectation, paired with the risk
+            # allocator's 0.5× floor for minimum sizing.
+            horizon_bars = int(self.config["short_horizon_bars"])
+            sleeve = "intraday_exploration"
+            iv_change = 0.0
         else:
             horizon_bars = int(self.config["short_horizon_bars"])
             sleeve = "no_trade"
@@ -99,6 +113,7 @@ class DirectionalSignalEngine:
                 0.18 if regime.label == "breakout"
                 else 0.08 if regime.label == "trend"
                 else 0.06 if regime.label == "micro_trend"
+                else 0.04 if regime.label == "exploration"
                 else 0.0
             )
             + max(range_expansion - 1.0, 0.0) * 0.12,
