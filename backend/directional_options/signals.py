@@ -1,10 +1,22 @@
-"""Directional signal generation on the underlying spot series."""
+"""Directional signal generation on the underlying spot series.
+
+Confidence is hard-capped at MAX_SIGNAL_CONFIDENCE. Trading does not allow
+100% certainty — the cap matters because allocation downstream scales
+linearly with confidence above the min_confidence threshold, and an
+unbounded ceiling would let a single overheated bar size aggressively.
+"""
 from __future__ import annotations
 
 from typing import Any, Optional
 
 from directional_options.features import timeframe_minutes
 from directional_options.schemas import DirectionalSignal, RegimeSnapshot
+
+
+# Trading-grade ceiling. Matches regime.MAX_REGIME_CONFIDENCE so the two
+# engines agree on the upper bound; the risk allocator uses this value as
+# its 100% point on the confidence-to-size curve.
+MAX_SIGNAL_CONFIDENCE = 0.85
 
 
 class DirectionalSignalEngine:
@@ -37,7 +49,7 @@ class DirectionalSignalEngine:
             return None
 
         confidence = min(
-            0.97,
+            MAX_SIGNAL_CONFIDENCE,
             0.42
             + (direction_score * 0.18)
             + regime.confidence * 0.28

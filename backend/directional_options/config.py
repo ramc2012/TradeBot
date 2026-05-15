@@ -34,12 +34,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "signal_engine": {
         "min_confidence": 0.58,
+        # Intraday strategy — 5/15 min bars. Holding 18 bars on a 15-min
+        # timeframe (= 4.5 hours) crosses into swing territory, which this
+        # engine is not built for. Horizons clamp to ≤45 minutes on 5-min
+        # bars and ≤2.25 hours on 15-min bars.
         "breakout_confidence_bonus": 0.06,
         "expected_move_atr_multiplier": 1.25,
         "expected_move_trend_multiplier": 0.85,
-        "short_horizon_bars": 6,
-        "medium_horizon_bars": 12,
-        "long_horizon_bars": 18,
+        "short_horizon_bars": 3,
+        "medium_horizon_bars": 6,
+        "long_horizon_bars": 9,
     },
     "selector": {
         "max_candidates": 18,
@@ -88,8 +92,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "risk": {
         "starting_equity": 1_000_000.0,
+        # Base sizing — scaler 0.5×–1.5× of these per signal confidence
+        # (see DirectionalOptionsRiskEngine._confidence_multiplier).
+        # 0.5% risk → at 0.85 conf the lot risk budget is 0.75% of equity.
+        # 1.5% premium → at 0.85 conf the premium cap is 2.25% of equity,
+        # which clears one BANKNIFTY weekly lot at typical 100-pt premiums.
         "risk_pct": 0.005,
-        "premium_cap_pct": 0.01,
+        "premium_cap_pct": 0.015,
+        # Mirror min_confidence so the allocator knows the curve floor.
+        "min_confidence": 0.58,
         "planned_stop_pct": 0.35,
         "profit_target_pct": 0.45,
         "trail_giveback_pct": 0.18,
@@ -97,7 +108,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "daily_loss_cap_r": 2.0,
         "weekly_loss_cap_r": 5.0,
         "min_expected_edge_pct": 0.08,
-        "max_open_positions": 1,
+        # Intraday strategy — at most one open directional bet per
+        # underlying, but several underlyings can coexist if convictions
+        # align.
+        "max_open_positions": 4,
     },
     "execution": {
         "entry_slippage_pct": 0.0075,

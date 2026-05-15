@@ -1,7 +1,23 @@
-"""Regime classification for the directional long-options engine."""
+"""Regime classification for the directional long-options engine.
+
+This engine targets *intraday* 5-minute and 15-minute setups — not multi-day
+trend following. Expiry preference is therefore weekly (or current-day
+weekly if available) across every actionable label; monthly is only used
+for risk-off where we want extra time value as a cushion.
+
+Confidence is hard-capped at MAX_REGIME_CONFIDENCE so the engine can never
+claim near-certainty — no real-money setup deserves that. The cap also
+keeps the downstream confidence×allocation scaler well-bounded.
+"""
 from __future__ import annotations
 
 from directional_options.schemas import RegimeSnapshot
+
+
+# Trading-grade confidence ceiling. 100% confidence is not possible; even
+# the strongest setups warrant doubt. 0.85 leaves headroom for the signal
+# engine's own ceiling (0.85) and the risk-allocation curve.
+MAX_REGIME_CONFIDENCE = 0.85
 
 
 class RegimeClassifier:
@@ -21,7 +37,7 @@ class RegimeClassifier:
             return RegimeSnapshot(
                 label="risk_off",
                 trade_allowed=False,
-                confidence=min(0.98, 0.55 + rv_pct / 2.0),
+                confidence=min(MAX_REGIME_CONFIDENCE, 0.55 + rv_pct / 2.0),
                 reasons=reasons,
                 preferred_expiry_kind="monthly",
                 delta_target_min=0.45,
@@ -35,7 +51,7 @@ class RegimeClassifier:
             return RegimeSnapshot(
                 label="breakout",
                 trade_allowed=True,
-                confidence=min(0.96, 0.52 + max(breakout_up, breakout_down) * 0.18 + adx / 100.0),
+                confidence=min(MAX_REGIME_CONFIDENCE, 0.52 + max(breakout_up, breakout_down) * 0.18 + adx / 100.0),
                 reasons=reasons,
                 preferred_expiry_kind="weekly",
                 delta_target_min=0.30,
@@ -49,9 +65,12 @@ class RegimeClassifier:
             return RegimeSnapshot(
                 label="trend",
                 trade_allowed=True,
-                confidence=min(0.94, 0.48 + adx / 100.0 + abs(ema_spread) * 18.0),
+                confidence=min(MAX_REGIME_CONFIDENCE, 0.48 + adx / 100.0 + abs(ema_spread) * 18.0),
                 reasons=reasons,
-                preferred_expiry_kind="monthly" if rv_pct > 0.7 else "weekly",
+                # Intraday 5/15-min directional — always prefer weekly. The
+                # previous monthly fallback on high-rv days assumed multi-day
+                # holds; that's not the strategy.
+                preferred_expiry_kind="weekly",
                 delta_target_min=0.35,
                 delta_target_max=0.60,
                 exit_profile="balanced",
@@ -61,9 +80,9 @@ class RegimeClassifier:
         return RegimeSnapshot(
             label="chop",
             trade_allowed=False,
-            confidence=min(0.9, 0.45 + max(0.0, 18.0 - adx) / 40.0),
+            confidence=min(MAX_REGIME_CONFIDENCE, 0.45 + max(0.0, 18.0 - adx) / 40.0),
             reasons=reasons,
-            preferred_expiry_kind="monthly",
+            preferred_expiry_kind="weekly",
             delta_target_min=0.45,
             delta_target_max=0.55,
             exit_profile="defensive",

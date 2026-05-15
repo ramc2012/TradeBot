@@ -83,7 +83,12 @@ class Settings(BaseSettings):
     FRACTAL_MARKET_PROFILE_AUTO_ENABLED: bool = True
     FRACTAL_MARKET_PROFILE_AUTO_INTERVAL_SECONDS: int = 300
     DIRECTIONAL_OPTIONS_AUTO_ENABLED: bool = True
-    DIRECTIONAL_OPTIONS_AUTO_INTERVAL_SECONDS: int = 300
+    # Strategy operates on 5- and 15-minute bars. A 300s cadence misses
+    # the close of a fresh 5-min bar by up to 4 minutes and produces stale
+    # decisions on 15-min bars. 60s ensures every fresh bar is evaluated
+    # within one cycle of its close, which the broker quote refresh rate
+    # comfortably supports.
+    DIRECTIONAL_OPTIONS_AUTO_INTERVAL_SECONDS: int = 60
     COMMODITY_FYERS_RATE_LIMIT_BACKOFF_SECONDS: int = 90
     COMMODITY_KILL_LOCK: bool = False
     SECTOR_INTERACTION_DURABLE_STATE_ENABLED: bool = False

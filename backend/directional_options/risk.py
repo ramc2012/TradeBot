@@ -1,4 +1,15 @@
-"""Risk approval and position sizing for long-premium trades."""
+"""Risk approval and position sizing for long-premium trades.
+
+Position size scales with signal confidence:
+
+    multiplier = 0.5 + (confidence - min_confidence) / (max_confidence - min_confidence)
+
+so a barely-passing 0.58-confidence signal sizes at ~0.5× the base budget,
+while a 0.85-confidence setup sizes at ~1.5×. The motivation is that
+confidence already encodes our expectation of edge — sizing should
+respond, not stay flat. The base `risk_pct` and `premium_cap_pct` define
+the *median* allocation; the scaler nudges it up or down.
+"""
 from __future__ import annotations
 
 import math
@@ -7,11 +18,30 @@ from typing import Any
 from directional_options.schemas import ContractCandidate, DirectionalSignal, RiskDecision
 
 
+# Same ceiling the signal/regime engines clamp to. Anchors the "100%" point
+# of the confidence-to-size curve.
+MAX_ALLOCATION_CONFIDENCE = 0.85
+# Floor of the curve at min_confidence — barely-passing signals still trade
+# but at half the base risk budget. Below min_confidence the signal engine
+# already filters the trade, so the scaler is never invoked below this.
+MIN_ALLOCATION_FRACTION = 0.5
+# Top of the curve at max_confidence — strongest signals scale to 1.5×.
+MAX_ALLOCATION_FRACTION = 1.5
+
+
 class DirectionalOptionsRiskEngine:
-    """Keep long-option sizing small and only approve clear expectancy."""
+    """Long-option sizing scales with conviction; expectancy must still clear."""
 
     def __init__(self, config: dict[str, Any]):
         self.config = config
+
+    def _confidence_multiplier(self, confidence: float, min_confidence: float) -> float:
+        """Linear ramp from MIN_ALLOCATION_FRACTION at min_confidence to
+        MAX_ALLOCATION_FRACTION at MAX_ALLOCATION_CONFIDENCE."""
+        span = max(MAX_ALLOCATION_CONFIDENCE - min_confidence, 1e-6)
+        normalized = (max(confidence, min_confidence) - min_confidence) / span
+        normalized = min(1.0, max(0.0, normalized))
+        return MIN_ALLOCATION_FRACTION + normalized * (MAX_ALLOCATION_FRACTION - MIN_ALLOCATION_FRACTION)
 
     def approve(
         self,
@@ -22,8 +52,14 @@ class DirectionalOptionsRiskEngine:
         daily_realized: float = 0.0,
         weekly_realized: float = 0.0,
     ) -> RiskDecision:
-        risk_budget = equity * float(self.config["risk_pct"])
-        premium_cap = equity * float(self.config["premium_cap_pct"])
+        # Scale base budgets by the signal's conviction. min_confidence comes
+        # from the signal engine config so the curve is anchored to the same
+        # cutoff used to filter signals upstream.
+        min_confidence = float(self.config.get("min_confidence", 0.58))
+        confidence = float(signal.confidence)
+        scaler = self._confidence_multiplier(confidence, min_confidence)
+        risk_budget = equity * float(self.config["risk_pct"]) * scaler
+        premium_cap = equity * float(self.config["premium_cap_pct"]) * scaler
         planned_stop_pct = float(self.config["planned_stop_pct"])
         min_expected_edge_pct = float(self.config["min_expected_edge_pct"])
         fee_per_unit = 0.45
@@ -45,7 +81,11 @@ class DirectionalOptionsRiskEngine:
         if weekly_realized <= -(risk_budget * float(self.config["weekly_loss_cap_r"])):
             reasons.append("Weekly loss cap is already breached.")
         if qty_lots < 1:
-            reasons.append("Sizing rules do not permit even one lot.")
+            reasons.append(
+                f"Sizing rules do not permit even one lot (conf {confidence:.2f} → "
+                f"scaler {scaler:.2f}× of {self.config['risk_pct']:.3%} risk / "
+                f"{self.config['premium_cap_pct']:.3%} premium)."
+            )
 
         return RiskDecision(
             approved=not reasons,
