@@ -66,6 +66,14 @@ class DirectionalSignalEngine:
             horizon_bars = int(self.config["medium_horizon_bars"] if rv_pct < 0.8 else self.config["long_horizon_bars"])
             sleeve = "swing_trend"
             iv_change = 0.004 if rv_pct < 0.55 else -0.004
+        elif regime.label == "micro_trend":
+            # 5-minute micro-trends — keep the horizon tight (short) so the
+            # trade resolves inside the regime engine's intended timescale.
+            # IV drift on micro_trend is essentially flat; we pay the spread,
+            # not the vega, so don't try to monetise IV here.
+            horizon_bars = int(self.config["short_horizon_bars"])
+            sleeve = "intraday_micro_trend"
+            iv_change = 0.0
         else:
             horizon_bars = int(self.config["short_horizon_bars"])
             sleeve = "no_trade"
@@ -87,7 +95,12 @@ class DirectionalSignalEngine:
             1.0,
             0.35
             + regime.confidence * 0.34
-            + (0.18 if regime.label == "breakout" else 0.08 if regime.label == "trend" else 0.0)
+            + (
+                0.18 if regime.label == "breakout"
+                else 0.08 if regime.label == "trend"
+                else 0.06 if regime.label == "micro_trend"
+                else 0.0
+            )
             + max(range_expansion - 1.0, 0.0) * 0.12,
         )
         p_move_gt_1sigma = min(0.95, max(0.0, 0.18 + confidence * 0.32 + jump_score * 0.22))

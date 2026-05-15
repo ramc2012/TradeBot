@@ -18,7 +18,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     ),
     "data_root": DATA_ROOT,
     "runtime_root": RUNTIME_ROOT,
-    "universe": ["NIFTY", "BANKNIFTY", "SENSEX", "CRUDEOIL"],
+    "universe": ["NIFTY", "BANKNIFTY", "SENSEX", "CRUDEOIL", "GOLD", "SILVERM", "NATURALGAS"],
     "timeframes": ["5minute", "15minute"],
     "default_underlying": "NIFTY",
     "default_timeframe": "5minute",
