@@ -137,50 +137,108 @@ async def get_active_window(
     return None
 
 
+# Index window end buffer — indices are cash-settled so we only step out the
+# day before expiry (so the agent does not enter on settlement day). Stocks
+# use WINDOW_BUFFER_DAYS (7) because of compulsory physical delivery margins.
+INDEX_WINDOW_END_BUFFER_DAYS = 1
+
+
+def _stock_window_for_month(today: date, year: int, month: int) -> dict:
+    """Compute the stock trading window arithmetically for one expiry cycle.
+
+    No DB lookup. `prev_expiry` is the last Tuesday of the prior calendar
+    month — a pure calendar fact, independent of whether prior contract
+    data has been ingested.
+    """
+    expiry = get_monthly_expiry(year, month)
+    prev_year, prev_month = _shift_months(year, month, -1)
+    prev_expiry = get_monthly_expiry(prev_year, prev_month)
+    return {
+        "expiry": expiry,
+        "prev_expiry": prev_expiry,
+        "window_start": prev_expiry - timedelta(days=WINDOW_BUFFER_DAYS),
+        "window_end": expiry - timedelta(days=WINDOW_BUFFER_DAYS),
+    }
+
+
+def _index_window_for_month(symbol: str, today: date, year: int, month: int) -> dict:
+    """Compute the index trading window arithmetically for one expiry cycle.
+
+    Indices are cash-settled — the whole month is tradable. Window starts
+    the day after the prior month's expiry (when the new contract becomes
+    the front month) and ends one day before expiry.
+    """
+    expiry = get_index_monthly_expiry(symbol, year, month)
+    prev_year, prev_month = _shift_months(year, month, -1)
+    prev_expiry = get_index_monthly_expiry(symbol, prev_year, prev_month)
+    return {
+        "expiry": expiry,
+        "prev_expiry": prev_expiry,
+        # Day AFTER the prior expiry — the front-month role rolls forward.
+        "window_start": prev_expiry + timedelta(days=1),
+        "window_end": expiry - timedelta(days=INDEX_WINDOW_END_BUFFER_DAYS),
+    }
+
+
+def _pick_active_window(underlying: str, kind: str, today: date) -> Optional[dict]:
+    """Pick the active window for one underlying using arithmetic dates.
+
+    Scans the current month and the next two months and returns the one
+    that contains `today`. No DB round-trip required.
+    """
+    is_index = (kind or "").upper() == "INDEX"
+    for offset in range(0, 3):
+        year, month = _shift_months(today.year, today.month, offset)
+        if is_index:
+            w = _index_window_for_month(underlying, today, year, month)
+        else:
+            w = _stock_window_for_month(today, year, month)
+        if w["window_start"] <= today <= w["window_end"]:
+            return {
+                "underlying": underlying,
+                "kind": "INDEX" if is_index else "STOCK",
+                **w,
+            }
+    return None
+
+
 async def get_all_active_windows(
     as_of: Optional[date] = None,
 ) -> list[dict]:
-    """Return active trading windows for ALL underlyings in the F&O universe.
+    """Return active trading windows for ALL F&O underlyings.
 
-    Used by the scanner to know which underlyings are currently tradeable.
+    Windows are computed **arithmetically** from the calendar — they do
+    not depend on prior contract data being in `fo_expiry_catalog`. Rules:
+
+      * **Index** (cash-settled): window = (prev_monthly_expiry + 1) →
+        (current_monthly_expiry − 1). Entire month is tradable.
+      * **Stock** (compulsory physical delivery): window =
+        (prev_monthly_expiry − 7) → (current_monthly_expiry − 7), per the
+        delivery-margin constraint.
+
+    Only `fo_underlying_catalog` is consulted (to learn each symbol's
+    kind). The window math itself is calendar-driven so adding April 2026
+    catalog rows is not required to unblock May 2026 trading.
     """
     today = as_of or date.today()
-    rows = await _fetch_expiry_rows(
+    rows = await _fetch_underlying_rows(
         """
-        SELECT underlying, expiry, previous_monthly_expiry
-        FROM fo_expiry_catalog
-        WHERE previous_monthly_expiry IS NOT NULL
-          AND (previous_monthly_expiry - (:buffer_days * INTERVAL '1 day')) <= :today
-          AND (expiry - (:buffer_days * INTERVAL '1 day')) >= :today
-        ORDER BY underlying, expiry
+        SELECT symbol, kind
+        FROM fo_underlying_catalog
+        WHERE spot_instrument_key IS NOT NULL
+          AND underlying_key IS NOT NULL
+        ORDER BY CASE WHEN kind = 'INDEX' THEN 0 ELSE 1 END, symbol
         """,
-        {"buffer_days": WINDOW_BUFFER_DAYS, "today": today},
+        {},
     )
 
-    windows = []
-    seen = set()
-    for r in rows:
-        expiry: date = r["expiry"]
-        prev_expiry: date = r["previous_monthly_expiry"]
-        und: str = r["underlying"]
-        window_start = prev_expiry - timedelta(days=WINDOW_BUFFER_DAYS)
-        window_end = expiry - timedelta(days=WINDOW_BUFFER_DAYS)
-
-        if und in seen:
-            continue
-
-        if window_start <= today <= window_end:
-            seen.add(und)
-            windows.append(
-                {
-                    "underlying": und,
-                    "expiry": expiry,
-                    "prev_expiry": prev_expiry,
-                    "window_start": window_start,
-                    "window_end": window_end,
-                }
-            )
-
+    windows: list[dict] = []
+    for row in rows:
+        symbol = str(row["symbol"])
+        kind = str(row["kind"] or "")
+        picked = _pick_active_window(symbol, kind, today)
+        if picked is not None:
+            windows.append(picked)
     return windows
 
 

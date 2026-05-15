@@ -494,47 +494,43 @@ class OptionHistoryService:
                         else None,
                     }
 
-            if instrument_key:
-                await load_rows(
-                    """
-                    SELECT
-                        time, open, high, low, close, volume, oi, iv, delta, gamma, theta, vega, underlying_price
-                    FROM option_premium_candles
-                    WHERE instrument_key = :instrument_key
-                      AND interval = :interval
-                    ORDER BY time DESC
-                    LIMIT :limit
-                    """,
-                    {
-                        "instrument_key": instrument_key,
-                        "interval": interval,
-                        "limit": limit,
-                    },
-                )
-
-            if len(merged) < limit:
-                await load_rows(
-                    """
-                    SELECT
-                        time, open, high, low, close, volume, oi, iv, delta, gamma, theta, vega, underlying_price
+            # Read by *logical contract identity* (underlying + expiry +
+            # strike + option_type), not by broker-specific instrument_key.
+            # Each broker (Fyers / Upstox) writes its own instrument_key
+            # row for the same option, so an instrument_key query would
+            # return only that broker's slice — leading to broker-biased
+            # MACD that swings with the queried key. The DISTINCT ON
+            # collapses cross-broker duplicates at the same timestamp,
+            # keeping the most recently synced row.
+            await load_rows(
+                """
+                SELECT
+                    time, open, high, low, close, volume, oi, iv,
+                    delta, gamma, theta, vega, underlying_price
+                FROM (
+                    SELECT DISTINCT ON (time)
+                        time, open, high, low, close, volume, oi, iv,
+                        delta, gamma, theta, vega, underlying_price, synced_at
                     FROM option_premium_candles
                     WHERE underlying = :underlying
                       AND expiry = :expiry
                       AND strike = :strike
                       AND option_type = :option_type
                       AND interval = :interval
-                    ORDER BY time DESC
-                    LIMIT :limit
-                    """,
-                    {
-                        "underlying": underlying,
-                        "expiry": expiry,
-                        "strike": strike,
-                        "option_type": option_type,
-                        "interval": interval,
-                        "limit": limit,
-                    },
-                )
+                    ORDER BY time, synced_at DESC NULLS LAST
+                ) deduped
+                ORDER BY time DESC
+                LIMIT :limit
+                """,
+                {
+                    "underlying": underlying,
+                    "expiry": expiry,
+                    "strike": strike,
+                    "option_type": option_type,
+                    "interval": interval,
+                    "limit": limit,
+                },
+            )
 
             if len(merged) < limit:
                 snapshot_rows = await self._load_snapshot_candles(
