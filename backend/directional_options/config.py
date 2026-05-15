@@ -65,18 +65,26 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_spread_pct": 0.20,
         "fallback_spread_pct": 0.30,
         "sigma_floor": 0.12,
-        "sigma_ceiling": 0.62,
+        # MCX commodities routinely trade 60–90% IV; clamping at 0.62
+        # caused future_option_value to be undervalued in the trading-edge
+        # calc, making net edge come out negative on real setups. 0.95
+        # leaves headroom without enabling pathological vol blow-ups.
+        "sigma_ceiling": 0.95,
         "sigma_multiplier": 1.08,
         "risk_free_rate": 0.06,
         "distributional_optimizer": {
-            # Lowered hurdles so exploration trades can clear. The bigger
-            # win is that they pull commodity contracts (which model with
-            # higher uncertainty) into the candidate set.
-            "min_net_edge_pct": 0.015,
-            "min_probability_of_profit": 0.34,
-            "min_liquidity_score": 0.25,
-            "min_timing_fit": 0.22,
-            "model_error_base_pct": 0.035,
+            # Permissive hurdles — taking the trade and learning beats
+            # waiting for theoretically-perfect edge. Confidence×size
+            # scaler keeps low-conviction bets small.
+            "min_net_edge_pct": 0.005,
+            "min_probability_of_profit": 0.32,
+            "min_liquidity_score": 0.20,
+            "min_timing_fit": 0.18,
+            # The error buffer used to be ~3.5% of premium + uncertainty
+            # blow-up (×0.18). For commodities with model_uncertainty ~0.3
+            # that's 8.9% — bigger than typical trading edge. Halved so
+            # the buffer no longer dominates the trading_edge calc.
+            "model_error_base_pct": 0.015,
             "ordinary_delta_min": 0.45,
             "ordinary_delta_max": 0.65,
             "fast_move_delta_min": 0.35,
@@ -126,7 +134,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "expiry_guard_days": 0.8,
         "daily_loss_cap_r": 2.0,
         "weekly_loss_cap_r": 5.0,
-        "min_expected_edge_pct": 0.08,
+        # 4% expected-edge floor (was 8%). Commodity options price with
+        # higher model uncertainty than NSE indices — an 8% expected
+        # PnL/premium hurdle filtered out every commodity candidate even
+        # when the underlying setup was sound. Risk allocator still gates
+        # the bet size by confidence.
+        "min_expected_edge_pct": 0.04,
         # Intraday strategy — at most one open directional bet per
         # underlying, but several underlyings can coexist if convictions
         # align.
