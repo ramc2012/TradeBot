@@ -262,7 +262,7 @@ async def summary() -> dict:
             {"id": "gate_a", "label": "Data and feature engine", "status": "available"},
             {"id": "gate_b", "label": "Rule engine and walk-forward", "status": "available"},
             {"id": "gate_c", "label": "Shadow mode and auto paper trading", "status": "available"},
-            {"id": "gate_d", "label": "Live canary", "status": "planned"},
+            {"id": "gate_d", "label": "Live paper canary", "status": "available"},
         ],
         "implementation_plan": [
             "Automate Gate A against broker-backed snapshots and deterministic demo sessions.",

@@ -48,6 +48,16 @@ class PositionalAgent(StrategyAgent):
         enable_gap_failure = bool(self.config.get("enable_gap_failure", False))
         enable_balance_rotation = bool(self.config.get("enable_balance_rotation", False))
         enable_vpoc_rejection = bool(self.config.get("enable_vpoc_rejection", False))
+        # Trend-follow lets the positional sleeve participate on regime-led
+        # trend days when no fade/rejection setup matches. Without it, every
+        # trend day collapses to FLAT because the existing setups all expect
+        # a rejection structure, and AI never produces paper trades on
+        # genuine momentum sessions. Order flow gates are intentionally
+        # bypassed here so historical_replay (which infers flow from bars,
+        # not ticks) can still emit decisions — risk + confidence still
+        # gate execution downstream.
+        enable_trend_follow = bool(self.config.get("enable_trend_follow", True))
+        trend_follow_labels = set(self.config.get("trend_follow_regime_labels", ["trend_day"]))
         delta_strength = min(abs(float(flow.delta or 0.0)) / 10.0, 1.0)
         book_unavailable = abs(flow.book_pressure) < 0.02 and abs(flow.order_flow_imbalance) < 0.02
 
@@ -183,6 +193,36 @@ class PositionalAgent(StrategyAgent):
             else:
                 flat_reason = "entry_filter_failed"
                 blockers.append("negative_response_missing")
+        elif (
+            enable_trend_follow
+            and regime.label in trend_follow_labels
+            and "LONG" in (regime.allowed_directions or [])
+            and "SHORT" not in (regime.allowed_directions or [])
+        ):
+            candidate_action = "LONG"
+            action = "LONG"
+            setup_name = "regime_trend_follow_long"
+            stop = min(current.initial_balance_low, current.low_price, current.val)
+            target = max(current.vah, current.poc + (current.poc - stop) * risk_multiple)
+            rationale.append(
+                "Trend day with LONG bias — positional follows the regime; "
+                "tick-level order-flow confirmation bypassed by design."
+            )
+        elif (
+            enable_trend_follow
+            and regime.label in trend_follow_labels
+            and "SHORT" in (regime.allowed_directions or [])
+            and "LONG" not in (regime.allowed_directions or [])
+        ):
+            candidate_action = "SHORT"
+            action = "SHORT"
+            setup_name = "regime_trend_follow_short"
+            stop = max(current.initial_balance_high, current.high_price, current.vah)
+            target = min(current.val, current.poc - (stop - current.poc) * risk_multiple)
+            rationale.append(
+                "Trend day with SHORT bias — positional follows the regime; "
+                "tick-level order-flow confirmation bypassed by design."
+            )
         else:
             blockers.append("positional_setup_not_triggered")
 
@@ -192,15 +232,28 @@ class PositionalAgent(StrategyAgent):
             abs(flow.trade_imbalance),
             delta_strength * 0.7,
         )
-        confidence = round(
-            min(
-                1.0,
-                (0.42 * regime.confidence)
-                + (0.28 * flow.timing_confidence)
-                + (0.30 * flow_signal),
-            ),
-            4,
-        )
+        # Trend-follow setups derive conviction from the regime engine, not
+        # from intraday order flow (which is unreliable in historical_replay
+        # and during the first hour of a session). Blend the regime
+        # confidence dominantly so the threshold check passes when the
+        # regime is itself decisive.
+        if setup_name in {"regime_trend_follow_long", "regime_trend_follow_short"}:
+            # Trend-follow rides the regime engine's conviction directly so
+            # historical_replay (which can't produce tick-level flow_signal)
+            # still clears min_confidence on decisive trend days. The regime
+            # engine has already weighed range_extension, close_location,
+            # value-area overlap and POC shift — we don't penalise that.
+            confidence = round(min(1.0, regime.confidence), 4)
+        else:
+            confidence = round(
+                min(
+                    1.0,
+                    (0.42 * regime.confidence)
+                    + (0.28 * flow.timing_confidence)
+                    + (0.30 * flow_signal),
+                ),
+                4,
+            )
 
         metadata = self._decision_metadata(
             regime_label=regime.label,
