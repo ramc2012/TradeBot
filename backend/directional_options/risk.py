@@ -72,10 +72,26 @@ class DirectionalOptionsRiskEngine:
         qty_lots = max(0, min(max_lots_by_risk, max_lots_by_premium))
 
         reasons: list[str] = []
-        if candidate.expected_pnl <= candidate.option_price * min_expected_edge_pct:
+        # Exploration / micro-trend sleeves are *learning bets*. We don't
+        # demand positive expected edge from them — that's the whole point
+        # of having a small-size lane that records outcomes so RAG can
+        # accumulate evidence. The confidence×size scaler keeps the bet
+        # tiny (0.5×–0.7× of base risk) so even a string of losses stays
+        # well inside the daily loss cap. High-conviction sleeves (trend,
+        # breakout, swing_trend) still need the edge hurdle.
+        learning_sleeve = str(signal.sleeve or "").lower() in {
+            "intraday_exploration", "intraday_micro_trend",
+        }
+        if (
+            not learning_sleeve
+            and candidate.expected_pnl <= candidate.option_price * min_expected_edge_pct
+        ):
             reasons.append("Expected edge does not clear the long-premium hurdle.")
-        if candidate.rejection_reasons:
-            reasons.extend(f"Optimizer rejected candidate: {reason}." for reason in candidate.rejection_reasons)
+        if candidate.rejection_reasons and not learning_sleeve:
+            reasons.extend(
+                f"Optimizer rejected candidate: {reason}."
+                for reason in candidate.rejection_reasons
+            )
         if daily_realized <= -(risk_budget * float(self.config["daily_loss_cap_r"])):
             reasons.append("Daily loss cap is already breached.")
         if weekly_realized <= -(risk_budget * float(self.config["weekly_loss_cap_r"])):
