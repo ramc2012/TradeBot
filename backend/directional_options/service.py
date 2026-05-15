@@ -22,6 +22,7 @@ from directional_options.regime import RegimeClassifier
 from directional_options.risk import DirectionalOptionsRiskEngine
 from directional_options.selector import OptionSelectionEngine
 from directional_options.signals import DirectionalSignalEngine
+from market_data.commodity_contract_specs import get_commodity_contract_spec
 from market_data.market_intelligence_runtime import market_intelligence_runtime
 
 
@@ -65,7 +66,7 @@ class DirectionalOptionsService:
         available = [
             item
             for item in self.config["universe"]
-            if item in data_underlyings or (item == "CRUDEOIL" and runtime_root_exists)
+            if item in data_underlyings or (self._is_supported_commodity(item) and runtime_root_exists)
         ]
         if not available and (settings.PAPER_TRADING_ONLY or settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY):
             available = list(self.config["universe"])
@@ -86,6 +87,11 @@ class DirectionalOptionsService:
             "expires_at": monotonic() + self._summary_cache_ttl_seconds,
         }
         return payload
+
+    @staticmethod
+    def _is_supported_commodity(underlying: str) -> bool:
+        spec = get_commodity_contract_spec(underlying)
+        return bool(spec.root and spec.root != "UNKNOWN")
 
     @lru_cache(maxsize=24)
     def workspace(
@@ -142,12 +148,21 @@ class DirectionalOptionsService:
             summary = self.summary()
             lookback_days = max(int(self.config["paper_trading"]["live_lookback_days"]), lookback_sessions)
             try:
+                # 8s was tight for the *first* commodity history fetch — it
+                # pulls 10 days of 1-min bars from MCX through Fyers/Upstox.
+                # NSE indices come back fast (cached locally); commodities
+                # routinely needed 10–15s for the cold call and timed out,
+                # leaving feature_frame empty and the symbol stuck on
+                # "No local spot candles…". Once the commodity agent
+                # persists into underlying_spot_candles the subsequent calls
+                # are local-DB hits, but we still want the first cold call
+                # to succeed.
                 spot, history_source, history_symbol = await asyncio.wait_for(
                     self.store.load_live_spot_frame(
                         underlying,
                         lookback_days=lookback_days,
                     ),
-                    timeout=8.0,
+                    timeout=30.0,
                 )
                 feature_frame = await asyncio.to_thread(
                     self.feature_engine.build_frame,
@@ -310,7 +325,7 @@ class DirectionalOptionsService:
         timestamp = pd.Timestamp(row["time"])
         spot_price = float(row["close"])
         feature_snapshot = self.feature_engine.snapshot(row)
-        regime = self.regime.classify(row)
+        regime = self.regime.classify(row, timeframe=timeframe)
         signal = self.signals.predict(row, regime, timeframe)
 
         selection_reason = "Regime is not tradeable."
@@ -421,7 +436,7 @@ class DirectionalOptionsService:
         timestamp = pd.Timestamp(row["time"])
         spot_price = float(row["close"])
         feature_snapshot = self.feature_engine.snapshot(row)
-        regime = self.regime.classify(row)
+        regime = self.regime.classify(row, timeframe=timeframe)
         signal = self.signals.predict(row, regime, timeframe)
         if signal is None and not int(
             strategy_health.get("watchlist_rows_today")
@@ -705,6 +720,12 @@ class DirectionalOptionsService:
     ) -> dict[str, object]:
         latest_watchlist_time = strategy_health.get("latest_watchlist_time")
         watchlist_age_seconds = strategy_health.get("watchlist_age_seconds")
+        commodity_watchlist_status = {"rows": 0, "latest_time": None}
+        if self._is_supported_commodity(underlying):
+            commodity_watchlist_status = self.store._cached_commodity_watchlist_status(underlying)
+            if int(commodity_watchlist_status.get("rows") or 0) > 0:
+                latest_watchlist_time = commodity_watchlist_status.get("latest_time") or latest_watchlist_time
+                watchlist_age_seconds = None
         latest_spot_map = dict(strategy_health.get("latest_spot_rows") or {})
         latest_spot_time = latest_spot_map.get(str(underlying).upper())
         if not latest_spot_time and not feature_frame.empty:
@@ -717,11 +738,15 @@ class DirectionalOptionsService:
                 spot_ts = spot_ts.tz_localize("UTC")
             spot_age_seconds = max(0.0, (pd.Timestamp.utcnow() - spot_ts).total_seconds())
         watchlist_rows = int(
-            strategy_health.get("watchlist_rows_today")
+            commodity_watchlist_status.get("rows")
+            or strategy_health.get("watchlist_rows_today")
             or strategy_health.get("watchlist_rows_latest")
             or 0
         )
-        market_intelligence_ready = bool(strategy_health.get("ready", bool(watchlist_rows)))
+        market_intelligence_ready = bool(
+            (self._is_supported_commodity(underlying) and watchlist_rows)
+            or strategy_health.get("ready", bool(watchlist_rows))
+        )
         using_latest_session = str(strategy_health.get("readiness_mode") or "") == "latest_session"
         execution_ready = bool(
             not feature_frame.empty
@@ -757,8 +782,8 @@ class DirectionalOptionsService:
             "history_symbol": history_symbol,
             "latest_watchlist_time": latest_watchlist_time,
             "watchlist_age_seconds": watchlist_age_seconds,
-            "watchlist_rows_today": int(strategy_health.get("watchlist_rows_today") or 0),
-            "watchlist_rows_latest": int(strategy_health.get("watchlist_rows_latest") or 0),
+            "watchlist_rows_today": int(commodity_watchlist_status.get("rows") or strategy_health.get("watchlist_rows_today") or 0),
+            "watchlist_rows_latest": int(commodity_watchlist_status.get("rows") or strategy_health.get("watchlist_rows_latest") or 0),
             "readiness_mode": strategy_health.get("readiness_mode"),
             "latest_spot_time": latest_spot_time,
             "spot_age_seconds": spot_age_seconds,

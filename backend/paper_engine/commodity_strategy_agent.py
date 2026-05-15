@@ -2198,10 +2198,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
 
         adapter = await self._get_scan_adapter()
         if not adapter:
-            self._last_message = "No commodity broker adapter is available. Commodity preparation cannot refresh watchlists."
-            self._last_error = self._last_message
-            self._append_commentary("error", self._last_message)
-            return self.get_status(refresh=False)
+            self._append_commentary(
+                "warning",
+                "No commodity broker adapter is available. Preparing from MCX futures history and cached option watchlists.",
+            )
 
         quote_map = await self._safe_get_ltp(adapter, self._symbols)
         futures_rows: list[dict[str, Any]] = []
@@ -2494,10 +2494,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
 
                 adapter = await self._get_scan_adapter()
                 if not adapter:
-                    self._last_message = "No commodity broker adapter is available. Commodity agent cannot scan."
-                    self._last_error = self._last_message
-                    self._append_commentary("error", self._last_message)
-                    return self.get_status(refresh=False)
+                    self._append_commentary(
+                        "warning",
+                        "No commodity broker adapter is available. Scanning from MCX futures history and cached option watchlists.",
+                    )
 
                 quote_map = await self._safe_get_ltp(adapter, self._symbols)
                 data_quality_snapshot: dict[str, Any] | None = None
@@ -2524,7 +2524,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     data_quality_snapshot,
                     quote_map,
                 )
-                if settings.DATA_QUALITY_SCAN_GATE_ENABLED and commodity_quality_blocked:
+                if settings.DATA_QUALITY_SCAN_GATE_ENABLED and commodity_quality_blocked and adapter is not None:
                     message = (
                         "Data quality gate blocked the commodity scan: "
                         f"{commodity_quality_reason}."
@@ -2544,6 +2544,36 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     live_quotes=quote_map,
                 )
                 self._audit_futures_watchlist(futures_rows)
+                # Unified commodity data path: every scan, push fresh 1-minute
+                # bars for each configured commodity into underlying_spot_candles
+                # so every downstream strategy (directional long options, MP,
+                # auction intelligence, future agents) reads the same table
+                # instead of each one hitting the broker independently.
+                # Fire-and-forget — the persist runs in the background and
+                # never blocks the scan cycle. The persist code itself uses
+                # an in-memory "latest persisted" cache so each call only
+                # writes the bars that have arrived since the last persist.
+                try:
+                    from market_data.commodity_runtime_history import load_commodity_history_rows
+                    from market_data.commodity_contract_specs import extract_commodity_root
+
+                    seen_roots: set[str] = set()
+                    for symbol in self._symbols:
+                        root = (extract_commodity_root(symbol) or "").upper()
+                        if not root or root in seen_roots:
+                            continue
+                        seen_roots.add(root)
+                        # 2-day lookback keeps the call fast after the initial
+                        # sync; the first cold call still backfills 10 days
+                        # because _LATEST_PERSISTED is empty.
+                        asyncio.create_task(
+                            load_commodity_history_rows(root, interval="1minute", lookback_days=2),
+                            name=f"commodity-unified-persist-{root}",
+                        )
+                except Exception as exc:
+                    logger.debug(
+                        f"[CommodityStrategy] unified 1-min persist hook skipped: {exc}"
+                    )
 
                 option_rows = self._decorate_option_rows(await self._build_option_watchlist())
                 option_rows, retained_options = self._stabilize_option_watchlist(option_rows)
@@ -2664,10 +2694,12 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 self._running = False
                 self._persist_state()
 
-    async def _safe_get_ltp(self, adapter: BrokerAdapter, symbols: list[str]) -> dict[str, float]:
+    async def _safe_get_ltp(self, adapter: Optional[BrokerAdapter], symbols: list[str]) -> dict[str, float]:
         quotes = await load_upstox_mcx_quotes(symbols)
         remaining_symbols = [symbol for symbol in symbols if symbol not in quotes]
         if not remaining_symbols:
+            return quotes
+        if adapter is None:
             return quotes
         now = datetime.now(IST)
         if self._fyers_ltp_backoff_until is not None and now < self._fyers_ltp_backoff_until:
@@ -2694,7 +2726,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
 
     async def _manage_positions(
         self,
-        adapter: BrokerAdapter,
+        adapter: Optional[BrokerAdapter],
         futures_rows: list[dict[str, Any]],
         option_rows: list[dict[str, Any]],
         option_quote_map: Optional[dict[str, float]] = None,
@@ -3611,6 +3643,15 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         lane_map = {lane.descriptor.key: lane for lane in lane_agents}
         option_ready = lane_map["commodity_options"].ready_signals()
         futures_ready = lane_map["commodity_futures"].ready_signals()
+        last_error = self._last_error
+        last_message = self._last_message
+        if (
+            isinstance(last_error, str)
+            and last_error.startswith("No commodity broker adapter is available.")
+            and (self._runtime.futures_watchlist or self._runtime.option_watchlist)
+        ):
+            last_error = None
+            last_message = "Using prepared MCX futures/options watchlists until the next scan refreshes broker data."
         return {
             "enabled": self._enabled,
             "auto_run_enabled": self._auto_run_enabled,
@@ -3621,8 +3662,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "running": self._running,
             "scan_interval_seconds": self.scan_interval_seconds,
             "last_run_at": self._last_run_at,
-            "last_error": self._last_error,
-            "last_message": self._last_message,
+            "last_error": last_error,
+            "last_message": last_message,
             "config": {
                 "symbols": list(self._symbols),
                 "selected_option_expiries": dict(self._selected_option_expiries),
