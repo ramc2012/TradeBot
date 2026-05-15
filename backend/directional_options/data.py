@@ -16,6 +16,7 @@ from sqlalchemy import text
 from analysis.instruments import get_index_monthly_expiry, get_monthly_expiry
 from db.database import AsyncSessionLocal
 from directional_options.schemas import ContractMeta
+from market_data.commodity_contract_specs import get_commodity_contract_spec
 from market_data.market_intelligence_runtime import market_intelligence_runtime
 from market_data.option_history import option_history_service
 
@@ -139,7 +140,8 @@ class DirectionalOptionsDataStore:
         *,
         lookback_days: int = 10,
     ) -> tuple[pd.DataFrame, str, str]:
-        if underlying.upper() == "CRUDEOIL":
+        commodity_spec = get_commodity_contract_spec(underlying)
+        if commodity_spec.root and commodity_spec.root != "UNKNOWN":
             try:
                 from market_data.commodity_runtime_history import load_commodity_history_rows
 
@@ -277,7 +279,17 @@ class DirectionalOptionsDataStore:
                     "tick_size": 0.05,
                 }
             )
-        return payload
+        if payload:
+            return payload
+        commodity_payload = await self._live_commodity_contract_snapshots(
+            underlying=underlying,
+            option_type=option_type,
+            spot_price=spot_price,
+            as_of_ts=as_of_ts,
+            max_expiry=max_expiry,
+            limit=limit,
+        )
+        return commodity_payload
 
     async def latest_live_watchlist_status(
         self,
@@ -315,8 +327,13 @@ class DirectionalOptionsDataStore:
             row = result.first()
 
         latest_time = getattr(row, "latest_time", None) if row is not None else None
+        rows_count = int(getattr(row, "rows", 0) or 0) if row is not None else 0
+        if rows_count <= 0:
+            commodity_status = self._cached_commodity_watchlist_status(underlying)
+            if commodity_status["rows"] > 0:
+                return commodity_status
         return {
-            "rows": int(getattr(row, "rows", 0) or 0) if row is not None else 0,
+            "rows": rows_count,
             "latest_time": _parse_ts(latest_time).isoformat() if latest_time is not None else None,
         }
 
@@ -514,7 +531,7 @@ class DirectionalOptionsDataStore:
         option_rows = int(sum(meta.candle_count for meta in contracts))
         first_option = min((_parse_ts(meta.earliest_candle) for meta in contracts), default=None)
         last_option = max((_parse_ts(meta.latest_candle) for meta in contracts), default=None)
-        return {
+        summary = {
             "underlying": underlying,
             "spot_rows": int(len(spot.index)),
             "spot_start": spot["time"].iloc[0].isoformat() if not spot.empty else None,
@@ -526,12 +543,201 @@ class DirectionalOptionsDataStore:
             "option_start": first_option.isoformat() if first_option is not None else None,
             "option_end": last_option.isoformat() if last_option is not None else None,
         }
+        summary.update(self._cached_commodity_coverage(underlying))
+        return summary
 
     @staticmethod
     def _expiry_kind(underlying: str, expiry_value: date) -> str:
         normalized = str(underlying or "").upper().strip()
+        commodity_spec = get_commodity_contract_spec(normalized)
+        if commodity_spec.root and commodity_spec.root != "UNKNOWN":
+            # MCX commodity options do not follow the NSE weekly/monthly expiry calendar.
+            # Treat commodity expiries as "weekly" so they remain eligible when the
+            # directional long-options engine enforces weekly-only preference.
+            return "weekly"
         try:
             monthly = get_index_monthly_expiry(normalized, expiry_value.year, expiry_value.month)
         except Exception:
             monthly = get_monthly_expiry(expiry_value.year, expiry_value.month)
         return "monthly" if expiry_value == monthly else "weekly"
+
+    async def _live_commodity_contract_snapshots(
+        self,
+        *,
+        underlying: str,
+        option_type: str,
+        spot_price: float,
+        as_of_ts: pd.Timestamp,
+        max_expiry: date,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        normalized = str(underlying or "").upper().strip()
+        commodity_spec = get_commodity_contract_spec(normalized)
+        if not commodity_spec.root or commodity_spec.root == "UNKNOWN":
+            return []
+        try:
+            from market_data.commodity_atm_watchlist import commodity_atm_watchlist_service
+            from market_data.commodity_contract_specs import extract_commodity_root
+            from paper_engine.commodity_strategy_agent import CommodityStrategyAgent
+        except Exception:
+            return []
+
+        agent = CommodityStrategyAgent()
+        all_symbols = agent.get_symbols()
+        symbols = [
+            symbol
+            for symbol in all_symbols
+            if extract_commodity_root(symbol) == normalized
+        ]
+        if not symbols:
+            return []
+        selected_expiries = agent.get_selected_option_expiries()
+        selected_lookup_symbols = agent.get_selected_option_lookup_symbols()
+        payload = commodity_atm_watchlist_service.get_cached_watchlist(
+            all_symbols,
+            selected_expiries,
+            selected_lookup_symbols,
+        )
+        if payload is not None:
+            rows = [
+                row
+                for row in list(payload.get("rows") or [])
+                if str(row.get("underlying") or "").upper() == normalized
+                or extract_commodity_root(str(row.get("symbol") or "")) == normalized
+            ]
+        else:
+            rows = []
+        if payload is None:
+            payload = await commodity_atm_watchlist_service.get_watchlist(
+                symbols,
+                selected_expiries,
+                selected_lookup_symbols,
+            )
+            rows = list((payload or {}).get("rows") or [])
+        snapshots: list[dict[str, Any]] = []
+        for row in rows:
+            expiry_value = row.get("expiry") or row.get("active_expiry")
+            if not expiry_value:
+                continue
+            try:
+                expiry_date = date.fromisoformat(str(expiry_value)[:10])
+            except ValueError:
+                continue
+            if expiry_date < as_of_ts.date() or expiry_date > max_expiry:
+                continue
+            option_payload = row.get(str(option_type).lower()) or row.get(str(option_type).upper())
+            if not isinstance(option_payload, dict):
+                continue
+            ltp = float(option_payload.get("ltp") or 0.0)
+            strike = float(option_payload.get("strike") or 0.0)
+            if ltp <= 0.0 or strike <= 0.0:
+                continue
+            timestamp = _parse_ts((payload or {}).get("timestamp") or datetime.now(UTC))
+            snapshots.append(
+                {
+                    "time": timestamp.isoformat(),
+                    "underlying": normalized,
+                    "expiry": expiry_date.isoformat(),
+                    "expiry_kind": self._expiry_kind(normalized, expiry_date),
+                    "strike": strike,
+                    "option_type": str(option_payload.get("option_type") or option_type),
+                    "source_broker": str((payload or {}).get("source") or row.get("live_source") or "commodity_atm_watchlist"),
+                    "instrument_key": str(option_payload.get("instrument_key") or ""),
+                    "trading_symbol": str(option_payload.get("trading_symbol") or option_payload.get("instrument_key") or ""),
+                    "underlying_price": float(row.get("spot_price") or spot_price or 0.0),
+                    "ltp": ltp,
+                    "volume": float(option_payload.get("volume") or 0.0),
+                    "oi": float(option_payload.get("oi") or 0.0),
+                    "iv": float(option_payload.get("iv") or 0.0),
+                    "lot_size": int(row.get("lot_size") or commodity_spec.futures_lot_size or 1),
+                    "tick_size": 0.05,
+                }
+            )
+        snapshots.sort(key=lambda item: (item["expiry"], abs(float(item["strike"]) - float(spot_price or 0.0))))
+        return snapshots[: int(limit)]
+
+    @staticmethod
+    def _cached_commodity_coverage(underlying: str) -> dict[str, object]:
+        normalized = str(underlying or "").upper().strip()
+        spec = get_commodity_contract_spec(normalized)
+        if not spec.root or spec.root == "UNKNOWN":
+            return {}
+        try:
+            from market_data.commodity_atm_watchlist import commodity_atm_watchlist_service
+            from market_data.commodity_contract_specs import extract_commodity_root
+            from paper_engine.commodity_strategy_agent import CommodityStrategyAgent
+        except Exception:
+            return {"commodity_runtime_supported": True}
+
+        agent = CommodityStrategyAgent()
+        all_symbols = agent.get_symbols()
+        symbols = [
+            symbol
+            for symbol in all_symbols
+            if extract_commodity_root(symbol) == normalized
+        ]
+        selected_expiries = agent.get_selected_option_expiries()
+        selected_lookup_symbols = agent.get_selected_option_lookup_symbols()
+        catalog = commodity_atm_watchlist_service.get_cached_contract_catalog(
+            all_symbols,
+            selected_expiries,
+            selected_lookup_symbols,
+        ) if all_symbols else None
+        watchlist = commodity_atm_watchlist_service.get_cached_watchlist(
+            all_symbols,
+            selected_expiries,
+            selected_lookup_symbols,
+        ) if all_symbols else None
+        watchlist_rows = [
+            row
+            for row in list((watchlist or {}).get("rows") or [])
+            if str(row.get("underlying") or "").upper() == normalized
+            or extract_commodity_root(str(row.get("symbol") or "")) == normalized
+        ]
+        contracts = [
+            row
+            for row in list((catalog or {}).get("contracts") or [])
+            if str(row.get("underlying") or "").upper() == normalized
+            or extract_commodity_root(str(row.get("symbol") or "")) == normalized
+        ]
+        return {
+            "commodity_runtime_supported": True,
+            "commodity_symbols": symbols,
+            "commodity_contracts_ready": len([row for row in contracts if row.get("has_options") or row.get("active_expiry")]),
+            "commodity_watchlist_rows": len(watchlist_rows),
+            "commodity_watchlist_source": (watchlist or {}).get("source"),
+            "commodity_watchlist_timestamp": (watchlist or {}).get("timestamp"),
+        }
+
+    @staticmethod
+    def _cached_commodity_watchlist_status(underlying: str) -> dict[str, Any]:
+        normalized = str(underlying or "").upper().strip()
+        spec = get_commodity_contract_spec(normalized)
+        if not spec.root or spec.root == "UNKNOWN":
+            return {"rows": 0, "latest_time": None}
+        try:
+            from market_data.commodity_atm_watchlist import commodity_atm_watchlist_service
+            from market_data.commodity_contract_specs import extract_commodity_root
+            from paper_engine.commodity_strategy_agent import CommodityStrategyAgent
+        except Exception:
+            return {"rows": 0, "latest_time": None}
+
+        agent = CommodityStrategyAgent()
+        all_symbols = agent.get_symbols()
+        selected_expiries = agent.get_selected_option_expiries()
+        selected_lookup_symbols = agent.get_selected_option_lookup_symbols()
+        watchlist = commodity_atm_watchlist_service.get_cached_watchlist(
+            all_symbols,
+            selected_expiries,
+            selected_lookup_symbols,
+        ) if all_symbols else None
+        rows = [
+            row
+            for row in list((watchlist or {}).get("rows") or [])
+            if str(row.get("underlying") or "").upper() == normalized
+            or extract_commodity_root(str(row.get("symbol") or "")) == normalized
+        ]
+        return {
+            "rows": len(rows),
+            "latest_time": (watchlist or {}).get("timestamp"),
+        }
