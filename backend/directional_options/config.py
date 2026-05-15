@@ -91,14 +91,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
     },
     "risk": {
-        "starting_equity": 1_000_000.0,
+        # Matches the paper desk's actual equity (~₹30L). Was 10L which made
+        # even a single BANKNIFTY lot un-affordable on near-ATM strikes once
+        # premium_cap_pct was applied. If the live paper equity drifts we
+        # can wire `paper_portfolio.get_equity()` here later.
+        "starting_equity": 3_000_000.0,
         # Base sizing — scaler 0.5×–1.5× of these per signal confidence
         # (see DirectionalOptionsRiskEngine._confidence_multiplier).
         # 0.5% risk → at 0.85 conf the lot risk budget is 0.75% of equity.
-        # 1.5% premium → at 0.85 conf the premium cap is 2.25% of equity,
-        # which clears one BANKNIFTY weekly lot at typical 100-pt premiums.
+        # 2.5% premium → at 0.85 conf the premium cap is 3.75% of equity
+        # (~₹1.12 lakh on a ₹30L book), which clears one BANKNIFTY weekly
+        # ATM lot even when the option premium runs ₹120–₹250.
         "risk_pct": 0.005,
-        "premium_cap_pct": 0.015,
+        "premium_cap_pct": 0.025,
         # Mirror min_confidence so the allocator knows the curve floor.
         "min_confidence": 0.58,
         "planned_stop_pct": 0.35,
