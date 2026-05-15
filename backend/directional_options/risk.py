@@ -9,6 +9,17 @@ while a 0.85-confidence setup sizes at ~1.5×. The motivation is that
 confidence already encodes our expectation of edge — sizing should
 respond, not stay flat. The base `risk_pct` and `premium_cap_pct` define
 the *median* allocation; the scaler nudges it up or down.
+
+Edge hurdles (min_expected_edge_pct + optimizer rejection_reasons) are
+deliberately bypassed for two categories:
+
+  * Learning sleeves (intraday_exploration, intraday_micro_trend) — the
+    whole point is to take small bets and accumulate RAG evidence.
+  * Commodity underlyings (GOLD/SILVERM/NATURALGAS/CRUDEOIL/...) — the
+    model has higher inherent uncertainty than for NSE indices, so the
+    edge calculator routinely under-counts. The regime engine's
+    confidence is the real signal; capital gates (sizing, daily/weekly
+    loss caps) still keep us honest.
 """
 from __future__ import annotations
 
@@ -82,12 +93,20 @@ class DirectionalOptionsRiskEngine:
         learning_sleeve = str(signal.sleeve or "").lower() in {
             "intraday_exploration", "intraday_micro_trend",
         }
+        # Commodity underlyings — the model is less accurate (wider spreads,
+        # higher IV, sparser book) so the edge calc routinely under-counts.
+        # Trust the regime engine here; the confidence-scaled allocator
+        # keeps the bet sized to conviction. The MCX: prefix uniquely
+        # identifies commodity instruments across our broker mappings.
+        trading_symbol = str(candidate.trading_symbol or "").upper()
+        is_commodity = trading_symbol.startswith("MCX:") or trading_symbol.startswith("MCX_")
+        bypass_edge_gate = learning_sleeve or is_commodity
         if (
-            not learning_sleeve
+            not bypass_edge_gate
             and candidate.expected_pnl <= candidate.option_price * min_expected_edge_pct
         ):
             reasons.append("Expected edge does not clear the long-premium hurdle.")
-        if candidate.rejection_reasons and not learning_sleeve:
+        if candidate.rejection_reasons and not bypass_edge_gate:
             reasons.extend(
                 f"Optimizer rejected candidate: {reason}."
                 for reason in candidate.rejection_reasons
