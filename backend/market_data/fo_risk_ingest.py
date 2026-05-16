@@ -34,11 +34,27 @@ from sqlalchemy import text
 from db.database import AsyncSessionLocal
 
 
-# Public NSE endpoints. Both files are refreshed once per trading day,
-# usually a few minutes after the EOD calc completes (~18:30 IST). The
-# files are unchanged through the night until the next session.
-MWPL_URL = "https://nsearchives.nseindia.com/content/nsccl/fao_mwpl.csv"
-SECURITY_BAN_URL = "https://nsearchives.nseindia.com/content/nsccl/fao_security_ban.csv"
+# NSE rotates these URLs every couple of years. We try each candidate in
+# order — first 200 with a non-empty body wins. The files refresh once
+# per trading day, usually a few minutes after the EOD calc (~18:30 IST).
+MWPL_URL_CANDIDATES = [
+    # 2024+ archives host with the newer combined CSV that includes both
+    # market-wide and client-wise positions.
+    "https://nsearchives.nseindia.com/archives/nsccl/mwpl/combine_mwpl_cmpos.csv",
+    # Older path that still works for some files on the archives host.
+    "https://nsearchives.nseindia.com/content/nsccl/fao_mwpl.csv",
+    # Pre-2023 main-site path; kept as a fallback in case the archives
+    # host has another scheduled maintenance window.
+    "https://www.nseindia.com/content/nsccl/fao_mwpl.csv",
+]
+SECURITY_BAN_URL_CANDIDATES = [
+    "https://nsearchives.nseindia.com/archives/fo/sec_ban/fo_secban.csv",
+    "https://nsearchives.nseindia.com/content/nsccl/fao_security_ban.csv",
+    "https://www.nseindia.com/content/nsccl/fao_security_ban.csv",
+]
+# JSON fallback when the CSV endpoints all 404 (NSE's most reliable path
+# during URL transitions, but rate-limited and cookie-sensitive).
+NSE_FO_RESTRICTIONS_JSON = "https://www.nseindia.com/api/equity-fno-restrictions"
 
 # Mimic a normal browser User-Agent so NSE doesn't 403 the bot.
 _DEFAULT_HEADERS = {
@@ -203,18 +219,92 @@ def parse_ban_csv(body: str) -> list[BanRow]:
     return rows
 
 
-async def _fetch_csv(url: str, *, timeout: float = 20.0) -> str:
-    async with httpx.AsyncClient(headers=_DEFAULT_HEADERS, timeout=timeout, follow_redirects=True) as client:
-        # NSE sometimes requires a homepage hit first to set the
-        # session cookies that the CSV endpoint then validates.
-        try:
-            await client.get("https://www.nseindia.com", timeout=8.0)
-        except Exception:
-            # Cookie-priming is best-effort.
-            pass
-        response = await client.get(url)
+async def _fetch_csv(url: str, *, timeout: float = 20.0, client: httpx.AsyncClient | None = None) -> str:
+    """Fetch one CSV. The optional `client` is reused for cookie state
+    across the candidate URL chain to avoid repeating the cookie-priming
+    hit on every attempt.
+    """
+    own_client = client is None
+    http = client or httpx.AsyncClient(
+        headers=_DEFAULT_HEADERS, timeout=timeout, follow_redirects=True
+    )
+    try:
+        response = await http.get(url, timeout=timeout)
         response.raise_for_status()
         return response.text
+    finally:
+        if own_client:
+            await http.aclose()
+
+
+async def _fetch_ban_via_json_api() -> Optional[str]:
+    """JSON-API fallback for the ban list. NSE often keeps this endpoint
+    working even when the static CSV files 404. Returns the data
+    reshaped into the same Sr.No,Security CSV format the CSV parser
+    already understands.
+    """
+    try:
+        async with httpx.AsyncClient(
+            headers={**_DEFAULT_HEADERS, "Accept": "application/json"},
+            timeout=15.0,
+            follow_redirects=True,
+        ) as client:
+            await client.get("https://www.nseindia.com", timeout=8.0)
+            response = await client.get(NSE_FO_RESTRICTIONS_JSON, timeout=15.0)
+            response.raise_for_status()
+            data = response.json()
+    except Exception as exc:
+        logger.debug(f"[FoRiskIngest] JSON ban-list fallback failed: {exc}")
+        return None
+    # The JSON shape we've historically seen:
+    #   {"data": [{"symbol": "IDEA", "remark": "Banned ..."}], "timestamp": "..."}
+    items = []
+    if isinstance(data, dict):
+        items = data.get("data") or data.get("fo") or []
+    elif isinstance(data, list):
+        items = data
+    if not items:
+        return None
+    lines = ["Sr.No.,Security,Remarks"]
+    for idx, item in enumerate(items, start=1):
+        if isinstance(item, dict):
+            symbol = item.get("symbol") or item.get("scrip") or item.get("security")
+            remark = item.get("remark") or item.get("reason") or ""
+        else:
+            symbol, remark = str(item), ""
+        if symbol:
+            lines.append(f"{idx},{symbol},{remark}")
+    return "\n".join(lines)
+
+
+async def _fetch_first_available(
+    urls: list[str],
+    *,
+    label: str,
+    timeout: float = 20.0,
+) -> tuple[Optional[str], list[str]]:
+    """Try each URL until one returns a non-empty body. Returns
+    (body, errors) — body is None when every candidate failed.
+    """
+    errors: list[str] = []
+    async with httpx.AsyncClient(
+        headers=_DEFAULT_HEADERS, timeout=timeout, follow_redirects=True
+    ) as client:
+        # Prime cookies once for the session.
+        try:
+            await client.get("https://www.nseindia.com", timeout=8.0)
+        except Exception as exc:
+            errors.append(f"cookie_prime_failed: {exc}")
+        for url in urls:
+            try:
+                body = await _fetch_csv(url, timeout=timeout, client=client)
+                if body and body.strip():
+                    logger.info(f"[FoRiskIngest] {label} fetched from {url} ({len(body)} bytes)")
+                    return body, errors
+                errors.append(f"empty_body: {url}")
+            except Exception as exc:
+                errors.append(f"{url}: {exc}")
+    return None, errors
 
 
 async def ingest_fo_risk_snapshot(
@@ -232,7 +322,9 @@ async def ingest_fo_risk_snapshot(
 
     # ── MWPL ─────────────────────────────────────────────────────────
     try:
-        mwpl_body = await _fetch_csv(MWPL_URL)
+        mwpl_body, fetch_errors = await _fetch_first_available(MWPL_URL_CANDIDATES, label="MWPL")
+        if mwpl_body is None:
+            raise RuntimeError(f"all_candidates_failed: {fetch_errors[-3:]}")
         mwpl_rows = parse_mwpl_csv(mwpl_body)
         summary.mwpl_rows = len(mwpl_rows)
         if mwpl_rows:
@@ -275,7 +367,12 @@ async def ingest_fo_risk_snapshot(
 
     # ── Ban list ─────────────────────────────────────────────────────
     try:
-        ban_body = await _fetch_csv(SECURITY_BAN_URL)
+        ban_body, fetch_errors = await _fetch_first_available(SECURITY_BAN_URL_CANDIDATES, label="Ban list")
+        if ban_body is None:
+            # JSON fallback through the NSE API.
+            ban_body = await _fetch_ban_via_json_api()
+        if ban_body is None:
+            raise RuntimeError(f"all_candidates_failed: {fetch_errors[-3:]}")
         ban_rows = parse_ban_csv(ban_body)
         summary.ban_rows = len(ban_rows)
         if ban_rows:
