@@ -541,6 +541,11 @@ def _analyze_mcx(contract_catalog: dict[str, Any], atm_watchlist: dict[str, Any]
     bid_ask_watch: list[dict[str, Any]] = []
     greeks_rows: list[dict[str, Any]] = []
     strike_positioning: list[dict[str, Any]] = []
+    # Per-underlying summary: ATM strike, ATM straddle premium, implied
+    # expected move (1-σ proxy ≈ straddle premium), PCR-OI etc. These are
+    # the core trader-facing read-outs that the option-chain card in the
+    # design doc surfaces alongside Greeks.
+    straddle_summary: list[dict[str, Any]] = []
     for row in rows:
         expiry = row.get("active_expiry") or row.get("expiry") or atm_watchlist.get("expiry")
         tte = _days_to_expiry(expiry)
@@ -612,6 +617,33 @@ def _analyze_mcx(contract_catalog: dict[str, Any], atm_watchlist: dict[str, Any]
                         "note": positioning.note,
                     }
                 )
+        # ATM straddle summary — the CE-side strike is treated as the ATM
+        # since the commodity_atm_watchlist always centres on the nearest
+        # strike to spot. straddle_pct = (CE+PE)/spot * 100, an approximate
+        # 1-σ move expectation by expiry priced by the market.
+        ce_ltp = _safe_float((row.get("ce") or {}).get("ltp"))
+        pe_ltp = _safe_float((row.get("pe") or {}).get("ltp"))
+        ce_oi = _safe_float((row.get("ce") or {}).get("oi"))
+        pe_oi = _safe_float((row.get("pe") or {}).get("oi"))
+        straddle = (ce_ltp + pe_ltp) if (ce_ltp is not None and pe_ltp is not None) else None
+        straddle_pct = (straddle / spot * 100.0) if (straddle is not None and spot) else None
+        straddle_summary.append(
+            {
+                "underlying": underlying,
+                "expiry": expiry,
+                "days_to_expiry": tte,
+                "spot_price": _round(spot, 2),
+                "atm_strike": _round(ce_strike or pe_strike, 2),
+                "ce_ltp": _round(ce_ltp, 2),
+                "pe_ltp": _round(pe_ltp, 2),
+                "atm_straddle": _round(straddle, 2),
+                "expected_move": _round(straddle, 2),
+                "expected_move_pct": _round(straddle_pct, 3),
+                "ce_oi": _round(ce_oi, 0),
+                "pe_oi": _round(pe_oi, 0),
+                "pcr_oi": _ratio(pe_oi, ce_oi),
+            }
+        )
         if tte is not None and tte <= NEAR_EXPIRY_WARNING_DAYS:
             devolvement_watch.append(
                 {
@@ -668,7 +700,9 @@ def _analyze_mcx(contract_catalog: dict[str, Any], atm_watchlist: dict[str, Any]
             "pe_ready": pe_ready,
             "pcr_ready": _ratio(pe_ready, ce_ready),
             "timestamp": atm_watchlist.get("timestamp"),
+            "straddle_summary": straddle_summary,
         },
+        "straddle_summary": straddle_summary,
         "greeks": {
             "rows": greeks_rows,
             "mode": "exchange_10pct",
@@ -876,6 +910,62 @@ def _nse_option_greeks(fno_360: dict[str, Any] | None, limit: int) -> dict[str, 
     return {"rows": rows[:limit * 4], "mode": "exchange_10pct", "count": len(rows)}
 
 
+def _nse_straddle_summary(fno_360: dict[str, Any] | None, limit: int) -> list[dict[str, Any]]:
+    """Compute ATM straddle, expected move, PCR-OI per underlying.
+
+    The fno_360 statistics endpoint emits one row per NSE underlying with
+    ATM CE and PE LTP, OI, IV and the spot price. Sum the two LTPs and
+    you get the market-implied 1-σ move by expiry (straddle ≈ expected
+    move). Express it as a percentage of spot for cross-symbol comparison.
+    """
+    instruments = ((fno_360 or {}).get("analytics") or {}).get("oi_change_contracts") or []
+    if not instruments:
+        instruments = (fno_360 or {}).get("top_volume", [])
+    rows: list[dict[str, Any]] = []
+    for item in instruments:
+        if not isinstance(item, dict):
+            continue
+        spot = _safe_float(item.get("spot_price") or item.get("underlying_price"))
+        strike = _safe_float(item.get("strike"))
+        ce = item.get("ce") if isinstance(item.get("ce"), dict) else None
+        pe = item.get("pe") if isinstance(item.get("pe"), dict) else None
+        ce_ltp = _safe_float((ce or {}).get("ltp") or item.get("ce_ltp"))
+        pe_ltp = _safe_float((pe or {}).get("ltp") or item.get("pe_ltp"))
+        ce_oi = _safe_float((ce or {}).get("oi") or item.get("ce_oi"))
+        pe_oi = _safe_float((pe or {}).get("oi") or item.get("pe_oi"))
+        ce_iv = _safe_float((ce or {}).get("iv") or item.get("ce_iv"))
+        pe_iv = _safe_float((pe or {}).get("iv") or item.get("pe_iv"))
+        if spot is None or spot <= 0 or ce_ltp is None or pe_ltp is None:
+            continue
+        straddle = ce_ltp + pe_ltp
+        straddle_pct = straddle / spot * 100.0
+        avg_iv = None
+        ivs = [v for v in (ce_iv, pe_iv) if v is not None]
+        if ivs:
+            avg_iv = sum(ivs) / len(ivs)
+        rows.append(
+            {
+                "underlying": item.get("symbol") or item.get("underlying"),
+                "kind": item.get("kind"),
+                "expiry": item.get("expiry"),
+                "spot_price": _round(spot, 2),
+                "atm_strike": _round(strike, 2),
+                "ce_ltp": _round(ce_ltp, 2),
+                "pe_ltp": _round(pe_ltp, 2),
+                "atm_straddle": _round(straddle, 2),
+                "expected_move": _round(straddle, 2),
+                "expected_move_pct": _round(straddle_pct, 3),
+                "avg_iv": _round(avg_iv, 4),
+                "ce_oi": _round(ce_oi, 0),
+                "pe_oi": _round(pe_oi, 0),
+                "pcr_oi": _ratio(pe_oi, ce_oi),
+            }
+        )
+    # Sort by expected_move_pct descending — highest implied move first.
+    rows.sort(key=lambda r: (r.get("expected_move_pct") or 0.0), reverse=True)
+    return rows[:limit * 4]
+
+
 async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: int = 20) -> dict[str, Any]:
     # Load the active contract master broadly; the UI limit only applies to
     # watchlists/signal rows, not to data-quality and universe counts.
@@ -884,6 +974,7 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
     mcx = _analyze_mcx(contract_catalog, atm_watchlist)
     nse_oi_signals = _nse_oi_price_signals(fno_360, limit)
     nse_greeks = _nse_option_greeks(fno_360, limit)
+    nse_straddles = _nse_straddle_summary(fno_360, limit)
     nse = {
         "status": "ready" if nse_contracts or (fno_360 or {}).get("status") == "ready" else "missing",
         "source": nse_source,
@@ -911,6 +1002,7 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
         },
         "greeks": nse_greeks,
         "oi_price_signals": nse_oi_signals,
+        "straddle_summary": nse_straddles,
     }
     quality_checks = _build_quality_checks(nse, mcx, fno_360)
     return {
@@ -929,6 +1021,7 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
                 "volatility_watch": ((fno_360 or {}).get("analytics") or {}).get("volatility_watch", [])[:limit],
                 "oi_price_matrix": nse_oi_signals,
                 "greeks": nse_greeks,
+                "straddle_summary": nse_straddles,
             },
             "mcx": {
                 "devolvement_watch": (mcx.get("risk") or {}).get("devolvement_watch", [])[:limit],
@@ -937,6 +1030,7 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
                 "futures_curves": (mcx.get("futures_curve") or {}).get("curves", []),
                 "positioning": (mcx.get("positioning") or {}).get("strikes", [])[:limit],
                 "greeks": (mcx.get("greeks") or {}).get("rows", [])[:limit * 4],
+                "straddle_summary": (mcx.get("option_chain") or {}).get("straddle_summary", []),
             },
         },
     }

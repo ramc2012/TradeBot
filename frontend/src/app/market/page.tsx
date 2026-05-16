@@ -278,6 +278,24 @@ type StrikePositioning = {
   note?: string;
 };
 
+type StraddleRow = {
+  underlying?: string;
+  kind?: string;
+  expiry?: string;
+  days_to_expiry?: number | null;
+  spot_price?: number | null;
+  atm_strike?: number | null;
+  ce_ltp?: number | null;
+  pe_ltp?: number | null;
+  atm_straddle?: number | null;
+  expected_move?: number | null;
+  expected_move_pct?: number | null;
+  avg_iv?: number | null;
+  ce_oi?: number | null;
+  pe_oi?: number | null;
+  pcr_oi?: number | null;
+};
+
 type FnoAnalyticsPayload = {
   status?: string;
   as_of?: string;
@@ -295,6 +313,7 @@ type FnoAnalyticsPayload = {
       by_label?: Record<string, OiPriceSignal[]>;
       top?: OiPriceSignal[];
     };
+    straddle_summary?: StraddleRow[];
   };
   mcx?: {
     status?: string;
@@ -312,6 +331,7 @@ type FnoAnalyticsPayload = {
       count?: number;
     };
     positioning?: { strikes?: StrikePositioning[] };
+    straddle_summary?: StraddleRow[];
   };
   quality_checks?: Array<{ key?: string; label?: string; status?: string; detail?: string }>;
   stage_status?: Array<{ stage?: number; name?: string; status?: string; detail?: string }>;
@@ -1017,6 +1037,70 @@ function StrikePositioningCard({ rows }: { rows: StrikePositioning[] }) {
   );
 }
 
+function StraddleTable({ rows, title }: { rows: StraddleRow[]; title: string }) {
+  return (
+    <div className="rounded-lg border border-bg-border/70 bg-bg-primary/30 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-text-primary">{title}</div>
+        <div className="font-mono text-[10px] uppercase tracking-wide text-text-muted">{rows.length}</div>
+      </div>
+      <div className="mt-2 overflow-auto">
+        <table className="w-full min-w-[560px] text-[11px]">
+          <thead className="text-[10px] uppercase tracking-wide text-text-muted">
+            <tr className="border-b border-bg-border/40">
+              <th className="py-1.5 pr-2 text-left">Underlying</th>
+              <th className="py-1.5 pr-2 text-right">Spot</th>
+              <th className="py-1.5 pr-2 text-right">ATM</th>
+              <th className="py-1.5 pr-2 text-right">CE</th>
+              <th className="py-1.5 pr-2 text-right">PE</th>
+              <th className="py-1.5 pr-2 text-right">Straddle</th>
+              <th className="py-1.5 pr-2 text-right">Exp Move</th>
+              <th className="py-1.5 pr-2 text-right">PCR-OI</th>
+              <th className="py-1.5 text-right">Avg IV</th>
+            </tr>
+          </thead>
+          <tbody className="font-mono">
+            {rows.slice(0, 10).map((row, i) => {
+              const em = row.expected_move_pct ?? 0;
+              const emTone = em > 5 ? "text-accent-red" : em > 1.5 ? "text-accent-amber" : "text-text-secondary";
+              const pcrTone = row.pcr_oi == null
+                ? "text-text-muted"
+                : row.pcr_oi > 1.25 ? "text-accent-green"
+                : row.pcr_oi < 0.8 ? "text-accent-red"
+                : "text-text-secondary";
+              return (
+                <tr key={`${row.underlying}-${i}`} className="border-b border-bg-border/20">
+                  <td className="py-1.5 pr-2 text-text-primary">
+                    <span className="font-semibold">{row.underlying || "--"}</span>
+                  </td>
+                  <td className="py-1.5 pr-2 text-right">{formatNumber(row.spot_price, 2)}</td>
+                  <td className="py-1.5 pr-2 text-right text-text-secondary">{formatNumber(row.atm_strike, 0)}</td>
+                  <td className="py-1.5 pr-2 text-right">{formatNumber(row.ce_ltp, 2)}</td>
+                  <td className="py-1.5 pr-2 text-right">{formatNumber(row.pe_ltp, 2)}</td>
+                  <td className="py-1.5 pr-2 text-right text-text-primary">{formatNumber(row.atm_straddle, 2)}</td>
+                  <td className={clsx("py-1.5 pr-2 text-right font-semibold", emTone)}>
+                    {row.expected_move_pct != null ? `±${row.expected_move_pct.toFixed(2)}%` : "--"}
+                  </td>
+                  <td className={clsx("py-1.5 pr-2 text-right", pcrTone)}>{formatNumber(row.pcr_oi, 2)}</td>
+                  <td className="py-1.5 text-right text-accent-blue">
+                    {row.avg_iv != null ? formatPercent(row.avg_iv * 100, 1) : "--"}
+                  </td>
+                </tr>
+              );
+            })}
+            {!rows.length ? (
+              <tr><td colSpan={9} className="py-3 text-center text-text-muted">No ATM rows available yet.</td></tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+      <div className="mt-1.5 text-[10px] leading-4 text-text-muted">
+        Straddle premium ≈ 1-σ implied move by expiry. PCR-OI &gt; 1.25 is put-heavy (bullish skew), &lt; 0.8 is call-heavy (bearish skew).
+      </div>
+    </div>
+  );
+}
+
 function OptionsAnalyticsSection({
   payload,
   isLoading,
@@ -1030,15 +1114,21 @@ function OptionsAnalyticsSection({
   const curves = payload?.mcx?.futures_curve?.curves || [];
   const spreads = payload?.mcx?.futures_curve?.calendar_spreads || [];
   const positioning = payload?.mcx?.positioning?.strikes || [];
+  const nseStraddles = payload?.nse?.straddle_summary || [];
+  const mcxStraddles = payload?.mcx?.straddle_summary || [];
 
   return (
     <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
       <PanelHeader
         icon={<Activity size={16} className="text-accent-blue" />}
         title="Options Analytics"
-        detail="Greeks (Black-Scholes), OI–price participant matrix, futures curve shape and per-strike positioning bias from the live F&O snapshot."
-        meta={isLoading ? "loading" : `${(oiMatrix.count || 0)} OI signals · ${curves.length} curves`}
+        detail="ATM straddle / expected move, Greeks (Black-Scholes), OI–price participant matrix, futures curve shape and per-strike positioning bias."
+        meta={isLoading ? "loading" : `${(oiMatrix.count || 0)} OI signals · ${curves.length} curves · ${nseStraddles.length + mcxStraddles.length} ATM rows`}
       />
+      <div className="mt-3 grid gap-3 xl:grid-cols-2">
+        <StraddleTable rows={nseStraddles} title="NSE ATM Straddle & Expected Move" />
+        <StraddleTable rows={mcxStraddles} title="MCX ATM Straddle & Expected Move" />
+      </div>
       <div className="mt-3 grid gap-3 xl:grid-cols-2">
         <GreeksTable rows={nseGreeks} title="NSE Option Greeks (top ATM)" mode={payload?.nse?.greeks?.mode} />
         <GreeksTable rows={mcxGreeks} title="MCX Option Greeks (top ATM)" mode={payload?.mcx?.greeks?.mode} />
