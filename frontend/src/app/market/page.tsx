@@ -296,6 +296,18 @@ type StraddleRow = {
   pcr_oi?: number | null;
 };
 
+type MaxPainRow = {
+  underlying?: string;
+  expiry?: string;
+  strikes_count?: number;
+  max_pain_strike?: number | null;
+  max_call_oi_strike?: number | null;
+  max_put_oi_strike?: number | null;
+  total_call_oi?: number | null;
+  total_put_oi?: number | null;
+  chain_pcr_oi?: number | null;
+};
+
 type FnoAnalyticsPayload = {
   status?: string;
   as_of?: string;
@@ -314,6 +326,7 @@ type FnoAnalyticsPayload = {
       top?: OiPriceSignal[];
     };
     straddle_summary?: StraddleRow[];
+    max_pain?: MaxPainRow[];
   };
   mcx?: {
     status?: string;
@@ -332,6 +345,7 @@ type FnoAnalyticsPayload = {
     };
     positioning?: { strikes?: StrikePositioning[] };
     straddle_summary?: StraddleRow[];
+    max_pain?: MaxPainRow[];
   };
   quality_checks?: Array<{ key?: string; label?: string; status?: string; detail?: string }>;
   stage_status?: Array<{ stage?: number; name?: string; status?: string; detail?: string }>;
@@ -1101,6 +1115,64 @@ function StraddleTable({ rows, title }: { rows: StraddleRow[]; title: string }) 
   );
 }
 
+function MaxPainTable({ rows, title }: { rows: MaxPainRow[]; title: string }) {
+  return (
+    <div className="rounded-lg border border-bg-border/70 bg-bg-primary/30 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-text-primary">{title}</div>
+        <div className="font-mono text-[10px] uppercase tracking-wide text-text-muted">{rows.length}</div>
+      </div>
+      <div className="mt-2 overflow-auto">
+        <table className="w-full min-w-[560px] text-[11px]">
+          <thead className="text-[10px] uppercase tracking-wide text-text-muted">
+            <tr className="border-b border-bg-border/40">
+              <th className="py-1.5 pr-2 text-left">Underlying</th>
+              <th className="py-1.5 pr-2 text-left">Expiry</th>
+              <th className="py-1.5 pr-2 text-right">Strikes</th>
+              <th className="py-1.5 pr-2 text-right">Max Pain</th>
+              <th className="py-1.5 pr-2 text-right">Resistance (CE OI)</th>
+              <th className="py-1.5 pr-2 text-right">Support (PE OI)</th>
+              <th className="py-1.5 pr-2 text-right">Total CE OI</th>
+              <th className="py-1.5 pr-2 text-right">Total PE OI</th>
+              <th className="py-1.5 text-right">Chain PCR</th>
+            </tr>
+          </thead>
+          <tbody className="font-mono">
+            {rows.slice(0, 10).map((row, i) => {
+              const pcr = row.chain_pcr_oi;
+              const pcrTone = pcr == null
+                ? "text-text-muted"
+                : pcr > 1.25 ? "text-accent-green"
+                : pcr < 0.8 ? "text-accent-red"
+                : "text-text-secondary";
+              return (
+                <tr key={`${row.underlying}-${row.expiry}-${i}`} className="border-b border-bg-border/20">
+                  <td className="py-1.5 pr-2 text-text-primary font-semibold">{row.underlying || "--"}</td>
+                  <td className="py-1.5 pr-2 text-text-muted text-[10px]">{row.expiry || "--"}</td>
+                  <td className="py-1.5 pr-2 text-right text-text-secondary">{row.strikes_count || "--"}</td>
+                  <td className="py-1.5 pr-2 text-right text-accent-blue font-semibold">{formatNumber(row.max_pain_strike, 0)}</td>
+                  <td className="py-1.5 pr-2 text-right text-accent-red">{formatNumber(row.max_call_oi_strike, 0)}</td>
+                  <td className="py-1.5 pr-2 text-right text-accent-green">{formatNumber(row.max_put_oi_strike, 0)}</td>
+                  <td className="py-1.5 pr-2 text-right text-text-secondary">{formatCompact(row.total_call_oi)}</td>
+                  <td className="py-1.5 pr-2 text-right text-text-secondary">{formatCompact(row.total_put_oi)}</td>
+                  <td className={clsx("py-1.5 text-right", pcrTone)}>{formatNumber(row.chain_pcr_oi, 2)}</td>
+                </tr>
+              );
+            })}
+            {!rows.length ? (
+              <tr><td colSpan={9} className="py-3 text-center text-text-muted">No multi-strike chains stored yet. Max-pain needs ≥2 strikes per (underlying, expiry).</td></tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+      <div className="mt-1.5 text-[10px] leading-4 text-text-muted">
+        Max-pain = strike where writer payout is minimised at expiry. Resistance = strike with biggest CE OI build-up.
+        Support = strike with biggest PE OI build-up. Chain PCR-OI is computed across all loaded strikes (not just ATM).
+      </div>
+    </div>
+  );
+}
+
 function OptionsAnalyticsSection({
   payload,
   isLoading,
@@ -1116,6 +1188,8 @@ function OptionsAnalyticsSection({
   const positioning = payload?.mcx?.positioning?.strikes || [];
   const nseStraddles = payload?.nse?.straddle_summary || [];
   const mcxStraddles = payload?.mcx?.straddle_summary || [];
+  const nseMaxPain = payload?.nse?.max_pain || [];
+  const mcxMaxPain = payload?.mcx?.max_pain || [];
 
   return (
     <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
@@ -1128,6 +1202,10 @@ function OptionsAnalyticsSection({
       <div className="mt-3 grid gap-3 xl:grid-cols-2">
         <StraddleTable rows={nseStraddles} title="NSE ATM Straddle & Expected Move" />
         <StraddleTable rows={mcxStraddles} title="MCX ATM Straddle & Expected Move" />
+      </div>
+      <div className="mt-3 grid gap-3 xl:grid-cols-2">
+        <MaxPainTable rows={nseMaxPain} title="NSE Max Pain · Support/Resistance · Chain PCR" />
+        <MaxPainTable rows={mcxMaxPain} title="MCX Max Pain · Support/Resistance · Chain PCR" />
       </div>
       <div className="mt-3 grid gap-3 xl:grid-cols-2">
         <GreeksTable rows={nseGreeks} title="NSE Option Greeks (top ATM)" mode={payload?.nse?.greeks?.mode} />

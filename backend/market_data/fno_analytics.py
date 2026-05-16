@@ -239,6 +239,96 @@ async def _load_nse_contracts(limit: int = 2000) -> tuple[list[CanonicalContract
     return contracts, {"status": "ready" if contracts else "missing", "source": "fo_contract_catalog"}
 
 
+async def _load_chain_max_pain(limit_underlyings: int = 30) -> list[dict[str, Any]]:
+    """Compute max-pain + chain PCR-OI from option_premium_candles.
+
+    Picks the latest CE+PE OI per (underlying, expiry, strike) for active
+    expiries, then runs the canonical max-pain formula (writer payout
+    minimised at strike K). Returns one row per (underlying, expiry)
+    with: max_pain_strike, chain pcr_oi, total_call_oi, total_put_oi,
+    strikes_count.
+
+    Uses DISTINCT ON (strike, option_type) to dedupe the broker
+    duplicates that exist for some symbols.
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    """
+                    WITH ranked AS (
+                        SELECT DISTINCT ON (underlying, expiry, strike, option_type)
+                            underlying, expiry, strike, option_type,
+                            oi, time
+                        FROM option_premium_candles
+                        WHERE expiry >= CURRENT_DATE
+                          AND interval = '30minute'
+                          AND oi IS NOT NULL
+                          AND option_type IN ('CE', 'PE')
+                        ORDER BY underlying, expiry, strike, option_type, time DESC
+                    )
+                    SELECT underlying, expiry, strike, option_type, oi
+                    FROM ranked
+                    """
+                )
+            )
+            rows = list(result.mappings().all())
+    except Exception as exc:
+        logger.warning(f"[FNOAnalytics] chain max-pain load failed: {exc}")
+        return []
+
+    # Group by (underlying, expiry) → strike → {ce_oi, pe_oi}
+    grouped: dict[tuple[str, str], dict[float, dict[str, float]]] = {}
+    for row in rows:
+        underlying = str(row.get("underlying") or "").upper()
+        expiry = _iso_date(row.get("expiry"))
+        strike = _safe_float(row.get("strike"))
+        side = str(row.get("option_type") or "").upper()
+        oi = _safe_float(row.get("oi"))
+        if not underlying or not expiry or strike is None or oi is None:
+            continue
+        bucket = grouped.setdefault((underlying, expiry), {})
+        node = bucket.setdefault(strike, {"call_oi": 0.0, "put_oi": 0.0})
+        if side == "CE":
+            node["call_oi"] = float(oi)
+        elif side == "PE":
+            node["put_oi"] = float(oi)
+
+    from analysis.signal_library import max_pain
+
+    out: list[dict[str, Any]] = []
+    for (underlying, expiry), strike_map in grouped.items():
+        chain = [
+            {"strike": strike, "call_oi": data["call_oi"], "put_oi": data["put_oi"]}
+            for strike, data in sorted(strike_map.items())
+        ]
+        if len(chain) < 2:
+            # Need at least two strikes for the writer-payout curve to be meaningful.
+            continue
+        mp = max_pain(chain)
+        total_call_oi = sum(c["call_oi"] for c in chain)
+        total_put_oi = sum(c["put_oi"] for c in chain)
+        # Find the strike with the biggest CE OI build-up (resistance band)
+        max_call_strike = max(chain, key=lambda c: c["call_oi"]) if chain else None
+        # Biggest PE OI (support band)
+        max_put_strike = max(chain, key=lambda c: c["put_oi"]) if chain else None
+        out.append(
+            {
+                "underlying": underlying,
+                "expiry": expiry,
+                "strikes_count": len(chain),
+                "max_pain_strike": _round(mp, 2),
+                "max_call_oi_strike": _round((max_call_strike or {}).get("strike"), 2),
+                "max_put_oi_strike": _round((max_put_strike or {}).get("strike"), 2),
+                "total_call_oi": _round(total_call_oi, 0),
+                "total_put_oi": _round(total_put_oi, 0),
+                "chain_pcr_oi": _ratio(total_put_oi, total_call_oi),
+            }
+        )
+    out.sort(key=lambda r: (r.get("underlying") or "", r.get("expiry") or ""))
+    return out[:limit_underlyings]
+
+
 def _commodity_contract_from_catalog(item: dict[str, Any]) -> list[CanonicalContract]:
     symbol = str(item.get("symbol") or "").upper()
     root = str(item.get("underlying") or "").upper()
@@ -975,6 +1065,11 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
     nse_oi_signals = _nse_oi_price_signals(fno_360, limit)
     nse_greeks = _nse_option_greeks(fno_360, limit)
     nse_straddles = _nse_straddle_summary(fno_360, limit)
+    # Max-pain and chain-wide PCR-OI from option_premium_candles. This
+    # joins all available strikes per (underlying, expiry), not just ATM,
+    # so the resistance / support reads pick up the strikes where market
+    # makers are most exposed.
+    chain_max_pain = await _load_chain_max_pain()
     nse = {
         "status": "ready" if nse_contracts or (fno_360 or {}).get("status") == "ready" else "missing",
         "source": nse_source,
@@ -1003,7 +1098,18 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
         "greeks": nse_greeks,
         "oi_price_signals": nse_oi_signals,
         "straddle_summary": nse_straddles,
+        "max_pain": [
+            row for row in chain_max_pain
+            if (row.get("underlying") or "") not in {"CRUDEOIL", "GOLD", "SILVERM", "NATURALGAS"}
+        ],
     }
+    # Attach commodity rows to the mcx block so the UI can render
+    # commodity max-pain alongside the futures curve.
+    mcx_max_pain = [
+        row for row in chain_max_pain
+        if (row.get("underlying") or "") in {"CRUDEOIL", "GOLD", "SILVERM", "NATURALGAS"}
+    ]
+    mcx["max_pain"] = mcx_max_pain
     quality_checks = _build_quality_checks(nse, mcx, fno_360)
     return {
         "status": "ready" if any(check["status"] == "ok" for check in quality_checks) else "attention",
@@ -1022,6 +1128,7 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
                 "oi_price_matrix": nse_oi_signals,
                 "greeks": nse_greeks,
                 "straddle_summary": nse_straddles,
+                "max_pain": nse.get("max_pain", []),
             },
             "mcx": {
                 "devolvement_watch": (mcx.get("risk") or {}).get("devolvement_watch", [])[:limit],
@@ -1031,6 +1138,7 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
                 "positioning": (mcx.get("positioning") or {}).get("strikes", [])[:limit],
                 "greeks": (mcx.get("greeks") or {}).get("rows", [])[:limit * 4],
                 "straddle_summary": (mcx.get("option_chain") or {}).get("straddle_summary", []),
+                "max_pain": mcx.get("max_pain", []),
             },
         },
     }
