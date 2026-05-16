@@ -308,6 +308,28 @@ type MaxPainRow = {
   chain_pcr_oi?: number | null;
 };
 
+type FoRiskPayload = {
+  snapshot_date?: string | null;
+  mwpl?: {
+    row_count?: number;
+    high_utilisation?: Array<{
+      symbol?: string;
+      market_wide_position_limit?: number | null;
+      open_interest?: number | null;
+      utilisation_pct?: number | null;
+    }>;
+    above_80_pct_count?: number;
+    above_95_pct_count?: number;
+    snapshot_date?: string | null;
+  };
+  ban_list?: {
+    count?: number;
+    symbols?: string[];
+    reasons?: Record<string, string>;
+    snapshot_date?: string | null;
+  };
+};
+
 type FnoAnalyticsPayload = {
   status?: string;
   as_of?: string;
@@ -347,6 +369,7 @@ type FnoAnalyticsPayload = {
     straddle_summary?: StraddleRow[];
     max_pain?: MaxPainRow[];
   };
+  fo_risk?: FoRiskPayload;
   quality_checks?: Array<{ key?: string; label?: string; status?: string; detail?: string }>;
   stage_status?: Array<{ stage?: number; name?: string; status?: string; detail?: string }>;
   signals?: {
@@ -1173,6 +1196,99 @@ function MaxPainTable({ rows, title }: { rows: MaxPainRow[]; title: string }) {
   );
 }
 
+function FoRiskCard({ payload }: { payload?: FoRiskPayload }) {
+  const mwpl = payload?.mwpl;
+  const ban = payload?.ban_list;
+  const banSymbols = ban?.symbols || [];
+  const highUtil = mwpl?.high_utilisation || [];
+  return (
+    <div className="rounded-lg border border-bg-border/70 bg-bg-primary/30 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-text-primary">F&O Risk · MWPL Utilisation · Ban List</div>
+        <div className="font-mono text-[10px] uppercase tracking-wide text-text-muted">
+          {payload?.snapshot_date || "no snapshot"}
+        </div>
+      </div>
+      <div className="mt-2 grid gap-2 md:grid-cols-3">
+        <div className="rounded-md border border-bg-border/40 bg-bg-secondary/30 px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wide text-text-muted">Tracked</div>
+          <div className="font-mono text-lg text-text-primary">{mwpl?.row_count ?? 0}</div>
+          <div className="text-[10px] text-text-muted">symbols on MWPL list</div>
+        </div>
+        <div className="rounded-md border border-accent-amber/30 bg-accent-amber/8 px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wide text-accent-amber">≥ 80% utilisation</div>
+          <div className="font-mono text-lg text-accent-amber">{mwpl?.above_80_pct_count ?? 0}</div>
+          <div className="text-[10px] text-text-muted">at risk of ban next print</div>
+        </div>
+        <div className="rounded-md border border-accent-red/30 bg-accent-red/8 px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wide text-accent-red">≥ 95% — banned</div>
+          <div className="font-mono text-lg text-accent-red">{ban?.count ?? 0}</div>
+          <div className="text-[10px] text-text-muted">fresh F&O positions blocked</div>
+        </div>
+      </div>
+      <div className="mt-3 grid gap-3 lg:grid-cols-[1.4fr_1fr]">
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Top utilisation %</div>
+          <div className="mt-1 overflow-auto">
+            <table className="w-full min-w-[420px] text-[11px]">
+              <thead className="text-[10px] uppercase tracking-wide text-text-muted">
+                <tr className="border-b border-bg-border/40">
+                  <th className="py-1.5 pr-2 text-left">Symbol</th>
+                  <th className="py-1.5 pr-2 text-right">Utilisation</th>
+                  <th className="py-1.5 pr-2 text-right">Open Interest</th>
+                  <th className="py-1.5 text-right">MWPL Limit</th>
+                </tr>
+              </thead>
+              <tbody className="font-mono">
+                {highUtil.slice(0, 12).map((row, i) => {
+                  const u = row.utilisation_pct ?? 0;
+                  const tone = u >= 95
+                    ? "text-accent-red"
+                    : u >= 80 ? "text-accent-amber"
+                    : "text-text-secondary";
+                  return (
+                    <tr key={`${row.symbol}-${i}`} className="border-b border-bg-border/20">
+                      <td className="py-1.5 pr-2 text-text-primary font-semibold">{row.symbol || "--"}</td>
+                      <td className={clsx("py-1.5 pr-2 text-right", tone)}>{u.toFixed(1)}%</td>
+                      <td className="py-1.5 pr-2 text-right text-text-secondary">{formatCompact(row.open_interest)}</td>
+                      <td className="py-1.5 text-right text-text-muted">{formatCompact(row.market_wide_position_limit)}</td>
+                    </tr>
+                  );
+                })}
+                {!highUtil.length ? (
+                  <tr><td colSpan={4} className="py-3 text-center text-text-muted">No MWPL snapshot yet — POST /api/market/fo-risk/refresh to seed.</td></tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">F&O Ban List ({banSymbols.length})</div>
+          <div className="mt-1 max-h-[260px] overflow-auto rounded-md border border-bg-border/40 bg-bg-secondary/25 p-2">
+            {banSymbols.length ? (
+              <div className="flex flex-wrap gap-1">
+                {banSymbols.map((sym) => (
+                  <span
+                    key={sym}
+                    className="rounded-md border border-accent-red/30 bg-accent-red/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-accent-red"
+                  >
+                    {sym}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div className="text-[11px] text-text-muted">No banned symbols today.</div>
+            )}
+          </div>
+          <div className="mt-1.5 text-[10px] leading-4 text-text-muted">
+            Banned symbols only allow position-reducing trades. Pre-trade gate must check this before any F&O entry.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function OptionsAnalyticsSection({
   payload,
   isLoading,
@@ -1190,6 +1306,7 @@ function OptionsAnalyticsSection({
   const mcxStraddles = payload?.mcx?.straddle_summary || [];
   const nseMaxPain = payload?.nse?.max_pain || [];
   const mcxMaxPain = payload?.mcx?.max_pain || [];
+  const foRisk = payload?.fo_risk;
 
   return (
     <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
@@ -1217,6 +1334,9 @@ function OptionsAnalyticsSection({
       <div className="mt-3 grid gap-3 xl:grid-cols-[1.4fr_1fr]">
         <FuturesCurveCard curves={curves} spreads={spreads} />
         <StrikePositioningCard rows={positioning} />
+      </div>
+      <div className="mt-3">
+        <FoRiskCard payload={foRisk} />
       </div>
     </div>
   );

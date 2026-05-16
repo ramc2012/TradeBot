@@ -1497,6 +1497,22 @@ class UpstoxResearchSync:
             summary.chain_metrics_refreshed,
         ) = await self._sync_contract_candles(limit=contract_limit)
 
+        # Daily F&O risk ingest (MWPL + ban list). The function below
+        # is idempotent and the inserts upsert by (snapshot_date, symbol)
+        # so calling it on every research sync pass is safe — NSE only
+        # refreshes the files once per day (~18:30 IST).
+        try:
+            from market_data.fo_risk_ingest import ingest_fo_risk_snapshot
+
+            risk_summary = await ingest_fo_risk_snapshot()
+            logger.info(
+                f"[ResearchSync] FO risk ingest: mwpl={risk_summary.mwpl_inserted} "
+                f"ban={risk_summary.ban_inserted} errors={len(risk_summary.errors)}"
+            )
+        except Exception as exc:
+            logger.warning(f"[ResearchSync] FO risk ingest skipped: {exc}")
+            risk_summary = None
+
         db_summary = await self.get_db_summary()
         payload = {
             "run_summary": summary.to_dict(),
@@ -1504,6 +1520,7 @@ class UpstoxResearchSync:
             "discovered_expiry_batches": discovered_expiries,
             "backlog_before": backlog_before,
             "focus_mode": "backlog_drain" if discovery_paused else "discovery_and_sync",
+            "fo_risk_ingest": risk_summary.to_dict() if risk_summary is not None else None,
             "api_calls": {
                 "total": int(sum(self.client.api_call_counts.values())),
                 "by_endpoint": dict(sorted(self.client.api_call_counts.items())),

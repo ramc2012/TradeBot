@@ -1070,6 +1070,15 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
     # so the resistance / support reads pick up the strikes where market
     # makers are most exposed.
     chain_max_pain = await _load_chain_max_pain()
+    # F&O risk snapshot — MWPL utilisation + ban list — Stage 6 of the
+    # blueprint. Daily file; cheap to read every cycle (single SELECT).
+    fo_risk: dict[str, Any] = {}
+    try:
+        from market_data.fo_risk_ingest import latest_fo_risk_snapshot
+
+        fo_risk = await latest_fo_risk_snapshot()
+    except Exception as exc:
+        logger.debug(f"[FNOAnalytics] FO risk snapshot read failed: {exc}")
     nse = {
         "status": "ready" if nse_contracts or (fno_360 or {}).get("status") == "ready" else "missing",
         "source": nse_source,
@@ -1118,6 +1127,7 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
         "scope": ["NSE_FO", "BSE_FO", "MCX_COM"],
         "nse": nse,
         "mcx": mcx,
+        "fo_risk": fo_risk,
         "quality_checks": quality_checks,
         "stage_status": _stage_status(nse, mcx, fno_360),
         "signals": {

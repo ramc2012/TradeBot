@@ -527,6 +527,21 @@ async def fno_analytics(limit: int = Query(20, ge=1, le=100)) -> dict:
     return await build_fno_analytics(fno_360=fno_360, limit=limit)
 
 
+@router.post("/fo-risk/refresh")
+async def fo_risk_refresh() -> dict:
+    """Force a fresh fetch of the NSE MWPL + F&O ban-list CSVs.
+
+    Normally driven by the research-sync daemon; this endpoint exists
+    for the first-run backfill and for operator-triggered refreshes
+    when NSE posts an intraday update.
+    """
+    from market_data.fo_risk_ingest import ingest_fo_risk_snapshot, latest_fo_risk_snapshot
+
+    summary = await ingest_fo_risk_snapshot()
+    latest = await latest_fo_risk_snapshot()
+    return {"summary": summary.to_dict(), "latest": latest}
+
+
 @dataclass(frozen=True)
 class _ResolvedMarketSymbol:
     app_symbol: str
