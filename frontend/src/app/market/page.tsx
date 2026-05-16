@@ -1245,11 +1245,22 @@ function ResearchAnalyticsBlueprint({
           icon={<Activity size={16} className="text-accent-green" />}
           title="Live F&O Analytics"
           detail="Contract master, option-chain, data-quality and risk analytics generated from local NSE/MCX data sources."
-          meta={payload?.as_of ? `as of ${formatTimestamp(payload.as_of)}` : isLoading ? "loading" : "local"}
+          meta={
+            payload?.as_of
+              ? `as of ${formatTimestamp(payload.as_of)}${error ? " · stale, refresh pending" : ""}`
+              : isLoading
+              ? "loading"
+              : "local"
+          }
         />
-        {error ? (
+        {error && !payload ? (
           <div className="mt-3 rounded-lg border border-accent-red/25 bg-accent-red/8 px-3 py-2 text-xs text-accent-red">
-            Unable to load `/api/market/fno-analytics`.
+            Unable to load `/api/market/fno-analytics`. The next refresh tick will retry automatically.
+          </div>
+        ) : null}
+        {error && payload ? (
+          <div className="mt-3 rounded-lg border border-accent-amber/25 bg-accent-amber/8 px-3 py-2 text-xs text-accent-amber">
+            Latest refresh failed; showing cached payload from {formatTimestamp(payload.as_of)}. Auto-retry on next tick.
           </div>
         ) : null}
         <div className="mt-3 grid gap-2 md:grid-cols-4 xl:grid-cols-8">
@@ -1504,8 +1515,14 @@ function LiveMarketTools() {
   const fnoAnalyticsQuery = useQuery<FnoAnalyticsPayload>({
     queryKey: ["marketFnoAnalytics"],
     queryFn: () => getFnoAnalytics(20).then((response) => response.data),
-    staleTime: 60_000,
-    refetchInterval: activeTab === "research" ? 120_000 : false,
+    staleTime: 30_000,
+    // Faster refetch (30s) when on the research tab so a transient
+    // backend restart no longer leaves the dashboard stuck on
+    // "Unable to load…" for two minutes.
+    refetchInterval: activeTab === "research" ? 30_000 : false,
+    refetchOnWindowFocus: true,
+    retry: 2,
+    retryDelay: 2_000,
     enabled: activeTab === "research",
   });
 
