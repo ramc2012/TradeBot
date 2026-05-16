@@ -1514,9 +1514,26 @@ class UpstoxResearchSync:
             risk_summary = None
 
         db_summary = await self.get_db_summary()
+        contract_status = db_summary.get("contract_status") or {}
+        # Surface the per-batch caps + design intent so the operator can
+        # immediately see why X contracts are "skipped" without having to
+        # grep the source. Skipped is a deliberate priority-window
+        # filter, not an error.
+        design_notes = {
+            "discovery_common_strikes": self.DISCOVERY_COMMON_STRIKES,
+            "discovery_side_fallback": self.DISCOVERY_SIDE_FALLBACK,
+            "discovery_backlog_floor": self.DISCOVERY_BACKLOG_FLOOR,
+            "skipped_reason": (
+                "Contracts outside the prioritized strike window are tagged 'skipped' by "
+                f"design — DISCOVERY_COMMON_STRIKES={self.DISCOVERY_COMMON_STRIKES} keeps "
+                "only the closest CE/PE pair to spot. Increase to widen coverage."
+            ),
+            "skipped_contracts": int(contract_status.get("skipped") or 0),
+        }
         payload = {
             "run_summary": summary.to_dict(),
             "db_summary": db_summary,
+            "design_notes": design_notes,
             "discovered_expiry_batches": discovered_expiries,
             "backlog_before": backlog_before,
             "focus_mode": "backlog_drain" if discovery_paused else "discovery_and_sync",

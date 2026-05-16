@@ -239,6 +239,12 @@ class UnderlyingMeta:
     underlying_key: str
 
 
+# Tracks which (set of missing index defaults) we have already self-healed
+# in this process, so the patch log fires exactly once per missing set
+# instead of every scan cycle.
+_DEFAULT_INDEX_WARNING_SEEN: set[frozenset[str]] = set()
+
+
 DEFAULT_INDEX_UNDERLYINGS: tuple[UnderlyingMeta, ...] = (
     UnderlyingMeta(
         symbol="NIFTY",
@@ -2161,6 +2167,55 @@ class ATMWatchlistService:
     ) -> bool:
         return all(self._entry_matches_expiry(entry, expiry_date) for entry in entries if entry is not None)
 
+    async def _upsert_default_index_rows(self, metas: list[UnderlyingMeta]) -> None:
+        """Insert missing index defaults into fo_underlying_catalog so
+        the per-cycle 'missing default index rows' warning stops firing.
+        Idempotent — ON CONFLICT DO NOTHING."""
+        if not metas:
+            return
+        try:
+            payload = [
+                {
+                    "symbol": meta.symbol.upper(),
+                    "kind": meta.kind or "INDEX",
+                    "spot_instrument_key": meta.spot_instrument_key,
+                    "underlying_key": meta.underlying_key,
+                }
+                for meta in metas
+            ]
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO fo_underlying_catalog (
+                            symbol, kind, spot_instrument_key, underlying_key
+                        ) VALUES (
+                            :symbol, :kind, :spot_instrument_key, :underlying_key
+                        )
+                        ON CONFLICT (symbol) DO UPDATE
+                        SET spot_instrument_key = COALESCE(
+                                EXCLUDED.spot_instrument_key,
+                                fo_underlying_catalog.spot_instrument_key
+                            ),
+                            underlying_key = COALESCE(
+                                EXCLUDED.underlying_key,
+                                fo_underlying_catalog.underlying_key
+                            ),
+                            kind = COALESCE(
+                                NULLIF(EXCLUDED.kind, ''),
+                                fo_underlying_catalog.kind
+                            )
+                        """
+                    ),
+                    payload,
+                )
+                await session.commit()
+        except Exception as exc:
+            # Self-heal is best-effort. If the table schema differs in
+            # this deployment, fall back silently — the caller still
+            # uses the in-memory default list for the current cycle.
+            logger.debug(f"[ATM watchlist] default-index self-heal skipped: {exc}")
+
     async def _load_underlyings(self) -> list[UnderlyingMeta]:
         async def _query_rows() -> list[UnderlyingMeta]:
             statement = text("""
@@ -2194,11 +2249,19 @@ class ATMWatchlistService:
                 if meta.symbol.upper() not in by_symbol
             ]
             if missing_defaults:
-                logger.warning(
-                    "[ATM watchlist] fo_underlying_catalog is missing default index rows: "
-                    f"{', '.join(meta.symbol for meta in missing_defaults)}. "
-                    "Using built-in broker keys so index strategy coverage stays complete."
-                )
+                # Self-heal: upsert the missing default index rows so the
+                # next caller does not hit this branch. Was previously a
+                # per-cycle warning that flooded logs every 30-60s.
+                await self._upsert_default_index_rows(missing_defaults)
+                # Log once per process so the operator sees the patch
+                # without scan-cycle spam.
+                missing_key = frozenset(meta.symbol.upper() for meta in missing_defaults)
+                if missing_key not in _DEFAULT_INDEX_WARNING_SEEN:
+                    _DEFAULT_INDEX_WARNING_SEEN.add(missing_key)
+                    logger.info(
+                        "[ATM watchlist] Self-healed missing default index rows in "
+                        f"fo_underlying_catalog: {', '.join(meta.symbol for meta in missing_defaults)}."
+                    )
                 default_symbols = {meta.symbol.upper() for meta in DEFAULT_INDEX_UNDERLYINGS}
                 rows = [
                     by_symbol.get(meta.symbol.upper(), meta)

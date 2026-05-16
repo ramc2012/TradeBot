@@ -4168,6 +4168,26 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                         "status_payload": json.dumps(status_payload),
                     },
                 )
+                # Rolling retention — the table is written every scan cycle
+                # (60s) with the full status_payload as ~28 KB JSONB, so
+                # without a cap the table grows ~40 MB/day. Keep the last
+                # 720 rows per (market, strategy_key) ≈ 12 hours of scan
+                # history. The transition log lives in agent_audit_events
+                # (migration 017) which is the authoritative trail —
+                # agent_risk_state is just a fast point-in-time snapshot.
+                await session.execute(
+                    text(
+                        """
+                        DELETE FROM agent_risk_state
+                        WHERE id IN (
+                            SELECT id FROM agent_risk_state
+                            WHERE market = 'NSE' AND strategy_key = 'paper_strategy_agent'
+                            ORDER BY created_at DESC
+                            OFFSET 720
+                        )
+                        """
+                    )
+                )
                 await session.commit()
         except Exception as exc:
             logger.warning(f"[Strategy] Failed to persist agent risk state: {exc}")
