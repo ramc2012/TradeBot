@@ -214,6 +214,70 @@ type SectorRotationPayload = {
 
 type LiveMarketTab = "chain" | "watchlist" | "sectors" | "rrg" | "research";
 
+type GreekRow = {
+  underlying?: string;
+  option_type?: string;
+  expiry?: string;
+  strike?: number;
+  ltp?: number;
+  iv?: number | null;
+  delta?: number | null;
+  gamma?: number | null;
+  theta?: number | null;
+  vega?: number | null;
+  intrinsic_value?: number | null;
+  time_value?: number | null;
+  probability_itm?: number | null;
+  break_even?: number | null;
+  days_to_expiry?: number | null;
+};
+
+type OiPriceSignal = {
+  underlying?: string;
+  option_type?: string;
+  label?: string;
+  direction?: string;
+  conviction?: string;
+  price_change_pct?: number | null;
+  oi_change_pct?: number | null;
+  notes?: string[];
+};
+
+type CalendarSpread = {
+  underlying?: string;
+  near_contract_id?: string;
+  far_contract_id?: string;
+  near_expiry?: string;
+  far_expiry?: string;
+  near_price?: number;
+  far_price?: number;
+  spread?: number;
+  spread_pct?: number;
+  annualized_basis_pct?: number | null;
+};
+
+type FuturesCurve = {
+  underlying?: string;
+  spot_price?: number | null;
+  points?: Array<Record<string, any>>;
+  curve_shape?: string;
+  calendar_spreads?: Array<Record<string, any>>;
+  basis?: number | null;
+  basis_pct?: number | null;
+  annualized_basis_pct?: number | null;
+  rollover_pct?: number | null;
+  rollover_quality?: string | null;
+  notes?: string[];
+};
+
+type StrikePositioning = {
+  underlying?: string;
+  expiry?: string;
+  strike?: number;
+  bias?: string;
+  note?: string;
+};
+
 type FnoAnalyticsPayload = {
   status?: string;
   as_of?: string;
@@ -225,6 +289,12 @@ type FnoAnalyticsPayload = {
     };
     option_chain?: Record<string, any>;
     risk?: Record<string, any>;
+    greeks?: { rows?: GreekRow[]; count?: number; mode?: string };
+    oi_price_signals?: {
+      count?: number;
+      by_label?: Record<string, OiPriceSignal[]>;
+      top?: OiPriceSignal[];
+    };
   };
   mcx?: {
     status?: string;
@@ -235,12 +305,19 @@ type FnoAnalyticsPayload = {
     option_chain?: Record<string, any>;
     risk?: Record<string, any>;
     source?: Record<string, any>;
+    greeks?: { rows?: GreekRow[]; count?: number; mode?: string };
+    futures_curve?: {
+      curves?: FuturesCurve[];
+      calendar_spreads?: CalendarSpread[];
+      count?: number;
+    };
+    positioning?: { strikes?: StrikePositioning[] };
   };
   quality_checks?: Array<{ key?: string; label?: string; status?: string; detail?: string }>;
   stage_status?: Array<{ stage?: number; name?: string; status?: string; detail?: string }>;
   signals?: {
-    nse?: Record<string, any[]>;
-    mcx?: Record<string, any[]>;
+    nse?: Record<string, any>;
+    mcx?: Record<string, any>;
   };
 };
 
@@ -696,6 +773,287 @@ function qualityTone(value?: string | null) {
   return "text-text-secondary";
 }
 
+// ─── Options Analytics (Phase A) ────────────────────────────────────────────
+// Surfaces the Black-Scholes Greeks, OI–price participant matrix, futures
+// curve shape + calendar spreads, and per-strike positioning bias that the
+// backend's /api/market/fno-analytics endpoint now computes.
+
+const OI_PRICE_LABELS = [
+  { key: "long_buildup", label: "Long Buildup", tone: "text-accent-green", glyph: "↑↑" },
+  { key: "short_covering", label: "Short Covering", tone: "text-accent-green", glyph: "↑↓" },
+  { key: "short_buildup", label: "Short Buildup", tone: "text-accent-red", glyph: "↓↑" },
+  { key: "long_unwinding", label: "Long Unwinding", tone: "text-accent-red", glyph: "↓↓" },
+] as const;
+
+function curveShapeTone(shape?: string | null) {
+  const value = String(shape || "").toLowerCase();
+  if (value === "contango") return "text-accent-amber";
+  if (value === "backwardation") return "text-accent-red";
+  if (value === "flat") return "text-accent-blue";
+  if (value === "mixed") return "text-text-secondary";
+  return "text-text-muted";
+}
+
+function rolloverTone(quality?: string | null) {
+  const value = String(quality || "").toLowerCase();
+  if (value === "strong") return "text-accent-green";
+  if (value === "weak") return "text-accent-red";
+  if (value === "neutral") return "text-accent-amber";
+  return "text-text-muted";
+}
+
+function positioningTone(bias?: string | null) {
+  const value = String(bias || "").toLowerCase();
+  if (value === "call_writing") return "text-accent-red";
+  if (value === "put_writing") return "text-accent-green";
+  if (value === "call_buying") return "text-accent-green";
+  if (value === "put_buying") return "text-accent-red";
+  return "text-text-muted";
+}
+
+function convictionTone(conv?: string | null) {
+  const value = String(conv || "").toLowerCase();
+  if (value === "high") return "text-accent-green";
+  if (value === "medium") return "text-accent-amber";
+  return "text-text-muted";
+}
+
+function GreeksTable({ rows, title, mode }: { rows: GreekRow[]; title: string; mode?: string }) {
+  return (
+    <div className="rounded-lg border border-bg-border/70 bg-bg-primary/30 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-text-primary">{title}</div>
+        <div className="font-mono text-[10px] uppercase tracking-wide text-text-muted">
+          {mode || "BS"} · {rows.length}
+        </div>
+      </div>
+      <div className="mt-2 overflow-auto">
+        <table className="w-full min-w-[520px] text-[11px]">
+          <thead className="text-[10px] uppercase tracking-wide text-text-muted">
+            <tr className="border-b border-bg-border/40">
+              <th className="py-1.5 pr-2 text-left">Contract</th>
+              <th className="py-1.5 pr-2 text-right">LTP</th>
+              <th className="py-1.5 pr-2 text-right">IV</th>
+              <th className="py-1.5 pr-2 text-right">Δ</th>
+              <th className="py-1.5 pr-2 text-right">Γ</th>
+              <th className="py-1.5 pr-2 text-right">Θ/day</th>
+              <th className="py-1.5 pr-2 text-right">Vega</th>
+              <th className="py-1.5 text-right">BE</th>
+            </tr>
+          </thead>
+          <tbody className="font-mono">
+            {rows.slice(0, 8).map((row, i) => (
+              <tr key={`${row.underlying}-${row.option_type}-${row.strike}-${i}`} className="border-b border-bg-border/20">
+                <td className="py-1.5 pr-2 text-text-primary">
+                  <span className="font-semibold">{row.underlying || "--"}</span>
+                  <span className="ml-1 text-text-muted">{row.strike ? formatNumber(row.strike, 0) : "--"}{row.option_type || ""}</span>
+                </td>
+                <td className="py-1.5 pr-2 text-right">{formatNumber(row.ltp)}</td>
+                <td className="py-1.5 pr-2 text-right text-accent-blue">
+                  {row.iv != null ? formatPercent(row.iv * 100, 1) : "--"}
+                </td>
+                <td className="py-1.5 pr-2 text-right">{formatNumber(row.delta, 3)}</td>
+                <td className="py-1.5 pr-2 text-right">{row.gamma != null ? row.gamma.toExponential(2) : "--"}</td>
+                <td className="py-1.5 pr-2 text-right text-accent-red">{formatNumber(row.theta, 2)}</td>
+                <td className="py-1.5 pr-2 text-right">{formatNumber(row.vega, 2)}</td>
+                <td className="py-1.5 text-right text-text-secondary">{formatNumber(row.break_even, 0)}</td>
+              </tr>
+            ))}
+            {!rows.length ? (
+              <tr><td colSpan={8} className="py-3 text-center text-text-muted">No Greeks computed yet (waiting on spot + premium snapshots).</td></tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function OiPriceMatrixCard({ payload }: { payload?: { count?: number; by_label?: Record<string, OiPriceSignal[]> } }) {
+  const byLabel = payload?.by_label || {};
+  const total = payload?.count ?? 0;
+  return (
+    <div className="rounded-lg border border-bg-border/70 bg-bg-primary/30 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-text-primary">OI–Price Participant Matrix</div>
+        <div className="font-mono text-[10px] uppercase tracking-wide text-text-muted">{total} classified</div>
+      </div>
+      <div className="mt-2 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+        {OI_PRICE_LABELS.map((bucket) => {
+          const items = byLabel[bucket.key] || [];
+          return (
+            <div key={bucket.key} className="rounded-md border border-bg-border/50 bg-bg-secondary/30 p-2">
+              <div className="flex items-center justify-between">
+                <span className={clsx("text-[11px] font-semibold uppercase tracking-wide", bucket.tone)}>
+                  <span className="mr-1 font-mono">{bucket.glyph}</span>{bucket.label}
+                </span>
+                <span className="font-mono text-[10px] text-text-muted">{items.length}</span>
+              </div>
+              <div className="mt-1 max-h-[140px] space-y-1 overflow-auto">
+                {items.slice(0, 6).map((item, i) => (
+                  <div key={`${bucket.key}-${item.underlying}-${item.option_type}-${i}`} className="rounded-sm bg-bg-primary/40 px-2 py-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate text-[11px] font-semibold text-text-primary">
+                        {item.underlying} <span className="text-text-muted">{item.option_type}</span>
+                      </span>
+                      <span className={clsx("font-mono text-[9px] uppercase", convictionTone(item.conviction))}>
+                        {item.conviction || "--"}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 flex justify-between font-mono text-[10px] text-text-muted">
+                      <span>P {formatSigned(item.price_change_pct, 2, "%")}</span>
+                      <span>OI {formatSigned(item.oi_change_pct, 2, "%")}</span>
+                    </div>
+                  </div>
+                ))}
+                {!items.length ? <div className="text-[10px] text-text-muted">No items.</div> : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function FuturesCurveCard({ curves, spreads }: { curves: FuturesCurve[]; spreads: CalendarSpread[] }) {
+  return (
+    <div className="rounded-lg border border-bg-border/70 bg-bg-primary/30 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-text-primary">MCX Futures Curve</div>
+        <div className="font-mono text-[10px] uppercase tracking-wide text-text-muted">{curves.length} underlyings · {spreads.length} spreads</div>
+      </div>
+      <div className="mt-2 grid gap-2 lg:grid-cols-2">
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Curve Shape per Underlying</div>
+          <div className="mt-1 space-y-1.5">
+            {curves.map((curve, i) => (
+              <div key={`${curve.underlying}-${i}`} className="rounded-md bg-bg-secondary/30 px-2.5 py-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold text-text-primary">{curve.underlying}</span>
+                  <span className={clsx("font-mono text-[10px] uppercase", curveShapeTone(curve.curve_shape))}>
+                    {curve.curve_shape || "--"}
+                  </span>
+                </div>
+                <div className="mt-1 flex justify-between font-mono text-[10px] text-text-muted">
+                  <span>Basis {formatSigned(curve.basis_pct, 2, "%")}</span>
+                  <span>Ann {formatSigned(curve.annualized_basis_pct, 1, "%")}</span>
+                  <span>
+                    Rollover{" "}
+                    <span className={rolloverTone(curve.rollover_quality)}>
+                      {curve.rollover_pct != null ? `${curve.rollover_pct.toFixed(1)}%` : "--"}
+                      {curve.rollover_quality ? ` · ${curve.rollover_quality}` : ""}
+                    </span>
+                  </span>
+                </div>
+                {curve.notes?.length ? (
+                  <div className="mt-1 text-[10px] leading-4 text-text-muted">{curve.notes[0]}</div>
+                ) : null}
+              </div>
+            ))}
+            {!curves.length ? (
+              <div className="rounded-md bg-bg-secondary/20 px-2.5 py-3 text-[11px] text-text-muted">
+                No curves yet. Curves materialise once two or more futures contracts per root have live prices.
+              </div>
+            ) : null}
+          </div>
+        </div>
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Calendar Spreads (top by annualised basis)</div>
+          <div className="mt-1 space-y-1">
+            {spreads.slice(0, 8).map((s, i) => (
+              <div key={`${s.near_contract_id}-${s.far_contract_id}-${i}`} className="rounded-md bg-bg-secondary/30 px-2.5 py-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold text-text-primary">{s.underlying}</span>
+                  <span className="font-mono text-[10px] text-text-muted">
+                    {s.near_expiry} → {s.far_expiry}
+                  </span>
+                </div>
+                <div className="mt-0.5 flex justify-between font-mono text-[10px]">
+                  <span className="text-text-muted">{formatNumber(s.near_price, 1)} → {formatNumber(s.far_price, 1)}</span>
+                  <span className={clsx(((s.spread ?? 0) >= 0) ? "text-accent-amber" : "text-accent-red")}>
+                    {formatSigned(s.spread, 1)} ({formatSigned(s.spread_pct, 2, "%")})
+                  </span>
+                  <span className="text-text-secondary">
+                    Ann {formatSigned(s.annualized_basis_pct, 1, "%")}
+                  </span>
+                </div>
+              </div>
+            ))}
+            {!spreads.length ? <div className="text-[11px] text-text-muted">No calendar spreads available.</div> : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StrikePositioningCard({ rows }: { rows: StrikePositioning[] }) {
+  return (
+    <div className="rounded-lg border border-bg-border/70 bg-bg-primary/30 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-text-primary">Strike Positioning Bias</div>
+        <div className="font-mono text-[10px] uppercase tracking-wide text-text-muted">{rows.length} strikes</div>
+      </div>
+      <div className="mt-2 space-y-1">
+        {rows.slice(0, 8).map((row, i) => (
+          <div key={`${row.underlying}-${row.strike}-${i}`} className="rounded-md bg-bg-secondary/30 px-2.5 py-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-semibold text-text-primary">
+                {row.underlying} <span className="font-mono text-text-muted">{row.strike ? formatNumber(row.strike, 0) : "--"}</span>
+              </span>
+              <span className={clsx("font-mono text-[10px] uppercase", positioningTone(row.bias))}>
+                {(row.bias || "--").replaceAll("_", " ")}
+              </span>
+            </div>
+            {row.note ? <div className="mt-0.5 text-[10px] leading-4 text-text-muted">{row.note}</div> : null}
+          </div>
+        ))}
+        {!rows.length ? (
+          <div className="text-[11px] text-text-muted">No strikes flagged. Bias surfaces when OI builds with a directional bias.</div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function OptionsAnalyticsSection({
+  payload,
+  isLoading,
+}: {
+  payload?: FnoAnalyticsPayload;
+  isLoading: boolean;
+}) {
+  const nseGreeks = payload?.nse?.greeks?.rows || [];
+  const mcxGreeks = payload?.mcx?.greeks?.rows || [];
+  const oiMatrix = payload?.nse?.oi_price_signals || {};
+  const curves = payload?.mcx?.futures_curve?.curves || [];
+  const spreads = payload?.mcx?.futures_curve?.calendar_spreads || [];
+  const positioning = payload?.mcx?.positioning?.strikes || [];
+
+  return (
+    <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
+      <PanelHeader
+        icon={<Activity size={16} className="text-accent-blue" />}
+        title="Options Analytics"
+        detail="Greeks (Black-Scholes), OI–price participant matrix, futures curve shape and per-strike positioning bias from the live F&O snapshot."
+        meta={isLoading ? "loading" : `${(oiMatrix.count || 0)} OI signals · ${curves.length} curves`}
+      />
+      <div className="mt-3 grid gap-3 xl:grid-cols-2">
+        <GreeksTable rows={nseGreeks} title="NSE Option Greeks (top ATM)" mode={payload?.nse?.greeks?.mode} />
+        <GreeksTable rows={mcxGreeks} title="MCX Option Greeks (top ATM)" mode={payload?.mcx?.greeks?.mode} />
+      </div>
+      <div className="mt-3">
+        <OiPriceMatrixCard payload={oiMatrix} />
+      </div>
+      <div className="mt-3 grid gap-3 xl:grid-cols-[1.4fr_1fr]">
+        <FuturesCurveCard curves={curves} spreads={spreads} />
+        <StrikePositioningCard rows={positioning} />
+      </div>
+    </div>
+  );
+}
+
 function ResearchAnalyticsBlueprint({
   payload,
   isLoading,
@@ -765,6 +1123,8 @@ function ResearchAnalyticsBlueprint({
           </div>
         </div>
       </div>
+
+      <OptionsAnalyticsSection payload={payload} isLoading={isLoading} />
 
       <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
         <PanelHeader
