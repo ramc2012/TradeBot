@@ -149,6 +149,16 @@ type SectorComponentsPayload = {
 };
 
 type LiveMarketTab = "chain" | "watchlist" | "sectors" | "rrg" | "research";
+type ResearchViewTab =
+  | "overview"
+  | "option_chain"
+  | "open_interest"
+  | "scalper"
+  | "idea"
+  | "fo_stats"
+  | "strategy_chart"
+  | "strategy_builder"
+  | "company_info";
 
 type GreekRow = {
   underlying?: string;
@@ -327,6 +337,18 @@ const SECTOR_PERIOD_OPTIONS = [
   { value: "yearly", label: "Yearly" },
 ] as const;
 type SectorPeriod = (typeof SECTOR_PERIOD_OPTIONS)[number]["value"];
+
+const RESEARCH_VIEW_TABS: Array<{ value: ResearchViewTab; label: string; detail: string }> = [
+  { value: "overview", label: "Overview", detail: "Index, contract and quality breadth" },
+  { value: "option_chain", label: "Option Chain", detail: "ATM straddle, expected move and max pain" },
+  { value: "open_interest", label: "Open Interest", detail: "OI-price matrix and build-up labels" },
+  { value: "scalper", label: "Scalper", detail: "Fast OI, IV and MCX risk flags" },
+  { value: "idea", label: "Idea", detail: "Ranked live research signals" },
+  { value: "fo_stats", label: "F&O Stats", detail: "Greeks, IV and participation stats" },
+  { value: "strategy_chart", label: "Strategy Chart", detail: "Futures curve and positioning" },
+  { value: "strategy_builder", label: "Strategy Builder", detail: "Trade inputs and risk gates" },
+  { value: "company_info", label: "Company Info", detail: "Contract master and source coverage" },
+];
 
 function SectorPeriodSelect({
   value,
@@ -1359,6 +1381,105 @@ function ResearchStageTable({ rows }: { rows?: Array<{ stage?: number; name?: st
   );
 }
 
+function ResearchViewTabButton({
+  tab,
+  active,
+  onClick,
+}: {
+  tab: { value: ResearchViewTab; label: string; detail: string };
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={clsx(
+        "min-h-[58px] rounded-lg border px-3 py-2 text-left transition-colors",
+        active
+          ? "border-accent-blue bg-accent-blue/10 text-text-primary shadow-[0_0_0_1px_rgba(74,144,226,0.25)]"
+          : "border-bg-border bg-bg-secondary/25 text-text-muted hover:border-bg-active hover:text-text-primary",
+      )}
+    >
+      <div className="text-[11px] font-semibold uppercase tracking-[0.12em]">{tab.label}</div>
+      <div className="mt-1 text-[10px] leading-snug">{tab.detail}</div>
+    </button>
+  );
+}
+
+function ResearchMetricGrid({
+  payload,
+  isLoading,
+  nseSummary,
+  mcxSummary,
+  nseOptionSummary,
+  mcxOptionSummary,
+}: {
+  payload?: FnoAnalyticsPayload;
+  isLoading: boolean;
+  nseSummary: Record<string, any>;
+  mcxSummary: Record<string, any>;
+  nseOptionSummary: Record<string, any>;
+  mcxOptionSummary: Record<string, any>;
+}) {
+  return (
+    <div className="grid gap-2 md:grid-cols-4 xl:grid-cols-8">
+      <MetricTile label="NSE Contracts" value={String(nseSummary.total_contracts ?? "--")} detail={`${nseSummary.underlyings ?? 0} underlyings`} />
+      <MetricTile label="NSE Options" value={String(nseSummary.option_contracts ?? "--")} detail={`${nseSummary.ce_contracts ?? 0}/${nseSummary.pe_contracts ?? 0} CE/PE`} />
+      <MetricTile label="NSE PCR OI" value={formatNumber(nseOptionSummary.pcr_oi)} detail={`${nseOptionSummary.total_underlyings ?? 0} underlyings`} />
+      <MetricTile label="NSE Avg IV" value={formatNumber(nseOptionSummary.average_iv)} detail={String(payload?.nse?.option_chain?.status || "snapshot")} />
+      <MetricTile label="MCX Contracts" value={String(mcxSummary.total_contracts ?? "--")} detail={`${mcxSummary.underlyings ?? 0} underlyings`} />
+      <MetricTile label="MCX Options" value={String(mcxSummary.option_contracts ?? "--")} detail={`${mcxSummary.ce_contracts ?? 0}/${mcxSummary.pe_contracts ?? 0} CE/PE`} />
+      <MetricTile label="MCX ATM Rows" value={String(mcxOptionSummary.rows ?? "--")} detail={`CE ${mcxOptionSummary.ce_ready ?? 0} · PE ${mcxOptionSummary.pe_ready ?? 0}`} />
+      <MetricTile label="Quality" value={payload?.status || (isLoading ? "loading" : "--")} tone={qualityTone(payload?.status)} />
+    </div>
+  );
+}
+
+function QualityChecksPanel({ payload, isLoading }: { payload?: FnoAnalyticsPayload; isLoading: boolean }) {
+  return (
+    <div className="rounded-lg border border-bg-border bg-bg-secondary/25 p-3">
+      <div className="text-sm font-semibold text-text-primary">Data Quality Checks</div>
+      <div className="mt-3 space-y-2">
+        {(payload?.quality_checks || []).map((check) => (
+          <div key={check.key || check.label} className="rounded-lg border border-bg-border/70 bg-bg-primary/30 px-3 py-2">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs font-semibold text-text-primary">{check.label}</span>
+              <span className={clsx("font-mono text-[11px] uppercase", qualityTone(check.status))}>{check.status || "--"}</span>
+            </div>
+            <div className="mt-1 text-[11px] leading-5 text-text-muted">{check.detail}</div>
+          </div>
+        ))}
+        {!payload?.quality_checks?.length ? (
+          <div className="text-xs text-text-muted">{isLoading ? "Loading local F&O analytics..." : "No quality checks returned."}</div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function SignalWatchPanel({
+  nseSignals,
+  mcxSignals,
+  title = "Risk And Signal Watch",
+}: {
+  nseSignals: Record<string, any>;
+  mcxSignals: Record<string, any>;
+  title?: string;
+}) {
+  return (
+    <div className="rounded-lg border border-bg-border bg-bg-secondary/25 p-3">
+      <div className="text-sm font-semibold text-text-primary">{title}</div>
+      <div className="mt-3 grid gap-2 md:grid-cols-2">
+        <SignalList title="NSE OI Change" rows={nseSignals.oi_change_contracts || []} />
+        <SignalList title="NSE Volatility" rows={nseSignals.volatility_watch || []} />
+        <SignalList title="MCX Devolvement" rows={mcxSignals.devolvement_watch || []} />
+        <SignalList title="MCX Spread" rows={mcxSignals.spread_watch || []} />
+      </div>
+    </div>
+  );
+}
+
 function ResearchAnalyticsPanel({
   payload,
   isLoading,
@@ -1374,14 +1495,131 @@ function ResearchAnalyticsPanel({
   const mcxOptionSummary = payload?.mcx?.option_chain || {};
   const nseSignals = payload?.signals?.nse || {};
   const mcxSignals = payload?.signals?.mcx || {};
+  const [activeResearchTab, setActiveResearchTab] = useState<ResearchViewTab>("overview");
+  const nseGreeks = payload?.nse?.greeks?.rows || [];
+  const mcxGreeks = payload?.mcx?.greeks?.rows || [];
+  const oiMatrix = payload?.nse?.oi_price_signals || {};
+  const curves = payload?.mcx?.futures_curve?.curves || [];
+  const spreads = payload?.mcx?.futures_curve?.calendar_spreads || [];
+  const positioning = payload?.mcx?.positioning?.strikes || [];
+  const nseStraddles = payload?.nse?.straddle_summary || [];
+  const mcxStraddles = payload?.mcx?.straddle_summary || [];
+  const nseMaxPain = payload?.nse?.max_pain || [];
+  const mcxMaxPain = payload?.mcx?.max_pain || [];
+
+  const renderActiveResearchTab = () => {
+    switch (activeResearchTab) {
+      case "option_chain":
+        return (
+          <div className="space-y-3">
+            <div className="grid gap-3 xl:grid-cols-2">
+              <StraddleTable rows={nseStraddles} title="NSE ATM Straddle & Expected Move" />
+              <StraddleTable rows={mcxStraddles} title="MCX ATM Straddle & Expected Move" />
+            </div>
+            <div className="grid gap-3 xl:grid-cols-2">
+              <MaxPainTable rows={nseMaxPain} title="NSE Max Pain · Support/Resistance · Chain PCR" />
+              <MaxPainTable rows={mcxMaxPain} title="MCX Max Pain · Support/Resistance · Chain PCR" />
+            </div>
+          </div>
+        );
+      case "open_interest":
+        return (
+          <div className="space-y-3">
+            <OiPriceMatrixCard payload={oiMatrix} />
+            <div className="grid gap-3 xl:grid-cols-2">
+              <MaxPainTable rows={nseMaxPain} title="NSE OI Concentration" />
+              <MaxPainTable rows={mcxMaxPain} title="MCX OI Concentration" />
+            </div>
+          </div>
+        );
+      case "scalper":
+        return (
+          <div className="space-y-3">
+            <SignalWatchPanel title="Scalper Watch" nseSignals={nseSignals} mcxSignals={mcxSignals} />
+            <div className="grid gap-3 xl:grid-cols-[1.4fr_1fr]">
+              <OiPriceMatrixCard payload={oiMatrix} />
+              <StrikePositioningCard rows={positioning} />
+            </div>
+          </div>
+        );
+      case "idea":
+        return (
+          <div className="space-y-3">
+            <ResearchModuleGrid payload={payload} />
+            <SignalWatchPanel title="Idea Feed" nseSignals={nseSignals} mcxSignals={mcxSignals} />
+          </div>
+        );
+      case "fo_stats":
+        return (
+          <div className="space-y-3">
+            <div className="grid gap-3 xl:grid-cols-2">
+              <GreeksTable rows={nseGreeks} title="NSE Option Greeks (top ATM)" mode={payload?.nse?.greeks?.mode} />
+              <GreeksTable rows={mcxGreeks} title="MCX Option Greeks (top ATM)" mode={payload?.mcx?.greeks?.mode} />
+            </div>
+            <div className="grid gap-3 xl:grid-cols-2">
+              <StraddleTable rows={nseStraddles} title="NSE Volatility Stats" />
+              <StraddleTable rows={mcxStraddles} title="MCX Volatility Stats" />
+            </div>
+          </div>
+        );
+      case "strategy_chart":
+        return (
+          <div className="grid gap-3 xl:grid-cols-[1.4fr_1fr]">
+            <FuturesCurveCard curves={curves} spreads={spreads} />
+            <StrikePositioningCard rows={positioning} />
+          </div>
+        );
+      case "strategy_builder":
+        return (
+          <div className="space-y-3">
+            <FoRiskCard payload={payload?.fo_risk} />
+            <div className="grid gap-3 xl:grid-cols-2">
+              <MaxPainTable rows={nseMaxPain} title="NSE Structure Inputs" />
+              <MaxPainTable rows={mcxMaxPain} title="MCX Structure Inputs" />
+            </div>
+            <ResearchStageTable rows={payload?.stage_status} />
+          </div>
+        );
+      case "company_info":
+        return (
+          <div className="space-y-3">
+            <ResearchModuleGrid payload={payload} />
+            <div className="grid gap-3 xl:grid-cols-2">
+              <ContractSampleTable title="NSE Contract Master Sample" rows={payload?.nse?.contract_master?.sample || []} />
+              <ContractSampleTable title="MCX Contract Master Sample" rows={payload?.mcx?.contract_master?.sample || []} />
+            </div>
+            <ResearchStageTable rows={payload?.stage_status} />
+          </div>
+        );
+      case "overview":
+      default:
+        return (
+          <div className="space-y-3">
+            <ResearchMetricGrid
+              payload={payload}
+              isLoading={isLoading}
+              nseSummary={nseSummary}
+              mcxSummary={mcxSummary}
+              nseOptionSummary={nseOptionSummary}
+              mcxOptionSummary={mcxOptionSummary}
+            />
+            <div className="grid gap-3 xl:grid-cols-[0.85fr_1.15fr]">
+              <QualityChecksPanel payload={payload} isLoading={isLoading} />
+              <SignalWatchPanel nseSignals={nseSignals} mcxSignals={mcxSignals} />
+            </div>
+            <ResearchModuleGrid payload={payload} />
+          </div>
+        );
+    }
+  };
 
   return (
     <div className="mt-3 space-y-3">
       <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
         <PanelHeader
           icon={<Activity size={16} className="text-accent-green" />}
-          title="Live F&O Analytics"
-          detail="Contract master, option-chain, data-quality and risk analytics generated from local NSE/MCX data sources."
+          title="NSE + MCX Research"
+          detail="FNO 360-style research workspace using local NSE and MCX contract, option, OI, volatility and risk analytics."
           meta={
             payload?.as_of
               ? `as of ${formatTimestamp(payload.as_of)}${error ? " · stale, refresh pending" : ""}`
@@ -1400,43 +1638,45 @@ function ResearchAnalyticsPanel({
             Latest refresh failed; showing cached payload from {formatTimestamp(payload.as_of)}. Auto-retry on next tick.
           </div>
         ) : null}
-        <div className="mt-3 grid gap-2 md:grid-cols-4 xl:grid-cols-8">
-          <MetricTile label="NSE Contracts" value={String(nseSummary.total_contracts ?? "--")} detail={`${nseSummary.underlyings ?? 0} underlyings`} />
-          <MetricTile label="NSE Options" value={String(nseSummary.option_contracts ?? "--")} detail={`${nseSummary.ce_contracts ?? 0}/${nseSummary.pe_contracts ?? 0} CE/PE`} />
-          <MetricTile label="NSE PCR OI" value={formatNumber(nseOptionSummary.pcr_oi)} detail={`${nseOptionSummary.total_underlyings ?? 0} underlyings`} />
-          <MetricTile label="NSE Avg IV" value={formatNumber(nseOptionSummary.average_iv)} detail={String(payload?.nse?.option_chain?.status || "snapshot")} />
-          <MetricTile label="MCX Contracts" value={String(mcxSummary.total_contracts ?? "--")} detail={`${mcxSummary.underlyings ?? 0} underlyings`} />
-          <MetricTile label="MCX Options" value={String(mcxSummary.option_contracts ?? "--")} detail={`${mcxSummary.ce_contracts ?? 0}/${mcxSummary.pe_contracts ?? 0} CE/PE`} />
-          <MetricTile label="MCX ATM Rows" value={String(mcxOptionSummary.rows ?? "--")} detail={`CE ${mcxOptionSummary.ce_ready ?? 0} · PE ${mcxOptionSummary.pe_ready ?? 0}`} />
-          <MetricTile label="Quality" value={payload?.status || (isLoading ? "loading" : "--")} tone={qualityTone(payload?.status)} />
+        <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-9">
+          {RESEARCH_VIEW_TABS.map((tab) => (
+            <ResearchViewTabButton
+              key={tab.value}
+              tab={tab}
+              active={activeResearchTab === tab.value}
+              onClick={() => setActiveResearchTab(tab.value)}
+            />
+          ))}
+        </div>
+        <div className="mt-3">{renderActiveResearchTab()}</div>
+      </div>
+
+      <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
+        <PanelHeader
+          icon={<Activity size={16} className="text-accent-green" />}
+          title="Live F&O Analytics"
+          detail="Contract master, option-chain, data-quality and risk analytics generated from local NSE/MCX data sources."
+          meta={
+            payload?.as_of
+              ? `as of ${formatTimestamp(payload.as_of)}${error ? " · stale, refresh pending" : ""}`
+              : isLoading
+              ? "loading"
+              : "local"
+          }
+        />
+        <div className="mt-3">
+          <ResearchMetricGrid
+            payload={payload}
+            isLoading={isLoading}
+            nseSummary={nseSummary}
+            mcxSummary={mcxSummary}
+            nseOptionSummary={nseOptionSummary}
+            mcxOptionSummary={mcxOptionSummary}
+          />
         </div>
         <div className="mt-3 grid gap-3 xl:grid-cols-[0.85fr_1.15fr]">
-          <div className="rounded-lg border border-bg-border bg-bg-secondary/25 p-3">
-            <div className="text-sm font-semibold text-text-primary">Data Quality Checks</div>
-            <div className="mt-3 space-y-2">
-              {(payload?.quality_checks || []).map((check) => (
-                <div key={check.key || check.label} className="rounded-lg border border-bg-border/70 bg-bg-primary/30 px-3 py-2">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-xs font-semibold text-text-primary">{check.label}</span>
-                    <span className={clsx("font-mono text-[11px] uppercase", qualityTone(check.status))}>{check.status || "--"}</span>
-                  </div>
-                  <div className="mt-1 text-[11px] leading-5 text-text-muted">{check.detail}</div>
-                </div>
-              ))}
-              {!payload?.quality_checks?.length ? (
-                <div className="text-xs text-text-muted">{isLoading ? "Loading local F&O analytics..." : "No quality checks returned."}</div>
-              ) : null}
-            </div>
-          </div>
-          <div className="rounded-lg border border-bg-border bg-bg-secondary/25 p-3">
-            <div className="text-sm font-semibold text-text-primary">Risk And Signal Watch</div>
-            <div className="mt-3 grid gap-2 md:grid-cols-2">
-              <SignalList title="NSE OI Change" rows={nseSignals.oi_change_contracts || []} />
-              <SignalList title="NSE Volatility" rows={nseSignals.volatility_watch || []} />
-              <SignalList title="MCX Devolvement" rows={mcxSignals.devolvement_watch || []} />
-              <SignalList title="MCX Spread" rows={mcxSignals.spread_watch || []} />
-            </div>
-          </div>
+          <QualityChecksPanel payload={payload} isLoading={isLoading} />
+          <SignalWatchPanel nseSignals={nseSignals} mcxSignals={mcxSignals} />
         </div>
       </div>
 
