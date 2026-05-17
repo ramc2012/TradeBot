@@ -6,8 +6,6 @@ import { clsx } from "clsx";
 import {
   Activity,
   BarChart3,
-  Brain,
-  CheckCircle2,
   Database,
   RefreshCw,
   Shield,
@@ -310,91 +308,16 @@ type FnoAnalyticsPayload = {
   fo_risk?: FoRiskPayload;
   quality_checks?: Array<{ key?: string; label?: string; status?: string; detail?: string }>;
   stage_status?: Array<{ stage?: number; name?: string; status?: string; detail?: string }>;
+  research?: {
+    modules?: Array<{ key?: string; label?: string; status?: string; metric?: string; detail?: string }>;
+    answer_cards?: Array<{ key?: string; label?: string; status?: string; value?: string; detail?: string }>;
+    sources?: Array<{ key?: string; label?: string; status?: string; detail?: string }>;
+  };
   signals?: {
     nse?: Record<string, any>;
     mcx?: Record<string, any>;
   };
 };
-
-const RESEARCH_PRINCIPLES = [
-  "Contract correctness first",
-  "Data quality second",
-  "Risk context third",
-  "Analytics fourth",
-  "Signals fifth",
-  "Trading last, if at all",
-];
-
-const CONTRACT_MASTER_FIELDS = [
-  "exchange",
-  "segment",
-  "instrument_type",
-  "underlying",
-  "expiry_date",
-  "strike_price",
-  "option_type",
-  "lot_size",
-  "tick_size",
-  "price_unit",
-  "exercise_style",
-  "settlement_type",
-  "delivery/tender flags",
-  "margin/circular refs",
-];
-
-const RESEARCH_MODULES = [
-  {
-    title: "Contract Master",
-    detail: "Canonical NSE and MCX instrument identity, lot sizes, expiries, strikes, settlement, devolvement and circular references.",
-    items: ["FUTIDX / OPTIDX / FUTSTK / OPTSTK", "FUTCOM / FUTIDX / OPTCOM / OPTFUT / OPTIDX", "zero duplicate active contracts"],
-  },
-  {
-    title: "Data Ingestion",
-    detail: "EOD, live, option-chain, bhavcopy, margin, calendar and circular ingestion with source checksums and replayable raw archives.",
-    items: ["NSE contract price-volume and option chains", "MCX bhavcopy, option chain and market watch", "licensed live/delayed feed ready"],
-  },
-  {
-    title: "Option Intelligence",
-    detail: "Strike ladder, OI, change in OI, PCR, ATM straddle, expected move, IV smile, IV rank, Greeks and gamma concentration.",
-    items: ["NSE chain workbench", "MCX option devolvement map", "exchange-comparable and internal-risk IV modes"],
-  },
-  {
-    title: "Futures Curve",
-    detail: "Near/mid/far futures, basis, annualized basis, rollover, OI migration, contango/backwardation and calendar-spread behavior.",
-    items: ["NSE three-month futures cycle", "MCX curve and roll yield", "spot/reference basis audit"],
-  },
-  {
-    title: "Risk & Margin",
-    detail: "SPAN, exposure, ELM, delivery, tender, MWPL/ban, physical settlement, deep OTM short option and MCX devolvement risk.",
-    items: ["margin snapshot by contract", "expiry-day scenario P&L", "no alert without risk context"],
-  },
-  {
-    title: "Research Assistant",
-    detail: "Explains alerts, cites source snapshots, refuses stale data and links every explanation to contract, market, margin or circular data.",
-    items: ["daily NSE F&O summary", "daily MCX summary", "source-cited alert explanation"],
-  },
-];
-
-const DASHBOARD_BLUEPRINT = [
-  ["Market Overview", "NIFTY, BANKNIFTY, India VIX, MCX majors, top OI/volume moves, expiry calendar and events."],
-  ["NSE Option Chain", "Underlying/expiry selector, OI bars, change-OI, IV smile, ATM straddle, expected move, PCR and max OI zones."],
-  ["MCX Option Chain", "Commodity selector, underlying future, devolvement warning, bid-ask spread, IV smile and expiry P&L scenario."],
-  ["Futures Curve", "Near/next/far prices, curve shape, calendar spread, basis, OI by expiry and rollover migration."],
-  ["Risk & Margin", "SPAN, exposure, ELM, tender/delivery margin, portfolio Greeks, stress P&L, MWPL/ban and devolvement risk."],
-  ["Alerts", "Unusual OI, IV spike, spread widening, stale feed, expiry risk, margin spike, circular detected and delivery/tender warning."],
-];
-
-const BUILD_STAGES = [
-  ["1", "Contract Master", "99.9% mapping accuracy, no duplicate active contracts, daily contract refresh works."],
-  ["2", "EOD Pipeline", "OHLC/OI validation, checksum, idempotent re-runs, missing-contract report and raw file archive."],
-  ["3", "Option Chain", "ATM, PCR, OI totals, call/put mapping, bid-ask spread and ITM/OTM checks trace to raw snapshot."],
-  ["4", "Greeks & Vol", "Black-Scholes tests, IV solver convergence, near-expiry stability and visible assumptions."],
-  ["5", "Curve & Rollover", "Expiry ordering, basis source, rollover percent, spread sign convention and expired-contract pruning."],
-  ["6", "Risk & Margin", "Margin field mapping, portfolio exposure, stock physical settlement, MCX devolvement and margin-spike alerts."],
-  ["7", "Live Alerts", "Latency monitor, stale data block, duplicate/out-of-order tick handling and synthetic alert tests."],
-  ["8", "Strategy Lab", "No look-ahead bias, transaction cost, slippage, expiry, settlement, devolvement and reproducible replay."],
-  ["9", "Research Assistant", "No invented data, source-cited answers, stale-data refusal and uncertainty explanation."],
-];
 
 const SECTOR_PERIOD_OPTIONS = [
   { value: "daily", label: "Daily" },
@@ -1287,7 +1210,156 @@ function OptionsAnalyticsSection({
   );
 }
 
-function ResearchAnalyticsBlueprint({
+function ResearchModuleGrid({ payload }: { payload?: FnoAnalyticsPayload }) {
+  const modules = payload?.research?.modules || [];
+  const answers = payload?.research?.answer_cards || [];
+  const sources = payload?.research?.sources || [];
+  return (
+    <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
+      <PanelHeader
+        icon={<Database size={16} className="text-accent-blue" />}
+        title="Live Research Control"
+        detail="Data-backed NSE/MCX research modules, source coverage and decision checks generated by the analytics endpoint."
+        meta={`${modules.length} modules · ${sources.length} sources`}
+      />
+      <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+        {answers.map((item) => (
+          <div key={item.key || item.label} className="rounded-lg border border-bg-border/70 bg-bg-secondary/25 px-3 py-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-[11px] font-semibold text-text-primary">{item.label}</div>
+              <span className={clsx("font-mono text-[10px] uppercase", qualityTone(item.status))}>{item.status || "--"}</span>
+            </div>
+            <div className="mt-2 font-mono text-lg text-text-primary">{item.value || "--"}</div>
+            <div className="mt-1 text-[11px] leading-5 text-text-muted">{item.detail || "--"}</div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 grid gap-3 xl:grid-cols-[1.15fr_0.85fr]">
+        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+          {modules.map((module) => (
+            <div key={module.key || module.label} className="rounded-lg border border-bg-border/70 bg-bg-secondary/25 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs font-semibold text-text-primary">{module.label}</div>
+                <span className={clsx("font-mono text-[10px] uppercase", qualityTone(module.status))}>{module.status || "--"}</span>
+              </div>
+              <div className="mt-2 font-mono text-sm text-accent-blue">{module.metric || "--"}</div>
+              <div className="mt-2 text-[11px] leading-5 text-text-muted">{module.detail || "--"}</div>
+            </div>
+          ))}
+          {!modules.length ? (
+            <div className="rounded-lg border border-bg-border/70 bg-bg-secondary/25 p-3 text-xs text-text-muted">
+              Research modules will appear once `/api/market/fno-analytics` returns live source coverage.
+            </div>
+          ) : null}
+        </div>
+        <div className="rounded-lg border border-bg-border/70 bg-bg-secondary/25 p-3">
+          <div className="text-sm font-semibold text-text-primary">Source Coverage</div>
+          <div className="mt-3 space-y-2">
+            {sources.map((source) => (
+              <div key={source.key || source.label} className="rounded-md border border-bg-border/60 bg-bg-primary/30 px-3 py-2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs font-semibold text-text-primary">{source.label}</span>
+                  <span className={clsx("font-mono text-[10px] uppercase", qualityTone(source.status))}>{source.status || "--"}</span>
+                </div>
+                <div className="mt-1 font-mono text-[10px] leading-4 text-text-muted">{source.detail || "--"}</div>
+              </div>
+            ))}
+            {!sources.length ? <div className="text-xs text-text-muted">No source coverage returned.</div> : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ContractSampleTable({
+  title,
+  rows,
+}: {
+  title: string;
+  rows: Array<Record<string, any>>;
+}) {
+  return (
+    <div className="rounded-lg border border-bg-border/70 bg-bg-primary/30 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-text-primary">{title}</div>
+        <div className="font-mono text-[10px] uppercase tracking-wide text-text-muted">{rows.length} sampled</div>
+      </div>
+      <div className="mt-2 overflow-auto">
+        <table className="w-full min-w-[760px] text-[11px]">
+          <thead className="text-[10px] uppercase tracking-wide text-text-muted">
+            <tr className="border-b border-bg-border/40">
+              <th className="py-1.5 pr-2 text-left">Contract</th>
+              <th className="py-1.5 pr-2 text-left">Underlying</th>
+              <th className="py-1.5 pr-2 text-left">Type</th>
+              <th className="py-1.5 pr-2 text-right">Expiry</th>
+              <th className="py-1.5 pr-2 text-right">Strike</th>
+              <th className="py-1.5 pr-2 text-right">Lot</th>
+              <th className="py-1.5 text-left">Risk</th>
+            </tr>
+          </thead>
+          <tbody className="font-mono">
+            {rows.slice(0, 10).map((row, index) => (
+              <tr key={`${row.contract_id || row.instrument_key}-${index}`} className="border-b border-bg-border/20">
+                <td className="max-w-[260px] truncate py-1.5 pr-2 text-text-primary" title={row.contract_id || "--"}>{row.contract_id || "--"}</td>
+                <td className="py-1.5 pr-2 text-text-secondary">{row.underlying || "--"}</td>
+                <td className="py-1.5 pr-2 text-text-secondary">{row.instrument_type || "--"}{row.option_type ? `/${row.option_type}` : ""}</td>
+                <td className="py-1.5 pr-2 text-right text-text-muted">{row.expiry_date || "--"}</td>
+                <td className="py-1.5 pr-2 text-right text-text-secondary">{formatNumber(row.strike_price, 0)}</td>
+                <td className="py-1.5 pr-2 text-right text-text-secondary">{row.lot_size ?? "--"}</td>
+                <td className="py-1.5 text-left">
+                  <span className={clsx("rounded-md border px-1.5 py-0.5 text-[10px] uppercase", row.is_devolvement_applicable || row.is_physical_settlement ? "border-accent-amber/30 bg-accent-amber/8 text-accent-amber" : "border-bg-border bg-bg-secondary/30 text-text-muted")}>
+                    {row.is_devolvement_applicable ? "devolves" : row.is_physical_settlement ? "physical" : "cash"}
+                  </span>
+                </td>
+              </tr>
+            ))}
+            {!rows.length ? <tr><td colSpan={7} className="py-3 text-center text-text-muted">No contract samples available.</td></tr> : null}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ResearchStageTable({ rows }: { rows?: Array<{ stage?: number; name?: string; status?: string; detail?: string }> }) {
+  const items = rows || [];
+  return (
+    <div className="rounded-lg border border-bg-border/70 bg-bg-primary/30 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-text-primary">Build And Test Gates</div>
+        <div className="font-mono text-[10px] uppercase tracking-wide text-text-muted">{items.length} live statuses</div>
+      </div>
+      <div className="mt-2 overflow-auto">
+        <table className="w-full min-w-[720px] text-[11px]">
+          <thead className="text-[10px] uppercase tracking-wide text-text-muted">
+            <tr className="border-b border-bg-border/40">
+              <th className="py-1.5 pr-2 text-left">Stage</th>
+              <th className="py-1.5 pr-2 text-left">Module</th>
+              <th className="py-1.5 pr-2 text-left">Status</th>
+              <th className="py-1.5 text-left">Live Detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((item) => (
+              <tr key={`${item.stage}-${item.name}`} className="border-b border-bg-border/20 align-top">
+                <td className="py-1.5 pr-2 font-mono text-accent-blue">{item.stage ?? "--"}</td>
+                <td className="py-1.5 pr-2 font-semibold text-text-primary">{item.name || "--"}</td>
+                <td className="py-1.5 pr-2">
+                  <span className={clsx("font-mono text-[10px] uppercase", qualityTone(item.status))}>{item.status || "--"}</span>
+                </td>
+                <td className="py-1.5 text-text-muted">{item.detail || "Status computed from current data coverage."}</td>
+              </tr>
+            ))}
+            {!items.length ? <tr><td colSpan={4} className="py-3 text-center text-text-muted">No stage statuses returned.</td></tr> : null}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ResearchAnalyticsPanel({
   payload,
   isLoading,
   error,
@@ -1370,147 +1442,14 @@ function ResearchAnalyticsBlueprint({
 
       <OptionsAnalyticsSection payload={payload} isLoading={isLoading} />
 
-      <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
-        <PanelHeader
-          icon={<Brain size={16} className="text-accent-blue" />}
-          title="NSE + MCX F&O Research Blueprint"
-          detail="Analytics, risk and research system design for NSE equity derivatives and MCX commodity derivatives."
-          meta="research first"
-        />
-        <div className="mt-3 grid gap-2 md:grid-cols-3 xl:grid-cols-6">
-          {RESEARCH_PRINCIPLES.map((item, index) => (
-            <div key={item} className="rounded-lg border border-bg-border bg-bg-secondary/30 px-3 py-2">
-              <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-text-muted">Priority {index + 1}</div>
-              <div className="mt-1 text-sm font-semibold text-text-primary">{item}</div>
-            </div>
-          ))}
-        </div>
-        <div className="mt-3 grid gap-3 xl:grid-cols-[1.1fr_0.9fr]">
-          <div className="rounded-lg border border-bg-border bg-bg-secondary/25 p-3">
-            <div className="text-sm font-semibold text-text-primary">Questions the platform must answer</div>
-            <div className="mt-3 grid gap-2 md:grid-cols-5">
-              {[
-                ["What is happening?", "Price, volume, OI, IV, Greeks, spread, depth, rollover and volatility."],
-                ["Where is the risk?", "Margin, expiry, gamma, delivery/devolvement, MWPL/ban and liquidity risk."],
-                ["What changed today?", "OI buildup, IV spike, basis movement, roll move, unusual volume and volatility breakout."],
-                ["Is it tradeable?", "Liquidity, bid-ask, depth, slippage, margin, lot size and expiry proximity."],
-                ["Why was it flagged?", "Every alert carries the transparent data snapshot and explanation."],
-              ].map(([title, detail]) => (
-                <div key={title} className="rounded-lg border border-bg-border/70 bg-bg-primary/30 p-3">
-                  <div className="text-xs font-semibold text-text-primary">{title}</div>
-                  <div className="mt-2 text-[11px] leading-5 text-text-muted">{detail}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-          <div className="rounded-lg border border-bg-border bg-bg-secondary/25 p-3">
-            <div className="text-sm font-semibold text-text-primary">Canonical IDs</div>
-            <div className="mt-3 space-y-2 font-mono text-[11px] text-text-secondary">
-              <div className="rounded-md bg-bg-primary/50 px-3 py-2">NSE:FO:OPTIDX:NIFTY:2026-05-26:23700:CE</div>
-              <div className="rounded-md bg-bg-primary/50 px-3 py-2">NSE:FO:FUTSTK:RELIANCE:2026-05-26</div>
-              <div className="rounded-md bg-bg-primary/50 px-3 py-2">MCX:COM:OPTFUT:CRUDEOIL:2026-06-17:8300:PE</div>
-              <div className="rounded-md bg-bg-primary/50 px-3 py-2">MCX:COM:FUTCOM:GOLD:2026-06-05</div>
-            </div>
-          </div>
-        </div>
+      <ResearchModuleGrid payload={payload} />
+
+      <div className="grid gap-3 xl:grid-cols-2">
+        <ContractSampleTable title="NSE Contract Master Sample" rows={payload?.nse?.contract_master?.sample || []} />
+        <ContractSampleTable title="MCX Contract Master Sample" rows={payload?.mcx?.contract_master?.sample || []} />
       </div>
 
-      <div className="grid gap-3 xl:grid-cols-[0.82fr_1.18fr]">
-        <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
-          <PanelHeader
-            icon={<Database size={16} className="text-accent-green" />}
-            title="Contract Master Foundation"
-            detail="Start with contract correctness before charts, strategy or alerts."
-            meta={`${CONTRACT_MASTER_FIELDS.length} fields`}
-          />
-          <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-text-secondary md:grid-cols-3">
-            {CONTRACT_MASTER_FIELDS.map((field) => (
-              <div key={field} className="rounded-md border border-bg-border/70 bg-bg-secondary/25 px-2.5 py-2 font-mono">
-                {field}
-              </div>
-            ))}
-          </div>
-          <div className="mt-3 rounded-lg border border-accent-amber/25 bg-accent-amber/8 p-3 text-xs leading-5 text-text-secondary">
-            MCX options must map to the underlying futures contract because ITM options can devolve into futures. NSE stock F&O must carry
-            physical-settlement, MWPL/ban, corporate-action and deep-OTM short-option risk flags.
-          </div>
-        </div>
-
-        <div className="grid gap-3 md:grid-cols-2">
-          {RESEARCH_MODULES.map((module) => (
-            <div key={module.title} className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
-              <div className="text-sm font-semibold text-text-primary">{module.title}</div>
-              <div className="mt-2 min-h-[58px] text-xs leading-5 text-text-muted">{module.detail}</div>
-              <div className="mt-3 space-y-1.5">
-                {module.items.map((item) => (
-                  <div key={item} className="flex items-start gap-2 text-[11px] leading-5 text-text-secondary">
-                    <CheckCircle2 size={12} className="mt-1 shrink-0 text-accent-green" />
-                    <span>{item}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="grid gap-3 xl:grid-cols-[1fr_1fr]">
-        <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
-          <PanelHeader
-            icon={<BarChart3 size={16} className="text-accent-blue" />}
-            title="Dashboard Plan"
-            detail="Dedicated workbenches to keep NSE, MCX, risk and alerts inspectable."
-            meta="6 dashboards"
-          />
-          <div className="mt-3 overflow-auto rounded-lg border border-bg-border">
-            <table className="w-full min-w-[760px] text-xs">
-              <thead className="bg-bg-primary/70 text-text-muted">
-                <tr>
-                  <th className="px-3 py-2 text-left">Dashboard</th>
-                  <th className="px-3 py-2 text-left">Scope</th>
-                </tr>
-              </thead>
-              <tbody>
-                {DASHBOARD_BLUEPRINT.map(([name, scope]) => (
-                  <tr key={name} className="border-t border-bg-border/60">
-                    <td className="px-3 py-2 font-semibold text-text-primary">{name}</td>
-                    <td className="px-3 py-2 leading-5 text-text-secondary">{scope}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
-          <PanelHeader
-            icon={<Shield size={16} className="text-accent-amber" />}
-            title="Build And Test Gates"
-            detail="Stage-by-stage exit criteria for a data-quality-first analytics system."
-            meta="9 stages"
-          />
-          <div className="mt-3 max-h-[460px] overflow-auto rounded-lg border border-bg-border">
-            <table className="w-full min-w-[820px] text-xs">
-              <thead className="sticky top-0 bg-bg-primary/95 text-text-muted">
-                <tr>
-                  <th className="px-3 py-2 text-left">Stage</th>
-                  <th className="px-3 py-2 text-left">Build</th>
-                  <th className="px-3 py-2 text-left">Exit Criteria</th>
-                </tr>
-              </thead>
-              <tbody>
-                {BUILD_STAGES.map(([stage, build, criteria]) => (
-                  <tr key={stage} className="border-t border-bg-border/60 align-top">
-                    <td className="px-3 py-2 font-mono text-accent-blue">{stage}</td>
-                    <td className="px-3 py-2 font-semibold text-text-primary">{build}</td>
-                    <td className="px-3 py-2 leading-5 text-text-secondary">{criteria}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
+      <ResearchStageTable rows={payload?.stage_status} />
     </div>
   );
 }
@@ -1982,7 +1921,7 @@ function LiveMarketTools() {
       ) : null}
 
       {activeTab === "research" ? (
-        <ResearchAnalyticsBlueprint
+        <ResearchAnalyticsPanel
           payload={fnoAnalyticsQuery.data}
           isLoading={fnoAnalyticsQuery.isLoading || fnoAnalyticsQuery.isFetching}
           error={fnoAnalyticsQuery.error}

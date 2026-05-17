@@ -137,3 +137,6 @@ def test_build_fno_analytics_normalizes_nse_and_mcx_contracts(monkeypatch) -> No
     assert payload["mcx"]["contract_master"]["sample"][1]["is_devolvement_applicable"] is True
     assert payload["quality_checks"][0]["status"] == "ok"
     assert payload["stage_status"][0]["status"] == "ready"
+    assert payload["research"]["modules"][0]["key"] == "contract_master"
+    assert payload["research"]["answer_cards"][0]["label"] == "What is happening?"
+    assert any(source["key"] == "mcx_atm_watchlist" for source in payload["research"]["sources"])

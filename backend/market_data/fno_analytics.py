@@ -904,6 +904,150 @@ def _stage_status(nse: dict[str, Any], mcx: dict[str, Any], fno_360: dict[str, A
     ]
 
 
+def _research_modules(
+    nse: dict[str, Any],
+    mcx: dict[str, Any],
+    fno_360: dict[str, Any] | None,
+    fo_risk: dict[str, Any] | None,
+) -> dict[str, Any]:
+    nse_summary = ((nse.get("contract_master") or {}).get("summary") or {})
+    mcx_summary = ((mcx.get("contract_master") or {}).get("summary") or {})
+    nse_chain = nse.get("option_chain") or {}
+    mcx_chain = mcx.get("option_chain") or {}
+    nse_signals = nse.get("oi_price_signals") or {}
+    mcx_risk = mcx.get("risk") or {}
+    mcx_curve = mcx.get("futures_curve") or {}
+    mwpl = (fo_risk or {}).get("mwpl") or {}
+    ban = (fo_risk or {}).get("ban_list") or {}
+    latest_time = (fno_360 or {}).get("latest_time")
+
+    modules = [
+        {
+            "key": "contract_master",
+            "label": "Contract Master",
+            "status": "ready" if nse_summary.get("total_contracts") or mcx_summary.get("total_contracts") else "missing",
+            "metric": f"{nse_summary.get('total_contracts', 0)} NSE · {mcx_summary.get('total_contracts', 0)} MCX",
+            "detail": (
+                f"{nse_summary.get('underlyings', 0)} NSE underlyings, "
+                f"{mcx_summary.get('underlyings', 0)} MCX roots, "
+                f"{mcx_summary.get('option_contracts', 0)} MCX options with devolvement mapping."
+            ),
+        },
+        {
+            "key": "option_intelligence",
+            "label": "Option Intelligence",
+            "status": "ready" if (fno_360 or {}).get("status") == "ready" or mcx_chain.get("rows") else "attention",
+            "metric": f"{nse_chain.get('summary', {}).get('total_underlyings', 0)} NSE · {mcx_chain.get('rows', 0)} MCX",
+            "detail": (
+                f"PCR {nse_chain.get('summary', {}).get('pcr_oi', '--')}, "
+                f"avg IV {nse_chain.get('summary', {}).get('average_iv', '--')}, "
+                f"latest snapshot {latest_time or '--'}."
+            ),
+        },
+        {
+            "key": "greeks_vol",
+            "label": "Greeks & Vol",
+            "status": "ready" if ((nse.get("greeks") or {}).get("count") or 0) or ((mcx.get("greeks") or {}).get("count") or 0) else "attention",
+            "metric": f"{(nse.get('greeks') or {}).get('count', 0)} NSE · {(mcx.get('greeks') or {}).get('count', 0)} MCX",
+            "detail": "Exchange-mode Black-Scholes Greeks are computed from latest ATM premiums with expiry-aware time to expiry.",
+        },
+        {
+            "key": "curve_roll",
+            "label": "Futures Curve & Roll",
+            "status": "ready" if (mcx_curve.get("count") or 0) > 0 else "attention",
+            "metric": f"{mcx_curve.get('count', 0)} curves · {len(mcx_curve.get('calendar_spreads') or [])} spreads",
+            "detail": "MCX curve shape, basis, annualized basis and rollover quality come from live/saved commodity futures rows.",
+        },
+        {
+            "key": "risk_margin",
+            "label": "Risk & Settlement",
+            "status": "ready" if ban.get("snapshot_date") or mwpl.get("snapshot_date") or mcx_risk.get("devolvement_watch") else "attention",
+            "metric": f"{ban.get('count', 0)} banned · {len(mcx_risk.get('devolvement_watch') or [])} devolvement",
+            "detail": (
+                f"MWPL rows {mwpl.get('row_count', 0)}, >=80% utilisation {mwpl.get('above_80_pct_count', 0)}, "
+                "stock physical settlement and MCX devolvement flags are attached to contracts."
+            ),
+        },
+        {
+            "key": "live_signals",
+            "label": "Live Signals",
+            "status": "ready" if (nse_signals.get("count") or 0) or mcx_risk.get("spread_watch") else "attention",
+            "metric": f"{nse_signals.get('count', 0)} NSE · {len(mcx_risk.get('spread_watch') or [])} MCX",
+            "detail": "OI-price buildup, volatility watch, calendar spread and near-expiry devolvement signals are generated from current snapshots.",
+        },
+    ]
+
+    answer_cards = [
+        {
+            "key": "what_happened",
+            "label": "What is happening?",
+            "status": nse_chain.get("status") or (fno_360 or {}).get("status") or "unknown",
+            "value": f"PCR {nse_chain.get('summary', {}).get('pcr_oi', '--')}",
+            "detail": (
+                f"{nse_chain.get('summary', {}).get('total_underlyings', 0)} NSE underlyings, "
+                f"{mcx_chain.get('rows', 0)} MCX ATM rows, "
+                f"{len((nse.get('straddle_summary') or [])) + len((mcx.get('straddle_summary') or []))} straddle reads."
+            ),
+        },
+        {
+            "key": "risk_location",
+            "label": "Where is the risk?",
+            "status": "attention" if ban.get("count") or mcx_risk.get("devolvement_watch") else "ok",
+            "value": f"{ban.get('count', 0)} ban · {len(mcx_risk.get('devolvement_watch') or [])} MCX",
+            "detail": "Ban list, MWPL utilisation, physical-settlement and devolvement gates are checked before treating signals as tradeable.",
+        },
+        {
+            "key": "changed_today",
+            "label": "What changed today?",
+            "status": "ready" if (nse_signals.get("count") or 0) else "attention",
+            "value": f"{nse_signals.get('count', 0)} OI signals",
+            "detail": f"Latest F&O snapshot {latest_time or '--'} with volatility and OI-price participant classifications.",
+        },
+        {
+            "key": "tradeability",
+            "label": "Is it tradeable?",
+            "status": "ready" if (fno_360 or {}).get("status") == "ready" and not ban.get("count") else "attention",
+            "value": f"{mcx_chain.get('ce_ready', 0)}/{mcx_chain.get('pe_ready', 0)} MCX CE/PE",
+            "detail": "Tradeability is gated by snapshot freshness, bid/ask availability, expiry proximity, ban/MWPL and settlement rules.",
+        },
+    ]
+
+    sources = [
+        {
+            "key": "nse_contract_catalog",
+            "label": "NSE FO contract catalog",
+            "status": (nse.get("source") or {}).get("status") or "unknown",
+            "detail": (nse.get("source") or {}).get("source") or "fo_contract_catalog",
+        },
+        {
+            "key": "nse_atm_snapshots",
+            "label": "NSE ATM option snapshots",
+            "status": (fno_360 or {}).get("status") or "unknown",
+            "detail": f"latest={latest_time or '--'}",
+        },
+        {
+            "key": "mcx_contract_catalog",
+            "label": "MCX contract catalog",
+            "status": "ready" if mcx_summary.get("total_contracts") else "missing",
+            "detail": ((mcx.get("source") or {}).get("contract_catalog") or "commodity catalog"),
+        },
+        {
+            "key": "mcx_atm_watchlist",
+            "label": "MCX ATM watchlist",
+            "status": "ready" if mcx_chain.get("rows") else "missing",
+            "detail": ((mcx.get("source") or {}).get("atm_watchlist") or "commodity watchlist"),
+        },
+        {
+            "key": "fo_risk",
+            "label": "F&O MWPL / ban risk",
+            "status": "ready" if ban.get("snapshot_date") or mwpl.get("snapshot_date") else "attention",
+            "detail": f"snapshot={(fo_risk or {}).get('snapshot_date') or '--'}",
+        },
+    ]
+
+    return {"modules": modules, "answer_cards": answer_cards, "sources": sources}
+
+
 def _nse_oi_price_signals(fno_360: dict[str, Any] | None, limit: int) -> dict[str, Any]:
     """Classify NSE ATM CE/PE instruments via the OI–price matrix.
 
@@ -1070,8 +1214,8 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
     # so the resistance / support reads pick up the strikes where market
     # makers are most exposed.
     chain_max_pain = await _load_chain_max_pain()
-    # F&O risk snapshot — MWPL utilisation + ban list — Stage 6 of the
-    # blueprint. Daily file; cheap to read every cycle (single SELECT).
+    # F&O risk snapshot: MWPL utilisation + ban list. Daily file; cheap
+    # to read every cycle (single SELECT).
     fo_risk: dict[str, Any] = {}
     try:
         from market_data.fo_risk_ingest import latest_fo_risk_snapshot
@@ -1120,6 +1264,7 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
     ]
     mcx["max_pain"] = mcx_max_pain
     quality_checks = _build_quality_checks(nse, mcx, fno_360)
+    research = _research_modules(nse, mcx, fno_360, fo_risk)
     return {
         "status": "ready" if any(check["status"] == "ok" for check in quality_checks) else "attention",
         "as_of": _utc_now().isoformat(),
@@ -1128,6 +1273,7 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
         "nse": nse,
         "mcx": mcx,
         "fo_risk": fo_risk,
+        "research": research,
         "quality_checks": quality_checks,
         "stage_status": _stage_status(nse, mcx, fno_360),
         "signals": {
