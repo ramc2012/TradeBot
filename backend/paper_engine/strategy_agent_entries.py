@@ -10,6 +10,7 @@ from loguru import logger
 from sqlalchemy import text
 
 from analysis.macd_engine import check_iv_filter, compute_spot_ma_context
+from agent.iv_size_policy import iv_size_scaler, premium_passes_floor
 from agent.strategy_config import (
     COMMENTARY_MAX,
     EXCLUDED_UNDERLYINGS,
@@ -345,7 +346,36 @@ class StrategyEntryMixin:
                 continue
 
             tte = days_remaining_in_window(window, as_of=_now_ist().date())
-            if tte < MIN_TTE_DAYS:
+            # Kind-aware TTE threshold. Old behaviour: skip whenever TTE
+            # < MIN_TTE_DAYS for both indices and stocks. New behaviour:
+            # for stocks, when the active expiry is too close, log the
+            # intent to roll into the next expiry instead of silently
+            # dropping the candidate. The next-expiry watchlist row
+            # (when available in row["next_expiry"]) is used instead;
+            # otherwise the candidate is queued for the next pipeline
+            # tick when the active window flips.
+            kind = str(row.get("kind") or "").upper()
+            from agent.strategy_config import MIN_TTE_DAYS_INDEX, MIN_TTE_DAYS_STOCK
+            tte_threshold = MIN_TTE_DAYS_INDEX if kind == "INDEX" else MIN_TTE_DAYS_STOCK
+            if tte < tte_threshold:
+                next_expiry_meta = row.get("next_expiry") or {}
+                next_expiry_iso = (
+                    next_expiry_meta.get("expiry")
+                    if isinstance(next_expiry_meta, dict)
+                    else None
+                )
+                if kind == "STOCK" and next_expiry_iso:
+                    # Surface the rollover intent so audit + dashboard
+                    # can see it. The active-expiry candidate is still
+                    # skipped (we don't have its quote here yet), but
+                    # next session's pipeline will pick up the rolled
+                    # contract via the regular watchlist build once
+                    # window_calculator promotes it.
+                    await persist_raw_signal(
+                        "rollover_candidate",
+                        f"tte_{tte}d_below_{tte_threshold}d_roll_to_{next_expiry_iso}",
+                        ltp=None,
+                    )
                 continue
 
             if expiry_str:
@@ -471,8 +501,16 @@ class StrategyEntryMixin:
                 await persist_raw_signal("blocked", "missing_ltp")
                 continue
 
-            if latest_close < MIN_PREMIUM or latest_close > MAX_PREMIUM:
-                await persist_raw_signal("blocked", "premium_out_of_range", ltp=latest_close)
+            # Spot-relative liquidity floor. The old fixed rupee band
+            # (₹2–₹500) rejected legitimate setups across the F&O
+            # universe (deep-ITM RELIANCE >₹500, GOLD options >₹2000).
+            # premium_passes_floor enforces a tiny ₹0.50 absolute floor
+            # plus a 0.01% spot-relative floor — both purely liquidity
+            # sanity checks, no upper bound.
+            spot_for_floor = float(row.get("spot_price") or row.get("underlying_price") or 0.0)
+            prem_ok, prem_reason = premium_passes_floor(latest_close, spot_for_floor)
+            if not prem_ok:
+                await persist_raw_signal("blocked", f"premium_floor_{prem_reason}", ltp=latest_close)
                 continue
 
             option_ma20 = None
@@ -485,10 +523,26 @@ class StrategyEntryMixin:
             if iv_raw is not None:
                 iv_val = float(iv_raw)
                 iv_pct = iv_val * 100.0 if iv_val < 1.0 else iv_val
-            iv_status = check_iv_filter(iv_pct, MAX_ENTRY_IV_PCT, HARD_MAX_IV_PCT)
-            if iv_status == "reject":
-                await persist_raw_signal("blocked", "iv_rejected", ltp=latest_close, iv_pct=iv_pct)
+            # New IV policy: relative-to-market spread drives a size
+            # scaler in (0.25 .. 1.0]. We only reject when the IV is
+            # implausibly high (>90% — broker data sanity check).
+            market_iv_pct = float(
+                snapshot_state.get("market_iv_pct")
+                or snapshot_state.get("market_iv")
+                or 0.0
+            ) or None
+            iv_scaler, iv_note = iv_size_scaler(iv_pct, market_iv_pct)
+            if iv_scaler <= 0:
+                await persist_raw_signal("blocked", f"iv_{iv_note}", ltp=latest_close, iv_pct=iv_pct)
                 continue
+            # Map scaler back into the legacy iv_status tag so the
+            # downstream sizing function (which still keys off the
+            # "preferred"/"acceptable"/"reject" buckets) keeps working.
+            iv_status = (
+                "preferred" if iv_scaler >= 0.95
+                else "acceptable" if iv_scaler >= 0.65
+                else "cautious"
+            )
 
             if runtime.processed_signals.get(signal_key) == latest_bar_time:
                 await persist_raw_signal("blocked", "already_processed", ltp=latest_close, iv_pct=iv_pct)
@@ -525,6 +579,13 @@ class StrategyEntryMixin:
                     "opt_type": opt_type,
                     "iv_pct": iv_pct,
                     "iv_status": iv_status,
+                    # New relative-IV policy: scaler in (0, 1] multiplies
+                    # the Kelly-sized lot count downstream. iv_size_note
+                    # records the bucket (normal/caution/heavy/extreme)
+                    # so the audit trail explains the size reduction.
+                    "iv_size_scaler": iv_scaler,
+                    "iv_size_note": iv_note,
+                    "market_iv_pct": market_iv_pct,
                     "spot_setup": setup,
                     "option_ma20": _round_or_none(option_ma20, 2),
                     "option_ma50": _round_or_none(option_ma50, 2),
@@ -701,6 +762,13 @@ class StrategyEntryMixin:
                 fraction = KELLY_FRACTION
         learning_size_multiplier = float(candidate.get("learning_size_multiplier") or 1.0)
         fraction *= max(0.5, min(1.2, learning_size_multiplier))
+        # Apply the relative-IV size scaler from iv_size_policy. When
+        # the instrument IV is far above market IV we still take the
+        # trade — just at 0.75× / 0.50× / 0.25× of base size. This
+        # replaces the old hard IV reject which threw away setups that
+        # were merely paying for genuine vol.
+        iv_size_scaler_value = float(candidate.get("iv_size_scaler") or 1.0)
+        fraction *= max(0.25, min(1.0, iv_size_scaler_value))
 
         allocation = max(runtime.portfolio.total_equity * fraction, latest_close * lot_size)
         lots = max(1, int(allocation // max(latest_close * lot_size, 1.0)))

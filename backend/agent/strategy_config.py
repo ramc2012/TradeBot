@@ -26,11 +26,54 @@ WINDOW_BUFFER_DAYS = 7  # days before expiry to exit (avoid delivery margins)
 
 # ── Entry Filters ────────────────────────────────────────────────────────────
 
-MAX_ENTRY_IV_PCT = 30.0       # prefer IV ≤ 30% (vol-adjusted return 3.4× better)
-HARD_MAX_IV_PCT = 45.0        # refuse entry above 45%
-MIN_TTE_DAYS = 5              # need ≥5 days for move to develop without skipping viable weekly setups
-MIN_PREMIUM = 2.0             # avoid illiquid sub-₹2 options
-MAX_PREMIUM = 500.0           # overpriced entries fail 4/17 times
+# IV filter is now *relative* and *size-scaling*, not a hard gate.
+#   1. Compare per-instrument IV against the prevailing market IV
+#      (median IV across the F&O universe). A high IV in isolation
+#      is much less informative than a high IV-vs-market spread.
+#   2. When IV is elevated, REDUCE position size rather than reject
+#      outright. The thinking: high-IV setups are still tradeable,
+#      they just deserve smaller bets because the premium itself is
+#      already paying for expected move.
+# These thresholds are spread-vs-market (in percentage points), NOT
+# absolute IV. e.g. market IV 22%, instrument IV 32% → +10 pp spread.
+IV_SPREAD_CAUTION_PP = 8.0    # > +8 pp over market → 0.75× size
+IV_SPREAD_HEAVY_PP   = 15.0   # > +15 pp over market → 0.50× size
+IV_SPREAD_EXTREME_PP = 25.0   # > +25 pp over market → 0.25× size
+# Hard reject only when the instrument IV is implausibly high — a
+# defensive sanity-check against bad broker data, not a strategy gate.
+IV_SANITY_MAX_PCT    = 90.0
+# Legacy aliases kept for backward-compat with imports elsewhere in
+# the codebase. The new IV policy supersedes both but downstream code
+# may still import these names.
+MAX_ENTRY_IV_PCT = 30.0
+HARD_MAX_IV_PCT  = IV_SANITY_MAX_PCT
+
+MIN_TTE_DAYS_INDEX = 5        # for indices: ≥5 trading days on the active expiry
+MIN_TTE_DAYS_STOCK = 5        # for stocks:  ≥5 trading days, ELSE roll to next expiry
+# Legacy name retained for callers; equals the index threshold above.
+MIN_TTE_DAYS = MIN_TTE_DAYS_INDEX
+
+# Premium band (₹2–₹500) used to be a fixed rupee range. That is
+# nonsensical across the F&O universe:
+#   NIFTY ATM weekly       premium ~₹50–₹200
+#   RELIANCE monthly       premium ~₹10–₹60
+#   GOLD weekly            premium ~₹2,000–₹6,000
+#   BANKNIFTY ATM weekly   premium ~₹200–₹600
+# A single rupee band rejects deep-ITM commodities and ultra-cheap
+# weekly stocks alike. Replaced with two relative checks:
+#   * MIN_PREMIUM_ABS — a tiny sanity floor so we don't trade options
+#     that have effectively zero bid (i.e. likely no liquidity)
+#   * MIN_PREMIUM_PCT_OF_SPOT — premium must be ≥ this fraction of
+#     the underlying spot for the contract to be tradable; floors at
+#     ~0.01% which catches genuinely dead strikes without filtering
+#     legitimate ATM contracts.
+MIN_PREMIUM_ABS = 0.50            # ₹0.50 — pure liquidity sanity
+MIN_PREMIUM_PCT_OF_SPOT = 0.0001  # 0.01% of spot
+# Legacy names retained for compatibility; the new sanity floor
+# replaces the old rupee band entirely.
+MIN_PREMIUM = MIN_PREMIUM_ABS
+MAX_PREMIUM = float("inf")
+
 MIN_CANDLE_BARS = 20          # minimum 30-min bars in window before signal
 MIN_CANDLE_BARS_ATM = 20      # minimum bars for ATM strike selection query
 
