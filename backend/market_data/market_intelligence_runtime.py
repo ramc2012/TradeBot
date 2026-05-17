@@ -530,11 +530,10 @@ class MarketIntelligenceRuntime:
                     SELECT underlying, MAX(time) AS latest_time
                     FROM underlying_spot_candles
                     WHERE interval = '1minute'
-                      AND underlying = ANY(:underlyings)
+                      AND time >= NOW() - INTERVAL '10 days'
                     GROUP BY underlying
                     """
                 ),
-                {"underlyings": list(NSE_INDEX_SCOPE)},
             )
             per_symbol = {
                 str(row.underlying): _parse_time(row.latest_time).isoformat()

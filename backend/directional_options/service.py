@@ -37,7 +37,10 @@ class DirectionalOptionsService:
         self.signals = DirectionalSignalEngine(self.config["signal_engine"])
         self.selector = OptionSelectionEngine(self.store, self.config["selector"])
         self.risk = DirectionalOptionsRiskEngine(self.config["risk"])
-        self.paper = DirectionalOptionsPaperStore(self.config["paper_trading"]["journal_root"])
+        self.paper = DirectionalOptionsPaperStore(
+            self.config["paper_trading"]["journal_root"],
+            min_hold_bars=int(self.config["paper_trading"].get("min_hold_bars", 3)),
+        )
         self.backtester = DirectionalOptionsBacktester(
             store=self.store,
             feature_engine=self.feature_engine,

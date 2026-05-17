@@ -159,6 +159,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "journal_root": RUNTIME_ROOT / "paper",
         "live_lookback_days": 10,
         "stale_watchlist_seconds": 600,
+        # Anti-churn: minimum bars a position must be held before honouring a
+        # signal-flip or flat-signal close. Set per timeframe minutes — e.g. on
+        # 5-minute bars, 3 bars = 15 minutes of hold before regime reversal
+        # can flatten the trade. Stop / target exits still fire immediately.
+        "min_hold_bars": 3,
     },
 }
 

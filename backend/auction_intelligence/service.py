@@ -28,8 +28,9 @@ from auction_intelligence.validation.schemas import ValidationReport
 
 
 class AuctionIntelligenceService:
-    def __init__(self, config: dict | None = None):
+    def __init__(self, config: dict | None = None, *, paper_mode: bool = False):
         self.config = config or clone_default_config()
+        self.paper_mode = paper_mode
         self.market_profile = MarketProfileEngine(self.config["market_profile"])
         self.order_flow = OrderFlowEngine(self.config["order_flow"])
         self.regime = RegimeEngine(self.config["regime"])
@@ -42,6 +43,7 @@ class AuctionIntelligenceService:
                 **self.config["risk"],
                 "contract_specs": self.config.get("contract_specs", {}),
                 "mvp_scope": self.config.get("mvp_scope", {}),
+                "paper_mode": paper_mode,
             }
         )
         self.execution = ExecutionPlanner()

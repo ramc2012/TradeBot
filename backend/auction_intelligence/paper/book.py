@@ -9,6 +9,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from core.config import settings
+from core.paper_trade_recorder import paper_trade_recorder
 from auction_intelligence.paper.journal import resolve_journal_root
 from auction_intelligence.schemas import AnalysisBundle, PaperPositionRecord
 from market_data.option_history import option_history_service
@@ -238,8 +239,60 @@ class PaperPositionBook:
         position["regime_last"] = str(bundle.regime.label)
         position["unrealized_pnl"] = 0.0
         position["realized_pnl"] = round((exit_premium - entry_premium) * quantity, 2)
+        try:
+            await paper_trade_recorder.record_event(
+                strategy="auction_intelligence",
+                event="close",
+                underlying=position.get("underlying_symbol"),
+                instrument_key=position.get("instrument_key"),
+                option_type=position.get("option_type"),
+                strike=position.get("strike"),
+                expiry=str(position.get("expiry") or ""),
+                quantity=quantity,
+                entry_premium=entry_premium,
+                exit_premium=exit_premium,
+                realized=position["realized_pnl"],
+                position_id=position.get("position_id"),
+                reason=reason,
+            )
+        except Exception:
+            pass
 
     def _open_position(
+        self,
+        *,
+        bundle: AnalysisBundle,
+        decision: Any,
+        execution: Any,
+        now: str,
+        underlying: str,
+    ) -> dict[str, Any]:
+        record_dict = self._build_open_position(
+            bundle=bundle, decision=decision, execution=execution, now=now, underlying=underlying
+        )
+        try:
+            asyncio.create_task(
+                paper_trade_recorder.record_event(
+                    strategy="auction_intelligence",
+                    event="open",
+                    underlying=record_dict.get("underlying_symbol"),
+                    instrument_key=record_dict.get("instrument_key"),
+                    option_type=record_dict.get("option_type"),
+                    strike=record_dict.get("strike"),
+                    expiry=str(record_dict.get("expiry") or ""),
+                    quantity=int(record_dict.get("quantity") or 0),
+                    entry_premium=record_dict.get("entry_premium"),
+                    latest_premium=record_dict.get("latest_premium"),
+                    position_id=record_dict.get("position_id"),
+                    reason=str(record_dict.get("selection_reason") or ""),
+                    extra={"agent": record_dict.get("agent_name"), "action": record_dict.get("signal_action")},
+                )
+            )
+        except RuntimeError:
+            pass
+        return record_dict
+
+    def _build_open_position(
         self,
         *,
         bundle: AnalysisBundle,

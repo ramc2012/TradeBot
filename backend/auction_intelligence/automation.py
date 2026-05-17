@@ -187,7 +187,7 @@ async def capture_live_paper_cycle(
     session_payload = dict(request["session"])
     session_payload["broker_connected"] = True
     session_payload["stale_data_seconds"] = 0.0
-    service = AuctionIntelligenceService()
+    service = AuctionIntelligenceService(paper_mode=True)
     bundle, journal_paths, paper_positions = await service.analyze_and_record_option_paper(
         session=SessionContext(**session_payload),
         bars=[MarketBar(**_parse_bar(item)) for item in request.get("bars", [])],

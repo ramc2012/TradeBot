@@ -639,7 +639,7 @@ class FractalMarketProfileService:
             except json.JSONDecodeError:
                 pass
 
-        rows = self._load_local_csv_rows(normalized)
+        rows = await self._load_replay_rows(normalized)
         sessions = _group_rows_by_session(rows)
         session_dates = sorted(sessions)
         if len(session_dates) < 24:
@@ -2012,6 +2012,56 @@ class FractalMarketProfileService:
 
         local_rows = self._load_local_csv_rows(symbol_code)
         return local_rows, "local_csv_spot", f"{symbol_code}.1minute.csv.gz"
+
+    async def _load_replay_rows(self, symbol_code: str) -> list[dict[str, Any]]:
+        """Load minute bars for replay: prefer local CSV, top up with DB rows newer than CSV's last bar."""
+        try:
+            csv_rows = self._load_local_csv_rows(symbol_code)
+        except RuntimeError:
+            csv_rows = []
+        last_csv_time: Optional[datetime] = None
+        if csv_rows:
+            try:
+                last_csv_time = _ensure_dt(csv_rows[-1]["time"])
+            except Exception:
+                last_csv_time = None
+        from_time = last_csv_time or (datetime.combine(date.today() - timedelta(days=60), time.min, tzinfo=IST).astimezone(timezone.utc))
+        if last_csv_time is not None and last_csv_time.tzinfo is None:
+            from_time = last_csv_time.replace(tzinfo=timezone.utc)
+        elif last_csv_time is not None:
+            from_time = last_csv_time.astimezone(timezone.utc)
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT time, open, high, low, close, volume
+                        FROM underlying_spot_candles
+                        WHERE underlying = :underlying
+                          AND interval = '1minute'
+                          AND time > :from_time
+                        ORDER BY time ASC
+                        """
+                    ),
+                    {"underlying": symbol_code, "from_time": from_time},
+                )
+                db_rows = result.mappings().all()
+        except Exception:
+            db_rows = []
+        db_payload = [
+            {
+                "time": _iso(row["time"]),
+                "open": float(row["open"] or row["close"] or 0.0),
+                "high": float(row["high"] or row["close"] or 0.0),
+                "low": float(row["low"] or row["close"] or 0.0),
+                "close": float(row["close"] or 0.0),
+                "volume": float(row["volume"] or 0.0),
+            }
+            for row in db_rows
+        ]
+        if not csv_rows and not db_payload:
+            raise RuntimeError(f"No replay history available for {symbol_code}.")
+        return csv_rows + db_payload
 
     def _load_local_csv_rows(self, symbol_code: str) -> list[dict[str, Any]]:
         path = analytics_root() / "spot" / f"underlying={symbol_code}" / "1minute.csv.gz"

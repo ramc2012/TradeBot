@@ -3,14 +3,54 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from core.paper_trade_recorder import paper_trade_recorder
+
+
+_TIMEFRAME_MINUTES = {
+    "1minute": 1, "1m": 1,
+    "3minute": 3, "3m": 3,
+    "5minute": 5, "5m": 5,
+    "15minute": 15, "15m": 15,
+    "30minute": 30, "30m": 30,
+    "60minute": 60, "1hour": 60, "1h": 60,
+}
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts
+    except Exception:
+        return None
+
+
+def _has_satisfied_min_hold(
+    position: dict[str, Any],
+    *,
+    min_hold_bars: int,
+    timeframe: str | None,
+) -> bool:
+    if min_hold_bars <= 0:
+        return True
+    opened = _parse_iso(position.get("opened_at"))
+    if opened is None:
+        return True
+    minutes_per_bar = _TIMEFRAME_MINUTES.get(str(timeframe or "").lower(), 5)
+    elapsed = (datetime.now(timezone.utc) - opened).total_seconds() / 60.0
+    return elapsed >= float(min_hold_bars * minutes_per_bar)
 
 
 def _normalize_symbol(value: str | None) -> str:
@@ -34,13 +74,14 @@ def _same_contract(position: dict[str, Any], contract: dict[str, Any]) -> bool:
 
 
 class DirectionalOptionsPaperStore:
-    def __init__(self, root: Path | str):
+    def __init__(self, root: Path | str, *, min_hold_bars: int = 3):
         self.root = Path(root)
         if not self.root.is_absolute():
             self.root = Path(__file__).resolve().parent.parent / self.root
         self.journal_path = self.root / "paper_journal.jsonl"
         self.positions_path = self.root / "paper_positions.json"
         self._lock = asyncio.Lock()
+        self.min_hold_bars = int(min_hold_bars)
 
     async def list_journal(self, symbol: str | None = None, limit: int = 50) -> dict[str, Any]:
         records = self._load_journal()
@@ -153,7 +194,17 @@ class DirectionalOptionsPaperStore:
                 return self._summary(open_positions, closed_positions)
 
             if not actionable:
+                position_timeframe = str(selection.get("timeframe") or "")
                 for row in list(matching):
+                    if not _has_satisfied_min_hold(
+                        row,
+                        min_hold_bars=self.min_hold_bars,
+                        timeframe=row.get("timeframe") or position_timeframe,
+                    ):
+                        # Held too briefly — refuse to flatten on a single
+                        # noisy bar. Keep the position open; it will close
+                        # naturally on stop / target / a later flat-signal.
+                        continue
                     self._close_position(
                         row,
                         mark=marks.get(str(row.get("position_id") or "")) or {},
@@ -172,6 +223,7 @@ class DirectionalOptionsPaperStore:
                 return self._summary(open_positions, closed_positions)
 
             refreshed = False
+            position_timeframe = str(selection.get("timeframe") or "")
             for row in list(matching):
                 if _same_contract(row, contract) and str(row.get("direction") or "") == str(signal.get("direction") or ""):
                     row["updated_at"] = recorded_at
@@ -186,6 +238,14 @@ class DirectionalOptionsPaperStore:
                     row["unrealized_pnl"] = round((latest_mark - entry_premium) * quantity, 2)
                     refreshed = True
                     continue
+                if not _has_satisfied_min_hold(
+                    row,
+                    min_hold_bars=self.min_hold_bars,
+                    timeframe=row.get("timeframe") or position_timeframe,
+                ):
+                    # Held too briefly — keep position open through a single
+                    # noisy regime flip. Will reassess on the next bar.
+                    continue
                 self._close_position(
                     row,
                     mark=marks.get(str(row.get("position_id") or "")) or {},
@@ -196,9 +256,28 @@ class DirectionalOptionsPaperStore:
                 closed_positions.append(row)
 
             if not refreshed:
+                new_position_id = uuid4().hex
+                try:
+                    await paper_trade_recorder.record_event(
+                        strategy="directional_options",
+                        event="open",
+                        underlying=underlying,
+                        instrument_key=contract.get("instrument_key"),
+                        option_type=contract.get("option_type"),
+                        strike=float(contract.get("strike") or 0.0),
+                        expiry=str(contract.get("expiry") or ""),
+                        quantity=int(risk.get("quantity_units") or 0),
+                        entry_premium=latest_mark,
+                        latest_premium=latest_mark,
+                        position_id=new_position_id,
+                        reason=str(snapshot.get("selection_reason") or ""),
+                        extra={"direction": signal.get("direction"), "timeframe": selection.get("timeframe")},
+                    )
+                except Exception:
+                    pass
                 open_positions.append(
                     {
-                        "position_id": uuid4().hex,
+                        "position_id": new_position_id,
                         "status": "open",
                         "opened_at": recorded_at,
                         "updated_at": recorded_at,
@@ -275,7 +354,29 @@ class DirectionalOptionsPaperStore:
         position["price_source"] = mark.get("price_source") or position.get("price_source")
         position["mark_time"] = mark.get("mark_time") or position.get("mark_time")
         position["unrealized_pnl"] = 0.0
-        position["realized_pnl"] = round((latest_premium - entry_premium) * quantity, 2)
+        realized = round((latest_premium - entry_premium) * quantity, 2)
+        position["realized_pnl"] = realized
+        try:
+            asyncio.create_task(
+                paper_trade_recorder.record_event(
+                    strategy="directional_options",
+                    event="close",
+                    underlying=position.get("underlying"),
+                    instrument_key=position.get("instrument_key"),
+                    option_type=position.get("option_type"),
+                    strike=position.get("strike"),
+                    expiry=position.get("expiry"),
+                    quantity=quantity,
+                    entry_premium=entry_premium,
+                    exit_premium=latest_premium,
+                    realized=realized,
+                    position_id=position.get("position_id"),
+                    reason=close_reason,
+                )
+            )
+        except RuntimeError:
+            # No running event loop (e.g. unit tests) — skip event logging.
+            pass
 
     def _summary(self, open_positions: list[dict[str, Any]], closed_positions: list[dict[str, Any]]) -> dict[str, Any]:
         realized = round(sum(float(row.get("realized_pnl") or 0.0) for row in closed_positions), 2)

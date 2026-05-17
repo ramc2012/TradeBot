@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from loguru import logger
+from sqlalchemy import text
+
+from core.paper_trade_recorder import paper_trade_recorder
+from db.database import AsyncSessionLocal
 from fractal_market_profile.config import PAPER_ROOT
 from fractal_market_profile.schemas import FMPPaperPositionRecord
 
@@ -91,6 +96,11 @@ class FMPPaperStore:
             underlying = str(snapshot.get("symbol_code") or "").upper().strip()
             matching = [row for row in open_positions if str(row.get("underlying") or "").upper() == underlying]
 
+            # Always refresh latest_premium for every open position before we
+            # consider closing — otherwise exit_premium gets stamped with stale
+            # entry-time premium and realized_pnl collapses to zero.
+            await self._refresh_open_premiums(matching)
+
             if not signal.get("actionable") or not signal.get("options"):
                 for row in matching:
                     row["status"] = "closed"
@@ -103,6 +113,24 @@ class FMPPaperStore:
                         * int(row.get("quantity") or 0),
                         2,
                     )
+                    try:
+                        await paper_trade_recorder.record_event(
+                            strategy="fractal_market_profile",
+                            event="close",
+                            underlying=row.get("underlying"),
+                            instrument_key=row.get("instrument_key"),
+                            option_type=row.get("option_type"),
+                            strike=row.get("strike"),
+                            expiry=row.get("expiry"),
+                            quantity=int(row.get("quantity") or 0),
+                            entry_premium=row.get("entry_premium"),
+                            exit_premium=row.get("exit_premium"),
+                            realized=row.get("realized_pnl"),
+                            position_id=row.get("position_id"),
+                            reason="flat_snapshot",
+                        )
+                    except Exception:
+                        pass
                     open_positions.remove(row)
                     closed_positions.append(row)
                 self._save_positions(
@@ -184,11 +212,47 @@ class FMPPaperStore:
                     (latest_premium - float(row.get("entry_premium") or 0.0)) * int(row.get("quantity") or 0),
                     2,
                 )
+                try:
+                    await paper_trade_recorder.record_event(
+                        strategy="fractal_market_profile",
+                        event="close",
+                        underlying=row.get("underlying"),
+                        instrument_key=row.get("instrument_key"),
+                        option_type=row.get("option_type"),
+                        strike=row.get("strike"),
+                        expiry=row.get("expiry"),
+                        quantity=int(row.get("quantity") or 0),
+                        entry_premium=row.get("entry_premium"),
+                        exit_premium=row.get("exit_premium"),
+                        realized=row.get("realized_pnl"),
+                        position_id=row.get("position_id"),
+                        reason="signal_flip",
+                    )
+                except Exception:
+                    pass
                 open_positions.remove(row)
                 closed_positions.append(row)
 
             if not refreshed:
                 open_positions.append(new_position)
+                try:
+                    await paper_trade_recorder.record_event(
+                        strategy="fractal_market_profile",
+                        event="open",
+                        underlying=new_position.get("underlying"),
+                        instrument_key=new_position.get("instrument_key"),
+                        option_type=new_position.get("option_type"),
+                        strike=new_position.get("strike"),
+                        expiry=new_position.get("expiry"),
+                        quantity=int(new_position.get("quantity") or 0),
+                        entry_premium=new_position.get("entry_premium"),
+                        latest_premium=new_position.get("latest_premium"),
+                        position_id=new_position.get("position_id"),
+                        reason=str(new_position.get("setup_name") or ""),
+                        extra={"action": new_position.get("action")},
+                    )
+                except Exception:
+                    pass
 
             self._save_positions(
                 {
@@ -198,6 +262,40 @@ class FMPPaperStore:
                 }
             )
             return self._summary(open_positions, closed_positions)
+
+    async def _refresh_open_premiums(self, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        keys = [str(row.get("instrument_key") or "") for row in rows if row.get("instrument_key")]
+        if not keys:
+            return
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT DISTINCT ON (instrument_key)
+                            instrument_key, ltp, time
+                        FROM atm_option_watchlist_snapshots
+                        WHERE instrument_key = ANY(:keys)
+                          AND time >= NOW() - INTERVAL '2 days'
+                        ORDER BY instrument_key, time DESC
+                        """
+                    ),
+                    {"keys": keys},
+                )
+                latest = {str(r.instrument_key): float(r.ltp or 0.0) for r in result.fetchall()}
+        except Exception as exc:
+            logger.warning("fmp.paper.refresh_premium_failed error={}", exc)
+            return
+        for row in rows:
+            ltp = latest.get(str(row.get("instrument_key") or ""))
+            if ltp is not None and ltp > 0:
+                row["latest_premium"] = ltp
+                row["unrealized_pnl"] = round(
+                    (ltp - float(row.get("entry_premium") or 0.0)) * int(row.get("quantity") or 0),
+                    2,
+                )
 
     def _summary(self, open_positions: list[dict[str, Any]], closed_positions: list[dict[str, Any]]) -> dict[str, Any]:
         realized = round(sum(float(row.get("realized_pnl") or 0.0) for row in closed_positions), 2)

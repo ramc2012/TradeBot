@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from loguru import logger
+
 from auction_intelligence.schemas import AgentDecision, PortfolioSnapshot, RiskDecision, SessionContext
 
 
@@ -18,6 +20,7 @@ class RiskGovernor:
         self.session_close_buffer_minutes = int(config.get("session_close_buffer_minutes", 15))
         self.stale_data_seconds = int(config.get("stale_data_seconds", 10))
         self.min_model_confidence = float(config.get("min_model_confidence", 0.55))
+        self.paper_mode = bool(config.get("paper_mode", False))
 
     def evaluate(
         self,
@@ -26,12 +29,22 @@ class RiskGovernor:
         decisions: list[AgentDecision],
     ) -> RiskDecision:
         reasons: list[str] = []
+        gate_log: dict[str, Any] = {
+            "symbol": session.symbol,
+            "broker_connected": session.broker_connected,
+            "stale_data_seconds": session.stale_data_seconds,
+            "minutes_to_close": session.minutes_to_close,
+            "open_positions": portfolio.open_positions,
+            "daily_realized_pnl": portfolio.daily_realized_pnl,
+            "decisions": [(d.agent_name, d.action, d.confidence) for d in decisions],
+            "paper_mode": self.paper_mode,
+        }
 
-        if not session.broker_connected:
+        if not session.broker_connected and not self.paper_mode:
             reasons.append("Broker connectivity unavailable.")
-        if session.stale_data_seconds > self.stale_data_seconds:
+        if session.stale_data_seconds > self.stale_data_seconds and not self.paper_mode:
             reasons.append("Market data is stale.")
-        if portfolio.daily_realized_pnl <= -abs(self.max_daily_loss):
+        if portfolio.daily_realized_pnl <= -abs(self.max_daily_loss) and not self.paper_mode:
             reasons.append("Daily loss limit breached.")
         if portfolio.open_positions >= self.max_concurrent_positions and any(
             decision.action != "FLAT" for decision in decisions
@@ -73,20 +86,34 @@ class RiskGovernor:
                 reasons.append("Projected correlated exposure would exceed cap.")
 
         if reasons:
+            logger.info(
+                "auction.risk.blocked symbol={symbol} reasons={reasons} gate_log={gate_log}",
+                symbol=session.symbol,
+                reasons=reasons,
+                gate_log=gate_log,
+            )
             return RiskDecision(
                 allowed=False,
-                kill_switch=any(
-                    reason in {
-                        "Broker connectivity unavailable.",
-                        "Market data is stale.",
-                        "Daily loss limit breached.",
-                    }
-                    for reason in reasons
+                kill_switch=(
+                    not self.paper_mode
+                    and any(
+                        reason in {
+                            "Broker connectivity unavailable.",
+                            "Market data is stale.",
+                            "Daily loss limit breached.",
+                        }
+                        for reason in reasons
+                    )
                 ),
                 max_size_multiplier=0.0,
                 reasons=reasons,
             )
 
+        logger.debug(
+            "auction.risk.allowed symbol={symbol} gate_log={gate_log}",
+            symbol=session.symbol,
+            gate_log=gate_log,
+        )
         return RiskDecision(allowed=True, kill_switch=False, max_size_multiplier=1.0, reasons=["Risk checks passed."])
 
     def _decision_exposure_ratio(

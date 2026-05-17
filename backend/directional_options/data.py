@@ -1,6 +1,7 @@
 """Runtime dataset access for the directional options engine."""
 from __future__ import annotations
 
+import asyncio
 import gzip
 import json
 import math
@@ -139,27 +140,38 @@ class DirectionalOptionsDataStore:
         underlying: str,
         *,
         lookback_days: int = 10,
+        broker_timeout_seconds: float = 15.0,
+        local_timeout_seconds: float = 20.0,
     ) -> tuple[pd.DataFrame, str, str]:
         commodity_spec = get_commodity_contract_spec(underlying)
         if commodity_spec.root and commodity_spec.root != "UNKNOWN":
             try:
                 from market_data.commodity_runtime_history import load_commodity_history_rows
 
-                rows, history_symbol = await load_commodity_history_rows(
-                    underlying,
-                    interval="1minute",
-                    lookback_days=lookback_days,
+                rows, history_symbol = await asyncio.wait_for(
+                    load_commodity_history_rows(
+                        underlying,
+                        interval="1minute",
+                        lookback_days=lookback_days,
+                    ),
+                    timeout=broker_timeout_seconds,
                 )
                 frame = _frame_from_rows(rows)
                 if not frame.empty:
                     return frame, "commodity_broker_history", history_symbol
-            except Exception:
+            except (asyncio.TimeoutError, Exception):
                 pass
 
-        rows, source, history_symbol = await market_intelligence_runtime.load_local_spot_rows(
-            underlying,
-            lookback_days=max(int(lookback_days), 1),
-        )
+        try:
+            rows, source, history_symbol = await asyncio.wait_for(
+                market_intelligence_runtime.load_local_spot_rows(
+                    underlying,
+                    lookback_days=max(int(lookback_days), 1),
+                ),
+                timeout=local_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            return pd.DataFrame(), "timeout_no_data", underlying
         frame = _frame_from_rows(rows)
         return frame, source, history_symbol
 

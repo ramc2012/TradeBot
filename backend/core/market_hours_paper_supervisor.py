@@ -130,6 +130,7 @@ class MarketHoursPaperSupervisor:
         from directional_options.service import directional_options_service
         from fractal_market_profile.config import SUPPORTED_SYMBOLS
         from fractal_market_profile.service import fmp_service
+        from gann_tp_delta.service import gann_tp_delta_service
         from market_data.market_intelligence_runtime import market_intelligence_runtime
 
         directional_service = directional_options_service
@@ -259,6 +260,26 @@ class MarketHoursPaperSupervisor:
                 "results": results,
             }
 
+        async def _gann_runner() -> dict[str, Any]:
+            try:
+                result = await asyncio.wait_for(
+                    gann_tp_delta_service.run_paper_agent_once(),
+                    timeout=120.0,
+                )
+            except asyncio.TimeoutError:
+                return {
+                    "status": "timeout",
+                    "result_count": 0,
+                    "failure_count": 1,
+                    "failures": {"paper_agent": "timed out after 120s"},
+                    "results": [],
+                }
+            return {
+                "status": "ok",
+                "result_count": int(result.get("evaluated") or 0) if isinstance(result, dict) else 0,
+                "result": result,
+            }
+
         return [
             RunnerConfig(
                 key="market_intelligence",
@@ -287,6 +308,17 @@ class MarketHoursPaperSupervisor:
                 interval_seconds=settings.DIRECTIONAL_OPTIONS_AUTO_INTERVAL_SECONDS,
                 callback=_directional_runner,
                 enabled=settings.DIRECTIONAL_OPTIONS_AUTO_ENABLED,
+            ),
+            RunnerConfig(
+                key="gann_tp_delta",
+                label="Gann TP Delta Paper Cycle",
+                interval_seconds=getattr(
+                    settings,
+                    "GANN_TP_DELTA_AUTO_INTERVAL_SECONDS",
+                    settings.DIRECTIONAL_OPTIONS_AUTO_INTERVAL_SECONDS,
+                ),
+                callback=_gann_runner,
+                enabled=getattr(settings, "GANN_TP_DELTA_AUTO_ENABLED", True),
             ),
         ]
 
@@ -347,6 +379,17 @@ class MarketHoursPaperSupervisor:
                         due_runners.append(runtime)
                     if due_runners:
                         await self._run_due_runners(due_runners, now=now)
+                    # End-of-session portfolio reconciliation snapshot.
+                    try:
+                        from core.paper_trade_recorder import paper_trade_recorder
+
+                        await paper_trade_recorder.snapshot_daily(
+                            session_date=catchup_session_date.isoformat()
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "[MarketHoursSupervisor] portfolio snapshot failed: {}", exc
+                        )
                     for runtime in due_runners:
                         if runtime.last_error is None:
                             runtime.last_result_meta.setdefault(
