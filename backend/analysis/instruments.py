@@ -21,8 +21,8 @@ INDEX_EXPIRY_WEEKDAY: dict[str, int] = {
     "BANKNIFTY":  1,   # Tuesday
     "FINNIFTY":   1,   # Tuesday
     "MIDCPNIFTY": 1,   # Tuesday
-    "SENSEX":     4,   # Friday  (BSE)
-    "BANKEX":     0,   # Monday  (BSE)
+    "SENSEX":     3,   # Thursday (BSE)
+    "BANKEX":     0,   # Monday   (BSE)
 }
 
 # ── Strike step sizes ─────────────────────────────────────────────────────────
