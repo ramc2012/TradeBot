@@ -476,9 +476,47 @@ class StrategyEntryMixin:
                 )
                 continue
 
-            if self._has_underlying_position(runtime, underlying):
-                await persist_raw_signal("blocked", "existing_underlying_position")
-                continue
+            # Existing-position handling with signal-flip support.
+            #
+            # If a position is already open for this underlying:
+            #   * Same side (CE↔CE or PE↔PE): block — no doubling up.
+            #     The earlier crossover is still in flight; a duplicate
+            #     entry just dilutes the original.
+            #   * Opposite side (CE position + new PE signal, or vice
+            #     versa): treat as a regime flip. Close the existing
+            #     leg at the current premium, then fall through to the
+            #     normal entry path for the new side. The strategy
+            #     stays in the market but on the side the new tape
+            #     wants.
+            existing = next(
+                (p for p in runtime.positions.values() if p.underlying == underlying),
+                None,
+            )
+            if existing is not None:
+                if existing.option_type == opt_type:
+                    await persist_raw_signal(
+                        "blocked", "existing_underlying_position_same_side"
+                    )
+                    continue
+                # Opposite side — flip. Use the position's last-known
+                # current_price as the exit fill; if missing, fall back
+                # to entry_price so PnL is at least defined.
+                exit_ltp = float(existing.current_price or existing.entry_price or 0.0)
+                await self._close_position(
+                    runtime,
+                    existing,
+                    exit_ltp,
+                    f"signal_flip_to_{opt_type}",
+                )
+                await persist_raw_signal(
+                    "signal_flip",
+                    f"closed_{existing.option_type}_for_{opt_type}",
+                    ltp=exit_ltp,
+                )
+                # Capacity opens up — the new opposite-side entry
+                # below now has room.
+                capacity = max(self.max_positions - len(runtime.positions), 0)
+                cap_reached = capacity <= 0
 
             if cap_reached:
                 await persist_raw_signal("blocked", "position_cap_reached")
