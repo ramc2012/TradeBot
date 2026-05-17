@@ -371,6 +371,17 @@ export const getStrategyPortfolio = (underlying = "SENSEX") =>
 export const getStrategyOpenSignals = (underlying = "SENSEX") =>
   api.get("/api/strategy/open-signals", { params: { underlying } });
 
+// ── CBE Scanner ───────────────────────────────────────────────────────────
+export const getCBEConfig = () => api.get("/api/cbe/config");
+export const getCBEUniverse = (limit = 500) => api.get("/api/cbe/universe", { params: { limit } });
+export const getCBELatestScan = (source?: string) => api.get("/api/cbe/latest", { params: { source } });
+export const runCBEScan = (payload: object) => api.post("/api/cbe/scan", payload, { timeout: 90_000 });
+export const getCBEInstrumentAnalytics = (symbol: string, lookbackDays = 300) =>
+  api.get(`/api/cbe/instruments/${encodeURIComponent(symbol)}/analytics`, {
+    params: { lookback_days: lookbackDays },
+    timeout: 90_000,
+  });
+
 // ── Directional Long Options ───────────────────────────────────────────────
 export const getDirectionalOptionsSummary = () =>
   api.get("/api/directional-options/summary");
@@ -457,6 +468,20 @@ export const runGannTPDeltaPaperProposal = (
   });
 export const getGannTPDeltaPaperJournal = (symbol?: string, limit = 50) =>
   api.get("/api/gann-tp-delta/paper-journal", { params: { symbol, limit } });
+export const getGannTPDeltaPaperAgentStatus = (limit = 50) =>
+  api.get("/api/gann-tp-delta/paper-agent/status", { params: { limit } });
+export const runGannTPDeltaPaperAgentOnce = (
+  timeframe = "15minute",
+  lookbackSessions = 60,
+  anchorMode = "auto_pivot",
+  hMode = "median_tpd",
+  liveRefresh = false,
+  maxUnderlyings = 0,
+) =>
+  api.post("/api/gann-tp-delta/paper-agent/run-once", null, {
+    params: { timeframe, lookback_sessions: lookbackSessions, anchor_mode: anchorMode, h_mode: hMode, live_refresh: liveRefresh, max_underlyings: maxUnderlyings },
+    timeout: 120_000,
+  });
 
 // ── Auction Intelligence ─────────────────────────────────────────────────
 export const getAuctionIntelligenceSummary = () =>

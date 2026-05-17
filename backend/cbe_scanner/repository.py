@@ -1,0 +1,158 @@
+"""Persistence helpers for CBE scan audit trails."""
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from loguru import logger
+from sqlalchemy import text
+
+from db.database import AsyncSessionLocal
+
+
+async def persist_scan_payload(payload: dict[str, Any]) -> str | None:
+    """Persist one scan response. Fail closed to logging, not to the scanner."""
+    results = list(payload.get("results") or [])
+    watchlist_symbols = {str(row.get("instrument") or "") for row in payload.get("watchlist") or []}
+    try:
+        async with AsyncSessionLocal() as session:
+            if not await _tables_ready(session):
+                return None
+            run_result = await session.execute(
+                text(
+                    """
+                    INSERT INTO cbe_scan_runs
+                        (source, scan_date, universe_size, scored_count, watchlist_count, config, source_status)
+                    VALUES
+                        (
+                            :source, :scan_date, :universe_size, :scored_count,
+                            :watchlist_count, CAST(:config AS JSONB), CAST(:source_status AS JSONB)
+                        )
+                    RETURNING id
+                    """
+                ),
+                {
+                    "source": str(payload.get("source") or "unknown"),
+                    "scan_date": payload.get("scan_date"),
+                    "universe_size": int(payload.get("universe_size") or 0),
+                    "scored_count": int(payload.get("scored_count") or 0),
+                    "watchlist_count": int(payload.get("watchlist_count") or 0),
+                    "config": json.dumps(payload.get("config") or {}),
+                    "source_status": json.dumps(payload.get("source_status") or {}),
+                },
+            )
+            run_id = run_result.scalar_one()
+            if results:
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO cbe_scan_results
+                            (
+                                run_id, rank, instrument, composite_score, directional_bias,
+                                bias_conviction, f1_vc_score, f2_omp_score, f3_csmd_score,
+                                f4_cp_score, f5_mp_score, is_watchlist, details
+                            )
+                        VALUES
+                            (
+                                :run_id, :rank, :instrument, :composite_score, :directional_bias,
+                                :bias_conviction, :f1_vc_score, :f2_omp_score, :f3_csmd_score,
+                                :f4_cp_score, :f5_mp_score, :is_watchlist, CAST(:details AS JSONB)
+                            )
+                        """
+                    ),
+                    [
+                        {
+                            "run_id": run_id,
+                            "rank": index + 1,
+                            "instrument": str(row.get("instrument") or ""),
+                            "composite_score": float(row.get("composite_score") or 0.0),
+                            "directional_bias": str(row.get("directional_bias") or "neutral"),
+                            "bias_conviction": float(row.get("bias_conviction") or 0.0),
+                            "f1_vc_score": float(row.get("f1_vc_score") or 0.0),
+                            "f2_omp_score": float(row.get("f2_omp_score") or 0.0),
+                            "f3_csmd_score": float(row.get("f3_csmd_score") or 0.0),
+                            "f4_cp_score": float(row.get("f4_cp_score") or 0.0),
+                            "f5_mp_score": float(row.get("f5_mp_score") or 0.0),
+                            "is_watchlist": str(row.get("instrument") or "") in watchlist_symbols,
+                            "details": json.dumps(row.get("details") or {}),
+                        }
+                        for index, row in enumerate(results)
+                        if row.get("instrument")
+                    ],
+                )
+            await session.commit()
+            return str(run_id)
+    except Exception as exc:
+        logger.warning(f"[CBE] Scan persistence skipped: {exc}")
+        return None
+
+
+async def load_latest_scan_payload(source: str | None = None) -> dict[str, Any] | None:
+    try:
+        async with AsyncSessionLocal() as session:
+            if not await _tables_ready(session):
+                return None
+            run_query = """
+                SELECT id, source, scan_date, universe_size, scored_count, watchlist_count,
+                       config, source_status, created_at
+                FROM cbe_scan_runs
+            """
+            params: dict[str, Any] = {}
+            if source:
+                run_query += " WHERE source = :source"
+                params["source"] = source
+            run_query += " ORDER BY created_at DESC LIMIT 1"
+            run_result = await session.execute(text(run_query), params)
+            run_row = run_result.mappings().first()
+            if not run_row:
+                return None
+            run_id = run_row["id"]
+            result_rows = await session.execute(
+                text(
+                    """
+                    SELECT rank, instrument, composite_score, directional_bias, bias_conviction,
+                           f1_vc_score, f2_omp_score, f3_csmd_score, f4_cp_score,
+                           f5_mp_score, is_watchlist, details
+                    FROM cbe_scan_results
+                    WHERE run_id = :run_id
+                    ORDER BY rank ASC
+                    """
+                ),
+                {"run_id": run_id},
+            )
+            rows = [_result_row_to_payload(dict(row)) for row in result_rows.mappings().all()]
+            return {
+                "id": str(run_id),
+                "source": run_row["source"],
+                "scan_date": run_row["scan_date"].isoformat(),
+                "created_at": run_row["created_at"].isoformat(),
+                "universe_size": run_row["universe_size"],
+                "scored_count": run_row["scored_count"],
+                "watchlist_count": run_row["watchlist_count"],
+                "config": run_row["config"] or {},
+                "source_status": run_row["source_status"] or {},
+                "results": rows,
+                "watchlist": [row for row in rows if row.get("is_watchlist")],
+            }
+    except Exception as exc:
+        logger.warning(f"[CBE] Latest scan load skipped: {exc}")
+        return None
+
+
+def _result_row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
+    row.pop("rank", None)
+    row["details"] = row.get("details") or {}
+    return row
+
+
+async def _tables_ready(session) -> bool:
+    result = await session.execute(
+        text(
+            """
+            SELECT to_regclass('public.cbe_scan_runs') AS runs_table,
+                   to_regclass('public.cbe_scan_results') AS results_table
+            """
+        )
+    )
+    row = result.mappings().first()
+    return bool(row and row.get("runs_table") and row.get("results_table"))

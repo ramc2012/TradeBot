@@ -3,12 +3,14 @@
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { clsx } from "clsx";
-import { AlertTriangle, Compass, FilePlus2, RefreshCw, Target, Waves } from "lucide-react";
+import { AlertTriangle, Bot, Compass, FilePlus2, Play, RefreshCw, Target } from "lucide-react";
 
 import {
   describeApiError,
+  getGannTPDeltaPaperAgentStatus,
   getGannTPDeltaPaperJournal,
   getGannTPDeltaWorkspace,
+  runGannTPDeltaPaperAgentOnce,
   runGannTPDeltaPaperProposal,
 } from "@/lib/api";
 
@@ -40,6 +42,48 @@ type Workspace = {
   };
   backtest: { summary: { event_count: number; total_points: number; win_rate_pct: number; avg_win: number; avg_loss: number }; events: Array<{ time: string; bias: string; score: number; pnl_points: number }> };
 };
+type AgentPosition = {
+  position_id: string;
+  underlying: string;
+  direction: string;
+  option_type: string;
+  trading_symbol?: string;
+  expiry?: string;
+  strike?: number;
+  qty_units?: number;
+  entry_price?: number;
+  current_price?: number;
+  stop_price?: number;
+  target_price?: number;
+  signal_score?: number;
+  realized_pnl?: number;
+  unrealized_pnl?: number;
+  close_reason?: string;
+};
+type AgentDecision = {
+  underlying: string;
+  signal_state?: string;
+  signal_score?: number;
+  decision?: string;
+  reason?: string;
+  option_type?: string;
+};
+type AgentStatus = {
+  mode: string;
+  last_scan_at?: string;
+  last_message?: string;
+  last_run?: Record<string, string | number | boolean>;
+  summary: {
+    open_positions: number;
+    closed_positions?: number;
+    realized_pnl?: number;
+    unrealized_pnl?: number;
+    total_pnl?: number;
+  };
+  open_positions: AgentPosition[];
+  closed_positions?: AgentPosition[];
+  recent_signals?: AgentDecision[];
+};
 
 const UNDERLYINGS = ["NIFTY", "BANKNIFTY", "SENSEX", "CRUDEOIL", "GOLD", "SILVERM", "NATURALGAS"];
 const TIMEFRAMES = ["5minute", "15minute", "1hour", "1day"];
@@ -57,8 +101,10 @@ export default function GannTPDeltaWorkspace() {
   const [manualH, setManualH] = useState(47);
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [journalCount, setJournalCount] = useState(0);
+  const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [agentRunning, setAgentRunning] = useState(false);
 
   const load = () => {
     setError(null);
@@ -66,10 +112,12 @@ export default function GannTPDeltaWorkspace() {
     Promise.all([
       getGannTPDeltaWorkspace(underlying, timeframe, lookback, anchorMode, hMode, hMode === "manual" ? manualH : undefined),
       getGannTPDeltaPaperJournal(underlying, 20),
+      getGannTPDeltaPaperAgentStatus(50),
     ])
-      .then(([workspaceResponse, journalResponse]) => {
+      .then(([workspaceResponse, journalResponse, agentResponse]) => {
         setWorkspace(workspaceResponse.data);
         setJournalCount(journalResponse.data?.summary?.count || 0);
+        setAgentStatus(agentResponse.data);
       })
       .catch((err) => setError(describeApiError(err, "Failed to load Gann TP Delta workspace.")))
       .finally(() => setLoading(false));
@@ -91,6 +139,15 @@ export default function GannTPDeltaWorkspace() {
       .finally(() => setLoading(false));
   };
 
+  const runAgent = () => {
+    setAgentRunning(true);
+    setError(null);
+    runGannTPDeltaPaperAgentOnce(timeframe, lookback, anchorMode, hMode, false)
+      .then((response) => setAgentStatus(response.data))
+      .catch((err) => setError(describeApiError(err, "Failed to run Gann paper agent.")))
+      .finally(() => setAgentRunning(false));
+  };
+
   return (
     <main className="min-h-screen bg-bg-primary px-4 py-4 text-text-primary">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -109,6 +166,10 @@ export default function GannTPDeltaWorkspace() {
           <button type="button" onClick={recordProposal} className="inline-flex items-center gap-2 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-sm text-emerald-300 hover:border-emerald-300">
             <FilePlus2 size={15} />
             Paper proposal
+          </button>
+          <button type="button" onClick={runAgent} disabled={agentRunning} className="inline-flex items-center gap-2 rounded-md border border-accent-blue/40 bg-accent-blue/10 px-3 py-2 text-sm text-accent-blue hover:border-accent-blue disabled:cursor-not-allowed disabled:opacity-60">
+            <Play size={15} className={clsx(agentRunning && "animate-pulse")} />
+            Run paper agent
           </button>
         </div>
       </div>
@@ -160,6 +221,7 @@ export default function GannTPDeltaWorkspace() {
               ))}
             </div>
           </Panel>
+          <AgentPanel status={agentStatus} running={agentRunning} onRun={runAgent} />
         </aside>
       </section>
 
@@ -229,6 +291,53 @@ function MetricGrid({ snapshot, journalCount }: { snapshot?: Workspace["snapshot
         <Stat label="SQ9" value={snapshot?.nearest_sq9_level?.price ? snapshot.nearest_sq9_level.price.toFixed(2) : "-"} />
         <Stat label="Cycle" value={snapshot?.active_time_cycle?.cycle || "-"} />
         <Stat label="Journal" value={journalCount} />
+      </div>
+    </Panel>
+  );
+}
+
+function AgentPanel({ status, running, onRun }: { status: AgentStatus | null; running: boolean; onRun: () => void }) {
+  const openPositions = status?.open_positions || [];
+  const recentSignals = status?.recent_signals || [];
+  return (
+    <Panel title="Paper Agent">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2 text-sm text-text-secondary">
+          <Bot size={15} className="shrink-0 text-accent-blue" />
+          <span className="truncate">{status?.last_message || "Paper agent has not run yet."}</span>
+        </div>
+        <button type="button" onClick={onRun} disabled={running} className="inline-flex shrink-0 items-center gap-2 rounded-md border border-accent-blue/40 px-2 py-1 text-xs text-accent-blue hover:border-accent-blue disabled:cursor-not-allowed disabled:opacity-60">
+          <Play size={13} />
+          Run
+        </button>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <Stat label="Open" value={status?.summary.open_positions ?? 0} />
+        <Stat label="Unrl P&L" value={status?.summary.unrealized_pnl ?? 0} />
+        <Stat label="Total P&L" value={status?.summary.total_pnl ?? 0} />
+      </div>
+      <div className="mt-3 space-y-2">
+        {openPositions.slice(0, 4).map((position) => (
+          <div key={position.position_id} className="rounded-md border border-bg-border bg-bg-primary/40 px-3 py-2 text-xs">
+            <div className="flex items-center justify-between gap-2">
+              <span className="min-w-0 truncate font-semibold text-text-primary">{position.underlying} {position.option_type} {position.strike}</span>
+              <span className={clsx("font-mono", (position.unrealized_pnl || 0) >= 0 ? "text-emerald-300" : "text-red-300")}>{numberFmt.format(position.unrealized_pnl || 0)}</span>
+            </div>
+            <div className="mt-1 flex items-center justify-between gap-2 text-text-muted">
+              <span className="truncate">{position.expiry} | score {position.signal_score ?? "-"}</span>
+              <span className="shrink-0 font-mono">{numberFmt.format(position.entry_price || 0)} -&gt; {numberFmt.format(position.current_price || 0)}</span>
+            </div>
+          </div>
+        ))}
+        {!openPositions.length ? <div className="rounded-md border border-bg-border bg-bg-primary/40 px-3 py-2 text-sm text-text-muted">No open paper positions.</div> : null}
+      </div>
+      <div className="mt-3 max-h-40 space-y-1 overflow-auto pr-1">
+        {recentSignals.slice(0, 8).map((item) => (
+          <div key={`${item.underlying}-${item.signal_state}-${item.reason}`} className="flex items-center justify-between gap-2 rounded-md bg-bg-primary/30 px-2 py-1 text-xs text-text-secondary">
+            <span className="truncate">{item.underlying} {item.signal_state || "none"}</span>
+            <span className="shrink-0 font-mono text-text-muted">{item.decision || "skip"} {item.signal_score ?? 0}</span>
+          </div>
+        ))}
       </div>
     </Panel>
   );

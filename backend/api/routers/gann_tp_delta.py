@@ -96,3 +96,29 @@ async def paper_journal(
     limit: int = Query(50, ge=1, le=200),
 ) -> dict:
     return await asyncio.to_thread(gann_tp_delta_service.paper_journal, symbol, limit)
+
+
+@router.get("/paper-agent/status")
+async def paper_agent_status(
+    limit: int = Query(50, ge=1, le=200),
+) -> dict:
+    return await asyncio.to_thread(gann_tp_delta_service.paper_agent_status, limit)
+
+
+@router.post("/paper-agent/run-once")
+async def paper_agent_run_once(
+    timeframe: str = Query("15minute"),
+    lookback_sessions: int = Query(60, ge=4, le=180),
+    anchor_mode: str = Query("auto_pivot"),
+    h_mode: str = Query("median_tpd"),
+    live_refresh: bool = Query(False),
+    max_underlyings: int = Query(0, ge=0, le=500),
+) -> dict:
+    return await gann_tp_delta_service.run_paper_agent_once(
+        timeframe=timeframe,
+        lookback_sessions=lookback_sessions,
+        anchor_mode=anchor_mode,
+        h_mode=h_mode,
+        live_refresh=live_refresh,
+        max_underlyings=max_underlyings or None,
+    )

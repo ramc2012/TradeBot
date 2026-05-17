@@ -82,6 +82,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "paper": {
         "journal_root": RUNTIME_ROOT / "paper",
     },
+    "paper_agent": {
+        "enabled": True,
+        "timeframe": "15minute",
+        "lookback_sessions": 60,
+        "anchor_mode": "auto_pivot",
+        "h_mode": "median_tpd",
+        "live_refresh": False,
+        "lots": 1,
+        "max_positions": 20,
+        "max_days_to_expiry": 45,
+        "scan_concurrency": 6,
+        "min_score": 3,
+        "stop_loss_pct": 35.0,
+        "target_pct": 50.0,
+    },
 }
 
 

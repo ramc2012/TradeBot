@@ -121,8 +121,16 @@ def test_gann_api_routes_return_stable_schemas(monkeypatch) -> None:
     )
     monkeypatch.setattr(gann_router.gann_tp_delta_service, "backtest", lambda *args: {"summary": {"event_count": 0}, "events": []})
     monkeypatch.setattr(gann_router.gann_tp_delta_service, "paper_journal", lambda *args: {"records": [], "summary": {"count": 0}})
+    monkeypatch.setattr(gann_router.gann_tp_delta_service, "paper_agent_status", lambda *args: {"mode": "paper", "summary": {"open_positions": 0}, "open_positions": []})
+
+    async def _run_agent_once(*args, **kwargs):
+        return {"mode": "paper", "summary": {"open_positions": 0}, "last_run": {"scanned": 0, "opened": 0}}
+
+    monkeypatch.setattr(gann_router.gann_tp_delta_service, "run_paper_agent_once", _run_agent_once)
 
     assert client.get("/api/gann-tp-delta/summary").json()["key"] == "gann_tp_delta"
     assert client.get("/api/gann-tp-delta/workspace").json()["snapshot"]["status"] == "ready"
     assert client.get("/api/gann-tp-delta/backtest").json()["summary"]["event_count"] == 0
     assert client.get("/api/gann-tp-delta/paper-journal").json()["summary"]["count"] == 0
+    assert client.get("/api/gann-tp-delta/paper-agent/status").json()["summary"]["open_positions"] == 0
+    assert client.post("/api/gann-tp-delta/paper-agent/run-once").json()["last_run"]["opened"] == 0

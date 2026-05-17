@@ -11,6 +11,7 @@ import pandas as pd
 
 from core.config import settings
 from gann_tp_delta.anchors import select_anchor
+from gann_tp_delta.agent import GannTPDeltaPaperAgent
 from gann_tp_delta.backtest import GannTPDeltaBacktester
 from gann_tp_delta.config import clone_default_config
 from gann_tp_delta.data import GannTPDeltaDataStore
@@ -26,6 +27,7 @@ class GannTPDeltaService:
         self.store = GannTPDeltaDataStore(self.config["data_root"], self.config["feature_engine"])
         self.backtester = GannTPDeltaBacktester(self.config)
         self.paper = GannTPDeltaPaperStore(self.config["paper"]["journal_root"])
+        self.paper_agent = GannTPDeltaPaperAgent(self, self.config)
         self._summary_cache: tuple[float, dict[str, Any]] | None = None
 
     def summary(self) -> dict[str, Any]:
@@ -121,6 +123,27 @@ class GannTPDeltaService:
 
     def paper_journal(self, symbol: str | None = None, limit: int = 50) -> dict[str, Any]:
         return self.paper.list(symbol=symbol, limit=limit)
+
+    def paper_agent_status(self, limit: int = 50) -> dict[str, Any]:
+        return self.paper_agent.status(limit=limit)
+
+    async def run_paper_agent_once(
+        self,
+        timeframe: str | None = None,
+        lookback_sessions: int | None = None,
+        anchor_mode: str | None = None,
+        h_mode: str | None = None,
+        live_refresh: bool | None = None,
+        max_underlyings: int | None = None,
+    ) -> dict[str, Any]:
+        return await self.paper_agent.run_once(
+            timeframe=timeframe,
+            lookback_sessions=lookback_sessions,
+            anchor_mode=anchor_mode,
+            h_mode=h_mode,
+            live_refresh=live_refresh,
+            max_underlyings=max_underlyings,
+        )
 
     def _snapshot(
         self,
