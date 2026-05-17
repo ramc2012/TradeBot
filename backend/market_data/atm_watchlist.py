@@ -215,18 +215,11 @@ def _trading_days_until(target: date, *, today: Optional[date] = None) -> int:
 
 
 def _next_weekly_expiry(symbol: str, today: Optional[date] = None) -> Optional[date]:
-    """Return the next weekly expiry date for an index symbol.
-
-    Uses INDEX_EXPIRY_WEEKDAY (Mon=0..Fri=4) to find the next occurrence
-    of the symbol's weekly expiry weekday on or after today. NSE / BSE
-    holidays are not subtracted here (small impact for a weekly
-    cadence).
-
-    Some indices no longer have weekly contracts (BANKNIFTY, FINNIFTY,
-    MIDCPNIFTY, BANKEX post-2024). For those, this helper still returns
-    the next-weekly date, but the watchlist build will fall back to
-    monthly when the broker chain confirms no contract exists at that
-    date. The S2 caller can also fall back explicitly when None.
+    """LEGACY weekday-based weekly resolver — retained as a last-resort
+    fallback only. The authoritative source for available expiries is
+    the broker's option chain (master) plus fo_expiry_catalog (monthly
+    master). See _resolve_expiry_from_master() on the service for the
+    proper instrument-master-driven path.
     """
     from analysis.instruments import INDEX_EXPIRY_WEEKDAY
     today = today or date.today()
@@ -235,9 +228,6 @@ def _next_weekly_expiry(symbol: str, today: Optional[date] = None) -> Optional[d
         return None
     delta = (weekday - today.weekday()) % 7
     if delta == 0 and today.weekday() == weekday:
-        # If today is the expiry weekday, return today (T-0 trading
-        # may be allowed by the profile). Callers that want the *next*
-        # week pass an adjusted today.
         return today
     return today + timedelta(days=delta if delta > 0 else 7)
 
@@ -267,51 +257,14 @@ def _stock_monthly_for_selected_expiry(
     return active
 
 
-def _resolve_expiry_for_profile(
-    *,
-    symbol: str,
-    kind: str,
-    profile: "StrategyContractProfile",  # type: ignore[name-defined]
-    today: Optional[date] = None,
-) -> Optional[date]:
-    """Apply the strategy's profile to pick the right expiry for *symbol*.
-
-    Returns None when no suitable expiry exists for this combination
-    (e.g. caller passes a weekly profile to a symbol with no weekly
-    contract — caller can decide whether to fall back to monthly).
-    """
-    today = today or date.today()
-    kind = (kind or "").upper()
-    if kind == "INDEX":
-        pref = profile.index_expiry
-        if pref == "weekly":
-            weekly = _next_weekly_expiry(symbol, today=today)
-            if weekly is None:
-                return None
-            # If today IS the weekly expiry and profile blocks T-0,
-            # advance to next week's expiry.
-            if weekly == today and not profile.index_allow_t0:
-                return weekly + timedelta(days=7)
-            return weekly
-        # monthly
-        anchor = today
-        monthly = get_index_monthly_expiry(symbol, anchor.year, anchor.month)
-        if monthly < today:
-            nxt = (monthly + timedelta(days=4)).replace(day=28)
-            monthly = get_index_monthly_expiry(symbol, nxt.year, nxt.month)
-        if monthly == today and not profile.index_allow_t0:
-            nxt = (monthly + timedelta(days=4)).replace(day=28)
-            monthly = get_index_monthly_expiry(symbol, nxt.year, nxt.month)
-        return monthly
-    # stocks: only monthly, rollover per profile
-    anchor = today
-    base = get_monthly_expiry(anchor.year, anchor.month)
-    if base < today:
-        nxt = (base + timedelta(days=4)).replace(day=28)
-        base = get_monthly_expiry(nxt.year, nxt.month)
-    return _stock_monthly_for_selected_expiry(
-        base, today=today, rollover_td=profile.stock_rollover_td
-    )
+# NOTE: a pure weekday-math sync resolver previously lived here. It was
+# superseded by ATMWatchlistService._resolve_expiry_from_master, which
+# sources expiries from the broker chain (master) plus fo_expiry_catalog
+# (monthly master) and falls back to weekday math only when both are
+# unavailable. We deleted the sync version to remove the dead path —
+# the broker- and catalog-driven resolution catches holiday-shifted
+# expiries that pure weekday math cannot (e.g. SENSEX 2026-05-27 in
+# the catalog vs the weekday-Thursday 2026-05-28).
 
 
 def _parse_payload_datetime(value: Any) -> Optional[datetime]:
@@ -2556,6 +2509,131 @@ class ATMWatchlistService:
             return INDEX_FYERS_SYMBOLS.get(meta.symbol, f"NSE:{meta.symbol}-INDEX")
         return f"NSE:{meta.symbol}-EQ"
 
+    async def _list_known_monthly_expiries(self, symbol: str) -> set[date]:
+        """Monthly-expiry master: query fo_expiry_catalog for the rows
+        the F&O catalog has marked as a monthly for this symbol."""
+        try:
+            async with AsyncSessionLocal() as session:
+                rows = await session.execute(
+                    text(
+                        """
+                        SELECT expiry
+                        FROM fo_expiry_catalog
+                        WHERE underlying = :symbol
+                          AND expiry >= CURRENT_DATE
+                        ORDER BY expiry
+                        """
+                    ),
+                    {"symbol": symbol.upper()},
+                )
+                return {row.expiry for row in rows.fetchall()}
+        except Exception as exc:
+            logger.debug(f"[ATM watchlist] monthly-master lookup failed for {symbol}: {exc}")
+            return set()
+
+    async def _resolve_expiry_from_master(
+        self,
+        *,
+        meta: "UnderlyingMeta",
+        profile,  # StrategyContractProfile
+        today: Optional[date] = None,
+        upstox_adapter: Optional[BrokerAdapter] = None,
+        fyers_adapter: Optional[BrokerAdapter] = None,
+    ) -> Optional[date]:
+        """Pick the expiry the strategy wants from the actual available
+        list returned by the brokers (instrument master), filtered
+        against fo_expiry_catalog to distinguish weekly from monthly.
+
+        Order of truth:
+          1. Broker option-chain reports all available expiries for the
+             symbol (weekly + monthly, holiday-shifted, expired-skipped).
+          2. fo_expiry_catalog records which of those are MONTHLY
+             contracts. Everything in (1) that is NOT in (2) is a
+             weekly.
+          3. The legacy weekday helpers (_next_weekly_expiry,
+             get_monthly_expiry) are only used as a last-resort
+             fallback when the broker chain is completely unavailable
+             (e.g. weekend with no cached chain).
+        """
+        today = today or date.today()
+        # 1. Broker chain — the authoritative list of tradable expiries.
+        broker_isos, _source = await self._get_broker_expiry_snapshot_for_symbol(
+            meta, upstox_adapter, fyers_adapter
+        )
+        broker_dates = sorted({
+            date.fromisoformat(s) for s in broker_isos if s
+        })
+        # 2. Monthly master — which of those are monthlies.
+        monthly_set = await self._list_known_monthly_expiries(meta.symbol)
+
+        kind = (meta.kind or "").upper()
+        allow_t0 = profile.index_allow_t0 if kind == "INDEX" else True
+
+        def _filter_future(dates: list[date]) -> list[date]:
+            return [d for d in dates if (d > today if not allow_t0 else d >= today)]
+
+        if not broker_dates:
+            # Last-resort fallback: synthesise expiries from the
+            # weekday helpers so the system doesn't go dark when broker
+            # chain is unavailable. This is the only path that still
+            # uses date arithmetic.
+            logger.debug(
+                f"[ATM watchlist] broker chain empty for {meta.symbol}; "
+                "falling back to weekday-based expiry math."
+            )
+            if kind == "INDEX" and profile.index_expiry == "weekly":
+                w = _next_weekly_expiry(meta.symbol, today=today)
+                if w is None:
+                    return None
+                if w == today and not allow_t0:
+                    w = w + timedelta(days=7)
+                return w
+            # monthly fallback
+            anchor = today
+            try:
+                cand = get_index_monthly_expiry(meta.symbol, anchor.year, anchor.month)
+            except Exception:
+                cand = get_monthly_expiry(anchor.year, anchor.month)
+            if cand < today or (cand == today and not allow_t0):
+                nxt = (cand + timedelta(days=4)).replace(day=28)
+                try:
+                    cand = get_index_monthly_expiry(meta.symbol, nxt.year, nxt.month)
+                except Exception:
+                    cand = get_monthly_expiry(nxt.year, nxt.month)
+            if kind == "STOCK" and profile.stock_rollover_td > 0:
+                if _trading_days_until(cand, today=today) <= profile.stock_rollover_td:
+                    nxt = (cand + timedelta(days=4)).replace(day=28)
+                    cand = get_monthly_expiry(nxt.year, nxt.month)
+            return cand
+
+        candidates = _filter_future(broker_dates)
+        if not candidates:
+            return None
+
+        # Weekly preference (indices only). Pick the nearest expiry
+        # that is NOT a known monthly. If everything in the chain is a
+        # monthly (some symbols only trade monthly), fall back to the
+        # nearest available.
+        if kind == "INDEX" and profile.index_expiry == "weekly":
+            weeklies = [d for d in candidates if d not in monthly_set]
+            return weeklies[0] if weeklies else candidates[0]
+
+        # Monthly preference (default for stocks, configurable for indices).
+        monthlies = [d for d in candidates if d in monthly_set]
+        if not monthlies:
+            # Broker chain returned only weeklies (or fo_expiry_catalog
+            # missing rows for this symbol). Take the nearest available
+            # contract — better than returning None.
+            return candidates[0]
+
+        nearest_monthly = monthlies[0]
+        if kind == "STOCK" and profile.stock_rollover_td > 0:
+            if _trading_days_until(nearest_monthly, today=today) <= profile.stock_rollover_td:
+                # Roll to the next monthly if available.
+                for d in monthlies[1:]:
+                    return d
+        return nearest_monthly
+
     async def get_watchlist_for_strategy(
         self,
         profile,  # StrategyContractProfile
@@ -2582,15 +2660,40 @@ class ATMWatchlistService:
         if not symbols:
             return {"rows": [], "source": "no_symbols", "profile": profile.name}
         today = date.today()
-        # Resolve each symbol's preferred expiry through the profile.
+        # Resolve each symbol's preferred expiry from the instruments
+        # master (broker chain + fo_expiry_catalog), not weekday math.
+        # If brokers are unavailable the resolver falls back to date
+        # arithmetic as a last resort.
         underlyings = await self._load_underlyings()
-        kind_by_symbol = {u.symbol.upper(): u.kind for u in underlyings}
+        meta_by_symbol = {u.symbol.upper(): u for u in underlyings}
+        upstox_adapter = await self._get_upstox_adapter()
+        fyers_adapter = get_active_adapter("fyers")
         resolutions: dict[str, Optional[date]] = {}
         for sym in symbols:
             su = sym.upper()
-            kind = kind_by_symbol.get(su) or "STOCK"
-            resolutions[su] = _resolve_expiry_for_profile(
-                symbol=su, kind=kind, profile=profile, today=today
+            meta = meta_by_symbol.get(su)
+            if meta is None:
+                # Synthesise a minimal meta when the symbol isn't in
+                # fo_underlying_catalog yet — resolver only needs
+                # `.symbol` and `.kind` to query the broker.
+                synthesised_kind = (
+                    "INDEX"
+                    if su in {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY",
+                              "SENSEX", "BANKEX", "NIFTYNXT50"}
+                    else "STOCK"
+                )
+                meta = UnderlyingMeta(
+                    symbol=su,
+                    kind=synthesised_kind,
+                    spot_instrument_key="",
+                    underlying_key="",
+                )
+            resolutions[su] = await self._resolve_expiry_from_master(
+                meta=meta,
+                profile=profile,
+                today=today,
+                upstox_adapter=upstox_adapter,
+                fyers_adapter=fyers_adapter,
             )
         # Bucket by expiry so we hit the broker per-expiry, not per-symbol.
         by_expiry: dict[str, list[str]] = {}
