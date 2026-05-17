@@ -214,32 +214,104 @@ def _trading_days_until(target: date, *, today: Optional[date] = None) -> int:
     return count
 
 
+def _next_weekly_expiry(symbol: str, today: Optional[date] = None) -> Optional[date]:
+    """Return the next weekly expiry date for an index symbol.
+
+    Uses INDEX_EXPIRY_WEEKDAY (Mon=0..Fri=4) to find the next occurrence
+    of the symbol's weekly expiry weekday on or after today. NSE / BSE
+    holidays are not subtracted here (small impact for a weekly
+    cadence).
+
+    Some indices no longer have weekly contracts (BANKNIFTY, FINNIFTY,
+    MIDCPNIFTY, BANKEX post-2024). For those, this helper still returns
+    the next-weekly date, but the watchlist build will fall back to
+    monthly when the broker chain confirms no contract exists at that
+    date. The S2 caller can also fall back explicitly when None.
+    """
+    from analysis.instruments import INDEX_EXPIRY_WEEKDAY
+    today = today or date.today()
+    weekday = INDEX_EXPIRY_WEEKDAY.get(symbol.upper())
+    if weekday is None:
+        return None
+    delta = (weekday - today.weekday()) % 7
+    if delta == 0 and today.weekday() == weekday:
+        # If today is the expiry weekday, return today (T-0 trading
+        # may be allowed by the profile). Callers that want the *next*
+        # week pass an adjusted today.
+        return today
+    return today + timedelta(days=delta if delta > 0 else 7)
+
+
 def _stock_monthly_for_selected_expiry(
     selected_expiry: date,
     *,
     today: Optional[date] = None,
+    rollover_td: Optional[int] = None,
 ) -> date:
     """Resolve stocks to the monthly expiry for the selected month, but
-    *roll forward* when the active monthly has ≤ MIN_TTE_DAYS_STOCK
-    trading days left.
-
-    The strategy itself no longer gates on TTE — instrument selection
-    is the Market Intelligence module's job. This helper is that
-    selection point. When the active monthly is too close, the
-    watchlist promotes the next month's contract so the strategy
-    receives only "tradeable" rows.
+    *roll forward* when the active monthly has ≤ rollover_td trading
+    days left. rollover_td defaults to MIN_TTE_DAYS_STOCK (3) so the
+    S1 path is unchanged when callers don't pass a profile override.
     """
     today = today or date.today()
     active = get_monthly_expiry(selected_expiry.year, selected_expiry.month)
-    try:
-        from agent.strategy_config import MIN_TTE_DAYS_STOCK as _stock_min_tte
-    except Exception:
-        _stock_min_tte = 3
-    if _trading_days_until(active, today=today) <= int(_stock_min_tte):
-        # Roll to next month's monthly expiry
+    if rollover_td is None:
+        try:
+            from agent.strategy_config import MIN_TTE_DAYS_STOCK as _stock_min_tte
+        except Exception:
+            _stock_min_tte = 3
+        rollover_td = int(_stock_min_tte)
+    if rollover_td > 0 and _trading_days_until(active, today=today) <= rollover_td:
         next_anchor = (active.replace(day=28) + timedelta(days=4))
         return get_monthly_expiry(next_anchor.year, next_anchor.month)
     return active
+
+
+def _resolve_expiry_for_profile(
+    *,
+    symbol: str,
+    kind: str,
+    profile: "StrategyContractProfile",  # type: ignore[name-defined]
+    today: Optional[date] = None,
+) -> Optional[date]:
+    """Apply the strategy's profile to pick the right expiry for *symbol*.
+
+    Returns None when no suitable expiry exists for this combination
+    (e.g. caller passes a weekly profile to a symbol with no weekly
+    contract — caller can decide whether to fall back to monthly).
+    """
+    today = today or date.today()
+    kind = (kind or "").upper()
+    if kind == "INDEX":
+        pref = profile.index_expiry
+        if pref == "weekly":
+            weekly = _next_weekly_expiry(symbol, today=today)
+            if weekly is None:
+                return None
+            # If today IS the weekly expiry and profile blocks T-0,
+            # advance to next week's expiry.
+            if weekly == today and not profile.index_allow_t0:
+                return weekly + timedelta(days=7)
+            return weekly
+        # monthly
+        anchor = today
+        monthly = get_index_monthly_expiry(symbol, anchor.year, anchor.month)
+        if monthly < today:
+            nxt = (monthly + timedelta(days=4)).replace(day=28)
+            monthly = get_index_monthly_expiry(symbol, nxt.year, nxt.month)
+        if monthly == today and not profile.index_allow_t0:
+            nxt = (monthly + timedelta(days=4)).replace(day=28)
+            monthly = get_index_monthly_expiry(symbol, nxt.year, nxt.month)
+        return monthly
+    # stocks: only monthly, rollover per profile
+    anchor = today
+    base = get_monthly_expiry(anchor.year, anchor.month)
+    if base < today:
+        nxt = (base + timedelta(days=4)).replace(day=28)
+        base = get_monthly_expiry(nxt.year, nxt.month)
+    return _stock_monthly_for_selected_expiry(
+        base, today=today, rollover_td=profile.stock_rollover_td
+    )
 
 
 def _parse_payload_datetime(value: Any) -> Optional[datetime]:
@@ -2483,6 +2555,97 @@ class ATMWatchlistService:
             # Explicit mapping takes precedence over the fallback
             return INDEX_FYERS_SYMBOLS.get(meta.symbol, f"NSE:{meta.symbol}-INDEX")
         return f"NSE:{meta.symbol}-EQ"
+
+    async def get_watchlist_for_strategy(
+        self,
+        profile,  # StrategyContractProfile
+        *,
+        symbols: list[str],
+        live_refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Build a watchlist tailored to a strategy's contract profile.
+
+        This is the strategy-aware entry point. The profile tells MI:
+          * which expiry to resolve per symbol (weekly vs monthly)
+          * whether T-0 (expiry day) is allowed for indices
+          * how aggressively to roll stocks on near-expiry
+          * how tight to make the strike-neighbour search
+
+        Today's S1 callers can keep using get_watchlist() — that path
+        is unchanged. Strategies with different needs (S2, future
+        directional intraday) call this method with their profile.
+
+        The implementation groups symbols by their resolved expiry and
+        issues parallel get_watchlist() requests scoped to each
+        expiry+symbol-set so the broker chain queries stay efficient.
+        """
+        if not symbols:
+            return {"rows": [], "source": "no_symbols", "profile": profile.name}
+        today = date.today()
+        # Resolve each symbol's preferred expiry through the profile.
+        underlyings = await self._load_underlyings()
+        kind_by_symbol = {u.symbol.upper(): u.kind for u in underlyings}
+        resolutions: dict[str, Optional[date]] = {}
+        for sym in symbols:
+            su = sym.upper()
+            kind = kind_by_symbol.get(su) or "STOCK"
+            resolutions[su] = _resolve_expiry_for_profile(
+                symbol=su, kind=kind, profile=profile, today=today
+            )
+        # Bucket by expiry so we hit the broker per-expiry, not per-symbol.
+        by_expiry: dict[str, list[str]] = {}
+        unresolved: list[str] = []
+        for sym, exp in resolutions.items():
+            if exp is None:
+                unresolved.append(sym)
+                continue
+            by_expiry.setdefault(exp.isoformat(), []).append(sym)
+
+        if not by_expiry:
+            return {
+                "rows": [],
+                "source": "no_resolved_expiries",
+                "profile": profile.name,
+                "unresolved": unresolved,
+            }
+
+        # Issue parallel watchlist requests, one per resolved expiry.
+        import asyncio as _asyncio
+        payloads = await _asyncio.gather(
+            *(
+                self.get_watchlist(
+                    expiry=exp_iso,
+                    symbols=sym_list,
+                    live_refresh=live_refresh,
+                )
+                for exp_iso, sym_list in by_expiry.items()
+            ),
+            return_exceptions=True,
+        )
+
+        # Merge rows, tagging each with the profile + resolved expiry.
+        merged_rows: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        for (exp_iso, sym_list), payload in zip(by_expiry.items(), payloads):
+            if isinstance(payload, Exception):
+                errors.append({"expiry": exp_iso, "symbols": sym_list, "error": str(payload)})
+                continue
+            for row in list((payload or {}).get("rows") or []):
+                if str(row.get("underlying") or "").upper() in {s.upper() for s in sym_list}:
+                    row = dict(row)
+                    row["strategy_profile"] = profile.name
+                    row["profile_resolved_expiry"] = exp_iso
+                    merged_rows.append(row)
+
+        return {
+            "rows": merged_rows,
+            "source": "strategy_profile",
+            "profile": profile.name,
+            "expiries_requested": list(by_expiry.keys()),
+            "unresolved_symbols": unresolved,
+            "errors": errors,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
 
     async def get_next_expiry_row(
         self,

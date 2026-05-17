@@ -2559,6 +2559,32 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         rows: list[dict[str, Any]],
         started_at: datetime,
     ) -> None:
+        # S2 wants weekly index contracts and is comfortable trading on
+        # expiry day. The shared `rows` argument here is S1's monthly
+        # watchlist build — wrong shape for S2. Ask MI for the S2
+        # profile's contracts instead and use *that* as the row set.
+        try:
+            from agent.strategy_profiles import S2_CONTRACT_PROFILE
+            s2_payload = await atm_watchlist_service.get_watchlist_for_strategy(
+                S2_CONTRACT_PROFILE,
+                symbols=list(STRATEGY2_UNDERLYINGS),
+                live_refresh=False,
+            )
+            s2_rows = list((s2_payload or {}).get("rows") or [])
+            if s2_rows:
+                rows = s2_rows
+                logger.debug(
+                    f"[Strategy2] MI served {len(s2_rows)} weekly rows via "
+                    f"profile={S2_CONTRACT_PROFILE.name}; "
+                    f"expiries={s2_payload.get('expiries_requested')}"
+                )
+            else:
+                logger.debug(
+                    "[Strategy2] MI returned no weekly rows for profile "
+                    f"{S2_CONTRACT_PROFILE.name}; falling back to shared S1 rows."
+                )
+        except Exception as exc:
+            logger.debug(f"[Strategy2] profile-aware MI call failed: {exc}; using shared rows.")
         index_rows = [row for row in rows if row.get("underlying") in STRATEGY2_UNDERLYINGS]
         if not index_rows:
             contexts = {
