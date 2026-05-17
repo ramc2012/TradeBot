@@ -48,9 +48,18 @@ IV_SANITY_MAX_PCT    = 90.0
 MAX_ENTRY_IV_PCT = 30.0
 HARD_MAX_IV_PCT  = IV_SANITY_MAX_PCT
 
-MIN_TTE_DAYS_INDEX = 5        # for indices: ≥5 trading days on the active expiry
-MIN_TTE_DAYS_STOCK = 3        # for stocks:  ≤3 trading days → roll to next expiry
-# Legacy name retained for callers; equals the index threshold above.
+# Indices are cash-settled — they can be traded right up to the day
+# before expiry (T-1). S1 specifically does NOT enter on the expiry
+# day itself (T-0) because the MACD signal has no time to play out
+# and end-of-day theta annihilation kills long-premium positions.
+#
+# Stocks are physically settled — rolling to next month when the
+# active expiry is too close avoids assignment / delivery risk. The
+# MI layer's _stock_monthly_for_selected_expiry handles the rollover
+# at watchlist build time (≤3 trading days → next monthly).
+MIN_TTE_DAYS_INDEX = 1        # T-1 entry OK; T-0 (expiry day) skipped
+MIN_TTE_DAYS_STOCK = 3        # MI rolls to next expiry when ≤3td left
+# Legacy name retained for callers; defaults to the index threshold.
 MIN_TTE_DAYS = MIN_TTE_DAYS_INDEX
 
 # Premium price filtering is DELIBERATELY removed.

@@ -351,10 +351,22 @@ class StrategyEntryMixin:
             # rolled stocks to the next monthly when the active monthly
             # is too close (≤MIN_TTE_DAYS_STOCK trading days) — see
             # market_data.atm_watchlist._stock_monthly_for_selected_expiry.
-            # Here we just confirm the instrument has live data and a
-            # non-stale quote; the actual entry decision is the MACD
-            # signal that follows.
+            # Here we just confirm the instrument has live data, a
+            # non-stale quote, and (for indices specifically) that we
+            # are not on T-0 — S1 does not enter on the expiry day
+            # itself; the signal has no time to play out and theta
+            # decay annihilates the position.
             tte = days_remaining_in_window(window, as_of=_now_ist().date())
+            kind_str = str(row.get("kind") or "").upper()
+            if kind_str == "INDEX":
+                from agent.window_calculator import trading_days_remaining as _trading_days_remaining
+                if _trading_days_remaining(window, as_of=_now_ist().date()) < MIN_TTE_DAYS:
+                    await persist_raw_signal(
+                        "blocked",
+                        "expiry_day_skip_t0",
+                        ltp=None,
+                    )
+                    continue
 
             if expiry_str:
                 try:

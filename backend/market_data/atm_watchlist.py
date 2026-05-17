@@ -87,6 +87,80 @@ def _nearest_index_expiry(symbol: str) -> date:
     return monthly
 
 
+def _select_liquid_atm_strike(
+    *,
+    strikes: list[float],
+    spot_price: float,
+    chain_entries,
+    neighbours: int = 2,
+    liquidity_lift: float = 1.5,
+) -> float:
+    """Pick the most-liquid strike near literal-ATM.
+
+    Some strikes near spot trade much thinner than their neighbours
+    (e.g. NIFTY 23550 << NIFTY 23600 because round strikes dominate
+    OI/volume). We scan ±*neighbours* strikes around the literal-ATM
+    and prefer a neighbour only when its combined CE+PE traded volume
+    is at least *liquidity_lift* × the literal-ATM volume. Otherwise
+    we keep literal-ATM. This is purely an instrument-selection
+    refinement at the MI layer — the strategy never sees the
+    discarded thinner strike.
+
+    The chain_entries argument is a sequence of option-chain entries
+    with `.strike`, `.option_type` and `.volume` (Upstox / Fyers chain
+    payload shape). When volume is unavailable, OI substitutes; when
+    both are absent, we fall back to the literal-ATM strike.
+    """
+    if not strikes or spot_price <= 0:
+        return strikes[0] if strikes else 0.0
+    atm = min(strikes, key=lambda s: abs(s - spot_price))
+    # Build a strike → total-volume map (CE + PE combined). OI is
+    # used as a fallback when explicit volume is zero/None.
+    liq: dict[float, float] = {}
+    for entry in chain_entries or []:
+        try:
+            strike = float(entry.strike)
+        except (TypeError, ValueError):
+            continue
+        vol = float(getattr(entry, "volume", 0) or 0)
+        if vol <= 0:
+            vol = float(getattr(entry, "oi", 0) or 0) / 100.0  # OI proxy
+        liq[strike] = liq.get(strike, 0.0) + max(vol, 0.0)
+    if not liq:
+        return atm
+    # Candidate set: literal ATM plus ±neighbours steps. Use the
+    # sorted strikes list to find neighbours since strikes aren't
+    # necessarily evenly spaced.
+    try:
+        atm_idx = strikes.index(atm)
+    except ValueError:
+        return atm
+    lo = max(0, atm_idx - neighbours)
+    hi = min(len(strikes), atm_idx + neighbours + 1)
+    candidates = strikes[lo:hi]
+    atm_liquidity = liq.get(atm, 0.0)
+    # If the *entire* candidate window has zero liquidity recorded, we
+    # don't have signal to choose — keep literal ATM. This happens when
+    # the chain payload omits volume/OI fields (some broker fallbacks).
+    if all(liq.get(s, 0.0) <= 0 for s in candidates):
+        return atm
+    if atm_liquidity <= 0:
+        # ATM has no volume but some neighbour does — pick the most-
+        # liquid neighbour with no threshold (the literal ATM is dead).
+        return max(candidates, key=lambda s: liq.get(s, 0.0))
+    best_strike = atm
+    best_liq = atm_liquidity
+    for strike in candidates:
+        if strike == atm:
+            continue
+        cand_liq = liq.get(strike, 0.0)
+        # Only switch when the alternative is materially more liquid.
+        if cand_liq >= atm_liquidity * liquidity_lift and cand_liq > best_liq:
+            best_strike = strike
+            best_liq = cand_liq
+    return best_strike
+
+
 def _trading_days_until(target: date, *, today: Optional[date] = None) -> int:
     """Count Mon–Fri weekdays from today (exclusive) to target (exclusive)."""
     today = today or date.today()
@@ -1022,7 +1096,16 @@ class ATMWatchlistService:
         strikes = sorted({float(entry.strike) for entry in chain.entries})
         if not strikes:
             return None
-        atm_strike = min(strikes, key=lambda strike: abs(strike - spot_price))
+        # Liquid-strike selection: literal-ATM is often thinner than a
+        # round-strike neighbour (e.g. NIFTY 23550 < NIFTY 23600 by 5×).
+        # _select_liquid_atm_strike scans ±2 strikes around literal-ATM
+        # and switches to a neighbour only when its CE+PE volume is at
+        # least 1.5× the ATM's volume.
+        atm_strike = _select_liquid_atm_strike(
+            strikes=strikes,
+            spot_price=spot_price,
+            chain_entries=chain.entries,
+        )
         ce_entry = next((entry for entry in chain.entries if entry.option_type == "CE" and float(entry.strike) == atm_strike), None)
         pe_entry = next((entry for entry in chain.entries if entry.option_type == "PE" and float(entry.strike) == atm_strike), None)
         if not ce_entry and not pe_entry:
@@ -1052,7 +1135,14 @@ class ATMWatchlistService:
                     spot_price = float(chain.spot_price or 0.0)
                     strikes = sorted({float(item.strike) for item in chain.entries})
                     if strikes:
-                        atm_strike = min(strikes, key=lambda item: abs(item - spot_price))
+                        # Same liquid-strike pick on the Upstox fallback
+                        # path so the rolled chain still benefits from
+                        # neighbour-volume comparison.
+                        atm_strike = _select_liquid_atm_strike(
+                            strikes=strikes,
+                            spot_price=spot_price,
+                            chain_entries=chain.entries,
+                        )
                         ce_entry = next(
                             (item for item in chain.entries if item.option_type == "CE" and float(item.strike) == atm_strike),
                             None,
@@ -2334,6 +2424,52 @@ class ATMWatchlistService:
             # Explicit mapping takes precedence over the fallback
             return INDEX_FYERS_SYMBOLS.get(meta.symbol, f"NSE:{meta.symbol}-INDEX")
         return f"NSE:{meta.symbol}-EQ"
+
+    async def get_next_expiry_row(
+        self,
+        symbol: str,
+        *,
+        live_refresh: bool = False,
+    ) -> Optional[dict[str, Any]]:
+        """Feedback API the strategy calls when the active-expiry row
+        for *symbol* is unusable (data stale, insufficient bars, etc.)
+        and it wants to evaluate the NEXT expiry instead.
+
+        MI owns instrument selection — the strategy should never roll
+        expiries by itself. This method returns the watchlist row for
+        the next monthly expiry of *symbol*, building it if needed.
+        Returns None when no next expiry exists (e.g. broker quote
+        chain doesn't have the further-out contract yet).
+        """
+        symbol = str(symbol or "").upper().strip()
+        if not symbol:
+            return None
+        today = date.today()
+        # Resolve the active monthly first, then jump one month forward
+        # so we always land on the *next* monthly regardless of where
+        # we currently are in the cycle.
+        active_monthly = get_monthly_expiry(today.year, today.month)
+        if active_monthly <= today:
+            anchor = (active_monthly + timedelta(days=4)).replace(day=28)
+            active_monthly = get_monthly_expiry(anchor.year, anchor.month)
+        next_anchor = (active_monthly + timedelta(days=4)).replace(day=28)
+        next_monthly = get_monthly_expiry(next_anchor.year, next_anchor.month)
+        try:
+            payload = await self.get_watchlist(
+                expiry=next_monthly.isoformat(),
+                symbols=[symbol],
+                live_refresh=live_refresh,
+            )
+        except Exception as exc:
+            logger.debug(
+                f"[ATM watchlist] get_next_expiry_row({symbol}) failed: {exc}"
+            )
+            return None
+        rows = list((payload or {}).get("rows") or [])
+        for row in rows:
+            if str(row.get("underlying") or "").upper() == symbol:
+                return row
+        return None
 
 
 atm_watchlist_service = ATMWatchlistService()
