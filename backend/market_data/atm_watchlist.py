@@ -87,6 +87,99 @@ def _nearest_index_expiry(symbol: str) -> date:
     return monthly
 
 
+def _select_liquid_atm_strikes(
+    *,
+    strikes: list[float],
+    spot_price: float,
+    chain_entries,
+    neighbours: int = 2,
+    liquidity_lift: float = 1.5,
+) -> dict[str, float]:
+    """Pick asymmetric CE and PE strikes near spot, preferring liquidity.
+
+    We trade directionally, NOT straddles — so CE and PE need not be
+    on the same strike. The convention:
+
+      CE: pick the most-liquid strike *at or above* spot, allowing
+          ±*neighbours* slop. e.g. spot 23577 → 23600 (or 23650 if
+          much more liquid).
+      PE: pick the most-liquid strike *at or below* spot, allowing
+          ±*neighbours* slop. e.g. spot 23577 → 23500 (or 23550 if
+          much more liquid).
+
+    The CE-side hunt biases upward (out-of-the-money for CE) and
+    PE-side hunt biases downward (out-of-the-money for PE), so both
+    sides land on the side with natural directional convexity.
+
+    A neighbour is preferred over the side-anchored strike only when
+    its single-side volume (CE volume for CE pick, PE volume for PE
+    pick) is at least *liquidity_lift* × the anchored strike's volume.
+
+    Returns {"CE": ce_strike, "PE": pe_strike}. They MAY coincide if
+    the most-liquid strike on both sides happens to be the same one.
+    """
+    if not strikes or spot_price <= 0:
+        s0 = strikes[0] if strikes else 0.0
+        return {"CE": s0, "PE": s0}
+    sorted_strikes = sorted(strikes)
+    # Single-side liquidity maps.
+    ce_liq: dict[float, float] = {}
+    pe_liq: dict[float, float] = {}
+    for entry in chain_entries or []:
+        try:
+            strike = float(entry.strike)
+        except (TypeError, ValueError):
+            continue
+        opt = str(getattr(entry, "option_type", "")).upper()
+        vol = float(getattr(entry, "volume", 0) or 0)
+        if vol <= 0:
+            vol = float(getattr(entry, "oi", 0) or 0) / 100.0  # OI proxy
+        if opt == "CE":
+            ce_liq[strike] = ce_liq.get(strike, 0.0) + max(vol, 0.0)
+        elif opt == "PE":
+            pe_liq[strike] = pe_liq.get(strike, 0.0) + max(vol, 0.0)
+
+    def _pick(*, side: str) -> float:
+        side_liq = ce_liq if side == "CE" else pe_liq
+        # Anchor: nearest strike at or *above* spot for CE; at or
+        # *below* spot for PE. Fall back to literal nearest if the
+        # side-anchored search is empty.
+        if side == "CE":
+            anchored = [s for s in sorted_strikes if s >= spot_price]
+            if not anchored:
+                anchored = sorted_strikes
+            anchor = anchored[0]
+        else:
+            anchored = [s for s in sorted_strikes if s <= spot_price]
+            if not anchored:
+                anchored = sorted_strikes
+            anchor = anchored[-1]
+        try:
+            idx = sorted_strikes.index(anchor)
+        except ValueError:
+            return anchor
+        lo = max(0, idx - neighbours)
+        hi = min(len(sorted_strikes), idx + neighbours + 1)
+        candidates = sorted_strikes[lo:hi]
+        if all(side_liq.get(s, 0.0) <= 0 for s in candidates):
+            return anchor  # no signal — keep side-anchored strike
+        anchor_liq = side_liq.get(anchor, 0.0)
+        if anchor_liq <= 0:
+            return max(candidates, key=lambda s: side_liq.get(s, 0.0))
+        best = anchor
+        best_liq = anchor_liq
+        for strike in candidates:
+            if strike == anchor:
+                continue
+            cand_liq = side_liq.get(strike, 0.0)
+            if cand_liq >= anchor_liq * liquidity_lift and cand_liq > best_liq:
+                best = strike
+                best_liq = cand_liq
+        return best
+
+    return {"CE": _pick(side="CE"), "PE": _pick(side="PE")}
+
+
 def _select_liquid_atm_strike(
     *,
     strikes: list[float],
@@ -95,70 +188,16 @@ def _select_liquid_atm_strike(
     neighbours: int = 2,
     liquidity_lift: float = 1.5,
 ) -> float:
-    """Pick the most-liquid strike near literal-ATM.
-
-    Some strikes near spot trade much thinner than their neighbours
-    (e.g. NIFTY 23550 << NIFTY 23600 because round strikes dominate
-    OI/volume). We scan ±*neighbours* strikes around the literal-ATM
-    and prefer a neighbour only when its combined CE+PE traded volume
-    is at least *liquidity_lift* × the literal-ATM volume. Otherwise
-    we keep literal-ATM. This is purely an instrument-selection
-    refinement at the MI layer — the strategy never sees the
-    discarded thinner strike.
-
-    The chain_entries argument is a sequence of option-chain entries
-    with `.strike`, `.option_type` and `.volume` (Upstox / Fyers chain
-    payload shape). When volume is unavailable, OI substitutes; when
-    both are absent, we fall back to the literal-ATM strike.
-    """
-    if not strikes or spot_price <= 0:
-        return strikes[0] if strikes else 0.0
-    atm = min(strikes, key=lambda s: abs(s - spot_price))
-    # Build a strike → total-volume map (CE + PE combined). OI is
-    # used as a fallback when explicit volume is zero/None.
-    liq: dict[float, float] = {}
-    for entry in chain_entries or []:
-        try:
-            strike = float(entry.strike)
-        except (TypeError, ValueError):
-            continue
-        vol = float(getattr(entry, "volume", 0) or 0)
-        if vol <= 0:
-            vol = float(getattr(entry, "oi", 0) or 0) / 100.0  # OI proxy
-        liq[strike] = liq.get(strike, 0.0) + max(vol, 0.0)
-    if not liq:
-        return atm
-    # Candidate set: literal ATM plus ±neighbours steps. Use the
-    # sorted strikes list to find neighbours since strikes aren't
-    # necessarily evenly spaced.
-    try:
-        atm_idx = strikes.index(atm)
-    except ValueError:
-        return atm
-    lo = max(0, atm_idx - neighbours)
-    hi = min(len(strikes), atm_idx + neighbours + 1)
-    candidates = strikes[lo:hi]
-    atm_liquidity = liq.get(atm, 0.0)
-    # If the *entire* candidate window has zero liquidity recorded, we
-    # don't have signal to choose — keep literal ATM. This happens when
-    # the chain payload omits volume/OI fields (some broker fallbacks).
-    if all(liq.get(s, 0.0) <= 0 for s in candidates):
-        return atm
-    if atm_liquidity <= 0:
-        # ATM has no volume but some neighbour does — pick the most-
-        # liquid neighbour with no threshold (the literal ATM is dead).
-        return max(candidates, key=lambda s: liq.get(s, 0.0))
-    best_strike = atm
-    best_liq = atm_liquidity
-    for strike in candidates:
-        if strike == atm:
-            continue
-        cand_liq = liq.get(strike, 0.0)
-        # Only switch when the alternative is materially more liquid.
-        if cand_liq >= atm_liquidity * liquidity_lift and cand_liq > best_liq:
-            best_strike = strike
-            best_liq = cand_liq
-    return best_strike
+    """Backward-compat shim: returns the CE strike from the asymmetric
+    selector. New callers should use _select_liquid_atm_strikes."""
+    picks = _select_liquid_atm_strikes(
+        strikes=strikes,
+        spot_price=spot_price,
+        chain_entries=chain_entries,
+        neighbours=neighbours,
+        liquidity_lift=liquidity_lift,
+    )
+    return picks["CE"]
 
 
 def _trading_days_until(target: date, *, today: Optional[date] = None) -> int:
@@ -1096,18 +1135,25 @@ class ATMWatchlistService:
         strikes = sorted({float(entry.strike) for entry in chain.entries})
         if not strikes:
             return None
-        # Liquid-strike selection: literal-ATM is often thinner than a
-        # round-strike neighbour (e.g. NIFTY 23550 < NIFTY 23600 by 5×).
-        # _select_liquid_atm_strike scans ±2 strikes around literal-ATM
-        # and switches to a neighbour only when its CE+PE volume is at
-        # least 1.5× the ATM's volume.
-        atm_strike = _select_liquid_atm_strike(
+        # Asymmetric liquid-strike selection. We trade directionally,
+        # not straddles — CE and PE pick their own strike:
+        #   CE → most-liquid strike at-or-above spot (±2 slop)
+        #   PE → most-liquid strike at-or-below spot (±2 slop)
+        # A neighbour is preferred over the side-anchored strike only
+        # when its single-side volume is ≥1.5× the anchor's.
+        atm_picks = _select_liquid_atm_strikes(
             strikes=strikes,
             spot_price=spot_price,
             chain_entries=chain.entries,
         )
-        ce_entry = next((entry for entry in chain.entries if entry.option_type == "CE" and float(entry.strike) == atm_strike), None)
-        pe_entry = next((entry for entry in chain.entries if entry.option_type == "PE" and float(entry.strike) == atm_strike), None)
+        atm_ce_strike = atm_picks["CE"]
+        atm_pe_strike = atm_picks["PE"]
+        # Downstream payload still carries a single "atm_strike" for
+        # legacy callers — set it to the CE pick (the more common
+        # default and the one used by long-CE-only paths).
+        atm_strike = atm_ce_strike
+        ce_entry = next((entry for entry in chain.entries if entry.option_type == "CE" and float(entry.strike) == atm_ce_strike), None)
+        pe_entry = next((entry for entry in chain.entries if entry.option_type == "PE" and float(entry.strike) == atm_pe_strike), None)
         if not ce_entry and not pe_entry:
             return None
 
@@ -1115,8 +1161,8 @@ class ATMWatchlistService:
             (float(contract["strike_price"]), str(contract["instrument_type"])): contract
             for contract in contracts
         }
-        ce_contract = contract_map.get((atm_strike, "CE"))
-        pe_contract = contract_map.get((atm_strike, "PE"))
+        ce_contract = contract_map.get((atm_ce_strike, "CE"))
+        pe_contract = contract_map.get((atm_pe_strike, "PE"))
 
         if (
             live_source == "fyers"
@@ -1135,24 +1181,27 @@ class ATMWatchlistService:
                     spot_price = float(chain.spot_price or 0.0)
                     strikes = sorted({float(item.strike) for item in chain.entries})
                     if strikes:
-                        # Same liquid-strike pick on the Upstox fallback
-                        # path so the rolled chain still benefits from
-                        # neighbour-volume comparison.
-                        atm_strike = _select_liquid_atm_strike(
+                        # Same asymmetric liquid-strike pick on the
+                        # Upstox fallback path. CE biases above spot,
+                        # PE biases below.
+                        atm_picks = _select_liquid_atm_strikes(
                             strikes=strikes,
                             spot_price=spot_price,
                             chain_entries=chain.entries,
                         )
+                        atm_ce_strike = atm_picks["CE"]
+                        atm_pe_strike = atm_picks["PE"]
+                        atm_strike = atm_ce_strike
                         ce_entry = next(
-                            (item for item in chain.entries if item.option_type == "CE" and float(item.strike) == atm_strike),
+                            (item for item in chain.entries if item.option_type == "CE" and float(item.strike) == atm_ce_strike),
                             None,
                         )
                         pe_entry = next(
-                            (item for item in chain.entries if item.option_type == "PE" and float(item.strike) == atm_strike),
+                            (item for item in chain.entries if item.option_type == "PE" and float(item.strike) == atm_pe_strike),
                             None,
                         )
-                        ce_contract = contract_map.get((atm_strike, "CE"))
-                        pe_contract = contract_map.get((atm_strike, "PE"))
+                        ce_contract = contract_map.get((atm_ce_strike, "CE"))
+                        pe_contract = contract_map.get((atm_pe_strike, "PE"))
                         _upstox_succeeded = True
             except Exception as exc:
                 logger.debug(f"[ATM watchlist] Upstox expiry fallback failed for {meta.symbol}: {exc}")
@@ -1166,12 +1215,16 @@ class ATMWatchlistService:
                 )
                 live_source = "fyers"
 
+        # CE and PE may land on different strikes when the asymmetric
+        # liquid-strike picker biases each side toward its OTM (CE
+        # ≥ spot, PE ≤ spot). Pass each side's own strike so the
+        # payload strike field matches the actual contract priced.
         ce_payload = await self._build_option_payload(
             meta,
             expiry,
             expiry_date,
             spot_price,
-            atm_strike,
+            atm_ce_strike,
             ce_entry,
             ce_contract,
             live_source,
@@ -1181,7 +1234,7 @@ class ATMWatchlistService:
             expiry,
             expiry_date,
             spot_price,
-            atm_strike,
+            atm_pe_strike,
             pe_entry,
             pe_contract,
             live_source,
@@ -1208,7 +1261,13 @@ class ATMWatchlistService:
             "spot_price": round(spot_price, 2),
             "as_of": datetime.now(UTC).isoformat(),
             "expiry": expiry,
+            # Legacy single-strike field (kept for back-compat). CE/PE
+            # may now be on different strikes — see ce_atm_strike /
+            # pe_atm_strike below for the authoritative per-side values.
             "atm_strike": atm_strike,
+            "ce_atm_strike": atm_ce_strike,
+            "pe_atm_strike": atm_pe_strike,
+            "atm_strikes_asymmetric": atm_ce_strike != atm_pe_strike,
             "live_source": live_source,
             "fyers_symbol": fyers_symbol,
             "lot_size": lot_size,   # NSE-mandated lot size for this underlying
