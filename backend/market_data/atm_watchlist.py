@@ -87,9 +87,46 @@ def _nearest_index_expiry(symbol: str) -> date:
     return monthly
 
 
-def _stock_monthly_for_selected_expiry(selected_expiry: date) -> date:
-    """Resolve stocks to the monthly expiry for the selected expiry month."""
-    return get_monthly_expiry(selected_expiry.year, selected_expiry.month)
+def _trading_days_until(target: date, *, today: Optional[date] = None) -> int:
+    """Count Mon–Fri weekdays from today (exclusive) to target (exclusive)."""
+    today = today or date.today()
+    if target <= today:
+        return 0
+    count = 0
+    cur = today
+    while cur < target:
+        cur += timedelta(days=1)
+        if cur.weekday() < 5:
+            count += 1
+    return count
+
+
+def _stock_monthly_for_selected_expiry(
+    selected_expiry: date,
+    *,
+    today: Optional[date] = None,
+) -> date:
+    """Resolve stocks to the monthly expiry for the selected month, but
+    *roll forward* when the active monthly has ≤ MIN_TTE_DAYS_STOCK
+    trading days left.
+
+    The strategy itself no longer gates on TTE — instrument selection
+    is the Market Intelligence module's job. This helper is that
+    selection point. When the active monthly is too close, the
+    watchlist promotes the next month's contract so the strategy
+    receives only "tradeable" rows.
+    """
+    today = today or date.today()
+    active = get_monthly_expiry(selected_expiry.year, selected_expiry.month)
+    try:
+        from agent.strategy_config import MIN_TTE_DAYS_STOCK as _stock_min_tte
+    except Exception:
+        _stock_min_tte = 3
+    if _trading_days_until(active, today=today) <= int(_stock_min_tte):
+        # Roll to next month's monthly expiry
+        next_anchor = (active.replace(day=28) + timedelta(days=4))
+        return get_monthly_expiry(next_anchor.year, next_anchor.month)
+    return active
 
 
 def _parse_payload_datetime(value: Any) -> Optional[datetime]:

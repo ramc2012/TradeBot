@@ -28,7 +28,7 @@ from agent.strategy_config import (
     SETUP_BREAKOUT,
     SETUP_PREMIUM,
 )
-from agent.window_calculator import days_remaining_in_window, trading_days_remaining
+from agent.window_calculator import days_remaining_in_window
 from analytics.technicals import latest_macd_rsi
 from core.config import settings
 from market_data import market_profile_builder, option_history_service
@@ -345,38 +345,16 @@ class StrategyEntryMixin:
             if not window:
                 continue
 
-            tte_calendar = days_remaining_in_window(window, as_of=_now_ist().date())
-            tte_trading = trading_days_remaining(window, as_of=_now_ist().date())
-            # Kind-aware TTE threshold, measured in *trading* days
-            # (Mon–Fri) so a Friday-with-Monday-expiry doesn't masquerade
-            # as 3 days remaining.
-            #   INDEX → ≥5 trading days on the active expiry
-            #   STOCK → ≤3 trading days triggers a rollover to next
-            #           expiry. Active-expiry candidate is skipped and
-            #           a rollover_candidate marker is recorded; the
-            #           next pipeline tick picks up the rolled contract
-            #           once window_calculator promotes it.
-            kind = str(row.get("kind") or "").upper()
-            from agent.strategy_config import MIN_TTE_DAYS_INDEX, MIN_TTE_DAYS_STOCK
-            tte_threshold = MIN_TTE_DAYS_INDEX if kind == "INDEX" else MIN_TTE_DAYS_STOCK
-            if tte_trading <= tte_threshold:
-                next_expiry_meta = row.get("next_expiry") or {}
-                next_expiry_iso = (
-                    next_expiry_meta.get("expiry")
-                    if isinstance(next_expiry_meta, dict)
-                    else None
-                )
-                if kind == "STOCK":
-                    await persist_raw_signal(
-                        "rollover_candidate",
-                        (
-                            f"tte_{tte_trading}td_at_or_below_{tte_threshold}td"
-                            + (f"_roll_to_{next_expiry_iso}" if next_expiry_iso else "_await_next_expiry")
-                        ),
-                        ltp=None,
-                    )
-                continue
-            tte = tte_calendar  # retained downstream for legacy uses
+            # Instrument selection (which expiry, which strike) is the
+            # Market Intelligence module's job, not the strategy's.
+            # By the time a row reaches us, the watchlist has already
+            # rolled stocks to the next monthly when the active monthly
+            # is too close (≤MIN_TTE_DAYS_STOCK trading days) — see
+            # market_data.atm_watchlist._stock_monthly_for_selected_expiry.
+            # Here we just confirm the instrument has live data and a
+            # non-stale quote; the actual entry decision is the MACD
+            # signal that follows.
+            tte = days_remaining_in_window(window, as_of=_now_ist().date())
 
             if expiry_str:
                 try:
