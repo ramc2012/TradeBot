@@ -456,6 +456,7 @@ async def _fno_360_statistics(limit: int = 10) -> dict:
         },
         "breadth": breadth,
         "buildup_counts": buildup_counts,
+        "instruments": sorted(instruments, key=lambda item: str(item.get("symbol") or "")),
         "top_volume": top_volume_all,
         "top_oi": top_oi_all,
         "top_gainers": _top_by(instruments, "avg_change_pct", limit),
@@ -479,6 +480,11 @@ async def _fno_360_statistics(limit: int = 10) -> dict:
                 "largest_oi_symbol": top_oi_all[0]["symbol"] if top_oi_all else None,
                 "largest_volume_symbol": top_volume_all[0]["symbol"] if top_volume_all else None,
             },
+            "instruments": sorted(instruments, key=lambda item: str(item.get("symbol") or "")),
+            "side_contracts": sorted(
+                side_contracts,
+                key=lambda item: (str(item.get("symbol") or ""), str(item.get("side") or "")),
+            ),
             "active_options": _top_by(side_contracts, "volume", limit),
             "oi_change_contracts": sorted(
                 side_contracts,

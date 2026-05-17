@@ -1048,6 +1048,45 @@ def _research_modules(
     return {"modules": modules, "answer_cards": answer_cards, "sources": sources}
 
 
+def _nse_instruments(fno_360: dict[str, Any] | None) -> list[dict[str, Any]]:
+    analytics = ((fno_360 or {}).get("analytics") or {})
+    instruments = analytics.get("instruments") or (fno_360 or {}).get("instruments") or []
+    if instruments:
+        return [item for item in instruments if isinstance(item, dict)]
+    fallback = analytics.get("oi_change_contracts") or (fno_360 or {}).get("top_volume", [])
+    return [item for item in fallback if isinstance(item, dict)]
+
+
+def _nse_side_contracts(fno_360: dict[str, Any] | None) -> list[dict[str, Any]]:
+    analytics = ((fno_360 or {}).get("analytics") or {})
+    side_contracts = analytics.get("side_contracts") or []
+    if side_contracts:
+        return [item for item in side_contracts if isinstance(item, dict)]
+    expanded: list[dict[str, Any]] = []
+    for item in _nse_instruments(fno_360):
+        for side in ("CE", "PE"):
+            side_key = side.lower()
+            leg = item.get(side_key) if isinstance(item.get(side_key), dict) else None
+            expanded.append(
+                {
+                    "symbol": item.get("symbol") or item.get("underlying"),
+                    "kind": item.get("kind"),
+                    "side": side,
+                    "expiry": item.get("expiry"),
+                    "strike": item.get("strike"),
+                    "ltp": (leg or {}).get("ltp") or item.get(f"{side_key}_ltp"),
+                    "change_pct": (leg or {}).get("change_pct") or item.get(f"{side_key}_change_pct"),
+                    "oi": (leg or {}).get("oi") or item.get(f"{side_key}_oi"),
+                    "oi_change": (leg or {}).get("oi_change") or item.get(f"{side_key}_oi_change"),
+                    "oi_change_pct": (leg or {}).get("oi_change_pct") or item.get(f"{side_key}_oi_change_pct"),
+                    "volume": (leg or {}).get("volume") or item.get(f"{side_key}_volume"),
+                    "iv": (leg or {}).get("iv") or item.get(f"{side_key}_iv"),
+                    "buildup": item.get("buildup"),
+                }
+            )
+    return expanded
+
+
 def _nse_oi_price_signals(fno_360: dict[str, Any] | None, limit: int) -> dict[str, Any]:
     """Classify NSE ATM CE/PE instruments via the OI–price matrix.
 
@@ -1055,43 +1094,39 @@ def _nse_oi_price_signals(fno_360: dict[str, Any] | None, limit: int) -> dict[st
     and ``change_pct``. Returns top items per label so the UI can render
     "long buildup / short covering / short buildup / long unwinding" cards.
     """
-    instruments = ((fno_360 or {}).get("analytics") or {}).get("oi_change_contracts") or []
-    if not instruments:
-        instruments = (fno_360 or {}).get("top_volume", [])
+    side_contracts = _nse_side_contracts(fno_360)
     signals: list[dict[str, Any]] = []
-    for item in instruments:
-        if not isinstance(item, dict):
-            continue
+    for item in side_contracts:
         symbol = str(item.get("symbol") or item.get("underlying") or "")
         if not symbol:
             continue
-        for side in ("ce", "pe"):
-            side_data = item.get(side) if isinstance(item.get(side), dict) else None
-            price_pct = (
-                _safe_float(side_data.get("change_pct")) if side_data else _safe_float(item.get("change_pct"))
-            )
-            oi_pct = (
-                _safe_float(side_data.get("oi_change_pct")) if side_data else _safe_float(item.get("oi_change_pct"))
-            )
-            if price_pct is None and oi_pct is None:
-                continue
-            classified = classify_oi_price(
-                contract_id=f"{symbol}:{side.upper()}",
-                price_change_pct=price_pct,
-                oi_change_pct=oi_pct,
-            )
-            signals.append(
-                {
-                    "underlying": symbol,
-                    "option_type": side.upper(),
-                    "label": classified.label,
-                    "direction": classified.direction,
-                    "conviction": classified.conviction,
-                    "price_change_pct": classified.price_change_pct,
-                    "oi_change_pct": classified.oi_change_pct,
-                    "notes": classified.notes,
-                }
-            )
+        side = str(item.get("side") or item.get("option_type") or "").upper()
+        price_pct = _safe_float(item.get("change_pct") or item.get("price_change_pct"))
+        oi_pct = _safe_float(item.get("oi_change_pct"))
+        if side not in {"CE", "PE"} or (price_pct is None and oi_pct is None):
+            continue
+        classified = classify_oi_price(
+            contract_id=f"{symbol}:{side}",
+            price_change_pct=price_pct,
+            oi_change_pct=oi_pct,
+        )
+        signals.append(
+            {
+                "underlying": symbol,
+                "option_type": side,
+                "expiry": item.get("expiry"),
+                "strike": item.get("strike"),
+                "label": classified.label,
+                "direction": classified.direction,
+                "conviction": classified.conviction,
+                "price_change_pct": classified.price_change_pct,
+                "oi_change_pct": classified.oi_change_pct,
+                "oi": item.get("oi"),
+                "volume": item.get("volume"),
+                "iv": item.get("iv"),
+                "notes": classified.notes,
+            }
+        )
 
     by_label: dict[str, list[dict[str, Any]]] = {}
     for sig in signals:
@@ -1115,9 +1150,7 @@ def _nse_oi_price_signals(fno_360: dict[str, Any] | None, limit: int) -> dict[st
 
 def _nse_option_greeks(fno_360: dict[str, Any] | None, limit: int) -> dict[str, Any]:
     """Compute Greeks for each ATM instrument that has spot+strike+expiry+premium."""
-    instruments = ((fno_360 or {}).get("analytics") or {}).get("oi_change_contracts") or []
-    if not instruments:
-        instruments = (fno_360 or {}).get("top_volume", [])
+    instruments = _nse_instruments(fno_360)
     rows: list[dict[str, Any]] = []
     for item in instruments:
         if not isinstance(item, dict):
@@ -1141,7 +1174,7 @@ def _nse_option_greeks(fno_360: dict[str, Any] | None, limit: int) -> dict[str, 
                     **payload,
                 }
             )
-    return {"rows": rows[:limit * 4], "mode": "exchange_10pct", "count": len(rows)}
+    return {"rows": rows, "mode": "exchange_10pct", "count": len(rows)}
 
 
 def _nse_straddle_summary(fno_360: dict[str, Any] | None, limit: int) -> list[dict[str, Any]]:
@@ -1152,9 +1185,7 @@ def _nse_straddle_summary(fno_360: dict[str, Any] | None, limit: int) -> list[di
     you get the market-implied 1-σ move by expiry (straddle ≈ expected
     move). Express it as a percentage of spot for cross-symbol comparison.
     """
-    instruments = ((fno_360 or {}).get("analytics") or {}).get("oi_change_contracts") or []
-    if not instruments:
-        instruments = (fno_360 or {}).get("top_volume", [])
+    instruments = _nse_instruments(fno_360)
     rows: list[dict[str, Any]] = []
     for item in instruments:
         if not isinstance(item, dict):
@@ -1197,7 +1228,7 @@ def _nse_straddle_summary(fno_360: dict[str, Any] | None, limit: int) -> list[di
         )
     # Sort by expected_move_pct descending — highest implied move first.
     rows.sort(key=lambda r: (r.get("expected_move_pct") or 0.0), reverse=True)
-    return rows[:limit * 4]
+    return rows
 
 
 async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: int = 20) -> dict[str, Any]:
@@ -1213,7 +1244,7 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
     # joins all available strikes per (underlying, expiry), not just ATM,
     # so the resistance / support reads pick up the strikes where market
     # makers are most exposed.
-    chain_max_pain = await _load_chain_max_pain()
+    chain_max_pain = await _load_chain_max_pain(limit_underlyings=max(limit * 5, 500))
     # F&O risk snapshot: MWPL utilisation + ban list. Daily file; cheap
     # to read every cycle (single SELECT).
     fo_risk: dict[str, Any] = {}
@@ -1281,6 +1312,8 @@ async def build_fno_analytics(*, fno_360: dict[str, Any] | None = None, limit: i
                 "top_volume": (fno_360 or {}).get("top_volume", [])[:limit],
                 "oi_change_contracts": ((fno_360 or {}).get("analytics") or {}).get("oi_change_contracts", [])[:limit],
                 "volatility_watch": ((fno_360 or {}).get("analytics") or {}).get("volatility_watch", [])[:limit],
+                "instruments": ((fno_360 or {}).get("analytics") or {}).get("instruments", []),
+                "side_contracts": ((fno_360 or {}).get("analytics") or {}).get("side_contracts", []),
                 "oi_price_matrix": nse_oi_signals,
                 "greeks": nse_greeks,
                 "straddle_summary": nse_straddles,

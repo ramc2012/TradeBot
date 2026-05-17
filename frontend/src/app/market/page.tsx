@@ -10,6 +10,17 @@ import {
   RefreshCw,
   Shield,
 } from "lucide-react";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import {
   getATMWatchlist,
@@ -1480,6 +1491,133 @@ function SignalWatchPanel({
   );
 }
 
+function rowUnderlying(row: Record<string, any>) {
+  return String(row.underlying || row.symbol || row.contract_id || "").toUpperCase();
+}
+
+function compactSymbol(row: Record<string, any>) {
+  const symbol = rowUnderlying(row);
+  return symbol.length > 13 ? `${symbol.slice(0, 12)}…` : symbol || "--";
+}
+
+function filterRowsByInstrument<T extends Record<string, any>>(rows: T[], selected: string): T[] {
+  if (selected === "ALL") return rows;
+  const [, symbol] = selected.split(":");
+  return rows.filter((row) => rowUnderlying(row) === symbol);
+}
+
+function InstrumentSelector({
+  value,
+  onChange,
+  options,
+  counts,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  options: Array<{ value: string; label: string; exchange: string; kind?: string }>;
+  counts: { nse: number; mcx: number };
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-bg-border bg-bg-secondary/25 px-3 py-2">
+      <div>
+        <div className="text-[10px] uppercase tracking-[0.14em] text-text-muted">Instrument</div>
+        <div className="mt-0.5 font-mono text-[11px] text-text-secondary">
+          NSE {counts.nse} · MCX {counts.mcx}
+        </div>
+      </div>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="min-w-[220px] rounded-md border border-bg-border bg-bg-primary px-3 py-2 font-mono text-xs text-text-primary outline-none"
+      >
+        <option value="ALL" className="bg-bg-card text-text-primary">All F&O instruments</option>
+        {options.map((option) => (
+          <option key={option.value} value={option.value} className="bg-bg-card text-text-primary">
+            {option.exchange} · {option.label}{option.kind ? ` · ${option.kind}` : ""}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function ResearchBarChart({
+  title,
+  rows,
+  bars,
+}: {
+  title: string;
+  rows: Array<Record<string, any>>;
+  bars: Array<{ key: string; label: string; color: string }>;
+}) {
+  const chartRows = rows.slice(0, 14).map((row) => ({
+    name: compactSymbol(row),
+    ...row,
+  }));
+  return (
+    <div className="rounded-lg border border-bg-border/70 bg-bg-primary/30 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-text-primary">{title}</div>
+        <div className="font-mono text-[10px] uppercase tracking-wide text-text-muted">{rows.length} rows</div>
+      </div>
+      <div className="mt-3 h-[210px]">
+        {chartRows.length ? (
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={chartRows} margin={{ top: 8, right: 12, left: -18, bottom: 0 }}>
+              <CartesianGrid stroke="#26344d" strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="name" tick={{ fill: "#7d8aa3", fontSize: 10 }} interval={0} angle={-18} height={42} />
+              <YAxis tick={{ fill: "#7d8aa3", fontSize: 10 }} tickFormatter={(value) => formatCompact(Number(value))} />
+              <Tooltip
+                contentStyle={{ background: "#0f1624", border: "1px solid #26344d", borderRadius: 8, color: "#d8deea" }}
+                formatter={(value: any, name: any) => [typeof value === "number" ? formatCompact(value) : value, name]}
+              />
+              {bars.map((bar) => (
+                <Bar key={bar.key} dataKey={bar.key} name={bar.label} fill={bar.color} radius={[3, 3, 0, 0]} />
+              ))}
+            </BarChart>
+          </ResponsiveContainer>
+        ) : (
+          <div className="flex h-full items-center justify-center text-xs text-text-muted">No chart rows for the selected instrument.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ResearchLineChart({ title, rows }: { title: string; rows: Array<Record<string, any>> }) {
+  const chartRows = rows.slice(0, 24).map((row) => ({
+    name: compactSymbol(row),
+    ratio: Number(row.pcr_oi ?? row.chain_pcr_oi ?? 0),
+    iv: Number(row.avg_iv ?? row.iv ?? 0),
+    move: Number(row.expected_move_pct ?? row.price_change_pct ?? 0),
+  }));
+  return (
+    <div className="rounded-lg border border-bg-border/70 bg-bg-primary/30 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-text-primary">{title}</div>
+        <div className="font-mono text-[10px] uppercase tracking-wide text-text-muted">{rows.length} rows</div>
+      </div>
+      <div className="mt-3 h-[210px]">
+        {chartRows.length ? (
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={chartRows} margin={{ top: 8, right: 12, left: -18, bottom: 0 }}>
+              <CartesianGrid stroke="#26344d" strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="name" tick={{ fill: "#7d8aa3", fontSize: 10 }} interval={0} angle={-18} height={42} />
+              <YAxis tick={{ fill: "#7d8aa3", fontSize: 10 }} />
+              <Tooltip contentStyle={{ background: "#0f1624", border: "1px solid #26344d", borderRadius: 8, color: "#d8deea" }} />
+              <Line type="monotone" dataKey="ratio" name="PCR" stroke="#4a90e2" strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="iv" name="IV" stroke="#55d6a7" strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="move" name="Move %" stroke="#f0b35a" strokeWidth={2} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        ) : (
+          <div className="flex h-full items-center justify-center text-xs text-text-muted">No chart rows for the selected instrument.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ResearchAnalyticsPanel({
   payload,
   isLoading,
@@ -1506,76 +1644,173 @@ function ResearchAnalyticsPanel({
   const mcxStraddles = payload?.mcx?.straddle_summary || [];
   const nseMaxPain = payload?.nse?.max_pain || [];
   const mcxMaxPain = payload?.mcx?.max_pain || [];
+  const nseInstruments = (payload?.signals?.nse?.instruments || payload?.nse?.option_chain?.analytics?.instruments || []) as Array<Record<string, any>>;
+  const mcxInstruments = mcxStraddles as Array<Record<string, any>>;
+  const instrumentOptions = [
+    ...nseInstruments.map((row) => ({
+      value: `NSE:${rowUnderlying(row)}`,
+      label: rowUnderlying(row),
+      exchange: "NSE",
+      kind: row.kind ? String(row.kind).toUpperCase() : undefined,
+    })),
+    ...mcxInstruments.map((row) => ({
+      value: `MCX:${rowUnderlying(row)}`,
+      label: rowUnderlying(row),
+      exchange: "MCX",
+      kind: "COM",
+    })),
+  ].filter((option, index, list) => option.label && list.findIndex((item) => item.value === option.value) === index);
+  const [selectedInstrument, setSelectedInstrument] = useState("ALL");
+  useEffect(() => {
+    if (selectedInstrument !== "ALL" && !instrumentOptions.some((option) => option.value === selectedInstrument)) {
+      setSelectedInstrument("ALL");
+    }
+  }, [instrumentOptions, selectedInstrument]);
+
+  const selectedNseStraddles = filterRowsByInstrument(nseStraddles as Array<Record<string, any>>, selectedInstrument);
+  const selectedMcxStraddles = filterRowsByInstrument(mcxStraddles as Array<Record<string, any>>, selectedInstrument);
+  const selectedNseMaxPain = filterRowsByInstrument(nseMaxPain as Array<Record<string, any>>, selectedInstrument);
+  const selectedMcxMaxPain = filterRowsByInstrument(mcxMaxPain as Array<Record<string, any>>, selectedInstrument);
+  const selectedNseGreeks = filterRowsByInstrument(nseGreeks as Array<Record<string, any>>, selectedInstrument) as GreekRow[];
+  const selectedMcxGreeks = filterRowsByInstrument(mcxGreeks as Array<Record<string, any>>, selectedInstrument) as GreekRow[];
+  const selectedPositioning = filterRowsByInstrument(positioning as Array<Record<string, any>>, selectedInstrument) as StrikePositioning[];
+  const selectedSignals = filterRowsByInstrument([
+    ...(nseSignals.oi_change_contracts || []),
+    ...(nseSignals.volatility_watch || []),
+    ...(mcxSignals.devolvement_watch || []),
+    ...(mcxSignals.spread_watch || []),
+  ], selectedInstrument);
+  const selectedContractRows = filterRowsByInstrument([
+    ...(payload?.nse?.contract_master?.sample || []),
+    ...(payload?.mcx?.contract_master?.sample || []),
+  ], selectedInstrument);
+  const selectedOiRows = filterRowsByInstrument((payload?.signals?.nse?.side_contracts || []) as Array<Record<string, any>>, selectedInstrument);
+  const selectedVolRows = [
+    ...selectedNseStraddles,
+    ...selectedMcxStraddles,
+  ].sort((left, right) => (right.expected_move_pct || 0) - (left.expected_move_pct || 0));
+  const selectedDisplayName = selectedInstrument === "ALL" ? "All instruments" : selectedInstrument.replace(":", " · ");
+
+  const selector = (
+    <InstrumentSelector
+      value={selectedInstrument}
+      onChange={setSelectedInstrument}
+      options={instrumentOptions}
+      counts={{ nse: nseInstruments.length, mcx: mcxInstruments.length }}
+    />
+  );
 
   const renderActiveResearchTab = () => {
     switch (activeResearchTab) {
       case "option_chain":
         return (
           <div className="space-y-3">
+            {selector}
             <div className="grid gap-3 xl:grid-cols-2">
-              <StraddleTable rows={nseStraddles} title="NSE ATM Straddle & Expected Move" />
-              <StraddleTable rows={mcxStraddles} title="MCX ATM Straddle & Expected Move" />
+              <StraddleTable rows={selectedNseStraddles as StraddleRow[]} title={`NSE ATM Straddle & Expected Move · ${selectedDisplayName}`} />
+              <StraddleTable rows={selectedMcxStraddles as StraddleRow[]} title={`MCX ATM Straddle & Expected Move · ${selectedDisplayName}`} />
             </div>
             <div className="grid gap-3 xl:grid-cols-2">
-              <MaxPainTable rows={nseMaxPain} title="NSE Max Pain · Support/Resistance · Chain PCR" />
-              <MaxPainTable rows={mcxMaxPain} title="MCX Max Pain · Support/Resistance · Chain PCR" />
+              <MaxPainTable rows={selectedNseMaxPain as MaxPainRow[]} title="NSE Max Pain · Support/Resistance · Chain PCR" />
+              <MaxPainTable rows={selectedMcxMaxPain as MaxPainRow[]} title="MCX Max Pain · Support/Resistance · Chain PCR" />
+            </div>
+            <div className="grid gap-3 xl:grid-cols-2">
+              <ResearchBarChart
+                title="Expected Move by Instrument"
+                rows={selectedVolRows}
+                bars={[{ key: "expected_move_pct", label: "Expected Move %", color: "#4a90e2" }]}
+              />
+              <ResearchLineChart title="PCR / IV / Move Trace" rows={selectedVolRows} />
             </div>
           </div>
         );
       case "open_interest":
         return (
           <div className="space-y-3">
+            {selector}
             <OiPriceMatrixCard payload={oiMatrix} />
+            <ResearchBarChart
+              title={`CE / PE Open Interest · ${selectedDisplayName}`}
+              rows={selectedNseStraddles}
+              bars={[
+                { key: "ce_oi", label: "CE OI", color: "#ff5f73" },
+                { key: "pe_oi", label: "PE OI", color: "#55d6a7" },
+              ]}
+            />
             <div className="grid gap-3 xl:grid-cols-2">
-              <MaxPainTable rows={nseMaxPain} title="NSE OI Concentration" />
-              <MaxPainTable rows={mcxMaxPain} title="MCX OI Concentration" />
+              <MaxPainTable rows={selectedNseMaxPain as MaxPainRow[]} title="NSE OI Concentration" />
+              <MaxPainTable rows={selectedMcxMaxPain as MaxPainRow[]} title="MCX OI Concentration" />
             </div>
           </div>
         );
       case "scalper":
         return (
           <div className="space-y-3">
+            {selector}
             <SignalWatchPanel title="Scalper Watch" nseSignals={nseSignals} mcxSignals={mcxSignals} />
             <div className="grid gap-3 xl:grid-cols-[1.4fr_1fr]">
-              <OiPriceMatrixCard payload={oiMatrix} />
-              <StrikePositioningCard rows={positioning} />
+              <ResearchBarChart
+                title={`Fast OI / Volume Read · ${selectedDisplayName}`}
+                rows={selectedOiRows}
+                bars={[
+                  { key: "oi_change", label: "OI Change", color: "#4a90e2" },
+                  { key: "volume", label: "Volume", color: "#55d6a7" },
+                ]}
+              />
+              <StrikePositioningCard rows={selectedPositioning} />
             </div>
           </div>
         );
       case "idea":
         return (
           <div className="space-y-3">
+            {selector}
             <ResearchModuleGrid payload={payload} />
-            <SignalWatchPanel title="Idea Feed" nseSignals={nseSignals} mcxSignals={mcxSignals} />
+            <div className="grid gap-3 xl:grid-cols-[1fr_1fr]">
+              <SignalWatchPanel title="Idea Feed" nseSignals={nseSignals} mcxSignals={mcxSignals} />
+              <ResearchBarChart
+                title={`Ranked Signal Intensity · ${selectedDisplayName}`}
+                rows={selectedSignals}
+                bars={[
+                  { key: "oi_change", label: "OI Change", color: "#4a90e2" },
+                  { key: "volume", label: "Volume", color: "#55d6a7" },
+                ]}
+              />
+            </div>
           </div>
         );
       case "fo_stats":
         return (
           <div className="space-y-3">
+            {selector}
             <div className="grid gap-3 xl:grid-cols-2">
-              <GreeksTable rows={nseGreeks} title="NSE Option Greeks (top ATM)" mode={payload?.nse?.greeks?.mode} />
-              <GreeksTable rows={mcxGreeks} title="MCX Option Greeks (top ATM)" mode={payload?.mcx?.greeks?.mode} />
+              <GreeksTable rows={selectedNseGreeks} title="NSE Option Greeks" mode={payload?.nse?.greeks?.mode} />
+              <GreeksTable rows={selectedMcxGreeks} title="MCX Option Greeks" mode={payload?.mcx?.greeks?.mode} />
             </div>
             <div className="grid gap-3 xl:grid-cols-2">
-              <StraddleTable rows={nseStraddles} title="NSE Volatility Stats" />
-              <StraddleTable rows={mcxStraddles} title="MCX Volatility Stats" />
+              <ResearchLineChart title={`IV / PCR / Move · ${selectedDisplayName}`} rows={selectedVolRows} />
+              <StraddleTable rows={selectedVolRows as StraddleRow[]} title="Volatility Stats" />
             </div>
           </div>
         );
       case "strategy_chart":
         return (
-          <div className="grid gap-3 xl:grid-cols-[1.4fr_1fr]">
-            <FuturesCurveCard curves={curves} spreads={spreads} />
-            <StrikePositioningCard rows={positioning} />
+          <div className="space-y-3">
+            {selector}
+            <div className="grid gap-3 xl:grid-cols-[1.4fr_1fr]">
+              <FuturesCurveCard curves={curves} spreads={spreads} />
+              <StrikePositioningCard rows={selectedPositioning} />
+            </div>
           </div>
         );
       case "strategy_builder":
         return (
           <div className="space-y-3">
+            {selector}
             <FoRiskCard payload={payload?.fo_risk} />
             <div className="grid gap-3 xl:grid-cols-2">
-              <MaxPainTable rows={nseMaxPain} title="NSE Structure Inputs" />
-              <MaxPainTable rows={mcxMaxPain} title="MCX Structure Inputs" />
+              <MaxPainTable rows={selectedNseMaxPain as MaxPainRow[]} title="NSE Structure Inputs" />
+              <MaxPainTable rows={selectedMcxMaxPain as MaxPainRow[]} title="MCX Structure Inputs" />
             </div>
             <ResearchStageTable rows={payload?.stage_status} />
           </div>
@@ -1583,9 +1818,10 @@ function ResearchAnalyticsPanel({
       case "company_info":
         return (
           <div className="space-y-3">
+            {selector}
             <ResearchModuleGrid payload={payload} />
             <div className="grid gap-3 xl:grid-cols-2">
-              <ContractSampleTable title="NSE Contract Master Sample" rows={payload?.nse?.contract_master?.sample || []} />
+              <ContractSampleTable title={`Selected Contract Rows · ${selectedDisplayName}`} rows={selectedInstrument === "ALL" ? (payload?.nse?.contract_master?.sample || []) : selectedContractRows} />
               <ContractSampleTable title="MCX Contract Master Sample" rows={payload?.mcx?.contract_master?.sample || []} />
             </div>
             <ResearchStageTable rows={payload?.stage_status} />
@@ -1595,6 +1831,7 @@ function ResearchAnalyticsPanel({
       default:
         return (
           <div className="space-y-3">
+            {selector}
             <ResearchMetricGrid
               payload={payload}
               isLoading={isLoading}
@@ -1768,7 +2005,7 @@ function LiveMarketTools() {
 
   const fnoAnalyticsQuery = useQuery<FnoAnalyticsPayload>({
     queryKey: ["marketFnoAnalytics"],
-    queryFn: () => getFnoAnalytics(20).then((response) => response.data),
+    queryFn: () => getFnoAnalytics(100).then((response) => response.data),
     staleTime: 30_000,
     // Faster refetch (30s) when on the research tab so a transient
     // backend restart no longer leaves the dashboard stuck on
