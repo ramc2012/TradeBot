@@ -10,7 +10,7 @@ from loguru import logger
 from sqlalchemy import text
 
 from analysis.macd_engine import check_iv_filter, compute_spot_ma_context
-from agent.iv_size_policy import iv_size_scaler, premium_passes_floor
+from agent.iv_size_policy import iv_size_scaler
 from agent.strategy_config import (
     COMMENTARY_MAX,
     EXCLUDED_UNDERLYINGS,
@@ -28,7 +28,7 @@ from agent.strategy_config import (
     SETUP_BREAKOUT,
     SETUP_PREMIUM,
 )
-from agent.window_calculator import days_remaining_in_window
+from agent.window_calculator import days_remaining_in_window, trading_days_remaining
 from analytics.technicals import latest_macd_rsi
 from core.config import settings
 from market_data import market_profile_builder, option_history_service
@@ -345,38 +345,38 @@ class StrategyEntryMixin:
             if not window:
                 continue
 
-            tte = days_remaining_in_window(window, as_of=_now_ist().date())
-            # Kind-aware TTE threshold. Old behaviour: skip whenever TTE
-            # < MIN_TTE_DAYS for both indices and stocks. New behaviour:
-            # for stocks, when the active expiry is too close, log the
-            # intent to roll into the next expiry instead of silently
-            # dropping the candidate. The next-expiry watchlist row
-            # (when available in row["next_expiry"]) is used instead;
-            # otherwise the candidate is queued for the next pipeline
-            # tick when the active window flips.
+            tte_calendar = days_remaining_in_window(window, as_of=_now_ist().date())
+            tte_trading = trading_days_remaining(window, as_of=_now_ist().date())
+            # Kind-aware TTE threshold, measured in *trading* days
+            # (Mon–Fri) so a Friday-with-Monday-expiry doesn't masquerade
+            # as 3 days remaining.
+            #   INDEX → ≥5 trading days on the active expiry
+            #   STOCK → ≤3 trading days triggers a rollover to next
+            #           expiry. Active-expiry candidate is skipped and
+            #           a rollover_candidate marker is recorded; the
+            #           next pipeline tick picks up the rolled contract
+            #           once window_calculator promotes it.
             kind = str(row.get("kind") or "").upper()
             from agent.strategy_config import MIN_TTE_DAYS_INDEX, MIN_TTE_DAYS_STOCK
             tte_threshold = MIN_TTE_DAYS_INDEX if kind == "INDEX" else MIN_TTE_DAYS_STOCK
-            if tte < tte_threshold:
+            if tte_trading <= tte_threshold:
                 next_expiry_meta = row.get("next_expiry") or {}
                 next_expiry_iso = (
                     next_expiry_meta.get("expiry")
                     if isinstance(next_expiry_meta, dict)
                     else None
                 )
-                if kind == "STOCK" and next_expiry_iso:
-                    # Surface the rollover intent so audit + dashboard
-                    # can see it. The active-expiry candidate is still
-                    # skipped (we don't have its quote here yet), but
-                    # next session's pipeline will pick up the rolled
-                    # contract via the regular watchlist build once
-                    # window_calculator promotes it.
+                if kind == "STOCK":
                     await persist_raw_signal(
                         "rollover_candidate",
-                        f"tte_{tte}d_below_{tte_threshold}d_roll_to_{next_expiry_iso}",
+                        (
+                            f"tte_{tte_trading}td_at_or_below_{tte_threshold}td"
+                            + (f"_roll_to_{next_expiry_iso}" if next_expiry_iso else "_await_next_expiry")
+                        ),
                         ltp=None,
                     )
                 continue
+            tte = tte_calendar  # retained downstream for legacy uses
 
             if expiry_str:
                 try:
@@ -501,17 +501,10 @@ class StrategyEntryMixin:
                 await persist_raw_signal("blocked", "missing_ltp")
                 continue
 
-            # Spot-relative liquidity floor. The old fixed rupee band
-            # (₹2–₹500) rejected legitimate setups across the F&O
-            # universe (deep-ITM RELIANCE >₹500, GOLD options >₹2000).
-            # premium_passes_floor enforces a tiny ₹0.50 absolute floor
-            # plus a 0.01% spot-relative floor — both purely liquidity
-            # sanity checks, no upper bound.
-            spot_for_floor = float(row.get("spot_price") or row.get("underlying_price") or 0.0)
-            prem_ok, prem_reason = premium_passes_floor(latest_close, spot_for_floor)
-            if not prem_ok:
-                await persist_raw_signal("blocked", f"premium_floor_{prem_reason}", ltp=latest_close)
-                continue
+            # No premium price filter. We trade ATM only — the ATM
+            # contract on a live F&O underlying is liquid by
+            # construction, so absolute / relative premium bands don't
+            # add signal here.
 
             option_ma20 = None
             option_ma50 = None

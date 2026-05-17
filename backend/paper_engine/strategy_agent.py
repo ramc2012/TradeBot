@@ -1214,20 +1214,18 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     iv_pct = iv_val * 100.0 if iv_val < 1.0 else iv_val
                 except (TypeError, ValueError):
                     iv_pct = None
-            # Pre-market preparation: no hard IV reject any more; only
-            # the broker-sanity bound (>90%) blocks. Premium band check
-            # is also removed — the spot-relative floor (applied at the
-            # entry site) is the real liquidity sanity. Here we just
-            # apply a score nudge so visibly-overpriced or visibly-dead
-            # rows fall down the watchlist rank without being rejected.
+            # Pre-market preparation: no hard IV reject and no premium
+            # band — ATM-only universe is liquid by construction. We
+            # apply the IV sanity scaler so broker reads above 90% IV
+            # are dropped, and nudge the watchlist score down for
+            # high-IV setups so they fall in priority without being
+            # rejected.
             from agent.iv_size_policy import iv_size_scaler as _iv_size_scaler
             _iv_scaler, _iv_note = _iv_size_scaler(iv_pct, None)
             if _iv_scaler <= 0:
                 continue
             if _iv_scaler < 0.6:
                 score -= 25.0  # heavy IV → push down the watchlist rank
-            if ltp is not None and ltp <= 0.5:
-                score -= 25.0  # near-zero premium → likely dead strike
 
             prepared.append(
                 {
@@ -1794,20 +1792,10 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             if side is None or option_type is None:
                 continue
             ltp = float(side.get("ltp") or 0.0)
-            # Historical-signal replay: use the spot-relative liquidity
-            # floor (matches the live entry gate) instead of the fixed
-            # ₹2–₹500 rupee band that wrongly rejected legitimate ITM
-            # / commodity / deep-OTM contracts.
-            from agent.iv_size_policy import premium_passes_floor as _premium_passes_floor
+            # No premium price filter — ATM-only universe is liquid by
+            # construction. We still apply the IV sanity scaler so
+            # implausibly-high IV broker readings (>90%) are dropped.
             from agent.iv_size_policy import iv_size_scaler as _iv_size_scaler_replay
-            spot_for_floor = float(
-                paired.get("underlying_price")
-                or side.get("underlying_price")
-                or 0.0
-            )
-            prem_ok, _ = _premium_passes_floor(ltp, spot_for_floor)
-            if not prem_ok:
-                continue
             iv_raw = side.get("iv")
             iv_pct = None
             if iv_raw is not None:

@@ -283,6 +283,29 @@ def days_remaining_in_window(window: dict, as_of: Optional[date] = None) -> int:
     return max(0, (window["window_end"] - today).days)
 
 
+def trading_days_remaining(window: dict, as_of: Optional[date] = None) -> int:
+    """Mon-Fri trading days between today (inclusive) and window_end.
+
+    Used by S1's TTE gate so "TTE ≤ 3 trading days" means three actual
+    weekday sessions, not three calendar days. A Friday with expiry
+    on the following Monday is therefore TTE=1 trading day, not 3.
+    NSE/MCX holidays are not subtracted here — that refinement comes
+    later if needed; the practical impact is at most one day per
+    quarter, well within the noise of a 3-day threshold.
+    """
+    today = as_of or date.today()
+    window_end = window["window_end"]
+    if today >= window_end:
+        return 0
+    count = 0
+    d = today
+    while d < window_end:
+        d += timedelta(days=1)
+        if d.weekday() < 5:  # Monday=0 … Friday=4
+            count += 1
+    return count
+
+
 def is_within_window(window: dict, as_of: Optional[date] = None) -> bool:
     today = as_of or date.today()
     return window["window_start"] <= today <= window["window_end"]

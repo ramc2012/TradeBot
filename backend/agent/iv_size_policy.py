@@ -1,32 +1,23 @@
-"""Relative-IV and premium-band helpers for the entry pipeline.
+"""Relative-IV position-sizing helper for the entry pipeline.
 
-The original S1 design used three fixed gates:
-  * MIN_PREMIUM = ₹2, MAX_PREMIUM = ₹500
-  * MAX_ENTRY_IV_PCT = 30 (prefer) / HARD_MAX_IV_PCT = 45 (reject)
+The original S1 design used an *absolute* IV gate
+(MAX_ENTRY_IV_PCT=30 / HARD_MAX_IV_PCT=45) that hard-rejected setups
+above 45% IV. That is regime-dependent and wrong:
 
-Both were problematic in production:
+  * 40% IV on RELIANCE in a calm market is genuinely overpriced.
+  * 40% IV when market IV is 38% is just an average instrument.
+  * 40% IV during a vol-spike week may even be cheap relative to peers.
 
-  * Premium rupee-band is *underlying-dependent*. ATM weekly NIFTY runs
-    ₹50–₹200; ATM weekly GOLD runs ₹2,000–₹6,000; deep ITM RELIANCE can
-    be ₹600 even when the strategy is sound. A single rupee band rejects
-    legitimate setups whenever the underlying spot is far from the band.
+The correct quantity is the *spread vs market IV*, not the absolute
+level. ``iv_size_scaler(instrument_iv, market_iv)`` returns a
+multiplicative size scaler in (0, 1] based on how much the instrument's
+IV exceeds the market's. High IV → smaller bet, not no bet. Below or
+near market IV → full size. A sanity hard-cap blocks implausible
+broker readings (>90% IV).
 
-  * Absolute IV gate is *regime-dependent*. A 40% IV on RELIANCE during
-    a calm market is genuinely overpriced. The same 40% IV when market
-    IV is 38% is just an average instrument. The same 40% IV during a
-    high-vol week may even be *cheap* relative to peers. The correct
-    quantity is the *spread vs market IV*, not the absolute level.
-
-This module replaces both with:
-
-  * ``premium_passes_floor(premium, spot)`` — a minimal liquidity sanity
-    check (absolute floor + spot-relative floor), no upper bound.
-
-  * ``iv_size_scaler(instrument_iv_pct, market_iv_pct)`` — returns a
-    multiplicative size scaler in (0, 1] based on how much the
-    instrument's IV exceeds the market's. High IV → smaller bet, not no
-    bet. Below or near market IV → full size (1.0×). A sanity hard-cap
-    blocks implausible broker readings (>90%).
+NOTE: Premium price filtering was deliberately removed from the
+strategy. We trade ATM options only, and the ATM contract on a live
+F&O underlying is liquid by construction.
 """
 from __future__ import annotations
 
@@ -37,27 +28,7 @@ from agent.strategy_config import (
     IV_SPREAD_CAUTION_PP,
     IV_SPREAD_HEAVY_PP,
     IV_SPREAD_EXTREME_PP,
-    MIN_PREMIUM_ABS,
-    MIN_PREMIUM_PCT_OF_SPOT,
 )
-
-
-def premium_passes_floor(premium: Optional[float], spot: Optional[float]) -> tuple[bool, str]:
-    """Return (passes, reason). Replaces the old MIN_PREMIUM..MAX_PREMIUM
-    rupee band with a spot-relative liquidity sanity floor.
-    """
-    try:
-        prem = float(premium) if premium is not None else 0.0
-        sp = float(spot) if spot is not None else 0.0
-    except (TypeError, ValueError):
-        return False, "premium_or_spot_invalid"
-    if prem < MIN_PREMIUM_ABS:
-        return False, f"premium_below_abs_floor_{MIN_PREMIUM_ABS}"
-    if sp > 0:
-        floor = sp * MIN_PREMIUM_PCT_OF_SPOT
-        if prem < floor:
-            return False, f"premium_below_spot_relative_floor_{floor:.2f}"
-    return True, "ok"
 
 
 def iv_size_scaler(
@@ -103,4 +74,4 @@ def iv_size_scaler(
     return 0.25, f"iv_spread_extreme_{spread:+.1f}pp"
 
 
-__all__ = ["premium_passes_floor", "iv_size_scaler"]
+__all__ = ["iv_size_scaler"]

@@ -49,29 +49,19 @@ MAX_ENTRY_IV_PCT = 30.0
 HARD_MAX_IV_PCT  = IV_SANITY_MAX_PCT
 
 MIN_TTE_DAYS_INDEX = 5        # for indices: ≥5 trading days on the active expiry
-MIN_TTE_DAYS_STOCK = 5        # for stocks:  ≥5 trading days, ELSE roll to next expiry
+MIN_TTE_DAYS_STOCK = 3        # for stocks:  ≤3 trading days → roll to next expiry
 # Legacy name retained for callers; equals the index threshold above.
 MIN_TTE_DAYS = MIN_TTE_DAYS_INDEX
 
-# Premium band (₹2–₹500) used to be a fixed rupee range. That is
-# nonsensical across the F&O universe:
-#   NIFTY ATM weekly       premium ~₹50–₹200
-#   RELIANCE monthly       premium ~₹10–₹60
-#   GOLD weekly            premium ~₹2,000–₹6,000
-#   BANKNIFTY ATM weekly   premium ~₹200–₹600
-# A single rupee band rejects deep-ITM commodities and ultra-cheap
-# weekly stocks alike. Replaced with two relative checks:
-#   * MIN_PREMIUM_ABS — a tiny sanity floor so we don't trade options
-#     that have effectively zero bid (i.e. likely no liquidity)
-#   * MIN_PREMIUM_PCT_OF_SPOT — premium must be ≥ this fraction of
-#     the underlying spot for the contract to be tradable; floors at
-#     ~0.01% which catches genuinely dead strikes without filtering
-#     legitimate ATM contracts.
-MIN_PREMIUM_ABS = 0.50            # ₹0.50 — pure liquidity sanity
-MIN_PREMIUM_PCT_OF_SPOT = 0.0001  # 0.01% of spot
-# Legacy names retained for compatibility; the new sanity floor
-# replaces the old rupee band entirely.
-MIN_PREMIUM = MIN_PREMIUM_ABS
+# Premium price filtering is DELIBERATELY removed.
+# The strategy only ever trades ATM options. By construction the ATM
+# contract on a live F&O underlying is liquid enough to fill at the
+# market — there is no premium band, rupee floor, or spot-relative
+# floor that adds signal here. The old fixed band (₹2–₹500) wrongly
+# rejected legitimate setups across the universe (deep-ITM RELIANCE,
+# GOLD options at ₹6k, etc.). The legacy aliases below are retained
+# only so downstream imports do not break; they are not gating.
+MIN_PREMIUM = 0.0
 MAX_PREMIUM = float("inf")
 
 MIN_CANDLE_BARS = 20          # minimum 30-min bars in window before signal
