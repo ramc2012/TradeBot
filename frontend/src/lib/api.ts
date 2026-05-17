@@ -262,6 +262,8 @@ export const getCalendarHeatmap = () => api.get("/api/analytics/calendar-heatmap
 export const getPortfolioGreeks = () => api.get("/api/analytics/portfolio-greeks");
 export const getSectorRotation = (timeframe = "daily") =>
   api.get("/api/analytics/sector-rotation", { params: { timeframe } });
+export const getSectorRotationComponents = (sectorCode: string, timeframe = "daily") =>
+  api.get(`/api/analytics/sector-rotation/${encodeURIComponent(sectorCode)}/components`, { params: { timeframe } });
 export const getMacroDashboard = () => api.get("/api/analytics/macro-dashboard");
 
 // ── Macro Research / Sector Discovery ─────────────────────────────────────
@@ -408,6 +410,53 @@ export const getDirectionalOptionsPaperJournal = (symbol?: string, limit = 50) =
   api.get("/api/directional-options/paper-journal", { params: { symbol, limit } });
 export const getDirectionalOptionsPaperPositions = (symbol?: string, status = "all", limit = 50) =>
   api.get("/api/directional-options/paper-positions", { params: { symbol, status, limit } });
+
+// ── Gann TP Delta Harmonic ────────────────────────────────────────────────
+export const getGannTPDeltaSummary = () => api.get("/api/gann-tp-delta/summary");
+export const getGannTPDeltaWorkspace = (
+  underlying = "NIFTY",
+  timeframe = "15minute",
+  lookbackSessions = 60,
+  anchorMode = "auto_pivot",
+  hMode = "median_tpd",
+  manualH?: number,
+) =>
+  api.get("/api/gann-tp-delta/workspace", {
+    params: { underlying, timeframe, lookback_sessions: lookbackSessions, anchor_mode: anchorMode, h_mode: hMode, manual_h: manualH },
+  });
+export const getGannTPDeltaLiveSnapshot = (
+  underlying = "NIFTY",
+  timeframe = "15minute",
+  lookbackSessions = 60,
+  anchorMode = "auto_pivot",
+  hMode = "median_tpd",
+  manualH?: number,
+) =>
+  api.get("/api/gann-tp-delta/live-snapshot", {
+    params: { underlying, timeframe, lookback_sessions: lookbackSessions, anchor_mode: anchorMode, h_mode: hMode, manual_h: manualH },
+  });
+export const getGannTPDeltaBacktest = (
+  underlying = "NIFTY",
+  timeframe = "15minute",
+  lookbackSessions = 60,
+  anchorMode = "auto_pivot",
+  hMode = "median_tpd",
+) =>
+  api.get("/api/gann-tp-delta/backtest", {
+    params: { underlying, timeframe, lookback_sessions: lookbackSessions, anchor_mode: anchorMode, h_mode: hMode },
+  });
+export const runGannTPDeltaPaperProposal = (
+  underlying = "NIFTY",
+  timeframe = "15minute",
+  lookbackSessions = 60,
+  anchorMode = "auto_pivot",
+  hMode = "median_tpd",
+) =>
+  api.post("/api/gann-tp-delta/paper-proposal", null, {
+    params: { underlying, timeframe, lookback_sessions: lookbackSessions, anchor_mode: anchorMode, h_mode: hMode },
+  });
+export const getGannTPDeltaPaperJournal = (symbol?: string, limit = 50) =>
+  api.get("/api/gann-tp-delta/paper-journal", { params: { symbol, limit } });
 
 // ── Auction Intelligence ─────────────────────────────────────────────────
 export const getAuctionIntelligenceSummary = () =>

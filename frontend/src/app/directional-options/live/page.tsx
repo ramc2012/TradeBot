@@ -8,7 +8,7 @@
  */
 import { useMemo } from "react";
 import Link from "next/link";
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 
 import {
   api as apiClient,
@@ -29,7 +29,15 @@ import {
 } from "@/components/strategy/desk-helpers";
 
 const REFRESH_MS = 6_000;
-const SYMBOLS = ["NIFTY", "BANKNIFTY", "SENSEX", "CRUDEOIL"] as const;
+const DEFAULT_SYMBOLS = [
+  "NIFTY",
+  "BANKNIFTY",
+  "SENSEX",
+  "CRUDEOIL",
+  "GOLD",
+  "SILVERM",
+  "NATURALGAS",
+];
 
 type DOSnap = {
   as_of?: string;
@@ -41,6 +49,7 @@ type DOSnap = {
   signal?: {
     direction?: "CE" | "PE" | null;
     strength?: number;
+    confidence?: number;
     rationale?: string[];
   } | null;
   selected_contract?: {
@@ -48,7 +57,10 @@ type DOSnap = {
     strike?: number;
     option_type?: string;
     ltp?: number;
+    option_price?: number;
     iv_pct?: number;
+    iv?: number;
+    implied_vol?: number;
     days_to_expiry?: number;
   } | null;
   risk?: {
@@ -72,16 +84,24 @@ export default function DirectionalOptionsLivePage() {
     refetchIntervalInBackground: true,
   });
 
-  const symbolQueries = SYMBOLS.map((symbol) =>
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    useQuery({
+  const symbols = useMemo(() => {
+    const configured = summaryQuery.data?.underlyings;
+    return Array.isArray(configured) && configured.length
+      ? configured.map((symbol: unknown) => String(symbol)).filter(Boolean)
+      : DEFAULT_SYMBOLS;
+  }, [summaryQuery.data?.underlyings]);
+
+  const symbolQueries = useQueries({
+    queries: symbols.map((symbol) => ({
       queryKey: ["do-live", "snapshot", symbol],
-      queryFn: async () =>
-        (await getDirectionalOptionsLiveSnapshot(symbol)).data as DOSnap,
+      queryFn: async () => {
+        const payload = (await getDirectionalOptionsLiveSnapshot(symbol)).data;
+        return (payload?.snapshot ?? payload) as DOSnap;
+      },
       refetchInterval: REFRESH_MS,
       refetchIntervalInBackground: true,
-    }),
-  );
+    })),
+  });
 
   const auditQuery = useQuery({
     queryKey: ["do-live", "audit"],
@@ -97,11 +117,11 @@ export default function DirectionalOptionsLivePage() {
 
   const rows: Array<DOSnap & { _key: string }> = useMemo(
     () =>
-      SYMBOLS.map((s, i) => {
+      symbols.map((s, i) => {
         const d = symbolQueries[i].data as DOSnap | undefined;
         return { _key: s, ...(d ?? { underlying: s }) };
       }),
-    [symbolQueries],
+    [symbolQueries, symbols],
   );
 
   const bucketedRows: BucketedRow[] = useMemo(
@@ -133,7 +153,7 @@ export default function DirectionalOptionsLivePage() {
             Directional Options · Live Data View
           </h1>
           <span className="text-xs text-text-muted">
-            {SYMBOLS.join(" · ")} · long-only premium
+            {symbols.join(" · ")} · long-only premium
           </span>
         </div>
         <div className="flex items-baseline gap-2 text-[11px]">
@@ -184,6 +204,13 @@ export default function DirectionalOptionsLivePage() {
                 const sig = r.signal;
                 const c = r.selected_contract;
                 const risk = r.risk;
+                const contractLtp = c?.ltp ?? c?.option_price;
+                const contractIv = c?.iv_pct ?? c?.iv ?? (
+                  typeof c?.implied_vol === "number" && c.implied_vol <= 1
+                    ? c.implied_vol * 100
+                    : c?.implied_vol
+                );
+                const signalStrength = sig?.strength ?? sig?.confidence;
                 return (
                   <tr
                     key={r._key}
@@ -210,16 +237,16 @@ export default function DirectionalOptionsLivePage() {
                       </span>
                     </td>
                     <td className="text-right font-mono">
-                      {formatNumber(sig?.strength, 2)}
+                      {formatNumber(signalStrength, 2)}
                     </td>
                     <td className="font-mono text-[10.5px]">
                       {c ? `${c.option_type || ""} ${c.strike || ""}` : "—"}
                     </td>
                     <td className="text-right font-mono">
-                      {formatNumber(c?.ltp, 2)}
+                      {formatNumber(contractLtp, 2)}
                     </td>
                     <td className="text-right font-mono">
-                      {formatNumber(c?.iv_pct, 1)}
+                      {formatNumber(contractIv, 1)}
                     </td>
                     <td className="text-right font-mono">
                       {c?.days_to_expiry ?? "—"}

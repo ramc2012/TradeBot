@@ -194,6 +194,10 @@ TIMEFRAME_ALIASES = {
     "weekly": "weekly",
     "month": "monthly",
     "monthly": "monthly",
+    "quarter": "quarterly",
+    "quarterly": "quarterly",
+    "year": "yearly",
+    "yearly": "yearly",
 }
 
 TIMEFRAME_CONFIG = {
@@ -202,6 +206,8 @@ TIMEFRAME_CONFIG = {
         "upstox_interval": "30minute",
         "history_days": 10,
         "bucket": "hourly",
+        "change_periods": 1,
+        "label": "Hourly",
         "rrg_lookback": 10,
         "trail": 8,
     },
@@ -210,6 +216,8 @@ TIMEFRAME_CONFIG = {
         "upstox_interval": "day",
         "history_days": 120,
         "bucket": "daily",
+        "change_periods": 1,
+        "label": "Daily",
         "rrg_lookback": 12,
         "trail": 8,
     },
@@ -218,6 +226,8 @@ TIMEFRAME_CONFIG = {
         "upstox_interval": "day",
         "history_days": 400,
         "bucket": "weekly",
+        "change_periods": 1,
+        "label": "Weekly",
         "rrg_lookback": 10,
         "trail": 8,
     },
@@ -226,8 +236,30 @@ TIMEFRAME_CONFIG = {
         "upstox_interval": "day",
         "history_days": 900,
         "bucket": "monthly",
+        "change_periods": 1,
+        "label": "Monthly",
         "rrg_lookback": 8,
         "trail": 8,
+    },
+    "quarterly": {
+        "redis_ttl": 900,
+        "upstox_interval": "day",
+        "history_days": 1500,
+        "bucket": "quarterly",
+        "change_periods": 1,
+        "label": "Quarterly",
+        "rrg_lookback": 8,
+        "trail": 8,
+    },
+    "yearly": {
+        "redis_ttl": 1800,
+        "upstox_interval": "day",
+        "history_days": 2600,
+        "bucket": "yearly",
+        "change_periods": 1,
+        "label": "Yearly",
+        "rrg_lookback": 6,
+        "trail": 6,
     },
 }
 
@@ -247,11 +279,140 @@ class SectorRotationTracker:
         await redis.set(cache_key, json.dumps(payload), ex=TIMEFRAME_CONFIG[normalized]["redis_ttl"])
         return payload
 
+    async def get_sector_components(self, sector_code: str, timeframe: str = "daily") -> dict:
+        normalized = self._normalize_timeframe(timeframe)
+        code = (sector_code or "").upper()
+        config = SECTOR_CONFIG_MAP.get(code)
+        period_config = TIMEFRAME_CONFIG[normalized]
+        if not config:
+            return {
+                "timeframe": normalized,
+                "period_label": period_config["label"],
+                "sector": None,
+                "stocks": [],
+                "rrg": {"points": [], "quadrant_counts": self._quadrant_counts([])},
+                "source": "none",
+                "configured_members": 0,
+                "available_members": 0,
+                "detail": f"Unknown sector '{sector_code}'.",
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+
+        redis = await get_redis()
+        cache_key = f"sector_components:{normalized}:{code}"
+        cached = await redis.get(cache_key)
+        if cached:
+            return json.loads(cached)
+
+        benchmark_series = await self._fetch_single_market_series(
+            app_symbol=BENCHMARK_APP_SYMBOL,
+            instrument_key=UPSTOX_BENCHMARK_SYMBOL,
+            timeframe=normalized,
+        )
+        stock_series = await self._load_stock_history_map(
+            normalized,
+            symbols=config.members,
+            fetch_missing_fyers=True,
+        )
+        sector_series = await self._fetch_single_market_series(
+            app_symbol=config.app_symbol,
+            instrument_key=config.upstox_symbol,
+            timeframe=normalized,
+        )
+        sector_source = "official" if sector_series else "synthetic"
+        if not sector_series:
+            sector_series = self._build_synthetic_sector_series(config.members, stock_series)
+
+        sector_closes = [close for _, close in sector_series]
+        benchmark_closes = [close for _, close in benchmark_series] or sector_closes
+        if len(sector_closes) < 2:
+            payload = {
+                "timeframe": normalized,
+                "period_label": period_config["label"],
+                "sector": {
+                    "code": config.code,
+                    "name": config.label,
+                    "symbol": config.app_symbol,
+                    "member_count": len(config.members),
+                    "series_source": sector_source,
+                },
+                "stocks": [],
+                "rrg": {"points": [], "quadrant_counts": self._quadrant_counts([])},
+                "source": sector_source,
+                "configured_members": len(config.members),
+                "available_members": 0,
+                "detail": "No sector/component history is available for the selected period.",
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+            await redis.set(cache_key, json.dumps(payload), ex=min(60, period_config["redis_ttl"]))
+            return payload
+
+        sector_entry = self._build_rotation_row(
+            code=config.code,
+            name=config.label,
+            symbol=config.app_symbol,
+            closes=sector_closes,
+            benchmark_closes=benchmark_closes,
+            change_periods=period_config["change_periods"],
+            trail_limit=period_config["trail"],
+            sample_count=len(sector_closes),
+            series_source=sector_source,
+            member_count=len(config.members),
+        )
+
+        stock_points: list[dict[str, Any]] = []
+        for symbol in config.members:
+            stock_rows = stock_series.get(symbol)
+            if not stock_rows:
+                continue
+            stock_closes = [close for _, close in stock_rows]
+            if len(stock_closes) < 2:
+                continue
+            stock_points.append(
+                self._build_rotation_row(
+                    code=symbol,
+                    name=symbol,
+                    symbol=symbol,
+                    closes=stock_closes,
+                    benchmark_closes=sector_closes,
+                    change_periods=period_config["change_periods"],
+                    trail_limit=period_config["trail"],
+                    sample_count=len(stock_closes),
+                )
+            )
+
+        stock_points.sort(
+            key=lambda row: (row["quadrant"] != "leading", -row["relative_strength_pct"], row["name"])
+        )
+        payload = {
+            "timeframe": normalized,
+            "period_label": period_config["label"],
+            "sector": {key: value for key, value in sector_entry.items() if key != "trail"},
+            "stocks": [{key: value for key, value in row.items() if key != "trail"} for row in stock_points],
+            "rrg": {
+                "points": stock_points,
+                "quadrant_counts": self._quadrant_counts(stock_points),
+            },
+            "source": sector_source,
+            "configured_members": len(config.members),
+            "available_members": len(stock_points),
+            "detail": None if stock_points else "No component history is available for the selected period.",
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+        await redis.set(
+            cache_key,
+            json.dumps(payload),
+            ex=period_config["redis_ttl"] if stock_points else min(60, period_config["redis_ttl"]),
+        )
+        return payload
+
     async def _calculate_relative_strength(self, timeframe: str) -> dict:
+        period_config = TIMEFRAME_CONFIG[timeframe]
         index_series, source, detail = await self._load_index_series(timeframe)
         if BENCHMARK_APP_SYMBOL not in index_series:
             return {
                 "timeframe": timeframe,
+                "period_label": period_config["label"],
                 "benchmark": None,
                 "watchlist": [],
                 "rrg": {"benchmark_symbol": BENCHMARK_APP_SYMBOL, "points": [], "quadrant_counts": self._quadrant_counts([])},
@@ -265,7 +426,7 @@ class SectorRotationTracker:
         stock_series = await self._load_stock_history_map(timeframe)
         benchmark_series = index_series[BENCHMARK_APP_SYMBOL]
         benchmark_closes = [close for _, close in benchmark_series]
-        benchmark_change_pct = self._change_pct(benchmark_closes)
+        benchmark_change_pct = self._period_change_pct(benchmark_closes, period_config["change_periods"])
 
         benchmark = {
             "symbol": BENCHMARK_APP_SYMBOL,
@@ -273,6 +434,7 @@ class SectorRotationTracker:
             "price": round(benchmark_closes[-1], 2) if benchmark_closes else 0.0,
             "tracked_change_pct": round(benchmark_change_pct, 2),
             "samples": len(benchmark_closes),
+            "period_label": period_config["label"],
         }
 
         watchlist: list[dict[str, Any]] = []
@@ -293,6 +455,7 @@ class SectorRotationTracker:
                 symbol=config.app_symbol,
                 closes=closes,
                 benchmark_closes=benchmark_closes,
+                change_periods=period_config["change_periods"],
                 trail_limit=TIMEFRAME_CONFIG[timeframe]["trail"],
                 sample_count=len(closes),
                 series_source=sector_source,
@@ -316,6 +479,7 @@ class SectorRotationTracker:
                     symbol=symbol,
                     closes=stock_closes,
                     benchmark_closes=closes,
+                    change_periods=period_config["change_periods"],
                     trail_limit=TIMEFRAME_CONFIG[timeframe]["trail"],
                     sample_count=len(stock_closes),
                 )
@@ -348,6 +512,7 @@ class SectorRotationTracker:
                     symbol="SECTOR:BROAD_MARKET",
                     closes=fallback_closes,
                     benchmark_closes=benchmark_closes,
+                    change_periods=period_config["change_periods"],
                     trail_limit=TIMEFRAME_CONFIG[timeframe]["trail"],
                     sample_count=len(fallback_closes),
                     series_source="synthetic",
@@ -371,6 +536,7 @@ class SectorRotationTracker:
                             symbol=symbol,
                             closes=stock_closes,
                             benchmark_closes=fallback_closes,
+                            change_periods=period_config["change_periods"],
                             trail_limit=TIMEFRAME_CONFIG[timeframe]["trail"],
                             sample_count=len(stock_closes),
                         )
@@ -403,6 +569,7 @@ class SectorRotationTracker:
 
         return {
             "timeframe": timeframe,
+            "period_label": period_config["label"],
             "benchmark": benchmark,
             "watchlist": watchlist,
             "rrg": {
@@ -471,6 +638,25 @@ class SectorRotationTracker:
         else:
             source = "upstox+timescale"
         return series_map, source, None
+
+    async def _fetch_single_market_series(
+        self,
+        *,
+        app_symbol: str,
+        instrument_key: Optional[str],
+        timeframe: str,
+    ) -> list[tuple[datetime, float]]:
+        config = TIMEFRAME_CONFIG[timeframe]
+        from_date = date.today() - timedelta(days=config["history_days"])
+        to_date = date.today()
+        return await self._fetch_cached_market_series(
+            app_symbol=app_symbol,
+            instrument_key=instrument_key,
+            interval=config["upstox_interval"],
+            from_date=from_date,
+            to_date=to_date,
+            bucket=timeframe,
+        )
 
     async def _fetch_cached_market_series(
         self,
@@ -627,8 +813,14 @@ class SectorRotationTracker:
         )
         return aggregated
 
-    async def _load_stock_history_map(self, timeframe: str) -> dict[str, list[tuple[datetime, float]]]:
-        symbols = sorted(SECTOR_STOCKS)
+    async def _load_stock_history_map(
+        self,
+        timeframe: str,
+        *,
+        symbols: tuple[str, ...] | list[str] | set[str] | None = None,
+        fetch_missing_fyers: bool = False,
+    ) -> dict[str, list[tuple[datetime, float]]]:
+        symbols = sorted(set(symbols or SECTOR_STOCKS))
         if not symbols:
             return {}
 
@@ -655,11 +847,33 @@ class SectorRotationTracker:
         for row in rows:
             grouped[str(row.underlying)].append((row.time.astimezone(UTC), float(row.close)))
 
-        return {
+        history_map = {
             symbol: self._aggregate_close_series(series, timeframe)
             for symbol, series in grouped.items()
             if series
         }
+        if not fetch_missing_fyers:
+            return history_map
+
+        missing_symbols = [symbol for symbol in symbols if symbol not in history_map]
+        for index, symbol in enumerate(missing_symbols):
+            if index:
+                await asyncio.sleep(0.25)
+            try:
+                rows = await self._fetch_cached_fyers_series(
+                    app_symbol=f"NSE:{symbol}-EQ",
+                    interval=config["upstox_interval"],
+                    from_date=from_ts.date(),
+                    to_date=date.today(),
+                    bucket=timeframe,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[Sector] component history fetch failed for {symbol}: {exc}")
+                rows = []
+            if rows:
+                history_map[symbol] = rows
+
+        return history_map
 
     @staticmethod
     def _build_synthetic_sector_series(
@@ -668,9 +882,14 @@ class SectorRotationTracker:
     ) -> list[tuple[datetime, float]]:
         grouped: dict[datetime, list[float]] = defaultdict(list)
         for symbol in members:
-            for ts, close in stock_series.get(symbol, []):
-                if math.isfinite(close):
-                    grouped[ts].append(close)
+            series = [(ts, close) for ts, close in stock_series.get(symbol, []) if math.isfinite(close) and close > 0]
+            if not series:
+                continue
+            base_close = series[0][1]
+            if base_close <= 0:
+                continue
+            for ts, close in series:
+                grouped[ts].append((close / base_close) * 100.0)
         synthetic = [
             (ts, round(mean(values), 4))
             for ts, values in grouped.items()
@@ -692,6 +911,10 @@ class SectorRotationTracker:
             bucket_mode = "weekly"
         elif timeframe == "monthly":
             bucket_mode = "monthly"
+        elif timeframe == "quarterly":
+            bucket_mode = "quarterly"
+        elif timeframe == "yearly":
+            bucket_mode = "yearly"
         else:
             bucket_mode = timeframe
 
@@ -705,9 +928,16 @@ class SectorRotationTracker:
             elif bucket_mode == "weekly":
                 monday = local_ts.date() - timedelta(days=local_ts.weekday())
                 bucket = datetime.combine(monday, time(0, 0), tzinfo=IST)
-            else:
+            elif bucket_mode == "monthly":
                 month_start = date(local_ts.year, local_ts.month, 1)
                 bucket = datetime.combine(month_start, time(0, 0), tzinfo=IST)
+            elif bucket_mode == "quarterly":
+                quarter_start_month = ((local_ts.month - 1) // 3) * 3 + 1
+                quarter_start = date(local_ts.year, quarter_start_month, 1)
+                bucket = datetime.combine(quarter_start, time(0, 0), tzinfo=IST)
+            else:
+                year_start = date(local_ts.year, 1, 1)
+                bucket = datetime.combine(year_start, time(0, 0), tzinfo=IST)
             aggregated[bucket.astimezone(UTC)] = close
 
         return sorted(aggregated.items(), key=lambda item: item[0])
@@ -720,13 +950,14 @@ class SectorRotationTracker:
         symbol: str,
         closes: list[float],
         benchmark_closes: list[float],
+        change_periods: int,
         trail_limit: int,
         sample_count: int,
         series_source: Optional[str] = None,
         member_count: Optional[int] = None,
     ) -> dict[str, Any]:
-        tracked_change_pct = self._change_pct(closes)
-        benchmark_change_pct = self._change_pct(benchmark_closes)
+        tracked_change_pct = self._period_change_pct(closes, change_periods)
+        benchmark_change_pct = self._period_change_pct(benchmark_closes, change_periods)
         relative_strength_pct = tracked_change_pct - benchmark_change_pct
         rrg_series = self._build_rrg_series(closes, benchmark_closes)
         ratio = rrg_series[-1]["ratio"] if rrg_series else 100.0
@@ -763,6 +994,14 @@ class SectorRotationTracker:
         if len(closes) < 2 or closes[0] == 0:
             return 0.0
         return ((closes[-1] / closes[0]) - 1.0) * 100.0
+
+    @classmethod
+    def _period_change_pct(cls, closes: list[float], periods: int) -> float:
+        lookback = max(1, int(periods or 1))
+        if len(closes) <= lookback:
+            return cls._change_pct(closes)
+        window = closes[-(lookback + 1):]
+        return cls._change_pct(window)
 
     @staticmethod
     def _build_rrg_series(

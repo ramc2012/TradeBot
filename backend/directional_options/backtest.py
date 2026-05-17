@@ -86,7 +86,7 @@ class DirectionalOptionsBacktester:
             day_key = timestamp.date().isoformat()
             iso = timestamp.isocalendar()
             week_key = f"{iso.year}-W{iso.week:02d}"
-            regime = self.regime.classify(row)
+            regime = self.regime.classify(row, timeframe=timeframe)
 
             if open_position is not None:
                 current_mark = self._mark_price(open_position.contract.file_path, timestamp, open_position.entry_mark_price)

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import {
@@ -11,120 +11,22 @@ import {
   Database,
   RefreshCw,
   Shield,
-  WifiOff,
 } from "lucide-react";
 
 import {
   getATMWatchlist,
-  getBrokerStatus,
   getFnoAnalytics,
   getOptionChain,
   getOptionExpiries,
   getSectorRotation,
-  getStrategyAgentStatus,
+  getSectorRotationComponents,
 } from "@/lib/api";
-import { isBrokerReady, type BrokerStatusEntry } from "@/lib/broker-status";
 import {
   MARKET_INDEX_SYMBOLS,
   type MarketIndexSymbol,
   getMarketIndexLabel,
 } from "@/lib/marketSymbols";
-import { useStore, useTickSymbol } from "@/store";
-
-type StrategySummary = {
-  available_capital?: number | null;
-  total_equity?: number | null;
-  unrealized_pnl?: number | null;
-  realized_pnl?: number | null;
-  day_pnl?: number | null;
-  total_trades?: number | null;
-  win_rate?: number | null;
-  open_positions?: number | null;
-  entries?: number | null;
-  exits?: number | null;
-};
-
-type StrategyPosition = {
-  symbol?: string | null;
-  underlying?: string | null;
-  expiry?: string | null;
-  strike?: number | null;
-  option_type?: string | null;
-  qty?: number | null;
-  entry_price?: number | null;
-  current_price?: number | null;
-  entered_at?: string | null;
-  price_updated_at?: string | null;
-  phase?: string | null;
-  signal_reason?: string | null;
-  latest_rsi?: number | null;
-  entry_iv_pct?: number | null;
-  regime?: string | null;
-  spot_setup?: string | null;
-  unrealized_pnl?: number | null;
-  return_pct?: number | null;
-};
-
-type StrategySignal = {
-  underlying?: string | null;
-  direction?: string | null;
-  status?: string | null;
-  freshness?: string | null;
-  reason?: string | null;
-  instruction?: string | null;
-  source?: string | null;
-  as_of?: string | null;
-  signal_date?: string | null;
-  trade_date?: string | null;
-  spot_price?: number | null;
-  atm_strike?: number | null;
-  ltp?: number | null;
-  iv_pct?: number | null;
-  priority_score?: number | null;
-  mp_day_type?: string | null;
-  poc?: number | null;
-  vah?: number | null;
-  val?: number | null;
-  option_last_bar_time?: string | null;
-  spot_last_time?: string | null;
-};
-
-type StrategyTrade = {
-  symbol?: string | null;
-  action?: string | null;
-  qty?: number | null;
-  entry_price?: number | null;
-  exit_price?: number | null;
-  pnl?: number | null;
-  entry_time?: string | null;
-  exit_time?: string | null;
-  option_type?: string | null;
-};
-
-type StrategyPayload = {
-  key?: string | null;
-  label?: string | null;
-  last_scan_at?: string | null;
-  last_message?: string | null;
-  summary?: StrategySummary;
-  positions?: StrategyPosition[];
-  trade_history?: StrategyTrade[];
-  signals?: StrategySignal[];
-  meta?: Record<string, any>;
-};
-
-type StrategyAgentStatus = {
-  running?: boolean;
-  loop_active?: boolean;
-  auto_run_enabled?: boolean;
-  kill_switch_active?: boolean;
-  last_run_at?: string | null;
-  next_scan_at?: string | null;
-  last_message?: string | null;
-  data_health?: Record<string, any>;
-  target_expiry?: string | null;
-  strategies?: StrategyPayload[];
-};
+import { useTickSymbol } from "@/store";
 
 type ChainEntry = {
   strike: number;
@@ -197,19 +99,55 @@ type SectorWatchlistRow = {
   rrg_momentum?: number | null;
   quadrant?: string | null;
   trend?: string | null;
+  samples?: number | null;
+  series_source?: string | null;
+  member_count?: number | null;
   trail?: Array<{ ratio: number; momentum: number }>;
 };
 
 type SectorRotationPayload = {
+  timeframe?: string | null;
+  period_label?: string | null;
   benchmark?: {
     name?: string | null;
     tracked_change_pct?: number | null;
+    samples?: number | null;
   } | null;
   watchlist?: SectorWatchlistRow[];
   rrg?: {
     points?: SectorWatchlistRow[];
   };
+  stocks_by_sector?: Record<string, {
+    sector?: SectorWatchlistRow;
+    stocks?: SectorWatchlistRow[];
+    rrg?: {
+      points?: SectorWatchlistRow[];
+      quadrant_counts?: Record<string, number>;
+    };
+    source?: string | null;
+    configured_members?: number | null;
+    available_members?: number | null;
+    detail?: string | null;
+  }>;
+  source?: string | null;
   detail?: string | null;
+  timestamp?: string | null;
+};
+
+type SectorComponentsPayload = {
+  timeframe?: string | null;
+  period_label?: string | null;
+  sector?: SectorWatchlistRow | null;
+  stocks?: SectorWatchlistRow[];
+  rrg?: {
+    points?: SectorWatchlistRow[];
+    quadrant_counts?: Record<string, number>;
+  };
+  source?: string | null;
+  configured_members?: number | null;
+  available_members?: number | null;
+  detail?: string | null;
+  timestamp?: string | null;
 };
 
 type LiveMarketTab = "chain" | "watchlist" | "sectors" | "rrg" | "research";
@@ -458,11 +396,40 @@ const BUILD_STAGES = [
   ["9", "Research Assistant", "No invented data, source-cited answers, stale-data refusal and uncertainty explanation."],
 ];
 
-const TRADING_BROKERS = ["fyers", "upstox"];
-const BROKER_LABEL: Record<string, string> = {
-  fyers: "Fyers",
-  upstox: "Upstox",
-};
+const SECTOR_PERIOD_OPTIONS = [
+  { value: "daily", label: "Daily" },
+  { value: "weekly", label: "Weekly" },
+  { value: "monthly", label: "Monthly" },
+  { value: "quarterly", label: "Quarterly" },
+  { value: "yearly", label: "Yearly" },
+] as const;
+type SectorPeriod = (typeof SECTOR_PERIOD_OPTIONS)[number]["value"];
+
+function SectorPeriodSelect({
+  value,
+  onChange,
+}: {
+  value: SectorPeriod;
+  onChange: (value: SectorPeriod) => void;
+}) {
+  return (
+    <label className="inline-flex items-center gap-2 rounded-lg border border-bg-border bg-bg-secondary/35 px-3 py-2 text-xs text-text-secondary">
+      <span className="uppercase tracking-[0.1em] text-text-muted">Period</span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value as SectorPeriod)}
+        className="bg-transparent font-mono text-text-primary outline-none"
+        title="Sector lead period"
+      >
+        {SECTOR_PERIOD_OPTIONS.map((option) => (
+          <option key={option.value} value={option.value} className="bg-bg-card text-text-primary">
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
 
 function formatNumber(value?: number | null, digits = 2) {
   if (value == null || Number.isNaN(value)) return "--";
@@ -473,15 +440,6 @@ function formatSigned(value?: number | null, digits = 2, suffix = "") {
   if (value == null || Number.isNaN(value)) return "--";
   const prefix = value > 0 ? "+" : "";
   return `${prefix}${value.toFixed(digits)}${suffix}`;
-}
-
-function formatMoney(value?: number | null) {
-  if (value == null || Number.isNaN(value)) return "--";
-  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
-  const abs = Math.abs(value);
-  if (abs >= 10_00_000) return `${sign}Rs ${(abs / 10_00_000).toFixed(2)}L`;
-  if (abs >= 1_000) return `${sign}Rs ${(abs / 1_000).toFixed(1)}K`;
-  return `${sign}Rs ${abs.toFixed(0)}`;
 }
 
 function formatCompact(value?: number | null) {
@@ -622,46 +580,6 @@ function PanelHeader({
   );
 }
 
-function BucketBar({ rows }: { rows: StrategySignal[] }) {
-  const counts = rows.reduce(
-    (acc, row) => {
-      const key = String(row.direction || row.status || row.freshness || "other").toUpperCase();
-      if (key.includes("CE")) acc.ce += 1;
-      else if (key.includes("PE")) acc.pe += 1;
-      else if (key.includes("MISSING")) acc.missing += 1;
-      else acc.watch += 1;
-      return acc;
-    },
-    { ce: 0, pe: 0, watch: 0, missing: 0 },
-  );
-  const total = Math.max(1, counts.ce + counts.pe + counts.watch + counts.missing);
-  const segments = [
-    { label: "CE", value: counts.ce, className: "bg-accent-green" },
-    { label: "PE", value: counts.pe, className: "bg-accent-red" },
-    { label: "Watch", value: counts.watch, className: "bg-accent-amber" },
-    { label: "Missing", value: counts.missing, className: "bg-text-muted/50" },
-  ];
-
-  return (
-    <div className="rounded-lg border border-bg-border bg-bg-secondary/25 px-3 py-2" title="Saved signal split by CE, PE, watch and missing lanes">
-      <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-[0.08em] text-text-muted">
-        <span>Signal Split</span>
-        <span className="font-mono">{counts.ce}/{counts.pe}/{counts.watch}/{counts.missing}</span>
-      </div>
-      <div className="flex h-2 overflow-hidden rounded-full bg-bg-primary">
-        {segments.map((segment) => (
-          <div
-            key={segment.label}
-            className={segment.className}
-            style={{ width: `${(segment.value / total) * 100}%` }}
-            title={`${segment.label}: ${segment.value}`}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function LiveIndexButton({
   symbol,
   active,
@@ -749,7 +667,29 @@ function AtmWatchlistTable({ rows }: { rows: AtmWatchlistRow[] }) {
   );
 }
 
-function RrgMap({ points }: { points: SectorWatchlistRow[] }) {
+function getQuadrantCounts(rows: SectorWatchlistRow[]) {
+  return {
+    leading: rows.filter((row) => row.quadrant === "leading").length,
+    improving: rows.filter((row) => row.quadrant === "improving").length,
+    deteriorating: rows.filter((row) => row.quadrant === "weakening").length,
+    lagging: rows.filter((row) => row.quadrant === "lagging").length,
+  };
+}
+
+function rrgPointLabel(point: SectorWatchlistRow) {
+  if (!point.code.includes("_")) return point.code.slice(0, 7);
+  return point.code.replaceAll("_", " ").split(" ").map((part) => part[0]).join("").slice(0, 4);
+}
+
+function RrgMap({
+  points,
+  activeCode,
+  onPointClick,
+}: {
+  points: SectorWatchlistRow[];
+  activeCode?: string | null;
+  onPointClick?: (point: SectorWatchlistRow) => void;
+}) {
   const xValues = points.map((point) => point.rrg_ratio ?? 100);
   const yValues = points.map((point) => point.rrg_momentum ?? 100);
   const xMin = Math.min(95, ...xValues) - 1;
@@ -760,10 +700,10 @@ function RrgMap({ points }: { points: SectorWatchlistRow[] }) {
   return (
     <div className="relative min-h-[340px] overflow-hidden rounded-lg border border-bg-border bg-bg-primary/50">
       <div className="absolute inset-0 grid grid-cols-2 grid-rows-2 text-[10px] uppercase tracking-[0.14em] text-text-muted">
-        <div className="border-b border-r border-bg-border/60 p-3">Lagging</div>
-        <div className="border-b border-bg-border/60 p-3 text-right">Improving</div>
-        <div className="border-r border-bg-border/60 p-3">Weakening</div>
-        <div className="p-3 text-right">Leading</div>
+        <div className="border-b border-r border-bg-border/60 p-3">Improving</div>
+        <div className="border-b border-bg-border/60 p-3 text-right">Leading</div>
+        <div className="border-r border-bg-border/60 p-3">Lagging</div>
+        <div className="p-3 text-right">Weakening</div>
       </div>
       <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
         <line x1="50" y1="0" x2="50" y2="100" stroke="#26344d" strokeWidth="0.35" />
@@ -772,18 +712,23 @@ function RrgMap({ points }: { points: SectorWatchlistRow[] }) {
       {points.slice(0, 28).map((point) => {
         const left = positionPct(point.rrg_ratio, xMin, xMax);
         const top = 100 - positionPct(point.rrg_momentum, yMin, yMax);
+        const clickable = Boolean(onPointClick);
         return (
-          <div
+          <button
             key={point.code}
+            type="button"
+            onClick={() => onPointClick?.(point)}
             title={`${point.name} · ${point.quadrant || "unknown"}`}
             className={clsx(
-              "absolute -translate-x-1/2 -translate-y-1/2 rounded-md border px-1.5 py-1 text-[10px] font-semibold uppercase shadow-lg",
+              "absolute -translate-x-1/2 -translate-y-1/2 rounded-md border px-1.5 py-1 text-[10px] font-semibold uppercase shadow-lg transition-transform",
+              clickable && "cursor-pointer hover:z-10 hover:scale-110",
+              activeCode === point.code && "ring-1 ring-accent-blue",
               quadrantTone(point.quadrant),
             )}
             style={{ left: `${left}%`, top: `${top}%` }}
           >
-            {point.code.replaceAll("_", " ").split(" ").map((part) => part[0]).join("").slice(0, 4)}
-          </div>
+            {rrgPointLabel(point)}
+          </button>
         );
       })}
       {!points.length ? (
@@ -1602,6 +1547,8 @@ function LiveMarketTools() {
   const [symbol, setSymbol] = useState<MarketIndexSymbol>("NSE:NIFTY50-INDEX");
   const [expiry, setExpiry] = useState("");
   const [activeTab, setActiveTab] = useState<LiveMarketTab>("chain");
+  const [sectorPeriod, setSectorPeriod] = useState<SectorPeriod>("daily");
+  const [selectedRrgSectorCode, setSelectedRrgSectorCode] = useState<string | null>(null);
   const selectedTick = useTickSymbol(symbol);
 
   const expiriesQuery = useQuery<ExpiryPayload>({
@@ -1626,10 +1573,18 @@ function LiveMarketTools() {
   });
 
   const sectorQuery = useQuery<SectorRotationPayload>({
-    queryKey: ["marketSectorRotation", "daily"],
-    queryFn: () => getSectorRotation("daily").then((response) => response.data),
+    queryKey: ["marketSectorRotation", sectorPeriod],
+    queryFn: () => getSectorRotation(sectorPeriod).then((response) => response.data),
     staleTime: 30_000,
     refetchInterval: 60_000,
+  });
+
+  const componentQuery = useQuery<SectorComponentsPayload>({
+    queryKey: ["marketSectorRotationComponents", selectedRrgSectorCode, sectorPeriod],
+    queryFn: () => getSectorRotationComponents(selectedRrgSectorCode || "", sectorPeriod).then((response) => response.data),
+    staleTime: 30_000,
+    refetchInterval: selectedRrgSectorCode ? 60_000 : false,
+    enabled: Boolean(selectedRrgSectorCode),
   });
 
   const fnoAnalyticsQuery = useQuery<FnoAnalyticsPayload>({
@@ -1665,7 +1620,27 @@ function LiveMarketTools() {
     : [];
   const watchlistRows = watchlistQuery.data?.rows || [];
   const sectorRows = sectorQuery.data?.watchlist || [];
-  const rrgPoints = sectorQuery.data?.rrg?.points || sectorRows;
+  const embeddedRrgSector = selectedRrgSectorCode ? sectorQuery.data?.stocks_by_sector?.[selectedRrgSectorCode] : null;
+  const selectedRrgSector = componentQuery.data
+    ? {
+        sector: componentQuery.data.sector || undefined,
+        stocks: componentQuery.data.stocks || [],
+        rrg: componentQuery.data.rrg || { points: [] },
+        source: componentQuery.data.source,
+        configured_members: componentQuery.data.configured_members,
+        available_members: componentQuery.data.available_members,
+        detail: componentQuery.data.detail,
+      }
+    : embeddedRrgSector;
+  const selectedRrgSectorMeta = selectedRrgSector?.sector || sectorRows.find((sector) => sector.code === selectedRrgSectorCode);
+  const componentRows = selectedRrgSector?.stocks || [];
+  const componentPoints = selectedRrgSector?.rrg?.points || componentRows;
+  const isComponentRrg = Boolean(selectedRrgSectorCode);
+  const rrgRows = isComponentRrg ? componentRows : sectorRows;
+  const rrgPoints = isComponentRrg ? componentPoints : sectorQuery.data?.rrg?.points || sectorRows;
+  const sectorPeriodLabel = sectorQuery.data?.period_label || SECTOR_PERIOD_OPTIONS.find((option) => option.value === sectorPeriod)?.label || "Daily";
+  const sectorQuadrants = getQuadrantCounts(sectorRows);
+  const rrgQuadrants = getQuadrantCounts(rrgRows);
   const spot = selectedTick?.ltp || chain?.spot_price || 0;
 
   return (
@@ -1681,6 +1656,16 @@ function LiveMarketTools() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={sectorPeriod}
+            onChange={(event) => setSectorPeriod(event.target.value as SectorPeriod)}
+            className="terminal-input min-w-[132px] py-1.5 text-xs"
+            title="Sector lead period"
+          >
+            {SECTOR_PERIOD_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label} leads</option>
+            ))}
+          </select>
           <select
             value={expiry}
             onChange={(event) => setExpiry(event.target.value)}
@@ -1732,13 +1717,15 @@ function LiveMarketTools() {
         <LiveTabButton
           active={activeTab === "sectors"}
           label="Sector Rotation"
-          detail={`${sectorRows.length} sectors · leading ${sectorRows.filter((sector) => sector.quadrant === "leading").length}`}
+          detail={`${sectorRows.length} sectors · L ${sectorQuadrants.leading} · I ${sectorQuadrants.improving} · D ${sectorQuadrants.deteriorating} · Lag ${sectorQuadrants.lagging}`}
           onClick={() => setActiveTab("sectors")}
         />
         <LiveTabButton
           active={activeTab === "rrg"}
           label="RRG"
-          detail={`${rrgPoints.length} points · ratio x momentum map`}
+          detail={isComponentRrg && selectedRrgSectorMeta
+            ? `${selectedRrgSectorMeta.name} · ${componentQuery.isFetching && !rrgPoints.length ? "loading" : `${rrgPoints.length} components`}`
+            : `${rrgPoints.length} points · ${sectorPeriodLabel.toLowerCase()} lead map`}
           onClick={() => setActiveTab("rrg")}
         />
         <LiveTabButton
@@ -1845,31 +1832,37 @@ function LiveMarketTools() {
 
       {activeTab === "sectors" ? (
         <div className="mt-3 rounded-xl border border-bg-border bg-bg-primary/20 p-3">
-          <PanelHeader
-            icon={<BarChart3 size={16} className="text-accent-blue" />}
-            title="Sector Rotation"
-            detail="Sector relative strength and momentum versus NIFTY 50."
-            meta={sectorQuery.data?.benchmark?.name || "NIFTY 50"}
-          />
-          <div className="mt-3 grid gap-2 md:grid-cols-4">
-            <MetricTile label="Benchmark" value={sectorQuery.data?.benchmark?.name || "NIFTY 50"} detail={formatPercent(sectorQuery.data?.benchmark?.tracked_change_pct)} />
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <PanelHeader
+              icon={<BarChart3 size={16} className="text-accent-blue" />}
+              title="Sector Rotation"
+              detail="Sector relative strength and momentum versus NIFTY 50."
+              meta={`${sectorPeriodLabel} · ${sectorQuery.data?.source || "source pending"}`}
+            />
+            <SectorPeriodSelect value={sectorPeriod} onChange={setSectorPeriod} />
+          </div>
+          <div className="mt-3 grid gap-2 md:grid-cols-3 xl:grid-cols-6">
+            <MetricTile label="Benchmark" value={sectorQuery.data?.benchmark?.name || "NIFTY 50"} detail={`${sectorPeriodLabel} ${formatPercent(sectorQuery.data?.benchmark?.tracked_change_pct)} · ${sectorQuery.data?.benchmark?.samples || 0} samples`} />
             <MetricTile label="Sectors" value={String(sectorRows.length)} />
-            <MetricTile label="Leading" value={String(sectorRows.filter((sector) => sector.quadrant === "leading").length)} />
-            <MetricTile label="Improving" value={String(sectorRows.filter((sector) => sector.quadrant === "improving").length)} />
+            <MetricTile label="Leading" value={String(sectorQuadrants.leading)} />
+            <MetricTile label="Improving" value={String(sectorQuadrants.improving)} detail={sectorQuery.data?.timestamp ? `Updated ${formatTimestamp(sectorQuery.data.timestamp)}` : undefined} />
+            <MetricTile label="Deteriorating" value={String(sectorQuadrants.deteriorating)} detail="Weakening quadrant" />
+            <MetricTile label="Lagging" value={String(sectorQuadrants.lagging)} />
           </div>
           <div className="mt-3 max-h-[64vh] overflow-auto rounded-lg border border-bg-border">
-            <table className="w-full min-w-[860px] text-xs">
+            <table className="w-full min-w-[980px] text-xs">
               <thead className="sticky top-0 bg-bg-primary/95 text-text-muted">
                 <tr>
                   <th className="px-3 py-2 text-left">Sector</th>
                   <th className="px-3 py-2 text-left">Symbol</th>
                   <th className="px-3 py-2 text-right">Price</th>
-                  <th className="px-3 py-2 text-right">Tracked</th>
-                  <th className="px-3 py-2 text-right">RS</th>
+                  <th className="px-3 py-2 text-right">{sectorPeriodLabel}</th>
+                  <th className="px-3 py-2 text-right">Lead</th>
                   <th className="px-3 py-2 text-right">Ratio</th>
                   <th className="px-3 py-2 text-right">Momentum</th>
                   <th className="px-3 py-2 text-left">Quadrant</th>
                   <th className="px-3 py-2 text-left">Trend</th>
+                  <th className="px-3 py-2 text-left">Source</th>
                 </tr>
               </thead>
               <tbody>
@@ -1884,10 +1877,11 @@ function LiveMarketTools() {
                     <td className="px-3 py-2 text-right font-mono">{formatNumber(sector.rrg_momentum)}</td>
                     <td className="px-3 py-2"><StatusBadge label={prettify(sector.quadrant)} tone={sector.quadrant} /></td>
                     <td className="px-3 py-2 text-text-secondary">{prettify(sector.trend)}</td>
+                    <td className="px-3 py-2 text-text-muted">{prettify(sector.series_source)}{sector.samples ? ` · ${sector.samples}` : ""}</td>
                   </tr>
                 ))}
                 {!sectorRows.length ? (
-                  <tr><td colSpan={9} className="px-3 py-8 text-center text-text-muted">{sectorQuery.data?.detail || "No sector rotation rows available."}</td></tr>
+                  <tr><td colSpan={10} className="px-3 py-8 text-center text-text-muted">{sectorQuery.data?.detail || "No sector rotation rows available."}</td></tr>
                 ) : null}
               </tbody>
             </table>
@@ -1898,30 +1892,72 @@ function LiveMarketTools() {
       {activeTab === "rrg" ? (
         <div className="mt-3 grid gap-3 xl:grid-cols-[1.45fr_0.75fr]">
           <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
-            <PanelHeader
-              icon={<Shield size={16} className="text-accent-green" />}
-              title="RRG"
-              detail="Relative Rotation Graph: ratio on X-axis, momentum on Y-axis."
-              meta={`${rrgPoints.length} points`}
-            />
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <PanelHeader
+                icon={<Shield size={16} className="text-accent-green" />}
+                title={isComponentRrg && selectedRrgSectorMeta ? `${selectedRrgSectorMeta.name} Component RRG` : "RRG"}
+                detail={isComponentRrg && selectedRrgSectorMeta
+                  ? `Components plotted against ${selectedRrgSectorMeta.name} for the selected period.`
+                  : "Relative Rotation Graph: ratio on X-axis, momentum on Y-axis."}
+                meta={isComponentRrg
+                  ? `${sectorPeriodLabel} · ${componentQuery.isFetching && !rrgPoints.length ? "loading" : `${rrgPoints.length}/${selectedRrgSector?.configured_members || selectedRrgSector?.available_members || rrgPoints.length} components`}`
+                  : `${sectorPeriodLabel} · ${rrgPoints.length} points`}
+              />
+              <div className="flex flex-wrap items-center gap-2">
+                {isComponentRrg ? (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedRrgSectorCode(null)}
+                    className="rounded-lg border border-bg-border bg-bg-secondary/35 px-3 py-2 text-xs text-text-secondary transition-colors hover:text-text-primary"
+                  >
+                    Sector RRG
+                  </button>
+                ) : null}
+                <SectorPeriodSelect value={sectorPeriod} onChange={setSectorPeriod} />
+              </div>
+            </div>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              <MetricTile label="Leading" value={String(rrgQuadrants.leading)} />
+              <MetricTile label="Improving" value={String(rrgQuadrants.improving)} />
+              <MetricTile label="Deteriorating" value={String(rrgQuadrants.deteriorating)} detail="Weakening quadrant" />
+              <MetricTile label="Lagging" value={String(rrgQuadrants.lagging)} />
+            </div>
             <div className="mt-3 [&>div]:min-h-[560px]">
-              <RrgMap points={rrgPoints} />
+              <RrgMap
+                points={rrgPoints}
+                activeCode={selectedRrgSectorCode}
+                onPointClick={isComponentRrg ? undefined : (point) => setSelectedRrgSectorCode(point.code)}
+              />
             </div>
           </div>
           <div className="rounded-xl border border-bg-border bg-bg-primary/20 p-3">
             <PanelHeader
               icon={<BarChart3 size={16} className="text-accent-blue" />}
-              title="RRG Ranking"
-              detail="Sorted by quadrant, relative strength, and momentum."
-              meta={sectorQuery.data?.benchmark?.name || "NIFTY 50"}
+              title={isComponentRrg && selectedRrgSectorMeta ? `${selectedRrgSectorMeta.name} Components` : "RRG Ranking"}
+              detail={isComponentRrg
+                ? "Component stocks sorted by quadrant, relative strength, and momentum."
+                : "Sorted by quadrant, relative strength, and momentum. Click a sector to open component RRG."}
+              meta={isComponentRrg && selectedRrgSectorMeta
+                ? `${selectedRrgSectorMeta.name} · ${selectedRrgSector?.source || "source pending"}`
+                : `${sectorQuery.data?.benchmark?.name || "NIFTY 50"} · ${sectorQuery.data?.source || "source pending"}`}
             />
             <div className="mt-3 max-h-[560px] space-y-2 overflow-auto">
-              {sectorRows.map((sector) => (
-                <div key={sector.code} className="rounded-lg border border-bg-border bg-bg-secondary/25 px-3 py-2">
+              {rrgRows.map((sector) => (
+                <button
+                  key={sector.code}
+                  type="button"
+                  onClick={() => {
+                    if (!isComponentRrg) setSelectedRrgSectorCode(sector.code);
+                  }}
+                  className={clsx(
+                    "w-full rounded-lg border border-bg-border bg-bg-secondary/25 px-3 py-2 text-left transition-colors",
+                    !isComponentRrg && "hover:border-accent-blue/45 hover:bg-accent-blue/8",
+                  )}
+                >
                   <div className="flex items-center justify-between gap-3">
                     <div className="min-w-0">
                       <div className="truncate text-sm font-semibold text-text-primary">{sector.name}</div>
-                      <div className="mt-1 text-[11px] text-text-muted">{prettify(sector.trend)} · RS {formatPercent(sector.relative_strength_pct)}</div>
+                      <div className="mt-1 text-[11px] text-text-muted">{prettify(sector.trend)} · {sectorPeriodLabel} lead {formatPercent(sector.relative_strength_pct)}</div>
                     </div>
                     <StatusBadge label={prettify(sector.quadrant)} tone={sector.quadrant} />
                   </div>
@@ -1929,9 +1965,17 @@ function LiveMarketTools() {
                     <span>Ratio {formatNumber(sector.rrg_ratio)}</span>
                     <span>Momentum {formatNumber(sector.rrg_momentum)}</span>
                   </div>
-                </div>
+                </button>
               ))}
-              {!sectorRows.length ? <div className="text-sm text-text-muted">{sectorQuery.data?.detail || "No RRG ranking available."}</div> : null}
+              {!rrgRows.length ? (
+                <div className="text-sm text-text-muted">
+                  {isComponentRrg && componentQuery.isFetching
+                    ? "Loading component RRG points..."
+                    : isComponentRrg && selectedRrgSectorMeta
+                      ? selectedRrgSector?.detail || `No component RRG points available for ${selectedRrgSectorMeta.name}.`
+                    : sectorQuery.data?.detail || "No RRG ranking available."}
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
@@ -1948,302 +1992,10 @@ function LiveMarketTools() {
   );
 }
 
-function MarketBrokerState() {
-  const layoutBrokerStatuses = useStore((state) => state.brokerStatuses);
-  const statusQuery = useQuery<BrokerStatusEntry[]>({
-    queryKey: ["brokerHealthBanner"],
-    queryFn: () => getBrokerStatus().then((r) => r.data),
-    refetchInterval: 30_000,
-    staleTime: 20_000,
-  });
-
-  const entries = statusQuery.data?.length ? statusQuery.data : layoutBrokerStatuses;
-  const trading = entries.filter((entry) => TRADING_BROKERS.includes(entry.broker));
-  const disconnected = trading.filter((entry) => !isBrokerReady(entry));
-  const connected = trading.filter((entry) => isBrokerReady(entry));
-
-  if (disconnected.length === 0 && connected.length > 0) {
-    return (
-      <div className="inline-flex items-center gap-2 rounded-full border border-accent-green/20 bg-accent-green/8 px-3 py-2 text-xs text-accent-green">
-        <CheckCircle2 size={13} className="shrink-0" />
-        <span className="font-medium">Brokers</span>
-        <span>{connected.map((entry) => BROKER_LABEL[entry.broker] ?? entry.broker).join(" · ")}</span>
-      </div>
-    );
-  }
-
-  const names = disconnected.map((entry) => BROKER_LABEL[entry.broker] ?? entry.broker).join(", ") || "Fyers, Upstox";
-  return (
-    <a
-      href="/settings"
-      className="inline-flex items-center gap-2 rounded-full border border-accent-red/25 bg-accent-red/8 px-3 py-2 text-xs text-accent-red transition-colors hover:opacity-90"
-      title="Broker sessions can stay offline on holidays; this page reads saved NSE strategy state."
-    >
-      <WifiOff size={13} className="shrink-0" />
-      <span className="font-semibold">{names} offline</span>
-    </a>
-  );
-}
-
-function findStrategy(status: StrategyAgentStatus | undefined, key: string) {
-  return (status?.strategies || []).find((strategy) => strategy.key === key) || null;
-}
-
 export default function MarketPage() {
-  const statusQuery = useQuery<StrategyAgentStatus>({
-    queryKey: ["nseStrategyMarketIntelligence"],
-    queryFn: () => getStrategyAgentStatus().then((response) => response.data),
-    refetchInterval: 60_000,
-    staleTime: 15_000,
-    refetchOnWindowFocus: false,
-  });
-
-  const status = statusQuery.data;
-  const strategy1 = findStrategy(status, "macd_strategy");
-  const strategy2 = findStrategy(status, "index_mp_strategy");
-  const strategy1Prepared = useMemo<StrategySignal[]>(
-    () => (strategy1?.meta?.prepared_watchlist || strategy1?.signals || []) as StrategySignal[],
-    [strategy1?.meta?.prepared_watchlist, strategy1?.signals],
-  );
-  const strategy2Signals = useMemo<StrategySignal[]>(
-    () => (strategy2?.signals || []) as StrategySignal[],
-    [strategy2?.signals],
-  );
-  const allPositions = [...(strategy1?.positions || []), ...(strategy2?.positions || [])];
-  const marketHealth = status?.data_health?.market_intelligence || strategy1?.meta?.market_intelligence || strategy2?.meta?.market_intelligence || {};
-  const brokerSnapshot = status?.data_health?.broker_snapshot || strategy1?.meta?.broker_snapshot || strategy2?.meta?.broker_snapshot || {};
-  const strategy2Pipeline = (strategy2?.meta?.pipeline || []) as Array<Record<string, any>>;
-  const okPipeline = strategy2Pipeline.filter((row) => row.status === "ok").length;
-  const totalUnrealized = (strategy1?.summary?.unrealized_pnl || 0) + (strategy2?.summary?.unrealized_pnl || 0);
-  const totalRealized = (strategy1?.summary?.realized_pnl || 0) + (strategy2?.summary?.realized_pnl || 0);
-
   return (
     <div className="mx-auto max-w-[1680px] space-y-3 pb-6">
-      <section className="rounded-xl border border-bg-active/60 bg-bg-secondary/30 px-3 py-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-2 font-mono text-xl font-semibold text-text-primary" title="NSE Strategy 1 and Strategy 2 saved intelligence only">
-              <Brain size={18} className="text-accent-blue" />
-              Market Intelligence
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              onClick={() => void statusQuery.refetch()}
-              className="inline-flex items-center gap-2 rounded-lg border border-bg-border bg-bg-secondary/35 px-3 py-2 text-xs text-text-secondary transition-colors hover:text-text-primary"
-              title="Refresh saved NSE strategy state"
-            >
-              <RefreshCw size={14} className={statusQuery.isFetching ? "animate-spin" : ""} />
-              Refresh
-            </button>
-            <MarketBrokerState />
-          </div>
-        </div>
-
-        <div className="mt-3 grid gap-2 md:grid-cols-3 xl:grid-cols-9">
-          <MetricTile label="Last Saved" value={formatTimestamp(status?.last_run_at)} detail={status?.last_message || undefined} />
-          <MetricTile label="Runtime" value={status?.running ? "Running" : status?.loop_active ? "Loop" : "Idle"} detail={status?.last_message || undefined} />
-          <MetricTile label="Broker Gate" value={brokerSnapshot?.broker_ready ? "Ready" : "Offline"} detail={`Fyers ${brokerSnapshot?.fyers_ready ? "ready" : "off"} / Upstox ${brokerSnapshot?.upstox_ready ? "ready" : "off"}`} tone={brokerSnapshot?.broker_ready ? "text-accent-green" : "text-accent-red"} />
-          <MetricTile label="S1 Saved" value={String(strategy1Prepared.length)} detail={`${strategy1?.positions?.length || 0} open positions`} />
-          <MetricTile label="S2 Lanes" value={String(strategy2Signals.length)} detail={`${okPipeline}/${strategy2Pipeline.length || 0} replay feeds OK`} />
-          <MetricTile label="Latest Rows" value={String(marketHealth?.watchlist_rows_latest || strategy1?.meta?.watchlist_rows || 0)} detail={formatTimestamp(marketHealth?.latest_watchlist_time || strategy1?.meta?.latest_watchlist_time)} />
-          <MetricTile label="Open Positions" value={String(allPositions.length)} />
-          <MetricTile label="Open P&L" value={formatMoney(totalUnrealized)} tone={pnlTone(totalUnrealized)} />
-          <MetricTile label="Realized" value={formatMoney(totalRealized)} tone={pnlTone(totalRealized)} />
-        </div>
-      </section>
-
       <LiveMarketTools />
-
-      <section className="grid gap-3 xl:grid-cols-2">
-        <div className="rounded-xl border border-bg-border bg-bg-secondary/20 p-3">
-          <PanelHeader
-            icon={<Activity size={16} className="text-accent-green" />}
-            title="Strategy 1 · 30m ATM MACD"
-            detail="Saved Strategy 1 positions and prepared CE/PE candidates from the last usable NSE data."
-            meta={prettify(strategy1?.meta?.mode || "waiting")}
-          />
-          <div className="mt-3 grid gap-2 md:grid-cols-4">
-            <MetricTile label="Equity" value={formatMoney(strategy1?.summary?.total_equity)} />
-            <MetricTile label="Available" value={formatMoney(strategy1?.summary?.available_capital)} />
-            <MetricTile label="Open P&L" value={formatMoney(strategy1?.summary?.unrealized_pnl)} tone={pnlTone(strategy1?.summary?.unrealized_pnl)} />
-            <BucketBar rows={strategy1Prepared} />
-          </div>
-          <div className="mt-3 overflow-hidden rounded-lg border border-bg-border">
-            <table className="w-full min-w-[980px] text-xs">
-              <thead className="bg-bg-primary/60 text-text-muted">
-                <tr>
-                  <th className="px-3 py-2 text-left">Open Position</th>
-                  <th className="px-3 py-2 text-right">Qty</th>
-                  <th className="px-3 py-2 text-right">Entry</th>
-                  <th className="px-3 py-2 text-right">Last</th>
-                  <th className="px-3 py-2 text-right">P&L</th>
-                  <th className="px-3 py-2 text-right">Return</th>
-                  <th className="px-3 py-2 text-left">State</th>
-                  <th className="px-3 py-2 text-left">Updated</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(strategy1?.positions || []).map((position, index) => (
-                  <tr key={position.symbol || `${position.underlying || "position"}-${index}`} className="border-t border-bg-border/60">
-                    <td className="px-3 py-2">
-                      <div className="font-semibold text-text-primary">{position.underlying || position.symbol}</div>
-                      <div className="text-[11px] text-text-muted">{position.expiry} {formatNumber(position.strike, 0)} {position.option_type}</div>
-                    </td>
-                    <td className="px-3 py-2 text-right font-mono">{position.qty || "--"}</td>
-                    <td className="px-3 py-2 text-right font-mono">{formatNumber(position.entry_price)}</td>
-                    <td className="px-3 py-2 text-right font-mono">{formatNumber(position.current_price)}</td>
-                    <td className={clsx("px-3 py-2 text-right font-mono font-semibold", pnlTone(position.unrealized_pnl))}>{formatMoney(position.unrealized_pnl)}</td>
-                    <td className={clsx("px-3 py-2 text-right font-mono", pnlTone(position.return_pct))}>{formatSigned(position.return_pct, 2, "%")}</td>
-                    <td className="px-3 py-2"><StatusBadge label={prettify(position.phase)} tone={position.phase} /></td>
-                    <td className="px-3 py-2 text-text-muted">{formatTimestamp(position.price_updated_at || position.entered_at)}</td>
-                  </tr>
-                ))}
-                {!strategy1?.positions?.length ? (
-                  <tr><td colSpan={8} className="px-3 py-6 text-center text-text-muted">No saved open Strategy 1 positions.</td></tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-bg-border bg-bg-secondary/20 p-3">
-          <PanelHeader
-            icon={<BarChart3 size={16} className="text-accent-blue" />}
-            title="Strategy 2 · 5m Index MACD + MP"
-            detail="Saved Strategy 2 index lanes, Market Profile replay state and recent ledger."
-            meta={prettify(strategy2?.meta?.mode || "waiting")}
-          />
-          <div className="mt-3 grid gap-2 md:grid-cols-4">
-            <MetricTile label="Equity" value={formatMoney(strategy2?.summary?.total_equity)} />
-            <MetricTile label="Trades" value={String(strategy2?.summary?.total_trades || 0)} />
-            <MetricTile label="Realized" value={formatMoney(strategy2?.summary?.realized_pnl)} tone={pnlTone(strategy2?.summary?.realized_pnl)} />
-            <BucketBar rows={strategy2Signals} />
-          </div>
-          <div className="mt-3 overflow-hidden rounded-lg border border-bg-border">
-            <table className="w-full min-w-[920px] text-xs">
-              <thead className="bg-bg-primary/60 text-text-muted">
-                <tr>
-                  <th className="px-3 py-2 text-left">Lane</th>
-                  <th className="px-3 py-2 text-left">Signal</th>
-                  <th className="px-3 py-2 text-right">Spot</th>
-                  <th className="px-3 py-2 text-right">POC</th>
-                  <th className="px-3 py-2 text-right">VAH / VAL</th>
-                  <th className="px-3 py-2 text-left">Freshness</th>
-                  <th className="px-3 py-2 text-left">Last Bar</th>
-                </tr>
-              </thead>
-              <tbody>
-                {strategy2Signals.map((row) => (
-                  <tr key={`${row.underlying}-${row.status}-${row.option_last_bar_time}`} className="border-t border-bg-border/60">
-                    <td className="px-3 py-2 font-semibold text-text-primary">{row.underlying || "--"}</td>
-                    <td className="px-3 py-2">
-                      <div className="flex flex-wrap gap-1">
-                        {row.direction ? <StatusBadge label={row.direction} tone={row.direction} /> : null}
-                        <StatusBadge label={prettify(row.status)} tone={row.status} />
-                      </div>
-                      <div className="mt-1 truncate text-[11px] text-text-muted" title={row.reason || row.instruction || undefined}>{row.reason || row.instruction || "--"}</div>
-                    </td>
-                    <td className="px-3 py-2 text-right font-mono">{formatNumber(row.spot_price)}</td>
-                    <td className="px-3 py-2 text-right font-mono">{formatNumber(row.poc)}</td>
-                    <td className="px-3 py-2 text-right font-mono">{formatNumber(row.vah)} / {formatNumber(row.val)}</td>
-                    <td className="px-3 py-2"><StatusBadge label={prettify(row.freshness)} tone={row.freshness} /></td>
-                    <td className="px-3 py-2 text-text-muted">{formatTimestamp(row.option_last_bar_time || row.spot_last_time || row.as_of)}</td>
-                  </tr>
-                ))}
-                {!strategy2Signals.length ? (
-                  <tr><td colSpan={7} className="px-3 py-6 text-center text-text-muted">No saved Strategy 2 lanes available.</td></tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-
-      <section className="grid gap-3 xl:grid-cols-[1.4fr_0.8fr]">
-        <div className="rounded-xl border border-bg-border bg-bg-secondary/20 p-3">
-          <PanelHeader
-            icon={<Database size={16} className="text-accent-amber" />}
-            title="Strategy 1 Prepared CE/PE List"
-            detail="Saved candidate list. It is not regenerated from broker feeds while brokers are disconnected."
-            meta={`${strategy1Prepared.length} rows`}
-          />
-          <div className="mt-3 max-h-[52vh] overflow-auto rounded-lg border border-bg-border">
-            <table className="w-full min-w-[1180px] text-xs">
-              <thead className="sticky top-0 bg-bg-primary/95 text-text-muted">
-                <tr>
-                  <th className="px-3 py-2 text-left">Underlying</th>
-                  <th className="px-3 py-2 text-left">Side</th>
-                  <th className="px-3 py-2 text-right">Score</th>
-                  <th className="px-3 py-2 text-right">Spot</th>
-                  <th className="px-3 py-2 text-right">ATM</th>
-                  <th className="px-3 py-2 text-right">LTP</th>
-                  <th className="px-3 py-2 text-right">IV</th>
-                  <th className="px-3 py-2 text-left">Reason</th>
-                  <th className="px-3 py-2 text-left">Saved</th>
-                </tr>
-              </thead>
-              <tbody>
-                {strategy1Prepared.map((row) => (
-                  <tr key={`${row.underlying}-${row.direction}-${row.priority_score}-${row.as_of}`} className="border-t border-bg-border/60">
-                    <td className="px-3 py-2 font-semibold text-text-primary">{row.underlying || "--"}</td>
-                    <td className="px-3 py-2"><StatusBadge label={row.direction || "--"} tone={row.direction} /></td>
-                    <td className="px-3 py-2 text-right font-mono">{formatNumber(row.priority_score, 2)}</td>
-                    <td className="px-3 py-2 text-right font-mono">{formatNumber(row.spot_price)}</td>
-                    <td className="px-3 py-2 text-right font-mono">{formatNumber(row.atm_strike, 0)}</td>
-                    <td className="px-3 py-2 text-right font-mono">{formatNumber(row.ltp)}</td>
-                    <td className="px-3 py-2 text-right font-mono">{formatNumber(row.iv_pct, 1)}%</td>
-                    <td className="px-3 py-2 text-text-secondary" title={row.instruction || undefined}>{row.reason || "--"}</td>
-                    <td className="px-3 py-2 text-text-muted">{formatTimestamp(row.option_last_bar_time || row.as_of)}</td>
-                  </tr>
-                ))}
-                {!strategy1Prepared.length ? (
-                  <tr><td colSpan={9} className="px-3 py-8 text-center text-text-muted">No saved Strategy 1 prepared list returned by the API.</td></tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div className="space-y-3">
-          <div className="rounded-xl border border-bg-border bg-bg-secondary/20 p-3">
-            <PanelHeader
-              icon={<Shield size={16} className="text-accent-green" />}
-              title="Persistence Check"
-              detail="Confirms the page is reading saved state and not depending on holiday broker sessions."
-            />
-            <div className="mt-3 grid gap-2">
-              <MetricTile label="Market Mode" value={prettify(strategy1?.meta?.market_state || strategy2?.meta?.market_state || "unknown")} />
-              <MetricTile label="Readiness" value={marketHealth?.ready ? "Saved Ready" : "Not Ready"} detail={prettify(marketHealth?.readiness_mode || marketHealth?.execution_mode)} tone={marketHealth?.ready ? "text-accent-green" : "text-accent-red"} />
-              <MetricTile label="Latest Session" value={String(marketHealth?.watchlist_rows_latest || 0)} detail={formatTimestamp(marketHealth?.latest_watchlist_time)} />
-              <MetricTile label="Today Rows" value={String(marketHealth?.watchlist_rows_today || 0)} detail="Holiday/offline rows can be zero" />
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-bg-border bg-bg-secondary/20 p-3">
-            <PanelHeader
-              icon={<Database size={16} className="text-accent-blue" />}
-              title="Recent Strategy 2 Ledger"
-              detail="Recent saved Strategy 2 closed trades."
-              meta={`${strategy2?.trade_history?.length || 0} trades`}
-            />
-            <div className="mt-3 space-y-2">
-              {(strategy2?.trade_history || []).slice(0, 5).map((trade) => (
-                <div key={`${trade.symbol}-${trade.exit_time}`} className="rounded-lg border border-bg-border bg-bg-primary/25 px-3 py-2 text-xs">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="truncate font-semibold text-text-primary">{trade.symbol || "--"}</div>
-                      <div className="mt-1 text-[11px] text-text-muted">{formatTimestamp(trade.exit_time || trade.entry_time)} · {trade.qty || "--"} qty</div>
-                    </div>
-                    <div className={clsx("font-mono font-semibold", pnlTone(trade.pnl))}>{formatMoney(trade.pnl)}</div>
-                  </div>
-                </div>
-              ))}
-              {!strategy2?.trade_history?.length ? <div className="text-xs text-text-muted">No saved Strategy 2 closed trades.</div> : null}
-            </div>
-          </div>
-        </div>
-      </section>
     </div>
   );
 }

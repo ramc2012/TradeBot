@@ -774,7 +774,7 @@ class IndexOptionWalkForwardRunner:
         trades_path = self.output_root / "oos_trades.csv"
         fieldnames = sorted({key for trade in trades for key in trade.keys()})
         with trades_path.open("w", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
             writer.writeheader()
             for trade in trades:
                 writer.writerow(trade)

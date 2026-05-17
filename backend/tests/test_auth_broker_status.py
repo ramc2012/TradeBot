@@ -42,6 +42,12 @@ def test_format_broker_status_summary_marks_upstox_connected_when_ready() -> Non
     assert "UPSTOX connected" in summary
 
 
+def test_append_query_param_replaces_existing_key() -> None:
+    url = auth._append_query_param("https://example.test/login?state=None&client_id=abc", "state", "signed")
+
+    assert url == "https://example.test/login?client_id=abc&state=signed"
+
+
 def test_broker_connection_snapshot_only_marks_valid_active_brokers_connected(monkeypatch) -> None:
     async def _noop(*args, **kwargs) -> bool:
         return False

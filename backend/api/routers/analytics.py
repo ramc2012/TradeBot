@@ -84,9 +84,23 @@ async def get_portfolio_greeks():
 
 @router.get("/sector-rotation")
 async def get_sector_rotation(
-    timeframe: str = Query("daily", pattern="^(hourly|daily|weekly|monthly|hour|day|week|month)$"),
+    timeframe: str = Query(
+        "daily",
+        pattern="^(hourly|daily|weekly|monthly|quarterly|yearly|hour|day|week|month|quarter|year)$",
+    ),
 ):
     return await sector_tracker.get_sector_rotation(timeframe)
+
+
+@router.get("/sector-rotation/{sector_code}/components")
+async def get_sector_rotation_components(
+    sector_code: str,
+    timeframe: str = Query(
+        "daily",
+        pattern="^(hourly|daily|weekly|monthly|quarterly|yearly|hour|day|week|month|quarter|year)$",
+    ),
+):
+    return await sector_tracker.get_sector_components(sector_code, timeframe)
 
 
 @router.get("/macro-dashboard")

@@ -14,7 +14,10 @@ from market_data.commodity_contract_specs import extract_commodity_root
 UTC = timezone.utc
 
 DEFAULT_COMMODITY_FUTURES: dict[str, str] = {
-    "CRUDEOIL": "MCX:CRUDEOIL26MAYFUT",
+    "CRUDEOIL": "MCX:CRUDEOIL26JUNFUT",
+    "GOLD": "MCX:GOLD26MAYFUT",
+    "SILVERM": "MCX:SILVERM26MAYFUT",
+    "NATURALGAS": "MCX:NATURALGAS26MAYFUT",
 }
 
 # Per-instrument lock so concurrent callers don't race on the same upsert.
@@ -194,21 +197,34 @@ async def load_commodity_history_rows(
 
     agent = CommodityStrategyAgent()
     configured_symbols = agent.get_symbols()
-    selected_symbol = next(
-        (
-            symbol
-            for symbol in configured_symbols
-            if extract_commodity_root(symbol) == normalized_root
-        ),
-        DEFAULT_COMMODITY_FUTURES.get(normalized_root, ""),
+    candidate_symbols: list[str] = []
+    candidate_symbols.extend(
+        symbol
+        for symbol in configured_symbols
+        if extract_commodity_root(symbol) == normalized_root
     )
-    if not selected_symbol:
+    candidate_symbols.extend(
+        symbol
+        for symbol in agent.get_selected_option_lookup_symbols().values()
+        if extract_commodity_root(symbol) == normalized_root
+    )
+    fallback_symbol = DEFAULT_COMMODITY_FUTURES.get(normalized_root, "")
+    if fallback_symbol:
+        candidate_symbols.append(fallback_symbol)
+    candidate_symbols = list(dict.fromkeys(symbol for symbol in candidate_symbols if symbol))
+    if not candidate_symbols:
         return [], normalized_root
-    rows = await agent._load_history(  # noqa: SLF001 - shared runtime bridge for local strategy history.
-        selected_symbol,
-        interval=interval,
-        lookback_days=lookback_days,
-    )
+    selected_symbol = candidate_symbols[0]
+    rows: list[dict[str, Any]] = []
+    for symbol in candidate_symbols:
+        selected_symbol = symbol
+        rows = await agent._load_history(  # noqa: SLF001 - shared runtime bridge for local strategy history.
+            symbol,
+            interval=interval,
+            lookback_days=lookback_days,
+        )
+        if rows:
+            break
 
     if persist and rows:
         # Fire-and-forget: persistence must never block the request path.

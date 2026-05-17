@@ -101,10 +101,13 @@ class DirectionalOptionsRiskEngine:
         trading_symbol = str(candidate.trading_symbol or "").upper()
         is_commodity = trading_symbol.startswith("MCX:") or trading_symbol.startswith("MCX_")
         bypass_edge_gate = learning_sleeve or is_commodity
-        if (
-            not bypass_edge_gate
-            and candidate.expected_pnl <= candidate.option_price * min_expected_edge_pct
-        ):
+        edge_hurdle = (
+            candidate.option_price * min_expected_edge_pct
+            + float(candidate.spread_cost or 0.0)
+            + float(candidate.slippage_cost or 0.0)
+            + float(candidate.fees or 0.0)
+        )
+        if not bypass_edge_gate and candidate.expected_pnl <= edge_hurdle:
             reasons.append("Expected edge does not clear the long-premium hurdle.")
         if candidate.rejection_reasons and not bypass_edge_gate:
             reasons.extend(

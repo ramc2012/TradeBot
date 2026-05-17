@@ -485,10 +485,26 @@ function FyersCard({ status, onRefresh }: { status: BrokerStatusEntry | undefine
   };
 
   const handleGetUrl = async () => {
+    const loginWindow = window.open("", "fyers-login", "width=600,height=700");
     try {
       const r = await getFyersAuthUrl();
-      window.open(r.data.auth_url, "_blank", "width=600,height=700");
-    } catch (e: any) { setMsg(describeApiError(e, "Save credentials first")); }
+      const authUrl = String(r.data.auth_url || "");
+      if (!authUrl) {
+        loginWindow?.close();
+        setMsg("Fyers did not return a login URL.");
+        return;
+      }
+      if (loginWindow) {
+        loginWindow.location.href = authUrl;
+        loginWindow.focus();
+      } else {
+        window.location.assign(authUrl);
+      }
+      setMsg("Login page opened. After login, copy the auth_code from the redirect URL and paste it below.");
+    } catch (e: any) {
+      loginWindow?.close();
+      setMsg(describeApiError(e, "Save credentials first"));
+    }
   };
 
   const handleConnect = async () => {

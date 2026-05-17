@@ -19,6 +19,7 @@ from api.routers import analysis as analysis_router
 from api.routers import strategy as strategy_router
 from api.routers import auction_intelligence as auction_intelligence_router
 from api.routers import directional_options as directional_options_router
+from api.routers import gann_tp_delta as gann_tp_delta_router
 from api.routers import fractal_market_profile as fractal_market_profile_router
 from api.routers import system as system_router
 from api.routers import audit as audit_router
@@ -243,6 +244,7 @@ app.include_router(analysis_router.router)
 app.include_router(strategy_router.router)
 app.include_router(auction_intelligence_router.router)
 app.include_router(directional_options_router.router)
+app.include_router(gann_tp_delta_router.router)
 app.include_router(fractal_market_profile_router.router)
 app.include_router(system_router.router)
 app.include_router(audit_router.router)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import asyncio
 import sys
 import types
 
@@ -149,6 +150,106 @@ def test_directional_options_service_handles_missing_runtime_dataset(tmp_path) -
     assert summary["underlyings"] == []
     assert payload["snapshot"]["as_of"] is None
     assert payload["backtest"]["summary"]["trade_count"] == 0
+
+
+def test_directional_options_summary_exposes_supported_commodities_when_runtime_exists(tmp_path) -> None:
+    config = clone_default_config()
+    config["data_root"] = tmp_path / "runtime-data"
+    config["data_root"].mkdir(parents=True)
+    config["universe"] = ["CRUDEOIL", "GOLD", "SILVERM", "NATURALGAS", "UNKNOWN"]
+    service = DirectionalOptionsService(config)
+
+    summary = service.summary()
+
+    assert summary["underlyings"] == ["CRUDEOIL", "GOLD", "SILVERM", "NATURALGAS"]
+
+
+def test_directional_options_data_store_marks_commodity_expiries_as_weekly(tmp_path) -> None:
+    from directional_options.data import DirectionalOptionsDataStore
+
+    store = DirectionalOptionsDataStore(tmp_path)
+
+    assert store._expiry_kind("GOLD", pd.Timestamp("2026-05-27").date()) == "weekly"
+    assert store._expiry_kind("SILVERM", pd.Timestamp("2026-05-26").date()) == "weekly"
+    assert store._expiry_kind("CRUDEOIL", pd.Timestamp("2026-06-16").date()) == "weekly"
+    assert store._expiry_kind("NATURALGAS", pd.Timestamp("2026-05-22").date()) == "weekly"
+
+
+def test_directional_options_data_store_uses_commodity_watchlist_fallback(monkeypatch, tmp_path) -> None:
+    from directional_options.data import DirectionalOptionsDataStore
+    from market_data.commodity_atm_watchlist import commodity_atm_watchlist_service
+    from paper_engine.commodity_strategy_agent import CommodityStrategyAgent
+
+    monkeypatch.setattr(CommodityStrategyAgent, "get_symbols", lambda self: ["MCX:GOLD26JUNFUT"])
+    monkeypatch.setattr(CommodityStrategyAgent, "get_selected_option_expiries", lambda self: {"MCX:GOLD26JUNFUT": "2026-05-27"})
+    monkeypatch.setattr(CommodityStrategyAgent, "get_selected_option_lookup_symbols", lambda self: {"MCX:GOLD26JUNFUT": "MCX:GOLD26JUNFUT"})
+    monkeypatch.setattr(commodity_atm_watchlist_service, "get_cached_watchlist", lambda *args, **kwargs: None)
+
+    async def fake_watchlist(*args, **kwargs):
+        return {
+            "source": "test_watchlist",
+            "timestamp": "2026-05-15T10:00:00+00:00",
+            "rows": [
+                {
+                    "underlying": "GOLD",
+                    "symbol": "MCX:GOLD26JUNFUT",
+                    "spot_price": 72250.0,
+                    "expiry": "2026-05-27",
+                    "lot_size": 10,
+                    "ce": {
+                        "strike": 72300,
+                        "option_type": "CE",
+                        "instrument_key": "MCX_FO|GOLD_CE",
+                        "trading_symbol": "MCX GOLD 72300 CE",
+                        "ltp": 125.5,
+                        "volume": 120,
+                        "oi": 450,
+                        "iv": 0.21,
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(commodity_atm_watchlist_service, "get_watchlist", fake_watchlist)
+    store = DirectionalOptionsDataStore(tmp_path)
+
+    rows = asyncio.run(
+        store._live_commodity_contract_snapshots(
+            underlying="GOLD",
+            option_type="CE",
+            spot_price=72240.0,
+            as_of_ts=pd.Timestamp("2026-05-15T10:00:00+00:00"),
+            max_expiry=pd.Timestamp("2026-06-15").date(),
+            limit=10,
+        )
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["underlying"] == "GOLD"
+    assert rows[0]["expiry_kind"] == "weekly"
+    assert rows[0]["source_broker"] == "test_watchlist"
+    assert rows[0]["lot_size"] == 10
+
+
+def test_commodity_runtime_history_tries_lookup_symbol_when_configured_future_is_stale(monkeypatch) -> None:
+    from market_data import commodity_runtime_history
+    from paper_engine.commodity_strategy_agent import CommodityStrategyAgent
+
+    monkeypatch.setattr(CommodityStrategyAgent, "get_symbols", lambda self: ["MCX:CRUDEOIL26MAYFUT"])
+    monkeypatch.setattr(CommodityStrategyAgent, "get_selected_option_lookup_symbols", lambda self: {"MCX:CRUDEOIL26MAYFUT": "MCX:CRUDEOIL26JUNFUT"})
+
+    async def fake_load_history(self, symbol, *, interval, lookback_days):
+        if symbol.endswith("26JUNFUT"):
+            return [{"time": "2026-05-15T10:00:00+05:30", "close": 9350.0}]
+        return []
+
+    monkeypatch.setattr(CommodityStrategyAgent, "_load_history", fake_load_history)
+    rows, history_symbol = asyncio.run(
+        commodity_runtime_history.load_commodity_history_rows("CRUDEOIL", persist=False)
+    )
+
+    assert history_symbol == "MCX:CRUDEOIL26JUNFUT"
+    assert rows[0]["close"] == 9350.0
 
 
 def test_dash_mount_primes_workspace_cache_with_mounted_state(monkeypatch) -> None:

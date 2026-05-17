@@ -672,10 +672,19 @@ def _data_quality_block_reason(symbol: str, source: str) -> Optional[str]:
     symbol = str(symbol or "").strip()
     if not symbol:
         return "Data quality gate blocked entry because no tradable symbol was available."
+    fallback_sources = {
+        "broker_futures_quote": ("broker_quote",),
+        "broker_option_quote": ("broker_quote",),
+    }
     try:
         from market_data.data_quality_agent import data_quality_agent
 
         verdict = data_quality_agent.assess_freshness(symbol=symbol, source=source)
+        if verdict.stale and str(verdict.reason or "").startswith("No observation recorded"):
+            for fallback_source in fallback_sources.get(source, ()):
+                fallback = data_quality_agent.assess_freshness(symbol=symbol, source=fallback_source)
+                if not fallback.stale:
+                    return None
     except Exception as exc:
         return f"Data quality gate could not verify {symbol}: {exc}"
     if verdict.stale:
@@ -1448,6 +1457,17 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             },
         )
         self._append_commentary("warning", self._last_message)
+
+    async def _engage_drawdown_kill_switch(self, *, drawdown_pct: Optional[float] = None) -> dict[str, Any]:
+        drawdown = float(drawdown_pct if drawdown_pct is not None else self._current_drawdown_pct())
+        state = await self.set_kill_switch(True)
+        self._last_message = (
+            f"Commodity drawdown kill switch active: drawdown {drawdown:.1f}% exceeded "
+            f"the {COMMODITY_MAX_DRAWDOWN_PCT:.1f}% cap. Manual restart is required."
+        )
+        self._append_commentary("warning", self._last_message)
+        self._persist_state()
+        return state
 
     def _strategy_catalog(self) -> list[dict[str, Any]]:
         option_contracts_ready = sum(1 for expiry in self._selected_option_expiries.values() if expiry)

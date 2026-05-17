@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date
+from datetime import date, datetime, timezone
 
 import httpx
 
@@ -86,6 +86,7 @@ def test_sector_rotation_row_carries_source_metadata() -> None:
         symbol="NSE:NIFTYIT-INDEX",
         closes=[100.0, 101.5, 103.0, 105.0],
         benchmark_closes=[100.0, 100.5, 101.0, 101.2],
+        change_periods=1,
         trail_limit=4,
         sample_count=4,
         series_source="fyers",
@@ -95,6 +96,39 @@ def test_sector_rotation_row_carries_source_metadata() -> None:
     assert row["series_source"] == "fyers"
     assert row["member_count"] == 12
     assert row["quadrant"] in {"leading", "improving", "weakening", "lagging"}
+
+
+def test_sector_rotation_row_uses_selected_period_for_lead_pct() -> None:
+    tracker = SectorRotationTracker()
+    row = tracker._build_rotation_row(
+        code="IT",
+        name="IT",
+        symbol="NSE:NIFTYIT-INDEX",
+        closes=[100.0, 110.0, 111.1],
+        benchmark_closes=[100.0, 100.0, 101.0],
+        change_periods=1,
+        trail_limit=3,
+        sample_count=3,
+    )
+
+    assert row["tracked_change_pct"] == 1.0
+    assert row["relative_strength_pct"] == 0.0
+
+
+def test_synthetic_sector_series_normalizes_constituent_prices() -> None:
+    tracker = SectorRotationTracker()
+    t1 = datetime(2026, 5, 14, tzinfo=timezone.utc)
+    t2 = datetime(2026, 5, 15, tzinfo=timezone.utc)
+
+    series = tracker._build_synthetic_sector_series(
+        ["LOW", "HIGH"],
+        {
+            "LOW": [(t1, 10.0), (t2, 11.0)],
+            "HIGH": [(t1, 1000.0), (t2, 1000.0)],
+        },
+    )
+
+    assert series == [(t1, 100.0), (t2, 105.0)]
 
 
 def test_fyers_expiry_helpers_convert_dates() -> None:

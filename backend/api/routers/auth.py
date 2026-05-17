@@ -1232,7 +1232,7 @@ def _mint_websocket_token(subject: str) -> tuple[str, str]:
 
 def _append_query_param(url: str, key: str, value: str) -> str:
     parts = urlsplit(url)
-    query = parse_qsl(parts.query, keep_blank_values=True)
+    query = [(item_key, item_value) for item_key, item_value in parse_qsl(parts.query, keep_blank_values=True) if item_key != key]
     query.append((key, value))
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 

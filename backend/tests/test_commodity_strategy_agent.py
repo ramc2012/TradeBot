@@ -553,7 +553,7 @@ def test_commodity_options_signal_is_blocked_when_data_quality_gate_has_no_fresh
     assert "No observation" in decorated[0]["signal_validation_detail"]
 
 
-def test_commodity_run_once_stops_on_invalid_fyers_session(monkeypatch, tmp_path: Path) -> None:
+def test_commodity_run_once_stops_when_all_commodity_brokers_are_invalid(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "commodity_strategy.json"
     monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
     monkeypatch.setattr(commodity_module, "_in_commodity_hours", lambda _: True)
@@ -566,15 +566,124 @@ def test_commodity_run_once_stops_on_invalid_fyers_session(monkeypatch, tmp_path
             "message": "Saved Fyers access token is invalid.",
         }
 
+    async def fake_upstox_health(*, force: bool = False):
+        return {
+            "connected": False,
+            "valid": False,
+            "status": "expired_reconnect_required",
+            "message": "Saved Upstox access token is invalid.",
+        }
+
     agent = CommodityStrategyAgent()
     agent.update_symbols(["MCX:GOLD26JUNFUT"])
     monkeypatch.setattr(commodity_module, "get_fyers_token_health", fake_fyers_health)
+    monkeypatch.setattr(commodity_module, "get_upstox_token_health", fake_upstox_health)
 
     status = asyncio.run(agent.run_once(force=False))
 
     assert status["last_error"] is not None
-    assert "No valid Fyers session is available for the commodity scan." in status["last_message"]
+    assert "No valid commodity broker session is available for the commodity scan." in status["last_message"]
     assert status["data_health"]["fyers_token_health"]["valid"] is False
+    assert status["data_health"]["upstox_token_health"]["valid"] is False
+
+
+def test_commodity_run_once_degrades_to_history_when_adapter_is_missing(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+    monkeypatch.setattr(commodity_module, "_in_commodity_hours", lambda _: True)
+
+    async def fake_fyers_health(*, force: bool = False):
+        return {"connected": True, "valid": True, "status": "valid_session", "message": "ok"}
+
+    async def fake_upstox_health(*, force: bool = False):
+        return {"connected": True, "valid": True, "status": "valid_session", "message": "ok"}
+
+    async def fake_ensure_session(*, force_validate: bool = False):
+        return True
+
+    async def fake_get_scan_adapter(self):
+        return None
+
+    async def fake_analyze_futures_symbol(self, symbol, live_ltp):
+        return {
+            "symbol": symbol,
+            "underlying": "GOLD",
+            "price": 101.5,
+            "previous_close": 100.0,
+            "change_pct": 1.5,
+            "signal": None,
+            "signal_validation": "waiting_cross",
+        }
+
+    async def fake_build_option_watchlist(self):
+        return []
+
+    async def fake_manage_positions(self, adapter, futures_rows, option_rows, option_quote_map=None):
+        return None
+
+    async def fake_upstox_quotes(symbols):
+        return {}
+
+    class _FakeLane:
+        def __init__(self, key: str):
+            self.descriptor = type(
+                "Descriptor",
+                (),
+                {
+                    "key": key,
+                    "title": key,
+                    "timeframe": "test",
+                    "instrument_scope": "test",
+                    "execution_mode": "paper_execution",
+                    "position_cap": 0,
+                },
+            )()
+
+        def ready_signals(self):
+            return 0
+
+        def open_positions(self):
+            return 0
+
+        def build_status_payload(self):
+            return {
+                "key": self.descriptor.key,
+                "title": self.descriptor.title,
+                "timeframe": self.descriptor.timeframe,
+                "instrument_scope": self.descriptor.instrument_scope,
+                "execution_mode": self.descriptor.execution_mode,
+                "position_cap": self.descriptor.position_cap,
+                "tracked_symbols": 1,
+                "open_positions": 0,
+                "ready_signals": 0,
+            }
+
+        async def run_entries(self, rows):
+            return None
+
+    monkeypatch.setattr(commodity_module, "get_fyers_token_health", fake_fyers_health)
+    monkeypatch.setattr(commodity_module, "get_upstox_token_health", fake_upstox_health)
+    monkeypatch.setattr(commodity_module, "ensure_fyers_session", fake_ensure_session)
+    monkeypatch.setattr(commodity_module, "ensure_upstox_session", fake_ensure_session)
+    monkeypatch.setattr(commodity_module, "load_upstox_mcx_quotes", fake_upstox_quotes)
+    monkeypatch.setattr(CommodityStrategyAgent, "_get_scan_adapter", fake_get_scan_adapter)
+    monkeypatch.setattr(CommodityStrategyAgent, "_analyze_futures_symbol", fake_analyze_futures_symbol)
+    monkeypatch.setattr(CommodityStrategyAgent, "_build_option_watchlist", fake_build_option_watchlist)
+    monkeypatch.setattr(CommodityStrategyAgent, "_manage_positions", fake_manage_positions)
+    monkeypatch.setattr(
+        CommodityStrategyAgent,
+        "_strategy_agents",
+        lambda self: [_FakeLane("commodity_futures"), _FakeLane("commodity_options")],
+    )
+
+    agent = CommodityStrategyAgent()
+    agent.update_symbols(["MCX:GOLD26JUNFUT"])
+
+    status = asyncio.run(agent.run_once(force=False))
+
+    assert status["last_error"] is None
+    assert len(status["futures_watchlist"]) == 1
+    assert status["futures_watchlist"][0]["symbol"] == "MCX:GOLD26JUNFUT"
 
 
 def test_commodity_run_once_retains_previous_watchlists_on_transient_scan_gap(monkeypatch, tmp_path: Path) -> None:

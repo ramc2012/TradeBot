@@ -268,12 +268,8 @@ class AgenticRAGService:
         resolved_cases = int(case_stats.get("resolved_cases") or 0)
         win_rate = case_stats.get("win_rate")
 
-        # Hard-risk rejection from the risk governor — RAG echoes it as an
-        # advisory note, not a second veto. The trade is already blocked
-        # upstream; adding "hard_risk_failed" twice just spams the rejection
-        # list and made the dashboard read as if RAG itself was restrictive.
         if not request.hard_risk_passed:
-            reasons.append("hard_risk_inherited")
+            return "block", ["hard_risk_failed"]
 
         negative_expectancy = (
             resolved_cases >= 1 and expectancy is not None and expectancy < 0
