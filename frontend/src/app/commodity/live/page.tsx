@@ -239,6 +239,11 @@ function formatPct(n: number | null | undefined, decimals = 2): string {
   return `${sign}${Number(n).toFixed(decimals)}%`;
 }
 
+function finiteNumber(value: unknown, fallback = 0): number {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
 function formatIST(iso: string | null | undefined): string {
   if (!iso) return "--";
   try {
@@ -1087,8 +1092,10 @@ export default function CommodityLivePage() {
   const totalEquity = Number(summary.total_equity ?? 0);
   const initialCapital = Number(summary.initial_capital ?? 1_000_000);
   const realizedPnl = Number(summary.realized_pnl ?? 0);
-  const dayPnl = Number(summary.day_pnl ?? 0);
-  const unrealizedPnl = Number(summary.unrealized_pnl ?? 0);
+  const positionOpenPnl = positions.reduce((total, position) => total + finiteNumber(position.unrealized_pnl), 0);
+  const dayRealizedPnl = finiteNumber(summary.day_pnl);
+  const unrealizedPnl = finiteNumber(summary.unrealized_pnl, positionOpenPnl);
+  const dayPnl = dayRealizedPnl + unrealizedPnl;
   const totalTrades = Number(summary.total_trades ?? 0);
   const winRate = Number(summary.win_rate ?? 0);
   const maxDrawdown = Number(summary.max_drawdown ?? 0);
@@ -1202,7 +1209,7 @@ export default function CommodityLivePage() {
         <StatTile
           label="Day P&L"
           value={formatINR(dayPnl)}
-          detail={`open ${formatINR(unrealizedPnl)}`}
+          detail={`realized ${formatINR(dayRealizedPnl)} · open ${formatINR(unrealizedPnl)}`}
           tone={dayPnl >= 0 ? "text-emerald-400" : "text-rose-400"}
         />
         <StatTile
