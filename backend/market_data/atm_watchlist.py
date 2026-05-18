@@ -6,7 +6,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Any, Optional
 
 from loguru import logger
@@ -30,6 +30,7 @@ from market_data.option_history import option_history_service
 
 
 UTC = timezone.utc
+IST = timezone(timedelta(hours=5, minutes=30))
 DEFAULT_WATCHLIST_TTL = 900
 DEFAULT_EXPIRY_TTL = 300
 DEFAULT_PARTIAL_TTL = 900
@@ -877,7 +878,7 @@ class ATMWatchlistService:
         stale_force_refresh_count = 0
         if live_refresh and prior_rows:
             today_session_open = datetime.combine(
-                datetime.now(IST).date(), time(9, 15), tzinfo=IST
+                datetime.now(IST).date(), dt_time(9, 15), tzinfo=IST
             ).astimezone(UTC)
             stale_symbols: list[str] = []
             for symbol, row in list(prior_rows.items()):
