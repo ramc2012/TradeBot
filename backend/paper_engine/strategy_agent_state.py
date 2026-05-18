@@ -101,6 +101,10 @@ class StrategyRuntime:
     last_message: Optional[str] = None
     signal_lane: list[dict[str, Any]] = field(default_factory=list)
     meta: dict[str, Any] = field(default_factory=dict)
+    # Per-cycle rejection counter. Reset at the start of each scan, surfaced in
+    # the lane's status payload as last_run_summary.rejection_counts so we can
+    # answer "why didn't this candidate trade?" without tailing logs.
+    last_run_summary: dict[str, Any] = field(default_factory=dict)
 
 
 def _resolve_strategy_state_file() -> Path:

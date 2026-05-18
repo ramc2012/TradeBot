@@ -465,6 +465,7 @@ class _BaseNSEStrategyLaneAgent:
         raise NotImplementedError
 
     def build_status_payload(self) -> dict[str, Any]:
+        summary = self.runtime.last_run_summary if isinstance(self.runtime.last_run_summary, dict) else {}
         return {
             "key": self.descriptor.key,
             "label": self.descriptor.label,
@@ -477,6 +478,11 @@ class _BaseNSEStrategyLaneAgent:
             "open_positions": len(self.runtime.positions),
             "signals": len(self.runtime.signal_lane),
             "mode": self.runtime.meta.get("mode") if self.runtime.meta else None,
+            "last_run_summary": {
+                "counters": dict(summary.get("counters") or {}),
+                "blocked_reasons": dict(summary.get("blocked_reasons") or {}),
+                "last_observation_at": summary.get("last_observation_at"),
+            },
         }
 
 
@@ -532,6 +538,14 @@ class _Strategy1LaneAgent(_BaseNSEStrategyLaneAgent):
         window_map: dict[str, dict[str, Any]],
         expiries: list[str],
     ) -> None:
+        # Reset per-cycle rejection counters so the status payload reflects
+        # only the most recent scan, not cumulative since boot.
+        self.runtime.last_run_summary = {
+            "counters": {},
+            "blocked_reasons": {},
+            "last_observation_at": None,
+            "scanned_rows": len(rows),
+        }
         await self.owner._manage_exits(self.runtime, rows)
         if window_map:
             await self.owner._scan_entries(self.runtime, rows, window_map)
@@ -609,6 +623,12 @@ class _Strategy2LaneAgent(_BaseNSEStrategyLaneAgent):
         window_map: dict[str, dict[str, Any]],
         expiries: list[str],
     ) -> None:
+        self.runtime.last_run_summary = {
+            "counters": {},
+            "blocked_reasons": {},
+            "last_observation_at": None,
+            "scanned_rows": len(rows),
+        }
         await self.owner._run_strategy2(self.runtime, rows, started_at)
 
 

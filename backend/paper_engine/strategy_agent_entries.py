@@ -416,6 +416,19 @@ class StrategyEntryMixin:
             signal_key = f"{underlying}:{opt_type}"
 
             async def persist_raw_signal(status_value: str, block_reason: Optional[str] = None, **extra: Any) -> None:
+                # In-memory rejection / observation tally. Gives the status
+                # endpoint a per-cycle "why no entries" breakdown without
+                # needing to query the signal_observations table.
+                summary = runtime.last_run_summary if isinstance(runtime.last_run_summary, dict) else {}
+                if not isinstance(runtime.last_run_summary, dict):
+                    runtime.last_run_summary = summary
+                counters = summary.setdefault("counters", {})
+                counters[status_value] = int(counters.get(status_value) or 0) + 1
+                if status_value == "blocked" and block_reason:
+                    reasons = summary.setdefault("blocked_reasons", {})
+                    reasons[str(block_reason)[:80]] = int(reasons.get(str(block_reason)[:80]) or 0) + 1
+                if status_value in {"observed", "candidate"}:
+                    summary["last_observation_at"] = latest_bar_time
                 if not callable(persist_observation):
                     return
                 side_for_signal = side or {}
