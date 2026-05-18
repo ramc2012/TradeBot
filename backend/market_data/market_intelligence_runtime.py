@@ -314,6 +314,10 @@ class MarketIntelligenceRuntime:
                     expiry=expiry,
                     symbols=symbols,
                     live_refresh=True,
+                    # Force a true rebuild for the full-universe call so the
+                    # stale-row filter at line 864 actually runs. Index-scope
+                    # calls keep the cache fast path.
+                    force_rebuild=(symbols is None),
                 )
                 for expiry, symbols in watchlist_requests
             ),

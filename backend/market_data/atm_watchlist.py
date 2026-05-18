@@ -704,6 +704,7 @@ class ATMWatchlistService:
         symbols: Optional[list[str]] = None,
         *,
         live_refresh: bool = False,
+        force_rebuild: bool = False,
     ) -> dict[str, Any]:
         expiry_payload = await self.get_expiries(expiry, live_refresh=live_refresh)
         selected_expiry = expiry or expiry_payload.get("default_expiry")
@@ -755,7 +756,14 @@ class ATMWatchlistService:
         if cached:
             cached_payload = json.loads(cached)
             cached_rows = list(cached_payload.get("rows") or [])
-            if live_refresh and not _watchlist_rows_are_fresh(cached_rows):
+            if force_rebuild and live_refresh:
+                # Caller explicitly demands a fresh rebuild — typically the
+                # MI runner's full-universe stock refresh after a weekend.
+                # Skip the cache-hit fast path so prior_rows below get the
+                # stale-row filter and the BG build actually fetches new
+                # broker data for stocks.
+                await redis.delete(cache_key)
+            elif live_refresh and not _watchlist_rows_are_fresh(cached_rows):
                 await redis.delete(cache_key)
             else:
                 return cached_payload
