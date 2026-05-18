@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from datetime import date, datetime
+
 import pandas as pd
 
 from cbe_scanner import CBEConfig, SyntheticDataProvider, generate_watchlist, scan_universe
+from cbe_scanner.repository import _coerce_scan_date
 from cbe_scanner.service import run_synthetic_scan
 
 
@@ -57,3 +60,10 @@ def test_cbe_service_returns_json_ready_payload() -> None:
     assert payload["watchlist_count"] >= 1
     assert "details" in payload["results"][0]
     assert isinstance(payload["watchlist"][0]["composite_score"], float)
+
+
+def test_cbe_repository_coerces_scan_date_for_postgres() -> None:
+    assert _coerce_scan_date("2026-05-18") == date(2026, 5, 18)
+    assert _coerce_scan_date(datetime(2026, 5, 18, 9, 15)) == date(2026, 5, 18)
+    assert _coerce_scan_date(date(2026, 5, 18)) == date(2026, 5, 18)
+    assert _coerce_scan_date(None) is None

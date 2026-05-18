@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
 from typing import Any
 
 from loguru import logger
@@ -33,7 +34,7 @@ async def persist_scan_payload(payload: dict[str, Any]) -> str | None:
                 ),
                 {
                     "source": str(payload.get("source") or "unknown"),
-                    "scan_date": payload.get("scan_date"),
+                    "scan_date": _coerce_scan_date(payload.get("scan_date")),
                     "universe_size": int(payload.get("universe_size") or 0),
                     "scored_count": int(payload.get("scored_count") or 0),
                     "watchlist_count": int(payload.get("watchlist_count") or 0),
@@ -137,6 +138,18 @@ async def load_latest_scan_payload(source: str | None = None) -> dict[str, Any] 
     except Exception as exc:
         logger.warning(f"[CBE] Latest scan load skipped: {exc}")
         return None
+
+
+def _coerce_scan_date(value: Any) -> date | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        return date.fromisoformat(value[:10])
+    return value
 
 
 def _result_row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
