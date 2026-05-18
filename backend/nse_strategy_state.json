@@ -281,7 +281,7 @@
       "signal_lane": [],
       "meta": {
         "mode": "market_closed",
-        "updated_at": "2026-05-18T22:55:30.594158+05:30",
+        "updated_at": "2026-05-18T22:56:30.920856+05:30",
         "market_state": "closed",
         "scan_windows": 220,
         "active_windows": 220,
@@ -3337,7 +3337,7 @@
             "freshness": "live"
           }
         ],
-        "updated_at": "2026-05-18T22:55:30.594158+05:30",
+        "updated_at": "2026-05-18T22:56:30.920856+05:30",
         "stale_count": 0,
         "market_state": "closed",
         "missing_count": 0,
