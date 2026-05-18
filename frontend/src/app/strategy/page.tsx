@@ -540,7 +540,7 @@ function buildExternalStrategies(extra: any) {
 
   const commodityAgents = (commodityStatus?.strategy_agents || []).map((agent: any) => ({
     key: agent.key || "commodity_strategy",
-    label: agent.label || prettify(agent.key || "Commodity Strategy"),
+    label: agent.label || agent.title || prettify(agent.key || "Commodity Strategy"),
     summary: buildEmptySummary({ open_positions: Number(agent.open_positions || 0) }),
     positions: (agent.positions || []).map((row: any) => normalizeExternalPosition(row, row?.underlying || "CRUDEOIL")),
     trade_history: (agent.trade_history || []).map((row: any) => normalizeExternalTrade(row, row?.underlying || "CRUDEOIL")),
@@ -620,12 +620,27 @@ function buildExternalStrategies(extra: any) {
   return [directional, ...commodityAgents, fmp];
 }
 
-async function safeApi<T>(request: Promise<{ data: T }>, fallback: T): Promise<T> {
+async function safeApi<T>(request: Promise<{ data: T }>, fallback: T, timeoutMs = 5_000): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const requestResult = request
+    .then((response) => response.data)
+    .catch(() => fallback);
+
+  if (timeoutMs <= 0) {
+    return requestResult;
+  }
+
   try {
-    const response = await request;
-    return response.data;
-  } catch {
-    return fallback;
+    return await Promise.race([
+      requestResult,
+      new Promise<T>((resolve) => {
+        timeout = setTimeout(() => resolve(fallback), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
   }
 }
 
@@ -839,6 +854,16 @@ export default function StrategyPage() {
         brokers,
         pipeline,
         live_portfolio,
+      ] = await Promise.all([
+        getStrategyAgentStatus().then((response) => response.data as StrategyAgentStatus),
+        getStrategyOpenSignals().then((response) => response.data as any),
+        getStrategyAgentComments().then((response) => response.data as StrategyComment[]),
+        getBrokerStatus().then((response) => response.data as any[]),
+        getStrategyDataStatus().then((response) => response.data as any),
+        getStrategyPortfolio().then((response) => response.data as any),
+      ]);
+
+      const [
         commodity_status,
         commodity_watchlist,
         directional_summary,
@@ -850,23 +875,18 @@ export default function StrategyPage() {
         fmp_positions,
         fmp_journal,
       ] = await Promise.all([
-        getStrategyAgentStatus().then((response) => response.data as StrategyAgentStatus),
-        getStrategyOpenSignals().then((response) => response.data as any),
-        getStrategyAgentComments().then((response) => response.data as StrategyComment[]),
-        getBrokerStatus().then((response) => response.data as any[]),
-        getStrategyDataStatus().then((response) => response.data as any),
-        getStrategyPortfolio().then((response) => response.data as any),
-        safeApi(getCommodityStrategyStatus(), {}),
-        safeApi(getCommodityATMWatchlist(), {}),
-        safeApi(getDirectionalOptionsSummary(), {}),
-        safeApi(getDirectionalOptionsLiveSnapshot("NIFTY", "5minute", 16), {}),
-        safeApi(getDirectionalOptionsPaperPositions(undefined, "all", 50), {}),
-        safeApi(getDirectionalOptionsPaperJournal(undefined, 50), {}),
-        safeApi(getFractalMarketProfileSummary(), {}),
-        safeApi(getFractalMarketProfileLiveSnapshot("NIFTY"), {}),
-        safeApi(getFractalMarketProfilePaperPositions(undefined, "all", 50), {}),
-        safeApi(getFractalMarketProfilePaperJournal(undefined, 50), {}),
+        safeApi(getCommodityStrategyStatus(), {}, 2_500),
+        safeApi(getCommodityATMWatchlist(), {}, 2_500),
+        safeApi(getDirectionalOptionsSummary(), {}, 2_500),
+        safeApi(getDirectionalOptionsLiveSnapshot("NIFTY", "5minute", 16), {}, 2_500),
+        safeApi(getDirectionalOptionsPaperPositions(undefined, "all", 50), {}, 2_500),
+        safeApi(getDirectionalOptionsPaperJournal(undefined, 50), {}, 2_500),
+        safeApi(getFractalMarketProfileSummary(), {}, 2_500),
+        safeApi(getFractalMarketProfileLiveSnapshot("NIFTY"), {}, 2_500),
+        safeApi(getFractalMarketProfilePaperPositions(undefined, "all", 50), {}, 2_500),
+        safeApi(getFractalMarketProfilePaperJournal(undefined, 50), {}, 2_500),
       ]);
+
       return {
         agent_status,
         open_signals,
@@ -902,6 +922,7 @@ export default function StrategyPage() {
 	          }),
         onStatusChange,
       ),
+    preferStream: false,
     staleTime: 10_000,
   });
 
@@ -997,15 +1018,34 @@ export default function StrategyPage() {
   const strategyRuntimeRows = agentStatus?.strategy_agents || [];
   const liveStrategyCount = deskStrategies.length || strategyRuntimeRows.length || strategies.length;
   const activeScanCount = deskStrategies.filter((strategy: any) => strategy?.meta?.mode !== "disabled").length || strategyRuntimeRows.filter((strategy: any) => strategy.mode !== "disabled").length || strategies.length;
-  const commodityWatchRows = Number(strategyDesk?.commodityWatchlist?.summary?.total_rows || 0);
+  const commodityWatchRows = Number(
+    strategyDesk?.commodityWatchlist?.summary?.total_rows
+    || strategyDesk?.commodityStatus?.option_watchlist?.length
+    || strategyDesk?.commodityStatus?.futures_watchlist?.length
+    || strategyDesk?.commodityStatus?.watchlist?.length
+    || 0,
+  );
   const marketIntelligenceHealth = ((agentStatus?.data_health || {}) as any).market_intelligence || {};
   const directionalDataStatus = strategyDesk?.directionalLive?.snapshot?.data_status || {};
   const fmpAutomation = strategyDesk?.fmpSummary?.automation || {};
   const pipelineRows = [...(pipeline?.live_pipeline || []), ...(pipeline?.strategy2_pipeline || [])];
   const okPipelineRows = pipelineRows.filter((item: any) => item.status === "ok").length;
   const currentLiveRows = pipelineRows.filter((item: any) => item.freshness === "live").length;
-  const marketDataLabel = currentLiveRows > 0 ? "Live" : okPipelineRows > 0 ? "Replay / session-close" : "Stale / blocked";
-  const marketDataTone = currentLiveRows > 0 ? "text-accent-green" : okPipelineRows > 0 ? "text-accent-amber" : "text-accent-red";
+  const coreStatusLoading = !agentStatus && strategyOverviewQuery.isLoading;
+  const marketDataLabel = coreStatusLoading
+    ? "Loading"
+    : currentLiveRows > 0
+      ? "Live"
+      : okPipelineRows > 0
+        ? "Replay / session-close"
+        : "Stale / blocked";
+  const marketDataTone = coreStatusLoading
+    ? "text-text-secondary"
+    : currentLiveRows > 0
+      ? "text-accent-green"
+      : okPipelineRows > 0
+        ? "text-accent-amber"
+        : "text-accent-red";
 
   return (
     <div className="mx-auto max-w-[1680px] space-y-3 pb-6">
@@ -1020,15 +1060,19 @@ export default function StrategyPage() {
           <div className="rounded-lg border border-bg-border bg-bg-secondary/35 px-3 py-2" title="Loop state, broker gate, scan timestamps, target expiry, and cadence">
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs font-semibold text-text-primary">Runtime</span>
-              <StatusBadge label={agentStatus?.running ? "Loop Active" : "Idle"} tone={agentStatus?.running ? "ready" : "idle"} />
-              <StatusBadge
-                label={agentStatus?.kill_switch_active ? "Kill Switch On" : "Kill Switch Off"}
-                tone={agentStatus?.kill_switch_active ? "warning" : "ready"}
-              />
-              <StatusBadge
-                label={agentStatus?.auto_run_enabled ? "Automatic" : "Manual"}
-                tone={agentStatus?.auto_run_enabled ? "ready" : "warning"}
-              />
+              <StatusBadge label={!agentStatus ? "Loading" : agentStatus.running ? "Loop Active" : "Idle"} tone={!agentStatus ? "idle" : agentStatus.running ? "ready" : "idle"} />
+              {agentStatus ? (
+                <>
+                  <StatusBadge
+                    label={agentStatus.kill_switch_active ? "Kill Switch On" : "Kill Switch Off"}
+                    tone={agentStatus.kill_switch_active ? "warning" : "ready"}
+                  />
+                  <StatusBadge
+                    label={agentStatus.auto_run_enabled ? "Automatic" : "Manual"}
+                    tone={agentStatus.auto_run_enabled ? "ready" : "warning"}
+                  />
+                </>
+              ) : null}
               {brokerSnapshot ? (
                 <StatusBadge
                   label={brokerSnapshot.broker_ready ? "Broker Ready" : "Broker Blocked"}
@@ -1046,7 +1090,7 @@ export default function StrategyPage() {
         </div>
 
         <div className="mt-3 grid gap-2 md:grid-cols-3 xl:grid-cols-9">
-          <MetricTile label="Live Strategies" value={String(liveStrategyCount)} detail={`${activeScanCount} scan-capable`} tone="text-accent-blue" />
+          <MetricTile label="Live Strategies" value={coreStatusLoading ? "--" : String(liveStrategyCount)} detail={coreStatusLoading ? "loading" : `${activeScanCount} scan-capable`} tone="text-accent-blue" />
           <MetricTile label="Market Data" value={marketDataLabel} detail={`${okPipelineRows}/${pipelineRows.length || 0} feeds OK`} tone={marketDataTone} />
           <MetricTile label="Open Positions" value={String(allPositions.length)} />
           <MetricTile label="Strategy 1 Open" value={String(strategies.find((strategy) => strategy.key === "macd_strategy")?.summary.open_positions || 0)} />
@@ -1073,7 +1117,7 @@ export default function StrategyPage() {
           <div className="rounded-lg border border-bg-border bg-bg-primary/25 p-3">
             <div className="flex items-center justify-between gap-3">
               <div className="text-sm font-semibold text-text-primary">NSE CE/PE MACD + MP</div>
-              <StatusBadge label={marketIntelligenceHealth?.ready ? "prepared" : "checking"} tone={marketIntelligenceHealth?.ready ? "ready" : "warning"} />
+              <StatusBadge label={!agentStatus ? "loading" : marketIntelligenceHealth?.ready ? "prepared" : "checking"} tone={!agentStatus ? "idle" : marketIntelligenceHealth?.ready ? "ready" : "warning"} />
             </div>
             <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
               <MiniMetric label="F&O Rows" value={String(marketIntelligenceHealth?.watchlist_rows_latest || 0)} />
