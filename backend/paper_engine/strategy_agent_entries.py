@@ -393,20 +393,32 @@ class StrategyEntryMixin:
 
             ce_side = row.get("ce")
             pe_side = row.get("pe")
-            if not ce_side or not pe_side:
-                _tally("missing_ce_or_pe_side")
+            if not ce_side and not pe_side:
+                _tally("missing_both_sides")
                 continue
 
-            ce_snapshot = self._strategy1_side_snapshot(ce_side, snapshot_state)
-            pe_snapshot = self._strategy1_side_snapshot(pe_side, snapshot_state)
-            ce_macd = ce_snapshot.get("current_macd")
-            pe_macd = pe_snapshot.get("current_macd")
-            if ce_macd is None or pe_macd is None:
+            # Tolerant of single-side rows. The broker option chain for some
+            # stocks (Fyers under 429 rate-limit) returns only PE entries —
+            # the watchlist row ends up with ce=None / pe populated. We can
+            # still evaluate a PE-direction trade on those, just not the CE.
+            ce_snapshot = self._strategy1_side_snapshot(ce_side, snapshot_state) if ce_side else {}
+            pe_snapshot = self._strategy1_side_snapshot(pe_side, snapshot_state) if pe_side else {}
+            ce_macd = ce_snapshot.get("current_macd") if ce_side else None
+            pe_macd = pe_snapshot.get("current_macd") if pe_side else None
+            if ce_macd is None and pe_macd is None:
                 _tally("no_macd_values")
                 continue
 
-            ce_cross = ce_snapshot.get("previous_macd") is not None and ce_snapshot["previous_macd"] <= 0 < ce_macd
-            pe_cross = pe_snapshot.get("previous_macd") is not None and pe_snapshot["previous_macd"] >= 0 > pe_macd
+            ce_cross = (
+                ce_macd is not None
+                and ce_snapshot.get("previous_macd") is not None
+                and ce_snapshot["previous_macd"] <= 0 < ce_macd
+            )
+            pe_cross = (
+                pe_macd is not None
+                and pe_snapshot.get("previous_macd") is not None
+                and pe_snapshot["previous_macd"] >= 0 > pe_macd
+            )
             if ce_cross:
                 side = ce_side
                 side_snapshot = ce_snapshot

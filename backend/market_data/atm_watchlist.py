@@ -1187,6 +1187,32 @@ class ATMWatchlistService:
         if not chain.entries:
             return None
 
+        # Single-side guard: if the primary broker only returned one option-type
+        # (e.g. Upstox under heavy 429-throttle returning PE entries but no CE),
+        # try the other broker before settling on a half-row. Fixes the
+        # missing_ce_or_pe_side blocker that left 143/215 stocks half-built.
+        if chain.entries:
+            has_ce = any(str(getattr(e, "option_type", "")).upper() == "CE" for e in chain.entries)
+            has_pe = any(str(getattr(e, "option_type", "")).upper() == "PE" for e in chain.entries)
+            if not (has_ce and has_pe):
+                primary = live_source
+                if primary == "upstox" and fyers_adapter is not None:
+                    saved = chain
+                    if await _load_fyers_chain() and chain.entries:
+                        ce_ok = any(str(getattr(e, "option_type", "")).upper() == "CE" for e in chain.entries)
+                        pe_ok = any(str(getattr(e, "option_type", "")).upper() == "PE" for e in chain.entries)
+                        if not (ce_ok and pe_ok):
+                            chain = saved
+                            live_source = primary
+                elif primary == "fyers" and upstox_adapter is not None:
+                    saved = chain
+                    if await _load_upstox_chain() and chain.entries:
+                        ce_ok = any(str(getattr(e, "option_type", "")).upper() == "CE" for e in chain.entries)
+                        pe_ok = any(str(getattr(e, "option_type", "")).upper() == "PE" for e in chain.entries)
+                        if not (ce_ok and pe_ok):
+                            chain = saved
+                            live_source = primary
+
         spot_price = float(chain.spot_price or 0.0)
         strikes = sorted({float(entry.strike) for entry in chain.entries})
         if not strikes:
