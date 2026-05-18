@@ -876,8 +876,9 @@ class ATMWatchlistService:
         # and the stock universe never refreshes on Monday morning.
         stale_force_refresh_count = 0
         if live_refresh and prior_rows:
-            from datetime import datetime as _dt
-            today_session_open = _dt.combine(_now_ist().date(), time(9, 15), tzinfo=IST).astimezone(UTC)
+            today_session_open = datetime.combine(
+                datetime.now(IST).date(), time(9, 15), tzinfo=IST
+            ).astimezone(UTC)
             stale_symbols: list[str] = []
             for symbol, row in list(prior_rows.items()):
                 latest = _latest_watchlist_row_time([row])
