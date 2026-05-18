@@ -187,10 +187,22 @@ class MarketHoursPaperSupervisor:
             if not results and failures:
                 joined = "; ".join(f"{symbol}: {detail}" for symbol, detail in failures.items())
                 raise RuntimeError(f"Fractal Market Profile paper cycle failed: {joined}")
+            from collections import Counter as _Counter
+
+            rejection_counts: _Counter = _Counter()
+            actionable_count = 0
+            for item in results:
+                if item.get("actionable"):
+                    actionable_count += 1
+                else:
+                    for reason in item.get("rejection_reasons") or []:
+                        rejection_counts[str(reason)[:80]] += 1
             return {
                 "symbols_requested": list(SUPPORTED_SYMBOLS),
                 "symbols_completed": [item.get("symbol_code") for item in results],
                 "result_count": len(results),
+                "actionable_count": actionable_count,
+                "rejection_counts": dict(rejection_counts.most_common(10)),
                 "failure_count": len(failures),
                 "failures": failures,
                 "results": results,
@@ -251,10 +263,22 @@ class MarketHoursPaperSupervisor:
             if not results and failures:
                 joined = "; ".join(f"{symbol}: {detail}" for symbol, detail in failures.items())
                 raise RuntimeError(f"Directional options paper cycle failed: {joined}")
+            from collections import Counter as _Counter
+
+            rejection_counts: _Counter = _Counter()
+            actionable_count = 0
+            for item in results:
+                if item.get("actionable"):
+                    actionable_count += 1
+                else:
+                    for reason in item.get("rejection_reasons") or []:
+                        rejection_counts[str(reason)[:80]] += 1
             return {
                 "symbols_requested": list(directional_service.config["universe"]),
                 "symbols_completed": [item.get("underlying") for item in results],
                 "result_count": len(results),
+                "actionable_count": actionable_count,
+                "rejection_counts": dict(rejection_counts.most_common(10)),
                 "failure_count": len(failures),
                 "failures": failures,
                 "results": results,
@@ -274,9 +298,21 @@ class MarketHoursPaperSupervisor:
                     "failures": {"paper_agent": "timed out after 120s"},
                     "results": [],
                 }
+            from collections import Counter as _Counter
+
+            last_run = result.get("last_run") if isinstance(result, dict) else {}
+            recent = (result or {}).get("recent_signals") or []
+            rejection_counts: _Counter = _Counter()
+            for r in recent:
+                if str(r.get("decision")) == "skip":
+                    rejection_counts[str(r.get("reason") or "unknown")[:80]] += 1
+            actionable = int((last_run or {}).get("opened") or 0)
             return {
                 "status": "ok",
-                "result_count": int(result.get("evaluated") or 0) if isinstance(result, dict) else 0,
+                "result_count": int((last_run or {}).get("scanned") or 0),
+                "actionable_count": actionable,
+                "rejection_counts": dict(rejection_counts.most_common(10)),
+                "failure_count": int((last_run or {}).get("errors") or 0),
                 "result": result,
             }
 
@@ -484,6 +520,7 @@ class MarketHoursPaperSupervisor:
             "fractal_market_profile": "fmp",
             "directional_options": "directional_options",
             "market_intelligence": "market_intelligence",
+            "gann_tp_delta": "gann_tp_delta",
         }
         market = market_map.get(runner_key)
         if market is None:

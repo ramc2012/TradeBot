@@ -166,6 +166,12 @@ def _report_interval_seconds(value: str) -> int:
 STRATEGY2_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
 STRATEGY2_ENTRY_CUTOFF = time(15, 0)
 STRATEGY2_FORCE_EXIT = time(15, 20)
+# Anti-churn: ignore a market-profile direction flip if the position has been
+# open less than this many 5-minute bars. Friday's session had four entries
+# all closed within 0-2 bars on `mp_gate_flip` for losses between -0% and -6%.
+# Stop / target / macd_reversal exits still fire immediately.
+STRATEGY2_MIN_HOLD_BARS = 3
+STRATEGY2_MIN_HOLD_SECONDS = STRATEGY2_MIN_HOLD_BARS * 5 * 60
 STRATEGY2_SPOT_CACHE_TTL_SECONDS = 90
 STRATEGY2_HARD_STOP_PCT = 18.0
 STRATEGY2_TARGET_PCT = 35.0
@@ -2946,8 +2952,23 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 continue
 
             if aligned_direction and aligned_direction != pos.option_type:
-                await self._close_position(runtime, pos, latest_close, "mp_gate_flip", qty=pos.qty)
-                continue
+                hold_seconds = None
+                if entered_at is not None:
+                    hold_seconds = (started_at - entered_at).total_seconds()
+                if hold_seconds is None or hold_seconds >= STRATEGY2_MIN_HOLD_SECONDS:
+                    await self._close_position(runtime, pos, latest_close, "mp_gate_flip", qty=pos.qty)
+                    continue
+                # Held too briefly — single-bar MP flips are noise. Skip the
+                # close and re-check next cycle. Hard-stop / target / macd
+                # reversal exits below still get evaluated.
+                logger.debug(
+                    "[S2] mp_gate_flip suppressed by min-hold: underlying={u} "
+                    "option_type={ot} hold_s={hs:.0f} threshold_s={th}",
+                    u=pos.underlying,
+                    ot=pos.option_type,
+                    hs=hold_seconds,
+                    th=STRATEGY2_MIN_HOLD_SECONDS,
+                )
 
             if pos.macd_line and len(pos.macd_line) >= 2:
                 previous = pos.macd_line[-2]

@@ -235,11 +235,75 @@ class MarketIntelligenceRuntime:
         full_refresh_due = self._last_full_watchlist_refresh_at is None or (
             now - self._last_full_watchlist_refresh_at
         ).total_seconds() >= max(int(settings.MARKET_INTELLIGENCE_FULL_WATCHLIST_REFRESH_MINUTES), 1) * 60
+
+        # DB-state override: if today's STOCK coverage in
+        # atm_option_watchlist_snapshots is below the last-session count, the
+        # in-memory timer is lying (stale Redis cache, prior crash, container
+        # restart, etc.). Force a full refresh until the stock universe
+        # actually populates for today. Without this, S1 keeps scanning 215
+        # rows where 208 are Friday's snapshots and MACD never crosses.
+        if not full_refresh_due:
+            try:
+                today_start = datetime.combine(now.date(), time.min, tzinfo=IST).astimezone(UTC)
+                async with AsyncSessionLocal() as session:
+                    stock_today = await session.scalar(
+                        text(
+                            """
+                            SELECT COUNT(DISTINCT underlying)
+                            FROM atm_option_watchlist_snapshots
+                            WHERE kind = 'STOCK'
+                              AND time >= :today_start
+                            """
+                        ),
+                        {"today_start": today_start},
+                    )
+                    stock_latest = await session.scalar(
+                        text(
+                            """
+                            SELECT COUNT(DISTINCT underlying)
+                            FROM atm_option_watchlist_snapshots
+                            WHERE kind = 'STOCK'
+                            """
+                        ),
+                    )
+                stock_today = int(stock_today or 0)
+                stock_latest = int(stock_latest or 0)
+                if stock_latest > 0 and stock_today < int(stock_latest * 0.5):
+                    logger.info(
+                        "[MarketIntelligence] forcing full watchlist refresh: "
+                        "stocks today={today} vs latest_session={latest}",
+                        today=stock_today,
+                        latest=stock_latest,
+                    )
+                    full_refresh_due = True
+                    self._last_full_watchlist_refresh_at = None
+            except Exception as exc:
+                logger.warning(
+                    "[MarketIntelligence] stock freshness probe failed: {}", exc
+                )
         watchlist_requests: list[tuple[str | None, list[str] | None]] = []
         if full_refresh_due:
             full_universe_expiry = stock_monthly_expiry or str(expiry_payload.get("monthly_expiry") or "").strip()
             if full_universe_expiry:
                 watchlist_requests.append((full_universe_expiry, None))
+                # Bust the shared-universe Redis cache so the live_refresh
+                # rebuild actually iterates the stock universe instead of
+                # returning the cached blob. Without this, a stale "ready"
+                # payload satisfies _watchlist_rows_are_fresh() and the BG
+                # build for stocks never fires.
+                try:
+                    redis = await get_redis()
+                    cache_keys = [
+                        f"atm_watchlist:v12:live:{full_universe_expiry}:all",
+                        f"atm_watchlist:partial:v12:live:{full_universe_expiry}:all",
+                    ]
+                    for key in cache_keys:
+                        await redis.delete(key)
+                except Exception as exc:
+                    logger.warning(
+                        "[MarketIntelligence] failed to invalidate full-universe cache: {}",
+                        exc,
+                    )
         for expiry in index_expiries:
             watchlist_requests.append((expiry, list(NSE_INDEX_SCOPE)))
         if not index_expiries:
