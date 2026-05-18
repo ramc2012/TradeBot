@@ -334,15 +334,29 @@ class StrategyEntryMixin:
         snapshot_state = await self._load_strategy1_recent_snapshot_state(rows)
         persist_observation = getattr(self, "_persist_agent_signal_observation", None)
 
+        def _tally(reason: str) -> None:
+            """Bump per-cycle rejection counter for silent-skip paths that
+            never reach persist_raw_signal. This is what surfaces in the
+            status payload's last_run_summary.blocked_reasons."""
+            summary = runtime.last_run_summary if isinstance(runtime.last_run_summary, dict) else {}
+            if not isinstance(runtime.last_run_summary, dict):
+                runtime.last_run_summary = summary
+            counters = summary.setdefault("counters", {})
+            counters["blocked"] = int(counters.get("blocked") or 0) + 1
+            reasons = summary.setdefault("blocked_reasons", {})
+            reasons[reason[:80]] = int(reasons.get(reason[:80]) or 0) + 1
+
         for row in rows:
             underlying = row.get("underlying", "")
             expiry_str = row.get("expiry", "")
 
             if underlying in EXCLUDED_UNDERLYINGS:
+                _tally("excluded_underlying")
                 continue
 
             window = window_map.get(underlying)
             if not window:
+                _tally("no_active_window")
                 continue
 
             # Instrument selection (which expiry, which strike) is the
@@ -372,6 +386,7 @@ class StrategyEntryMixin:
                 try:
                     opt_expiry = date.fromisoformat(expiry_str)
                     if (opt_expiry - _now_ist().date()).days < 3:
+                        _tally("expiry_within_3_days")
                         continue
                 except (ValueError, TypeError):
                     pass
@@ -379,6 +394,7 @@ class StrategyEntryMixin:
             ce_side = row.get("ce")
             pe_side = row.get("pe")
             if not ce_side or not pe_side:
+                _tally("missing_ce_or_pe_side")
                 continue
 
             ce_snapshot = self._strategy1_side_snapshot(ce_side, snapshot_state)
@@ -386,6 +402,7 @@ class StrategyEntryMixin:
             ce_macd = ce_snapshot.get("current_macd")
             pe_macd = pe_snapshot.get("current_macd")
             if ce_macd is None or pe_macd is None:
+                _tally("no_macd_values")
                 continue
 
             ce_cross = ce_snapshot.get("previous_macd") is not None and ce_snapshot["previous_macd"] <= 0 < ce_macd
@@ -403,12 +420,14 @@ class StrategyEntryMixin:
                 regime_name = REGIME_BEARISH
                 expected_mp_direction = "PE"
             else:
+                _tally("no_fresh_macd_cross")
                 continue
             quadrant = SimpleNamespace(regime=regime_name)
             self._regime_cache[underlying] = quadrant
 
             latest_bar_time = str(side_snapshot.get("latest_bar_time") or "")
             if not latest_bar_time:
+                _tally("no_latest_bar_time")
                 continue
 
             strength = abs(float(side_snapshot.get("current_macd") or 0.0))

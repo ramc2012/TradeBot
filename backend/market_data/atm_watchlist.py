@@ -861,9 +861,30 @@ class ATMWatchlistService:
             await redis.set(cache_key, json.dumps(payload), ex=30)
             return payload
 
+        # On a live_refresh cycle, treat any prior_row whose latest_time is
+        # older than today's session-open as STALE → include it in pending so
+        # the BG build actually re-fetches fresh option premium data. Without
+        # this, Friday's snapshots (213 stocks) live forever in prior_rows
+        # and the stock universe never refreshes on Monday morning.
+        stale_force_refresh_count = 0
+        if live_refresh and prior_rows:
+            from datetime import datetime as _dt
+            today_session_open = _dt.combine(_now_ist().date(), time(9, 15), tzinfo=IST).astimezone(UTC)
+            stale_symbols: list[str] = []
+            for symbol, row in list(prior_rows.items()):
+                latest = _latest_watchlist_row_time([row])
+                if latest is None or latest < today_session_open:
+                    stale_symbols.append(symbol)
+            if stale_symbols:
+                stale_force_refresh_count = len(stale_symbols)
+                # Drop them from prior_rows so they re-enter pending and the
+                # BG build path picks them up below.
+                for sym in stale_symbols:
+                    prior_rows.pop(sym, None)
         pending = [m for m in underlyings if m.symbol not in prior_rows]
         logger.info(
-            f"[ATM watchlist] {len(prior_rows)} cached, {len(pending)} to fetch for {selected_expiry} ({scope_key})"
+            f"[ATM watchlist] {len(prior_rows)} cached, {len(pending)} to fetch for {selected_expiry} ({scope_key}) "
+            f"(stale_force_refresh={stale_force_refresh_count})"
         )
         coverage_target = (
             len(underlyings)
