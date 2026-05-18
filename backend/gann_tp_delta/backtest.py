@@ -19,6 +19,9 @@ class GannTPDeltaBacktester:
     def run(self, frame: pd.DataFrame, *, anchor_mode: str, h_mode: str) -> dict[str, Any]:
         if frame.empty or len(frame.index) < 30:
             return self._empty("Not enough candles for backtest.")
+        max_bars = int(self.config.get("backtest", {}).get("max_bars") or 260)
+        if max_bars > 30 and len(frame.index) > max_bars:
+            frame = frame.tail(max_bars).reset_index(drop=True)
         events: list[dict[str, Any]] = []
         cfg = self.config
         geometry_cfg = cfg["geometry"]

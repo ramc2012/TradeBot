@@ -7,9 +7,11 @@ import { AlertTriangle, Bot, Compass, FilePlus2, Play, RefreshCw, Target } from 
 
 import {
   describeApiError,
+  getGannTPDeltaBacktest,
+  getGannTPDeltaLiveSnapshot,
   getGannTPDeltaPaperAgentStatus,
   getGannTPDeltaPaperJournal,
-  getGannTPDeltaWorkspace,
+  getGannTPDeltaSummary,
   runGannTPDeltaPaperAgentOnce,
   runGannTPDeltaPaperProposal,
 } from "@/lib/api";
@@ -110,14 +112,27 @@ export default function GannTPDeltaWorkspace() {
     setError(null);
     setLoading(true);
     Promise.all([
-      getGannTPDeltaWorkspace(underlying, timeframe, lookback, anchorMode, hMode, hMode === "manual" ? manualH : undefined),
+      getGannTPDeltaSummary(),
+      getGannTPDeltaLiveSnapshot(underlying, timeframe, lookback, anchorMode, hMode, hMode === "manual" ? manualH : undefined),
       getGannTPDeltaPaperJournal(underlying, 20),
       getGannTPDeltaPaperAgentStatus(50),
     ])
-      .then(([workspaceResponse, journalResponse, agentResponse]) => {
-        setWorkspace(workspaceResponse.data);
+      .then(([summaryResponse, snapshotResponse, journalResponse, agentResponse]) => {
+        setWorkspace({
+          module: summaryResponse.data,
+          selection: { underlying, timeframe, lookback_sessions: lookback, anchor_mode: anchorMode, h_mode: hMode },
+          snapshot: snapshotResponse.data,
+          backtest: { summary: { event_count: 0, total_points: 0, win_rate_pct: 0, avg_win: 0, avg_loss: 0 }, events: [] },
+        });
         setJournalCount(journalResponse.data?.summary?.count || 0);
         setAgentStatus(agentResponse.data);
+        getGannTPDeltaBacktest(underlying, timeframe, lookback, anchorMode, hMode)
+          .then((backtestResponse) => {
+            setWorkspace((current) => (current ? { ...current, backtest: backtestResponse.data } : current));
+          })
+          .catch(() => {
+            setWorkspace((current) => current);
+          });
       })
       .catch((err) => setError(describeApiError(err, "Failed to load Gann TP Delta workspace.")))
       .finally(() => setLoading(false));
@@ -351,8 +366,8 @@ function GannChart({ snapshot }: { snapshot?: Workspace["snapshot"] }) {
   }
   const { width, height, xFor, yFor, closePath } = geometry;
   return (
-    <div className="h-[520px] w-full overflow-hidden">
-      <svg viewBox={`0 0 ${width} ${height}`} className="h-full w-full">
+    <div className="h-[560px] w-full overflow-auto">
+      <svg viewBox={`0 0 ${width} ${height}`} className="h-full min-w-[1120px]">
         <rect width={width} height={height} fill="transparent" />
         {bars.map((bar) => {
           const x = xFor(bar.index);
@@ -384,12 +399,34 @@ function buildChartGeometry(snapshot?: Workspace["snapshot"]) {
   if (bars.length < 2) return null;
   const width = 1040;
   const height = 500;
-  const values = bars.flatMap((bar) => [bar.high, bar.low]);
-  values.push(...(snapshot?.gann_angles || []).flatMap((angle) => [angle.current_price, angle.projected_price]));
-  values.push(...(snapshot?.sq9_levels || []).map((level) => level.price));
+  const barValues = bars.flatMap((bar) => [bar.high, bar.low]);
+  const barMin = Math.min(...barValues);
+  const barMax = Math.max(...barValues);
+  const current = snapshot?.spot_price ?? bars[bars.length - 1]?.close;
+  const focusPad = Math.max((barMax - barMin) * 0.35, Math.abs(current) * 0.008, 1);
+  const focusMin = Math.min(barMin, current) - focusPad;
+  const focusMax = Math.max(barMax, current) + focusPad;
+  const values = [...barValues, current];
+  if (snapshot?.anchor?.price && snapshot.anchor.price >= focusMin && snapshot.anchor.price <= focusMax) {
+    values.push(snapshot.anchor.price);
+  }
+  values.push(
+    ...(snapshot?.gann_angles || [])
+      .map((angle) => angle.current_price)
+      .filter((price) => price >= focusMin && price <= focusMax),
+  );
+  values.push(
+    ...(snapshot?.sq9_levels || [])
+      .map((level) => level.price)
+      .filter((price) => price >= focusMin && price <= focusMax),
+  );
+  values.push(...(snapshot?.signal?.targets || []).filter((price) => price >= focusMin && price <= focusMax));
+  if (snapshot?.signal?.stop && snapshot.signal.stop >= focusMin && snapshot.signal.stop <= focusMax) {
+    values.push(snapshot.signal.stop);
+  }
   const min = Math.min(...values);
   const max = Math.max(...values);
-  const pad = Math.max((max - min) * 0.08, 1);
+  const pad = Math.max((max - min) * 0.12, Math.abs(current) * 0.001, 1);
   const minIndex = Math.min(...bars.map((bar) => bar.index), snapshot?.anchor?.bar_index ?? bars[0].index);
   const maxIndex = Math.max(...bars.map((bar) => bar.index), minIndex + 1);
   const xFor = (index: number) => ((index - minIndex) / Math.max(maxIndex - minIndex, 1)) * width;

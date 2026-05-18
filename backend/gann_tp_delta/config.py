@@ -77,6 +77,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "backtest": {
         "max_events": 120,
+        "max_bars": 260,
         "risk_reward": 1.6,
     },
     "paper": {
