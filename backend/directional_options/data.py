@@ -402,23 +402,29 @@ class DirectionalOptionsDataStore:
             row = result.first()
             if row is not None:
                 return float(row.ltp), _parse_ts(row.time).isoformat(), "local_watchlist"
-        candles = await option_history_service.load_candles(
-            underlying=underlying.upper(),
-            expiry=params["expiry"],
-            strike=float(strike),
-            option_type=option_type,
-            instrument_key=params["instrument_key"] or None,
-            interval="1minute",
-            limit=3,
-            allow_broker_refresh=False,
-        )
-        if not candles:
-            return None, None, "none"
-        latest = candles[-1]
-        close_value = latest.get("close")
-        if close_value is None:
-            return None, None, "none"
-        return float(close_value), str(latest.get("time") or ""), "local_option_history"
+        # Try several intervals in priority order. Index options are usually
+        # stored at 1-minute resolution, but MCX commodity options only land
+        # at 30-minute — so the previous hard-coded 1minute lookup returned
+        # nothing for GOLD/CRUDE/etc., and exit_premium fell back to entry.
+        for interval in ("1minute", "5minute", "15minute", "30minute"):
+            candles = await option_history_service.load_candles(
+                underlying=underlying.upper(),
+                expiry=params["expiry"],
+                strike=float(strike),
+                option_type=option_type,
+                instrument_key=params["instrument_key"] or None,
+                interval=interval,
+                limit=3,
+                allow_broker_refresh=False,
+            )
+            if not candles:
+                continue
+            latest = candles[-1]
+            close_value = latest.get("close")
+            if close_value is None:
+                continue
+            return float(close_value), str(latest.get("time") or ""), f"local_option_history_{interval}"
+        return None, None, "none"
 
     async def load_local_option_frame(
         self,
