@@ -23,6 +23,16 @@ def _in_nse_market_hours(now: datetime) -> bool:
     return time(9, 15) <= now.time() <= time(15, 30)
 
 
+def _in_mcx_market_hours(now: datetime) -> bool:
+    if now.weekday() >= 5:
+        return False
+    return time(9, 0) <= now.time() <= time(23, 30)
+
+
+def _in_gann_market_hours(now: datetime) -> bool:
+    return _in_nse_market_hours(now) or _in_mcx_market_hours(now)
+
+
 def _next_nse_market_open(now: datetime) -> datetime:
     next_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
     if now >= next_open:
@@ -30,6 +40,21 @@ def _next_nse_market_open(now: datetime) -> datetime:
     while next_open.weekday() >= 5:
         next_open += timedelta(days=1)
     return next_open
+
+
+def _next_mcx_market_open(now: datetime) -> datetime:
+    next_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    if now >= next_open:
+        next_open += timedelta(days=1)
+    while next_open.weekday() >= 5:
+        next_open += timedelta(days=1)
+    return next_open
+
+
+def _next_gann_market_open(now: datetime) -> datetime:
+    if _in_gann_market_hours(now):
+        return now
+    return min(_next_nse_market_open(now), _next_mcx_market_open(now))
 
 
 def _should_run_post_close_catchup(now: datetime) -> bool:
@@ -43,6 +68,8 @@ class RunnerConfig:
     interval_seconds: int
     callback: RunnerCallback
     enabled: bool = True
+    market_hours_fn: MarketHoursFn | None = None
+    next_open_fn: NextOpenFn | None = None
 
 
 @dataclass
@@ -355,6 +382,8 @@ class MarketHoursPaperSupervisor:
                 ),
                 callback=_gann_runner,
                 enabled=getattr(settings, "GANN_TP_DELTA_AUTO_ENABLED", True),
+                market_hours_fn=_in_gann_market_hours,
+                next_open_fn=_next_gann_market_open,
             ),
         ]
 
@@ -384,10 +413,17 @@ class MarketHoursPaperSupervisor:
             while True:
                 await self.run_due_once()
                 now = self._now_fn()
-                if self._market_hours_fn(now):
+                enabled_runners = [
+                    runtime for runtime in self._runners.values()
+                    if runtime.config.enabled
+                ]
+                if any(self._runtime_market_open(runtime, now) for runtime in enabled_runners):
                     await asyncio.sleep(max(int(settings.MARKET_HOURS_SUPERVISOR_LOOP_SECONDS), 5))
                 else:
-                    next_open = self._next_open_fn(now)
+                    next_open = min(
+                        (self._runtime_next_open(runtime, now) for runtime in enabled_runners),
+                        default=self._next_open_fn(now),
+                    )
                     seconds_until_open = max((next_open - now).total_seconds(), 60.0)
                     await asyncio.sleep(min(seconds_until_open, 300.0))
         except asyncio.CancelledError:
@@ -402,55 +438,60 @@ class MarketHoursPaperSupervisor:
 
         async with self._lock:
             now = self._now_fn()
-            if not self._market_hours_fn(now) and not force:
-                if _should_run_post_close_catchup(now):
-                    catchup_session_date = now.date()
-                    catchup_ran = False
-                    due_runners: list[RunnerRuntime] = []
-                    for runtime in self._runners.values():
-                        if not runtime.config.enabled or runtime.running:
-                            continue
-                        if runtime.last_success_at and runtime.last_success_at.date() >= catchup_session_date:
-                            continue
-                        due_runners.append(runtime)
-                    if due_runners:
-                        await self._run_due_runners(due_runners, now=now)
-                    # End-of-session portfolio reconciliation snapshot.
-                    try:
-                        from core.paper_trade_recorder import paper_trade_recorder
+            due_runners: list[RunnerRuntime] = []
+            catchup_runners: list[RunnerRuntime] = []
+            catchup_session_date = now.date()
+            for runtime in self._runners.values():
+                if not runtime.config.enabled or runtime.running:
+                    continue
+                runtime_market_open = self._runtime_market_open(runtime, now)
+                if force or (runtime_market_open and runtime.is_due(now)):
+                    due_runners.append(runtime)
+                    continue
+                if (
+                    not force
+                    and not runtime_market_open
+                    and _should_run_post_close_catchup(now)
+                    and (
+                        runtime.last_success_at is None
+                        or runtime.last_success_at.date() < catchup_session_date
+                    )
+                ):
+                    catchup_runners.append(runtime)
 
-                        await paper_trade_recorder.snapshot_daily(
-                            session_date=catchup_session_date.isoformat()
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "[MarketHoursSupervisor] portfolio snapshot failed: {}", exc
-                        )
-                    for runtime in due_runners:
-                        if runtime.last_error is None:
-                            runtime.last_result_meta.setdefault(
-                                "catchup_session_date",
-                                catchup_session_date.isoformat(),
-                            )
-                            runtime.last_message = (
-                                f"{runtime.last_message} Catch-up captured for "
-                                f"{catchup_session_date.isoformat()}."
-                            )
-                        catchup_ran = True
-                    if catchup_ran:
-                        return self.get_status()
-                for runtime in self._runners.values():
-                    if runtime.config.enabled and not runtime.running and runtime.last_message is None:
-                        runtime.last_message = "Armed for the next market session."
-                return self.get_status()
-
-            due_runners = [
-                runtime
-                for runtime in self._runners.values()
-                if force or runtime.is_due(now)
-            ]
             if due_runners:
                 await self._run_due_runners(due_runners, now=now)
+            if catchup_runners:
+                await self._run_due_runners(catchup_runners, now=now)
+                # End-of-session portfolio reconciliation snapshot.
+                try:
+                    from core.paper_trade_recorder import paper_trade_recorder
+
+                    await paper_trade_recorder.snapshot_daily(
+                        session_date=catchup_session_date.isoformat()
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[MarketHoursSupervisor] portfolio snapshot failed: {}", exc
+                    )
+                for runtime in catchup_runners:
+                    if runtime.last_error is None:
+                        runtime.last_result_meta.setdefault(
+                            "catchup_session_date",
+                            catchup_session_date.isoformat(),
+                        )
+                        runtime.last_message = (
+                            f"{runtime.last_message} Catch-up captured for "
+                            f"{catchup_session_date.isoformat()}."
+                        )
+            for runtime in self._runners.values():
+                if (
+                    runtime.config.enabled
+                    and not runtime.running
+                    and runtime.last_message is None
+                    and not self._runtime_market_open(runtime, now)
+                ):
+                    runtime.last_message = "Armed for the next market session."
 
         return self.get_status()
 
@@ -632,9 +673,21 @@ class MarketHoursPaperSupervisor:
         return runtime.serialize(
             now,
             loop_active=loop_active,
-            market_hours_fn=self._market_hours_fn,
-            next_open_fn=self._next_open_fn,
+            market_hours_fn=self._runtime_market_hours_fn(runtime),
+            next_open_fn=self._runtime_next_open_fn(runtime),
         )
+
+    def _runtime_market_hours_fn(self, runtime: RunnerRuntime) -> MarketHoursFn:
+        return runtime.config.market_hours_fn or self._market_hours_fn
+
+    def _runtime_next_open_fn(self, runtime: RunnerRuntime) -> NextOpenFn:
+        return runtime.config.next_open_fn or self._next_open_fn
+
+    def _runtime_market_open(self, runtime: RunnerRuntime, now: datetime) -> bool:
+        return self._runtime_market_hours_fn(runtime)(now)
+
+    def _runtime_next_open(self, runtime: RunnerRuntime, now: datetime) -> datetime:
+        return self._runtime_next_open_fn(runtime)(now)
 
     def get_status(self) -> dict[str, Any]:
         now = self._now_fn()
@@ -645,16 +698,22 @@ class MarketHoursPaperSupervisor:
             key: runtime.serialize(
                 now,
                 loop_active=loop_active,
-                market_hours_fn=self._market_hours_fn,
-                next_open_fn=self._next_open_fn,
+                market_hours_fn=self._runtime_market_hours_fn(runtime),
+                next_open_fn=self._runtime_next_open_fn(runtime),
             )
             for key, runtime in self._runners.items()
         }
+        any_runner_market_open = any(
+            self._runtime_market_open(runtime, now)
+            for runtime in self._runners.values()
+            if runtime.config.enabled
+        )
         healthy_runner_count = sum(1 for item in runners.values() if item.get("last_error") is None)
         return {
             "enabled": self._enabled,
             "loop_active": loop_active,
             "market_open": market_open,
+            "any_runner_market_open": any_runner_market_open,
             "now_ist": now.isoformat(),
             "next_market_open_ist": next_open.isoformat(),
             "runner_count": len(runners),

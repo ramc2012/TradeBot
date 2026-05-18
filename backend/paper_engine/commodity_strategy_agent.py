@@ -1151,8 +1151,20 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             self._persist_state()
             return
         if self._manual_restart_required and not force:
-            self._persist_state()
-            return
+            if _in_commodity_hours():
+                self._manual_restart_required = False
+                self._start_required = False
+                self._last_message = "Commodity agent auto-resumed because MCX market is open."
+            else:
+                self._persist_state()
+                return
+        if self._start_required and not force:
+            if _in_commodity_hours():
+                self._start_required = False
+                self._last_message = "Commodity agent auto-resumed because MCX market is open."
+            else:
+                self._persist_state()
+                return
         if self._loop_active():
             return
         self._start_required = False
@@ -3615,12 +3627,19 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             )
             self._append_commentary("warning", self._last_message)
         else:
-            self._start_required = True
-            self._manual_restart_required = True
-            self._last_message = "Commodity kill switch released. Start the commodity agent manually to resume scanning."
+            market_open = _in_commodity_hours()
+            self._start_required = not market_open
+            self._manual_restart_required = False
+            self._last_message = (
+                "Commodity kill switch released. Agent will resume automatically now because MCX is open."
+                if market_open
+                else "Commodity kill switch released. Agent is armed for the next MCX session."
+            )
             self._append_commentary("success", self._last_message)
 
         self._persist_state()
+        if not self._kill_switch_active and _in_commodity_hours() and self._auto_run_enabled:
+            await self.start(force=True)
         if previous != self._kill_switch_active:
             await record_audit_event(
                 market="commodity",

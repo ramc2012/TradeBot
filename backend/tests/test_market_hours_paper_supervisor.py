@@ -106,3 +106,38 @@ def test_market_hours_supervisor_runs_post_close_catchup_once_per_session() -> N
     assert runner["last_result_meta"]["catchup_session_date"] == "2026-04-20"
     assert "Catch-up captured for 2026-04-20." in runner["last_message"]
     assert second["runners"]["auction_intelligence"]["last_success_at"] == runner["last_success_at"]
+
+
+def test_runner_specific_market_hours_can_run_when_primary_market_closed() -> None:
+    now = datetime(2026, 4, 20, 22, 0, tzinfo=IST)
+    calls: list[str] = []
+
+    async def _runner() -> dict[str, object]:
+        calls.append("gann")
+        return {"result_count": 1}
+
+    next_primary_open = datetime(2026, 4, 21, 9, 15, tzinfo=IST)
+    supervisor = MarketHoursPaperSupervisor(
+        enabled=True,
+        runners=[
+            RunnerConfig(
+                key="gann_tp_delta",
+                label="Gann",
+                interval_seconds=60,
+                callback=_runner,
+                market_hours_fn=lambda current: True,
+                next_open_fn=lambda current: current,
+            )
+        ],
+        now_fn=lambda: now,
+        market_hours_fn=lambda current: False,
+        next_open_fn=lambda current: next_primary_open,
+    )
+
+    status = asyncio.run(supervisor.run_due_once())
+
+    assert calls == ["gann"]
+    assert status["market_open"] is False
+    assert status["any_runner_market_open"] is True
+    runner = status["runners"]["gann_tp_delta"]
+    assert runner["last_success_at"] is not None
