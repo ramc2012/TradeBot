@@ -375,11 +375,12 @@ class StrategyEntryMixin:
             if kind_str == "INDEX":
                 from agent.window_calculator import trading_days_remaining as _trading_days_remaining
                 if _trading_days_remaining(window, as_of=_now_ist().date()) < MIN_TTE_DAYS:
-                    await persist_raw_signal(
-                        "blocked",
-                        "expiry_day_skip_t0",
-                        ltp=None,
-                    )
+                    # persist_raw_signal is not defined yet at this point in
+                    # the iteration (its def lives below near the macd
+                    # snapshot block). Tally the rejection through the
+                    # always-available _tally helper instead — same outcome
+                    # for the status-payload counter, no UnboundLocalError.
+                    _tally("expiry_day_skip_t0")
                     continue
 
             if expiry_str:
