@@ -1162,6 +1162,15 @@ async def ensure_fyers_session(force_validate: bool = False) -> bool:
                 "auto_restored": True,
             }
         _persist_broker_session("fyers", token)
+        # Wire the newly-restored adapter into the data router so the
+        # websocket subscribes to the live index feed. Without this the
+        # data router stays mode=idle with subscribed_count=0, no ticks
+        # flow, live_candle_store has nothing to flush, and
+        # option_premium_candles goes stale within the trading day.
+        try:
+            await _sync_market_data_feed()
+        except Exception as feed_exc:
+            logger.warning(f"[Fyers] feed sync after restore failed: {feed_exc}")
         logger.info("✓ Fyers restored from saved credentials")
         return True
     except Exception as exc:
