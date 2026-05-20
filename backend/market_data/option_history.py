@@ -175,7 +175,29 @@ class OptionHistoryService:
                 latest_seen = parsed
         if latest_seen is None:
             return False
-        return latest_seen.date() < cls._today_ist_date()
+        # Stale if the latest bar is from a previous trading day OR — if
+        # the market is open — older than one full bar interval plus a
+        # small broker-publish buffer. Without the intraday check the gate
+        # latches False as soon as the 09:15 bar lands (latest.date() ==
+        # today) and never refetches the 09:45/10:15/10:45 bars for the
+        # rest of the session — S1 ends up computing MACD on yesterday's
+        # close vs the 09:15 bar for 6 hours.
+        today = cls._today_ist_date()
+        if latest_seen.date() < today:
+            return True
+        now_ist = datetime.now(IST)
+        market_open = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+        market_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+        if now_ist < market_open or now_ist > market_close:
+            return False
+        try:
+            bar_minutes = interval_minutes(interval)
+        except KeyError:
+            return False
+        # Two-minute buffer so we don't pile broker calls in the seconds
+        # right after a bar boundary while the broker is still publishing.
+        stale_after = timedelta(minutes=bar_minutes + 2)
+        return (now_ist - latest_seen) > stale_after
 
     @staticmethod
     def _aggregate_rows(rows: list[dict[str, Any]], interval_minutes: int) -> list[dict[str, Any]]:
