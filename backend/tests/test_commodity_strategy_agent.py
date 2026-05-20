@@ -69,6 +69,8 @@ def test_evaluate_commodity_signal_detects_bullish_macd_zero_cross() -> None:
     assert signal["reason"] == "macd_zero_cross_up"
     assert signal["regime"] == "bullish"
     assert signal["macd"] is not None
+    assert signal["rsi"] is not None
+    assert signal["indicator_timeframe"] == "15minute"
     assert signal["atr"] is not None
 
 
@@ -133,6 +135,11 @@ def test_commodity_options_pe_cross_does_not_require_ce_quadrant(monkeypatch, tm
     assert analyzed["signal_side"] == "PE"
     assert analyzed["signal_reason"] == "pe_macd_zero_cross"
     assert analyzed["pe_cross"] is True
+    assert analyzed["indicator_timeframe"] == "30minute"
+    assert analyzed["ce"]["indicator_timeframe"] == "30minute"
+    assert analyzed["pe"]["indicator_timeframe"] == "30minute"
+    assert analyzed["ce"]["rsi"] is not None
+    assert analyzed["pe"]["rsi"] is not None
 
 
 def test_filter_closed_interval_rows_drops_incomplete_tail_bar() -> None:

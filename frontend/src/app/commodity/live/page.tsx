@@ -51,6 +51,8 @@ type WatchRow = {
   macd?: number | null;
   macd_signal?: number | null;
   macd_histogram?: number | null;
+  rsi?: number | null;
+  indicator_timeframe?: string | null;
   atr?: number | null;
   regime?: string | null;
   mp_day_type?: string | null;
@@ -63,6 +65,14 @@ type WatchRow = {
   trajectory?: Trajectory;
   proximity_pct?: number | null;
   bucket_rationale?: string | null;
+  expiry?: string | null;
+  ce_symbol?: string | null;
+  pe_symbol?: string | null;
+  signal_side?: string | null;
+  trade_bar_time?: string | null;
+  trade_symbol?: string | null;
+  ce?: Record<string, unknown> | null;
+  pe?: Record<string, unknown> | null;
 };
 
 type CommoditySnapshotContract = {
@@ -246,6 +256,13 @@ function formatPct(n: number | null | undefined, decimals = 2): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "--";
   const sign = n > 0 ? "+" : "";
   return `${sign}${Number(n).toFixed(decimals)}%`;
+}
+
+function timeframeLabel(value: unknown, fallback: string): string {
+  const raw = String(value || fallback);
+  if (raw === "15minute") return "15m";
+  if (raw === "30minute") return "30m";
+  return raw.replace("minute", "m");
 }
 
 function finiteNumber(value: unknown, fallback = 0): number {
@@ -583,9 +600,20 @@ function InstrumentWatchlist({
       </div>
     );
   }
-  const optionsBySymbol = new Map(
-    optionRows.map((row) => [String(row.symbol || ""), row]),
-  );
+  const optionsBySymbol = new Map<string, WatchRow>();
+  const addOptionKey = (key: unknown, row: WatchRow) => {
+    const normalized = String(key || "").trim();
+    if (normalized && !optionsBySymbol.has(normalized)) {
+      optionsBySymbol.set(normalized, row);
+    }
+  };
+  for (const row of optionRows) {
+    addOptionKey(row.symbol, row);
+    addOptionKey(row.configured_symbol, row);
+    addOptionKey(row.active_lookup_symbol, row);
+    addOptionKey(row.selected_lookup_symbol, row);
+    addOptionKey(row.underlying, row);
+  }
 
   const toggle = (key: string) => {
     setExpanded((prev) => {
@@ -606,29 +634,36 @@ function InstrumentWatchlist({
   const TDR = `${TD} text-right`;
 
   return (
-    <div className="overflow-hidden rounded-md border border-bg-active/30">
-      <table className="w-full border-collapse">
-        <thead>
-          <tr>
-            <th className={`${TH} w-6 px-1`} aria-label="expand" />
-            <th className={TH}>Symbol</th>
-            <th className={`${TH} w-14`}>Bkt</th>
-            <th className={`${THR} w-24`}>Last</th>
-            <th className={`${THR} w-20`}>Δ%</th>
-            <th className={`${THR} w-20`}>MACD</th>
-            <th className={`${THR} w-20`}>Hist</th>
-            <th className={`${TH} w-16`}>Regime</th>
-            <th className={`${TH} w-16`}>MP</th>
-            <th className={`${TH} w-16`}>Sig</th>
-            <th className={`${THR} w-16`}>DTE</th>
-            <th className={`${THR} w-20`}>Bar</th>
-          </tr>
-        </thead>
-        <tbody>
-          {futuresRows.map((row) => {
+    <div className="space-y-3">
+      <div className="overflow-hidden rounded-md border border-bg-active/30">
+        <table className="w-full border-collapse">
+          <thead>
+            <tr>
+              <th className={`${TH} w-6 px-1`} aria-label="expand" />
+              <th className={TH}>Symbol</th>
+              <th className={`${TH} w-14`}>Bkt</th>
+              <th className={`${THR} w-24`}>Last</th>
+              <th className={`${THR} w-20`}>Δ%</th>
+              <th className={`${THR} w-20`}>MACD 15m</th>
+              <th className={`${THR} w-20`}>Hist</th>
+              <th className={`${THR} w-16`}>RSI 15m</th>
+              <th className={`${TH} w-16`}>Regime</th>
+              <th className={`${TH} w-16`}>MP</th>
+              <th className={`${TH} w-16`}>Sig</th>
+              <th className={`${THR} w-16`}>DTE</th>
+              <th className={`${THR} w-20`}>Bar</th>
+            </tr>
+          </thead>
+          <tbody>
+            {futuresRows.map((row) => {
             const key = String(row.symbol || row.underlying || "");
             const isOpen = expanded.has(key);
-            const optionRow = optionsBySymbol.get(String(row.symbol || ""));
+            const optionRow =
+              optionsBySymbol.get(String(row.symbol || "")) ||
+              optionsBySymbol.get(String(row.configured_symbol || "")) ||
+              optionsBySymbol.get(String(row.active_lookup_symbol || "")) ||
+              optionsBySymbol.get(String(row.selected_lookup_symbol || "")) ||
+              optionsBySymbol.get(String(row.underlying || ""));
             const ce = (optionRow as Record<string, unknown> | undefined)?.ce as
               | Record<string, unknown>
               | undefined;
@@ -695,6 +730,9 @@ function InstrumentWatchlist({
                   <td className={`${TDR} ${colorForDelta(row.macd_histogram)}`}>
                     {formatNumber(row.macd_histogram, 2)}
                   </td>
+                  <td className={`${TDR} text-text-secondary`}>
+                    {formatNumber(row.rsi, 1)}
+                  </td>
                   <td className="px-2 py-1.5 align-middle text-[10.5px] uppercase text-text-secondary">
                     {regimeShort(row.regime)}
                   </td>
@@ -714,12 +752,94 @@ function InstrumentWatchlist({
                 {isOpen ? (
                   <tr className="border-t border-bg-active/15 bg-bg-secondary/15">
                     <td className="px-1" />
-                    <td colSpan={11} className="px-2 py-2">
+                    <td colSpan={12} className="px-2 py-2">
                       <InstrumentDetail row={row} ce={ce} pe={pe} dte={dte} />
                     </td>
                   </tr>
                 ) : null}
               </Fragment>
+            );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <OptionPairWatchlist rows={optionRows} />
+    </div>
+  );
+}
+
+function OptionPairWatchlist({ rows }: { rows: WatchRow[] }) {
+  if (!rows.length) {
+    return (
+      <div className="rounded-md border border-bg-active/20 px-3 py-4 text-center text-xs text-text-muted">
+        No CE/PE option pairs are available from the current commodity setup.
+      </div>
+    );
+  }
+
+  const TH =
+    "px-2 py-1.5 text-left text-[10px] font-semibold uppercase tracking-[0.14em] text-text-muted bg-bg-secondary/40 sticky top-0 z-10";
+  const THR = `${TH} text-right`;
+  const TD = "px-2 py-1.5 align-middle whitespace-nowrap font-mono text-[12px]";
+  const TDR = `${TD} text-right`;
+
+  return (
+    <div className="overflow-hidden rounded-md border border-bg-active/25">
+      <div className="border-b border-bg-active/20 px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-text-muted">
+        CE / PE Option Pairs · 30m MACD + RSI
+      </div>
+      <table className="w-full border-collapse">
+        <thead>
+          <tr>
+            <th className={TH}>Underlying</th>
+            <th className={TH}>Signal</th>
+            <th className={`${THR} w-20`}>CE Strike</th>
+            <th className={`${THR} w-20`}>CE LTP</th>
+            <th className={`${THR} w-20`}>CE MACD</th>
+            <th className={`${THR} w-16`}>CE RSI</th>
+            <th className={`${THR} w-20`}>PE Strike</th>
+            <th className={`${THR} w-20`}>PE LTP</th>
+            <th className={`${THR} w-20`}>PE MACD</th>
+            <th className={`${THR} w-16`}>PE RSI</th>
+            <th className={`${THR} w-20`}>Bar</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => {
+            const ce = (row.ce || {}) as Record<string, unknown>;
+            const pe = (row.pe || {}) as Record<string, unknown>;
+            const ceTimeframe = timeframeLabel(ce.indicator_timeframe, "30minute");
+            const peTimeframe = timeframeLabel(pe.indicator_timeframe, "30minute");
+            const key = String(row.symbol || row.underlying || row.ce_symbol || row.pe_symbol);
+            return (
+              <tr key={key} className="border-t border-bg-active/20 hover:bg-bg-secondary/20">
+                <td className="px-2 py-1.5 align-middle">
+                  <span className="font-semibold text-text-primary">{row.underlying || row.display_name || row.symbol}</span>
+                  <span className="ml-2 font-mono text-[10px] text-text-muted">{row.expiry || "--"}</span>
+                </td>
+                <td className="px-2 py-1.5 align-middle text-[10.5px] uppercase text-text-secondary">
+                  {row.signal_side || sigShort(row.signal_validation || row.signal_validation_detail)}
+                </td>
+                <td className={`${TDR} text-text-secondary`}>{ce.strike != null ? String(ce.strike) : "--"}</td>
+                <td className={`${TDR} text-text-primary`}>{formatNumber(Number(ce.live_ltp ?? ce.ltp), 2)}</td>
+                <td className={`${TDR} ${colorForDelta(Number(ce.macd))}`} title={`CE MACD ${ceTimeframe}`}>
+                  {formatNumber(Number(ce.macd), 2)}
+                </td>
+                <td className={`${TDR} text-text-secondary`} title={`CE RSI ${ceTimeframe}`}>
+                  {formatNumber(Number(ce.rsi), 1)}
+                </td>
+                <td className={`${TDR} text-text-secondary`}>{pe.strike != null ? String(pe.strike) : "--"}</td>
+                <td className={`${TDR} text-text-primary`}>{formatNumber(Number(pe.live_ltp ?? pe.ltp), 2)}</td>
+                <td className={`${TDR} ${colorForDelta(Number(pe.macd))}`} title={`PE MACD ${peTimeframe}`}>
+                  {formatNumber(Number(pe.macd), 2)}
+                </td>
+                <td className={`${TDR} text-text-secondary`} title={`PE RSI ${peTimeframe}`}>
+                  {formatNumber(Number(pe.rsi), 1)}
+                </td>
+                <td className={`${TDR} text-[10px] text-text-muted`}>
+                  {formatIST(row.trade_bar_time || String(ce.bar_time || pe.bar_time || ""))}
+                </td>
+              </tr>
             );
           })}
         </tbody>
@@ -743,6 +863,11 @@ function InstrumentDetail({
   const peLtp = Number(pe?.live_ltp ?? pe?.ltp);
   const ceMacd = Number(ce?.macd);
   const peMacd = Number(pe?.macd);
+  const ceRsi = Number(ce?.rsi);
+  const peRsi = Number(pe?.rsi);
+  const futuresTimeframe = timeframeLabel(row.indicator_timeframe, "15minute");
+  const ceTimeframe = timeframeLabel(ce?.indicator_timeframe, "30minute");
+  const peTimeframe = timeframeLabel(pe?.indicator_timeframe, "30minute");
   const ceOi = Number(ce?.oi);
   const peOi = Number(pe?.oi);
   const ceOiDelta = ce?.oi_change != null ? Number(ce.oi_change) : null;
@@ -755,13 +880,15 @@ function InstrumentDetail({
       {/* Futures stats column */}
       <div className="col-span-12 lg:col-span-3">
         <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-muted">
-          Futures
+          Futures · {futuresTimeframe}
         </div>
         <dl className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
           <dt className="text-text-muted">ATR</dt>
           <dd className="text-right font-mono">{formatNumber(row.atr, 2)}</dd>
-          <dt className="text-text-muted">Signal</dt>
+          <dt className="text-text-muted">MACD signal</dt>
           <dd className="text-right font-mono">{formatNumber(row.macd_signal, 2)}</dd>
+          <dt className="text-text-muted">RSI</dt>
+          <dd className="text-right font-mono">{formatNumber(row.rsi, 1)}</dd>
           <dt className="text-text-muted">Proximity</dt>
           <dd className="text-right font-mono">
             {row.proximity_pct == null ? "—" : `${Math.round(row.proximity_pct)}%`}
@@ -783,7 +910,7 @@ function InstrumentDetail({
       {/* CE leg */}
       <div className="col-span-12 sm:col-span-6 lg:col-span-4">
         <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-300/80">
-          CE leg
+          CE leg · {ceTimeframe}
         </div>
         {ce ? (
           <dl className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
@@ -796,6 +923,10 @@ function InstrumentDetail({
             <dt className="text-text-muted">MACD</dt>
             <dd className={`text-right font-mono ${colorForDelta(ceMacd)}`}>
               {Number.isFinite(ceMacd) ? formatNumber(ceMacd, 2) : "—"}
+            </dd>
+            <dt className="text-text-muted">RSI</dt>
+            <dd className="text-right font-mono">
+              {Number.isFinite(ceRsi) ? formatNumber(ceRsi, 1) : "—"}
             </dd>
             <dt className="text-text-muted">OI</dt>
             <dd className="text-right font-mono">
@@ -816,7 +947,7 @@ function InstrumentDetail({
       {/* PE leg */}
       <div className="col-span-12 sm:col-span-6 lg:col-span-4">
         <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-rose-300/80">
-          PE leg
+          PE leg · {peTimeframe}
         </div>
         {pe ? (
           <dl className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
@@ -829,6 +960,10 @@ function InstrumentDetail({
             <dt className="text-text-muted">MACD</dt>
             <dd className={`text-right font-mono ${colorForDelta(peMacd)}`}>
               {Number.isFinite(peMacd) ? formatNumber(peMacd, 2) : "—"}
+            </dd>
+            <dt className="text-text-muted">RSI</dt>
+            <dd className="text-right font-mono">
+              {Number.isFinite(peRsi) ? formatNumber(peRsi, 1) : "—"}
             </dd>
             <dt className="text-text-muted">OI</dt>
             <dd className="text-right font-mono">

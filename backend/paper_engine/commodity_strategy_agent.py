@@ -21,7 +21,7 @@ from agentic_rag.audit_agent import record_audit_event
 from analysis.indicators_agent import IndicatorContext, indicators_agent
 from analysis.macd_engine import compute_ema
 from analysis.signal_classifier import classify_signal_bucket
-from analytics.technicals import latest_macd_rsi
+from analytics.technicals import compute_rsi, latest_macd_rsi
 from api.routers.auth import (
     ensure_fyers_session,
     ensure_upstox_session,
@@ -570,8 +570,10 @@ def evaluate_commodity_signal(
             "macd": None,
             "macd_signal": None,
             "macd_histogram": None,
+            "rsi": None,
             "atr": None,
             "bar_time": None,
+            "indicator_timeframe": timeframe,
         }
 
     closes = [float(candle.get("close") or 0.0) for candle in candles]
@@ -586,6 +588,8 @@ def evaluate_commodity_signal(
     latest_hist = histogram[-1]
     latest_close = closes[-1]
     previous_close = closes[-2]
+    rsi_values = compute_rsi(closes)
+    latest_rsi = rsi_values[-1] if rsi_values else None
     latest_atr = _compute_atr(candles, DEFAULT_COMMODITY_ATR_PERIOD)[-1]
     recent_cross_signal, recent_cross_bars_ago = _recent_zero_cross(
         macd_line,
@@ -655,10 +659,12 @@ def evaluate_commodity_signal(
         "macd": _round_or_none(latest_macd, 4),
         "macd_signal": _round_or_none(latest_signal, 4),
         "macd_histogram": _round_or_none(latest_hist, 4),
+        "rsi": _round_or_none(latest_rsi, 2),
         "prev_macd_histogram": _round_or_none(prev_hist, 4),
         "prev_macd": _round_or_none(previous_macd, 4),
         "atr": _round_or_none(latest_atr, 4),
         "bar_time": str(candles[-1].get("time") or ""),
+        "indicator_timeframe": timeframe,
         "recent_cross_signal": recent_cross_signal,
         "recent_cross_bars_ago": recent_cross_bars_ago,
         "continuation_signal": continuation_signal,
@@ -1625,6 +1631,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             decorated.append(
                 {
                     **row,
+                    "indicator_timeframe": FUTURES_TIMEFRAME,
                     "display_name": spec.display_name,
                     "lot_size": spec.futures_lot_size,
                     "lots_per_trade": self._lots_per_trade,
@@ -2522,6 +2529,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
 
         ce.update(ce_indicators)
         pe.update(pe_indicators)
+        ce["indicator_timeframe"] = OPTIONS_TIMEFRAME
+        pe["indicator_timeframe"] = OPTIONS_TIMEFRAME
         ce["bar_time"] = ce_analysis.get("bar_time")
         pe["bar_time"] = pe_analysis.get("bar_time")
         ce["zero_cross"] = "fresh_up" if ce_analysis.get("signal") == "BUY" else "above_zero" if (ce_indicators.get("macd") or 0) > 0 else "below_zero"
@@ -2611,6 +2620,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "contract_unit_label": spec.contract_unit_label,
             "quote_unit_label": spec.quote_unit_label,
             "regime": regime,
+            "indicator_timeframe": OPTIONS_TIMEFRAME,
             "signal_side": signal_side,
             "signal_reason": signal_reason,
             "ce_cross": ce_cross,
