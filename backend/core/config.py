@@ -71,10 +71,27 @@ class Settings(BaseSettings):
     STRATEGY_LEARNING_LOOKBACK_DAYS: int = 120
     STRATEGY_LEARNING_MIN_TRADES: int = 3
     STRATEGY_LEARNING_BLOCK_ENTRIES_ENABLED: bool = False
+    # Per-purpose adapter routing. The goal is to distribute load between the
+    # two live brokers so neither hits 429 first and a single rate-limit storm
+    # doesn't cascade across desks. Rationale per purpose:
+    #
+    #   live_ticks      Fyers' websocket is more responsive and exposes L2 +
+    #                   aggressor-side data Upstox doesn't. Fyers first.
+    #   market_profile  Needs continuous tick stream for the value-area engine.
+    #                   Fyers preferred; postgres covers offline windows.
+    #   order_flow      Needs depth + aggressor flags only Fyers exposes.
+    #   option_chain    Upstox first — its chain endpoint has higher quota and
+    #                   richer contract metadata. Fyers reserved for the few
+    #                   purposes where it's uniquely capable (ticks / MP / OF)
+    #                   so the chain polls don't deplete Fyers' rate budget at
+    #                   startup. Catalog/postgres fallback if both brokers fail.
+    #   historical      DB-cached candles served first; Upstox analytics token
+    #                   has the deepest history; live Upstox + Fyers as backup.
+    #   analytics       DB first; brokers only as a backfill for missing rows.
     MARKET_DATA_LIVE_TICK_ORDER: str = "fyers,upstox"
     MARKET_DATA_MARKET_PROFILE_ORDER: str = "fyers,postgres,upstox"
     MARKET_DATA_ORDER_FLOW_ORDER: str = "fyers,upstox"
-    MARKET_DATA_OPTION_CHAIN_ORDER: str = "fyers,upstox,catalog"
+    MARKET_DATA_OPTION_CHAIN_ORDER: str = "upstox,fyers,catalog"
     MARKET_DATA_HISTORICAL_ORDER: str = "postgres,upstox_analytics,upstox,fyers"
     MARKET_DATA_ANALYTICS_ORDER: str = "postgres,upstox_analytics,upstox"
     DATA_QUALITY_SCAN_GATE_ENABLED: bool = True
