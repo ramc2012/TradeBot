@@ -23,7 +23,9 @@ import {
   Radar,
   Settings,
   Target,
+  Workflow,
   Waves,
+  CandlestickChart,
 } from "lucide-react";
 
 const SIDEBAR_STORAGE_KEY = "nomad-curie.sidebar.collapsed";
@@ -41,6 +43,8 @@ const NAV_GROUPS = [
       { href: "/directional-options", label: "Long Premium", icon: Target },
       { href: "/gann-tp-delta", label: "Gann TP Delta", icon: Compass },
       { href: "/commodity", label: "Commodity", icon: Waves },
+      { href: "/orderflow", label: "Orderflow", icon: Workflow },
+      { href: "/charts", label: "Charts", icon: CandlestickChart },
     ],
   },
   {

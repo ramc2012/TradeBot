@@ -1,0 +1,408 @@
+"""OHLC chart module with trade-history overlays.
+
+Returns spot/futures OHLC for any configured instrument plus the four
+indicators traders verify strategies against (MACD, RSI, BB, EMA50) and
+the trade entry/exit markers from S1 / S2 / Commodity / CBE / Directional.
+
+Spot/futures is the cleanest series to render across the mixed F&O
+universe (indices, MCX commodities, NSE stocks). Option-trade markers
+carry their strike + premium + P&L in the tooltip so a trader can verify
+a strategy fired where it was supposed to without reading two charts.
+"""
+from __future__ import annotations
+
+import math
+from datetime import date, datetime, timedelta, timezone
+from typing import Any
+from zoneinfo import ZoneInfo
+
+from fastapi import APIRouter, HTTPException, Query
+from sqlalchemy import text
+
+from analysis.macd_engine import compute_macd
+from analytics.technicals import compute_rsi
+from db.database import AsyncSessionLocal
+
+
+router = APIRouter(prefix="/api/charts", tags=["charts"])
+
+IST = ZoneInfo("Asia/Kolkata")
+
+# Strategy color palette matches what the frontend uses for trade markers.
+STRATEGY_COLORS: dict[str, str] = {
+    "s1": "#22d3ee",          # cyan
+    "s2": "#3b82f6",          # blue
+    "commodity": "#f59e0b",   # amber
+    "cbe": "#a855f7",         # violet
+    "directional": "#10b981", # emerald
+}
+
+SUPPORTED_TIMEFRAMES = ("15minute", "30minute", "60minute")
+
+# Strategy-label classifier — matches the labels we already write to
+# agent_signals.strategy_label and runtime/portfolio/events.jsonl.strategy.
+def _classify_strategy(label: str | None) -> str | None:
+    raw = str(label or "").lower()
+    if "strategy 1" in raw or "s1" in raw or raw == "macd_strategy":
+        return "s1"
+    if "strategy 2" in raw or "s2" in raw or raw == "index_mp_strategy":
+        return "s2"
+    if "commodity" in raw or "mcx" in raw:
+        return "commodity"
+    if "cbe" in raw or "compression" in raw:
+        return "cbe"
+    if "directional" in raw:
+        return "directional"
+    return None
+
+
+# ── Universe ────────────────────────────────────────────────────────────────
+
+_INDEX_UNDERLYINGS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "NIFTYNXT50"}
+_COMMODITY_UNDERLYINGS = {"CRUDEOIL", "GOLD", "SILVERM", "NATURALGAS"}
+
+
+@router.get("/universe")
+async def chart_universe() -> dict[str, Any]:
+    """Return all instruments the chart module can render, with metadata.
+
+    Indices + commodities ship in a fixed list (spot/futures series is
+    always available). Stocks come from atm_option_watchlist_snapshots —
+    only those we actually scan get a chart so the dropdown stays
+    meaningful. Each row carries `traded_today` so the UI can show a
+    chip when a strategy actually opened a position on it today.
+    """
+    async with AsyncSessionLocal() as session:
+        stock_rows = await session.execute(
+            text(
+                """
+                SELECT underlying
+                FROM atm_option_watchlist_snapshots
+                WHERE kind = 'STOCK'
+                  AND time >= NOW() - INTERVAL '3 days'
+                GROUP BY underlying
+                ORDER BY underlying ASC
+                """
+            )
+        )
+        stock_symbols = [row[0] for row in stock_rows.fetchall() if row[0]]
+
+        today_rows = await session.execute(
+            text(
+                """
+                SELECT DISTINCT underlying
+                FROM agent_signals
+                WHERE created_at >= (CURRENT_DATE AT TIME ZONE 'Asia/Kolkata')
+                  AND status IN ('open', 'closed', 'entered')
+                """
+            )
+        )
+        traded_today = {row[0] for row in today_rows.fetchall() if row[0]}
+
+    items: list[dict[str, Any]] = []
+    for sym in sorted(_INDEX_UNDERLYINGS):
+        items.append(
+            {"underlying": sym, "kind": "INDEX", "traded_today": sym in traded_today}
+        )
+    for sym in sorted(_COMMODITY_UNDERLYINGS):
+        items.append(
+            {"underlying": sym, "kind": "COMMODITY", "traded_today": sym in traded_today}
+        )
+    for sym in stock_symbols:
+        if sym in _INDEX_UNDERLYINGS or sym in _COMMODITY_UNDERLYINGS:
+            continue
+        items.append(
+            {"underlying": sym, "kind": "STOCK", "traded_today": sym in traded_today}
+        )
+    return {
+        "instruments": items,
+        "kinds": ["INDEX", "COMMODITY", "STOCK"],
+        "strategy_colors": STRATEGY_COLORS,
+        "supported_timeframes": list(SUPPORTED_TIMEFRAMES),
+    }
+
+
+# ── OHLC + indicators + trades ───────────────────────────────────────────────
+
+
+def _compute_ema(values: list[float], period: int) -> list[float | None]:
+    n = len(values)
+    out: list[float | None] = [None] * n
+    if n < period:
+        return out
+    sma = sum(values[:period]) / period
+    out[period - 1] = sma
+    k = 2.0 / (period + 1)
+    prev = sma
+    for i in range(period, n):
+        prev = values[i] * k + prev * (1.0 - k)
+        out[i] = prev
+    return out
+
+
+def _compute_bollinger(values: list[float], period: int = 20, num_std: float = 2.0) -> tuple[
+    list[float | None], list[float | None], list[float | None]
+]:
+    n = len(values)
+    upper: list[float | None] = [None] * n
+    middle: list[float | None] = [None] * n
+    lower: list[float | None] = [None] * n
+    if n < period:
+        return upper, middle, lower
+    for i in range(period - 1, n):
+        window = values[i - period + 1 : i + 1]
+        mean = sum(window) / period
+        variance = sum((x - mean) ** 2 for x in window) / period
+        std = math.sqrt(variance)
+        middle[i] = mean
+        upper[i] = mean + num_std * std
+        lower[i] = mean - num_std * std
+    return upper, middle, lower
+
+
+def _aggregate_to_timeframe(rows: list[dict[str, Any]], minutes: int) -> list[dict[str, Any]]:
+    """Aggregate 1-minute bars to the requested timeframe boundary.
+
+    Bucket key = bar-open floored to N-minute IST boundary. Within each
+    bucket: open = first, high = max, low = min, close = last, volume = sum.
+    """
+    if minutes <= 1:
+        return rows
+    buckets: dict[datetime, dict[str, Any]] = {}
+    order: list[datetime] = []
+    for row in rows:
+        ts = row.get("time")
+        if ts is None:
+            continue
+        if isinstance(ts, str):
+            try:
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        ts_ist = ts.astimezone(IST)
+        bucket_minute = (ts_ist.minute // minutes) * minutes
+        bucket_start = ts_ist.replace(minute=bucket_minute, second=0, microsecond=0)
+        if bucket_start not in buckets:
+            buckets[bucket_start] = {
+                "time": bucket_start.astimezone(timezone.utc),
+                "open": float(row.get("open") or row.get("close") or 0.0),
+                "high": float(row.get("high") or row.get("close") or 0.0),
+                "low": float(row.get("low") or row.get("close") or 0.0),
+                "close": float(row.get("close") or 0.0),
+                "volume": float(row.get("volume") or 0.0),
+            }
+            order.append(bucket_start)
+        else:
+            bucket = buckets[bucket_start]
+            high = float(row.get("high") or row.get("close") or 0.0)
+            low = float(row.get("low") or row.get("close") or 0.0)
+            bucket["high"] = max(bucket["high"], high)
+            bucket["low"] = min(bucket["low"], low)
+            bucket["close"] = float(row.get("close") or bucket["close"])
+            bucket["volume"] += float(row.get("volume") or 0.0)
+    return [buckets[start] for start in sorted(order)]
+
+
+async def _load_underlying_spot(
+    underlying: str,
+    lookback_sessions: int,
+    timeframe: str,
+) -> list[dict[str, Any]]:
+    """Pull underlying_spot_candles and aggregate to the requested timeframe."""
+    minutes = {"15minute": 15, "30minute": 30, "60minute": 60}.get(timeframe, 30)
+    # Pull enough 1-min history to cover the lookback in trading hours. ~7
+    # hours/day = 420 bars/day; pad to cover weekends.
+    days_back = max(lookback_sessions * 2 + 7, 14)
+    async with AsyncSessionLocal() as session:
+        # First try the native timeframe if it's already stored.
+        result = await session.execute(
+            text(
+                """
+                SELECT time, open, high, low, close, volume
+                FROM underlying_spot_candles
+                WHERE underlying = :underlying
+                  AND interval = :interval
+                  AND time >= NOW() - make_interval(days => :days)
+                ORDER BY time ASC
+                """
+            ),
+            {"underlying": underlying, "interval": timeframe, "days": days_back},
+        )
+        rows = [dict(row._mapping) for row in result.fetchall()]
+        if len(rows) >= 30:
+            return rows
+
+        # Fall back to 1-minute and aggregate.
+        result = await session.execute(
+            text(
+                """
+                SELECT time, open, high, low, close, volume
+                FROM underlying_spot_candles
+                WHERE underlying = :underlying
+                  AND interval = '1minute'
+                  AND time >= NOW() - make_interval(days => :days)
+                ORDER BY time ASC
+                """
+            ),
+            {"underlying": underlying, "days": days_back},
+        )
+        one_min_rows = [dict(row._mapping) for row in result.fetchall()]
+    return _aggregate_to_timeframe(one_min_rows, minutes)
+
+
+async def _load_trade_markers(
+    underlying: str,
+    *,
+    since: datetime,
+    until: datetime,
+) -> list[dict[str, Any]]:
+    """Return entry + exit markers for this underlying within [since, until]."""
+    markers: list[dict[str, Any]] = []
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT
+                    underlying,
+                    option_type,
+                    strike,
+                    entry_price,
+                    entered_at,
+                    closed_at,
+                    status,
+                    strategy_label,
+                    signal_reason,
+                    metadata
+                FROM agent_signals
+                WHERE underlying = :underlying
+                  AND entered_at IS NOT NULL
+                  AND entered_at BETWEEN :since AND :until
+                ORDER BY entered_at ASC
+                """
+            ),
+            {"underlying": underlying, "since": since, "until": until},
+        )
+        for row in result.fetchall():
+            r = dict(row._mapping)
+            strategy = _classify_strategy(r.get("strategy_label"))
+            if strategy not in STRATEGY_COLORS:
+                continue
+            entered_at = r.get("entered_at")
+            entry_price = r.get("entry_price")
+            metadata = dict(r.get("metadata") or {})
+            markers.append(
+                {
+                    "strategy": strategy,
+                    "type": "entry",
+                    "time": entered_at.isoformat() if entered_at else None,
+                    "option_type": r.get("option_type"),
+                    "strike": float(r.get("strike") or 0.0) or None,
+                    "premium": float(entry_price or 0.0) or None,
+                    "reason": r.get("signal_reason"),
+                    "label": r.get("strategy_label"),
+                }
+            )
+            closed_at = r.get("closed_at")
+            if closed_at and r.get("status") in {"closed", "exited"}:
+                exit_price = metadata.get("exit_price") or metadata.get("exit_premium")
+                pnl = metadata.get("pnl") or metadata.get("realized_pnl")
+                markers.append(
+                    {
+                        "strategy": strategy,
+                        "type": "exit",
+                        "time": closed_at.isoformat(),
+                        "option_type": r.get("option_type"),
+                        "strike": float(r.get("strike") or 0.0) or None,
+                        "premium": float(exit_price or 0.0) or None,
+                        "pnl": float(pnl) if pnl is not None else None,
+                        "reason": metadata.get("exit_reason") or metadata.get("close_reason"),
+                        "label": r.get("strategy_label"),
+                    }
+                )
+    return markers
+
+
+@router.get("/ohlc")
+async def chart_ohlc(
+    underlying: str = Query(..., description="Symbol — NIFTY, RELIANCE, CRUDEOIL, …"),
+    timeframe: str = Query("30minute"),
+    lookback_sessions: int = Query(5, ge=1, le=30),
+) -> dict[str, Any]:
+    timeframe = timeframe.lower()
+    if timeframe not in SUPPORTED_TIMEFRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported timeframe: {timeframe}. Supported: {', '.join(SUPPORTED_TIMEFRAMES)}",
+        )
+    underlying = underlying.upper().strip()
+    if not underlying:
+        raise HTTPException(status_code=400, detail="underlying is required")
+
+    bars_raw = await _load_underlying_spot(underlying, lookback_sessions, timeframe)
+    if not bars_raw:
+        return {
+            "underlying": underlying,
+            "timeframe": timeframe,
+            "bars": [],
+            "indicators": {},
+            "trades": [],
+            "detail": f"No spot/futures candle history available for {underlying}.",
+        }
+
+    closes = [float(b.get("close") or 0.0) for b in bars_raw]
+    # Indicators
+    macd_line, signal_line, hist = compute_macd(closes)
+    rsi_values = compute_rsi(closes, period=14)
+    upper, middle, lower = _compute_bollinger(closes, period=20, num_std=2.0)
+    ema50 = _compute_ema(closes, period=50)
+
+    bars: list[dict[str, Any]] = []
+    for i, b in enumerate(bars_raw):
+        t = b.get("time")
+        if hasattr(t, "isoformat"):
+            t_iso = t.isoformat()
+        else:
+            t_iso = str(t)
+        bars.append(
+            {
+                "time": t_iso,
+                "open": float(b.get("open") or 0.0),
+                "high": float(b.get("high") or 0.0),
+                "low": float(b.get("low") or 0.0),
+                "close": float(b.get("close") or 0.0),
+                "volume": float(b.get("volume") or 0.0),
+            }
+        )
+
+    if bars:
+        first_t = datetime.fromisoformat(bars[0]["time"].replace("Z", "+00:00"))
+        last_t = datetime.fromisoformat(bars[-1]["time"].replace("Z", "+00:00"))
+        # Pad ±1 day so entry/exit markers that landed slightly outside the
+        # aggregated bar window still attach to the nearest bar visually.
+        since = first_t - timedelta(days=1)
+        until = last_t + timedelta(days=1)
+    else:
+        since = datetime.now(timezone.utc) - timedelta(days=lookback_sessions * 2 + 5)
+        until = datetime.now(timezone.utc)
+    trades = await _load_trade_markers(underlying, since=since, until=until)
+
+    return {
+        "underlying": underlying,
+        "timeframe": timeframe,
+        "bar_count": len(bars),
+        "bars": bars,
+        "indicators": {
+            "macd": macd_line,
+            "macd_signal": signal_line,
+            "macd_histogram": hist,
+            "rsi": rsi_values,
+            "bb_upper": upper,
+            "bb_middle": middle,
+            "bb_lower": lower,
+            "ema50": ema50,
+        },
+        "trades": trades,
+        "strategy_colors": STRATEGY_COLORS,
+    }

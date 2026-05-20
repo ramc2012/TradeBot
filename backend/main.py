@@ -22,6 +22,7 @@ from api.routers import directional_options as directional_options_router
 from api.routers import gann_tp_delta as gann_tp_delta_router
 from api.routers import fractal_market_profile as fractal_market_profile_router
 from api.routers import orderflow as orderflow_router
+from api.routers import charts as charts_router
 from api.routers import system as system_router
 from api.routers import audit as audit_router
 from api.routers import data_quality as data_quality_router
@@ -250,6 +251,7 @@ app.include_router(directional_options_router.router)
 app.include_router(gann_tp_delta_router.router)
 app.include_router(fractal_market_profile_router.router)
 app.include_router(orderflow_router.router)
+app.include_router(charts_router.router)
 app.include_router(system_router.router)
 app.include_router(audit_router.router)
 app.include_router(data_quality_router.router)

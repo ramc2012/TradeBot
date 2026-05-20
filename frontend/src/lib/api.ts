@@ -598,6 +598,18 @@ export const getFractalMarketProfileReplayReport = (symbol = "NIFTY", force = fa
 export const getFractalMarketProfileReplaySuite = (force = false) =>
   api.get("/api/fractal-market-profile/replay-suite", { params: { force } });
 
+// ── OHLC Charts (verification module) ─────────────────────────────────────
+export const getChartUniverse = () => api.get("/api/charts/universe");
+export const getChartOHLC = (
+  underlying: string,
+  timeframe: "15minute" | "30minute" | "60minute" = "30minute",
+  lookbackSessions = 5,
+) =>
+  api.get("/api/charts/ohlc", {
+    params: { underlying, timeframe, lookback_sessions: lookbackSessions },
+    timeout: 30_000,
+  });
+
 // ── Backtester ────────────────────────────────────────────────────────────
 export const getBacktesterDefaultConfig = () => api.get("/api/backtester/default-config");
 export const runBacktestJson = (payload: object) => api.post("/api/backtester/run-json", payload);
