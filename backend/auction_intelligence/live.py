@@ -59,12 +59,15 @@ from brokers.base import Tick
 from core.config import settings
 from db.database import AsyncSessionLocal
 from market_data import data_router as market_data_router
+from market_data.commodity_runtime_history import load_commodity_history_rows
 from market_data.symbols import to_broker_symbol, to_fyers_symbol
 
 
 IST = ZoneInfo("Asia/Kolkata")
 SESSION_OPEN = time(9, 15)
 SESSION_CLOSE = time(15, 30)
+COMMODITY_SESSION_OPEN = time(9, 0)
+COMMODITY_SESSION_CLOSE = time(23, 30)
 DEFAULT_CONFIG = clone_default_config()
 CONTRACT_SPECS = DEFAULT_CONFIG.get("contract_specs", {})
 _LIVE_ANALYSIS_CACHE_TTL_SECONDS = 30.0
@@ -89,21 +92,21 @@ SYMBOL_MAP = {
         "app_symbol": "NSE:FINNIFTY-INDEX",
         "display": "FINNIFTY",
         "instrument_proxy": "continuous_futures_proxy",
-        "lot_size": 40,
+        "lot_size": 60,
         "tick_size": 0.5,
     },
     "MIDCPNIFTY": {
         "app_symbol": "NSE:MIDCPNIFTY-INDEX",
         "display": "MIDCPNIFTY",
         "instrument_proxy": "continuous_futures_proxy",
-        "lot_size": 75,
+        "lot_size": 120,
         "tick_size": 0.5,
     },
     "SENSEX": {
         "app_symbol": "BSE:SENSEX-INDEX",
         "display": "SENSEX",
         "instrument_proxy": "continuous_futures_proxy",
-        "lot_size": 10,
+        "lot_size": 20,
         "tick_size": 0.5,
     },
     "CRUDEOIL": {
@@ -125,6 +128,12 @@ INDEX_PRICE_BANDS: dict[str, tuple[float, float]] = {
 
 def available_live_symbols() -> list[str]:
     return list(SYMBOL_MAP.keys())
+
+
+def _session_bounds(symbol_code: str | None = None) -> tuple[time, time]:
+    if str(symbol_code or "").upper() == "CRUDEOIL":
+        return COMMODITY_SESSION_OPEN, COMMODITY_SESSION_CLOSE
+    return SESSION_OPEN, SESSION_CLOSE
 
 
 def _fyers_continuous_futures_symbol(symbol_code: str, as_of: date) -> str:
@@ -223,7 +232,11 @@ async def build_live_analysis(symbol_code: str = "NIFTY") -> dict[str, Any]:
         if not recent_rows:
             raise RuntimeError("No local or broker minute data returned for the requested symbol.")
 
-        sessions = _group_rows_by_session(recent_rows, allow_partial_live_session=True)
+        sessions = _group_rows_by_session(
+            recent_rows,
+            allow_partial_live_session=True,
+            symbol_code=normalized_symbol,
+        )
         session_dates = sorted(sessions.keys())
         if len(session_dates) < 2:
             raise RuntimeError("At least two completed sessions are required for live validation.")
@@ -277,7 +290,7 @@ async def build_shadow_backfill_snapshots(
     if not recent_rows:
         raise RuntimeError("No local or broker minute data returned for the requested symbol.")
 
-    sessions = _group_rows_by_session(recent_rows)
+    sessions = _group_rows_by_session(recent_rows, symbol_code=normalized_symbol)
     session_dates = sorted(sessions.keys())
     if len(session_dates) < 2:
         raise RuntimeError("At least two completed sessions are required for shadow backfill.")
@@ -340,20 +353,31 @@ async def _build_analysis_from_session_rows(
     config = SYMBOL_MAP[normalized_symbol]
     app_symbol = str(config["app_symbol"])
     tick_size = float(config["tick_size"])
+    session_open, session_close = _session_bounds(normalized_symbol)
     session_date = _row_time(current_session_rows[-1]).date()
     session_symbol = _session_symbol(normalized_symbol, history_source)
     is_futures_source = "futures" in history_source
+    is_commodity_futures = str(config.get("instrument_proxy")) == "commodity_futures"
 
     current_rows, snapshot_time_local, snapshot_mode = _select_snapshot_rows(
         current_session_rows,
         observation_bars=observation_bars,
         snapshot_cutoff=snapshot_cutoff,
+        symbol_code=normalized_symbol,
     )
     if len(current_rows) < 120:
         raise RuntimeError("The selected live snapshot does not have enough minute history yet.")
 
-    current_bars = _aggregate_rows(current_rows, interval_minutes=30)
-    prior_bars = _aggregate_rows(prior_session_rows, interval_minutes=30)
+    current_bars = _aggregate_rows(
+        current_rows,
+        interval_minutes=30,
+        session_open=session_open,
+    )
+    prior_bars = _aggregate_rows(
+        prior_session_rows,
+        interval_minutes=30,
+        session_open=session_open,
+    )
     if len(current_bars) < 4 or len(prior_bars) < 4:
         raise RuntimeError("Insufficient 30-minute bars were built from the broker history.")
 
@@ -366,6 +390,7 @@ async def _build_analysis_from_session_rows(
         quote_override=futures_quote,
         tick_size=tick_size,
         snapshot_mode=snapshot_mode,
+        symbol_code=normalized_symbol,
     )
     quote_payload = order_flow_inputs["quote"]
     depth_payload = order_flow_inputs["depth"]
@@ -399,7 +424,7 @@ async def _build_analysis_from_session_rows(
                 0,
                 int(
                     (
-                        datetime.combine(session_date, SESSION_CLOSE, tzinfo=IST)
+                        datetime.combine(session_date, session_close, tzinfo=IST)
                         - snapshot_time_local
                     ).total_seconds()
                     // 60
@@ -435,7 +460,9 @@ async def _build_analysis_from_session_rows(
             "trade_print_count": len(trades_payload),
             "snapshot_mode": snapshot_mode,
             "snapshot_time": snapshot_time_local.isoformat(),
-            "instrument_proxy": config["instrument_proxy"] if is_futures_source else "spot_index_proxy",
+            "instrument_proxy": config["instrument_proxy"]
+            if (is_futures_source or is_commodity_futures)
+            else "spot_index_proxy",
             "data_status": data_status,
         },
     }
@@ -525,11 +552,44 @@ async def _fetch_recent_minute_rows(
         rows = _filter_symbol_rows(rows)
         if not rows:
             return None
+        if not _has_current_session_open_coverage(rows, symbol_code=symbol_code.upper()):
+            return None
         if best_available is None:
             best_available = (rows, source, history_symbol)
-        if len(_group_rows_by_session(rows, allow_partial_live_session=True)) >= 2:
+        if (
+            len(
+                _group_rows_by_session(
+                    rows,
+                    allow_partial_live_session=True,
+                    symbol_code=symbol_code.upper(),
+                )
+            )
+            >= 2
+        ):
             return rows, source, history_symbol
         return None
+
+    if config.get("instrument_proxy") == "commodity_futures" and allow_live_broker_refresh:
+        try:
+            commodity_rows, commodity_symbol = await load_commodity_history_rows(
+                symbol_code.upper(),
+                interval="1minute",
+                lookback_days=lookback_days,
+                persist=True,
+            )
+            commodity_rows = await _append_latest_market_tick_as_minute_row(
+                commodity_rows,
+                app_symbol=app_symbol,
+            )
+            selected = _choose_source(
+                commodity_rows,
+                "commodity_runtime_history",
+                commodity_symbol,
+            )
+            if selected is not None:
+                return selected
+        except Exception:
+            pass
 
     persisted_rows = await _fetch_persisted_spot_rows(symbol_code.upper(), from_date=from_date)
     selected = _choose_source(persisted_rows, "timescaledb_spot_1minute", app_symbol)
@@ -712,6 +772,65 @@ async def _fetch_persisted_spot_rows(
     ]
 
 
+async def _append_latest_market_tick_as_minute_row(
+    rows: list[dict[str, Any]],
+    *,
+    app_symbol: str,
+) -> list[dict[str, Any]]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT time, ltp, volume, oi
+                FROM market_ticks
+                WHERE symbol = :symbol
+                ORDER BY time DESC
+                LIMIT 2
+                """
+            ),
+            {"symbol": app_symbol},
+        )
+        tick_rows = result.mappings().all()
+    if not tick_rows:
+        return rows
+
+    latest_tick = tick_rows[0]
+    latest_time = _row_time_from_value(latest_tick["time"]).astimezone(IST)
+    if rows:
+        last_row_time = _row_time(rows[-1]).astimezone(IST)
+        if latest_time <= last_row_time:
+            return rows
+
+    try:
+        ltp = float(latest_tick["ltp"] or 0.0)
+    except (TypeError, ValueError):
+        return rows
+    if ltp <= 0:
+        return rows
+
+    volume = 0.0
+    if len(tick_rows) > 1:
+        try:
+            volume = max(
+                0.0,
+                float(latest_tick["volume"] or 0.0) - float(tick_rows[1]["volume"] or 0.0),
+            )
+        except (TypeError, ValueError):
+            volume = 0.0
+
+    return rows + [
+        {
+            "time": latest_time.isoformat(),
+            "open": ltp,
+            "high": ltp,
+            "low": ltp,
+            "close": ltp,
+            "volume": volume,
+            "oi": float(latest_tick["oi"] or 0.0),
+        }
+    ]
+
+
 def _resolve_analytics_root():
     from pathlib import Path
     import os
@@ -739,7 +858,7 @@ async def build_live_validation_series(
         lookback_days=lookback_days,
         allow_live_broker_refresh=not (settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY),
     )
-    sessions = _group_rows_by_session(rows)
+    sessions = _group_rows_by_session(rows, symbol_code=normalized_symbol)
     session_dates = sorted(sessions.keys())[-max_sessions:]
 
     return {
@@ -748,7 +867,11 @@ async def build_live_validation_series(
         "sessions": [
             {
                 "session_date": session_date.isoformat(),
-                "bars": _aggregate_rows(sessions[session_date], interval_minutes=30),
+                "bars": _aggregate_rows(
+                    sessions[session_date],
+                    interval_minutes=30,
+                    session_open=_session_bounds(normalized_symbol)[0],
+                ),
             }
             for session_date in session_dates
         ],
@@ -757,7 +880,12 @@ async def build_live_validation_series(
 
 def _session_symbol(symbol_code: str, history_source: str) -> str:
     display_symbol = str(SYMBOL_MAP[symbol_code.upper()]["display"])
-    return f"{display_symbol} FUT" if "futures" in history_source else f"{display_symbol} INDEX"
+    instrument_proxy = str(SYMBOL_MAP[symbol_code.upper()].get("instrument_proxy") or "")
+    return (
+        f"{display_symbol} FUT"
+        if "futures" in history_source or instrument_proxy == "commodity_futures"
+        else f"{display_symbol} INDEX"
+    )
 
 
 async def _build_shadow_portfolio_snapshot(
@@ -783,12 +911,14 @@ def _group_rows_by_session(
     rows: list[dict[str, Any]],
     *,
     allow_partial_live_session: bool = False,
+    symbol_code: str | None = None,
 ) -> dict[date, list[dict[str, Any]]]:
+    session_open, session_close = _session_bounds(symbol_code)
     sessions: dict[date, list[dict[str, Any]]] = {}
     for row in rows:
         timestamp = _row_time(row)
         local_time = timestamp.astimezone(IST)
-        if local_time.time() < SESSION_OPEN or local_time.time() > SESSION_CLOSE:
+        if local_time.time() < session_open or local_time.time() > session_close:
             continue
         normalized = {
             "time": local_time.isoformat(),
@@ -810,10 +940,48 @@ def _group_rows_by_session(
         or (
             allow_partial_live_session
             and key == now_ist.date()
-            and SESSION_OPEN <= now_ist.time() < SESSION_CLOSE
+            and session_open <= now_ist.time() < session_close
             and len(value) >= 120
         )
     }
+
+
+def _has_current_session_open_coverage(
+    rows: list[dict[str, Any]],
+    *,
+    symbol_code: str | None = None,
+) -> bool:
+    """A live session profile is invalid if today's rows start after the IB window."""
+    session_open, session_close = _session_bounds(symbol_code)
+    now_ist = datetime.now(IST)
+    first_hour_end = (
+        datetime.combine(now_ist.date(), session_open, tzinfo=IST) + timedelta(minutes=60)
+    ).time()
+    latest_allowed_open_tick = (
+        datetime.combine(now_ist.date(), session_open, tzinfo=IST) + timedelta(minutes=10)
+    ).time()
+    today_minutes = []
+    for row in rows:
+        timestamp = _row_time(row)
+        if timestamp.date() == now_ist.date() and session_open <= timestamp.time() <= session_close:
+            today_minutes.append(timestamp.replace(second=0, microsecond=0))
+    if not today_minutes or now_ist.time() < first_hour_end:
+        return True
+
+    unique_minutes = sorted(set(today_minutes))
+    if not unique_minutes or unique_minutes[0].time() > latest_allowed_open_tick:
+        return False
+    first_hour = [item for item in unique_minutes if item.time() < first_hour_end]
+    if len(first_hour) < 45:
+        return False
+    max_gap = max(
+        (
+            (right - left).total_seconds() / 60.0
+            for left, right in zip(first_hour, first_hour[1:])
+        ),
+        default=0.0,
+    )
+    return max_gap <= 8.0
 
 
 def _select_snapshot_rows(
@@ -821,19 +989,21 @@ def _select_snapshot_rows(
     *,
     observation_bars: int | None = None,
     snapshot_cutoff: time | None = None,
+    symbol_code: str | None = None,
 ) -> tuple[list[dict[str, Any]], datetime, str]:
+    session_open, session_close = _session_bounds(symbol_code)
     now_ist = datetime.now(IST)
     latest_time = _row_time(rows[-1])
-    if latest_time.date() == now_ist.date() and SESSION_OPEN <= now_ist.time() < SESSION_CLOSE:
+    if latest_time.date() == now_ist.date() and session_open <= now_ist.time() < session_close:
         return rows, latest_time, "live_session"
 
     if observation_bars and observation_bars > 0:
-        aggregated = _aggregate_rows(rows, interval_minutes=30)
+        aggregated = _aggregate_rows(rows, interval_minutes=30, session_open=session_open)
         if len(aggregated) >= observation_bars:
             cutoff_time = (
                 datetime.fromisoformat(str(aggregated[observation_bars]["timestamp"]))
                 if len(aggregated) > observation_bars
-                else datetime.combine(_row_time(rows[-1]).date(), SESSION_CLOSE, tzinfo=IST) + timedelta(minutes=1)
+                else datetime.combine(_row_time(rows[-1]).date(), session_close, tzinfo=IST) + timedelta(minutes=1)
             )
             selected = [row for row in rows if _row_time(row) < cutoff_time]
             if selected:
@@ -850,14 +1020,19 @@ def _select_snapshot_rows(
     return snapshot_rows, _row_time(snapshot_rows[-1]), "historical_replay"
 
 
-def _aggregate_rows(rows: list[dict[str, Any]], *, interval_minutes: int) -> list[dict[str, Any]]:
+def _aggregate_rows(
+    rows: list[dict[str, Any]],
+    *,
+    interval_minutes: int,
+    session_open: time = SESSION_OPEN,
+) -> list[dict[str, Any]]:
     aggregated: list[dict[str, Any]] = []
     bucket_start: Optional[datetime] = None
     bucket: Optional[dict[str, Any]] = None
 
     for row in rows:
         timestamp = _row_time(row)
-        session_start = datetime.combine(timestamp.date(), SESSION_OPEN, tzinfo=IST)
+        session_start = datetime.combine(timestamp.date(), session_open, tzinfo=IST)
         elapsed_minutes = int((timestamp - session_start).total_seconds() // 60)
         bucket_index = max(0, elapsed_minutes // interval_minutes)
         current_bucket_start = session_start + timedelta(minutes=bucket_index * interval_minutes)
@@ -897,10 +1072,12 @@ async def _build_order_flow_inputs(
     quote_override: dict[str, Any] | None,
     tick_size: float,
     snapshot_mode: str,
+    symbol_code: str | None = None,
 ) -> dict[str, Any]:
     recent_ticks = await _fetch_recent_tick_rows(
         app_symbol,
         snapshot_end=_row_time(current_rows[-1]).astimezone(timezone.utc),
+        symbol_code=symbol_code,
     )
     if current_tick is not None:
         recent_ticks = _append_live_tick_row(recent_ticks, current_tick)
@@ -968,11 +1145,13 @@ async def _fetch_recent_tick_rows(
     symbol: str,
     *,
     snapshot_end: datetime,
+    symbol_code: str | None = None,
 ) -> list[dict[str, Any]]:
     lookback_minutes = int(DEFAULT_CONFIG.get("order_flow", {}).get("tick_lookback_minutes", 20))
+    session_open, _ = _session_bounds(symbol_code)
     from_time = max(
         snapshot_end - timedelta(minutes=max(lookback_minutes, 1)),
-        datetime.combine(snapshot_end.astimezone(IST).date(), SESSION_OPEN, tzinfo=IST).astimezone(timezone.utc),
+        datetime.combine(snapshot_end.astimezone(IST).date(), session_open, tzinfo=IST).astimezone(timezone.utc),
     )
     async with AsyncSessionLocal() as session:
         result = await session.execute(
