@@ -152,6 +152,165 @@ def test_filter_closed_interval_rows_drops_incomplete_tail_bar() -> None:
     assert filtered[-1]["time"] == (start + timedelta(minutes=15)).isoformat()
 
 
+def test_commodity_futures_history_keeps_live_tail_bar(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+    now = datetime(2026, 4, 16, 10, 7, tzinfo=UTC)
+    candles = [
+        {"time": (now - timedelta(minutes=30)).isoformat(), "close": 100.0},
+        {"time": (now - timedelta(minutes=15)).isoformat(), "close": 101.0},
+        {"time": (now - timedelta(minutes=7)).isoformat(), "close": 120.0},
+    ]
+
+    async def fake_resolve(_symbol: str):
+        return None
+
+    async def fake_fetch(**kwargs):
+        assert kwargs["interval"] == "15minute"
+        return list(candles)
+
+    monkeypatch.setattr(commodity_module, "_now_ist", lambda: now)
+    monkeypatch.setattr(commodity_module, "resolve_upstox_mcx_future", fake_resolve)
+    monkeypatch.setattr(commodity_module.option_history_service, "_fetch_broker_candles", fake_fetch)
+
+    agent = CommodityStrategyAgent()
+    rows = asyncio.run(agent._load_history("MCX:GOLD26JUNFUT", interval="15minute"))
+
+    assert rows == candles
+
+
+def test_commodity_option_analysis_uses_live_tail_bar_for_macd(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+    now = datetime(2026, 4, 16, 10, 7, tzinfo=UTC)
+
+    def live_candles(last_close: float) -> list[dict]:
+        start = now - timedelta(minutes=30 * 39)
+        rows = [
+            {
+                "time": (start + timedelta(minutes=30 * index)).isoformat(),
+                "open": 100.0 + index,
+                "high": 102.0 + index,
+                "low": 98.0 + index,
+                "close": 100.0 + index,
+                "volume": 1000 + index,
+            }
+            for index in range(39)
+        ]
+        rows.append(
+            {
+                "time": (now - timedelta(minutes=7)).isoformat(),
+                "open": last_close - 1.0,
+                "high": last_close + 2.0,
+                "low": last_close - 2.0,
+                "close": last_close,
+                "volume": 2000,
+            }
+        )
+        return rows
+
+    async def fake_load_candles(**kwargs):
+        return live_candles(999.0 if kwargs["option_type"] == "CE" else 88.0)
+
+    def fake_evaluate(candles, **kwargs):
+        last = candles[-1]
+        close = float(last["close"])
+        return {
+            "signal": "BUY" if close == 999.0 else None,
+            "reason": "macd_zero_cross_up" if close == 999.0 else "no_cross",
+            "regime": "bullish" if close == 999.0 else "bearish",
+            "latest_close": close,
+            "previous_close": float(candles[-2]["close"]),
+            "macd": 1.0 if close == 999.0 else -1.0,
+            "macd_signal": 0.0,
+            "macd_histogram": 1.0 if close == 999.0 else -1.0,
+            "prev_macd_histogram": -0.1,
+            "prev_macd": -0.1,
+            "atr": 10.0,
+            "bar_time": str(last["time"]),
+        }
+
+    monkeypatch.setattr(commodity_module, "_now_ist", lambda: now)
+    monkeypatch.setattr(commodity_module.option_history_service, "load_candles", fake_load_candles)
+    monkeypatch.setattr(commodity_module, "evaluate_commodity_signal", fake_evaluate)
+
+    agent = CommodityStrategyAgent()
+    row = {
+        "symbol": "MCX:GOLD26JUNFUT",
+        "underlying": "GOLD",
+        "expiry": "2099-06-26",
+        "ce": {
+            "instrument_key": "MCX_FO|GOLD_CE",
+            "trading_symbol": "GOLD CE",
+            "strike": 152000.0,
+            "option_type": "CE",
+            "ltp": 900.0,
+            "iv": 20.0,
+            "is_liquid": True,
+        },
+        "pe": {
+            "instrument_key": "MCX_FO|GOLD_PE",
+            "trading_symbol": "GOLD PE",
+            "strike": 152000.0,
+            "option_type": "PE",
+            "ltp": 850.0,
+            "iv": 20.0,
+            "is_liquid": True,
+        },
+    }
+
+    analyzed = asyncio.run(agent._analyze_option_row(row))
+
+    assert analyzed is not None
+    assert analyzed["signal_side"] == "CE"
+    assert analyzed["ce"]["bar_time"] == (now - timedelta(minutes=7)).isoformat()
+    assert analyzed["trade_bar_time"] == (now - timedelta(minutes=7)).isoformat()
+
+
+def test_commodity_futures_scan_uses_active_lookup_symbol(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    agent = CommodityStrategyAgent()
+    configured_symbols = [
+        "MCX:GOLD26MAYFUT",
+        "MCX:SILVERM26MAYFUT",
+        "MCX:CRUDEOIL26MAYFUT",
+        "MCX:NATURALGAS26MAYFUT",
+    ]
+    active_symbols = {
+        "MCX:GOLD26MAYFUT": "MCX:GOLD26JUNFUT",
+        "MCX:SILVERM26MAYFUT": "MCX:SILVERM26JUNFUT",
+        "MCX:CRUDEOIL26MAYFUT": "MCX:CRUDEOIL26JUNFUT",
+        "MCX:NATURALGAS26MAYFUT": "MCX:NATURALGAS26JUNFUT",
+    }
+    agent.update_symbols(configured_symbols)
+    agent._selected_option_lookup_symbols = {
+        configured_symbol: active_symbol
+        for configured_symbol, active_symbol in active_symbols.items()
+    }
+
+    active_map = agent._active_futures_symbols()
+    rows = [
+        {
+            "symbol": active_symbol,
+            "configured_symbol": configured_symbol,
+            "underlying": commodity_module.extract_commodity_root(configured_symbol),
+            "price": 9872.0,
+        }
+        for configured_symbol, active_symbol in active_map.items()
+    ]
+
+    stabilized, retained = agent._stabilize_futures_watchlist(
+        rows,
+        live_quotes={active_symbol: 9872.0 for active_symbol in active_symbols.values()},
+    )
+
+    assert active_map == active_symbols
+    assert retained == []
+    assert stabilized == rows
+
+
 def test_commodity_symbols_persist_to_config_file(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "commodity_strategy.json"
     monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
@@ -497,6 +656,42 @@ def test_commodity_watchlist_reports_signal_validation_and_strategy_metadata(tmp
     assert status["watchlist"][0]["lot_size"] == 10
     assert status["watchlist"][0]["default_qty"] == 10
     assert status["watchlist"][0]["signal_validation"] == "ready"
+
+
+def test_commodity_data_quality_summary_ignores_unrelated_global_staleness(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    agent = CommodityStrategyAgent()
+    agent.update_symbols(["MCX:GOLD26JUNFUT"])
+    snapshot = {
+        "overall": "degraded",
+        "symbol_health": [
+            {
+                "symbol": "NSE:NIFTY50-INDEX",
+                "stale": True,
+                "flagged": False,
+                "freshest_source": "fyers_tick",
+                "freshest_age_seconds": 600,
+                "sources": 1,
+            },
+            {
+                "symbol": "MCX:GOLD26JUNFUT",
+                "stale": False,
+                "flagged": False,
+                "freshest_source": "broker_futures_quote",
+                "freshest_age_seconds": 1,
+                "sources": 1,
+            },
+        ],
+    }
+
+    scoped = agent._commodity_data_quality_summary(snapshot, {"MCX:GOLD26JUNFUT": 152000.0})
+
+    assert scoped["overall"] == "healthy"
+    assert scoped["global_overall"] == "degraded"
+    assert scoped["symbol_count"] == 1
+    assert scoped["stale_count"] == 0
 
 
 def test_commodity_futures_signal_is_blocked_when_data_quality_gate_has_no_fresh_quote(tmp_path: Path, monkeypatch) -> None:
@@ -980,10 +1175,19 @@ def test_analyze_futures_symbol_uses_continuation_signal_when_mp_aligns(monkeypa
     )
 
     agent = CommodityStrategyAgent()
+    agent._last_quote_snapshots["MCX:CRUDEOIL26MAYFUT"] = {
+        "price": 8648.0,
+        "previous_close": 9000.0,
+        "change": -352.0,
+        "change_pct": -3.9111,
+    }
 
     row = asyncio.run(agent._analyze_futures_symbol("MCX:CRUDEOIL26MAYFUT", 8648.0))
 
     assert row is not None
+    assert row["previous_close"] == 9000.0
+    assert row["change"] == -352.0
+    assert row["change_pct"] == -3.91
     assert row["signal"] == "SELL"
     assert row["entry_style"] == "continuation"
     assert row["reason"] == "macd_continuation_breakdown_down_mp_trend_down"

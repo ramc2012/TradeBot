@@ -75,6 +75,9 @@ export function resolveWebSocketBaseUrl(): string {
     if (cloudRunBackendHost) {
       return trimTrailingSlash(`${protocol}//${cloudRunBackendHost}`);
     }
+    if (window.location.port && window.location.port !== DEFAULT_BACKEND_PORT) {
+      return trimTrailingSlash(`${protocol}//${hostname}:${DEFAULT_BACKEND_PORT}`);
+    }
     const host = isLocalHostname(hostname)
       ? `${hostname}:${DEFAULT_BACKEND_PORT}`
       : window.location.host;

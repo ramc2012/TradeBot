@@ -6,6 +6,7 @@ import Sidebar from "@/components/layout/Sidebar";
 import BrokerStatusBar from "@/components/layout/BrokerStatusBar";
 import RealTimeTicker from "@/components/layout/RealTimeTicker";
 import LiveModeWarning from "@/components/layout/LiveModeWarning";
+import AppWideStreamBridge from "@/components/live/AppWideStreamBridge";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -16,6 +17,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="bg-bg-primary text-text-primary min-h-screen">
         <Providers>
           <AppTokenGate>
+            <AppWideStreamBridge />
             <div className="flex flex-col h-screen overflow-hidden">
               <>
                 <AppErrorBoundary

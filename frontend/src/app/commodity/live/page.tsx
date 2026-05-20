@@ -4,6 +4,7 @@ import { Fragment, useMemo, useState } from "react";
 import Link from "next/link";
 import { ChevronDown, ChevronRight, CirclePlay, RefreshCcw, Save } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 
 import {
   api as apiClient,
@@ -17,6 +18,10 @@ import {
   startCommodityStrategyAgent,
   updateCommodityStrategyContracts,
 } from "@/lib/api";
+import {
+  createCommodityOverviewSocket,
+  createCommodityWatchlistSocket,
+} from "@/lib/websocket";
 
 const REFRESH_MS = 4_000;
 
@@ -34,6 +39,10 @@ type Trajectory = "improving" | "stalled" | "deteriorating" | null;
 
 type WatchRow = {
   symbol?: string | null;
+  configured_symbol?: string | null;
+  active_lookup_symbol?: string | null;
+  selected_lookup_symbol?: string | null;
+  rollover_detail?: string | null;
   underlying?: string | null;
   display_name?: string | null;
   price?: number | null;
@@ -305,6 +314,9 @@ function snapshotContractToWatchRow(contract: CommoditySnapshotContract): WatchR
   const unitParts = [contract.contract_unit_label, contract.quote_unit_label].filter(Boolean);
   return {
     symbol,
+    configured_symbol: contract.symbol || null,
+    active_lookup_symbol: contract.active_lookup_symbol || null,
+    selected_lookup_symbol: contract.selected_lookup_symbol || null,
     underlying: contract.underlying || contract.symbol || null,
     display_name: [contract.underlying || contract.symbol, expiry].filter(Boolean).join(" · "),
     regime: contract.selection_policy || "catalog",
@@ -316,6 +328,50 @@ function snapshotContractToWatchRow(contract: CommoditySnapshotContract): WatchR
     trajectory: "stalled",
     bucket_rationale: detail,
   };
+}
+
+function enrichFuturesRowsWithActiveContracts(
+  rows: WatchRow[],
+  contracts: CommoditySnapshotContract[],
+): WatchRow[] {
+  if (!rows.length || !contracts.length) return rows;
+
+  const contractsByConfiguredSymbol = new Map(
+    contracts
+      .filter((contract) => contract.symbol)
+      .map((contract) => [String(contract.symbol), contract]),
+  );
+  const contractsByUnderlying = new Map(
+    contracts
+      .filter((contract) => contract.underlying)
+      .map((contract) => [String(contract.underlying), contract]),
+  );
+
+  return rows.map((row) => {
+    const configuredSymbol = String(row.configured_symbol || row.symbol || "");
+    const contract =
+      contractsByConfiguredSymbol.get(configuredSymbol) ||
+      contractsByUnderlying.get(String(row.underlying || ""));
+    const activeSymbol =
+      contract?.selected_lookup_symbol ||
+      contract?.active_lookup_symbol ||
+      row.active_lookup_symbol ||
+      row.selected_lookup_symbol ||
+      row.symbol ||
+      null;
+    if (!contract || !activeSymbol || activeSymbol === row.symbol) return row;
+
+    return {
+      ...row,
+      symbol: activeSymbol,
+      configured_symbol: contract.symbol || row.configured_symbol || row.symbol || null,
+      active_lookup_symbol: contract.active_lookup_symbol || row.active_lookup_symbol || null,
+      selected_lookup_symbol: contract.selected_lookup_symbol || row.selected_lookup_symbol || null,
+      rollover_detail:
+        row.rollover_detail ||
+        `Showing active futures ${activeSymbol} for configured ${contract.symbol || row.symbol}.`,
+    };
+  });
 }
 
 function Section({
@@ -712,6 +768,12 @@ function InstrumentDetail({
           </dd>
           <dt className="text-text-muted">Prev close</dt>
           <dd className="text-right font-mono">{formatNumber(row.previous_close, 2)}</dd>
+          {row.configured_symbol && row.configured_symbol !== row.symbol ? (
+            <>
+              <dt className="text-text-muted">Configured</dt>
+              <dd className="text-right font-mono text-[10px]">{row.configured_symbol}</dd>
+            </>
+          ) : null}
           <dt className="text-text-muted">DTE</dt>
           <dd className="text-right font-mono">{dte == null ? "—" : dte}</dd>
           <dt className="text-text-muted">Bar time</dt>
@@ -1204,9 +1266,13 @@ export default function CommodityLivePage() {
   const [expiryDraft, setExpiryDraft] = useState<Record<string, string>>({});
   const queryClient = useQueryClient();
 
-  const overviewQuery = useQuery({
+  const overviewQuery = useLiveSnapshotQuery<Record<string, unknown>>({
     queryKey: ["commodity-live", "overview"],
     queryFn: async () => (await getCommodityOverview()).data,
+    streamFactory: (onData, onStatusChange) =>
+      createCommodityOverviewSocket((payload) => onData(payload as Record<string, unknown>), onStatusChange),
+    storageKey: "commodity-live:overview",
+    streamWhenHidden: true,
     refetchInterval: REFRESH_MS,
     refetchIntervalInBackground: true,
   });
@@ -1232,9 +1298,13 @@ export default function CommodityLivePage() {
     refetchIntervalInBackground: true,
   });
 
-  const watchlistSnapshotQuery = useQuery({
+  const watchlistSnapshotQuery = useLiveSnapshotQuery<CommodityWatchlistSnapshot>({
     queryKey: ["commodity-live", "watchlist-snapshot"],
     queryFn: async () => (await getCommodityWatchlistSnapshot()).data as CommodityWatchlistSnapshot,
+    streamFactory: (onData, onStatusChange) =>
+      createCommodityWatchlistSocket((payload) => onData(payload as CommodityWatchlistSnapshot), onStatusChange),
+    storageKey: "commodity-live:watchlist-snapshot",
+    streamWhenHidden: true,
     refetchInterval: REFRESH_MS * 3,
     refetchIntervalInBackground: true,
   });
@@ -1288,10 +1358,14 @@ export default function CommodityLivePage() {
   const status = (overviewQuery.data?.status ?? {}) as StatusPayload;
   const summary = status.summary ?? {};
   const config = status.config ?? {};
+  const contracts = useMemo(
+    () => (contractsQuery.data?.contracts ?? watchlistSnapshotQuery.data?.contract_catalog?.contracts ?? []) as CommoditySnapshotContract[],
+    [contractsQuery.data?.contracts, watchlistSnapshotQuery.data?.contract_catalog?.contracts],
+  );
 
   const runtimeFuturesWatchlist = useMemo(
-    () => (status.futures_watchlist ?? status.watchlist ?? []) as WatchRow[],
-    [status.futures_watchlist, status.watchlist],
+    () => enrichFuturesRowsWithActiveContracts((status.futures_watchlist ?? status.watchlist ?? []) as WatchRow[], contracts),
+    [contracts, status.futures_watchlist, status.watchlist],
   );
   const snapshotFuturesWatchlist = useMemo(
     () => (watchlistSnapshotQuery.data?.contract_catalog?.contracts ?? []).map(snapshotContractToWatchRow),
@@ -1314,17 +1388,20 @@ export default function CommodityLivePage() {
     [runtimeOptionWatchlist, snapshotOptionWatchlist],
   );
 
+  const streamedPositions = (overviewQuery.data?.positions as CommodityPosition[] | undefined) ?? status.positions;
+  const streamedOrders = (overviewQuery.data?.orders as Order[] | undefined) ?? status.orders;
+  const streamedReports = (overviewQuery.data?.reports as ReportRow[] | undefined) ?? status.reports;
   const positions = useMemo(
-    () => (positionsQuery.data as CommodityPosition[] | undefined) ?? status.positions ?? [],
-    [positionsQuery.data, status.positions],
+    () => streamedPositions ?? (positionsQuery.data as CommodityPosition[] | undefined) ?? [],
+    [positionsQuery.data, streamedPositions],
   );
   const orders = useMemo(
-    () => (ordersQuery.data as Order[] | undefined) ?? status.orders ?? [],
-    [ordersQuery.data, status.orders],
+    () => streamedOrders ?? (ordersQuery.data as Order[] | undefined) ?? [],
+    [ordersQuery.data, streamedOrders],
   );
   const reports = useMemo(
-    () => (reportsQuery.data as ReportRow[] | undefined) ?? status.reports ?? [],
-    [reportsQuery.data, status.reports],
+    () => streamedReports ?? (reportsQuery.data as ReportRow[] | undefined) ?? [],
+    [reportsQuery.data, streamedReports],
   );
   const trades = useMemo(() => (status.trade_history ?? []) as TradeRow[], [status.trade_history]);
   const auditEvents = useMemo(() => (auditQuery.data?.events ?? []) as AuditEvent[], [auditQuery.data]);
@@ -1337,11 +1414,6 @@ export default function CommodityLivePage() {
     () => (dataQuality.symbol_health ?? []).filter((s) => (s.symbol || "").startsWith("MCX:")),
     [dataQuality.symbol_health],
   );
-  const contracts = useMemo(
-    () => (contractsQuery.data?.contracts ?? watchlistSnapshotQuery.data?.contract_catalog?.contracts ?? []) as CommoditySnapshotContract[],
-    [contractsQuery.data?.contracts, watchlistSnapshotQuery.data?.contract_catalog?.contracts],
-  );
-
   const totalEquity = Number(summary.total_equity ?? 0);
   const initialCapital = Number(summary.initial_capital ?? 1_000_000);
   const realizedPnl = Number(summary.realized_pnl ?? 0);
@@ -1357,6 +1429,12 @@ export default function CommodityLivePage() {
   const killActive = Boolean(status.kill_switch_active);
   const loopActive = Boolean(status.loop_active);
   const usingSnapshotFutures = runtimeFuturesWatchlist.length === 0 && snapshotFuturesWatchlist.length > 0;
+  const streamState =
+    overviewQuery.isStreamConnected && watchlistSnapshotQuery.isStreamConnected
+      ? "streaming"
+      : overviewQuery.hasSnapshot || watchlistSnapshotQuery.hasSnapshot
+        ? "syncing"
+        : "loading";
 
   const saveExpiries = () => {
     const selected: Record<string, string> = {};
@@ -1397,6 +1475,17 @@ export default function CommodityLivePage() {
           <h1 className="text-base font-semibold tracking-tight">Commodity Desk</h1>
           <span className={`rounded-md px-2 py-0.5 text-[10.5px] font-medium ${statusBadgeTone}`}>
             {statusBadgeText}
+          </span>
+          <span
+            className={`rounded-md px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.14em] ${
+              streamState === "streaming"
+                ? "bg-emerald-500/10 text-emerald-300"
+                : streamState === "syncing"
+                  ? "bg-amber-500/10 text-amber-200"
+                  : "bg-bg-secondary/50 text-text-muted"
+            }`}
+          >
+            {streamState}
           </span>
           <span className="hidden text-[11px] text-text-muted sm:inline">
             {formatIST(status.last_run_at)} · {status.last_message || "—"}

@@ -41,7 +41,11 @@ from market_data.commodity_contract_specs import (
     get_commodity_display_name,
 )
 from market_data.option_history import option_history_service
-from market_data.upstox_commodity import load_upstox_mcx_quotes, resolve_upstox_mcx_future
+from market_data.upstox_commodity import (
+    load_upstox_mcx_quote_snapshots,
+    load_upstox_mcx_quotes,
+    resolve_upstox_mcx_future,
+)
 from paper_engine.base_strategy_agent import (
     BaseStrategyAgent,
     IST,
@@ -878,6 +882,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._auto_run_enabled = True
         self._running = False
         self._last_data_health: dict[str, Any] = {}
+        self._last_quote_snapshots: dict[str, dict[str, Any]] = {}
         self._commentary: list[CommodityCommentaryEntry] = []
         self._state_synced_at: Optional[datetime] = None
         self._fyers_ltp_backoff_until: Optional[datetime] = None
@@ -1242,6 +1247,20 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._refresh_state_from_store()
         return dict(self._selected_option_lookup_symbols)
 
+    def _active_futures_symbol(self, symbol: str) -> str:
+        configured_symbol = _canonicalize_symbol(symbol)
+        lookup_symbol = _canonicalize_symbol(self._selected_option_lookup_symbols.get(configured_symbol) or "")
+        if (
+            lookup_symbol
+            and lookup_symbol.endswith("FUT")
+            and extract_commodity_root(lookup_symbol) == extract_commodity_root(configured_symbol)
+        ):
+            return lookup_symbol
+        return configured_symbol
+
+    def _active_futures_symbols(self) -> dict[str, str]:
+        return {symbol: self._active_futures_symbol(symbol) for symbol in self._symbols}
+
     async def ensure_selected_option_setup_locks(self) -> dict[str, str]:
         self._refresh_state_from_store()
         missing_symbols = {
@@ -1500,7 +1519,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "position_cap": lane_map["commodity_futures"].descriptor.position_cap,
                 "lots_per_trade": self._lots_per_trade,
                 "broker": "upstox primary · fyers fallback",
-                "notes": "Entries use closed 15-minute bars only, accept fresh zero-crosses plus continuation breakouts only on trend-day MP, and keep hard stops live while delaying soft exits until the trade has had time to work. MCX futures quotes/history prefer Upstox and fall back to FYERS.",
+                "notes": "Entries use live 15-minute bars, accept fresh zero-crosses plus continuation breakouts only on trend-day MP, and keep hard stops live while delaying soft exits until the trade has had time to work. MCX futures quotes/history prefer Upstox and fall back to FYERS.",
             },
             {
                 "key": "commodity_options",
@@ -1537,7 +1556,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             event_reason = _commodity_event_block_reason(underlying)
             risk_block = self._entry_risk_block(underlying)
             validation = "waiting_cross"
-            validation_detail = "Waiting for a closed 15-minute MACD cross or a continuation breakout."
+            validation_detail = "Waiting for a live 15-minute MACD cross or a continuation breakout."
             if row.get("reason") == "insufficient_data":
                 validation = "warming_up"
                 validation_detail = "More 15-minute candles are required before futures MACD is valid."
@@ -1810,6 +1829,91 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             parts.append(f"stale quotes for {', '.join(stale_symbols)}")
         return True, "; ".join(parts)
 
+    def _commodity_data_quality_summary(
+        self,
+        data_quality_snapshot: Optional[dict[str, Any]],
+        quote_map: dict[str, float],
+        option_quote_map: Optional[dict[str, float]] = None,
+    ) -> dict[str, Any]:
+        """Return the commodity desk quality without unrelated NSE/BSE symbols."""
+        option_quote_map = option_quote_map or {}
+        expected_symbols = sorted(
+            {
+                str(symbol).strip()
+                for symbol in [*self._symbols, *quote_map.keys(), *option_quote_map.keys()]
+                if str(symbol or "").strip()
+            }
+        )
+        health_rows = {
+            str(row.get("symbol") or ""): row
+            for row in list((data_quality_snapshot or {}).get("symbol_health") or [])
+            if isinstance(row, dict)
+        }
+        entries_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for entry in list((data_quality_snapshot or {}).get("entries") or []):
+            if not isinstance(entry, dict):
+                continue
+            symbol = str(entry.get("symbol") or "")
+            if symbol in expected_symbols:
+                entries_by_symbol.setdefault(symbol, []).append(entry)
+
+        symbol_health: list[dict[str, Any]] = []
+        missing_symbols: list[str] = []
+        stale_symbols: list[str] = []
+        flagged_symbols: list[str] = []
+
+        for symbol in expected_symbols:
+            quote = quote_map.get(symbol, option_quote_map.get(symbol))
+            has_live_quote = False
+            try:
+                has_live_quote = float(quote or 0.0) > 0.0
+            except (TypeError, ValueError):
+                has_live_quote = False
+            row = dict(health_rows.get(symbol) or {})
+            if not row:
+                row = {
+                    "symbol": symbol,
+                    "stale": not has_live_quote,
+                    "flagged": False,
+                    "freshest_source": "direct_quote" if has_live_quote else None,
+                    "freshest_age_seconds": 0 if has_live_quote else None,
+                    "sources": 0,
+                }
+            if not has_live_quote and symbol in self._symbols:
+                missing_symbols.append(symbol)
+                row["stale"] = True
+            if bool(row.get("stale")):
+                stale_symbols.append(symbol)
+            if bool(row.get("flagged")):
+                flagged_symbols.append(symbol)
+            symbol_health.append(row)
+
+        overall = "healthy"
+        if not expected_symbols:
+            overall = "unknown"
+        elif flagged_symbols:
+            overall = "critical"
+        elif missing_symbols or stale_symbols:
+            overall = "degraded"
+
+        return {
+            "overall": overall,
+            "global_overall": (data_quality_snapshot or {}).get("overall"),
+            "symbol_count": len(symbol_health),
+            "stale_count": len(stale_symbols),
+            "flagged_count": len(flagged_symbols),
+            "missing_count": len(missing_symbols),
+            "missing_symbols": missing_symbols,
+            "stale_symbols": stale_symbols,
+            "flagged_symbols": flagged_symbols,
+            "symbol_health": symbol_health,
+            "entries": [
+                entry
+                for symbol in expected_symbols
+                for entry in entries_by_symbol.get(symbol, [])
+            ],
+        }
+
     @staticmethod
     def _option_history_warning(health: dict[str, Any]) -> Optional[str]:
         if int(health.get("failure_count", 0)) <= 0:
@@ -1876,7 +1980,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     minute_rows,
                     15 if interval == "15minute" else 5,
                 )
-        return _filter_closed_interval_rows(rows, interval=interval)
+        return rows
 
     def _build_market_profile(self, symbol: str, rows: list[dict[str, Any]]):
         if not rows:
@@ -1956,11 +2060,15 @@ class CommodityStrategyAgent(BaseStrategyAgent):
 
         analysis = evaluate_commodity_signal(candles, symbol=symbol, timeframe=FUTURES_TIMEFRAME)
         latest_close = analysis.get("latest_close")
-        previous_close = analysis.get("previous_close")
+        quote_snapshot = self._last_quote_snapshots.get(symbol) or {}
+        previous_close = quote_snapshot.get("previous_close") or analysis.get("previous_close")
         price = float(live_ltp or latest_close or 0.0)
-        change_pct = None
-        if price and previous_close:
-            change_pct = ((price - previous_close) / previous_close) * 100.0
+        change = quote_snapshot.get("change")
+        if change is None and price and previous_close:
+            change = price - float(previous_close)
+        change_pct = quote_snapshot.get("change_pct")
+        if change_pct is None and price and previous_close:
+            change_pct = ((price - float(previous_close)) / float(previous_close)) * 100.0
 
         session_rows, session_date = _latest_session_rows(candles)
         profile = self._build_market_profile(symbol, session_rows)
@@ -2017,6 +2125,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "display_name": spec.display_name,
             "price": _round_or_none(price, 2),
             "previous_close": _round_or_none(previous_close, 2),
+            "change": _round_or_none(change, 2),
             "change_pct": _round_or_none(change_pct, 2),
             "signal": signal,
             "raw_signal": analysis.get("signal"),
@@ -2088,11 +2197,12 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         stabilized: list[dict[str, Any]] = []
         retained_symbols: list[str] = []
         for symbol in self._symbols:
-            fresh = fresh_by_symbol.get(symbol)
+            active_symbol = self._active_futures_symbol(symbol)
+            fresh = fresh_by_symbol.get(symbol) or fresh_by_symbol.get(active_symbol)
             if fresh is not None:
                 stabilized.append(fresh)
                 continue
-            previous = previous_by_symbol.get(symbol)
+            previous = previous_by_symbol.get(symbol) or previous_by_symbol.get(active_symbol)
             if previous is None:
                 continue
 
@@ -2100,7 +2210,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 previous,
                 note="Retained after a temporary futures history gap.",
             )
-            quote = float((live_quotes or {}).get(symbol) or 0.0)
+            quote = float((live_quotes or {}).get(active_symbol) or (live_quotes or {}).get(symbol) or 0.0)
             previous_close = retained.get("previous_close")
             if quote > 0:
                 retained["price"] = _round_or_none(quote, 2)
@@ -2109,6 +2219,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 except (TypeError, ValueError):
                     prior_close = 0.0
                 if prior_close > 0:
+                    retained["change"] = _round_or_none(quote - prior_close, 2)
                     retained["change_pct"] = _round_or_none(((quote - prior_close) / prior_close) * 100.0, 2)
             stabilized.append(retained)
             retained_symbols.append(symbol)
@@ -2235,11 +2346,41 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "No commodity broker adapter is available. Preparing from MCX futures history and cached option watchlists.",
             )
 
-        quote_map = await self._safe_get_ltp(adapter, self._symbols)
+        await self.ensure_selected_option_setup_locks()
+        active_futures_symbols = self._active_futures_symbols()
+        quote_map = await self._safe_get_ltp(adapter, sorted(set(active_futures_symbols.values())))
+        futures_quote_map = dict(quote_map)
+        for configured_symbol, active_symbol in active_futures_symbols.items():
+            if active_symbol in quote_map:
+                futures_quote_map.setdefault(configured_symbol, quote_map[active_symbol])
+        data_quality_snapshot: dict[str, Any] | None = None
+        try:
+            from market_data.data_quality_agent import data_quality_agent
+
+            for symbol, quote in futures_quote_map.items():
+                if quote is not None:
+                    data_quality_agent.record_tick(
+                        symbol=symbol,
+                        source="broker_futures_quote",
+                        observed_at=started_at,
+                        last_value=float(quote),
+                    )
+            data_quality_snapshot = data_quality_agent.snapshot()
+        except Exception as exc:
+            data_quality_snapshot = {"overall": "unknown", "error": str(exc)}
+        self._last_data_health["data_quality"] = data_quality_snapshot
+        self._last_data_health["commodity_data_quality"] = self._commodity_data_quality_summary(
+            data_quality_snapshot,
+            futures_quote_map,
+        )
         futures_rows: list[dict[str, Any]] = []
-        for symbol in self._symbols:
-            row = await self._analyze_futures_symbol(symbol, quote_map.get(symbol))
+        for configured_symbol, active_symbol in active_futures_symbols.items():
+            row = await self._analyze_futures_symbol(active_symbol, quote_map.get(active_symbol))
             if row:
+                row["configured_symbol"] = configured_symbol
+                if active_symbol != configured_symbol:
+                    row["active_lookup_symbol"] = active_symbol
+                    row["rollover_detail"] = f"Scanning active futures {active_symbol} for configured {configured_symbol}."
                 prepared_row = dict(row)
                 prepared_row["preparation_mode"] = "closed_market"
                 prepared_row["can_enter"] = False
@@ -2247,7 +2388,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         futures_rows = self._decorate_futures_rows(futures_rows)
         futures_rows, retained_futures = self._stabilize_futures_watchlist(
             futures_rows,
-            live_quotes=quote_map,
+            live_quotes=futures_quote_map,
         )
 
         option_rows = self._decorate_option_rows(await self._build_option_watchlist())
@@ -2299,6 +2440,12 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "upstox_token_health": upstox_health,
             "option_history": option_history_health,
             "mode": "closed_market_preparation",
+            "data_quality": data_quality_snapshot,
+            "commodity_data_quality": self._commodity_data_quality_summary(
+                data_quality_snapshot,
+                futures_quote_map,
+                option_quote_map,
+            ),
         }
         self._last_message = (
             f"Market closed. Prepared for next MCX session: {len(futures_rows)} futures rows "
@@ -2352,9 +2499,6 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 interval=OPTIONS_TIMEFRAME,
                 limit=96,
             )
-        ce_candles = _filter_closed_interval_rows(ce_candles, interval=OPTIONS_TIMEFRAME)
-        pe_candles = _filter_closed_interval_rows(pe_candles, interval=OPTIONS_TIMEFRAME)
-
         ce_closes = [float(item["close"]) for item in ce_candles if item.get("close") is not None]
         pe_closes = [float(item["close"]) for item in pe_candles if item.get("close") is not None]
         ce_analysis = evaluate_commodity_signal(
@@ -2531,12 +2675,18 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                         "No commodity broker adapter is available. Scanning from MCX futures history and cached option watchlists.",
                     )
 
-                quote_map = await self._safe_get_ltp(adapter, self._symbols)
+                await self.ensure_selected_option_setup_locks()
+                active_futures_symbols = self._active_futures_symbols()
+                quote_map = await self._safe_get_ltp(adapter, sorted(set(active_futures_symbols.values())))
+                futures_quote_map = dict(quote_map)
+                for configured_symbol, active_symbol in active_futures_symbols.items():
+                    if active_symbol in quote_map:
+                        futures_quote_map.setdefault(configured_symbol, quote_map[active_symbol])
                 data_quality_snapshot: dict[str, Any] | None = None
                 try:
                     from market_data.data_quality_agent import data_quality_agent
 
-                    for symbol, quote in quote_map.items():
+                    for symbol, quote in futures_quote_map.items():
                         if quote is not None:
                             # MCX futures use a dedicated source so the
                             # 90s budget matches the 30s scan cadence
@@ -2552,9 +2702,13 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 except Exception as exc:
                     data_quality_snapshot = {"overall": "unknown", "error": str(exc)}
                     self._last_data_health["data_quality"] = data_quality_snapshot
+                self._last_data_health["commodity_data_quality"] = self._commodity_data_quality_summary(
+                    data_quality_snapshot,
+                    futures_quote_map,
+                )
                 commodity_quality_blocked, commodity_quality_reason = self._commodity_futures_quality_blocked(
                     data_quality_snapshot,
-                    quote_map,
+                    futures_quote_map,
                 )
                 if settings.DATA_QUALITY_SCAN_GATE_ENABLED and commodity_quality_blocked and adapter is not None:
                     message = (
@@ -2566,14 +2720,18 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     self._append_commentary("warning", message)
                     return self.get_status(refresh=False)
                 futures_rows: list[dict[str, Any]] = []
-                for symbol in self._symbols:
-                    row = await self._analyze_futures_symbol(symbol, quote_map.get(symbol))
+                for configured_symbol, active_symbol in active_futures_symbols.items():
+                    row = await self._analyze_futures_symbol(active_symbol, quote_map.get(active_symbol))
                     if row:
+                        row["configured_symbol"] = configured_symbol
+                        if active_symbol != configured_symbol:
+                            row["active_lookup_symbol"] = active_symbol
+                            row["rollover_detail"] = f"Scanning active futures {active_symbol} for configured {configured_symbol}."
                         futures_rows.append(row)
                 futures_rows = self._decorate_futures_rows(futures_rows)
                 futures_rows, retained_futures = self._stabilize_futures_watchlist(
                     futures_rows,
-                    live_quotes=quote_map,
+                    live_quotes=futures_quote_map,
                 )
                 self._audit_futures_watchlist(futures_rows)
                 # Unified commodity data path: every scan, push fresh 1-minute
@@ -2693,6 +2851,11 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     "upstox_token_health": upstox_health,
                     "option_history": option_history_health,
                     "data_quality": data_quality_snapshot,
+                    "commodity_data_quality": self._commodity_data_quality_summary(
+                        data_quality_snapshot,
+                        futures_quote_map,
+                        option_quote_map,
+                    ),
                 }
                 self._last_message = (
                     f"Scanned {len(futures_rows)} futures rows and {len(option_rows)} option rows. "
@@ -2727,7 +2890,24 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 self._persist_state()
 
     async def _safe_get_ltp(self, adapter: Optional[BrokerAdapter], symbols: list[str]) -> dict[str, float]:
-        quotes = await load_upstox_mcx_quotes(symbols)
+        try:
+            quote_snapshots = await load_upstox_mcx_quote_snapshots(symbols)
+        except Exception as exc:
+            logger.debug(f"[CommodityStrategy] Upstox quote snapshot fetch skipped: {exc}")
+            quote_snapshots = {}
+        if quote_snapshots:
+            self._last_quote_snapshots.update(quote_snapshots)
+            quotes = {
+                symbol: float(snapshot.get("price") or 0.0)
+                for symbol, snapshot in quote_snapshots.items()
+                if float(snapshot.get("price") or 0.0) > 0
+            }
+        else:
+            quotes = {}
+        if not quotes:
+            quotes = await load_upstox_mcx_quotes(symbols)
+        for symbol, value in quotes.items():
+            self._last_quote_snapshots.setdefault(symbol, {"price": value, "source": "upstox_ltp"})
         remaining_symbols = [symbol for symbol in symbols if symbol not in quotes]
         if not remaining_symbols:
             return quotes
@@ -2754,6 +2934,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 value = 0.0
             if value > 0:
                 quotes[symbol] = value
+                self._last_quote_snapshots.setdefault(symbol, {"price": value, "source": "broker_ltp"})
         return quotes
 
     async def _manage_positions(

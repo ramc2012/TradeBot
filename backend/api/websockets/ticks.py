@@ -333,12 +333,51 @@ async def ws_positions_overview(websocket: WebSocket):
 
     async def payload_factory():
         from api.routers.commodity import commodity_strategy_status
+        from api.routers.auction_intelligence import paper_positions as auction_paper_positions
+        from api.routers.directional_options import paper_positions as directional_paper_positions
+        from api.routers.fractal_market_profile import fractal_market_profile_paper_positions
+        from api.routers.gann_tp_delta import paper_agent_status as gann_paper_agent_status
         from api.routers.trading import get_positions, strategy_agent_status
 
+        errors: dict[str, str] = {}
+
+        async def settle(key: str, task):
+            try:
+                return await task
+            except Exception as exc:  # pragma: no cover - defensive stream isolation
+                errors[key] = str(exc)
+                logger.warning(f"[WS] positions overview source failed: {key}: {exc}")
+                return None
+
+        (
+            manual_positions,
+            nse_status,
+            commodity_status,
+            directional_positions,
+            gann_status,
+            auction_positions,
+            fractal_positions,
+        ) = await asyncio.gather(
+            settle("manual", get_positions()),
+            settle("nse", strategy_agent_status()),
+            settle("commodity", commodity_strategy_status()),
+            settle("directional", directional_paper_positions(symbol=None, status="all", limit=100)),
+            settle("gann", gann_paper_agent_status(limit=100)),
+            settle("auction", auction_paper_positions(symbol=None, status="all", limit=100)),
+            settle("fractal", fractal_market_profile_paper_positions(symbol=None, status="all", limit=100)),
+        )
+
         return {
-            "manual": await get_positions(),
-            "strategy": await strategy_agent_status(),
-            "commodity": await commodity_strategy_status(),
+            "manual": manual_positions,
+            "nse": nse_status,
+            "strategy": nse_status,
+            "commodity": commodity_status,
+            "directional": directional_positions,
+            "gann": gann_status,
+            "auction": auction_positions,
+            "fractal": fractal_positions,
+            "errors": errors,
+            "fetchedAt": datetime.now(timezone.utc).isoformat(),
         }
 
     await _stream_snapshot(
@@ -385,7 +424,7 @@ async def ws_commodity_watchlist(websocket: WebSocket):
             commodity_watchlist_snapshot,
         )
 
-        return await commodity_watchlist_snapshot()
+        return await commodity_watchlist_snapshot(live_refresh=True)
 
     await _stream_snapshot(
         websocket,
@@ -408,7 +447,7 @@ async def ws_market_watchlist(websocket: WebSocket):
 
         expiry_payload = await get_atm_watchlist_expiries(
             expiry=requested_expiry,
-            live_refresh=False,
+            live_refresh=True,
         )
         effective_expiry = requested_expiry or expiry_payload.get("default_expiry")
         return {
@@ -416,7 +455,7 @@ async def ws_market_watchlist(websocket: WebSocket):
             "watchlist": await get_atm_watchlist(
                 expiry=effective_expiry,
                 symbols=None,
-                live_refresh=False,
+                live_refresh=True,
             ),
         }
 
@@ -424,6 +463,24 @@ async def ws_market_watchlist(websocket: WebSocket):
         websocket,
         channel=f"market_watchlist:{requested_expiry or 'default'}",
         interval_seconds=8.0,
+        payload_factory=payload_factory,
+    )
+
+
+async def ws_market_option_chain(websocket: WebSocket, symbol: str):
+    """Stream the selected market option chain."""
+
+    requested_expiry = str(websocket.query_params.get("expiry") or "").strip() or None
+
+    async def payload_factory():
+        from api.routers.market import get_option_chain
+
+        return await get_option_chain(symbol=symbol, expiry=requested_expiry)
+
+    await _stream_snapshot(
+        websocket,
+        channel=f"market_option_chain:{symbol}:{requested_expiry or 'default'}",
+        interval_seconds=5.0,
         payload_factory=payload_factory,
     )
 

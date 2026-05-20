@@ -155,6 +155,14 @@ async def resolve_upstox_mcx_future(symbol: str) -> Optional[dict[str, Any]]:
 
 
 async def load_upstox_mcx_quotes(symbols: list[str]) -> dict[str, float]:
+    snapshots = await load_upstox_mcx_quote_snapshots(symbols)
+    if snapshots:
+        return {
+            symbol: float(snapshot.get("price") or 0.0)
+            for symbol, snapshot in snapshots.items()
+            if float(snapshot.get("price") or 0.0) > 0
+        }
+
     normalized_symbols = [str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()]
     if not normalized_symbols:
         return {}
@@ -188,3 +196,95 @@ async def load_upstox_mcx_quotes(symbols: list[str]) -> dict[str, float]:
         if value > 0:
             quotes[symbol] = value
     return quotes
+
+
+def _to_float(value: Any) -> Optional[float]:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def load_upstox_mcx_quote_snapshots(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """Load MCX futures LTP plus exchange day-change fields from Upstox quotes."""
+    normalized_symbols = [str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()]
+    if not normalized_symbols:
+        return {}
+
+    adapter = await get_upstox_adapter()
+    if adapter is None or not hasattr(adapter, "_headers") or not hasattr(adapter, "BASE_URL"):
+        return {}
+
+    instrument_by_symbol: dict[str, str] = {}
+    for symbol in normalized_symbols:
+        resolved = await resolve_upstox_mcx_future(symbol)
+        instrument_key = str((resolved or {}).get("instrument_key") or "")
+        if instrument_key:
+            instrument_by_symbol[symbol] = instrument_key
+
+    if not instrument_by_symbol:
+        return {}
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                f"{getattr(adapter, 'BASE_URL')}/market-quote/quotes",
+                params={"instrument_key": ",".join(instrument_by_symbol.values())},
+                headers=adapter._headers(),  # type: ignore[attr-defined]
+            )
+        response.raise_for_status()
+        data = response.json().get("data", {})
+    except Exception as exc:
+        logger.debug(f"[Commodity Upstox] Full quote fetch failed: {exc}")
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    snapshots: dict[str, dict[str, Any]] = {}
+    values = [dict(item) for item in data.values() if isinstance(item, dict)]
+    for symbol, instrument_key in instrument_by_symbol.items():
+        payload = next(
+            (
+                item
+                for key, item in data.items()
+                if key == instrument_key
+                or str(item.get("instrument_token") or item.get("instrument_key") or "") == instrument_key
+            ),
+            None,
+        )
+        if payload is None:
+            payload = next(
+                (
+                    item
+                    for item in values
+                    if str(item.get("symbol") or item.get("trading_symbol") or "").upper()
+                    in {symbol.split(":", 1)[-1], symbol}
+                ),
+                None,
+            )
+        if not isinstance(payload, dict):
+            continue
+        price = _to_float(payload.get("last_price") or payload.get("ltp"))
+        net_change = _to_float(payload.get("net_change"))
+        previous_close = (
+            price - net_change
+            if price is not None and net_change is not None
+            else _to_float((payload.get("ohlc") or {}).get("close"))
+        )
+        change_pct = (
+            (net_change / previous_close) * 100.0
+            if net_change is not None and previous_close not in (None, 0)
+            else None
+        )
+        if price is None or price <= 0:
+            continue
+        snapshots[symbol] = {
+            "price": price,
+            "previous_close": previous_close,
+            "change": net_change,
+            "change_pct": change_pct,
+            "source": "upstox_full_quote",
+        }
+    return snapshots
