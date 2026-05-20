@@ -212,6 +212,39 @@ def get_index_monthly_expiry(symbol: str, year: int, month: int) -> date:
     return candidate
 
 
+def normalize_index_contract_expiry(symbol: str | None, expiry_value: date | str | None) -> date | None:
+    """Normalize stale index expiry metadata to the current index calendar.
+
+    Some cached/live option rows can still carry the old NSE Thursday weekly
+    date even when the current tradable index expiry is the month-end Tuesday.
+    If a row is within the same expiry week as the current monthly expiry but
+    lands on the wrong weekday, report the actual monthly expiry date.
+    """
+    if not expiry_value:
+        return None
+    try:
+        expiry = expiry_value if isinstance(expiry_value, date) else date.fromisoformat(str(expiry_value)[:10])
+    except Exception:
+        return None
+
+    normalized_symbol = str(symbol or "").upper().strip()
+    expected_weekday = INDEX_EXPIRY_WEEKDAY.get(normalized_symbol)
+    if expected_weekday is None:
+        return expiry
+
+    monthly_expiry = get_index_monthly_expiry(normalized_symbol, expiry.year, expiry.month)
+    if expiry == monthly_expiry:
+        return expiry
+
+    stale_month_end_expiry = (
+        expiry.year == monthly_expiry.year
+        and expiry.month == monthly_expiry.month
+        and abs((expiry - monthly_expiry).days) <= 7
+        and expiry.weekday() != expected_weekday
+    )
+    return monthly_expiry if stale_month_end_expiry else expiry
+
+
 def get_monthly_expiries(from_date: date, to_date: date) -> list[date]:
     """
     Return all monthly NSE F&O expiry dates between from_date and to_date.
