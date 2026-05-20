@@ -254,10 +254,20 @@ async def update_commodity_strategy_config(body: CommodityConfigRequest):
 @router.get("/strategy-agent/contracts")
 async def commodity_strategy_contracts():
     await commodity_strategy_agent.ensure_selected_option_setup_locks()
+    symbols = commodity_strategy_agent.get_symbols()
+    selected_option_expiries = commodity_strategy_agent.get_selected_option_expiries()
+    selected_option_lookup_symbols = commodity_strategy_agent.get_selected_option_lookup_symbols()
+    cached = commodity_atm_watchlist_service.get_cached_contract_catalog(
+        symbols,
+        selected_option_expiries,
+        selected_option_lookup_symbols,
+    )
+    if cached:
+        return cached
     return await _bounded_contract_catalog(
-        commodity_strategy_agent.get_symbols(),
-        commodity_strategy_agent.get_selected_option_expiries(),
-        commodity_strategy_agent.get_selected_option_lookup_symbols(),
+        symbols,
+        selected_option_expiries,
+        selected_option_lookup_symbols,
     )
 
 
