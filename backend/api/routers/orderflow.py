@@ -691,11 +691,32 @@ async def _build_instrument_payload(
     # the dom/tape with a "proxy data" badge instead of pretending it's L2.
     dom_levels = _build_dom_levels(depth, mid_price=_num(order_flow.get("mid_price") or price))
     tape_rows = _build_tape_rows(trades, tick_size=tick_size)
-    synthetic_quote = str(metadata.get("quote_source") or "").lower() in {
+    # Mark the snapshot as proxy when the underlying broker feed isn't
+    # delivering real L2 / aggressor data. Three cases trigger this:
+    #
+    #   * The quote_source explicitly names one of the synthetic bridges.
+    #   * The symbol is CRUDEOIL — the websocket router only subscribes
+    #     to index spots, so MCX quotes arrive via the
+    #     _seed_crude_tick_orderflow bridge that backfills the shared
+    #     market_ticks table from minute-bar history + the Upstox MCX
+    #     quote endpoint, with synthetic bid/ask sized off LTP. Even
+    #     when quote_source comes back as "market_ticks" the underlying
+    #     is bar-derived, so we report PROXY rather than READY.
+    #   * Broker depth is missing AND there are no raw trade prints —
+    #     in that case the footprint is also bar-derived and the user
+    #     should know the dom/tape are reconstructed, not L2.
+    quote_source = str(metadata.get("quote_source") or "").lower()
+    synthetic_named_source = quote_source in {
         "commodity_runtime_history",
         "minute_bar_proxy",
         "synthetic",
     }
+    no_real_microstructure = not (depth.get("bids") or depth.get("asks")) and not trades
+    synthetic_quote = bool(
+        synthetic_named_source
+        or symbol == "CRUDEOIL"
+        or no_real_microstructure
+    )
     try:
         timeframes, history_meta = await _build_timeframe_history(
             symbol,
