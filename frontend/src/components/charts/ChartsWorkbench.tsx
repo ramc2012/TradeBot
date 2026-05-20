@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Search, RefreshCw } from "lucide-react";
 import { getChartUniverse, getChartOHLC } from "@/lib/api";
@@ -83,11 +83,16 @@ const TIMEFRAMES: { value: Timeframe; label: string }[] = [
   { value: "60minute", label: "1h" },
 ];
 
-const CHART_HEIGHT = 380;
-const MACD_HEIGHT = 110;
-const RSI_HEIGHT = 90;
-const VOLUME_HEIGHT = 60;
-const TOP_PAD = 18;
+// Chart pane heights tuned so candle bodies render at ≥4px even on a
+// busy 5-day × 30m view (~70 bars). Total vertical viewBox ~960 keeps
+// 212-bar views readable when the SVG scales down to ~1100px display
+// width. Increase the price pane the most — that's where granular
+// price action lives.
+const CHART_HEIGHT = 560;
+const MACD_HEIGHT = 150;
+const RSI_HEIGHT = 120;
+const VOLUME_HEIGHT = 80;
+const TOP_PAD = 20;
 const RIGHT_PAD = 70;
 const LEFT_PAD = 64;
 
@@ -175,23 +180,20 @@ function ChartsWorkbench() {
 
   return (
     <div className="min-h-full bg-bg-primary text-text-primary">
-      <header className="border-b border-bg-border bg-black/40 px-4 py-3">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <div className="font-mono text-[10px] font-semibold uppercase tracking-[0.22em] text-accent-cyan">
+      <header className="border-b border-bg-border bg-black/40 px-4 py-2">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-baseline gap-3">
+            <h1 className="font-mono text-base font-semibold uppercase tracking-[0.12em] text-text-primary">
               Verification chart
-            </div>
-            <h1 className="mt-1 font-mono text-2xl font-semibold uppercase tracking-[0.12em]">
-              OHLC + MACD · RSI · BB · EMA50
             </h1>
-            <p className="mt-1 max-w-3xl text-sm text-text-secondary">
-              Spot/futures OHLC with strategy trade markers overlaid. Filter by strategy to verify each desk's entries and exits.
-            </p>
+            <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-text-muted">
+              OHLC · MACD · RSI · BB · EMA50 · trade markers
+            </span>
           </div>
           <button
             type="button"
             onClick={() => ohlcQuery.refetch()}
-            className="inline-flex w-fit items-center gap-2 border border-accent-cyan/40 bg-accent-cyan/10 px-3 py-2 font-mono text-xs font-semibold uppercase tracking-[0.12em] text-accent-cyan transition-colors hover:bg-accent-cyan/15"
+            className="inline-flex items-center gap-2 border border-accent-cyan/40 bg-accent-cyan/10 px-3 py-1 font-mono text-xs font-semibold uppercase tracking-[0.12em] text-accent-cyan transition-colors hover:bg-accent-cyan/15"
           >
             <RefreshCw size={14} className={ohlcQuery.isFetching ? "animate-spin" : ""} />
             Refresh
@@ -199,7 +201,7 @@ function ChartsWorkbench() {
         </div>
       </header>
 
-      <div className="grid gap-3 p-3 xl:grid-cols-[320px_1fr]">
+      <div className="grid gap-3 p-3 xl:grid-cols-[240px_minmax(0,1fr)]">
         {/* ── Left rail: instrument picker + filters + strategy legend ── */}
         <aside className="space-y-3">
           <div className="border border-bg-border bg-black/30 p-3">
@@ -383,11 +385,14 @@ function ChartPanel({
   const [hover, setHover] = useState<number | null>(null);
 
   // Layout constants — main panel stacks price / MACD / RSI / Volume vertically
-  const totalHeight = TOP_PAD + CHART_HEIGHT + 8 + MACD_HEIGHT + 8 + RSI_HEIGHT + 8 + VOLUME_HEIGHT + 16;
+  const totalHeight = TOP_PAD + CHART_HEIGHT + 8 + MACD_HEIGHT + 8 + RSI_HEIGHT + 8 + VOLUME_HEIGHT + 28;
   const chartWidth = 1640; // SVG internal width — scales via viewBox
   const plotWidth = chartWidth - LEFT_PAD - RIGHT_PAD;
   const slot = plotWidth / Math.max(bars.length, 1);
-  const candleWidth = Math.max(2, Math.min(slot * 0.7, 14));
+  // Candle bodies fill 70% of their slot. No hard cap — when the user
+  // pulls a 1-day lookback the candles should render thick, not pinned
+  // to a 14px ceiling that wasted screen space.
+  const candleWidth = Math.max(2, Math.min(slot * 0.72, 24));
 
   const xFor = (idx: number) => LEFT_PAD + slot * idx + slot / 2;
 
@@ -472,7 +477,9 @@ function ChartPanel({
     return path;
   };
 
-  const priceTicks = 6;
+  // More gridlines now that the price pane is ~50% taller — denser
+  // y-axis ticks make small price movements legible.
+  const priceTicks = 10;
   const priceTickValues = Array.from({ length: priceTicks + 1 }, (_, i) =>
     priceMax - (i * (priceMax - priceMin)) / priceTicks,
   );
@@ -498,7 +505,7 @@ function ChartPanel({
 
       <div className="relative overflow-x-auto">
         <svg
-          className="h-auto w-full min-w-0 sm:min-w-[640px] lg:min-w-[960px]"
+          className="block h-auto w-full min-w-0 sm:min-w-[700px]"
           viewBox={`0 0 ${chartWidth} ${totalHeight}`}
           preserveAspectRatio="xMidYMid meet"
           onMouseLeave={() => setHover(null)}
@@ -521,7 +528,7 @@ function ChartPanel({
           {priceTickValues.map((tick, i) => (
             <g key={`pt-${i}`}>
               <line x1={LEFT_PAD} x2={chartWidth - RIGHT_PAD} y1={yPrice(tick)} y2={yPrice(tick)} stroke="#1e2d45" strokeDasharray="3 6" opacity="0.5" />
-              <text x={LEFT_PAD - 6} y={yPrice(tick) + 4} fill="#94a3b8" fontFamily="JetBrains Mono" fontSize="11" textAnchor="end">
+              <text x={LEFT_PAD - 6} y={yPrice(tick) + 4} fill="#94a3b8" fontFamily="JetBrains Mono" fontSize="13" textAnchor="end">
                 {fmt(tick, 2)}
               </text>
             </g>
@@ -615,7 +622,7 @@ function ChartPanel({
 
           {/* MACD pane */}
           <rect x={LEFT_PAD} y={macdY0} width={plotWidth} height={MACD_HEIGHT} fill="#050816" stroke="#1e2d45" />
-          <text x={LEFT_PAD - 6} y={macdY0 + 12} fill="#94a3b8" fontFamily="JetBrains Mono" fontSize="10" textAnchor="end">
+          <text x={LEFT_PAD - 6} y={macdY0 + 14} fill="#94a3b8" fontFamily="JetBrains Mono" fontSize="12" textAnchor="end">
             MACD
           </text>
           {/* Zero line */}
@@ -645,7 +652,7 @@ function ChartPanel({
 
           {/* RSI pane */}
           <rect x={LEFT_PAD} y={rsiY0} width={plotWidth} height={RSI_HEIGHT} fill="#050816" stroke="#1e2d45" />
-          <text x={LEFT_PAD - 6} y={rsiY0 + 12} fill="#94a3b8" fontFamily="JetBrains Mono" fontSize="10" textAnchor="end">
+          <text x={LEFT_PAD - 6} y={rsiY0 + 14} fill="#94a3b8" fontFamily="JetBrains Mono" fontSize="12" textAnchor="end">
             RSI
           </text>
           {[30, 50, 70].map((lvl) => (
@@ -659,7 +666,7 @@ function ChartPanel({
                 strokeDasharray={lvl === 50 ? "" : "2 4"}
                 opacity={lvl === 50 ? 0.6 : 0.35}
               />
-              <text x={chartWidth - RIGHT_PAD + 4} y={yRsi(lvl) + 3} fill="#475569" fontFamily="JetBrains Mono" fontSize="9">
+              <text x={chartWidth - RIGHT_PAD + 4} y={yRsi(lvl) + 4} fill="#64748b" fontFamily="JetBrains Mono" fontSize="11">
                 {lvl}
               </text>
             </g>
@@ -668,7 +675,7 @@ function ChartPanel({
 
           {/* Volume pane */}
           <rect x={LEFT_PAD} y={volY0} width={plotWidth} height={VOLUME_HEIGHT} fill="#050816" stroke="#1e2d45" />
-          <text x={LEFT_PAD - 6} y={volY0 + 12} fill="#94a3b8" fontFamily="JetBrains Mono" fontSize="10" textAnchor="end">
+          <text x={LEFT_PAD - 6} y={volY0 + 14} fill="#94a3b8" fontFamily="JetBrains Mono" fontSize="12" textAnchor="end">
             Vol
           </text>
           {bars.map((bar, i) => {
@@ -697,10 +704,10 @@ function ChartPanel({
                   <text
                     key={`xt-${k}`}
                     x={x}
-                    y={volY0 + VOLUME_HEIGHT + 14}
-                    fill="#64748b"
+                    y={volY0 + VOLUME_HEIGHT + 16}
+                    fill="#94a3b8"
                     fontFamily="JetBrains Mono"
-                    fontSize="10"
+                    fontSize="12"
                     textAnchor="middle"
                   >
                     {new Date(bars[i].time).toLocaleString("en-IN", {
