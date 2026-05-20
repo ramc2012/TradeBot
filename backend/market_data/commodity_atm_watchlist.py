@@ -935,7 +935,11 @@ class CommodityATMWatchlistService:
             )
             if cached_payload is not None:
                 return cached_payload
-        catalog = await self.get_contract_catalog(
+        catalog = self.get_cached_contract_catalog(
+            normalized_symbols,
+            selected_option_expiries,
+            selected_option_lookup_symbols,
+        ) or await self.get_contract_catalog(
             normalized_symbols,
             selected_option_expiries,
             selected_option_lookup_symbols,
