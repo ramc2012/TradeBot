@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from analysis.instruments import normalize_index_contract_expiry
 from core.paper_trade_recorder import paper_trade_recorder
 
 
@@ -57,6 +58,20 @@ def _normalize_symbol(value: str | None) -> str:
     return str(value or "").upper().strip()
 
 
+def _with_current_expiry_calendar(position: dict[str, Any]) -> dict[str, Any]:
+    row = dict(position)
+    raw_expiry = row.get("expiry")
+    normalized_expiry = normalize_index_contract_expiry(row.get("underlying"), raw_expiry)
+    if normalized_expiry is None or normalized_expiry.isoformat() == str(raw_expiry or "")[:10]:
+        return row
+
+    row["raw_expiry"] = raw_expiry
+    row["expiry"] = normalized_expiry.isoformat()
+    row["expiry_kind"] = "monthly"
+    row["expiry_correction_reason"] = "current_index_monthly_expiry_calendar"
+    return row
+
+
 def _same_contract(position: dict[str, Any], contract: dict[str, Any]) -> bool:
     position_key = str(position.get("instrument_key") or "").strip()
     contract_key = str(contract.get("instrument_key") or "").strip()
@@ -74,6 +89,13 @@ def _same_contract(position: dict[str, Any], contract: dict[str, Any]) -> bool:
 
 
 class DirectionalOptionsPaperStore:
+    # How long the "actionable=False" signal must persist before a flat_signal
+    # close fires. The directional strategy re-evaluates every ~60 s; without
+    # this, a single noisy cycle (brief spread widening / data gap / regime
+    # uncertainty) churns the position. Five minutes of confirmation prevents
+    # ~90 % churn observed on 2026-05-20 (71 opens / 64 closes in a session).
+    FLAT_CONFIRMATION_SECONDS: float = 300.0
+
     def __init__(self, root: Path | str, *, min_hold_bars: int = 3):
         self.root = Path(root)
         if not self.root.is_absolute():
@@ -98,8 +120,8 @@ class DirectionalOptionsPaperStore:
     async def list_positions(self, symbol: str | None = None, status: str = "all", limit: int = 50) -> dict[str, Any]:
         state = self._load_positions()
         normalized = _normalize_symbol(symbol)
-        open_positions = list(state.get("open_positions", []))
-        closed_positions = list(state.get("closed_positions", []))
+        open_positions = [_with_current_expiry_calendar(row) for row in state.get("open_positions", [])]
+        closed_positions = [_with_current_expiry_calendar(row) for row in state.get("closed_positions", [])]
         if normalized:
             open_positions = [row for row in open_positions if _normalize_symbol(row.get("underlying")) == normalized]
             closed_positions = [row for row in closed_positions if _normalize_symbol(row.get("underlying")) == normalized]
@@ -194,6 +216,14 @@ class DirectionalOptionsPaperStore:
                 return self._summary(open_positions, closed_positions)
 
             if not actionable:
+                # Two-stage close: require persistent flat signal before
+                # exiting. The strategy re-evaluates every ~60 s and any
+                # one of (signal/contract/risk/exec_ready) flipping to
+                # False sets actionable=False — but a single noisy cycle
+                # shouldn't churn a held position. Track when each row
+                # last saw an actionable=True cycle; only fire flat_signal
+                # close after FLAT_CONFIRMATION_SECONDS of sustained flat.
+                now_dt = datetime.now(timezone.utc)
                 position_timeframe = str(selection.get("timeframe") or "")
                 for row in list(matching):
                     if not _has_satisfied_min_hold(
@@ -205,6 +235,14 @@ class DirectionalOptionsPaperStore:
                         # noisy bar. Keep the position open; it will close
                         # naturally on stop / target / a later flat-signal.
                         continue
+                    last_actionable_iso = row.get("last_actionable_at") or row.get("opened_at")
+                    last_actionable_dt = _parse_iso(last_actionable_iso)
+                    if last_actionable_dt is not None:
+                        flat_for = (now_dt - last_actionable_dt).total_seconds()
+                        if flat_for < self.FLAT_CONFIRMATION_SECONDS:
+                            # Position recently green-lit; brief flat is
+                            # noise. Don't churn the position.
+                            continue
                     self._close_position(
                         row,
                         mark=marks.get(str(row.get("position_id") or "")) or {},
@@ -227,6 +265,10 @@ class DirectionalOptionsPaperStore:
             for row in list(matching):
                 if _same_contract(row, contract) and str(row.get("direction") or "") == str(signal.get("direction") or ""):
                     row["updated_at"] = recorded_at
+                    # Mark this cycle as green-lit so the flat-signal
+                    # confirmation timer above resets every time we get a
+                    # fresh actionable=True for the same contract.
+                    row["last_actionable_at"] = recorded_at
                     row["latest_premium"] = latest_mark
                     row["latest_spot"] = latest_spot
                     row["confidence"] = float(signal.get("confidence") or row.get("confidence") or 0.0)
@@ -281,6 +323,11 @@ class DirectionalOptionsPaperStore:
                         "status": "open",
                         "opened_at": recorded_at,
                         "updated_at": recorded_at,
+                        # Anchor for the flat-signal confirmation timer
+                        # (FLAT_CONFIRMATION_SECONDS). Initialized to open
+                        # time so the position has a full grace window
+                        # before any single noisy cycle can close it.
+                        "last_actionable_at": recorded_at,
                         "closed_at": None,
                         "underlying": underlying,
                         "timeframe": selection.get("timeframe"),

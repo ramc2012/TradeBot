@@ -1765,6 +1765,20 @@ class ATMWatchlistService:
         )
         if not closes and fallback_close > 0:
             closes = [fallback_close]
+        # Append a synthetic forming-bar close using the current LTP so
+        # MACD reacts intra-bar instead of waiting for the 30-minute bar
+        # to close. Without this the watchlist's MACD value is frozen
+        # between bar closes (09:15 → 09:45 → 10:15 etc.), and S1 can't
+        # detect a fresh zero-cross until the bar closes — which means
+        # zero entries possible in the first 30 minutes of the session.
+        #
+        # Only append when the LTP differs meaningfully from the last
+        # closed-bar close, otherwise the synthetic bar just duplicates
+        # state and doesn't move the MACD.
+        if closes and fallback_close > 0:
+            last_close = closes[-1]
+            if last_close > 0 and abs(fallback_close - last_close) / last_close > 0.001:
+                closes = list(closes) + [fallback_close]
         return latest_macd_rsi(closes)
 
     async def _load_persisted_watchlist_rows(
@@ -2796,6 +2810,41 @@ class ATMWatchlistService:
                     row["strategy_profile"] = profile.name
                     row["profile_resolved_expiry"] = exp_iso
                     merged_rows.append(row)
+
+        resolved_symbols = {
+            str(row.get("underlying") or "").upper()
+            for row in merged_rows
+            if str(row.get("underlying") or "").strip()
+        }
+        missing_symbols = [
+            str(sym).upper()
+            for sym in symbols
+            if str(sym).upper() not in resolved_symbols and str(sym).upper() not in unresolved
+        ]
+        if missing_symbols:
+            try:
+                fallback_payload = await self.get_watchlist(
+                    expiry=None,
+                    symbols=missing_symbols,
+                    live_refresh=live_refresh,
+                )
+                for row in list((fallback_payload or {}).get("rows") or []):
+                    underlying = str(row.get("underlying") or "").upper()
+                    if underlying not in set(missing_symbols):
+                        continue
+                    row = dict(row)
+                    row["strategy_profile"] = profile.name
+                    row["profile_resolved_expiry"] = str(row.get("expiry") or "")
+                    row["strategy_profile_fallback"] = "default_expiry"
+                    merged_rows.append(row)
+            except Exception as exc:
+                errors.append(
+                    {
+                        "expiry": None,
+                        "symbols": missing_symbols,
+                        "error": f"default_expiry_fallback_failed: {exc}",
+                    }
+                )
 
         return {
             "rows": merged_rows,
