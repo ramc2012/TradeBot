@@ -27,6 +27,7 @@ from macro_research import macro_research_service
 from sector_interaction.india_live import india_live_sector_service
 from market_data.source_policy import route_order, source_policy_snapshot
 from market_data.fno_analytics import build_fno_analytics
+from market_data.data_quality_agent import data_quality_agent
 from api.routers.auth import (
     ensure_fyers_session,
     ensure_upstox_session,
@@ -725,6 +726,58 @@ def _build_tick_snapshot(
     )
 
 
+def _parse_snapshot_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _latest_quality_tick_snapshot(app_symbol: str) -> LatestTickSnapshot | None:
+    """Return the freshest MCX quote already observed by strategy agents."""
+    try:
+        snapshot = data_quality_agent.snapshot()
+    except Exception as exc:
+        logger.trace(f"[Market] Data quality latest tick unavailable for {app_symbol}: {exc}")
+        return None
+
+    source_priority = {
+        "broker_futures_quote": 0,
+        "broker_option_quote": 1,
+        "mcx_tick": 2,
+        "broker_quote": 3,
+    }
+    candidates = [
+        entry
+        for entry in snapshot.get("entries", [])
+        if str(entry.get("symbol") or "") == app_symbol
+        and str(entry.get("source") or "") in source_priority
+        and _safe_float(entry.get("last_value")) > 0
+    ]
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda item: (
+            bool(item.get("stale")),
+            source_priority.get(str(item.get("source") or ""), 99),
+            float(item.get("age_seconds") or 0.0),
+        )
+    )
+    best = candidates[0]
+    observed_at = _parse_snapshot_timestamp(best.get("last_seen_at"))
+    return _build_tick_snapshot(
+        app_symbol=app_symbol,
+        ltp=best.get("last_value"),
+        timestamp=observed_at,
+        source=str(best.get("source") or "data_quality"),
+    )
+
+
 async def _latest_market_tick_snapshot(market_symbol: _ResolvedMarketSymbol) -> LatestTickSnapshot | None:
     underlying = _INDEX_UNDERLYING_BY_APP_SYMBOL.get(market_symbol.app_symbol)
     band = _INDEX_PRICE_BANDS.get(str(underlying or "").upper())
@@ -821,6 +874,9 @@ async def _latest_index_tick_snapshot(
             if snapshot:
                 return snapshot
 
+    quality_snapshot = _latest_quality_tick_snapshot(app_symbol)
+    if quality_snapshot:
+        return quality_snapshot
     db_snapshot = await _latest_market_tick_snapshot(_resolve_market_symbol(app_symbol))
     if db_snapshot:
         return db_snapshot

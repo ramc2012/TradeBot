@@ -424,7 +424,11 @@ async def ws_commodity_watchlist(websocket: WebSocket):
             commodity_watchlist_snapshot,
         )
 
-        return await commodity_watchlist_snapshot(live_refresh=True)
+        # The commodity strategy agent already refreshes futures/options data
+        # on its scan cadence. Do not make every websocket client force a live
+        # option-chain refresh; that fans out into broker REST calls and trips
+        # Fyers 429 limits, leaving rows stale for everyone.
+        return await commodity_watchlist_snapshot(live_refresh=False)
 
     await _stream_snapshot(
         websocket,
