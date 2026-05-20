@@ -807,12 +807,13 @@ function PositionsTable({ positions }: { positions: CommodityPosition[] }) {
   }
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[960px] text-xs">
+      <table className="w-full min-w-[1000px] text-xs">
         <thead className="text-[10.5px] uppercase tracking-wide text-text-muted">
           <tr>
             <th className="text-left">Instrument</th>
             <th className="text-left">Side</th>
-            <th className="text-right">Qty</th>
+            <th className="text-right" title="Lots × lot size">Lots</th>
+            <th className="text-right" title="Total contracts (lots × lot size)">Qty</th>
             <th className="text-right">Entry</th>
             <th className="text-right">Last</th>
             <th className="text-right">Stop</th>
@@ -823,29 +824,46 @@ function PositionsTable({ positions }: { positions: CommodityPosition[] }) {
           </tr>
         </thead>
         <tbody>
-          {positions.map((p) => (
-            <tr key={p.position_key || p.live_symbol} className={QUIET_ROW}>
-              <td className="py-1.5 font-medium">
-                {p.display_name || p.symbol}
-                <div className="text-[10px] text-text-muted">{p.live_symbol}</div>
-              </td>
-              <td>{p.action}</td>
-              <td className="text-right font-mono">{p.qty}</td>
-              <td className="text-right font-mono">{formatNumber(p.entry_price, 2)}</td>
-              <td className="text-right font-mono">{formatNumber(p.current_price, 2)}</td>
-              <td className="text-right font-mono text-rose-300">{formatNumber(p.stop_price, 2)}</td>
-              <td className="text-right font-mono text-emerald-300">{formatNumber(p.target_price, 2)}</td>
-              <td className={`text-right font-mono ${(p.unrealized_pnl ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                {formatINR(p.unrealized_pnl)}
-              </td>
-              <td className={`text-right font-mono ${(p.return_pct ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                {formatPct(p.return_pct, 1)}
-              </td>
-              <td className="text-[10.5px] text-text-muted">
-                {[p.strategy_title, p.regime, p.expiry].filter(Boolean).join(" · ") || "--"}
-              </td>
-            </tr>
-          ))}
+          {positions.map((p) => {
+            // Show lots × lot_size so the trader can audit position size at a
+            // glance — critical after the SENSEX lot-size bug surfaced. When
+            // backend doesn't supply lots explicitly, derive from qty (we
+            // know SENSEX=20, NIFTY=65, BANKNIFTY=30, MIDCPNIFTY=120, etc.).
+            const qty = Number(p.qty ?? 0);
+            const lots = Number(p.lots ?? 0);
+            const lotSize = lots > 0 ? Math.round(qty / lots) : null;
+            const lotLabel = lots > 0 && lotSize
+              ? `${lots} × ${lotSize}`
+              : lots > 0
+                ? `${lots}`
+                : "—";
+            return (
+              <tr key={p.position_key || p.live_symbol} className={QUIET_ROW}>
+                <td className="py-1.5 font-medium">
+                  {p.display_name || p.symbol}
+                  <div className="text-[10px] text-text-muted">{p.live_symbol}</div>
+                </td>
+                <td>{p.action}</td>
+                <td className="text-right font-mono text-[11px] text-text-muted" title="lots × contract size">
+                  {lotLabel}
+                </td>
+                <td className="text-right font-mono">{qty || "—"}</td>
+                <td className="text-right font-mono">{formatNumber(p.entry_price, 2)}</td>
+                <td className="text-right font-mono">{formatNumber(p.current_price, 2)}</td>
+                <td className="text-right font-mono text-rose-300">{formatNumber(p.stop_price, 2)}</td>
+                <td className="text-right font-mono text-emerald-300">{formatNumber(p.target_price, 2)}</td>
+                <td className={`text-right font-mono ${(p.unrealized_pnl ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                  {formatINR(p.unrealized_pnl)}
+                </td>
+                <td className={`text-right font-mono ${(p.return_pct ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                  {formatPct(p.return_pct, 1)}
+                </td>
+                <td className="text-[10.5px] text-text-muted">
+                  {[p.strategy_title, p.regime, p.expiry].filter(Boolean).join(" · ") || "--"}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -1310,7 +1328,11 @@ export default function CommodityLivePage() {
   );
   const trades = useMemo(() => (status.trade_history ?? []) as TradeRow[], [status.trade_history]);
   const auditEvents = useMemo(() => (auditQuery.data?.events ?? []) as AuditEvent[], [auditQuery.data]);
-  const dataQuality = useMemo(() => (dataQualityQuery.data ?? {}) as DataQualitySnap, [dataQualityQuery.data]);
+  const globalDataQuality = useMemo(() => (dataQualityQuery.data ?? {}) as DataQualitySnap, [dataQualityQuery.data]);
+  const dataQuality = useMemo(
+    () => ((status.data_health?.commodity_data_quality ?? globalDataQuality) as DataQualitySnap),
+    [globalDataQuality, status.data_health?.commodity_data_quality],
+  );
   const mcxQuality = useMemo(
     () => (dataQuality.symbol_health ?? []).filter((s) => (s.symbol || "").startsWith("MCX:")),
     [dataQuality.symbol_health],
