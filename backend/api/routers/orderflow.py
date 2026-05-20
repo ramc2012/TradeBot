@@ -421,6 +421,97 @@ async def _build_timeframe_history(
     }
 
 
+def _build_dom_levels(depth: dict[str, Any], *, mid_price: float, max_levels: int = 5) -> dict[str, Any]:
+    """Return a top-N DOM ladder split into bid and ask sides.
+
+    Mirrors a Bookmap/Quantower-style depth-of-market panel: each side
+    sorted by price (bids descending, asks ascending), with quantity and
+    cumulative quantity per level. When the broker depth array is empty
+    (typical for MCX commodities in this app), returns empty arrays —
+    the UI uses synthetic_quote elsewhere to label the gap.
+    """
+
+    def _normalize_side(rows: Any, *, ascending: bool) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for row in rows or []:
+            price = _num((row or {}).get("price"))
+            qty = _num((row or {}).get("quantity"))
+            if price <= 0:
+                continue
+            out.append({"price": round(price, 2), "quantity": round(qty, 2)})
+        out.sort(key=lambda item: item["price"], reverse=not ascending)
+        trimmed = out[:max_levels]
+        cumulative = 0.0
+        for level in trimmed:
+            cumulative += level["quantity"]
+            level["cumulative_quantity"] = round(cumulative, 2)
+        return trimmed
+
+    bids = _normalize_side(depth.get("bids"), ascending=False)
+    asks = _normalize_side(depth.get("asks"), ascending=True)
+    spread = (asks[0]["price"] - bids[0]["price"]) if bids and asks else 0.0
+    return {
+        "bids": bids,
+        "asks": asks,
+        "mid_price": round(mid_price, 4) if mid_price > 0 else None,
+        "spread": round(spread, 4),
+        "level_count": max(len(bids), len(asks)),
+    }
+
+
+def _build_tape_rows(trades: list[dict[str, Any]], *, tick_size: float, max_rows: int = 60) -> list[dict[str, Any]]:
+    """Return a Sierra-style time-and-sales tape — most recent first.
+
+    Each row exposes the price, quantity, aggressor side, and a tone
+    ("up"/"down"/"neutral") matched against the immediately previous
+    print so the UI can paint the tape green/red without re-deriving
+    state. Block size is computed from the typical-volume threshold
+    (≥3× median quantity in the recent window) so large prints stand
+    out without filtering them out.
+    """
+    if not trades:
+        return []
+    quantities = [_num(item.get("quantity")) for item in trades]
+    quantities = [q for q in quantities if q > 0]
+    block_threshold = 0.0
+    if quantities:
+        srt = sorted(quantities)
+        median = srt[len(srt) // 2]
+        block_threshold = max(median * 3.0, 1.0)
+
+    ordered = sorted(
+        trades,
+        key=lambda item: _parse_dt(item.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc),
+    )[-max_rows:]
+    prev_price: float | None = None
+    rows: list[dict[str, Any]] = []
+    for trade in ordered:
+        price = _num(trade.get("price"))
+        qty = _num(trade.get("quantity"))
+        if price <= 0 or qty <= 0:
+            continue
+        if prev_price is None or abs(price - prev_price) < tick_size / 2:
+            tone = "neutral"
+        elif price > prev_price:
+            tone = "up"
+        else:
+            tone = "down"
+        prev_price = price
+        rows.append(
+            {
+                "timestamp": trade.get("timestamp"),
+                "label": _time_label(trade.get("timestamp")),
+                "price": round(price, 4),
+                "quantity": round(qty, 2),
+                "side": str(trade.get("aggressor_side") or "neutral").lower(),
+                "tone": tone,
+                "is_block": qty >= block_threshold,
+            }
+        )
+    rows.reverse()  # newest first
+    return rows
+
+
 def _build_heatmap(snapshot: dict[str, Any], price: float) -> list[dict[str, Any]]:
     request = snapshot.get("request") or {}
     analysis = snapshot.get("analysis") or {}
@@ -580,6 +671,8 @@ async def _build_instrument_payload(
     metadata = request.get("metadata") or {}
     session = request.get("session") or {}
     quote = request.get("quote") or {}
+    depth = request.get("depth") or {}
+    trades = list(request.get("trades") or [])
     analysis = snapshot.get("analysis") or {}
     order_flow = analysis.get("order_flow") or {}
     market_profile = analysis.get("market_profile") or {}
@@ -591,6 +684,18 @@ async def _build_instrument_payload(
     footprint = _build_footprint(snapshot, symbol, tick_size)
     whales = _build_whales(snapshot, tick_size)
     flow_bias = _num(order_flow.get("order_flow_imbalance") or order_flow.get("trade_imbalance"))
+    # Mirror DOM + tape from the broker snapshot so the frontend can show
+    # an ATAS-style ladder + time-and-sales without re-fetching. For CRUDE
+    # the underlying snapshot is synthesized from minute bars (no real
+    # exchange depth), so synthetic_quote = True signals the UI to render
+    # the dom/tape with a "proxy data" badge instead of pretending it's L2.
+    dom_levels = _build_dom_levels(depth, mid_price=_num(order_flow.get("mid_price") or price))
+    tape_rows = _build_tape_rows(trades, tick_size=tick_size)
+    synthetic_quote = str(metadata.get("quote_source") or "").lower() in {
+        "commodity_runtime_history",
+        "minute_bar_proxy",
+        "synthetic",
+    }
     try:
         timeframes, history_meta = await _build_timeframe_history(
             symbol,
@@ -664,6 +769,9 @@ async def _build_instrument_payload(
         "ntm_volx": analysis.get("ntm_volx"),
         "raw_bar_count": len(request.get("bars") or []),
         "raw_trade_count": len(request.get("trades") or []),
+        "dom": dom_levels,
+        "tape": tape_rows,
+        "synthetic_quote": synthetic_quote,
     }
 
 

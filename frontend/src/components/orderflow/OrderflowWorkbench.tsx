@@ -85,6 +85,30 @@ type WhaleMarker = {
   source: string;
 };
 
+type DomLevel = {
+  price: number;
+  quantity: number;
+  cumulative_quantity: number;
+};
+
+type DomLadder = {
+  bids: DomLevel[];
+  asks: DomLevel[];
+  mid_price?: number | null;
+  spread: number;
+  level_count: number;
+};
+
+type TapeRow = {
+  timestamp?: string | null;
+  label: string;
+  price: number;
+  quantity: number;
+  side: string;
+  tone: "up" | "down" | "neutral";
+  is_block: boolean;
+};
+
 type OrderflowInstrument = {
   symbol: OrderflowSymbol;
   display: string;
@@ -156,6 +180,9 @@ type OrderflowInstrument = {
   };
   heatmap: HeatmapLevel[];
   whales: WhaleMarker[];
+  dom?: DomLadder;
+  tape?: TapeRow[];
+  synthetic_quote?: boolean;
   raw_bar_count: number;
   raw_trade_count: number;
   error?: string;
@@ -359,7 +386,11 @@ function InstrumentTabs({
               ) : null}
             </div>
             <div className="mt-1 truncate text-[10px] uppercase tracking-[0.14em] text-text-muted">
-              {item?.source?.order_flow ?? "broker history"} · {item ? formatAge(item.age_seconds) : "load on select"}
+              {item?.synthetic_quote ? (
+                <span className="text-accent-amber">proxy · bar-derived</span>
+              ) : (
+                <>{item?.source?.order_flow ?? "broker history"} · {item ? formatAge(item.age_seconds) : "load on select"}</>
+              )}
             </div>
           </button>
         );
@@ -494,7 +525,13 @@ function OrderflowChart({
       </div>
 
       <div className="relative overflow-x-auto">
-        <svg className="h-auto min-w-[1320px] w-full" viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`} role="img" aria-label={`${instrument.symbol} orderflow chart`}>
+        <svg
+          className="h-auto w-full min-w-0 sm:min-w-[640px] lg:min-w-[960px]"
+          viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
+          preserveAspectRatio="xMidYMid meet"
+          role="img"
+          aria-label={`${instrument.symbol} orderflow chart`}
+        >
           <defs>
             <linearGradient id="orderflowBackground" x1="0" x2="0" y1="0" y2="1">
               <stop offset="0%" stopColor="#111827" stopOpacity="0.88" />
@@ -717,6 +754,193 @@ function DataIntegrityPanel({ instrument }: { instrument: OrderflowInstrument })
   );
 }
 
+/**
+ * Bookmap/Quantower-style DOM ladder. Top-N bid + ask levels side-by-side
+ * with depth bars sized by per-level cumulative quantity. When the
+ * underlying broker doesn't publish L2 depth (e.g. MCX commodities in
+ * this app), we render an explicit empty state with the synthetic-data
+ * badge instead of pretending to have a book.
+ */
+function DomLadder({
+  dom,
+  synthetic,
+  symbol,
+}: {
+  dom: DomLadder | undefined;
+  synthetic: boolean;
+  symbol: OrderflowSymbol;
+}) {
+  const hasData = dom && (dom.bids.length > 0 || dom.asks.length > 0);
+  if (!hasData) {
+    return (
+      <div className="border border-bg-border bg-black px-3 py-3">
+        <div className="flex items-baseline justify-between gap-2">
+          <div className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-text-secondary">
+            DOM ladder
+          </div>
+          <span className="font-mono text-[10px] uppercase text-accent-amber">L2 unavailable</span>
+        </div>
+        <div className="mt-3 text-[11px] leading-5 text-text-muted">
+          {synthetic
+            ? "Quote source is the commodity 1-minute history bridge — exchange L2 is not exposed via the current broker session. Footprint and metrics fall back to bar-derived inference."
+            : "No depth rows received from broker chain. The footprint and queue-pressure metrics still update on every refresh."}
+        </div>
+      </div>
+    );
+  }
+  const maxBidSize = Math.max(1, ...dom.bids.map((level) => level.cumulative_quantity));
+  const maxAskSize = Math.max(1, ...dom.asks.map((level) => level.cumulative_quantity));
+  const priceDigits = symbol === "CRUDEOIL" ? 0 : 2;
+  return (
+    <div className="border border-bg-border bg-black px-3 py-3">
+      <div className="flex items-baseline justify-between gap-2">
+        <div className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-accent-cyan">
+          DOM ladder
+        </div>
+        <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-text-muted">
+          spread {formatPrice(dom.spread, priceDigits)} · {dom.level_count} lvls
+        </div>
+      </div>
+      <div className="mt-2 grid grid-cols-[1fr_auto_1fr] gap-x-3">
+        {/* Bid side — descending, left-aligned bar drawn from right edge */}
+        <div className="text-right">
+          {dom.bids.map((level) => {
+            const widthPct = Math.min(100, (level.cumulative_quantity / maxBidSize) * 100);
+            return (
+              <div key={`bid-${level.price}`} className="relative flex items-center justify-end gap-2 py-0.5">
+                <span
+                  className="absolute inset-y-0 right-0 bg-accent-green/15"
+                  style={{ width: `${widthPct}%` }}
+                  aria-hidden
+                />
+                <span className="relative font-mono text-[11px] text-accent-green/80">{formatCompact(level.cumulative_quantity)}</span>
+                <span className="relative font-mono text-[11px] text-text-secondary">{formatCompact(level.quantity)}</span>
+              </div>
+            );
+          })}
+        </div>
+        {/* Price column — bids descend matching asks ascend; align by row */}
+        <div>
+          {Array.from({ length: Math.max(dom.bids.length, dom.asks.length) }, (_, idx) => {
+            const bid = dom.bids[idx];
+            const ask = dom.asks[idx];
+            return (
+              <div key={idx} className="grid grid-cols-2 gap-1 py-0.5">
+                <span className={clsx("text-right font-mono text-[11px]", bid ? "text-accent-green" : "text-text-muted")}>
+                  {bid ? formatPrice(bid.price, priceDigits) : "—"}
+                </span>
+                <span className={clsx("text-left font-mono text-[11px]", ask ? "text-accent-red" : "text-text-muted")}>
+                  {ask ? formatPrice(ask.price, priceDigits) : "—"}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+        {/* Ask side — ascending, left-aligned bar drawn from left edge */}
+        <div>
+          {dom.asks.map((level) => {
+            const widthPct = Math.min(100, (level.cumulative_quantity / maxAskSize) * 100);
+            return (
+              <div key={`ask-${level.price}`} className="relative flex items-center gap-2 py-0.5">
+                <span
+                  className="absolute inset-y-0 left-0 bg-accent-red/15"
+                  style={{ width: `${widthPct}%` }}
+                  aria-hidden
+                />
+                <span className="relative font-mono text-[11px] text-text-secondary">{formatCompact(level.quantity)}</span>
+                <span className="relative font-mono text-[11px] text-accent-red/80">{formatCompact(level.cumulative_quantity)}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <div className="mt-3 border-t border-bg-border pt-2 text-[10px] uppercase tracking-[0.16em] text-text-muted">
+        Bar lengths are cumulative depth · inner numbers are level quantity
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Sierra Chart-style Time and Sales tape. Newest print first, painted
+ * green for up-ticks and red for down-ticks, with bold rows for block
+ * trades (≥3× median quantity in the recent window). Side chip shows
+ * the aggressor when the broker exposes it.
+ */
+function TapeFeed({
+  tape,
+  symbol,
+  synthetic,
+}: {
+  tape: TapeRow[] | undefined;
+  symbol: OrderflowSymbol;
+  synthetic: boolean;
+}) {
+  const rows = tape ?? [];
+  const priceDigits = symbol === "CRUDEOIL" ? 0 : 2;
+  return (
+    <div className="border border-bg-border bg-black px-3 py-3">
+      <div className="flex items-baseline justify-between gap-2">
+        <div className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-accent-amber">
+          Time & sales
+        </div>
+        <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-text-muted">
+          {rows.length} prints {synthetic ? "· bar-derived" : ""}
+        </div>
+      </div>
+      {rows.length === 0 ? (
+        <div className="mt-3 text-[11px] leading-5 text-text-muted">
+          {synthetic
+            ? "MCX prints not exposed by broker session — use footprint delta for flow signal."
+            : "Tape will populate as the next minute's trade prints land in the broker snapshot."}
+        </div>
+      ) : (
+        <div className="mt-2 max-h-[260px] overflow-y-auto font-mono text-[11px]">
+          <div className="grid grid-cols-[auto_1fr_auto_auto] gap-x-3 border-b border-bg-border pb-1 text-[9px] uppercase tracking-[0.14em] text-text-muted">
+            <span>Time</span>
+            <span className="text-right">Price</span>
+            <span className="text-right">Qty</span>
+            <span className="text-right">Side</span>
+          </div>
+          {rows.slice(0, 40).map((row, idx) => {
+            const tone =
+              row.tone === "up"
+                ? "text-accent-green"
+                : row.tone === "down"
+                  ? "text-accent-red"
+                  : "text-text-secondary";
+            return (
+              <div
+                key={`${row.timestamp ?? ""}-${row.price}-${idx}`}
+                className={clsx(
+                  "grid grid-cols-[auto_1fr_auto_auto] gap-x-3 py-0.5",
+                  row.is_block && "bg-accent-amber/10",
+                )}
+              >
+                <span className="text-text-muted">{row.label || "--"}</span>
+                <span className={clsx("text-right", tone, row.is_block && "font-semibold")}>
+                  {formatPrice(row.price, priceDigits)}
+                </span>
+                <span className={clsx("text-right", row.is_block ? "text-accent-amber font-semibold" : "text-text-secondary")}>
+                  {formatCompact(row.quantity)}
+                </span>
+                <span
+                  className={clsx(
+                    "text-right uppercase text-[10px] tracking-[0.14em]",
+                    row.side === "buy" ? "text-accent-green/80" : row.side === "sell" ? "text-accent-red/80" : "text-text-muted",
+                  )}
+                >
+                  {row.side === "buy" ? "B" : row.side === "sell" ? "S" : "·"}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function InfoRow({ label, value, tone = "normal" }: { label: string; value: string; tone?: "normal" | "warn" }) {
   return (
     <div className="flex items-center justify-between gap-3">
@@ -864,18 +1088,44 @@ export default function OrderflowWorkbench() {
                 hot={chartInstrument.whales.length > 0}
               />
               <MetricTile
-                icon={selected.data_quality?.execution_ready === false ? AlertTriangle : ShieldCheck}
+                icon={
+                  selected.data_quality?.execution_ready === false
+                    ? AlertTriangle
+                    : selected.synthetic_quote
+                      ? AlertTriangle
+                      : ShieldCheck
+                }
                 label="Quality"
-                value={selected.data_quality?.execution_ready === false ? "DEGRADED" : "READY"}
-                detail={`${selected.source?.order_flow ?? "--"} · ${formatAge(selected.age_seconds)}`}
-                hot={selected.data_quality?.execution_ready === false}
+                value={
+                  selected.data_quality?.execution_ready === false
+                    ? "DEGRADED"
+                    : selected.synthetic_quote
+                      ? "PROXY"
+                      : "READY"
+                }
+                detail={
+                  selected.synthetic_quote
+                    ? `bar-derived · ${formatAge(selected.age_seconds)}`
+                    : `${selected.source?.order_flow ?? "--"} · ${formatAge(selected.age_seconds)}`
+                }
+                hot={selected.data_quality?.execution_ready === false || Boolean(selected.synthetic_quote)}
               />
             </div>
 
             <OrderflowChart instrument={chartInstrument} timeframe={selectedTimeframe} session={activeSession} />
 
-            <div className="grid gap-4 xl:grid-cols-[1.15fr_1fr_1fr]">
+            {/* Side-by-side market microstructure: DOM ladder + Time and
+                Sales + latest footprint bar. Mirrors what an order-flow
+                trader looks at simultaneously (Bookmap left, ATAS center,
+                Sierra tape right). Falls back gracefully when broker
+                doesn't expose L2 / raw prints. */}
+            <div className="grid gap-4 xl:grid-cols-[1fr_1fr_1fr]">
+              <DomLadder dom={selected.dom} synthetic={Boolean(selected.synthetic_quote)} symbol={selected.symbol} />
+              <TapeFeed tape={selected.tape} synthetic={Boolean(selected.synthetic_quote)} symbol={selected.symbol} />
               <LatestFootprint instrument={chartInstrument} />
+            </div>
+
+            <div className="grid gap-4 xl:grid-cols-[1.15fr_1fr]">
               <WhaleTape whales={chartInstrument.whales} />
               <DataIntegrityPanel instrument={selected} />
             </div>
