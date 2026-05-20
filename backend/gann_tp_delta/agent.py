@@ -98,6 +98,20 @@ class GannTPDeltaPaperAgent:
 
         rows = [row for row in watchlist.get("rows") or [] if isinstance(row, dict) and row.get("underlying")]
         rows = self._dedupe_rows(rows)
+        # Restrict to the configured universe — Gann geometry needs spot
+        # history that's only synced for indices and a handful of MCX
+        # commodities. Scanning all ~215 F&O stocks wastes cycles and
+        # pollutes the rejection counters with `no_gann_setup` results
+        # that aren't true rejections, just missing-data noise.
+        configured_universe = {
+            str(item).upper() for item in self.config.get("universe") or []
+        }
+        if configured_universe:
+            rows = [
+                row
+                for row in rows
+                if str(row.get("underlying") or "").upper() in configured_universe
+            ]
         if max_underlyings > 0:
             rows = rows[:max_underlyings]
 
