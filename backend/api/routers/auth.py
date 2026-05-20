@@ -1052,6 +1052,12 @@ async def ensure_upstox_session(force_validate: bool = False) -> bool:
             expires_at=getattr(token, "expires_at", None),
         ):
             if not force_validate or await _validate_upstox_access_token(access_token):
+                # Mirror the Fyers branch: ensure the data router is wired
+                # even when we short-circuit on a still-valid in-memory
+                # session. Without this, a container that boots with a
+                # cached adapter but no data-router init never subscribes
+                # to the tick feed.
+                await _ensure_feed_sync_for("upstox")
                 return True
             logger.info("[Upstox] In-memory session token failed validation — evicting")
         else:
@@ -1127,6 +1133,13 @@ async def ensure_fyers_session(force_validate: bool = False) -> bool:
             expires_at=getattr(token, "expires_at", None),
         ):
             if not force_validate or await _validate_fyers_access_token(access_token):
+                # The adapter is in _active_brokers but the data router
+                # may not yet be wired to it (this happens at startup when
+                # auto_restore returns True before the data router is fully
+                # initialized, and again after every container restart that
+                # finds a valid in-memory cache via persistence). Ensure
+                # set_broker + subscribe runs whenever we report success.
+                await _ensure_feed_sync_for("fyers")
                 return True
             logger.info("[Fyers] In-memory session token failed validation — evicting")
         else:
@@ -1873,6 +1886,27 @@ def get_connected_brokers() -> list[str]:
     """Return list of currently connected broker names."""
     with _active_brokers_lock:
         return list(_active_brokers.keys())
+
+
+async def _ensure_feed_sync_for(broker: str) -> None:
+    """Sync the data router when an ensure_* path reports success.
+
+    Called from the early-return branches of ensure_fyers_session and
+    ensure_upstox_session — i.e. paths where the in-memory adapter was
+    already valid and we exit before running the saved-token restore
+    path. Without this hook the data router can stay mode=idle for the
+    entire session even though the broker is connected.
+
+    Wrapped in try/except so a feed-sync error does not flip a valid
+    session restore into a failure return.
+    """
+    try:
+        await _sync_market_data_feed()
+    except Exception as exc:
+        logger.warning(
+            f"[{broker.capitalize()}] feed sync after in-memory session "
+            f"validation failed: {exc}"
+        )
 
 
 async def _sync_market_data_feed() -> None:

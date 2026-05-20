@@ -571,6 +571,17 @@ export const getMPConceptDrift = (underlying = "NIFTY", window = 20) =>
 export const getMPOrderflowProxy = (underlying = "NIFTY", lookback = 60) =>
   api.get("/api/auction-intelligence/mp-orderflow-proxy", { params: { underlying, lookback } });
 
+// ── Institutional Orderflow ───────────────────────────────────────────────
+export const getOrderflowSnapshot = (
+  symbols = "NIFTY",
+  intervals = "3,5,15,30",
+  historySessions = 5,
+) =>
+  api.get("/api/orderflow/snapshot", {
+    params: { symbols, intervals, history_sessions: historySessions },
+    timeout: 60_000,
+  });
+
 // ── Fractal Market Profile ────────────────────────────────────────────────
 export const getFractalMarketProfileSummary = () =>
   api.get("/api/fractal-market-profile/summary");

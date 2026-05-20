@@ -21,6 +21,7 @@ from api.routers import auction_intelligence as auction_intelligence_router
 from api.routers import directional_options as directional_options_router
 from api.routers import gann_tp_delta as gann_tp_delta_router
 from api.routers import fractal_market_profile as fractal_market_profile_router
+from api.routers import orderflow as orderflow_router
 from api.routers import system as system_router
 from api.routers import audit as audit_router
 from api.routers import data_quality as data_quality_router
@@ -32,6 +33,7 @@ from api.websockets.ticks import (
     ws_commodity_watchlist,
     ws_fractal_market_profile,
     ws_layout,
+    ws_market_option_chain,
     ws_market_watchlist,
     ws_positions,
     ws_positions_overview,
@@ -247,6 +249,7 @@ app.include_router(auction_intelligence_router.router)
 app.include_router(directional_options_router.router)
 app.include_router(gann_tp_delta_router.router)
 app.include_router(fractal_market_profile_router.router)
+app.include_router(orderflow_router.router)
 app.include_router(system_router.router)
 app.include_router(audit_router.router)
 app.include_router(data_quality_router.router)
@@ -307,6 +310,11 @@ async def websocket_commodity_watchlist(websocket: WebSocket):
 @app.websocket("/ws/market-watchlist")
 async def websocket_market_watchlist(websocket: WebSocket):
     await ws_market_watchlist(websocket)
+
+
+@app.websocket("/ws/market-option-chain/{symbol:path}")
+async def websocket_market_option_chain(websocket: WebSocket, symbol: str):
+    await ws_market_option_chain(websocket, symbol)
 
 
 @app.websocket("/ws/fractal-market-profile/{symbol}")
