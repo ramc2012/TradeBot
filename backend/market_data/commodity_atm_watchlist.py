@@ -1085,6 +1085,14 @@ class CommodityATMWatchlistService:
                     chain_failures.append(f"{symbol} ({item['active_expiry']})")
                     if _is_rate_limit_error(exc):
                         rate_limit_errors.append(str(exc))
+                        self._mark_rate_limit(exc)
+                        cached_payload = self._cached_payload(
+                            self._watchlist_cache,
+                            cache_key,
+                            label="commodity ATM watchlist",
+                        )
+                        if cached_payload is not None:
+                            return cached_payload
                     logger.warning(f"[Commodity ATM] Failed to build {symbol} {item['active_expiry']}: {exc}")
                     result = None
                     break
