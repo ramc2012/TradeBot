@@ -140,6 +140,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Market-hours paper supervisor start skipped: {e}")
 
+    # P2 streaming: option WS subscription manager. Computes the ATM
+    # option symbol set every 5 min and reconciles against data_router's
+    # current subscriptions. DRY-RUN by default — set
+    # OPTION_WS_SUBSCRIPTIONS_ENABLED=true to actually subscribe.
+    try:
+        from market_data.option_subscription_manager import run_subscription_loop, _is_enabled
+        option_ws_task = asyncio.create_task(
+            run_subscription_loop(),
+            name="option-ws-subscription-manager",
+        )
+        mode = "ACTIVE" if _is_enabled() else "DRY-RUN"
+        logger.info(f"✓ Option WS subscription manager started ({mode})")
+    except Exception as e:
+        logger.warning(f"Option WS subscription manager start skipped: {e}")
+        option_ws_task = None
+
     if settings.RESEARCH_SYNC_EMBEDDED_ENABLED:
         async def _embedded_research_sync_worker() -> None:
             try:

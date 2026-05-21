@@ -64,6 +64,36 @@ class DataRouter:
         )
         logger.info(f"[DataRouter] Subscribed to {len(symbols)} symbols")
 
+    async def add_subscriptions(self, symbols: List[str]) -> int:
+        """Append symbols to the WebSocket subscription (idempotent).
+
+        Today implemented as a full re-subscribe with the merged set —
+        the broker WS adapters in this codebase don't yet expose an
+        incremental subscribe API. Returns the count of newly added
+        symbols (zero when all are already subscribed).
+        """
+        new = [s for s in symbols if s and s not in self._subscribed_symbols]
+        if not new:
+            return 0
+        merged = list(self._subscribed_symbols) + new
+        await self.subscribe(merged)
+        logger.info(f"[DataRouter] Added {len(new)} subscriptions (total {len(merged)})")
+        return len(new)
+
+    async def remove_subscriptions(self, symbols: List[str]) -> int:
+        """Drop symbols from the subscription (idempotent).
+
+        Mirrors add_subscriptions — re-subscribes with the reduced set.
+        Returns the count actually removed.
+        """
+        drop = {s for s in symbols if s in self._subscribed_symbols}
+        if not drop:
+            return 0
+        remaining = [s for s in self._subscribed_symbols if s not in drop]
+        await self.subscribe(remaining)
+        logger.info(f"[DataRouter] Removed {len(drop)} subscriptions (total {len(remaining)})")
+        return len(drop)
+
     async def unsubscribe(self):
         if self._ws_client:
             try:
