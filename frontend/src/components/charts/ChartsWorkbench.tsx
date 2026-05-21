@@ -4,6 +4,7 @@ import { Fragment, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Search, RefreshCw } from "lucide-react";
 import { getChartUniverse, getChartOHLC } from "@/lib/api";
+import { useTickStream } from "@/hooks/useTickStream";
 
 type Kind = "INDEX" | "COMMODITY" | "STOCK";
 type Timeframe = "15minute" | "30minute" | "60minute";
@@ -139,11 +140,22 @@ function ChartsWorkbench() {
   const ohlcQuery = useQuery<OHLCResponse>({
     queryKey: ["chart-ohlc", selected, timeframe, lookback],
     queryFn: async () => (await getChartOHLC(selected, timeframe, lookback)).data,
-    refetchInterval: 30_000,
-    staleTime: 25_000,
+    // REST refresh is for historical bars + indicators only. Live price
+    // updates come from the tick stream below, so the poll cadence is
+    // generous — once per 2 min to pick up newly-closed bars and to
+    // surface fresh trade markers from agent_signals.
+    refetchInterval: 120_000,
+    staleTime: 60_000,
     refetchOnWindowFocus: false,
     enabled: Boolean(selected),
   });
+
+  // Streaming layer: subscribe to broker WS via Redis pub/sub so the
+  // currently-displayed bar's close (and high/low if exceeded) reflect
+  // the last tick instead of waiting for the next REST poll. The hook
+  // returns null for instruments that aren't on the broker WS scope
+  // (stocks, commodities) — those keep updating on the REST cadence.
+  const liveTick = useTickStream(selected);
 
   const universe = universeQuery.data?.instruments ?? [];
   const strategyColors = universeQuery.data?.strategy_colors ?? {
@@ -165,7 +177,24 @@ function ChartsWorkbench() {
   }, [universe, search, kindFilter]);
 
   const data = ohlcQuery.data;
-  const bars = data?.bars ?? [];
+  // Splice the live tick into the last bar so the chart "breathes"
+  // between REST refreshes. Indicator series stay on the closed-bar
+  // values returned from the backend — they only recompute when a bar
+  // closes, which is the correct semantics for MACD/RSI/BB/EMA50.
+  const bars = useMemo(() => {
+    const raw = data?.bars ?? [];
+    if (!raw.length || !liveTick || liveTick.ltp == null) return raw;
+    const last = raw[raw.length - 1];
+    const ltp = Number(liveTick.ltp);
+    if (!Number.isFinite(ltp) || ltp <= 0) return raw;
+    const patched: Bar = {
+      ...last,
+      close: ltp,
+      high: Math.max(last.high, ltp),
+      low: Math.min(last.low, ltp),
+    };
+    return [...raw.slice(0, -1), patched];
+  }, [data?.bars, liveTick]);
   const trades = useMemo(
     () => (data?.trades ?? []).filter((t) => enabledStrategies.has(t.strategy)),
     [data?.trades, enabledStrategies],

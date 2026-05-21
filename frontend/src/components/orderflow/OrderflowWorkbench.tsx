@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, startTransition } from "react";
+import { useTickStream } from "@/hooks/useTickStream";
 import { clsx } from "clsx";
 import {
   Activity,
@@ -966,13 +967,39 @@ export default function OrderflowWorkbench() {
       const response = await getOrderflowSnapshot(selectedSymbol, "3,5,15,30", 5);
       return response.data as OrderflowSnapshot;
     },
-    refetchInterval: 30_000,
-    staleTime: 25_000,
+    // Footprint + DOM + tape come from REST since they aggregate broker
+    // depth + raw trades server-side. With the tick stream now driving
+    // header price freshness, we can space the heavy snapshot refresh
+    // generously — 60s keeps the dom/tape current without slamming the
+    // backend snapshot builder.
+    refetchInterval: 60_000,
+    staleTime: 50_000,
+    refetchOnWindowFocus: false,
     retry: 1,
   });
 
-  const instruments = query.data?.instruments ?? [];
-  const selected = instruments.find((item) => item.symbol === selectedSymbol) ?? instruments[0];
+  // Live tick from Redis pub/sub keeps the header price + the chart's
+  // last bar fresh between the 60s snapshot refreshes. Falls back to
+  // null for symbols not on the WS feed (today: CRUDEOIL); those keep
+  // using REST-only freshness.
+  const liveTick = useTickStream(selectedSymbol);
+  const rawInstruments = query.data?.instruments ?? [];
+  const selected = useMemo(() => {
+    const base = rawInstruments.find((item) => item.symbol === selectedSymbol) ?? rawInstruments[0];
+    if (!base || !liveTick || liveTick.ltp == null) return base;
+    const ltp = Number(liveTick.ltp);
+    if (!Number.isFinite(ltp) || ltp <= 0) return base;
+    const change = base.price ? ltp - base.price + base.change : 0;
+    const change_pct = base.price ? change / Math.max(Math.abs(base.price), 1) : 0;
+    return {
+      ...base,
+      price: ltp,
+      change,
+      change_pct,
+      age_seconds: 0,
+    };
+  }, [rawInstruments, selectedSymbol, liveTick]);
+  const instruments = rawInstruments;
   const timeframe = selected?.timeframes?.[selectedTimeframe];
   const sessions = timeframe?.sessions ?? [];
   const activeSession = useMemo(() => {
