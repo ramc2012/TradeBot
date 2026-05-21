@@ -22,6 +22,15 @@ from db.database import AsyncSessionLocal
 
 UPSTOX_EXPIRY = "2026-04-23"   # use April monthly to get contracts
 SEMAPHORE_N = 5                 # 5 concurrent Upstox calls
+INDEX_LOT_SIZES = {
+    "NIFTY": 65,
+    "BANKNIFTY": 30,
+    "FINNIFTY": 60,
+    "MIDCPNIFTY": 120,
+    "NIFTYNXT50": 25,
+    "SENSEX": 20,
+    "BANKEX": 30,
+}
 
 
 async def fetch_lot_size_upstox(upstox, symbol: str, underlying_key: str) -> tuple[str, int | None]:
@@ -46,6 +55,22 @@ async def fetch_lot_size_upstox(upstox, symbol: str, underlying_key: str) -> tup
 async def main() -> None:
     from api.routers.auth import auto_restore_sessions, get_active_adapter
     from core.config import settings  # noqa: F401 — triggers settings load
+
+    async with AsyncSessionLocal() as session:
+        for symbol, lot_size in INDEX_LOT_SIZES.items():
+            await session.execute(
+                text(
+                    """
+                    UPDATE fo_underlying_catalog
+                    SET lot_size = :lot_size
+                    WHERE symbol = :symbol
+                      AND (lot_size IS NULL OR lot_size != :lot_size)
+                    """
+                ),
+                {"symbol": symbol, "lot_size": lot_size},
+            )
+        await session.commit()
+    print(f"Refreshed {len(INDEX_LOT_SIZES)} index lot-size defaults.")
 
     print("Restoring broker sessions...")
     await auto_restore_sessions()

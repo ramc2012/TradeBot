@@ -32,6 +32,9 @@ from fractal_market_profile.config import (
     IST,
     LATEST_ENTRY_TIME,
     LOT_SIZES,
+    MCX_LATEST_ENTRY_TIME,
+    MCX_SESSION_CLOSE,
+    MCX_SESSION_OPEN,
     OPTION_STRIKE_STEPS,
     PAPER_ROOT,
     PROFILE_CONFIG,
@@ -75,8 +78,34 @@ def _iso(value: Any) -> str:
     return _ensure_dt(value).astimezone(timezone.utc).isoformat()
 
 
-def _session_start(session_date: date) -> datetime:
-    return datetime.combine(session_date, SESSION_OPEN, tzinfo=IST)
+def _is_mcx_symbol(symbol_code: str | None) -> bool:
+    return str(symbol_code or "").upper().strip() in {"CRUDEOIL"}
+
+
+def _session_open_time(symbol_code: str | None = None) -> time:
+    return MCX_SESSION_OPEN if _is_mcx_symbol(symbol_code) else SESSION_OPEN
+
+
+def _session_close_time(symbol_code: str | None = None) -> time:
+    return MCX_SESSION_CLOSE if _is_mcx_symbol(symbol_code) else SESSION_CLOSE
+
+
+def _latest_entry_time(symbol_code: str | None = None) -> time:
+    return MCX_LATEST_ENTRY_TIME if _is_mcx_symbol(symbol_code) else LATEST_ENTRY_TIME
+
+
+def _session_start(session_date: date, symbol_code: str | None = None) -> datetime:
+    return datetime.combine(session_date, _session_open_time(symbol_code), tzinfo=IST)
+
+
+def _session_close(session_date: date, symbol_code: str | None = None) -> datetime:
+    return datetime.combine(session_date, _session_close_time(symbol_code), tzinfo=IST)
+
+
+def _max_profile_hour(symbol_code: str | None = None) -> int:
+    session_start = datetime.combine(date.today(), _session_open_time(symbol_code), tzinfo=IST)
+    session_close = datetime.combine(date.today(), _session_close_time(symbol_code), tzinfo=IST)
+    return max(1, int(math.ceil((session_close - session_start).total_seconds() / 3600.0)))
 
 
 def _row_to_bar(row: dict[str, Any], *, timestamp_key: str = "time") -> MarketBar:
@@ -90,14 +119,14 @@ def _row_to_bar(row: dict[str, Any], *, timestamp_key: str = "time") -> MarketBa
     )
 
 
-def _aggregate_rows(rows: list[dict[str, Any]], interval_minutes: int) -> list[dict[str, Any]]:
+def _aggregate_rows(rows: list[dict[str, Any]], interval_minutes: int, symbol_code: str | None = None) -> list[dict[str, Any]]:
     aggregated: list[dict[str, Any]] = []
     bucket_start: Optional[datetime] = None
     bucket: Optional[dict[str, Any]] = None
 
     for row in rows:
         timestamp = _to_ist(row.get("time") or row.get("timestamp"))
-        session_start = _session_start(timestamp.date())
+        session_start = _session_start(timestamp.date(), symbol_code)
         elapsed = int((timestamp - session_start).total_seconds() // 60)
         bucket_index = max(0, elapsed // interval_minutes)
         current_bucket_start = session_start + timedelta(minutes=bucket_index * interval_minutes)
@@ -133,11 +162,14 @@ def _group_rows_by_session(
     rows: list[dict[str, Any]],
     *,
     allow_partial_live_session: bool = False,
+    symbol_code: str | None = None,
 ) -> dict[date, list[dict[str, Any]]]:
     grouped: dict[date, list[dict[str, Any]]] = {}
+    session_open = _session_open_time(symbol_code)
+    session_close = _session_close_time(symbol_code)
     for row in rows:
         timestamp = _to_ist(row.get("time") or row.get("timestamp"))
-        if timestamp.time() < SESSION_OPEN or timestamp.time() > SESSION_CLOSE:
+        if timestamp.time() < session_open or timestamp.time() > session_close:
             continue
         normalized = {
             "time": timestamp.isoformat(),
@@ -158,15 +190,15 @@ def _group_rows_by_session(
         or (
             allow_partial_live_session
             and key == now_ist.date()
-            and SESSION_OPEN <= now_ist.time() < SESSION_CLOSE
+            and session_open <= now_ist.time() < session_close
             and len(rows) >= 120
         )
     }
 
 
-def _hour_number(timestamp: datetime) -> int:
-    elapsed = int((timestamp.astimezone(IST) - _session_start(timestamp.astimezone(IST).date())).total_seconds() // 60)
-    return max(1, min(7, (elapsed // 60) + 1))
+def _hour_number(timestamp: datetime, symbol_code: str | None = None) -> int:
+    elapsed = int((timestamp.astimezone(IST) - _session_start(timestamp.astimezone(IST).date(), symbol_code)).total_seconds() // 60)
+    return max(1, min(_max_profile_hour(symbol_code), (elapsed // 60) + 1))
 
 
 def _tpo_rows(snapshot) -> list[dict[str, Any]]:
@@ -508,7 +540,7 @@ class FractalMarketProfileService:
                 return jsonable_encoder(cached[1])
 
             rows, history_source, history_symbol = await self._load_live_rows(normalized)
-            sessions = _group_rows_by_session(rows, allow_partial_live_session=True)
+            sessions = _group_rows_by_session(rows, allow_partial_live_session=True, symbol_code=normalized)
             if not sessions:
                 degraded_payload = await self._degraded_live_snapshot(
                     normalized,
@@ -603,7 +635,7 @@ class FractalMarketProfileService:
     async def live_health(self, symbol_code: str = "NIFTY") -> dict[str, Any]:
         normalized = self._normalize_symbol(symbol_code)
         rows, history_source, history_symbol = await self._load_live_rows(normalized)
-        sessions = _group_rows_by_session(rows, allow_partial_live_session=True)
+        sessions = _group_rows_by_session(rows, allow_partial_live_session=True, symbol_code=normalized)
         if not sessions:
             raise RuntimeError(f"No spot history available for {normalized}.")
 
@@ -620,7 +652,8 @@ class FractalMarketProfileService:
     async def record_paper_snapshot(self, symbol_code: str = "NIFTY") -> dict[str, Any]:
         snapshot = await self.live_snapshot(symbol_code)
         data_status = dict(snapshot.get("data_status") or {})
-        if data_status.get("execution_ready") is False and data_status.get("degraded_reason"):
+        paper_record_ready = bool(data_status.get("paper_record_ready", data_status.get("execution_ready", True)))
+        if not paper_record_ready and data_status.get("degraded_reason"):
             positions = await self.paper.list_positions(symbol=snapshot.get("symbol_code"), status="all", limit=50)
             snapshot["paper_summary"] = positions.get("summary") or {}
             snapshot["paper_record_skipped"] = True
@@ -640,7 +673,7 @@ class FractalMarketProfileService:
                 pass
 
         rows = await self._load_replay_rows(normalized)
-        sessions = _group_rows_by_session(rows)
+        sessions = _group_rows_by_session(rows, symbol_code=normalized)
         session_dates = sorted(sessions)
         if len(session_dates) < 24:
             raise RuntimeError(f"Not enough local minute history for {normalized} replay.")
@@ -659,7 +692,7 @@ class FractalMarketProfileService:
             open_trade = None
             inside_value_count = 0
             hour_profiles: dict[int, dict[str, Any]] = {}
-            three_minute_rows = _aggregate_rows(current_rows, 3)
+            three_minute_rows = _aggregate_rows(current_rows, 3, normalized)
             minute_rows = current_rows
 
             for bar_index in range(2, len(three_minute_rows)):
@@ -683,7 +716,7 @@ class FractalMarketProfileService:
                 if open_trade is None:
                     if (
                         current_signal["actionable"]
-                        and timestamp.time() <= LATEST_ENTRY_TIME
+                        and timestamp.time() <= _latest_entry_time(normalized)
                         and (last_exit_date is None or last_exit_date < current_date or timestamp.time() >= (datetime.combine(current_date, time(0, 0)) + timedelta(minutes=15)).time())
                     ):
                         option = self.option_repo.select_option(
@@ -947,7 +980,7 @@ class FractalMarketProfileService:
             order_flow["source"] = "bar_proxy_timeout"
             order_flow["degraded_reason"] = "live_order_flow_timeout"
         analysis["order_flow"] = order_flow
-        analysis["data_status"] = self._build_live_data_status(current_rows, order_flow)
+        analysis["data_status"] = self._build_live_data_status(symbol_code, current_rows, order_flow)
         try:
             analysis["current_signal"] = await asyncio.wait_for(
                 self._build_live_signal(symbol_code, analysis, order_flow),
@@ -990,12 +1023,12 @@ class FractalMarketProfileService:
     ) -> dict[str, Any]:
         normalized = self._normalize_symbol(symbol_code)
         session_date = _to_ist(current_rows[-1]["time"]).date()
-        daily_references = self._daily_references(session_lookup, session_date)
+        daily_references = self._daily_references(session_lookup, session_date, normalized)
         tick_size = self._adaptive_tick_size(normalized, daily_references["avg_atr"])
 
         daily_profile = self._build_profile(
             normalized,
-            rows=_aggregate_rows(current_rows, int(PROFILE_CONFIG["daily_period_minutes"])),
+            rows=_aggregate_rows(current_rows, int(PROFILE_CONFIG["daily_period_minutes"]), normalized),
             tick_size=tick_size,
             period_minutes=int(PROFILE_CONFIG["daily_period_minutes"]),
             initial_balance_periods=int(PROFILE_CONFIG["daily_initial_balance_periods"]),
@@ -1004,7 +1037,7 @@ class FractalMarketProfileService:
         )
         prior_daily_profile = self._build_profile(
             normalized,
-            rows=_aggregate_rows(prior_rows, int(PROFILE_CONFIG["daily_period_minutes"])),
+            rows=_aggregate_rows(prior_rows, int(PROFILE_CONFIG["daily_period_minutes"]), normalized),
             tick_size=tick_size,
             period_minutes=int(PROFILE_CONFIG["daily_period_minutes"]),
             initial_balance_periods=int(PROFILE_CONFIG["daily_initial_balance_periods"]),
@@ -1026,9 +1059,11 @@ class FractalMarketProfileService:
                 - ((float(prior_daily_profile["vah"]) + float(prior_daily_profile["val"])) / 2.0),
                 2,
             )
-        daily_profile["shape"] = _shape_from_snapshot(self._raw_profile_snapshot(normalized, _aggregate_rows(current_rows, 30), tick_size, 30, 2))
-        daily_profile["direction_bias"] = _direction_from_snapshot(self._raw_profile_snapshot(normalized, _aggregate_rows(current_rows, 30), tick_size, 30, 2))
-        daily_profile["day_type"] = _daily_day_type(self._raw_profile_snapshot(normalized, _aggregate_rows(current_rows, 30), tick_size, 30, 2), None if not prior_daily_profile else self._raw_profile_snapshot(normalized, _aggregate_rows(prior_rows, 30), tick_size, 30, 2))
+        daily_30m_rows = _aggregate_rows(current_rows, 30, normalized)
+        prior_30m_rows = _aggregate_rows(prior_rows, 30, normalized)
+        daily_profile["shape"] = _shape_from_snapshot(self._raw_profile_snapshot(normalized, daily_30m_rows, tick_size, 30, 2))
+        daily_profile["direction_bias"] = _direction_from_snapshot(self._raw_profile_snapshot(normalized, daily_30m_rows, tick_size, 30, 2))
+        daily_profile["day_type"] = _daily_day_type(self._raw_profile_snapshot(normalized, daily_30m_rows, tick_size, 30, 2), None if not prior_daily_profile else self._raw_profile_snapshot(normalized, prior_30m_rows, tick_size, 30, 2))
         daily_profile["avg_daily_ib"] = round(float(daily_references["avg_daily_ib"]), 2)
         daily_profile["daily_ib_ratio"] = round(
             float(daily_profile["initial_balance_range"]) / max(float(daily_references["avg_daily_ib"]) or 1.0, 1.0),
@@ -1060,8 +1095,8 @@ class FractalMarketProfileService:
             order_flow=self._build_bar_order_flow(current_rows),
             historical_options=True,
         )
-        intraday_3m_bars = _aggregate_rows(current_rows, int(PROFILE_CONFIG["hourly_period_minutes"]))
-        intraday_30m_bars = _aggregate_rows(current_rows, int(PROFILE_CONFIG["daily_period_minutes"]))
+        intraday_3m_bars = _aggregate_rows(current_rows, int(PROFILE_CONFIG["hourly_period_minutes"]), normalized)
+        intraday_30m_bars = _aggregate_rows(current_rows, int(PROFILE_CONFIG["daily_period_minutes"]), normalized)
 
         return {
             "session": {
@@ -1073,7 +1108,7 @@ class FractalMarketProfileService:
                     0,
                     int(
                         (
-                            datetime.combine(session_date, SESSION_CLOSE, tzinfo=IST)
+                            _session_close(session_date, normalized)
                             - _to_ist(current_rows[-1]["time"])
                         ).total_seconds()
                         // 60
@@ -1114,42 +1149,72 @@ class FractalMarketProfileService:
         data_status = dict(analysis.get("data_status") or {})
         if data_status and not bool(data_status.get("execution_ready", True)):
             reason = str(data_status.get("degraded_reason") or "live_order_flow_unavailable").replace("_", " ")
-            filters.append(
-                "Live tick/order-flow data is not ready for paper entries; "
-                f"current snapshot is degraded ({reason})."
-            )
+            if data_status.get("degraded_reason") == "market_closed":
+                filters.append(
+                    "New FMP paper entries are disabled outside the instrument's live session."
+                )
+            else:
+                filters.append(
+                    "Live tick/order-flow data is not ready for paper entries; "
+                    f"current snapshot is degraded ({reason})."
+                )
             advisories.append(
                 f"Order-flow source is {data_status.get('order_flow_source') or 'unknown'}."
             )
+        latest_row_time = data_status.get("latest_row_time")
+        if latest_row_time:
+            try:
+                latest_ist = _to_ist(latest_row_time)
+                latest_entry = _latest_entry_time(symbol_code)
+                if latest_ist.time() >= latest_entry:
+                    filters.append(
+                        f"New FMP paper entries stop after {latest_entry.strftime('%H:%M')} IST."
+                    )
+            except Exception:
+                pass
         try:
-            option_selection = await asyncio.wait_for(
-                self._live_option_selection(
-                    symbol_code,
-                    direction=str(signal["action"]),
-                    horizon=str(signal["horizon"]),
-                    confidence=float(signal["confidence"]),
-                ),
-                timeout=3.0,
-            )
+            if _is_mcx_symbol(symbol_code):
+                instrument_selection = await asyncio.wait_for(
+                    self._live_futures_selection(symbol_code, analysis, horizon=str(signal["horizon"])),
+                    timeout=3.0,
+                )
+            else:
+                instrument_selection = await asyncio.wait_for(
+                    self._live_option_selection(
+                        symbol_code,
+                        direction=str(signal["action"]),
+                        horizon=str(signal["horizon"]),
+                        confidence=float(signal["confidence"]),
+                    ),
+                    timeout=3.0,
+                )
         except Exception:
-            option_selection = None
-        if option_selection is None:
-            filters.append("Live option context is unavailable for this underlying.")
-        else:
-            signal["options"] = option_selection
-            pcr = option_selection.get("pcr_oi")
-            oi_change = float(option_selection.get("oi_change") or 0.0)
-            iv_rank = option_selection.get("iv_rank")
-            signal["confidence"], advisories = self._apply_option_confirmation_penalties(
-                action=str(signal["action"]),
-                confidence=float(signal["confidence"]),
-                pcr=pcr,
-                oi_change=oi_change,
-                iv_rank=iv_rank,
-                advisories=advisories,
+            instrument_selection = None
+        if instrument_selection is None:
+            filters.append(
+                "Live futures contract is unavailable for this underlying."
+                if _is_mcx_symbol(symbol_code)
+                else "Live option context is unavailable for this underlying."
             )
-            if not filters and not advisories:
-                rationale.append("Live ATM options flow is aligned with the FMP thesis.")
+        else:
+            signal["options"] = instrument_selection
+            if instrument_selection.get("instrument_type") == "FUT":
+                if not filters:
+                    rationale.append("Live MCX futures contract is mapped for FMP execution.")
+            else:
+                pcr = instrument_selection.get("pcr_oi")
+                oi_change = float(instrument_selection.get("oi_change") or 0.0)
+                iv_rank = instrument_selection.get("iv_rank")
+                signal["confidence"], advisories = self._apply_option_confirmation_penalties(
+                    action=str(signal["action"]),
+                    confidence=float(signal["confidence"]),
+                    pcr=pcr,
+                    oi_change=oi_change,
+                    iv_rank=iv_rank,
+                    advisories=advisories,
+                )
+                if not filters and not advisories:
+                    rationale.append("Live ATM options flow is aligned with the FMP thesis.")
 
         try:
             vix_payload = await asyncio.wait_for(sector_tracker._get_india_vix(), timeout=2.0)
@@ -1173,6 +1238,71 @@ class FractalMarketProfileService:
             and float(signal["confidence"]) >= float(SCAN_CONFIG["actionable_confidence_min"])
         )
         return signal
+
+    async def _live_futures_selection(
+        self,
+        symbol_code: str,
+        analysis: dict[str, Any],
+        *,
+        horizon: str,
+    ) -> dict[str, Any] | None:
+        if not _is_mcx_symbol(symbol_code):
+            return None
+        from market_data.commodity_contract_specs import get_commodity_contract_spec
+        from market_data.commodity_runtime_history import DEFAULT_COMMODITY_FUTURES
+        from market_data.upstox_commodity import load_upstox_mcx_quote_snapshots, resolve_upstox_mcx_future
+
+        configured_symbol = str(INDEX_APP_SYMBOLS.get(symbol_code) or DEFAULT_COMMODITY_FUTURES.get(symbol_code) or symbol_code)
+        resolved = await resolve_upstox_mcx_future(configured_symbol)
+        spec = get_commodity_contract_spec(symbol_code)
+        quote_snapshot = (await load_upstox_mcx_quote_snapshots([configured_symbol, symbol_code])).get(configured_symbol)
+        if not quote_snapshot:
+            quote_snapshot = (await load_upstox_mcx_quote_snapshots([symbol_code])).get(symbol_code)
+        session = analysis.get("session") or {}
+        price = float((quote_snapshot or {}).get("price") or session.get("last_price") or 0.0)
+        if price <= 0:
+            return None
+        instrument_key = str((resolved or {}).get("instrument_key") or configured_symbol)
+        trading_symbol = str((resolved or {}).get("trading_symbol") or configured_symbol.split(":", 1)[-1])
+        expiry = str((resolved or {}).get("expiry") or "")
+        days_to_expiry = 0
+        normalized_expiry = expiry
+        if expiry:
+            try:
+                if expiry.isdigit() and len(expiry) >= 12:
+                    expiry_date = datetime.fromtimestamp(int(expiry) / 1000.0, tz=timezone.utc).astimezone(IST).date()
+                else:
+                    expiry_date = datetime.fromisoformat(expiry.replace("Z", "+00:00")).date()
+            except Exception:
+                try:
+                    expiry_date = date.fromisoformat(expiry[:10])
+                except Exception:
+                    expiry_date = None
+            if expiry_date is not None:
+                normalized_expiry = expiry_date.isoformat()
+                days_to_expiry = max((expiry_date - _utc_now().astimezone(IST).date()).days, 0)
+        return {
+            "underlying": symbol_code,
+            "instrument_type": "FUT",
+            "option_type": "FUT",
+            "strike": 0.0,
+            "expiry": normalized_expiry,
+            "premium": round(price, 2),
+            "previous_premium": (quote_snapshot or {}).get("previous_close"),
+            "trading_symbol": trading_symbol,
+            "instrument_key": instrument_key,
+            "lot_size": int((resolved or {}).get("lot_size") or spec.futures_lot_size or LOT_SIZES.get(symbol_code, 1)),
+            "oi": None,
+            "oi_change": None,
+            "volume": None,
+            "pcr_oi": None,
+            "iv_rank": None,
+            "selection_reason": f"Live {horizon} mapping uses the active MCX Crude Oil futures contract",
+            "moneyness": "FUT",
+            "horizon": horizon,
+            "days_to_expiry": days_to_expiry,
+            "quote_source": (quote_snapshot or {}).get("source") or "session_last_price",
+        }
 
     def _apply_option_confirmation_penalties(
         self,
@@ -1459,7 +1589,7 @@ class FractalMarketProfileService:
             action != "FLAT"
             and not filters
             and confidence >= float(SCAN_CONFIG["actionable_confidence_min"])
-            and hour_number <= 6
+            and hour_number <= _max_profile_hour(symbol_code)
         )
 
         stop_level = (
@@ -1632,36 +1762,69 @@ class FractalMarketProfileService:
 
     def _build_live_data_status(
         self,
+        symbol_code: str,
         current_rows: list[dict[str, Any]],
         order_flow: dict[str, Any],
     ) -> dict[str, Any]:
-        latest_row_time = _to_ist(current_rows[-1]["time"]).astimezone(timezone.utc) if current_rows else None
+        latest_row_ist = _to_ist(current_rows[-1]["time"]) if current_rows else None
+        latest_row_time = latest_row_ist.astimezone(timezone.utc) if latest_row_ist is not None else None
+        now_utc = datetime.now(timezone.utc)
+        now_ist = now_utc.astimezone(IST)
         minute_history_age_seconds = (
-            max(0.0, (datetime.now(timezone.utc) - latest_row_time).total_seconds())
+            max(0.0, (now_utc - latest_row_time).total_seconds())
             if latest_row_time is not None
             else None
         )
         order_flow_source = str(order_flow.get("source") or "unknown")
         tick_ready = order_flow_source == "market_ticks"
-        minute_history_ready = bool(current_rows) and (
-            minute_history_age_seconds is None or minute_history_age_seconds <= 180.0
+        futures_proxy_ready = bool(_is_mcx_symbol(symbol_code) and order_flow_source in {"bar_proxy", "bar_fallback", "bar_proxy_timeout"})
+        order_flow_ready = bool(tick_ready or futures_proxy_ready)
+        session_open = _session_open_time(symbol_code)
+        session_close = _session_close_time(symbol_code)
+        session_close_at = _session_close(latest_row_ist.date(), symbol_code) if latest_row_ist is not None else None
+        same_session_day = bool(latest_row_ist is not None and latest_row_ist.date() == now_ist.date())
+        market_open_for_latest_session = bool(
+            same_session_day
+            and session_open <= now_ist.time() <= session_close
         )
-        execution_ready = bool(minute_history_ready and tick_ready)
+        final_session_snapshot = bool(
+            latest_row_ist is not None
+            and session_close_at is not None
+            and now_ist >= session_close_at
+            and latest_row_ist >= session_close_at - timedelta(minutes=20)
+        )
+        minute_history_ready = bool(current_rows) and (
+            minute_history_age_seconds is None
+            or minute_history_age_seconds <= 180.0
+            or final_session_snapshot
+        )
+        execution_ready = bool(minute_history_ready and order_flow_ready and market_open_for_latest_session)
+        paper_record_ready = bool(execution_ready)
         degraded_reason = None
         if not minute_history_ready:
             degraded_reason = "minute_history_stale_or_missing"
-        elif not tick_ready:
+        elif not market_open_for_latest_session:
+            degraded_reason = "market_closed"
+        elif not order_flow_ready:
             degraded_reason = "tick_order_flow_unavailable"
         return {
+            "symbol_code": symbol_code,
             "minute_history_ready": bool(minute_history_ready),
             "minute_history_age_seconds": (
                 round(float(minute_history_age_seconds), 3)
                 if minute_history_age_seconds is not None
                 else None
             ),
+            "latest_row_time": latest_row_time.isoformat() if latest_row_time is not None else None,
+            "latest_row_time_ist": latest_row_ist.isoformat() if latest_row_ist is not None else None,
+            "market_open_for_latest_session": market_open_for_latest_session,
+            "final_session_snapshot": final_session_snapshot,
             "order_flow_source": order_flow_source,
             "tick_ready": bool(tick_ready),
+            "futures_proxy_ready": futures_proxy_ready,
+            "order_flow_ready": order_flow_ready,
             "execution_ready": execution_ready,
+            "paper_record_ready": paper_record_ready,
             "degraded_reason": degraded_reason,
         }
 
@@ -1804,11 +1967,12 @@ class FractalMarketProfileService:
         return engine.build_profile(f"{symbol_code} FMP", bars, prior_profile=prior_snapshot)
 
     def _build_hourly_profiles(self, symbol_code: str, rows: list[dict[str, Any]], *, tick_size: float) -> list[dict[str, Any]]:
-        three_minute_rows = _aggregate_rows(rows, int(PROFILE_CONFIG["hourly_period_minutes"]))
+        three_minute_rows = _aggregate_rows(rows, int(PROFILE_CONFIG["hourly_period_minutes"]), symbol_code)
         grouped: dict[int, list[dict[str, Any]]] = {}
+        max_hour = _max_profile_hour(symbol_code)
         for row in three_minute_rows:
-            hour_num = _hour_number(_to_ist(row["time"]))
-            if hour_num > 6:
+            hour_num = _hour_number(_to_ist(row["time"]), symbol_code)
+            if hour_num > max_hour:
                 continue
             grouped.setdefault(hour_num, []).append(row)
 
@@ -1914,7 +2078,7 @@ class FractalMarketProfileService:
                 await session.rollback()
                 logger.warning(f"Skipping hourly_profiles persistence for {symbol_code}: {exc}")
 
-    def _daily_references(self, session_lookup: dict[date, list[dict[str, Any]]], current_date: date) -> dict[str, float]:
+    def _daily_references(self, session_lookup: dict[date, list[dict[str, Any]]], current_date: date, symbol_code: str | None = None) -> dict[str, float]:
         prior_dates = sorted(key for key in session_lookup if key < current_date)[-20:]
         if not prior_dates:
             return {"avg_daily_ib": 1.0, "avg_atr": 1.0}
@@ -1923,7 +2087,7 @@ class FractalMarketProfileService:
         previous_close = None
         for session_date in prior_dates:
             rows = session_lookup[session_date]
-            ib_rows = [row for row in rows if _to_ist(row["time"]) < _session_start(session_date) + timedelta(minutes=60)]
+            ib_rows = [row for row in rows if _to_ist(row["time"]) < _session_start(session_date, symbol_code) + timedelta(minutes=60)]
             if ib_rows:
                 daily_ibs.append(max(float(row["high"]) for row in ib_rows) - min(float(row["low"]) for row in ib_rows))
             session_high = max(float(row["high"]) for row in rows)

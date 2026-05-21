@@ -233,6 +233,9 @@ export default function BrokerStatusBar() {
       {showingSnapshot && (
         <span className="text-accent-amber">stale · {statusMessage}</span>
       )}
+      <span className={layoutQuery.isStreamConnected ? "text-accent-green" : "text-accent-amber"}>
+        {layoutQuery.isStreamConnected ? "STREAM" : "SYNC"}
+      </span>
 
       <span className="flex-1" />
 

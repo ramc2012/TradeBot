@@ -72,7 +72,7 @@ const DAY_TYPE_COLOR: Record<string, string> = {
   UNKNOWN: COLORS.unknown,
 };
 
-const UNDERLYINGS = ["NIFTY", "BANKNIFTY", "CRUDEOIL"];
+const UNDERLYINGS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "CRUDEOIL"];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -83,6 +83,9 @@ const pct = (n: number | undefined | null) =>
   n == null ? "—" : `${n.toFixed(1)}%`;
 
 const shortDate = (s: string) => s?.slice(5) ?? "";
+
+const niceSource = (s: string | undefined | null) =>
+  s ? s.replaceAll("_", " ").toUpperCase() : "—";
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
@@ -175,6 +178,55 @@ function AvailabilityStrip({ data }: { data: any }) {
       <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2" title="Current drift state and upward value migration">
         <div className="text-[10px] uppercase tracking-wide text-zinc-500">Drift / Migration</div>
         <div className="font-mono text-sm font-semibold text-zinc-100">{String(drift).toUpperCase()} · {pct(migration)}</div>
+      </div>
+    </div>
+  );
+}
+
+function SelectedInstrumentTape({ data, lookback }: { data: any; lookback: number }) {
+  const latestSession = data?.regime_history?.sessions?.at(-1);
+  const dataStatus = data?.data_status ?? {};
+  const source =
+    dataStatus.live_bridge?.[0] ??
+    dataStatus.source_name ??
+    dataStatus.source ??
+    dataStatus.mode;
+  const dayType = latestSession?.day_type ?? "—";
+  const dayColor = DAY_TYPE_COLOR[dayType] ?? COLORS.unknown;
+
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-950/35 p-3">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Layers3 className="h-4 w-4 text-amber-400" />
+          <div>
+            <p className="text-sm font-semibold text-zinc-100">
+              {data?.underlying ?? "—"} MP Tape
+            </p>
+            <p className="text-[10px] text-zinc-500">
+              {latestSession?.date ?? "latest session pending"} · last {lookback} sessions
+            </p>
+          </div>
+        </div>
+        <Pill label={dayType} color={dayColor} />
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
+        <StatCard label="POC" value={fmt(latestSession?.poc, 0)} accent={COLORS.poc} />
+        <StatCard label="VAH" value={fmt(latestSession?.vah, 0)} accent={COLORS.vah} />
+        <StatCard label="VAL" value={fmt(latestSession?.val, 0)} accent={COLORS.val} />
+        <StatCard
+          label="Close Location"
+          value={latestSession?.close_location == null ? "—" : pct(latestSession.close_location * 100)}
+          accent={(latestSession?.close_location ?? 0.5) >= 0.5 ? COLORS.trend_up : COLORS.trend_dn}
+        />
+        <StatCard
+          label="Direction"
+          value={latestSession?.direction ?? "—"}
+          accent={latestSession?.direction === "UP" ? COLORS.trend_up : latestSession?.direction === "DOWN" ? COLORS.trend_dn : undefined}
+        />
+        <StatCard label="Sessions" value={data?.total_sessions ?? "—"} sub={`${data?.lookback_days ?? lookback} requested`} />
+        <StatCard label="Source" value={source ? "LIVE" : "—"} sub={niceSource(source)} />
       </div>
     </div>
   );
@@ -1268,7 +1320,7 @@ function CompositeProfilePanel({ profiles, weeklyProfiles }: { profiles: any; we
 type Tab = "market" | "profiles" | "migration" | "regime" | "performance" | "cvd" | "drift";
 
 const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
-  { id: "market", label: "Macro + Sectors", icon: Network },
+  { id: "market", label: "Global Context", icon: Network },
   { id: "profiles", label: "Multi-TF Profiles", icon: Layers3 },
   { id: "migration", label: "Value Migration", icon: TrendingUp },
   { id: "regime", label: "Regime History", icon: Activity },
@@ -1307,7 +1359,20 @@ export default function MPIntelligenceDashboard() {
     refetchOnWindowFocus: false,
   });
 
-  const driftState = data?.concept_drift?.current_state;
+  const analyticsUnderlying =
+    typeof data?.underlying === "string" ? data.underlying : undefined;
+  const activeData =
+    data && (!analyticsUnderlying || analyticsUnderlying === underlying)
+      ? data
+      : undefined;
+  const isSwitchingInstrument = Boolean(data && !activeData);
+
+  const handleUnderlyingChange = (nextUnderlying: string) => {
+    setUnderlying(nextUnderlying);
+    setActiveTab((current) => (current === "market" ? "profiles" : current));
+  };
+
+  const driftState = activeData?.concept_drift?.current_state;
   const driftBadge =
     driftState === "drift"
       ? { label: "DRIFT", color: COLORS.drift_alert }
@@ -1334,7 +1399,7 @@ export default function MPIntelligenceDashboard() {
             {UNDERLYINGS.map((u) => (
               <button
                 key={u}
-                onClick={() => setUnderlying(u)}
+                onClick={() => handleUnderlyingChange(u)}
                 className={clsx(
                   "rounded-lg px-2.5 py-1 text-xs font-semibold transition-colors",
                   underlying === u
@@ -1392,20 +1457,26 @@ export default function MPIntelligenceDashboard() {
       </section>
 
       {/* Error state */}
-      {isError && !data && (
+      {isError && !activeData && (
         <div className="bg-red-950/30 border border-red-800 rounded-lg p-4 text-sm text-red-400">
           Failed to load MP analytics. Ensure the backend is running and data exists for {underlying}.
         </div>
       )}
 
-      {isShowingSnapshot && (
+      {isShowingSnapshot && activeData && (
         <div className="rounded-lg border border-amber-400/25 bg-amber-400/10 p-2 text-xs text-amber-100">
           Live refresh missed the last window. Showing the last saved MP analytics snapshot for {underlying} until the backend responds again.
         </div>
       )}
 
+      {isSwitchingInstrument && (
+        <div className="rounded-lg border border-blue-400/25 bg-blue-400/10 p-2 text-xs text-blue-100">
+          Loading {underlying} MP analytics. Previous {analyticsUnderlying} tape is hidden so the page does not mix instruments.
+        </div>
+      )}
+
       {/* Loading skeleton */}
-      {isLoading && !data && (
+      {(isLoading || isSwitchingInstrument) && !activeData && (
         <div className="space-y-3">
           {[200, 160, 160].map((h, i) => (
             <div
@@ -1418,18 +1489,19 @@ export default function MPIntelligenceDashboard() {
       )}
 
       {/* Top stat strip */}
-      {data && (
+      {activeData && (
         <div className="space-y-2">
+        <SelectedInstrumentTape data={{ ...activeData, lookback_days: lookback }} lookback={lookback} />
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
           <StatCard
             label="Sessions Analysed"
-            value={data.total_sessions ?? "—"}
+            value={activeData.total_sessions ?? "—"}
           />
           <StatCard
             label="Overall 1d Win Rate"
-            value={pct(data.setup_performance?.overall_next_day_win_rate)}
+            value={pct(activeData.setup_performance?.overall_next_day_win_rate)}
             accent={
-              (data.setup_performance?.overall_next_day_win_rate ?? 50) >= 50
+              (activeData.setup_performance?.overall_next_day_win_rate ?? 50) >= 50
                 ? COLORS.trend_up
                 : COLORS.trend_dn
             }
@@ -1437,22 +1509,22 @@ export default function MPIntelligenceDashboard() {
           <StatCard
             label="Cum POC Shift"
             value={fmt(
-              data.value_migration?.summary?.cumulative_poc_shift,
+              activeData.value_migration?.summary?.cumulative_poc_shift,
               0,
             )}
             accent={
-              (data.value_migration?.summary?.cumulative_poc_shift ?? 0) >= 0
+              (activeData.value_migration?.summary?.cumulative_poc_shift ?? 0) >= 0
                 ? COLORS.trend_up
                 : COLORS.trend_dn
             }
           />
           <StatCard
             label="Upward Migration"
-            value={pct(data.value_migration?.summary?.upward_migration_pct)}
+            value={pct(activeData.value_migration?.summary?.upward_migration_pct)}
           />
           <StatCard
             label="CVD Divergences"
-            value={data.orderflow_proxy?.summary?.divergences_count ?? 0}
+            value={activeData.orderflow_proxy?.summary?.divergences_count ?? 0}
             accent={COLORS.drift_alert}
           />
           <StatCard
@@ -1461,12 +1533,12 @@ export default function MPIntelligenceDashboard() {
             accent={driftBadge?.color}
           />
         </div>
-        <AvailabilityStrip data={{ ...data, lookback_days: lookback }} />
+        <AvailabilityStrip data={{ ...activeData, lookback_days: lookback }} />
         </div>
       )}
 
       {/* Tabs */}
-      {data && (
+      {activeData && (
         <div className="space-y-3">
           <div className="flex gap-1 flex-wrap border-b border-zinc-800">
             {TABS.map(({ id, label, icon: Icon }) => (
@@ -1512,8 +1584,8 @@ export default function MPIntelligenceDashboard() {
                   sub="Composite 20D / 50D + weekly aggregates"
                 />
                 <CompositeProfilePanel
-                  profiles={data.profiles}
-                  weeklyProfiles={data.weekly_profiles}
+                  profiles={activeData.profiles}
+                  weeklyProfiles={activeData.weekly_profiles}
                 />
               </section>
             )}
@@ -1525,7 +1597,7 @@ export default function MPIntelligenceDashboard() {
                   title="Value Migration Trend"
                   sub="POC drift, VA centre, VA width, close location"
                 />
-                <ValueMigrationPanel data={data.value_migration} />
+                <ValueMigrationPanel data={activeData.value_migration} />
               </section>
             )}
 
@@ -1536,7 +1608,7 @@ export default function MPIntelligenceDashboard() {
                   title="Regime History"
                   sub="Day-type sequence, transition matrix, streaks"
                 />
-                <RegimeHistoryPanel data={data.regime_history} />
+                <RegimeHistoryPanel data={activeData.regime_history} />
               </section>
             )}
 
@@ -1547,7 +1619,7 @@ export default function MPIntelligenceDashboard() {
                   title="Setup Performance Matrix"
                   sub="Empirical win rates & expectancy from historical signals"
                 />
-                <SetupPerformancePanel data={data.setup_performance} />
+                <SetupPerformancePanel data={activeData.setup_performance} />
               </section>
             )}
 
@@ -1558,7 +1630,7 @@ export default function MPIntelligenceDashboard() {
                   title="Orderflow Proxy"
                   sub="CVD approximation from daily auction structure — NSE MBO not available"
                 />
-                <OrderflowPanel data={data.orderflow_proxy} />
+                <OrderflowPanel data={activeData.orderflow_proxy} />
               </section>
             )}
 
@@ -1569,7 +1641,7 @@ export default function MPIntelligenceDashboard() {
                   title="Concept Drift Detection"
                   sub="Page-Hinkley test on rolling signal win rate"
                 />
-                <ConceptDriftPanel data={data.concept_drift} />
+                <ConceptDriftPanel data={activeData.concept_drift} />
               </section>
             )}
           </div>

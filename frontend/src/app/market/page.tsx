@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import {
@@ -30,6 +30,11 @@ import {
   getSectorRotation,
   getSectorRotationComponents,
 } from "@/lib/api";
+import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
+import {
+  createMarketOptionChainSocket,
+  createMarketWatchlistSocket,
+} from "@/lib/websocket";
 import {
   MARKET_INDEX_SYMBOLS,
   type MarketIndexSymbol,
@@ -47,6 +52,7 @@ type ChainEntry = {
   delta?: number | null;
   theta?: number | null;
   oi_change?: number | null;
+  ltp_change?: number | null;
   ltp_change_pct?: number | null;
 };
 
@@ -95,6 +101,11 @@ type AtmWatchlistPayload = {
   expiry?: string | null;
   rows?: AtmWatchlistRow[];
   detail?: string | null;
+};
+
+type MarketWatchlistStreamPayload = {
+  expiry_catalog?: ExpiryPayload;
+  watchlist?: AtmWatchlistPayload;
 };
 
 type SectorWatchlistRow = {
@@ -586,6 +597,18 @@ function OptionLegCell({ leg }: { leg?: AtmOptionLeg | null }) {
       <span>{formatCompact(leg?.oi)}</span>
       <span className={pnlTone(leg?.oi_change)}>{formatCompact(leg?.oi_change)}</span>
     </div>
+  );
+}
+
+function OptionPremiumCell({ entry, align = "right" }: { entry?: ChainEntry; align?: "left" | "right" }) {
+  const tone = pnlTone(entry?.ltp_change ?? entry?.ltp_change_pct);
+  return (
+    <td className={clsx("px-3 py-2 font-mono font-semibold", align === "right" ? "text-right" : "text-left", tone)}>
+      {formatNumber(entry?.ltp)}
+      <div className="text-[10px] font-normal">
+        {formatSigned(entry?.ltp_change)} · {formatPercent(entry?.ltp_change_pct)}
+      </div>
+    </td>
   );
 }
 
@@ -1974,17 +1997,33 @@ function LiveMarketTools() {
     refetchInterval: 60_000,
   });
 
-  const chainQuery = useQuery<OptionChainPayload>({
+  const chainQuery = useLiveSnapshotQuery<OptionChainPayload>({
     queryKey: ["marketOptionChain", symbol, expiry],
     queryFn: () => getOptionChain(symbol, expiry || undefined).then((response) => response.data),
-    staleTime: 10_000,
+    streamFactory: (onData, onStatusChange) =>
+      createMarketOptionChainSocket(
+        symbol,
+        expiry || "",
+        (payload) => onData(payload as OptionChainPayload),
+        onStatusChange,
+      ),
+    storageKey: `market:option-chain:${symbol}:${expiry || "default"}`,
+    streamWhenHidden: true,
+    staleTime: 2_000,
     refetchInterval: 30_000,
   });
 
-  const watchlistQuery = useQuery<AtmWatchlistPayload>({
+  const watchlistQuery = useLiveSnapshotQuery<AtmWatchlistPayload>({
     queryKey: ["marketAtmWatchlist", expiry, "live-refresh"],
     queryFn: () => getATMWatchlist(expiry || undefined, true).then((response) => response.data),
-    staleTime: 30_000,
+    streamFactory: (onData, onStatusChange) =>
+      createMarketWatchlistSocket(expiry || "", (payload) => {
+        const envelope = payload as MarketWatchlistStreamPayload;
+        onData((envelope.watchlist ?? payload) as AtmWatchlistPayload);
+      }, onStatusChange),
+    storageKey: `market:atm-watchlist:${expiry || "default"}`,
+    streamWhenHidden: true,
+    staleTime: 2_000,
     refetchInterval: 60_000,
   });
 
@@ -2035,6 +2074,16 @@ function LiveMarketTools() {
     ? strikes.slice(Math.max(0, atmIndex - 6), Math.min(strikes.length, atmIndex + 7))
     : [];
   const watchlistRows = watchlistQuery.data?.rows || [];
+  const marketStreamState = useMemo(() => {
+    if (chainQuery.isStreamConnected || watchlistQuery.isStreamConnected) return "streaming";
+    if (chainQuery.hasSnapshot || watchlistQuery.hasSnapshot) return "syncing";
+    return "loading";
+  }, [
+    chainQuery.hasSnapshot,
+    chainQuery.isStreamConnected,
+    watchlistQuery.hasSnapshot,
+    watchlistQuery.isStreamConnected,
+  ]);
   const sectorRows = sectorQuery.data?.watchlist || [];
   const embeddedRrgSector = selectedRrgSectorCode ? sectorQuery.data?.stocks_by_sector?.[selectedRrgSectorCode] : null;
   const selectedRrgSector = componentQuery.data
@@ -2066,9 +2115,21 @@ function LiveMarketTools() {
           <div className="flex items-center gap-2 font-mono text-lg font-semibold text-text-primary">
             <BarChart3 size={17} className="text-accent-green" />
             Live Market Intelligence
+            <span
+              className={clsx(
+                "rounded-md px-2 py-0.5 text-[10px] uppercase tracking-[0.16em]",
+                marketStreamState === "streaming"
+                  ? "bg-emerald-500/10 text-emerald-300"
+                  : marketStreamState === "syncing"
+                    ? "bg-amber-500/10 text-amber-200"
+                    : "bg-bg-secondary/50 text-text-muted",
+              )}
+            >
+              {marketStreamState}
+            </span>
           </div>
           <div className="mt-1 text-xs text-text-muted">
-            Option chain, CE/PE ATM watchlist, sector rotation, RRG and NSE + MCX research architecture are separate detailed modules.
+            Option chain and CE/PE ATM watchlist stream through websocket snapshots; sector and research modules use scheduled refresh.
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -2181,9 +2242,9 @@ function LiveMarketTools() {
                   <th className="px-3 py-2 text-right">CE IV</th>
                   <th className="px-3 py-2 text-right">CE Delta</th>
                   <th className="px-3 py-2 text-right">CE Theta</th>
-                  <th className="px-3 py-2 text-right">CE LTP</th>
+                  <th className="px-3 py-2 text-right">CE LTP / Δ%</th>
                   <th className="px-3 py-2 text-center text-accent-amber">Strike</th>
-                  <th className="px-3 py-2 text-left">PE LTP</th>
+                  <th className="px-3 py-2 text-left">PE LTP / Δ%</th>
                   <th className="px-3 py-2 text-left">PE Theta</th>
                   <th className="px-3 py-2 text-left">PE Delta</th>
                   <th className="px-3 py-2 text-left">PE IV</th>
@@ -2205,9 +2266,9 @@ function LiveMarketTools() {
                       <td className="px-3 py-2 text-right font-mono">{formatIv(ce?.iv)}</td>
                       <td className="px-3 py-2 text-right font-mono">{formatNumber(ce?.delta, 3)}</td>
                       <td className={clsx("px-3 py-2 text-right font-mono", pnlTone(ce?.theta))}>{formatNumber(ce?.theta)}</td>
-                      <td className="px-3 py-2 text-right font-mono font-semibold text-accent-green">{formatNumber(ce?.ltp)}</td>
+                      <OptionPremiumCell entry={ce} align="right" />
                       <td className={clsx("px-3 py-2 text-center font-mono font-semibold", isAtm ? "text-accent-amber" : "text-text-primary")}>{formatNumber(strike, 0)}</td>
-                      <td className="px-3 py-2 text-left font-mono font-semibold text-accent-red">{formatNumber(pe?.ltp)}</td>
+                      <OptionPremiumCell entry={pe} align="left" />
                       <td className={clsx("px-3 py-2 text-left font-mono", pnlTone(pe?.theta))}>{formatNumber(pe?.theta)}</td>
                       <td className="px-3 py-2 text-left font-mono">{formatNumber(pe?.delta, 3)}</td>
                       <td className="px-3 py-2 text-left font-mono">{formatIv(pe?.iv)}</td>

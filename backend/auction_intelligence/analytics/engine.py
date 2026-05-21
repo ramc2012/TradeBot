@@ -71,6 +71,7 @@ class MPAnalyticsEngine:
         frontend can render it with the same component.
         """
         window = [r for r in rows if _parse_date(r.get("date", "")) is not None]
+        available_sessions = len(window)
         window = sorted(window, key=lambda r: r["date"])[-lookback:]
         if not window:
             return {}
@@ -135,7 +136,13 @@ class MPAnalyticsEngine:
 
         return {
             "scope": label or f"composite_{lookback}d",
+            "required_lookback": lookback,
             "lookback_sessions": len(window),
+            "available_sessions": available_sessions,
+            "is_complete": len(window) >= lookback,
+            "integrity_status": "complete" if len(window) >= lookback else "partial",
+            "missing_sessions": max(lookback - len(window), 0),
+            "session_dates": [str(row.get("date", "")) for row in window],
             "session_start": window[0]["date"],
             "session_end": window[-1]["date"],
             "high_price": round(composite_high, 2),

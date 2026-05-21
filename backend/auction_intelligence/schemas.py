@@ -175,6 +175,8 @@ class NTMVolXLevel:
     call_pressure: float
     put_pressure: float
     net_pressure: float
+    observed_at: Optional[str] = None
+    source: Optional[str] = None
 
 
 @dataclass
@@ -199,6 +201,8 @@ class NTMVolXSnapshot:
     call_wall_strike: Optional[float]
     put_wall_strike: Optional[float]
     pair_count: int
+    snapshot_time: Optional[str] = None
+    source: Optional[str] = None
     notes: list[str] = field(default_factory=list)
     pressure_ladder: list[NTMVolXLevel] = field(default_factory=list)
 

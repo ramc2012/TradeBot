@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from brokers.base import OptionChain, OptionChainEntry
@@ -59,6 +60,7 @@ class NTMVolXAnalyzer:
         if not pairs:
             return None
 
+        snapshot_time = datetime.now(timezone.utc).isoformat()
         levels: list[NTMVolXLevel] = []
         call_pressure_total = 0.0
         put_pressure_total = 0.0
@@ -95,6 +97,8 @@ class NTMVolXAnalyzer:
                 call_pressure=round(call_metrics["pressure"], 4),
                 put_pressure=round(put_metrics["pressure"], 4),
                 net_pressure=round(net_pressure, 4),
+                observed_at=snapshot_time,
+                source="live_option_chain",
             )
             levels.append(level)
             call_pressure_total += call_metrics["pressure"]
@@ -152,6 +156,8 @@ class NTMVolXAnalyzer:
             call_wall_strike=call_wall_strike,
             put_wall_strike=put_wall_strike,
             pair_count=len(levels),
+            snapshot_time=snapshot_time,
+            source="live_option_chain",
             notes=notes,
             pressure_ladder=levels,
         )

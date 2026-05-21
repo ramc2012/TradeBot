@@ -93,6 +93,7 @@ class FMPPaperPositionRecord:
     horizon: str
     trading_symbol: Optional[str]
     instrument_key: Optional[str]
+    instrument_type: Optional[str]
     option_type: Optional[str]
     strike: Optional[float]
     expiry: Optional[str]

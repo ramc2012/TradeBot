@@ -36,8 +36,8 @@ SESSION_OPEN = time(9, 15)
 SESSION_CLOSE = time(15, 30)
 OUTPUT_ROOT = BACKEND_ROOT / "runtime" / "auction_intelligence" / "futures_validation"
 SYMBOLS = {
-    "NIFTY": {"lot_size": 25},
-    "BANKNIFTY": {"lot_size": 15},
+    "NIFTY": {"lot_size": 65},
+    "BANKNIFTY": {"lot_size": 30},
 }
 
 

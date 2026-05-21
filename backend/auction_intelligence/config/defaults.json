@@ -23,15 +23,15 @@
       "margin_fraction_per_lot": 0.18
     },
     "FINNIFTY": {
-      "lot_size": 40,
+      "lot_size": 60,
       "margin_fraction_per_lot": 0.18
     },
     "MIDCPNIFTY": {
-      "lot_size": 75,
+      "lot_size": 120,
       "margin_fraction_per_lot": 0.18
     },
     "SENSEX": {
-      "lot_size": 10,
+      "lot_size": 20,
       "margin_fraction_per_lot": 0.18
     }
   },

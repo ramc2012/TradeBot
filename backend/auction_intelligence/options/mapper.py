@@ -692,13 +692,9 @@ class OptionStrategyMapper:
         if self.config.get("require_option_ma20", True) and premium_ma20 is not None and not above_ma20 and not relaxed_filters:
             return None
 
-        underlying_lot_size = int(
-            self.contract_specs.get(underlying, {}).get("lot_size")
-            or lot_size
-            or 1
-        )
-        lots = max(1, int(decision.quantity // max(underlying_lot_size, 1)))
-        quantity = max(lot_size, lots * lot_size)
+        contract_lot_size = max(int(lot_size), 1)
+        lots = max(1, int(decision.quantity // contract_lot_size))
+        quantity = lots * contract_lot_size
 
         mid_price = self._mid_price(entry)
         limit_price = round(mid_price, 2) if instruction.order_type == "LIMIT" and mid_price > 0 else None

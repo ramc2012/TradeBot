@@ -319,6 +319,246 @@ def test_fmp_group_rows_by_session_keeps_partial_live_session_when_requested(mon
     assert len(kept[datetime(2026, 4, 16).date()]) == 130
 
 
+def test_fmp_data_status_blocks_post_close_paper_recording(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = FractalMarketProfileService()
+    fixed_now = datetime(2026, 4, 16, 16, 0, tzinfo=fmp_service_module.IST)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return fixed_now.replace(tzinfo=None)
+            return fixed_now.astimezone(tz)
+
+    monkeypatch.setattr(fmp_service_module, "datetime", _FixedDateTime)
+    rows = [{"time": datetime(2026, 4, 16, 15, 29, tzinfo=fmp_service_module.IST).isoformat()}]
+
+    status = service._build_live_data_status("NIFTY", rows, {"source": "market_ticks"})
+
+    assert status["minute_history_ready"] is True
+    assert status["final_session_snapshot"] is True
+    assert status["execution_ready"] is False
+    assert status["paper_record_ready"] is False
+    assert status["degraded_reason"] == "market_closed"
+
+
+def test_fmp_data_status_blocks_intraday_stale_history(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = FractalMarketProfileService()
+    fixed_now = datetime(2026, 4, 16, 10, 30, tzinfo=fmp_service_module.IST)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return fixed_now.replace(tzinfo=None)
+            return fixed_now.astimezone(tz)
+
+    monkeypatch.setattr(fmp_service_module, "datetime", _FixedDateTime)
+    rows = [{"time": datetime(2026, 4, 16, 10, 20, tzinfo=fmp_service_module.IST).isoformat()}]
+
+    status = service._build_live_data_status("NIFTY", rows, {"source": "market_ticks"})
+
+    assert status["minute_history_ready"] is False
+    assert status["execution_ready"] is False
+    assert status["paper_record_ready"] is False
+    assert status["degraded_reason"] == "minute_history_stale_or_missing"
+
+
+@pytest.mark.asyncio
+async def test_record_paper_snapshot_skips_post_close_position_management(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = FractalMarketProfileService()
+    recorded: dict[str, bool] = {"called": False}
+
+    async def _snapshot(symbol_code: str):
+        return {
+            "symbol_code": symbol_code,
+            "data_status": {
+                "execution_ready": False,
+                "paper_record_ready": False,
+                "degraded_reason": "market_closed",
+            },
+            "current_signal": {"action": "FLAT", "actionable": False},
+        }
+
+    async def _record_signal(snapshot):
+        recorded["called"] = True
+        return {"open_positions": 0, "closed_positions": 1, "realized_pnl": 125.0, "unrealized_pnl": 0.0, "total_pnl": 125.0}
+
+    monkeypatch.setattr(service, "live_snapshot", _snapshot)
+    monkeypatch.setattr(service.paper, "record_signal", _record_signal)
+
+    snapshot = await service.record_paper_snapshot("NIFTY")
+
+    assert recorded["called"] is False
+    assert snapshot["paper_record_skipped"] is True
+    assert snapshot["paper_skip_reason"] == "market_closed"
+
+
+def test_fmp_crude_keeps_mcx_evening_session_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    fixed_now = datetime(2026, 5, 19, 20, 0, tzinfo=fmp_service_module.IST)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return fixed_now.replace(tzinfo=None)
+            return fixed_now.astimezone(tz)
+
+    monkeypatch.setattr(fmp_service_module, "datetime", _FixedDateTime)
+    rows = _minute_rows(datetime(2026, 5, 19, 9, 0, tzinfo=fmp_service_module.IST), count=660, base=9900.0, drift=0.1)
+
+    sessions = fmp_service_module._group_rows_by_session(rows, allow_partial_live_session=True, symbol_code="CRUDEOIL")
+    latest = fmp_service_module._to_ist(sessions[datetime(2026, 5, 19).date()][-1]["time"])
+    status = FractalMarketProfileService()._build_live_data_status("CRUDEOIL", sessions[datetime(2026, 5, 19).date()], {"source": "bar_proxy"})
+
+    assert latest.time() > fmp_service_module.SESSION_CLOSE
+    assert status["market_open_for_latest_session"] is True
+    assert status["futures_proxy_ready"] is True
+    assert status["execution_ready"] is True
+    assert status["paper_record_ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_live_crude_selection_maps_to_futures_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = FractalMarketProfileService()
+
+    async def _fake_resolve(symbol):
+        return {
+            "instrument_key": "MCX_FO|12345",
+            "trading_symbol": "CRUDEOIL26JUNFUT",
+            "expiry": "2026-06-19",
+            "lot_size": 100,
+        }
+
+    async def _fake_quotes(symbols):
+        return {"MCX:CRUDEOIL26JUNFUT": {"price": 10025.0, "previous_close": 10000.0, "source": "upstox_full_quote"}}
+
+    monkeypatch.setattr("market_data.upstox_commodity.resolve_upstox_mcx_future", _fake_resolve)
+    monkeypatch.setattr("market_data.upstox_commodity.load_upstox_mcx_quote_snapshots", _fake_quotes)
+
+    selection = await service._live_futures_selection(
+        "CRUDEOIL",
+        {"session": {"last_price": 10020.0}},
+        horizon="swing",
+    )
+
+    assert selection is not None
+    assert selection["instrument_type"] == "FUT"
+    assert selection["option_type"] == "FUT"
+    assert selection["instrument_key"] == "MCX_FO|12345"
+    assert selection["premium"] == 10025.0
+    assert selection["lot_size"] == 100
+
+
+@pytest.mark.asyncio
+async def test_paper_store_calculates_short_futures_pnl(tmp_path: Path) -> None:
+    store = FMPPaperStore(tmp_path)
+    actionable_snapshot = {
+        "symbol_code": "CRUDEOIL",
+        "session": {"session_date": "2026-05-19", "last_price": 10000.0},
+        "current_signal": {
+            "hourly_number": 8,
+            "setup_name": "trend_pullback_put",
+            "action": "SHORT",
+            "confidence": 0.7,
+            "horizon": "swing",
+            "daily_shape": "Elongated",
+            "hourly_shape": "Elongated",
+            "entry_trigger": 9990.0,
+            "stop_level": 10040.0,
+            "target_level": 9900.0,
+            "filters": [],
+            "rationale": ["Crude futures short."],
+            "order_flow_bias": {"source": "bar_proxy"},
+            "actionable": True,
+            "options": {
+                "instrument_type": "FUT",
+                "option_type": "FUT",
+                "strike": 0.0,
+                "expiry": "2026-06-19",
+                "premium": 10000.0,
+                "trading_symbol": "CRUDEOIL26JUNFUT",
+                "instrument_key": "MCX_FO|12345",
+                "lot_size": 100,
+            },
+        },
+    }
+    await store.record_signal(actionable_snapshot)
+
+    flat_snapshot = {
+        "symbol_code": "CRUDEOIL",
+        "session": {"session_date": "2026-05-19", "last_price": 9950.0},
+        "current_signal": {
+            "setup_name": "no_trade",
+            "action": "FLAT",
+            "confidence": 0.2,
+            "horizon": "none",
+            "filters": ["Flat"],
+            "rationale": ["Exit."],
+            "actionable": False,
+            "options": None,
+        },
+    }
+    summary = await store.record_signal(flat_snapshot)
+
+    assert summary["realized_pnl"] == 5000.0
+
+
+@pytest.mark.asyncio
+async def test_paper_store_keeps_existing_futures_position_when_entry_cutoff_filter_trips(tmp_path: Path) -> None:
+    store = FMPPaperStore(tmp_path)
+    base_signal = {
+        "hourly_number": 13,
+        "setup_name": "trend_pullback_call",
+        "action": "LONG",
+        "confidence": 0.68,
+        "horizon": "swing",
+        "daily_shape": "Elongated",
+        "hourly_shape": "D-shape",
+        "entry_trigger": 10010.0,
+        "stop_level": 9980.0,
+        "target_level": 10120.0,
+        "rationale": ["Crude futures long."],
+        "order_flow_bias": {"source": "bar_proxy"},
+        "options": {
+            "instrument_type": "FUT",
+            "option_type": "FUT",
+            "strike": 0.0,
+            "expiry": "2026-06-18",
+            "premium": 10000.0,
+            "trading_symbol": "CRUDEOIL26JUNFUT",
+            "instrument_key": "MCX_FO|499095",
+            "lot_size": 100,
+        },
+    }
+    await store.record_signal(
+        {
+            "symbol_code": "CRUDEOIL",
+            "session": {"session_date": "2026-05-19", "last_price": 10000.0},
+            "current_signal": {**base_signal, "filters": [], "actionable": True},
+        }
+    )
+
+    summary = await store.record_signal(
+        {
+            "symbol_code": "CRUDEOIL",
+            "session": {"session_date": "2026-05-19", "last_price": 10040.0},
+            "current_signal": {
+                **base_signal,
+                "filters": ["New FMP paper entries stop after 22:30 IST."],
+                "actionable": False,
+                "options": {**base_signal["options"], "premium": 10040.0},
+            },
+        }
+    )
+
+    positions = await store.list_positions(symbol="CRUDEOIL", status="all", limit=10)
+    assert summary["open_positions"] == 1
+    assert summary["closed_positions"] == 0
+    assert positions["open_positions"][0]["latest_premium"] == 10040.0
+    assert positions["open_positions"][0]["unrealized_pnl"] == 4000.0
+
+
 def test_build_signal_detects_bullish_hourly_breakout() -> None:
     service = FractalMarketProfileService()
     current_rows = _minute_rows(datetime(2026, 4, 2, 9, 15, tzinfo=timezone.utc), count=12)

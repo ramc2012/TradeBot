@@ -184,9 +184,13 @@ class MarketHoursPaperSupervisor:
                     if filters:
                         not_actionable_because.extend(f"filter: {f}" for f in filters[:3])
                     if not bool(data_status.get("execution_ready", True)):
-                        not_actionable_because.append(
-                            f"data not ready ({data_status.get('degraded_reason') or 'unknown'})"
-                        )
+                        reason = data_status.get("degraded_reason") or "unknown"
+                        if reason == "market_closed":
+                            not_actionable_because.append("market closed (entries disabled)")
+                        elif bool(data_status.get("paper_record_ready")):
+                            not_actionable_because.append(f"execution not ready ({reason})")
+                        else:
+                            not_actionable_because.append(f"data not ready ({reason})")
                     confidence = sig.get("confidence")
                     if confidence is not None and float(confidence) < 0.55:
                         not_actionable_because.append(
@@ -204,6 +208,7 @@ class MarketHoursPaperSupervisor:
                             "rejection_reasons": not_actionable_because,
                             "data_status": {
                                 "execution_ready": data_status.get("execution_ready"),
+                                "paper_record_ready": data_status.get("paper_record_ready"),
                                 "reason": data_status.get("degraded_reason"),
                             },
                             "paper_summary": snapshot.get("paper_summary"),
@@ -364,6 +369,8 @@ class MarketHoursPaperSupervisor:
                 interval_seconds=settings.FRACTAL_MARKET_PROFILE_AUTO_INTERVAL_SECONDS,
                 callback=_fmp_runner,
                 enabled=settings.FRACTAL_MARKET_PROFILE_AUTO_ENABLED,
+                market_hours_fn=_in_gann_market_hours,
+                next_open_fn=_next_gann_market_open,
             ),
             RunnerConfig(
                 key="directional_options",

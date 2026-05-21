@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Optional
 
 import pandas as pd
 
+from analysis.instruments import normalize_index_contract_expiry
 from directional_options.data import DirectionalOptionsDataStore
 from directional_options.features import timeframe_minutes
 from directional_options.schemas import ContractCandidate, ContractMeta, DirectionalSignal, RegimeSnapshot
@@ -159,12 +160,17 @@ class OptionSelectionEngine:
             return {"best": None, "candidates": [], "reason": "No persisted option contracts were available for this timestamp."}
 
         expiry_preference = regime.preferred_expiry_kind
+        contracts = self._front_expiry_contracts(
+            contracts=contracts,
+            timestamp=timestamp,
+            preferred_expiry_kind=expiry_preference,
+        )
         contracts = sorted(
             contracts,
             key=lambda meta: (
-                0 if meta.expiry_kind == expiry_preference else 1,
+                self._contract_expiry_date(meta).isoformat(),
                 abs(meta.strike - spot_price),
-                meta.expiry,
+                0 if self._contract_expiry_kind(meta) == expiry_preference else 1,
             ),
         )[: int(selector_cfg["max_candidates"]) * 3]
 
@@ -229,12 +235,17 @@ class OptionSelectionEngine:
 
         selector_cfg = self.config
         expiry_preference = regime.preferred_expiry_kind
+        snapshot_rows = self._front_expiry_snapshots(
+            snapshot_rows=snapshot_rows,
+            timestamp=timestamp,
+            preferred_expiry_kind=expiry_preference,
+        )
         ordered = sorted(
             snapshot_rows,
             key=lambda item: (
-                0 if str(item.get("expiry_kind") or "") == expiry_preference else 1,
+                self._snapshot_expiry_date(item).isoformat(),
                 abs(float(item.get("strike") or 0.0) - spot_price),
-                str(item.get("expiry") or ""),
+                0 if self._snapshot_expiry_kind(item) == expiry_preference else 1,
             ),
         )[: int(selector_cfg["max_candidates"]) * 3]
 
@@ -283,6 +294,91 @@ class OptionSelectionEngine:
             "reason": selected.selection_reason,
         }
 
+    def _contract_expiry_date(self, meta: ContractMeta) -> date:
+        normalized = normalize_index_contract_expiry(meta.underlying, meta.expiry)
+        return normalized or pd.Timestamp(meta.expiry).date()
+
+    def _contract_expiry_kind(self, meta: ContractMeta) -> str:
+        expiry_date = self._contract_expiry_date(meta)
+        if expiry_date.isoformat() != str(meta.expiry or "")[:10]:
+            return "monthly"
+        return str(meta.expiry_kind or "weekly")
+
+    def _snapshot_expiry_date(self, item: dict[str, Any]) -> date:
+        normalized = normalize_index_contract_expiry(item.get("underlying"), item.get("expiry"))
+        return normalized or pd.Timestamp(item.get("expiry")).date()
+
+    def _snapshot_expiry_kind(self, item: dict[str, Any]) -> str:
+        expiry_date = self._snapshot_expiry_date(item)
+        if expiry_date.isoformat() != str(item.get("expiry") or "")[:10]:
+            return "monthly"
+        return str(item.get("expiry_kind") or "weekly")
+
+    def _front_expiry_contracts(
+        self,
+        *,
+        contracts: list[ContractMeta],
+        timestamp: pd.Timestamp,
+        preferred_expiry_kind: str,
+    ) -> list[ContractMeta]:
+        """For weekly intraday trades, keep selection on the front expiry.
+
+        Month-end NSE contracts can be both the front tradable expiry and the
+        monthly expiry. If we prioritize the "weekly" label before expiry date,
+        a farther weekly contract can beat the real front expiry, which is how
+        NIFTY drifted to 28-May instead of 26-May.
+        """
+        if preferred_expiry_kind != "weekly":
+            return contracts
+        as_of_date = timestamp.date()
+        expiries = sorted({
+            self._contract_expiry_date(item)
+            for item in contracts
+            if self._contract_expiry_date(item) >= as_of_date
+        })
+        if not expiries:
+            return contracts
+        front_expiry = expiries[0]
+        if (front_expiry - as_of_date).days > float(self.config.get("preferred_weekly_days", 8)):
+            return contracts
+        return [item for item in contracts if self._contract_expiry_date(item) == front_expiry]
+
+    def _front_expiry_snapshots(
+        self,
+        *,
+        snapshot_rows: list[dict[str, Any]],
+        timestamp: pd.Timestamp,
+        preferred_expiry_kind: str,
+    ) -> list[dict[str, Any]]:
+        if preferred_expiry_kind != "weekly":
+            return snapshot_rows
+        as_of_date = timestamp.date()
+        expiries: list[datetime.date] = []
+        for item in snapshot_rows:
+            expiry = item.get("expiry")
+            if not expiry:
+                continue
+            expiry_date = self._snapshot_expiry_date(item)
+            if expiry_date >= as_of_date:
+                expiries.append(expiry_date)
+        if not expiries:
+            return snapshot_rows
+        front_expiry = min(expiries)
+        if (front_expiry - as_of_date).days > float(self.config.get("preferred_weekly_days", 8)):
+            return snapshot_rows
+        normalized_rows: list[dict[str, Any]] = []
+        for item in snapshot_rows:
+            if not item.get("expiry") or self._snapshot_expiry_date(item) != front_expiry:
+                continue
+            row = dict(item)
+            normalized_expiry = self._snapshot_expiry_date(row)
+            if normalized_expiry.isoformat() != str(row.get("expiry") or "")[:10]:
+                row["raw_expiry"] = row.get("expiry")
+                row["expiry"] = normalized_expiry.isoformat()
+                row["expiry_kind"] = "monthly"
+            normalized_rows.append(row)
+        return normalized_rows
+
     def _score_contract(
         self,
         *,
@@ -308,8 +404,9 @@ class OptionSelectionEngine:
         if option_price <= 0.0:
             return None
 
-        expiry_dt = pd.Timestamp(meta.expiry)
-        days_to_expiry = max((expiry_dt.date() - timestamp.date()).days + (1.0 - float(timestamp.hour / 24.0)), 0.25)
+        expiry_date = self._contract_expiry_date(meta)
+        expiry_kind = self._contract_expiry_kind(meta)
+        days_to_expiry = max((expiry_date - timestamp.date()).days + (1.0 - float(timestamp.hour / 24.0)), 0.25)
         time_to_expiry_years = max(days_to_expiry / 365.0, 1.0 / 3650.0)
         delta, gamma, theta, vega = _black_scholes_greeks(
             spot=spot_price,
@@ -414,7 +511,7 @@ class OptionSelectionEngine:
         score += max(-12.0, min(greek_expected_pnl / max(option_price, 1.0), 1.0) * 6.0)
 
         selection_reason = (
-            f"{meta.expiry_kind} {meta.option_type} with {delta_abs:.2f} delta, "
+            f"{expiry_kind} {meta.option_type} with {delta_abs:.2f} delta, "
             f"{distributional['tail_edge']:+.2f} p-minus-q tail gap, "
             f"{distributional['timing_fit']:.0%} timing fit, and {expected_pnl:.2f} net trading edge."
         )
@@ -423,8 +520,8 @@ class OptionSelectionEngine:
             trading_symbol=meta.trading_symbol,
             file_path=meta.file_path,
             option_type=meta.option_type,
-            expiry=meta.expiry,
-            expiry_kind=meta.expiry_kind,
+            expiry=expiry_date.isoformat(),
+            expiry_kind=expiry_kind,
             strike=float(meta.strike),
             lot_size=int(meta.lot_size),
             tick_size=float(meta.tick_size),
@@ -491,8 +588,9 @@ class OptionSelectionEngine:
         if option_price <= 0.0 or strike <= 0.0:
             return None
 
-        expiry_dt = pd.Timestamp(snapshot.get("expiry"))
-        days_to_expiry = max((expiry_dt.date() - timestamp.date()).days + (1.0 - float(timestamp.hour / 24.0)), 0.25)
+        expiry_date = self._snapshot_expiry_date(snapshot)
+        expiry_kind = self._snapshot_expiry_kind(snapshot)
+        days_to_expiry = max((expiry_date - timestamp.date()).days + (1.0 - float(timestamp.hour / 24.0)), 0.25)
         time_to_expiry_years = max(days_to_expiry / 365.0, 1.0 / 3650.0)
         sigma = min(
             max(float(snapshot.get("iv") or default_sigma or 0.0), float(self.config["sigma_floor"])),
@@ -604,7 +702,7 @@ class OptionSelectionEngine:
 
         trading_symbol = str(snapshot.get("trading_symbol") or snapshot.get("instrument_key") or "")
         selection_reason = (
-            f"Local {snapshot.get('expiry_kind') or 'weekly'} {option_type} with {delta_abs:.2f} delta, "
+            f"Local {expiry_kind} {option_type} with {delta_abs:.2f} delta, "
             f"{distributional['tail_edge']:+.2f} p-minus-q tail gap, "
             f"{distributional['timing_fit']:.0%} timing fit, and {expected_pnl:.2f} net trading edge."
         )
@@ -612,8 +710,8 @@ class OptionSelectionEngine:
             trading_symbol=trading_symbol or f"{snapshot.get('underlying')} {strike:.0f} {option_type}",
             file_path=f"live:{snapshot.get('instrument_key') or trading_symbol or strike}",
             option_type=option_type,
-            expiry=str(snapshot.get("expiry") or ""),
-            expiry_kind=str(snapshot.get("expiry_kind") or "weekly"),
+            expiry=expiry_date.isoformat(),
+            expiry_kind=expiry_kind,
             strike=strike,
             lot_size=int(snapshot.get("lot_size") or 1),
             tick_size=float(snapshot.get("tick_size") or 0.05),

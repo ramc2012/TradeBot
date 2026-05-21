@@ -793,9 +793,9 @@ class StrategyEntryMixin:
         )
 
         lot_size: Optional[int] = None
-        if row.get("lot_size"):
+        if side.get("lot_size"):
             try:
-                lot_size = int(row["lot_size"])
+                lot_size = int(side["lot_size"])
             except (TypeError, ValueError):
                 pass
 
@@ -807,6 +807,12 @@ class StrategyEntryMixin:
                 option_type=opt_type,
                 instrument_key=side.get("instrument_key"),
             )
+
+        if not lot_size and row.get("lot_size"):
+            try:
+                lot_size = int(row["lot_size"])
+            except (TypeError, ValueError):
+                pass
 
         if not lot_size:
             logger.warning(

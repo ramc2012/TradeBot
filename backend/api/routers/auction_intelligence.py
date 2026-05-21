@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from collections import Counter, defaultdict
 from dataclasses import asdict
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic
 from typing import Optional
 
@@ -24,6 +24,7 @@ from auction_intelligence.demo import (
     build_demo_validation_series,
 )
 from auction_intelligence.live import (
+    _fetch_recent_minute_rows,
     available_live_symbols as get_available_live_symbols,
     build_live_analysis,
     build_shadow_backfill_snapshots,
@@ -785,12 +786,20 @@ _AUCTION_LIVE_MP_TIMEOUT_SECONDS = 30.0
 _FMP_LIVE_MP_TIMEOUT_SECONDS = 20.0
 _DURABLE_DAILY_MP_TIMEFRAME = "auction_daily"
 _DURABLE_DAILY_MP_SPOOL_ROOT = _BACKEND_ROOT / "runtime" / "auction_intelligence" / "daily_mp_spool"
+_IST = timezone(timedelta(hours=5, minutes=30))
 _MP_PRICE_BANDS: dict[str, tuple[float, float]] = {
     "NIFTY": (10_000.0, 50_000.0),
     "BANKNIFTY": (20_000.0, 100_000.0),
     "FINNIFTY": (10_000.0, 60_000.0),
     "MIDCPNIFTY": (5_000.0, 40_000.0),
     "SENSEX": (30_000.0, 150_000.0),
+}
+_MP_LIVE_SOURCE_PRIORITY: dict[str, int] = {
+    "fractal_market_profile:prior_daily_profile": 10,
+    "fractal_market_profile:daily_profile": 20,
+    "live_snapshot": 30,
+    "db_spot_1minute_profile": 40,
+    "broker_history_1minute_profile": 50,
 }
 
 
@@ -799,6 +808,41 @@ def _mp_tick_size(underlying: str) -> float:
     if normalized == "CRUDEOIL":
         return 10.0
     return 0.5
+
+
+def _bars_have_session_open_coverage(bars: list[MarketBar]) -> bool:
+    if not bars:
+        return False
+    minutes = sorted({
+        item.timestamp.astimezone(_IST).replace(second=0, microsecond=0)
+        for item in bars
+        if time(9, 15) <= item.timestamp.astimezone(_IST).time() <= time(15, 30)
+    })
+    if not minutes:
+        return False
+    if minutes[0].time() > time(9, 25):
+        return False
+    first_hour = [item for item in minutes if item.time() < time(10, 15)]
+    if len(first_hour) < 45:
+        return False
+    max_gap = max(
+        ((right - left).total_seconds() / 60.0 for left, right in zip(first_hour, first_hour[1:])),
+        default=0.0,
+    )
+    return max_gap <= 8.0
+
+
+def _parse_market_bar_timestamp(value: object) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=_IST)
+    return timestamp.astimezone(_IST)
 
 
 def _mp_enr_path(underlying: str) -> Path:
@@ -956,20 +1000,58 @@ def _price_in_underlying_band(underlying: str, value: object, *, required: bool 
     return band[0] <= price <= band[1]
 
 
-def _plausible_mp_row(underlying: str, row: dict | None) -> bool:
+def _mp_row_integrity_report(underlying: str, row: dict | None) -> dict[str, object]:
+    issues: list[str] = []
     if not row:
-        return False
+        return {"ok": False, "issues": ["missing_row"]}
     required_keys = ("open_price", "close_price", "session_high", "session_low", "poc", "vah", "val")
     if not all(_price_in_underlying_band(underlying, row.get(key), required=True) for key in required_keys):
-        return False
+        issues.append("price_outside_underlying_band")
     high = _flt(row, "session_high")
     low = _flt(row, "session_low")
     close = _flt(row, "close_price")
     vah = _flt(row, "vah")
     val = _flt(row, "val")
     if high < low or not (low <= close <= high):
-        return False
-    return vah >= val
+        issues.append("session_range_inconsistent")
+    if vah < val:
+        issues.append("value_area_inverted")
+
+    tick = _mp_tick_size(underlying)
+    ibh = _flt(row, "ibh")
+    ibl = _flt(row, "ibl")
+    ibr = _flt(row, "ibr")
+    session_range = max(high - low, 0.0)
+    if not _price_in_underlying_band(underlying, ibh, required=True) or not _price_in_underlying_band(
+        underlying, ibl, required=True
+    ):
+        issues.append("initial_balance_outside_underlying_band")
+    if ibh < ibl:
+        issues.append("initial_balance_inverted")
+    if high > low and not (low - tick <= ibl <= high + tick and low - tick <= ibh <= high + tick):
+        issues.append("initial_balance_outside_session_range")
+    expected_ibr = max(ibh - ibl, tick)
+    if ibr <= 0:
+        issues.append("initial_balance_range_missing")
+    elif abs(ibr - expected_ibr) > max(tick, expected_ibr * 0.05):
+        issues.append("initial_balance_range_mismatch")
+    if session_range >= tick * 20 and ibr <= tick:
+        issues.append("initial_balance_degenerate")
+
+    return {
+        "ok": not issues,
+        "issues": issues,
+        "ibh": round(ibh, 4),
+        "ibl": round(ibl, 4),
+        "ibr": round(ibr, 4),
+        "session_high": round(high, 4),
+        "session_low": round(low, 4),
+        "session_range": round(session_range, 4),
+    }
+
+
+def _plausible_mp_row(underlying: str, row: dict | None) -> bool:
+    return bool(_mp_row_integrity_report(underlying, row).get("ok"))
 
 
 def _valid_durable_mp_rows(underlying: str, rows: list[dict]) -> list[dict]:
@@ -1316,6 +1398,9 @@ async def _build_db_spot_mp_rows(underlying: str, *, limit: int = 60) -> list[di
     mp_rows: list[dict] = []
     for session_date, bars in sorted(bars_by_session.items()):
         try:
+            if not _bars_have_session_open_coverage(bars):
+                logger.debug(f"[Auction MP] DB spot MP skipped incomplete open coverage for {normalized} {session_date}")
+                continue
             row = _build_mp_row_from_bars(normalized, bars)
             if row and _plausible_mp_row(normalized, row):
                 mp_rows.append(row)
@@ -1329,6 +1414,47 @@ async def _build_db_spot_mp_row(underlying: str) -> dict | None:
     return rows[-1] if rows else None
 
 
+async def _build_broker_history_mp_row(underlying: str) -> dict | None:
+    normalized = underlying.upper()
+    rows, source, history_symbol = await _fetch_recent_minute_rows(
+        normalized,
+        lookback_days=2,
+        allow_live_broker_refresh=True,
+    )
+    bars_by_session: dict[date, list[MarketBar]] = defaultdict(list)
+    for row in rows:
+        timestamp = _parse_market_bar_timestamp(row.get("time") or row.get("timestamp"))
+        if timestamp is None or not (time(9, 15) <= timestamp.time() <= time(15, 30)):
+            continue
+        try:
+            bars_by_session[timestamp.date()].append(
+                MarketBar(
+                    timestamp=timestamp,
+                    open=float(row.get("open") or row.get("close") or 0.0),
+                    high=float(row.get("high") or row.get("close") or 0.0),
+                    low=float(row.get("low") or row.get("close") or 0.0),
+                    close=float(row.get("close") or 0.0),
+                    volume=float(row.get("volume") or 0.0),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    if not bars_by_session:
+        return None
+    latest_session = max(bars_by_session)
+    bars = sorted(bars_by_session[latest_session], key=lambda item: item.timestamp)
+    if not _bars_have_session_open_coverage(bars):
+        return None
+    row = _build_mp_row_from_bars(normalized, bars)
+    if not row:
+        return None
+    row["source_name"] = f"broker_history:{source}"
+    row["history_symbol"] = history_symbol
+    row["history_rows"] = len(rows)
+    row["session_rows"] = len(bars)
+    return row
+
+
 async def _collect_live_mp_candidate_rows(
     underlying: str,
 ) -> tuple[list[tuple[str, dict]], dict[str, object]]:
@@ -1340,20 +1466,43 @@ async def _collect_live_mp_candidate_rows(
     }
     candidate_rows: list[tuple[str, dict]] = []
     rejected_sources: list[str] = []
+    rejected_details: dict[str, list[str]] = {}
     live_snapshot_ok = False
 
+    def add_candidate(source_name: str, row: dict | None) -> bool:
+        if not row:
+            return False
+        integrity = _mp_row_integrity_report(underlying, row)
+        if integrity.get("ok"):
+            row["integrity_status"] = "ok"
+            row["integrity_issues"] = []
+            row["source_name"] = source_name
+            candidate_rows.append((source_name, row))
+            return True
+        rejected_sources.append(source_name)
+        rejected_details[source_name] = [str(item) for item in integrity.get("issues", [])]
+        return False
+
     if underlying.upper() != "CRUDEOIL":
+        try:
+            broker_row = await asyncio.wait_for(
+                _build_broker_history_mp_row(underlying),
+                timeout=15.0,
+            )
+            if add_candidate("broker_history_1minute_profile", broker_row):
+                live_snapshot_ok = True
+        except Exception as exc:
+            status["live_broker_history_error"] = str(exc)
+
+    if underlying.upper() != "CRUDEOIL" and not live_snapshot_ok:
         try:
             live_snapshot = await asyncio.wait_for(
                 build_live_analysis(symbol_code=underlying),
                 timeout=_AUCTION_LIVE_MP_TIMEOUT_SECONDS,
             )
             live_row = _build_live_mp_row(live_snapshot)
-            if _plausible_mp_row(underlying, live_row):
-                candidate_rows.append(("live_snapshot", live_row))
+            if add_candidate("live_snapshot", live_row):
                 live_snapshot_ok = True
-            elif live_row:
-                rejected_sources.append("live_snapshot")
         except Exception as exc:
             status["live_error"] = str(exc)
 
@@ -1365,12 +1514,9 @@ async def _collect_live_mp_candidate_rows(
                 fmp_service.live_snapshot(underlying),
                 timeout=_FMP_LIVE_MP_TIMEOUT_SECONDS,
             )
-            for profile_key in ("prior_daily_profile", "daily_profile"):
+            for profile_key in ("daily_profile", "prior_daily_profile"):
                 fmp_row = _build_live_mp_row_from_fmp(fmp_snapshot, profile_key=profile_key)
-                if _plausible_mp_row(underlying, fmp_row):
-                    candidate_rows.append((f"fractal_market_profile:{profile_key}", fmp_row))
-                elif fmp_row:
-                    rejected_sources.append(f"fractal_market_profile:{profile_key}")
+                add_candidate(f"fractal_market_profile:{profile_key}", fmp_row)
         except Exception as exc:
             if not status["live_error"]:
                 status["live_error"] = str(exc)
@@ -1378,14 +1524,12 @@ async def _collect_live_mp_candidate_rows(
                 status["live_fmp_error"] = str(exc)
 
     db_spot_row = await _build_db_spot_mp_row(underlying)
-    if _plausible_mp_row(underlying, db_spot_row):
-        candidate_rows.append(("db_spot_1minute_profile", db_spot_row))
-    elif db_spot_row:
-        rejected_sources.append("db_spot_1minute_profile")
+    add_candidate("db_spot_1minute_profile", db_spot_row)
 
     if rejected_sources:
         status["live_rejected"] = True
         status["live_rejected_sources"] = rejected_sources
+        status["live_rejected_details"] = rejected_details
 
     if candidate_rows:
         status["live_bridge"] = [source_name for source_name, _ in candidate_rows]
@@ -1630,7 +1774,7 @@ async def _load_mp_rows(
     try:
         candidate_rows, live_status = await asyncio.wait_for(
             _collect_live_mp_candidate_rows(underlying),
-            timeout=5.0,
+            timeout=20.0,
         )
     except asyncio.TimeoutError:
         candidate_rows = []
@@ -1662,7 +1806,10 @@ async def _load_mp_rows(
 
     for source_name, candidate in sorted(
         candidate_rows,
-        key=lambda item: str(item[1].get("date", "")),
+        key=lambda item: (
+            str(item[1].get("date", "")),
+            _MP_LIVE_SOURCE_PRIORITY.get(item[0], 0),
+        ),
     ):
         candidate_date = _parse_row_date(candidate.get("date"))
         if not candidate_date:
@@ -1813,6 +1960,9 @@ def _build_mp_signal_record(row: dict) -> dict:
         "close_location": round(close_location, 4),
         "value_shift": round(value_shift, 2),
         "range_factor": round(session_range / max(ibr, 1.0), 4) if session_range > 0 else 0.0,
+        "integrity_status": row.get("integrity_status") or "ok",
+        "integrity_issues": list(row.get("integrity_issues") or []),
+        "source_name": row.get("source_name"),
         "inside_value": inside_value,
         "above_value": above_value,
         "below_value": below_value,

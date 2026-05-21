@@ -99,20 +99,16 @@ class FMPPaperStore:
             # Always refresh latest_premium for every open position before we
             # consider closing — otherwise exit_premium gets stamped with stale
             # entry-time premium and realized_pnl collapses to zero.
-            await self._refresh_open_premiums(matching)
+            await self._refresh_open_premiums(matching, snapshot=snapshot)
 
-            if not signal.get("actionable") or not signal.get("options"):
+            if str(signal.get("action") or "").upper() == "FLAT" or not signal.get("options"):
                 for row in matching:
                     row["status"] = "closed"
                     row["updated_at"] = recorded_at
                     row["closed_at"] = recorded_at
                     row["close_reason"] = "flat_snapshot"
                     row["exit_premium"] = row.get("latest_premium")
-                    row["realized_pnl"] = round(
-                        (float(row.get("exit_premium") or 0.0) - float(row.get("entry_premium") or 0.0))
-                        * int(row.get("quantity") or 0),
-                        2,
-                    )
+                    row["realized_pnl"] = self._pnl(row, row.get("exit_premium"))
                     try:
                         await paper_trade_recorder.record_event(
                             strategy="fractal_market_profile",
@@ -159,6 +155,7 @@ class FMPPaperStore:
                     horizon=str(signal.get("horizon") or "swing"),
                     trading_symbol=options.get("trading_symbol"),
                     instrument_key=options.get("instrument_key"),
+                    instrument_type=options.get("instrument_type"),
                     option_type=options.get("option_type"),
                     strike=float(options.get("strike") or 0.0),
                     expiry=str(options.get("expiry") or ""),
@@ -192,7 +189,7 @@ class FMPPaperStore:
                     row["updated_at"] = recorded_at
                     row["latest_premium"] = latest_premium
                     row["unrealized_pnl"] = round(
-                        (latest_premium - float(row.get("entry_premium") or 0.0)) * int(row.get("quantity") or 0),
+                        self._pnl(row, latest_premium),
                         2,
                     )
                     row["confidence"] = float(signal.get("confidence") or row.get("confidence") or 0.0)
@@ -208,10 +205,7 @@ class FMPPaperStore:
                 row["closed_at"] = recorded_at
                 row["close_reason"] = "signal_flip"
                 row["exit_premium"] = latest_premium
-                row["realized_pnl"] = round(
-                    (latest_premium - float(row.get("entry_premium") or 0.0)) * int(row.get("quantity") or 0),
-                    2,
-                )
+                row["realized_pnl"] = self._pnl(row, latest_premium)
                 try:
                     await paper_trade_recorder.record_event(
                         strategy="fractal_market_profile",
@@ -233,7 +227,7 @@ class FMPPaperStore:
                 open_positions.remove(row)
                 closed_positions.append(row)
 
-            if not refreshed:
+            if not refreshed and signal.get("actionable"):
                 open_positions.append(new_position)
                 try:
                     await paper_trade_recorder.record_event(
@@ -263,10 +257,21 @@ class FMPPaperStore:
             )
             return self._summary(open_positions, closed_positions)
 
-    async def _refresh_open_premiums(self, rows: list[dict[str, Any]]) -> None:
+    async def _refresh_open_premiums(self, rows: list[dict[str, Any]], *, snapshot: dict[str, Any] | None = None) -> None:
         if not rows:
             return
-        keys = [str(row.get("instrument_key") or "") for row in rows if row.get("instrument_key")]
+        futures_rows = [
+            row
+            for row in rows
+            if str(row.get("instrument_type") or row.get("option_type") or "").upper() == "FUT"
+        ]
+        snapshot_price = float(((snapshot or {}).get("session") or {}).get("last_price") or 0.0)
+        for row in futures_rows:
+            if snapshot_price > 0:
+                row["latest_premium"] = snapshot_price
+                row["unrealized_pnl"] = self._pnl(row, snapshot_price)
+        option_rows = [row for row in rows if row not in futures_rows]
+        keys = [str(row.get("instrument_key") or "") for row in option_rows if row.get("instrument_key")]
         if not keys:
             return
         try:
@@ -293,9 +298,20 @@ class FMPPaperStore:
             if ltp is not None and ltp > 0:
                 row["latest_premium"] = ltp
                 row["unrealized_pnl"] = round(
-                    (ltp - float(row.get("entry_premium") or 0.0)) * int(row.get("quantity") or 0),
+                    self._pnl(row, ltp),
                     2,
                 )
+
+    def _pnl(self, row: dict[str, Any], latest_price: Any) -> float:
+        try:
+            latest = float(latest_price or 0.0)
+            entry = float(row.get("entry_premium") or 0.0)
+            quantity = int(row.get("quantity") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        if str(row.get("instrument_type") or row.get("option_type") or "").upper() == "FUT" and str(row.get("action") or "").upper() == "SHORT":
+            return round((entry - latest) * quantity, 2)
+        return round((latest - entry) * quantity, 2)
 
     def _summary(self, open_positions: list[dict[str, Any]], closed_positions: list[dict[str, Any]]) -> dict[str, Any]:
         realized = round(sum(float(row.get("realized_pnl") or 0.0) for row in closed_positions), 2)

@@ -2929,6 +2929,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             return
 
         row_map = {row["underlying"]: row for row in rows}
+        live_quotes = await self._latest_position_quote_map(list(runtime.positions.values()))
         for symbol, pos in list(runtime.positions.items()):
             row = row_map.get(pos.underlying)
             if not row:
@@ -2937,13 +2938,19 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             side = row.get("ce") if pos.option_type == "CE" else row.get("pe")
             candles = await self._load_candles(row, side or {}, interval="5minute", limit=96) if side else []
             closes = [float(c["close"]) for c in candles if c.get("close")] if candles else []
-            live_ltp = float((side or {}).get("ltp") or 0.0)
-            latest_close = live_ltp or (closes[-1] if closes else 0.0)
+            live_observed_at: Optional[str] = None
+            direct_quote = live_quotes.get(pos.symbol)
+            if direct_quote:
+                latest_close, live_observed_at = direct_quote
+            else:
+                live_ltp = float((side or {}).get("ltp") or 0.0)
+                latest_close = closes[-1] if closes else live_ltp
             if latest_close <= 0:
                 continue
 
             pos.current_price = latest_close
             pos.peak_price = max(pos.peak_price, latest_close)
+            pos.price_updated_at = live_observed_at or started_at.isoformat()
             if len(closes) >= MACD_MIN_BARS:
                 last_bar_time = str(candles[-1].get("time") or "") if candles else None
                 macd_line, _, _ = _strategy_macd(
@@ -3919,7 +3926,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                         "session_id": session_id,
                         "symbol": pos.symbol,
                         "strike": pos.strike,
-                        "expiry": _coerce_date(pos.expiry),
+                        "expiry": str(_coerce_date(pos.expiry) or pos.expiry or ""),
                         "option_type": pos.option_type,
                         "qty": pos.qty,
                         "avg_price": pos.entry_price,

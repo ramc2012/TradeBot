@@ -15,15 +15,15 @@ down_revision: Union[str, None] = "009_rl_qtable"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-# NSE-mandated lot sizes (as of 2026-Q1)
+# Exchange-mandated index lot sizes for January 2026+ expiries.
 _INDEX_LOT_SIZES = {
-    "NIFTY":       25,
-    "BANKNIFTY":   15,
-    "FINNIFTY":    40,
-    "MIDCPNIFTY":  75,
+    "NIFTY":       65,
+    "BANKNIFTY":   30,
+    "FINNIFTY":    60,
+    "MIDCPNIFTY":  120,
     "NIFTYNXT50":  25,
-    "SENSEX":      10,
-    "BANKEX":      15,
+    "SENSEX":      20,
+    "BANKEX":      30,
 }
 
 

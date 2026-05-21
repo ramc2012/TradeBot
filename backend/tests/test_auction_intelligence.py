@@ -587,6 +587,75 @@ def test_option_mapper_selects_atm_put_for_scalp_short(monkeypatch) -> None:
     assert plans[0].quantity == 75
 
 
+def test_option_mapper_sizes_quantity_from_selected_contract_lot(monkeypatch) -> None:
+    config = clone_default_config()
+    config["contract_specs"]["NIFTY"]["lot_size"] = 65
+    mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])
+    expiry = "2026-04-09"
+    adapter = _FakeOptionAdapter(
+        expiries=[{"expiry": expiry}],
+        contracts=[
+            {"instrument_key": "PE22500", "trading_symbol": "NIFTY22500PE", "strike_price": 22500.0, "instrument_type": "PE", "expiry": expiry, "lot_size": 20},
+        ],
+        option_chain=type("Chain", (), {
+            "spot_price": 22496.0,
+            "entries": [
+                type("Entry", (), {"strike": 22500.0, "option_type": "PE", "ltp": 61.0, "oi": 26000, "volume": 22000, "bid": 60.5, "ask": 61.0, "delta": -0.50, "instrument_key": "PE22500"})(),
+            ],
+        })(),
+    )
+
+    async def _fake_load_candles(**_kwargs):
+        return [{"close": 58.0 + (index * 0.1)} for index in range(40)]
+
+    async def _fake_resolve_lot_size(**_kwargs):
+        return 20
+
+    monkeypatch.setattr("auction_intelligence.options.mapper.get_active_adapter", lambda broker=None: adapter if broker == "upstox" else None)
+    monkeypatch.setattr("auction_intelligence.options.mapper.ensure_upstox_session", lambda: asyncio.sleep(0, result=False))
+    monkeypatch.setattr("auction_intelligence.options.mapper.ensure_fyers_session", lambda: asyncio.sleep(0, result=False))
+    monkeypatch.setattr("auction_intelligence.options.mapper.option_history_service.load_candles", _fake_load_candles)
+    monkeypatch.setattr("auction_intelligence.options.mapper.option_history_service.resolve_lot_size", _fake_resolve_lot_size)
+
+    plans = asyncio.run(
+        mapper.map_execution_plan(
+            session=SessionContext(symbol="NIFTY FUT", session_date=date(2026, 4, 9), last_price=22496.0, minutes_to_close=180),
+            decisions=[
+                AgentDecision(
+                    agent_name="scalp",
+                    action="SHORT",
+                    confidence=0.73,
+                    entry_price=22496.0,
+                    stop_price=22512.0,
+                    target_price=22470.0,
+                    quantity=65,
+                    sleeve_fraction=0.2,
+                    rationale=["Responsive sell near upper value."],
+                    metadata={"setup_name": "responsive_sell_short"},
+                )
+            ],
+            execution_plan=[
+                ExecutionInstruction(
+                    agent_name="scalp",
+                    symbol="NIFTY FUT",
+                    action="SHORT",
+                    style="PASSIVE",
+                    order_type="LIMIT",
+                    limit_price=22496.0,
+                    slices=2,
+                    cancel_after_seconds=30,
+                    rationale=["Base execution."],
+                    quantity=65,
+                )
+            ],
+        )
+    )
+
+    assert len(plans) == 1
+    assert plans[0].lot_size == 20
+    assert plans[0].quantity == 60
+
+
 def test_option_mapper_select_expiry_accepts_string_session_date() -> None:
     config = clone_default_config()
     mapper = OptionStrategyMapper(config["options_mapping"], config["contract_specs"])

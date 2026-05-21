@@ -246,6 +246,19 @@ export function createMarketWatchlistSocket(
   );
 }
 
+export function createMarketOptionChainSocket(
+  symbol: string,
+  expiry: string,
+  onMessage: (data: unknown) => void,
+  onStatusChange?: (connected: boolean) => void,
+): ReconnectingWS {
+  return createReconnectingSocket(
+    withQuery(`${resolveWebSocketBaseUrl()}/ws/market-option-chain/${encodeURIComponent(symbol)}`, { expiry }),
+    onMessage,
+    onStatusChange,
+  );
+}
+
 export function createFractalMarketProfileSocket(
   symbol: string,
   onMessage: (data: unknown) => void,

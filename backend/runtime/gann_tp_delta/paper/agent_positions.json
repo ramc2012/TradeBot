@@ -1,0 +1,136 @@
+{
+  "version": 1,
+  "last_scan_at": "2026-05-21T17:59:17.509230+00:00",
+  "last_message": "Scanned 2 F&O underlyings, opened 0, closed 0.",
+  "last_run": {
+    "scanned": 2,
+    "opened": 0,
+    "closed": 0,
+    "skipped": 2,
+    "errors": 0,
+    "timeframe": "15minute",
+    "lookback_sessions": 60,
+    "anchor_mode": "auto_pivot",
+    "h_mode": "median_tpd",
+    "live_refresh": false
+  },
+  "open_positions": [
+    {
+      "position_id": "2e02184c71b64082b3b496aad5df2659",
+      "status": "open",
+      "opened_at": "2026-05-21T08:34:45.632668+00:00",
+      "updated_at": "2026-05-21T09:16:33.610063+00:00",
+      "underlying": "BANKNIFTY",
+      "direction": "long_call",
+      "option_type": "CE",
+      "expiry": "2026-05-26",
+      "strike": 53500.0,
+      "instrument_key": "NSE_FO|67184",
+      "trading_symbol": "BANKNIFTY 53500 CE 26 MAY 26",
+      "lot_size": 30,
+      "qty_lots": 1,
+      "qty_units": 30,
+      "entry_price": 428.05,
+      "current_price": 490.0,
+      "stop_price": 278.23,
+      "target_price": 642.08,
+      "signal_state": "bullish_setup",
+      "signal_bias": "bullish",
+      "signal_score": 3,
+      "signal_threshold": 3,
+      "signal_reasons": [
+        "near bullish 1x3",
+        "near SQ9 270 upside",
+        "cycle 21 active"
+      ],
+      "spot_price": 53527.55,
+      "unrealized_pnl": 0.0,
+      "realized_pnl": 0.0
+    }
+  ],
+  "closed_positions": [
+    {
+      "position_id": "1861cefecb0b4248ad399f9cb1d8d10a",
+      "status": "closed",
+      "opened_at": "2026-05-20T14:00:04.844630+00:00",
+      "updated_at": "2026-05-21T08:34:45.045699+00:00",
+      "underlying": "BANKNIFTY",
+      "direction": "long_call",
+      "option_type": "CE",
+      "expiry": "2026-05-26",
+      "strike": 53500.0,
+      "instrument_key": "NSE_FO|67184",
+      "trading_symbol": "BANKNIFTY 53500 CE 26 MAY 26",
+      "lot_size": 30,
+      "qty_lots": 1,
+      "qty_units": 30,
+      "entry_price": 676.9,
+      "current_price": 428.05,
+      "stop_price": 439.99,
+      "target_price": 1015.35,
+      "signal_state": "bullish_setup",
+      "signal_bias": "bullish",
+      "signal_score": 3,
+      "signal_threshold": 3,
+      "signal_reasons": [
+        "near bullish 1x3",
+        "near SQ9 270 upside",
+        "cycle 21 active"
+      ],
+      "spot_price": 53527.55,
+      "unrealized_pnl": 0.0,
+      "realized_pnl": -7465.5,
+      "closed_at": "2026-05-21T08:34:45.045694+00:00",
+      "exit_price": 428.05,
+      "close_reason": "option_stop_loss"
+    }
+  ],
+  "signals": [
+    {
+      "underlying": "BANKNIFTY",
+      "spot_price": 53527.55,
+      "signal_state": "bullish_setup",
+      "signal_bias": "bullish",
+      "signal_score": 3,
+      "signal_threshold": 3,
+      "signal_reasons": [
+        "near bullish 1x3",
+        "near SQ9 270 upside",
+        "cycle 21 active"
+      ],
+      "as_of": "2026-05-18T10:00:00",
+      "decision": "skip",
+      "reason": "position_already_open",
+      "option_type": "CE",
+      "direction": "long_call",
+      "option": {
+        "underlying": "BANKNIFTY",
+        "expiry": "2026-05-26",
+        "strike": 53500.0,
+        "option_type": "CE",
+        "instrument_key": "NSE_FO|67184",
+        "trading_symbol": "BANKNIFTY 53500 CE 26 MAY 26",
+        "ltp": 490.0,
+        "as_of": "2026-05-21T09:16:33.610063+00:00",
+        "lot_size": 30,
+        "source": "upstox"
+      }
+    },
+    {
+      "underlying": "NIFTY",
+      "spot_price": 23644.45,
+      "signal_state": "watch",
+      "signal_bias": "bearish",
+      "signal_score": 3,
+      "signal_threshold": 3,
+      "signal_reasons": [
+        "near bearish 1x8",
+        "near SQ9 45 downside",
+        "cycle 7 active"
+      ],
+      "as_of": "2026-05-18T10:00:00",
+      "decision": "skip",
+      "reason": "no_gann_setup"
+    }
+  ]
+}

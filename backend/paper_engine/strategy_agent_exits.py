@@ -1,7 +1,7 @@
 """Strategy exit management for the NSE paper strategy runtime."""
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Optional
 
 from analysis.indicators_agent import IndicatorContext, indicators_agent
@@ -10,9 +10,11 @@ from agent.macd_quadrant import check_macd_death_signal
 from agent.strategy_config import EXIT, FIRST_PULLBACK_IGNORE_BARS, MACD_FAST, MACD_MIN_BARS, MACD_SIGNAL, MACD_SLOW, OPTION_ENTRY_MA_FAST, REGIME_DEAD
 from analytics.technicals import latest_macd_rsi
 from core.config import settings
+from db.database import AsyncSessionLocal
 from market_data import option_history_service
-from paper_engine.base_strategy_agent import _now_ist, _round_or_none
+from paper_engine.base_strategy_agent import IST, _now_ist, _parse_iso_timestamp, _round_or_none
 from paper_engine.strategy_agent_state import StrategyEvent, StrategyPosition, StrategyRuntime
+from sqlalchemy import text
 
 if TYPE_CHECKING:
     from paper_engine.strategy_agent import PaperStrategyAgent
@@ -32,6 +34,7 @@ class StrategyExitMixin:
             for row in rows:
                 if isinstance(row, dict):
                     row_map[str(row.get("underlying", ""))] = row
+        live_quotes = await self._latest_position_quote_map(list(runtime.positions.values()))
 
         for symbol, pos in list(runtime.positions.items()):
             candles = await option_history_service.load_candles(
@@ -47,28 +50,40 @@ class StrategyExitMixin:
             closes = [float(c["close"]) for c in candles if c.get("close")] if candles else []
 
             live_ltp: Optional[float] = None
+            live_observed_at: Optional[str] = None
+            direct_quote = live_quotes.get(pos.symbol)
+            if direct_quote:
+                live_ltp, live_observed_at = direct_quote
             wl_row = row_map.get(pos.underlying)
-            if wl_row:
+            if live_ltp is None and wl_row:
                 side_key = "ce" if pos.option_type == "CE" else "pe"
                 wl_side = wl_row.get(side_key) or {}
+                if not self._watchlist_side_matches_position(pos, wl_row, wl_side):
+                    wl_side = {}
                 raw_ltp = wl_side.get("ltp") if isinstance(wl_side, dict) else None
                 if raw_ltp:
                     try:
                         live_ltp = float(raw_ltp)
+                        live_observed_at = str(
+                            wl_side.get("as_of")
+                            or wl_side.get("time")
+                            or wl_row.get("as_of")
+                            or wl_row.get("time")
+                            or ""
+                        ) or None
                     except (TypeError, ValueError):
                         live_ltp = None
 
-            if closes:
-                latest_close = closes[-1]
-                if live_ltp and live_ltp > 0 and abs(latest_close - live_ltp) / max(live_ltp, 1.0) > 0.10:
-                    latest_close = live_ltp
-            elif live_ltp and live_ltp > 0:
+            if live_ltp and live_ltp > 0:
                 latest_close = live_ltp
+            elif closes:
+                latest_close = closes[-1]
             else:
                 continue
 
             pos.current_price = latest_close
             pos.peak_price = max(pos.peak_price, latest_close)
+            pos.price_updated_at = live_observed_at or _now_ist().isoformat()
 
             # Cache MACD + EMA via indicators_agent so the entries side and
             # exit side of the same scan cycle don't recompute on the same
@@ -175,13 +190,24 @@ class StrategyExitMixin:
                 continue
             side = "ce" if pos.option_type == "CE" else "pe"
             opt = row.get(side) or {}
+            if not self._watchlist_side_matches_position(pos, row, opt):
+                continue
             ltp = opt.get("ltp") if isinstance(opt, dict) else None
             if ltp:
                 try:
+                    observed_at = _parse_iso_timestamp(
+                        opt.get("as_of")
+                        or opt.get("time")
+                        or row.get("as_of")
+                        or row.get("time")
+                    )
+                    current_at = _parse_iso_timestamp(pos.price_updated_at)
+                    if current_at is not None and (observed_at is None or observed_at < current_at):
+                        continue
                     price = float(ltp)
                     if price > 0:
                         pos.current_price = price
-                        pos.price_updated_at = now_str
+                        pos.price_updated_at = observed_at.isoformat() if observed_at else now_str
                         if price > pos.peak_price:
                             pos.peak_price = price
                 except (TypeError, ValueError):
@@ -189,6 +215,96 @@ class StrategyExitMixin:
         latest_prices = {symbol: position.current_price for symbol, position in runtime.positions.items()}
         if latest_prices:
             runtime.portfolio.update_prices(latest_prices)
+
+    @staticmethod
+    def _watchlist_side_matches_position(
+        pos: StrategyPosition,
+        row: dict[str, object],
+        opt: object,
+    ) -> bool:
+        if not isinstance(opt, dict):
+            return False
+        opt_key = str(opt.get("instrument_key") or "").strip()
+        if pos.instrument_key and opt_key and opt_key == pos.instrument_key:
+            return True
+        expiry = str(opt.get("expiry") or row.get("expiry") or "").strip()
+        option_type = str(opt.get("option_type") or "").upper().strip()
+        if not option_type:
+            option_type = "CE" if opt is row.get("ce") else "PE" if opt is row.get("pe") else ""
+        try:
+            strike = float(opt.get("strike") or row.get("atm_strike") or 0.0)
+        except (TypeError, ValueError):
+            strike = 0.0
+        return bool(
+            expiry == pos.expiry
+            and option_type == pos.option_type
+            and strike > 0
+            and abs(strike - float(pos.strike)) < 0.01
+        )
+
+    async def _latest_position_quote_map(
+        self: "PaperStrategyAgent",
+        positions: list[StrategyPosition],
+    ) -> dict[str, tuple[float, str]]:
+        """Return freshest contract-level mark rows for open paper positions."""
+        quotes: dict[str, tuple[float, str]] = {}
+        if not positions:
+            return quotes
+        try:
+            async with AsyncSessionLocal() as session:
+                for pos in positions:
+                    row = (
+                        await session.execute(
+                            text(
+                                """
+                                SELECT price, time
+                                FROM (
+                                    SELECT ltp::float8 AS price, time
+                                    FROM atm_option_watchlist_snapshots
+                                    WHERE underlying = :underlying
+                                      AND expiry = :expiry
+                                      AND strike = :strike
+                                      AND option_type = :option_type
+                                      AND ltp IS NOT NULL
+                                    UNION ALL
+                                    SELECT close::float8 AS price, time
+                                    FROM option_premium_candles
+                                    WHERE underlying = :underlying
+                                      AND expiry = :expiry
+                                      AND strike = :strike
+                                      AND option_type = :option_type
+                                      AND close IS NOT NULL
+                                ) marks
+                                ORDER BY time DESC
+                                LIMIT 1
+                                """
+                            ),
+                            {
+                                "underlying": pos.underlying,
+                                "expiry": date.fromisoformat(pos.expiry),
+                                "strike": pos.strike,
+                                "option_type": pos.option_type,
+                            },
+                        )
+                    ).mappings().first()
+                    if not row:
+                        continue
+                    try:
+                        ltp = float(row.get("price") or 0.0)
+                    except (TypeError, ValueError):
+                        continue
+                    if ltp <= 0:
+                        continue
+                    observed_at = row.get("time")
+                    if isinstance(observed_at, datetime):
+                        observed = observed_at.astimezone(IST).isoformat()
+                    else:
+                        observed = _parse_iso_timestamp(observed_at)
+                        observed = observed.isoformat() if observed else _now_ist().isoformat()
+                    quotes[pos.symbol] = (ltp, observed)
+        except Exception:
+            return quotes
+        return quotes
 
     async def _close_position(
         self: "PaperStrategyAgent",

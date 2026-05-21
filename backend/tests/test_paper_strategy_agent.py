@@ -660,6 +660,46 @@ def test_strategy1_scan_entries_uses_snapshot_macd_cross(monkeypatch) -> None:
     assert opened[0]["quadrant"].regime == "bullish"
 
 
+def test_strategy1_open_position_prefers_contract_lot_over_underlying_row(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    runtime = agent._build_runtime("strategy1", "Strategy 1")
+
+    async def fake_resolve_lot_size(**kwargs):
+        assert kwargs["instrument_key"] == "BSE_FO|SENSEX_CE"
+        return 20
+
+    monkeypatch.setattr(strategy_entries_module.option_history_service, "resolve_lot_size", fake_resolve_lot_size)
+
+    candidate = {
+        "row": {
+            "underlying": "SENSEX",
+            "expiry": "2026-05-29",
+            "lot_size": 10,
+        },
+        "side": {
+            "instrument_key": "BSE_FO|SENSEX_CE",
+            "trading_symbol": "SENSEX75000CE",
+            "strike": 75000.0,
+        },
+        "latest_close": 100.0,
+        "opt_type": "CE",
+        "latest_bar_time": "2026-05-19T10:00:00+05:30",
+        "signal_key": "SENSEX:2026-05-29:75000:CE",
+        "reason": "macd_zero_cross",
+        "tte_days": 10,
+        "spot_setup": "breakout",
+        "quadrant": type("Quadrant", (), {"regime": "bullish"})(),
+        "strength": 1.0,
+        "fraction_override": 0.0,
+    }
+
+    asyncio.run(agent._open_position(runtime, candidate))
+
+    position = next(iter(runtime.positions.values()))
+    assert position.lot_size == 20
+    assert position.qty == 20
+
+
 def test_strategy2_signal_context_can_bypass_market_profile_gate(monkeypatch) -> None:
     agent = PaperStrategyAgent()
     started_at = datetime(2026, 4, 16, 9, 45, tzinfo=strategy_agent_module.IST)
@@ -1113,6 +1153,59 @@ def test_ensure_recovered_state_ignores_rows_before_paper_reset(monkeypatch) -> 
     assert called is False
 
 
+def test_persist_position_serializes_expiry_for_positions_table(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    runtime = agent.get_runtime("macd_strategy")
+    assert runtime is not None
+
+    captured: dict[str, object] = {}
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        async def execute(self, _query, params):
+            captured.update(params)
+
+        async def commit(self) -> None:
+            captured["committed"] = True
+
+    async def fake_ensure_session(_session, _runtime):
+        return "paper-session-id"
+
+    position = StrategyPosition(
+        symbol="OPT:NIFTY:2026-05-26:24000:CE",
+        underlying="NIFTY",
+        expiry=date(2026, 5, 26),
+        strike=24000.0,
+        option_type="CE",
+        instrument_key=None,
+        trading_symbol=None,
+        qty=65,
+        initial_qty=65,
+        entry_price=120.5,
+        current_price=120.5,
+        peak_price=120.5,
+        entry_bar_time="2026-05-19T10:00:00+05:30",
+        entered_at="2026-05-19T10:00:00+05:30",
+        signal_reason="test",
+    )
+
+    import db.database as database_module
+
+    monkeypatch.setattr(database_module, "AsyncSessionLocal", lambda: FakeSession())
+    monkeypatch.setattr(agent, "_ensure_paper_session_record", fake_ensure_session)
+
+    asyncio.run(agent._persist_position(runtime, position))
+
+    assert captured["expiry"] == "2026-05-26"
+    assert isinstance(captured["expiry"], str)
+    assert captured["committed"] is True
+
+
 def test_run_once_stops_when_no_valid_broker_session_is_available(monkeypatch) -> None:
     agent = PaperStrategyAgent()
 
@@ -1243,12 +1336,16 @@ def test_manage_exits_ignores_first_ma20_pullback(monkeypatch) -> None:
     async def fake_load_candles(**_kwargs):
         return candles
 
+    async def fake_latest_quotes(_positions):
+        return {}
+
     closed: list[str] = []
 
     async def fake_close_position(_runtime, _position, _exit_price, reason, **_kwargs):
         closed.append(reason)
 
     monkeypatch.setattr(strategy_agent_module.option_history_service, "load_candles", fake_load_candles)
+    monkeypatch.setattr(agent, "_latest_position_quote_map", fake_latest_quotes)
     monkeypatch.setattr(agent, "_close_position", fake_close_position)
 
     asyncio.run(agent._manage_exits(runtime))
@@ -1292,17 +1389,113 @@ def test_manage_exits_closes_after_pullback_ignore_window(monkeypatch) -> None:
     async def fake_load_candles(**_kwargs):
         return candles
 
+    async def fake_latest_quotes(_positions):
+        return {}
+
     closed: list[str] = []
 
     async def fake_close_position(_runtime, _position, _exit_price, reason, **_kwargs):
         closed.append(reason)
 
     monkeypatch.setattr(strategy_agent_module.option_history_service, "load_candles", fake_load_candles)
+    monkeypatch.setattr(agent, "_latest_position_quote_map", fake_latest_quotes)
     monkeypatch.setattr(agent, "_close_position", fake_close_position)
 
     asyncio.run(agent._manage_exits(runtime))
 
     assert closed == ["ma20_pullback_exit"]
+
+
+def test_manage_exits_uses_latest_contract_quote_for_mark(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    runtime = agent._strategy1
+    runtime.positions.clear()
+    position = StrategyPosition(
+        symbol="OPT:BANKNIFTY:2026-05-26:53000:PE",
+        underlying="BANKNIFTY",
+        expiry="2026-05-26",
+        strike=53000.0,
+        option_type="PE",
+        instrument_key="NSE_FO|123",
+        trading_symbol="BANKNIFTY 53000 PE",
+        qty=150,
+        initial_qty=150,
+        entry_price=624.0,
+        current_price=675.0,
+        peak_price=675.0,
+        entry_bar_time="2026-05-20T09:15:00+05:30",
+        entered_at="2026-05-20T09:36:00+05:30",
+        signal_reason="macd_zero_cross",
+        phase="phase1",
+    )
+    runtime.positions[position.symbol] = position
+
+    start = datetime(2026, 5, 20, 9, 15, tzinfo=UTC)
+    candles = [
+        {"time": (start + timedelta(minutes=30 * index)).isoformat(), "close": 640.0}
+        for index in range(25)
+    ]
+
+    async def fake_load_candles(**_kwargs):
+        return candles
+
+    async def fake_latest_quotes(_positions):
+        return {position.symbol: (460.0, "2026-05-20T11:19:25+05:30")}
+
+    closed: list[tuple[str, float]] = []
+
+    async def fake_close_position(_runtime, _position, exit_price, reason, **_kwargs):
+        closed.append((reason, exit_price))
+
+    monkeypatch.setattr(strategy_agent_module.option_history_service, "load_candles", fake_load_candles)
+    monkeypatch.setattr(agent, "_latest_position_quote_map", fake_latest_quotes)
+    monkeypatch.setattr(agent, "_close_position", fake_close_position)
+
+    asyncio.run(agent._manage_exits(runtime))
+
+    assert position.current_price == 460.0
+    assert position.price_updated_at == "2026-05-20T11:19:25+05:30"
+    assert closed == [("hard_stop", 460.0)]
+
+
+def test_refresh_prices_from_watchlist_does_not_overwrite_newer_quote() -> None:
+    agent = PaperStrategyAgent()
+    runtime = agent._strategy1
+    runtime.positions.clear()
+    position = StrategyPosition(
+        symbol="OPT:NIFTY:2026-05-26:23500:PE",
+        underlying="NIFTY",
+        expiry="2026-05-26",
+        strike=23500.0,
+        option_type="PE",
+        instrument_key="NSE_FO|123",
+        trading_symbol="NIFTY 23500 PE",
+        qty=65,
+        initial_qty=65,
+        entry_price=190.0,
+        current_price=172.0,
+        peak_price=190.0,
+        entry_bar_time="2026-05-20T13:30:00+05:30",
+        entered_at="2026-05-20T13:31:00+05:30",
+        signal_reason="macd_zero_cross",
+        phase="phase1",
+        price_updated_at="2026-05-20T13:40:58+05:30",
+    )
+    runtime.positions[position.symbol] = position
+
+    agent._refresh_prices_from_watchlist(
+        runtime,
+        [
+            {
+                "underlying": "NIFTY",
+                "time": "2026-05-20T13:31:00+05:30",
+                "pe": {"ltp": 190.45, "time": "2026-05-20T13:31:00+05:30"},
+            }
+        ],
+    )
+
+    assert position.current_price == 172.0
+    assert position.price_updated_at == "2026-05-20T13:40:58+05:30"
 
 
 def test_load_candles_appends_newer_atm_watchlist_snapshot(monkeypatch) -> None:

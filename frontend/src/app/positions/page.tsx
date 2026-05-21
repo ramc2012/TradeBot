@@ -11,91 +11,36 @@ import {
   TrendingUp,
 } from "lucide-react";
 
-import { StreamStatus } from "@/components/live/StreamStatus";
-import type { StrategyAgentStatus } from "@/components/trading/StrategyAgentMonitor";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
-import {
-  getCommodityStrategyStatus,
-  getPositions,
-  getStrategyAgentStatus,
-} from "@/lib/api";
 import { createPositionsOverviewSocket } from "@/lib/websocket";
+import {
+  type AppStrategyPortfolioSnapshot,
+  type AppStrategyPositionRow,
+  buildClosedTradeRows,
+  buildOpenPositionRows,
+  fetchAppStrategyPortfolioSnapshot,
+} from "@/lib/strategy-position-ledger";
 
 type PositionScope = "all" | "options" | "futures";
 
-type CommodityStatus = {
-  positions?: Array<{
-    position_key: string;
-    symbol: string;
-    live_symbol: string;
-    underlying: string;
-    strategy_key: string;
-    strategy_title: string;
-    instrument_type: string;
-    action: "BUY" | "SELL";
-    qty: number;
-    lots: number;
-    lot_size: number;
-    entry_price: number;
-    current_price: number;
-    unrealized_pnl?: number | null;
-    return_pct?: number | null;
-    expiry?: string | null;
-    strike?: number | null;
-    option_type?: "CE" | "PE" | null;
-    entered_at: string;
-    stop_price?: number | null;
-    target_price?: number | null;
-    target_reached?: boolean | null;
-    peak_price?: number | null;
-    signal_reason?: string | null;
-  }>;
+type GlobalPositionRow = AppStrategyPositionRow;
+type PositionsOverviewPayload = AppStrategyPortfolioSnapshot & {
+  strategy?: AppStrategyPortfolioSnapshot["nse"];
+  manual?: unknown;
 };
 
-type ManualPosition = {
-  symbol: string;
-  action: "BUY" | "SELL";
-  qty: number;
-  avg_price: number;
-  ltp: number;
-  unrealized_pnl?: number | null;
-  instrument_type?: string | null;
-  expiry?: string | null;
-  strike?: number | null;
-  option_type?: string | null;
-};
-
-type GlobalPositionRow = {
-  id: string;
-  desk: string;
-  strategy: string;
-  source: string;
-  venue: string;
-  underlying: string;
-  symbol: string;
-  contract: string;
-  instrumentGroup: "options" | "futures" | "other";
-  action: string;
-  qty: number;
-  lots?: number | null;
-  lotSize?: number | null;
-  entryPrice: number;
-  currentPrice: number;
-  unrealizedPnl: number;
-  returnPct?: number | null;
-  updatedAt?: string | null;
-  expiry?: string | null;
-  dte?: number | null;
-  phase?: string | null;
-  trailingStop?: number | null;
-  stopPrice?: number | null;
-  targetPrice?: number | null;
-  targetReached?: boolean | null;
-  peakPrice?: number | null;
-  entryIvPct?: number | null;
-  signalReason?: string | null;
-  enteredAt?: string | null;
-};
+function normalizePositionsOverview(payload: PositionsOverviewPayload): AppStrategyPortfolioSnapshot {
+  return {
+    nse: payload.nse ?? payload.strategy ?? null,
+    commodity: payload.commodity ?? null,
+    directional: payload.directional ?? null,
+    gann: payload.gann ?? null,
+    auction: payload.auction ?? null,
+    fractal: payload.fractal ?? null,
+    errors: payload.errors ?? {},
+    fetchedAt: payload.fetchedAt ?? new Date().toISOString(),
+  };
+}
 
 function formatNumber(value?: number | null, digits = 2) {
   if (value == null || Number.isNaN(value)) return "--";
@@ -126,14 +71,6 @@ function formatTimestamp(value?: string | null) {
     minute: "2-digit",
     hour12: false,
   });
-}
-
-function computeDTE(expiry?: string | null): number | null {
-  if (!expiry) return null;
-  const parsed = new Date(expiry);
-  if (Number.isNaN(parsed.getTime())) return null;
-  const diffMs = parsed.getTime() - Date.now();
-  return Math.ceil(diffMs / 86_400_000);
 }
 
 function formatHeldFor(enteredAt?: string | null): string {
@@ -179,6 +116,26 @@ function scopeLabel(scope: PositionScope) {
   if (scope === "options") return "Options";
   if (scope === "futures") return "Futures";
   return "All";
+}
+
+function rowMatchesFilters(row: GlobalPositionRow, scope: PositionScope, search: string) {
+  if (scope !== "all" && row.instrumentGroup !== scope) {
+    return false;
+  }
+  if (!search) {
+    return true;
+  }
+  const haystack = [
+    row.desk,
+    row.strategy,
+    row.source,
+    row.venue,
+    row.underlying,
+    row.symbol,
+    row.contract,
+    row.signalReason,
+  ].join(" ").toLowerCase();
+  return haystack.includes(search);
 }
 
 function MetricTile({
@@ -229,7 +186,7 @@ function ScopeButton({
 const PositionsLedgerTable = memo(function PositionsLedgerTable({ rows }: { rows: GlobalPositionRow[] }) {
   return (
     <div className="mt-4 overflow-x-auto">
-      <table className="w-full min-w-[1760px] text-left text-xs">
+      <table className="w-full min-w-[1880px] text-left text-xs">
         <thead>
           <tr className="border-b border-bg-border text-text-muted">
             <th className="pb-2 pr-3">Desk</th>
@@ -240,11 +197,13 @@ const PositionsLedgerTable = memo(function PositionsLedgerTable({ rows }: { rows
             <th className="pb-2 pr-3">Phase</th>
             <th className="pb-2 pr-3">Side</th>
             <th className="pb-2 pr-3">Qty / Lots</th>
-            <th className="pb-2 pr-3">Entry</th>
-            <th className="pb-2 pr-3">Last</th>
+            <th className="pb-2 pr-3">Entry Price</th>
+            <th className="pb-2 pr-3">Last Price</th>
             <th className="pb-2 pr-3">Risk</th>
             <th className="pb-2 pr-3">Open P&amp;L</th>
             <th className="pb-2 pr-3">Reason</th>
+            <th className="pb-2 pr-3">Entry Time</th>
+            <th className="pb-2 pr-3">Last Mark</th>
             <th className="pb-2">Age</th>
           </tr>
         </thead>
@@ -371,9 +330,102 @@ const PositionsLedgerTable = memo(function PositionsLedgerTable({ rows }: { rows
                       <span className="text-text-muted">--</span>
                     )}
                   </td>
+                  <td className="py-3 pr-3 font-mono text-[11px] text-text-secondary">
+                    {formatTimestamp(row.enteredAt)}
+                  </td>
+                  <td className="py-3 pr-3 font-mono text-[11px] text-text-secondary">
+                    {formatTimestamp(row.updatedAt)}
+                  </td>
                   <td className="py-3 text-[11px] text-text-muted">
                     <div className="font-mono text-text-secondary">{heldFor}</div>
-                    <div className="mt-0.5 text-[10px]">{formatTimestamp(row.updatedAt)}</div>
+                  </td>
+                </tr>
+              );
+            })
+          ) : (
+            <tr>
+              <td colSpan={16} className="py-10 text-center text-sm text-text-muted">
+                No open positions match the current filters.
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+});
+
+const ClosedPositionsTable = memo(function ClosedPositionsTable({ rows }: { rows: GlobalPositionRow[] }) {
+  return (
+    <div className="mt-4 overflow-x-auto">
+      <table className="w-full min-w-[1720px] text-left text-xs">
+        <thead>
+          <tr className="border-b border-bg-border text-text-muted">
+            <th className="pb-2 pr-3">Desk</th>
+            <th className="pb-2 pr-3">Strategy</th>
+            <th className="pb-2 pr-3">Venue</th>
+            <th className="pb-2 pr-3">Underlying</th>
+            <th className="pb-2 pr-3">Contract</th>
+            <th className="pb-2 pr-3">Side</th>
+            <th className="pb-2 pr-3">Qty / Lots</th>
+            <th className="pb-2 pr-3">Entry Price</th>
+            <th className="pb-2 pr-3">Exit Price</th>
+            <th className="pb-2 pr-3">Realized P&amp;L</th>
+            <th className="pb-2 pr-3">Return</th>
+            <th className="pb-2 pr-3">Reason</th>
+            <th className="pb-2 pr-3">Entry Time</th>
+            <th className="pb-2">Exit Time</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length ? (
+            rows.map((row) => {
+              const reason = prettifyReason(row.signalReason);
+              return (
+                <tr key={row.id} className="border-b border-bg-border/40 align-top">
+                  <td className="py-3 pr-3">
+                    <div className="font-medium text-text-primary">{row.desk}</div>
+                    <div className="mt-1 text-[11px] text-text-muted">{row.source}</div>
+                  </td>
+                  <td className="py-3 pr-3 text-text-secondary">{row.strategy}</td>
+                  <td className="py-3 pr-3">
+                    <span className={clsx(
+                      "inline-flex rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em]",
+                      row.venue === "MCX"
+                        ? "border-accent-amber/30 bg-accent-amber/10 text-accent-amber"
+                        : "border-accent-blue/30 bg-accent-blue/10 text-accent-blue",
+                    )}>
+                      {row.venue}
+                    </span>
+                  </td>
+                  <td className="py-3 pr-3 font-medium text-text-primary">{row.underlying}</td>
+                  <td className="py-3 pr-3">
+                    <div className="font-mono text-text-primary">{row.contract}</div>
+                    <div className="mt-1 text-[11px] text-text-muted">{row.symbol}</div>
+                  </td>
+                  <td className={clsx("py-3 pr-3 font-semibold", row.action.includes("BUY") ? "text-accent-green" : "text-accent-red")}>
+                    {row.action}
+                  </td>
+                  <td className="py-3 pr-3 font-mono text-text-secondary">
+                    <div>{row.qty}</div>
+                    {row.lots ? <div className="mt-1 text-[11px] text-text-muted">{row.lots} lot · {row.lotSize || "--"} size</div> : null}
+                  </td>
+                  <td className="py-3 pr-3 font-mono text-text-primary">{formatNumber(row.entryPrice)}</td>
+                  <td className="py-3 pr-3 font-mono text-text-primary">{formatNumber(row.currentPrice)}</td>
+                  <td className={clsx("py-3 pr-3 font-mono font-semibold", pnlTone(row.realizedPnl))}>
+                    {formatSigned(row.realizedPnl, 0)}
+                  </td>
+                  <td className={clsx("py-3 pr-3 font-mono", pnlTone(row.returnPct))}>
+                    {formatSigned(row.returnPct, 1, "%")}
+                  </td>
+                  <td className="py-3 pr-3 text-[11px] text-text-secondary max-w-[200px]">
+                    {reason ? <span title={reason}>{reason}</span> : <span className="text-text-muted">--</span>}
+                  </td>
+                  <td className="py-3 pr-3 font-mono text-[11px] text-text-secondary">
+                    {formatTimestamp(row.enteredAt)}
+                  </td>
+                  <td className="py-3 font-mono text-[11px] text-text-secondary">
+                    {formatTimestamp(row.closedAt || row.updatedAt)}
                   </td>
                 </tr>
               );
@@ -381,7 +433,7 @@ const PositionsLedgerTable = memo(function PositionsLedgerTable({ rows }: { rows
           ) : (
             <tr>
               <td colSpan={14} className="py-10 text-center text-sm text-text-muted">
-                No positions match the current filters.
+                No closed positions match the current filters.
               </td>
             </tr>
           )}
@@ -397,157 +449,59 @@ export default function PositionsPage() {
   const deferredSearch = useDeferredValue(search.trim().toLowerCase());
 
   const positionsQuery = useLiveSnapshotQuery<{
-    manual: ManualPosition[];
-    strategy: StrategyAgentStatus;
-    commodity: CommodityStatus;
+    portfolio: AppStrategyPortfolioSnapshot;
   }>({
     queryKey: ["globalPositionsSnapshot"],
     queryFn: async () => {
-      const [manual, strategy, commodity] = await Promise.all([
-        getPositions().then((response) => response.data as ManualPosition[]),
-        getStrategyAgentStatus().then((response) => response.data as StrategyAgentStatus),
-        getCommodityStrategyStatus().then((response) => response.data as CommodityStatus),
-      ]);
-      return { manual, strategy, commodity };
+      const portfolio = await fetchAppStrategyPortfolioSnapshot();
+      return { portfolio };
     },
-    streamFactory: (onData, onStatusChange) =>
-      createPositionsOverviewSocket(
-        (data) =>
-          onData(data as {
-            manual: ManualPosition[];
-            strategy: StrategyAgentStatus;
-            commodity: CommodityStatus;
-          }),
-        onStatusChange,
-      ),
     storageKey: "globalPositionsSnapshot",
+    streamFactory: (onData, onStatusChange) =>
+      createPositionsOverviewSocket((payload) => {
+        onData({ portfolio: normalizePositionsOverview(payload as PositionsOverviewPayload) });
+      }, onStatusChange),
+    streamWhenHidden: true,
     staleTime: 5_000,
+    refetchInterval: 15_000,
   });
   const data = positionsQuery.data;
   const isLoading = positionsQuery.isLoading;
 
-  const rows = useMemo<GlobalPositionRow[]>(() => {
-    const manualRows: GlobalPositionRow[] = (data?.manual || []).map((position) => {
-      const symbolToken = position.symbol?.split(":")[1] || position.symbol;
-      const underlying = symbolToken?.split("-")[0] || symbolToken || "Manual";
-      const isOption = (position.option_type || position.instrument_type) ? ["CE", "PE", "OPT"].includes(String(position.option_type || position.instrument_type).toUpperCase()) : false;
-      const isFuture = !isOption && String(position.instrument_type || "").toUpperCase() === "FUT";
-      const instrumentGroup: GlobalPositionRow["instrumentGroup"] = isOption ? "options" : isFuture ? "futures" : "other";
-      return {
-        id: `manual-${position.symbol}`,
-        desk: "Manual Book",
-        strategy: "Execution",
-        source: "manual",
-        venue: "NSE",
-        underlying,
-        symbol: position.symbol,
-        contract: isOption
-          ? `${position.option_type || position.instrument_type} ${position.strike ?? "--"} · ${position.expiry || "--"}`
-          : position.symbol,
-        instrumentGroup,
-        action: position.action,
-        qty: position.qty,
-        lots: null,
-        lotSize: null,
-        entryPrice: position.avg_price,
-        currentPrice: position.ltp,
-        unrealizedPnl: position.unrealized_pnl || 0,
-        updatedAt: null,
-        expiry: position.expiry || null,
-        dte: computeDTE(position.expiry),
-      };
-    });
-
-    const strategyRows: GlobalPositionRow[] = (data?.strategy?.strategies || []).flatMap((strategy) =>
-      (strategy.positions || []).map((position) => ({
-        id: `strategy-${strategy.key}-${position.symbol}-${position.entered_at}`,
-        desk: "Strategy Desk",
-        strategy: strategy.label,
-        source: strategy.key,
-        venue: "NSE",
-        underlying: position.underlying,
-        symbol: position.symbol,
-        contract: `${position.option_type} ${position.strike} · ${position.expiry || "--"}`,
-        instrumentGroup: "options" as const,
-        action: "BUY",
-        qty: position.qty,
-        lots: null,
-        lotSize: null,
-        entryPrice: position.entry_price,
-        currentPrice: position.current_price,
-        unrealizedPnl: position.unrealized_pnl || 0,
-        returnPct: position.return_pct,
-        updatedAt: position.price_updated_at || position.entered_at,
-        expiry: position.expiry || null,
-        dte: computeDTE(position.expiry),
-        phase: position.phase || null,
-        trailingStop: position.trailing_stop ?? null,
-        peakPrice: position.peak_price ?? null,
-        entryIvPct: position.entry_iv_pct ?? null,
-        signalReason: position.signal_reason || null,
-        enteredAt: position.entered_at || null,
-      })),
-    );
-
-    const commodityRows: GlobalPositionRow[] = (data?.commodity?.positions || []).map((position) => {
-      const isOption = position.instrument_type === "OPT" || Boolean(position.option_type);
-      const instrumentGroup: GlobalPositionRow["instrumentGroup"] = isOption ? "options" : "futures";
-      return {
-        id: `commodity-${position.position_key}`,
-        desk: "Commodity Desk",
-        strategy: position.strategy_title,
-        source: position.strategy_key,
-        venue: "MCX",
-        underlying: position.underlying,
-        symbol: position.live_symbol || position.symbol,
-        contract: isOption
-          ? `${position.option_type || "--"} ${position.strike ?? "--"} · ${position.expiry || "--"}`
-          : position.live_symbol || position.symbol,
-        instrumentGroup,
-        action: position.action,
-        qty: position.qty,
-        lots: position.lots,
-        lotSize: position.lot_size,
-        entryPrice: position.entry_price,
-        currentPrice: position.current_price,
-        unrealizedPnl: position.unrealized_pnl || 0,
-        returnPct: position.return_pct,
-        updatedAt: position.entered_at,
-        expiry: position.expiry || null,
-        dte: computeDTE(position.expiry),
-        stopPrice: position.stop_price ?? null,
-        targetPrice: position.target_price ?? null,
-        targetReached: position.target_reached ?? null,
-        peakPrice: position.peak_price ?? null,
-        signalReason: position.signal_reason || null,
-        enteredAt: position.entered_at || null,
-      };
-    });
-
-    return [...strategyRows, ...commodityRows, ...manualRows].sort(
+  const openRows = useMemo<GlobalPositionRow[]>(() => {
+    return buildOpenPositionRows(data?.portfolio).sort(
       (left, right) => Math.abs(right.unrealizedPnl || 0) - Math.abs(left.unrealizedPnl || 0),
     );
   }, [data]);
 
-  const { filteredRows, totalOpenPnl, optionsCount, futuresCount, desksActive, grossNotional } = useMemo(() => {
-    const nextFilteredRows = rows.filter((row) => {
-      if (scope !== "all" && row.instrumentGroup !== scope) {
-        return false;
-      }
-      if (!deferredSearch) {
-        return true;
-      }
-      const haystack = `${row.desk} ${row.strategy} ${row.underlying} ${row.symbol} ${row.contract}`.toLowerCase();
-      return haystack.includes(deferredSearch);
-    });
+  const closedRows = useMemo<GlobalPositionRow[]>(() => {
+    return buildClosedTradeRows(data?.portfolio);
+  }, [data]);
+
+  const {
+    filteredOpenRows,
+    filteredClosedRows,
+    totalOpenPnl,
+    totalClosedPnl,
+    optionsCount,
+    futuresCount,
+    desksActive,
+    grossNotional,
+    closedWinners,
+    closedWinRate,
+  } = useMemo(() => {
+    const nextOpenRows = openRows.filter((row) => rowMatchesFilters(row, scope, deferredSearch));
+    const nextClosedRows = closedRows.filter((row) => rowMatchesFilters(row, scope, deferredSearch));
 
     let nextOpenPnl = 0;
+    let nextClosedPnl = 0;
     let nextOptionsCount = 0;
     let nextFuturesCount = 0;
     let nextGrossNotional = 0;
+    let nextClosedWinners = 0;
     const activeDesks = new Set<string>();
 
-    for (const row of nextFilteredRows) {
+    for (const row of nextOpenRows) {
       nextOpenPnl += row.unrealizedPnl || 0;
       nextGrossNotional += (row.currentPrice || 0) * (row.qty || 0);
       if (row.instrumentGroup === "options") nextOptionsCount += 1;
@@ -555,15 +509,25 @@ export default function PositionsPage() {
       activeDesks.add(row.desk);
     }
 
+    for (const row of nextClosedRows) {
+      const pnl = row.realizedPnl || 0;
+      nextClosedPnl += pnl;
+      if (pnl > 0) nextClosedWinners += 1;
+    }
+
     return {
-      filteredRows: nextFilteredRows,
+      filteredOpenRows: nextOpenRows,
+      filteredClosedRows: nextClosedRows,
       totalOpenPnl: nextOpenPnl,
+      totalClosedPnl: nextClosedPnl,
       optionsCount: nextOptionsCount,
       futuresCount: nextFuturesCount,
       desksActive: activeDesks.size,
       grossNotional: nextGrossNotional,
+      closedWinners: nextClosedWinners,
+      closedWinRate: nextClosedRows.length ? (nextClosedWinners / nextClosedRows.length) * 100 : 0,
     };
-  }, [deferredSearch, rows, scope]);
+  }, [closedRows, deferredSearch, openRows, scope]);
 
   return (
     <div className="mx-auto max-w-[1760px] space-y-6 pb-10">
@@ -574,7 +538,7 @@ export default function PositionsPage() {
             Portfolio Positions
           </div>
           <p className="mt-2 max-w-4xl text-sm leading-6 text-text-secondary line-clamp-2">
-            One live book for manual trading, the NSE desk, and the commodity desk. This normalized ledger remains available directly, even though portfolio analytics now carry the primary navigation slot.
+            One app-owned book for every strategy. Open exposure stays first, closed trades are separated with realized totals and entry/exit timestamps.
           </p>
         </div>
       </section>
@@ -584,17 +548,23 @@ export default function PositionsPage() {
           <div>
             <div className="text-sm font-semibold text-text-primary">Live Book</div>
             <div className="mt-1 text-xs text-text-muted">
-              The second menu slot now leads directly to the normalized positions ledger.
+              Strategy-owned positions across NSE options, MCX commodities, directional options, Gann TP Delta, auction intelligence, and fractal market profile.
             </div>
-            <StreamStatus
-              className="mt-3"
-              title="Positions"
-              isStreamConnected={positionsQuery.isStreamConnected}
-              isShowingSnapshot={positionsQuery.isShowingSnapshot}
-              snapshotSavedAt={positionsQuery.snapshotSavedAt}
-              liveText="manual, NSE strategy, and commodity books are streaming"
-              bootstrapText="loading the combined ledger before the live socket takes over"
-            />
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <span className={clsx(
+                "inline-flex rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em]",
+                positionsQuery.isFetching
+                  ? "border-accent-amber/30 bg-accent-amber/10 text-accent-amber"
+                  : "border-accent-green/30 bg-accent-green/10 text-accent-green",
+              )}>
+                Positions · {positionsQuery.isFetching ? "Refreshing" : "Snapshot"}
+              </span>
+              <span className="text-xs text-text-muted">
+                {positionsQuery.snapshotSavedAt
+                  ? `saved ${formatTimestamp(positionsQuery.snapshotSavedAt)}`
+                  : "auto refreshes every 15 seconds"}
+              </span>
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -630,26 +600,26 @@ export default function PositionsPage() {
         </div>
 
         <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-          <MetricTile label="Open Positions" value={String(filteredRows.length)} detail={isLoading ? "Refreshing…" : `${rows.length} total rows`} />
+          <MetricTile label="Open Positions" value={String(filteredOpenRows.length)} detail={isLoading ? "Refreshing…" : `${openRows.length} total open`} />
           <MetricTile label="Open P&L" value={formatSigned(totalOpenPnl, 0)} tone={pnlTone(totalOpenPnl)} />
           <MetricTile label="Gross Notional" value={formatCompact(grossNotional)} />
           <MetricTile label="Options / Futures" value={`${optionsCount} / ${futuresCount}`} />
-          <MetricTile label="Active Desks" value={String(desksActive)} detail="Manual, strategy, commodity" />
+          <MetricTile label="Active Desks" value={String(desksActive)} detail="strategy-owned books only" />
         </div>
       </section>
 
       <section className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <div className="text-sm font-semibold text-text-primary">Combined Positions Table</div>
+            <div className="text-sm font-semibold text-text-primary">Open Positions</div>
             <div className="mt-1 text-xs text-text-muted">
-              Options and futures are normalized into one ledger with desk and strategy labels.
+              Live options and futures exposure, normalized by desk, strategy, venue, quantity, entry, current mark, and mark time.
             </div>
           </div>
-          <div className="text-xs text-text-muted">{filteredRows.length} rows</div>
+          <div className="text-xs text-text-muted">{filteredOpenRows.length} rows</div>
         </div>
 
-        <PositionsLedgerTable rows={filteredRows} />
+        <PositionsLedgerTable rows={filteredOpenRows} />
 
         <div className="mt-5 grid gap-4 xl:grid-cols-3">
           <div className="rounded-[22px] border border-bg-border bg-bg-secondary/20 p-4">
@@ -658,7 +628,7 @@ export default function PositionsPage() {
               Strategy Desk
             </div>
             <div className="mt-3 text-xs text-text-secondary">
-              {(data?.strategy?.strategies || []).reduce((sum, strategy) => sum + (strategy.summary.open_positions || 0), 0)} open option positions across Strategy 1 and Strategy 2.
+              {(data?.portfolio.nse?.strategies || []).reduce((sum, strategy) => sum + (strategy.summary.open_positions || 0), 0)} open option positions across Strategy 1 and Strategy 2.
             </div>
           </div>
           <div className="rounded-[22px] border border-bg-border bg-bg-secondary/20 p-4">
@@ -667,19 +637,40 @@ export default function PositionsPage() {
               Commodity Desk
             </div>
             <div className="mt-3 text-xs text-text-secondary">
-              {(data?.commodity?.positions || []).length} open commodity futures and options positions.
+              {(data?.portfolio.commodity?.positions || []).length} open commodity futures and options positions.
             </div>
           </div>
           <div className="rounded-[22px] border border-bg-border bg-bg-secondary/20 p-4">
             <div className="flex items-center gap-2 text-sm font-semibold text-text-primary">
               <Activity size={14} className="text-accent-green" />
-              Manual Book
+              Research Strategy Books
             </div>
             <div className="mt-3 text-xs text-text-secondary">
-              {(data?.manual || []).length} open manual execution positions from the primary trading surface.
+              {openRows.filter((row) => ["directional", "gann", "auction", "fractal"].includes(row.source)).length} open and {closedRows.filter((row) => ["directional", "gann", "auction", "fractal"].includes(row.source)).length} closed positions from directional, Gann, auction, and fractal strategy pages.
             </div>
           </div>
         </div>
+      </section>
+
+      <section className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-text-primary">Closed Positions</div>
+            <div className="mt-1 text-xs text-text-muted">
+              Completed strategy trades with entry time, exit time, exit price, realized P&amp;L, and close reason.
+            </div>
+          </div>
+          <div className="text-xs text-text-muted">{filteredClosedRows.length} rows</div>
+        </div>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <MetricTile label="Closed Trades" value={String(filteredClosedRows.length)} detail={`${closedRows.length} total closed`} />
+          <MetricTile label="Realized P&L" value={formatSigned(totalClosedPnl, 0)} tone={pnlTone(totalClosedPnl)} />
+          <MetricTile label="Winners" value={String(closedWinners)} detail={`${formatNumber(closedWinRate, 1)}% win rate`} />
+          <MetricTile label="Avg Closed P&L" value={formatSigned(filteredClosedRows.length ? totalClosedPnl / filteredClosedRows.length : 0, 0)} tone={pnlTone(totalClosedPnl)} />
+        </div>
+
+        <ClosedPositionsTable rows={filteredClosedRows} />
       </section>
     </div>
   );

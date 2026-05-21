@@ -223,6 +223,8 @@ type AnalysisResponse = {
   ntm_volx?: {
     underlying: string;
     expiry: string;
+    snapshot_time?: string | null;
+    source?: string | null;
     spot_price: number;
     atm_strike: number;
     dominant_side: "CALLS" | "PUTS" | "BALANCED";
@@ -255,6 +257,8 @@ type AnalysisResponse = {
       call_pressure: number;
       put_pressure: number;
       net_pressure: number;
+      observed_at?: string | null;
+      source?: string | null;
     }[];
   } | null;
 };
@@ -289,7 +293,13 @@ type DataMode = "live" | "demo";
 
 type MPCompositeProfile = {
   scope?: string;
+  required_lookback?: number;
   lookback_sessions?: number;
+  available_sessions?: number;
+  is_complete?: boolean;
+  integrity_status?: string;
+  missing_sessions?: number;
+  session_dates?: string[];
   session_start?: string;
   session_end?: string;
   high_price?: number;
@@ -376,11 +386,16 @@ type WhaleFlowCandidate = {
   oiChange: number;
   distancePct: number;
   pressure: number;
-  volOiRatio: number;
+  volOiRatio: number | null;
   confidence: number;
   alertType: string;
   direction: "BULLISH" | "BEARISH";
   flags: string[];
+  observedAt?: string | null;
+  observedAtLabel: string;
+  ageLabel: string;
+  source: string;
+  expiry?: string | null;
 };
 
 type DefaultConfigResponse = {
@@ -533,6 +548,30 @@ function formatRawPct(value: number | null | undefined, digits = 0) {
   return `${prefix}${value.toFixed(digits)}%`;
 }
 
+function formatISTTime(value: string | null | undefined) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("en-IN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Kolkata",
+  }).format(date);
+}
+
+function formatAge(value: string | null | undefined) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  const seconds = Math.max(Math.floor((Date.now() - date.getTime()) / 1000), 0);
+  if (seconds < 90) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 90) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h`;
+}
+
 function terminalTone(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "text-[#d8d8d8]";
   if (value > 0) return "text-[#4ec97a]";
@@ -578,6 +617,8 @@ function buildWhaleFlowCandidates(analysis?: AnalysisResponse): WhaleFlowCandida
   const ntm = analysis?.ntm_volx;
   const levels = ntm?.pressure_ladder ?? [];
   if (!ntm || !levels.length) return [];
+  const snapshotTime = ntm.snapshot_time ?? null;
+  const snapshotSource = ntm.source ?? "live_option_chain";
 
   const sideRows = levels.flatMap((level) => [
     {
@@ -589,6 +630,8 @@ function buildWhaleFlowCandidates(analysis?: AnalysisResponse): WhaleFlowCandida
       distancePct: Number(level.distance_from_spot_pct || 0),
       pressure: Number(level.call_pressure || 0),
       netPressure: Number(level.net_pressure || 0),
+      observedAt: level.observed_at ?? snapshotTime,
+      source: level.source ?? snapshotSource,
     },
     {
       side: "PUT" as const,
@@ -599,6 +642,8 @@ function buildWhaleFlowCandidates(analysis?: AnalysisResponse): WhaleFlowCandida
       distancePct: Number(level.distance_from_spot_pct || 0),
       pressure: Number(level.put_pressure || 0),
       netPressure: Number(level.net_pressure || 0),
+      observedAt: level.observed_at ?? snapshotTime,
+      source: level.source ?? snapshotSource,
     },
   ]).filter((row) => row.premium > 0 || row.volume > 0 || row.pressure > 0);
 
@@ -610,13 +655,14 @@ function buildWhaleFlowCandidates(analysis?: AnalysisResponse): WhaleFlowCandida
   const dynamicPremiumFloor = Math.max(100_000, maxPremium * 0.42);
 
   return sideRows.map((row) => {
-    const volOiRatio = row.volume / Math.max(row.oiChange || 1, 1);
+    const volOiRatio = row.oiChange > 0 ? row.volume / row.oiChange : null;
     const premiumShare = row.premium / maxPremium;
     const pressureShare = row.pressure / maxPressure;
+    const volumeShare = row.volume / Math.max(avgVolume, 1);
     const nearAtm = Math.abs(row.distancePct) <= 1.25;
     const highPremium = row.premium >= dynamicPremiumFloor;
     const openingProxy = row.oiChange > 0 && row.volume >= row.oiChange * 0.65;
-    const sizeVsOiProxy = row.volume > Math.max(row.oiChange, 1) * 1.2;
+    const sizeVsOiProxy = row.oiChange > 0 && row.volume > row.oiChange * 1.2;
     const clusteredVolume = row.volume >= Math.max(avgVolume * 1.4, 1);
     const direction: WhaleFlowCandidate["direction"] = row.side === "CALL" ? "BULLISH" : "BEARISH";
     const aligned = row.side === "CALL" ? row.netPressure > 0 : row.netPressure < 0;
@@ -634,7 +680,7 @@ function buildWhaleFlowCandidates(analysis?: AnalysisResponse): WhaleFlowCandida
         18
           + premiumShare * 30
           + pressureShare * 22
-          + Math.min(volOiRatio, 3) * 7
+          + Math.min(volOiRatio ?? volumeShare, 3) * 7
           + (nearAtm ? 8 : 0)
           + (openingProxy ? 8 : 0)
           + (aligned ? 6 : 0),
@@ -662,6 +708,11 @@ function buildWhaleFlowCandidates(analysis?: AnalysisResponse): WhaleFlowCandida
       alertType,
       direction,
       flags,
+      observedAt: row.observedAt,
+      observedAtLabel: formatISTTime(row.observedAt),
+      ageLabel: formatAge(row.observedAt),
+      source: row.source,
+      expiry: ntm.expiry,
     };
   }).sort((left, right) => right.confidence - left.confidence || right.premium - left.premium).slice(0, 10);
 }
@@ -765,6 +816,8 @@ function CompositeTerminalProfile({
   const rows = [...profile.tpo_rows].sort((left, right) => right.price - left.price);
   const maxCount = Math.max(...rows.map((row) => Number(row.count || 0)), 1);
   const height = 330;
+  const requiredLookback = profile.required_lookback ?? Number(label.match(/\d+/)?.[0] ?? profile.lookback_sessions ?? 0);
+  const complete = profile.is_complete ?? ((profile.lookback_sessions ?? 0) >= requiredLookback);
 
   return (
     <div className="border border-[#2a2a2a] bg-black">
@@ -772,12 +825,15 @@ function CompositeTerminalProfile({
         <div>
           <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#ffb02e]">{label}</div>
           <div className="mt-0.5 text-[9px] uppercase tracking-[0.12em] text-[#666]">
-            {profile.session_start ?? "—"} → {profile.session_end ?? "—"} · {profile.lookback_sessions ?? "—"} sessions
+            {profile.session_start ?? "—"} → {profile.session_end ?? "—"} · {profile.lookback_sessions ?? "—"}/{requiredLookback || "—"} sessions
           </div>
         </div>
         <div className="text-right text-[10px] uppercase tracking-[0.12em] text-[#888]">
           <div>POC <span className="text-[#ffd357]">{formatPrice(profile.poc, 0)}</span></div>
           <div>VA <span className="text-[#ffb02e]">{formatPrice(profile.val, 0)}-{formatPrice(profile.vah, 0)}</span></div>
+          <div className={complete ? "text-[#4ec97a]" : "text-[#ffb02e]"}>
+            {complete ? "FULL" : `PARTIAL -${profile.missing_sessions ?? 0}`}
+          </div>
         </div>
       </div>
       <div className="relative grid grid-cols-[58px_minmax(0,1fr)]" style={{ height }}>
@@ -936,33 +992,47 @@ function OrderFlowTerminalCharts({
 }
 
 function WhaleFlowPanel({ candidates }: { candidates: WhaleFlowCandidate[] }) {
+  const latest = candidates[0];
   return (
     <div className="border border-[#2a2a2a] bg-black">
       <div className="flex items-center justify-between border-b border-[#2a2a2a] bg-[#0a0a0a] px-2 py-2">
         <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#ffb02e]">Options Whale Flow</div>
-        <div className="text-[9px] uppercase tracking-[0.14em] text-[#666]">UW-style proxy</div>
+        <div className="text-right text-[9px] uppercase tracking-[0.14em] text-[#666]">
+          <div>{latest?.expiry ?? "—"} · {latest?.source?.replaceAll("_", " ") ?? "UW-style proxy"}</div>
+          <div>{latest ? `${latest.observedAtLabel} IST · age ${latest.ageLabel}` : "waiting for chain timestamp"}</div>
+        </div>
       </div>
       <div className="max-h-[310px] overflow-auto">
         {candidates.length ? (
           <table className="w-full table-fixed text-left font-mono text-[10px]">
             <thead className="sticky top-0 bg-black text-[#666]">
               <tr className="border-b border-[#1a1a1a]">
-                <th className="w-[21%] px-2 py-1.5 font-medium uppercase tracking-[0.12em]">Type</th>
-                <th className="w-[18%] px-2 py-1.5 text-right font-medium uppercase tracking-[0.12em]">Strike</th>
-                <th className="w-[22%] px-2 py-1.5 text-right font-medium uppercase tracking-[0.12em]">Premium</th>
-                <th className="w-[17%] px-2 py-1.5 text-right font-medium uppercase tracking-[0.12em]">Vol/OI</th>
-                <th className="w-[22%] px-2 py-1.5 text-right font-medium uppercase tracking-[0.12em]">Score</th>
+                <th className="w-[18%] px-2 py-1.5 font-medium uppercase tracking-[0.12em]">Time</th>
+                <th className="w-[18%] px-2 py-1.5 font-medium uppercase tracking-[0.12em]">Type</th>
+                <th className="w-[16%] px-2 py-1.5 text-right font-medium uppercase tracking-[0.12em]">Strike</th>
+                <th className="w-[20%] px-2 py-1.5 text-right font-medium uppercase tracking-[0.12em]">Premium</th>
+                <th className="w-[14%] px-2 py-1.5 text-right font-medium uppercase tracking-[0.12em]">Vol/OI</th>
+                <th className="w-[14%] px-2 py-1.5 text-right font-medium uppercase tracking-[0.12em]">Score</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#1a1a1a]">
               {candidates.map((candidate) => (
                 <tr key={candidate.id}>
+                  <td className="px-2 py-1.5 text-[#888]">
+                    <div>{candidate.observedAtLabel}</div>
+                    <div className="text-[8px] uppercase text-[#555]">{candidate.ageLabel}</div>
+                  </td>
                   <td className={clsx("px-2 py-1.5 font-bold", candidate.direction === "BULLISH" ? "text-[#4ec97a]" : "text-[#e75a6b]")}>
-                    {candidate.side}
+                    <div>{candidate.side}</div>
+                    <div className="truncate text-[8px] font-medium uppercase text-[#777]" title={candidate.flags.join(" · ")}>
+                      {candidate.alertType}
+                    </div>
                   </td>
                   <td className="px-2 py-1.5 text-right text-[#f5f5f5]">{formatPrice(candidate.strike, 0)}</td>
                   <td className="px-2 py-1.5 text-right text-[#f5f5f5]">{formatCompact(candidate.premium)}</td>
-                  <td className="px-2 py-1.5 text-right text-[#ffb02e]">{candidate.volOiRatio.toFixed(1)}x</td>
+                  <td className="px-2 py-1.5 text-right text-[#ffb02e]">
+                    {candidate.volOiRatio == null ? "—" : `${candidate.volOiRatio.toFixed(1)}x`}
+                  </td>
                   <td className="px-2 py-1.5 text-right text-[#f5f5f5]">{candidate.confidence}</td>
                 </tr>
               ))}
@@ -975,7 +1045,7 @@ function WhaleFlowPanel({ candidates }: { candidates: WhaleFlowCandidate[] }) {
         )}
       </div>
       <div className="border-t border-[#1a1a1a] px-2 py-2 text-[10px] leading-5 text-[#888]">
-        Flags combine premium blocks, volume versus OI-change, near-ATM pressure, and directional NTM VolX. Raw NBBO sweep side is not available yet.
+        Time is the option-chain observation timestamp; flags combine premium blocks, volume versus OI-change, near-ATM pressure, and directional NTM VolX.
       </div>
     </div>
   );
@@ -1065,6 +1135,8 @@ function AuctionTerminalWorkbench({
       ? Number(latest.daily_move)
       : null;
   const priceSource = canonicalLastPrice != null ? "canonical index ltp" : "profile fallback";
+  const ibIssues = Array.isArray(latest?.integrity_issues) ? latest.integrity_issues : [];
+  const ibStatus = ibIssues.length ? "IB CHECK" : "IB OK";
 
   return (
     <section className="overflow-hidden rounded-sm border border-[#2a2a2a] bg-black font-mono text-[#d8d8d8]">
@@ -1086,6 +1158,8 @@ function AuctionTerminalWorkbench({
       <div className="flex min-w-0 overflow-x-auto border-b border-[#2a2a2a] bg-black">
         <TerminalReadout label="Day" value={String(latest?.day_type ?? analysis?.regime.label ?? "—").toUpperCase()} hot />
         <TerminalReadout label="POC" value={formatPrice(latest?.poc ?? analysis?.market_profile.poc, 0)} />
+        <TerminalReadout label="IB" value={`${formatPrice(latest?.ibl ?? analysis?.market_profile.initial_balance_low, 0)}-${formatPrice(latest?.ibh ?? analysis?.market_profile.initial_balance_high, 0)}`} hot={ibIssues.length > 0} />
+        <TerminalReadout label="IB QA" value={ibStatus} hot={ibIssues.length > 0} />
         <TerminalReadout label="20D rel" value={profileRelation(livePrice, profile20)} />
         <TerminalReadout label="50D rel" value={profileRelation(livePrice, profile50)} />
         <TerminalReadout label="CVD" value={formatSigned(orderflowProxy?.current_cvd, 2)} hot={Math.abs(orderflowProxy?.current_cvd ?? 0) >= 2} />
@@ -1143,6 +1217,13 @@ export default function AuctionIntelligenceWorkspace() {
   const liveReady = Boolean(summary?.live_ready);
   const liveSnapshotEnabled = deferredMode !== "live" || liveReady;
 
+  const handleSymbolChange = (nextSymbol: string) => {
+    startTransition(() => {
+      setSymbol(nextSymbol);
+      setMpUnderlying(nextSymbol);
+    });
+  };
+
   const validationQuery = usePersistentSnapshotQuery<WorkspacePayload>({
     queryKey: [
       "auction-intelligence",
@@ -1161,7 +1242,19 @@ export default function AuctionIntelligenceWorkspace() {
     refetchOnWindowFocus: false,
     enabled: liveSnapshotEnabled,
   });
-  const payload = validationQuery.data;
+  const rawPayload = validationQuery.data;
+  const payloadSymbol = String(
+    rawPayload?.request.metadata.symbol_code ??
+    rawPayload?.request.session.symbol ??
+    "",
+  ).toUpperCase();
+  const expectedPayloadSymbol = String(deferredSymbol).toUpperCase();
+  const payloadMatchesSelection =
+    !rawPayload ||
+    !payloadSymbol ||
+    payloadSymbol === expectedPayloadSymbol ||
+    payloadSymbol.includes(expectedPayloadSymbol);
+  const payload = payloadMatchesSelection ? rawPayload : undefined;
 
   const gateAQuery = useQuery<ValidationResponse>({
     queryKey: [
@@ -1356,6 +1449,14 @@ export default function AuctionIntelligenceWorkspace() {
   const canonicalLastPrice = finiteNumber(mpTick?.ltp);
   const canonicalPrevClose = finiteNumber(mpTick?.close);
   const whaleCandidates = useMemo(() => buildWhaleFlowCandidates(analysis), [analysis]);
+  const activeMultiTf =
+    !mpMultiTfQuery.data?.underlying || mpMultiTfQuery.data.underlying === mpUnderlying
+      ? mpMultiTfQuery.data
+      : undefined;
+  const activeOrderflowProxy =
+    !mpOrderflowProxyQuery.data?.underlying || mpOrderflowProxyQuery.data.underlying === mpUnderlying
+      ? mpOrderflowProxyQuery.data
+      : undefined;
   const gateA = gateAQuery.data;
   const gateB = gateBQuery.data;
   const gateC = gateCQuery.data;
@@ -1462,7 +1563,7 @@ export default function AuctionIntelligenceWorkspace() {
               <div className="text-[11px] uppercase tracking-[0.18em] text-text-muted">Underlying</div>
               <select
                 value={symbol}
-                onChange={(event) => startTransition(() => setSymbol(event.target.value))}
+                onChange={(event) => handleSymbolChange(event.target.value)}
                 className="w-full rounded-sm border border-[#2a2a2a] bg-[#050505] px-3 py-2 font-mono text-xs text-text-primary outline-none transition-colors focus:border-accent-blue"
               >
                 {symbols.map((option) => (
@@ -1615,8 +1716,8 @@ export default function AuctionIntelligenceWorkspace() {
         symbol={mpUnderlying}
         payload={payload}
         analysis={analysis}
-        multiTf={mpMultiTfQuery.data}
-        orderflowProxy={mpOrderflowProxyQuery.data}
+        multiTf={activeMultiTf}
+        orderflowProxy={activeOrderflowProxy}
         whaleCandidates={whaleCandidates}
         canonicalLastPrice={canonicalLastPrice}
         canonicalPrevClose={canonicalPrevClose}

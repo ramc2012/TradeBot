@@ -74,18 +74,27 @@ export function usePersistentSnapshotQuery<TData, TError = Error>({
   queryFn,
   ...options
 }: PersistentSnapshotQueryOptions<TData, TError>): PersistentSnapshotQueryResult<TData, TError> {
-  const [snapshot, setSnapshot] = useState<SnapshotEnvelope<TData> | null>(null);
+  const [snapshotState, setSnapshotState] = useState<{
+    storageKey: string;
+    snapshot: SnapshotEnvelope<TData> | null;
+  } | null>(null);
 
   useEffect(() => {
-    setSnapshot(loadSnapshot<TData>(storageKey));
+    setSnapshotState({
+      storageKey,
+      snapshot: loadSnapshot<TData>(storageKey),
+    });
   }, [storageKey]);
+
+  const snapshot =
+    snapshotState?.storageKey === storageKey ? snapshotState.snapshot : null;
 
   const query = useQuery<TData, TError, TData, QueryKey>({
     ...options,
     queryKey,
     queryFn,
     initialData: snapshot?.data,
-    initialDataUpdatedAt: snapshot ? new Date(snapshot.savedAt).getTime() : undefined,
+    initialDataUpdatedAt: snapshot ? 0 : undefined,
   });
 
   useEffect(() => {
@@ -94,7 +103,7 @@ export function usePersistentSnapshotQuery<TData, TError = Error>({
         data: query.data,
         savedAt: new Date().toISOString(),
       };
-      setSnapshot(nextSnapshot);
+      setSnapshotState({ storageKey, snapshot: nextSnapshot });
       persistSnapshot(storageKey, nextSnapshot);
     }
   }, [query.data, query.dataUpdatedAt, query.isSuccess, storageKey]);

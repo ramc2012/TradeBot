@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import asyncio
+import json
 import sys
 import types
 
@@ -376,6 +377,82 @@ def test_live_snapshot_selector_scores_local_watchlist_candidate() -> None:
     assert selection["best"].instrument_key == "NSE_FO|NIFTY22500CE"
 
 
+def test_live_snapshot_selector_uses_front_expiry_when_monthly_is_nearest() -> None:
+    service = DirectionalOptionsService()
+    regime = RegimeSnapshot(
+        label="trend",
+        trade_allowed=True,
+        confidence=0.8,
+        reasons=["trend confirmed"],
+        preferred_expiry_kind="weekly",
+        delta_target_min=0.35,
+        delta_target_max=0.55,
+        exit_profile="balanced",
+    )
+    signal = DirectionalSignal(
+        direction="PE",
+        confidence=0.74,
+        expected_move=82.0,
+        expected_horizon_bars=8,
+        expected_horizon_hours=0.67,
+        direction_score=0.74,
+        expected_iv_change=0.003,
+        sleeve="intraday_breakout",
+        thesis="bearish test signal",
+        regime="trend",
+    )
+    base = {
+        "time": "2026-05-19T09:45:00Z",
+        "underlying": "NIFTY",
+        "strike": 23700.0,
+        "option_type": "PE",
+        "underlying_price": 23700.0,
+        "ltp": 132.0,
+        "volume": 6400.0,
+        "oi": 245000.0,
+        "iv": 0.21,
+        "lot_size": 65,
+        "tick_size": 0.05,
+    }
+
+    selection = service.selector.select_from_live_snapshots(
+        underlying="NIFTY",
+        timestamp=pd.Timestamp("2026-05-19T09:45:00Z"),
+        spot_price=23700.0,
+        row={"rv_annualized": 0.22},
+        signal=signal,
+        regime=regime,
+        timeframe="5minute",
+        snapshot_rows=[
+            {
+                **base,
+                "expiry": "2026-05-21",
+                "expiry_kind": "weekly",
+                "instrument_key": "NSE_FO|NIFTY21MAY23700PE",
+                "trading_symbol": "NIFTY 23700 PE 21 MAY 26",
+            },
+            {
+                **base,
+                "expiry": "2026-05-26",
+                "expiry_kind": "monthly",
+                "instrument_key": "NSE_FO|NIFTY26MAY23700PE",
+                "trading_symbol": "NIFTY 23700 PE 26 MAY 26",
+            },
+            {
+                **base,
+                "expiry": "2026-05-28",
+                "expiry_kind": "weekly",
+                "instrument_key": "NSE_FO|NIFTY28MAY23700PE",
+                "trading_symbol": "NIFTY 23700 PE 28 MAY 26",
+            },
+        ],
+    )
+
+    assert selection["best"] is not None
+    assert selection["best"].expiry == "2026-05-26"
+    assert {candidate.expiry for candidate in selection["candidates"]} == {"2026-05-26"}
+
+
 @pytest.mark.asyncio
 async def test_directional_options_paper_store_tracks_open_and_closed_positions(tmp_path: Path) -> None:
     store = DirectionalOptionsPaperStore(tmp_path / "directional-paper")
@@ -458,6 +535,43 @@ async def test_directional_options_paper_store_tracks_open_and_closed_positions(
     assert closed_summary["open_positions"] == 0
     assert closed_summary["closed_positions"] == 1
     assert closed_positions["closed_positions"][0]["realized_pnl"] == pytest.approx((146.0 - 132.0) * 75)
+
+
+@pytest.mark.asyncio
+async def test_directional_options_paper_store_reports_current_nifty_monthly_expiry(tmp_path: Path) -> None:
+    store = DirectionalOptionsPaperStore(tmp_path / "directional-paper")
+    store.positions_path.parent.mkdir(parents=True, exist_ok=True)
+    store.positions_path.write_text(json.dumps({
+        "last_synced_at": "2026-05-19T09:35:00+00:00",
+        "open_positions": [
+            {
+                "position_id": "stale-nifty-expiry",
+                "status": "open",
+                "opened_at": "2026-05-19T09:30:00+00:00",
+                "updated_at": "2026-05-19T09:35:00+00:00",
+                "underlying": "NIFTY",
+                "trading_symbol": "NSE:NIFTY2651923700PE",
+                "instrument_key": "NSE:NIFTY2651923700PE",
+                "option_type": "PE",
+                "expiry": "2026-05-28",
+                "expiry_kind": "weekly",
+                "strike": 23700.0,
+                "quantity_units": 75,
+                "entry_premium": 132.0,
+                "latest_premium": 144.0,
+                "unrealized_pnl": 900.0,
+                "realized_pnl": 0.0,
+            }
+        ],
+        "closed_positions": [],
+    }))
+
+    positions = await store.list_positions(symbol="NIFTY", status="open", limit=10)
+    row = positions["open_positions"][0]
+
+    assert row["expiry"] == "2026-05-26"
+    assert row["expiry_kind"] == "monthly"
+    assert row["raw_expiry"] == "2026-05-28"
 
 
 @pytest.mark.asyncio
