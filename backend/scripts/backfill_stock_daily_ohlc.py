@@ -1,22 +1,17 @@
 """
 Backfill daily stock OHLC into underlying_spot_candles for the F&O stock
-universe via Fyers history API.
+universe via the already-authenticated Fyers adapter.
 
 Why: CBE Scanner's Volatility Compression (F1) + Volatility Cone (F6) need
 ~250 days of clean daily OHLC. Without it, CBE can only score the few
-features that derive from the option chain, single-feature dominance kicks in,
-and the watchlist is unreliable. This script does a one-shot 400-day backfill.
+features that derive from the option chain, single-feature dominance kicks
+in, and the watchlist is unreliable.
 
-Rate-limit safe: ~3 req/sec to Fyers history. 211 stocks × 1 call each
-≈ 1.5 minutes wall-clock.
-
-Storage: writes to underlying_spot_candles with interval='1day' and source='fyers'.
+Reuses the running backend's broker session (no fresh login required).
 """
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -28,14 +23,13 @@ from loguru import logger
 from sqlalchemy import text
 
 from db.database import AsyncSessionLocal
+from api.routers.auth import ensure_fyers_session, get_active_adapter
 
 
-CREDS_FILE = Path("/app/credentials.json")
 LOOKBACK_DAYS = 400
 INTERVAL = "1day"
 SOURCE = "fyers"
-RATE_LIMIT_SLEEP = 0.35  # ~3 req/sec
-IST = timezone(timedelta(hours=5, minutes=30))
+RATE_LIMIT_SLEEP = 0.35  # ~3 req/sec to stay under Fyers history limits
 
 
 async def get_fno_stock_universe() -> list[tuple[str, str]]:
@@ -52,14 +46,13 @@ async def get_fno_stock_universe() -> list[tuple[str, str]]:
             """
         ))
         rows = result.fetchall()
-    universe = []
+
+    universe: list[tuple[str, str]] = []
     for sym, key in rows:
         key = str(key or "").strip()
         if not key:
             continue
-        # Convert Upstox key (NSE_EQ|ISIN) to Fyers history symbol when possible.
         if key.startswith("NSE_EQ|"):
-            # No reliable conversion without a lookup — try the conventional form.
             fyers_sym = f"NSE:{sym}-EQ"
         elif key.startswith("NSE:") or key.startswith("BSE:"):
             fyers_sym = key
@@ -69,51 +62,7 @@ async def get_fno_stock_universe() -> list[tuple[str, str]]:
     return universe
 
 
-def load_fyers_client():
-    from fyers_apiv3 import fyersModel
-    creds = json.loads(CREDS_FILE.read_text())
-    token = creds.get("fyers", {}).get("access_token", "").strip()
-    if not token:
-        raise RuntimeError("Fyers access_token missing in credentials.json")
-    app_id = os.environ.get("FYERS_APP_ID", "")
-    return fyersModel.FyersModel(client_id=app_id, is_async=False, token=token, log_path="")
-
-
-def fetch_daily(fyers, fyers_symbol: str, from_dt: date, to_dt: date) -> list[dict]:
-    """Fetch daily candles for one stock from Fyers."""
-    payload = {
-        "symbol": fyers_symbol,
-        "resolution": "D",      # daily
-        "date_format": "1",
-        "range_from": from_dt.isoformat(),
-        "range_to": to_dt.isoformat(),
-        "cont_flag": "1",
-    }
-    resp = fyers.history(payload)
-    candles = resp.get("candles") or []
-    if not candles and resp.get("s") != "ok":
-        return []
-    out = []
-    for c in candles:
-        if not c or len(c) < 6:
-            continue
-        try:
-            ts = datetime.fromtimestamp(int(c[0]), IST)
-            out.append({
-                "time": ts,
-                "open": float(c[1]),
-                "high": float(c[2]),
-                "low": float(c[3]),
-                "close": float(c[4]),
-                "volume": int(c[5] or 0),
-            })
-        except (TypeError, ValueError):
-            continue
-    return out
-
-
 async def upsert_rows(symbol: str, instrument_key: str, rows: list[dict]) -> int:
-    """Upsert rows into underlying_spot_candles."""
     if not rows:
         return 0
     async with AsyncSessionLocal() as session:
@@ -153,29 +102,60 @@ async def upsert_rows(symbol: str, instrument_key: str, rows: list[dict]) -> int
 async def main():
     stocks = await get_fno_stock_universe()
     logger.info(f"Backfilling daily OHLC for {len(stocks)} F&O stocks")
-    fyers = load_fyers_client()
+
+    # Reuse the live Fyers adapter
+    adapter = get_active_adapter("fyers")
+    if adapter is None:
+        ok = await ensure_fyers_session(force_validate=False)
+        if not ok:
+            raise RuntimeError("No live Fyers session — login first")
+        adapter = get_active_adapter("fyers")
+        if adapter is None:
+            raise RuntimeError("Fyers adapter unavailable after ensure")
+    logger.info("Using live Fyers adapter")
 
     to_dt = date.today()
     from_dt = to_dt - timedelta(days=LOOKBACK_DAYS)
 
-    succeeded = 0
-    failed = 0
-    total_rows = 0
+    succeeded = failed = total_rows = 0
     start = time.time()
 
     for idx, (symbol, fyers_symbol) in enumerate(stocks, start=1):
         try:
-            rows = fetch_daily(fyers, fyers_symbol, from_dt, to_dt)
+            raw = await adapter.get_historical_candles(
+                symbol=fyers_symbol,
+                resolution="D",
+                range_from=from_dt.isoformat(),
+                range_to=to_dt.isoformat(),
+            )
+            # Convert the adapter's "time" (ISO string ending Z) → datetime
+            rows = []
+            for r in raw:
+                try:
+                    ts = datetime.fromisoformat(str(r["time"]).replace("Z", "+00:00"))
+                    rows.append({
+                        "time": ts,
+                        "open": float(r["open"]),
+                        "high": float(r["high"]),
+                        "low": float(r["low"]),
+                        "close": float(r["close"]),
+                        "volume": int(r.get("volume") or 0),
+                    })
+                except (TypeError, ValueError, KeyError):
+                    continue
             n = await upsert_rows(symbol, fyers_symbol, rows)
             total_rows += n
             succeeded += 1
-            if idx % 20 == 0:
+            if idx % 25 == 0:
                 elapsed = time.time() - start
-                logger.info(f"  [{idx}/{len(stocks)}] {symbol}: {n} rows. running total={total_rows}, elapsed={elapsed:.1f}s")
+                logger.info(
+                    f"  [{idx}/{len(stocks)}] {symbol}: {n} rows. "
+                    f"running total={total_rows}, elapsed={elapsed:.1f}s"
+                )
         except Exception as exc:
             failed += 1
             logger.warning(f"  [{idx}/{len(stocks)}] {symbol} FAILED: {exc}")
-        time.sleep(RATE_LIMIT_SLEEP)
+        await asyncio.sleep(RATE_LIMIT_SLEEP)
 
     elapsed = time.time() - start
     logger.success(
