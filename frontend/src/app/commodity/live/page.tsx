@@ -1207,7 +1207,7 @@ function ActionQueue({ rows }: { rows: WatchRow[] }) {
     neutral: "Neutral · idle",
   };
   return (
-    <div className="space-y-2">
+    <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
       {grouped.map(({ bucket, rows: bucketRows }) => {
         if (!bucket) return null;
         const label = titles[bucket];
@@ -1633,12 +1633,21 @@ export default function CommodityLivePage() {
   const killActive = Boolean(status.kill_switch_active);
   const loopActive = Boolean(status.loop_active);
   const usingSnapshotFutures = runtimeFuturesWatchlist.length === 0 && snapshotFuturesWatchlist.length > 0;
-  const streamState =
-    overviewQuery.isStreamConnected && watchlistSnapshotQuery.isStreamConnected
-      ? "streaming"
+  const scanIntervalSeconds = Number(status.scan_interval_seconds ?? 30);
+  const feedState =
+    liveTickQuery.isFetching
+      ? "refreshing quotes"
+      : liveTickQuery.data
+        ? "quotes 4s"
+        : overviewQuery.hasSnapshot || watchlistSnapshotQuery.hasSnapshot
+          ? `scan ${scanIntervalSeconds}s`
+          : "loading";
+  const feedStateTone =
+    liveTickQuery.data || overviewQuery.isStreamConnected || watchlistSnapshotQuery.isStreamConnected
+      ? "bg-emerald-500/10 text-emerald-300"
       : overviewQuery.hasSnapshot || watchlistSnapshotQuery.hasSnapshot
-        ? "syncing"
-        : "loading";
+        ? "bg-amber-500/10 text-amber-200"
+        : "bg-bg-secondary/50 text-text-muted";
 
   const saveExpiries = () => {
     const selected: Record<string, string> = {};
@@ -1681,15 +1690,9 @@ export default function CommodityLivePage() {
             {statusBadgeText}
           </span>
           <span
-            className={`rounded-md px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.14em] ${
-              streamState === "streaming"
-                ? "bg-emerald-500/10 text-emerald-300"
-                : streamState === "syncing"
-                  ? "bg-amber-500/10 text-amber-200"
-                  : "bg-bg-secondary/50 text-text-muted"
-            }`}
+            className={`rounded-md px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.14em] ${feedStateTone}`}
           >
-            {streamState}
+            {feedState}
           </span>
           <span className="hidden text-[11px] text-text-muted sm:inline">
             {formatIST(status.last_run_at)} · {status.last_message || "—"}
@@ -1799,24 +1802,22 @@ export default function CommodityLivePage() {
       {/* WATCHLIST tab — Bloomberg-style dense table + action queue side panel. */}
       {activeTab === "watchlist" ? (
         <>
-          <div className="mb-3 grid grid-cols-12 gap-3">
-            <Section
-              title="Action Queue"
-              detail={`${watchlist.length} symbols · bucketed by signal proximity`}
-              className="col-span-12 xl:col-span-4"
-            >
-              <ActionQueue rows={watchlist} />
-            </Section>
+          <div className="mb-3 space-y-3">
             <Section
               title="Live Instruments"
               detail={
                 usingSnapshotFutures
                   ? "catalog fallback · scanner offline"
-                  : `${watchlist.length} futures · ${optionWatchlist.length} option pairs · runtime rows`
+                  : `${watchlist.length} futures · ${optionWatchlist.length} option pairs · quote poll 4s · scan ${scanIntervalSeconds}s`
               }
-              className="col-span-12 xl:col-span-8"
             >
               <InstrumentWatchlist futuresRows={watchlist} optionRows={optionWatchlist} />
+            </Section>
+            <Section
+              title="Action Queue"
+              detail={`${watchlist.length} symbols · bucketed by signal proximity`}
+            >
+              <ActionQueue rows={watchlist} />
             </Section>
           </div>
         </>
