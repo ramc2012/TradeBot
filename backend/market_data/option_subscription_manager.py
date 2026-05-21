@@ -41,9 +41,11 @@ from typing import Any
 
 from loguru import logger
 
+from api.routers.auth import get_active_adapter
 from core.config import settings
 from market_data import data_router
 from market_data.atm_watchlist import atm_watchlist_service
+from market_data.symbols import to_fyers_symbol
 from paper_engine.base_strategy_agent import _now_ist
 
 
@@ -109,6 +111,56 @@ MIN_OI_LOTS = 1_000
 MIN_PRIOR_VOLUME_LOTS = 100
 
 
+async def _resolve_fyers_option_symbol(
+    underlying: str,
+    expiry: str,
+    strike: float,
+    option_type: str,
+    chain_cache: dict[tuple[str, str], dict[tuple[float, str], str]],
+) -> str | None:
+    """Translate (underlying, expiry, strike, type) → Fyers WS symbol.
+
+    The watchlist exposes Upstox-style instrument keys (NSE_FO|67184)
+    that Fyers WS can't subscribe to. Fyers's own option-chain endpoint
+    returns the WS-compatible key in OptionChainEntry.instrument_key —
+    use that as the canonical source of truth.
+
+    chain_cache is a per-pick scratch dict so we make at most one
+    Fyers REST call per (underlying, expiry) combination.
+    """
+    if not underlying or not expiry or not strike or option_type not in ("CE", "PE"):
+        return None
+    cache_key = (underlying, expiry)
+    if cache_key not in chain_cache:
+        adapter = get_active_adapter("fyers")
+        if adapter is None or getattr(adapter, "broker_name", "") != "fyers":
+            chain_cache[cache_key] = {}
+            return None
+        try:
+            fyers_underlying = to_fyers_symbol(underlying)
+            chain = await adapter.get_option_chain(fyers_underlying, expiry)
+        except Exception as exc:
+            logger.warning(
+                f"[OptionWS] Fyers option-chain fetch failed for "
+                f"{underlying} {expiry}: {exc}"
+            )
+            chain_cache[cache_key] = {}
+            return None
+        index: dict[tuple[float, str], str] = {}
+        for entry in chain.entries or []:
+            sym = getattr(entry, "instrument_key", None)
+            if not sym or ":" not in str(sym):
+                continue
+            try:
+                k = (float(entry.strike), str(entry.option_type or "").upper())
+            except (TypeError, ValueError):
+                continue
+            index[k] = str(sym)
+        chain_cache[cache_key] = index
+    lookup = chain_cache[cache_key]
+    return lookup.get((float(strike), option_type.upper()))
+
+
 def _passes_liquidity_gate(side: dict[str, Any]) -> tuple[bool, str]:
     """Return (passes, reason) for whether this CE/PE side is liquid
     enough to be worth a websocket slot.
@@ -172,37 +224,54 @@ async def compute_session_option_symbols() -> tuple[list[str], list[str]]:
             continue
         by_underlying.setdefault(underlying, row)
 
+    # Scratch cache: at most one Fyers REST call per (underlying, expiry).
+    chain_cache: dict[tuple[str, str], dict[tuple[float, str], str]] = {}
+
     for underlying, row in by_underlying.items():
+        expiry = str(row.get("expiry") or "").strip()
         for side_key in ("ce", "pe"):
             side = row.get(side_key) or {}
             if not isinstance(side, dict):
                 continue
-            broker_key = (
-                side.get("live_symbol")
-                or side.get("instrument_key")
-                or side.get("trading_symbol")
-            )
-            if not broker_key:
-                continue
-            broker_key = str(broker_key).strip()
             label = f"{underlying} {side_key.upper()} {side.get('strike')}"
-            # Sanity guard: the broker WS expects an exchange-prefixed
-            # machine key like NSE:NIFTY24N1424900CE. Human-readable
-            # trading symbols ("NIFTY 23600 CE 26 MAY 26") and Upstox
-            # numeric keys (NSE_FO|54466) will not work on Fyers WS.
-            # Drop anything that isn't a Fyers-format key so a bad row
-            # can't tear down the rest of the subscription set.
-            looks_fyers = (
-                ":" in broker_key
-                and " " not in broker_key
-                and not broker_key.startswith(("NSE_FO|", "BSE_FO|", "MCX_FO|"))
-            )
-            if not looks_fyers:
-                skipped.append(f"{label}  [bad-format: {broker_key!r}]")
-                continue
+            # Liquidity check first — saves a Fyers REST call for any
+            # contract we'd reject anyway.
             passes, why = _passes_liquidity_gate(side)
             if not passes:
                 skipped.append(f"{label}  [{why}]")
+                continue
+            # Source the broker-WS key in this order:
+            #   1. live_symbol if the watchlist already populated it
+            #      with a Fyers-format string (some chain queries do)
+            #   2. else translate via Fyers option-chain lookup using
+            #      (underlying, expiry, strike, option_type)
+            # Upstox numeric keys (NSE_FO|XXXX) won't work on Fyers WS
+            # so we never use them directly.
+            broker_key: str | None = None
+            candidate = str(side.get("live_symbol") or "").strip()
+            if (
+                candidate
+                and ":" in candidate
+                and " " not in candidate
+                and not candidate.startswith(("NSE_FO|", "BSE_FO|", "MCX_FO|"))
+            ):
+                broker_key = candidate
+            if not broker_key:
+                strike_value = side.get("strike")
+                try:
+                    strike_float = float(strike_value) if strike_value is not None else None
+                except (TypeError, ValueError):
+                    strike_float = None
+                if strike_float is not None:
+                    broker_key = await _resolve_fyers_option_symbol(
+                        underlying=underlying,
+                        expiry=expiry,
+                        strike=strike_float,
+                        option_type=side_key.upper(),
+                        chain_cache=chain_cache,
+                    )
+            if not broker_key:
+                skipped.append(f"{label}  [no-fyers-symbol resolved]")
                 continue
             desired.append(broker_key)
 
