@@ -179,17 +179,32 @@ async def compute_session_option_symbols() -> tuple[list[str], list[str]]:
                 continue
             broker_key = (
                 side.get("live_symbol")
-                or side.get("trading_symbol")
                 or side.get("instrument_key")
+                or side.get("trading_symbol")
             )
             if not broker_key:
                 continue
-            passes, why = _passes_liquidity_gate(side)
+            broker_key = str(broker_key).strip()
             label = f"{underlying} {side_key.upper()} {side.get('strike')}"
+            # Sanity guard: the broker WS expects an exchange-prefixed
+            # machine key like NSE:NIFTY24N1424900CE. Human-readable
+            # trading symbols ("NIFTY 23600 CE 26 MAY 26") and Upstox
+            # numeric keys (NSE_FO|54466) will not work on Fyers WS.
+            # Drop anything that isn't a Fyers-format key so a bad row
+            # can't tear down the rest of the subscription set.
+            looks_fyers = (
+                ":" in broker_key
+                and " " not in broker_key
+                and not broker_key.startswith(("NSE_FO|", "BSE_FO|", "MCX_FO|"))
+            )
+            if not looks_fyers:
+                skipped.append(f"{label}  [bad-format: {broker_key!r}]")
+                continue
+            passes, why = _passes_liquidity_gate(side)
             if not passes:
                 skipped.append(f"{label}  [{why}]")
                 continue
-            desired.append(str(broker_key))
+            desired.append(broker_key)
 
     seen: set[str] = set()
     out: list[str] = []
@@ -210,7 +225,7 @@ async def perform_session_open_pick() -> dict[str, Any]:
     desired, skipped = await compute_session_option_symbols()
     today_ist = _now_ist().strftime("%Y-%m-%d")
 
-    current_subs = set(data_router.data_router._subscribed_symbols)  # type: ignore[attr-defined]
+    current_subs = set(data_router._subscribed_symbols)  # type: ignore[attr-defined]
     # Manage only the option subset — never touch the spot index subs.
     locked_to_drop = [s for s in _locked_option_symbols if s not in desired]
     new_to_add = [s for s in desired if s not in current_subs]
@@ -243,9 +258,9 @@ async def perform_session_open_pick() -> dict[str, Any]:
         return summary
 
     if locked_to_drop:
-        await data_router.data_router.remove_subscriptions(locked_to_drop)
+        await data_router.remove_subscriptions(locked_to_drop)
     if new_to_add:
-        await data_router.data_router.add_subscriptions(new_to_add)
+        await data_router.add_subscriptions(new_to_add)
 
     _locked_option_symbols = set(desired)
     _locked_for_date = today_ist
@@ -265,16 +280,31 @@ async def run_subscription_loop() -> None:
     next 09:05 IST trigger and repeats.
     """
     # If we boot during market hours, do the pick right now and bind
-    # the lock to today.
+    # the lock to today. Retry on failure with a short backoff so a
+    # transient error doesn't push the next attempt to tomorrow.
     if _market_hours_now() and _locked_for_date != _now_ist().strftime("%Y-%m-%d"):
-        try:
-            await perform_session_open_pick()
-        except Exception as exc:
-            logger.warning(f"[OptionWS] startup session-open pick failed: {exc}")
+        for attempt in range(5):
+            try:
+                await perform_session_open_pick()
+                break
+            except Exception as exc:
+                logger.warning(
+                    f"[OptionWS] startup session-open pick failed "
+                    f"(attempt {attempt + 1}/5): {exc}"
+                )
+                await asyncio.sleep(30.0)
 
     while True:
-        next_pick_at = _next_session_open_pick()
-        sleep_seconds = max(60.0, (next_pick_at - _now_ist()).total_seconds())
+        # If we're still in market hours and today's pick is missing
+        # (all retries above failed), retry quickly. Otherwise sleep
+        # until the next scheduled 09:05 IST trigger.
+        today_ist = _now_ist().strftime("%Y-%m-%d")
+        if _market_hours_now() and _locked_for_date != today_ist:
+            sleep_seconds = 60.0
+            next_pick_at = _now_ist() + timedelta(seconds=sleep_seconds)
+        else:
+            next_pick_at = _next_session_open_pick()
+            sleep_seconds = max(60.0, (next_pick_at - _now_ist()).total_seconds())
         logger.info(
             f"[OptionWS] next session-open pick scheduled for "
             f"{next_pick_at.isoformat()} (sleeping {int(sleep_seconds)}s)"
