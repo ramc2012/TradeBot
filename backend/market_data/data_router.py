@@ -22,6 +22,7 @@ class DataRouter:
     def __init__(self):
         self._broker: Optional[BrokerAdapter] = None
         self._ws_client: Any = None
+        self._ws_broker: Optional[BrokerAdapter] = None
         self._subscribed_symbols: List[str] = []
         # Sticky extras — symbols that the OptionWS subscription manager
         # (or any future per-strategy subscriber) pins onto the broker
@@ -56,15 +57,24 @@ class DataRouter:
         if not self._broker:
             logger.warning("[DataRouter] No broker set — cannot subscribe")
             return
-        await self.stop_mock_feed()
-        await self.unsubscribe()
-        self._loop = asyncio.get_running_loop()
         # Merge in any sticky extras (e.g. option contracts pinned by the
         # OptionWS subscription manager). Without this the broker-session
         # refresh path that periodically resyncs spot indices would wipe
         # out a previously-applied option subscription set.
         sticky_extras = [s for s in getattr(self, "_sticky_extras", set()) if s not in symbols]
         full_set = list(symbols) + sticky_extras
+        if (
+            self._ws_client is not None
+            and self._ws_broker is self._broker
+            and set(full_set) == set(self._subscribed_symbols)
+        ):
+            logger.debug(
+                f"[DataRouter] Subscription already active for {len(full_set)} symbols; skipping resubscribe"
+            )
+            return
+        await self.stop_mock_feed()
+        await self.unsubscribe()
+        self._loop = asyncio.get_running_loop()
         self._subscribed_symbols = full_set
         broker_name = getattr(self._broker, "broker_name", "")
         if broker_name == "fyers":
@@ -74,6 +84,7 @@ class DataRouter:
         self._ws_client = await self._broker.subscribe_websocket(
             broker_symbols, self._on_tick
         )
+        self._ws_broker = self._broker
         logger.info(
             f"[DataRouter] Subscribed to {len(full_set)} symbols "
             f"(primary={len(symbols)} sticky={len(sticky_extras)})"
@@ -123,6 +134,7 @@ class DataRouter:
             except Exception:
                 pass
         self._ws_client = None
+        self._ws_broker = None
 
     async def stop_mock_feed(self):
         if self._mock_task and not self._mock_task.done():

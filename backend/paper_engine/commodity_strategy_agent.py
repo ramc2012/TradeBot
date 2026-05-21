@@ -70,6 +70,7 @@ DEFAULT_COMMODITY_COMMENTARY_MAX = 80
 DEFAULT_COMMODITY_SIGNAL_AUDIT_MAX = 120
 DEFAULT_COMMODITY_INITIAL_CAPITAL = 1_000_000.0
 DEFAULT_COMMODITY_ARCHIVE_DIR = Path(__file__).resolve().parent.parent / "runtime" / "commodity_archive"
+DEFAULT_COMMODITY_SCAN_TIMEOUT_SECONDS = 120
 
 FUTURES_MACD_FAST = 12
 FUTURES_MACD_SLOW = 26
@@ -1751,9 +1752,22 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         try:
             while self._enabled and not self._kill_switch_active and not self._start_required:
                 try:
-                    await self.run_once(force=False)
+                    await asyncio.wait_for(
+                        self.run_once(force=False),
+                        timeout=DEFAULT_COMMODITY_SCAN_TIMEOUT_SECONDS,
+                    )
                 except asyncio.CancelledError:
                     raise
+                except asyncio.TimeoutError:
+                    self._last_error = (
+                        f"Commodity strategy scan exceeded {DEFAULT_COMMODITY_SCAN_TIMEOUT_SECONDS}s and was cancelled."
+                    )
+                    self._last_message = (
+                        "Commodity strategy scan timed out; the loop will retry on the next cycle."
+                    )
+                    self._append_commentary("warning", self._last_message)
+                    self._persist_state()
+                    logger.warning("[CommodityStrategy] scan timed out; retrying next cycle")
                 except Exception as exc:
                     self._last_error = str(exc)
                     self._last_message = f"Commodity strategy error: {exc}"
