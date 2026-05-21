@@ -99,20 +99,68 @@ def _next_session_open_pick() -> datetime:
     return target
 
 
-async def compute_session_option_symbols() -> list[str]:
-    """Resolve the ATM±1 option symbols to subscribe for today's session.
+# Liquidity floor for morning subscription. Pre-open we don't yet have
+# today's volume so we lean on OI (carries from prior session). 1000
+# lots is conservative-but-realistic for NSE index weeklies — anything
+# below this is illiquid enough that the strategy would reject it at
+# entry anyway. Yesterday's volume (when available from the watchlist
+# snapshot) gates contracts that have OI but no actual trading flow.
+MIN_OI_LOTS = 1_000
+MIN_PRIOR_VOLUME_LOTS = 100
+
+
+def _passes_liquidity_gate(side: dict[str, Any]) -> tuple[bool, str]:
+    """Return (passes, reason) for whether this CE/PE side is liquid
+    enough to be worth a websocket slot.
+
+    Allowed when:
+      - the watchlist already marked is_liquid = True, OR
+      - OI ≥ MIN_OI_LOTS (carryover from prior session), OR
+      - prior-session volume ≥ MIN_PRIOR_VOLUME_LOTS
+
+    The watchlist's own liquid-strike picker should already prefer a
+    neighbour when the literal ATM is thin, so most contracts should
+    pass cleanly. The gate exists to skip the rare case where even the
+    picked strike is too thin to support live tick flow.
+    """
+    if bool(side.get("is_liquid")):
+        return True, "is_liquid"
+    oi = side.get("oi") or 0
+    try:
+        oi_lots = float(oi)
+    except (TypeError, ValueError):
+        oi_lots = 0.0
+    if oi_lots >= MIN_OI_LOTS:
+        return True, f"oi={int(oi_lots)}"
+    volume = side.get("volume") or 0
+    try:
+        vol_lots = float(volume)
+    except (TypeError, ValueError):
+        vol_lots = 0.0
+    if vol_lots >= MIN_PRIOR_VOLUME_LOTS:
+        return True, f"vol={int(vol_lots)}"
+    return False, f"thin (oi={int(oi_lots)} vol={int(vol_lots)})"
+
+
+async def compute_session_option_symbols() -> tuple[list[str], list[str]]:
+    """Resolve the option symbols to subscribe for today's session.
 
     Reads atm_watchlist (no extra broker call) which already knows each
-    underlying's nearest active expiry and its ATM-anchored CE/PE pair.
-    Falls back gracefully when a row is missing — we just skip that
-    underlying rather than block the whole pick.
+    underlying's nearest active expiry and applies its own liquid-strike
+    picker. We then layer one more explicit liquidity gate
+    (_passes_liquidity_gate) so we never burn a websocket slot on a
+    thin contract that the strategy would reject anyway at entry.
+
+    Returns (kept_symbols, dropped_for_liquidity) so the boot log can
+    show exactly which contracts were skipped and why.
     """
     desired: list[str] = []
+    skipped: list[str] = []
     try:
         payload = await atm_watchlist_service.get_watchlist(live_refresh=False)
     except Exception as exc:
         logger.warning(f"[OptionWS] watchlist load failed during session pick: {exc}")
-        return desired
+        return desired, skipped
 
     rows = payload.get("rows") or []
     by_underlying: dict[str, dict[str, Any]] = {}
@@ -136,6 +184,11 @@ async def compute_session_option_symbols() -> list[str]:
             )
             if not broker_key:
                 continue
+            passes, why = _passes_liquidity_gate(side)
+            label = f"{underlying} {side_key.upper()} {side.get('strike')}"
+            if not passes:
+                skipped.append(f"{label}  [{why}]")
+                continue
             desired.append(str(broker_key))
 
     seen: set[str] = set()
@@ -144,7 +197,7 @@ async def compute_session_option_symbols() -> list[str]:
         if sym not in seen:
             seen.add(sym)
             out.append(sym)
-    return out
+    return out, skipped
 
 
 async def perform_session_open_pick() -> dict[str, Any]:
@@ -154,7 +207,7 @@ async def perform_session_open_pick() -> dict[str, Any]:
     global _locked_option_symbols, _locked_for_date
 
     enabled = _is_enabled()
-    desired = await compute_session_option_symbols()
+    desired, skipped = await compute_session_option_symbols()
     today_ist = _now_ist().strftime("%Y-%m-%d")
 
     current_subs = set(data_router.data_router._subscribed_symbols)  # type: ignore[attr-defined]
@@ -166,11 +219,18 @@ async def perform_session_open_pick() -> dict[str, Any]:
         "enabled": enabled,
         "session_date": today_ist,
         "desired_count": len(desired),
+        "skipped_for_liquidity": skipped,
         "current_subs": len(current_subs),
         "to_add": new_to_add,
         "to_remove_from_yesterday": locked_to_drop,
         "applied": False,
     }
+
+    if skipped:
+        logger.info(
+            f"[OptionWS] {len(skipped)} contract(s) skipped for liquidity: "
+            + "; ".join(skipped[:6])
+        )
 
     if not enabled:
         logger.info(
