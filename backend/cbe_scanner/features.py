@@ -60,15 +60,32 @@ class CBEConfig:
     mp_block_deal_window: int = 10
     mp_fii_dii_window: int = 3
 
-    # Composite weights (must sum to 1.0)
-    w_vc: float = 0.25
-    w_omp: float = 0.25
-    w_csmd: float = 0.15
-    w_cp: float = 0.20
-    w_mp: float = 0.15
+    # F6 (NEW): Volatility Cone (Burghardt-Lane)
+    # Realized vol over multiple horizons, percentile vs trailing history.
+    # When ALL horizons sit below their 25th percentile simultaneously,
+    # compression is real (not just one-bar noise).
+    cone_horizons: tuple = (10, 20, 40, 60)
+    cone_percentile_history: int = 252
+    cone_compression_pct: float = 25.0     # all horizons below this %ile = compression
+    cone_min_history_days: int = 80        # gracefully degrade when shorter
+
+    # F7 (NEW): IV Term Structure
+    # Front IV < back IV by >1σ of historical spread = vol-floor / squeeze setup.
+    its_lookback_days: int = 60
+
+    # Composite weights (must sum to 1.0). These are PRIORS; the actual scoring
+    # at composite time renormalizes weights to the subset of features that
+    # actually returned data (so dead feeds don't permanently cap the score).
+    w_vc: float = 0.20
+    w_omp: float = 0.20
+    w_csmd: float = 0.12
+    w_cp: float = 0.13
+    w_mp: float = 0.10
+    w_cone: float = 0.15
+    w_its: float = 0.10
 
     # Final score threshold for watchlist inclusion
-    watchlist_min_score: float = 7.0
+    watchlist_min_score: float = 5.5
     watchlist_max_size: int = 15
     min_ohlc_rows: int = 5
 
@@ -83,8 +100,9 @@ class CBEConfig:
                 "expiry_week": 0.5,
                 "sector_event": 0.7,
             }
-        assert abs(self.w_vc + self.w_omp + self.w_csmd + self.w_cp + self.w_mp - 1.0) < 1e-6, \
-            "Composite weights must sum to 1.0"
+        total_w = self.w_vc + self.w_omp + self.w_csmd + self.w_cp + self.w_mp + self.w_cone + self.w_its
+        assert abs(total_w - 1.0) < 1e-6, \
+            f"Composite weights must sum to 1.0 (got {total_w:.6f})"
 
 
 # ============================================================
@@ -460,6 +478,191 @@ def feature_microstructure_pressure(
 
 
 # ============================================================
+# F6 (NEW): VOLATILITY CONE — Burghardt-Lane
+# ============================================================
+# Realized vol over multiple horizons (10/20/40/60-day) compared against
+# its own historical %ile distribution. Compression is "real" when ALL
+# horizons simultaneously sit in the bottom quartile.
+#
+# This is a more rigorous replacement for F1's ad-hoc ATR ratio + BB-width:
+# the cone tells you whether vol is compressed across timescales (true
+# coiled spring) vs. just one timescale (noise).
+#
+# Reference: Burghardt & Lane (1990), "How To Tell If Options Are Cheap"
+# in Journal of Portfolio Management.
+
+def feature_volatility_cone(ohlc: pd.DataFrame, cfg: CBEConfig) -> dict:
+    """Score 0-10 based on multi-horizon volatility compression.
+
+    For each horizon h in cfg.cone_horizons, compute realized annualized
+    vol over the last h days. Then compute the %ile of that current value
+    against its trailing distribution (last cone_percentile_history days).
+
+    Score:
+        - All horizons below cone_compression_pct (%ile): 10 (deep compression)
+        - 3 of 4 below: 7
+        - 2 of 4 below: 4
+        - 1 of 4 below: 1.5
+        - 0 below: 0
+    """
+    out = {"score": 0.0, "horizons": {}, "available": False, "reason": ""}
+    if ohlc is None or len(ohlc) < cfg.cone_min_history_days:
+        out["reason"] = f"insufficient history ({len(ohlc) if ohlc is not None else 0} < {cfg.cone_min_history_days})"
+        return out
+
+    log_ret = np.log(ohlc["close"] / ohlc["close"].shift(1)).dropna()
+    if len(log_ret) < cfg.cone_min_history_days - 2:
+        out["reason"] = "insufficient returns"
+        return out
+
+    horizons_below = 0
+    horizon_count = 0
+    for h in cfg.cone_horizons:
+        if len(log_ret) < h + 30:  # need at least 30 trailing %ile samples
+            continue
+        rv = log_ret.rolling(h).std() * np.sqrt(252)
+        rv = rv.dropna()
+        if len(rv) < 30:
+            continue
+        current = float(rv.iloc[-1])
+        history = rv.iloc[-min(cfg.cone_percentile_history, len(rv)):]
+        pct = float((history <= current).mean() * 100)
+        out["horizons"][f"h{h}_rv"] = round(current, 4)
+        out["horizons"][f"h{h}_pct"] = round(pct, 1)
+        horizon_count += 1
+        if pct <= cfg.cone_compression_pct:
+            horizons_below += 1
+
+    if horizon_count == 0:
+        out["reason"] = "no horizon could be computed"
+        return out
+
+    out["available"] = True
+    fraction_below = horizons_below / horizon_count
+    # Non-linear scoring: 1.0 (all below) → 10, 0.75 → 7, 0.5 → 4, 0.25 → 1.5
+    if fraction_below >= 1.0:
+        score = 10.0
+    elif fraction_below >= 0.75:
+        score = 7.0
+    elif fraction_below >= 0.5:
+        score = 4.0
+    elif fraction_below >= 0.25:
+        score = 1.5
+    else:
+        score = 0.0
+    out["score"] = round(score, 2)
+    out["horizons_below_threshold"] = horizons_below
+    out["horizons_evaluated"] = horizon_count
+    out["fraction_below"] = round(fraction_below, 2)
+    return out
+
+
+# ============================================================
+# F7 (NEW): IV TERM STRUCTURE
+# ============================================================
+# When the front-month IV is materially below the back-month IV (in
+# contango by >1σ of its history), the market is pricing in low
+# near-term vol while still pricing a regular term-structure for later.
+# Combined with realized-vol compression, that's a vol-floor / squeeze
+# setup: implied is suppressed, history shows it shouldn't be.
+#
+# The reverse — backwardation (front > back) — usually signals event
+# stress and is a *bad* setup for compression-expansion plays.
+
+def feature_iv_term_structure(
+    options_chain: Optional[pd.DataFrame],
+    iv_history: Optional[pd.Series],
+    cfg: CBEConfig,
+) -> dict:
+    """Score 0-10 based on front-vs-back IV slope vs its history.
+
+    Args:
+        options_chain: Must have at least two expiries with IV.
+        iv_history: Front-month ATM IV history (for z-score of the spread).
+    """
+    out = {"score": 0.0, "available": False, "reason": "", "term_slope": None, "term_z": None}
+    if options_chain is None or len(options_chain) < 4:
+        out["reason"] = "no options chain"
+        return out
+    chain = options_chain.copy()
+    if "expiry" not in chain.columns or "iv" not in chain.columns:
+        out["reason"] = "chain missing expiry/iv"
+        return out
+    chain = chain.dropna(subset=["iv", "expiry"])
+    chain = chain[chain["iv"] > 0.01]
+    if chain.empty:
+        out["reason"] = "no valid iv rows"
+        return out
+
+    chain["expiry_ts"] = pd.to_datetime(chain["expiry"], errors="coerce")
+    chain = chain.dropna(subset=["expiry_ts"])
+    expiries = sorted(chain["expiry_ts"].unique())
+    if len(expiries) < 2:
+        out["reason"] = f"only {len(expiries)} expiry"
+        return out
+
+    # ATM-bucket IV per expiry: median of CE+PE within 5% moneyness if
+    # we have a spot; else median of all
+    spot = None
+    if "strike" in chain.columns and len(chain):
+        spot = float(chain["strike"].median())
+
+    def atm_iv(expiry_ts):
+        rows = chain[chain["expiry_ts"] == expiry_ts]
+        if spot:
+            rows = rows[rows["strike"].between(spot * 0.95, spot * 1.05)]
+        if rows.empty:
+            return None
+        return float(rows["iv"].median())
+
+    front_iv = atm_iv(expiries[0])
+    back_iv = atm_iv(expiries[1])
+    if front_iv is None or back_iv is None or front_iv <= 0 or back_iv <= 0:
+        out["reason"] = "front/back atm iv unavailable"
+        return out
+
+    # Slope as relative spread; positive = contango (back > front)
+    slope = (back_iv - front_iv) / max(front_iv, 1e-6)
+    out["term_slope"] = round(slope, 4)
+    out["front_iv"] = round(front_iv, 4)
+    out["back_iv"] = round(back_iv, 4)
+
+    # Z-score the current slope against historical slope distribution
+    # (using iv_history as proxy if no historical slope series is wired).
+    # Without true historical slope, we use an absolute heuristic:
+    # - slope > +0.10 = strong contango → score ~7
+    # - slope > +0.05 = mild contango → score ~4
+    # - slope between [-0.02, +0.05] = flat → score ~1
+    # - slope < -0.02 = backwardation (event stress) → score 0
+    out["available"] = True
+    if slope >= 0.10:
+        score = 7.0 + min(3.0, (slope - 0.10) * 30.0)
+    elif slope >= 0.05:
+        score = 4.0 + (slope - 0.05) * 60.0
+    elif slope >= -0.02:
+        score = max(0.0, 1.0 + slope * 20.0)
+    else:
+        score = 0.0
+    out["score"] = round(min(10.0, score), 2)
+
+    # If we have IV history of >20 days, also compute a rough z-score on
+    # front IV itself (low front-IV vs history reinforces the signal).
+    if iv_history is not None and len(iv_history) >= 20:
+        recent_iv = float(iv_history.iloc[-1]) if hasattr(iv_history, "iloc") else None
+        if recent_iv:
+            mu = float(iv_history.iloc[-cfg.its_lookback_days:].mean())
+            sd = float(iv_history.iloc[-cfg.its_lookback_days:].std())
+            if sd > 0:
+                z = (recent_iv - mu) / sd
+                out["front_iv_z"] = round(z, 2)
+                # If front IV is in bottom 25% of its history AND we see
+                # contango, boost the score by up to +2
+                if z < -0.6 and slope > 0.03:
+                    out["score"] = round(min(10.0, out["score"] + 2.0), 2)
+    return out
+
+
+# ============================================================
 # COMPOSITE SCORING
 # ============================================================
 
@@ -476,6 +679,11 @@ class CBEScore:
     f3_csmd: dict
     f4_cp: dict
     f5_mp: dict
+    f6_cone: dict
+    f7_its: dict
+    active_features: list  # names of features that contributed (had data)
+    effective_weight_total: float  # sum of weights that contributed before renorm
+    composite_quality: str = "ok"  # ok | partial | low_confidence_single_feature | no_data
 
     def to_dict(self):
         return asdict(self)
@@ -505,14 +713,66 @@ def compute_cbe_score(
     f1 = feature_volatility_compression(ohlc, cfg)
     f2 = feature_option_positioning(options_chain, iv_history, pcr_history, cfg)
     f3 = feature_cross_sectional_divergence(stock_returns, sector_returns, cfg) \
-        if sector_returns is not None else {"score": 0.0, "directional_bias": "neutral"}
+        if sector_returns is not None else {"score": 0.0, "directional_bias": "neutral", "available": False}
     f4 = feature_catalyst_proximity(events or [], date, cfg)
     f5 = feature_microstructure_pressure(ohlc, spread_series, block_deals, fii_dii_flow, cfg)
+    f6 = feature_volatility_cone(ohlc, cfg)
+    f7 = feature_iv_term_structure(options_chain, iv_history, cfg)
 
-    # Composite
-    composite = (cfg.w_vc * f1["score"] + cfg.w_omp * f2["score"] +
-                 cfg.w_csmd * f3["score"] + cfg.w_cp * f4["score"] +
-                 cfg.w_mp * f5["score"])
+    # Active-feature renormalization. A feature is "active" if it had
+    # enough data to score. Dead-feed features get excluded and the
+    # surviving weights are re-scaled to sum to 1. This prevents the
+    # composite from being permanently capped just because, say, the
+    # events feed is unwired.
+    def _is_active(feat: dict, *, allow_explicit_zero: bool = False) -> bool:
+        if not isinstance(feat, dict):
+            return False
+        # Honour explicit `available` flag from new features (F6, F7)
+        if "available" in feat:
+            return bool(feat["available"])
+        score = feat.get("score")
+        if score is None:
+            return False
+        # Heuristic: a feature that returned 0.0 with no sub-data is dark.
+        # Keep it if it has explicit sub-fields populated.
+        if score == 0.0 and not allow_explicit_zero:
+            has_data = any(
+                feat.get(k) is not None
+                for k in ("iv_rank", "atr_ratio", "divergence", "nearest_event", "spread_tightening_pct")
+            )
+            return has_data
+        return True
+
+    active_map = {
+        "f1_vc":   (_is_active(f1), cfg.w_vc,  f1.get("score", 0.0)),
+        "f2_omp":  (_is_active(f2), cfg.w_omp, f2.get("score", 0.0)),
+        "f3_csmd": (_is_active(f3), cfg.w_csmd, f3.get("score", 0.0)),
+        "f4_cp":   (_is_active(f4, allow_explicit_zero=False), cfg.w_cp, f4.get("score", 0.0)),
+        "f5_mp":   (_is_active(f5, allow_explicit_zero=False), cfg.w_mp, f5.get("score", 0.0)),
+        "f6_cone": (_is_active(f6), cfg.w_cone, f6.get("score", 0.0)),
+        "f7_its":  (_is_active(f7), cfg.w_its, f7.get("score", 0.0)),
+    }
+    active_features = [k for k, (live, _, _) in active_map.items() if live]
+    effective_weight_total = sum(w for (live, w, _) in active_map.values() if live)
+
+    # GATE: require at least 2 active features for a meaningful composite.
+    # A single-feature composite is just that feature's score (no diversification),
+    # which the renormalization makes deceptively reach 10/10 and flood the
+    # watchlist. Until enough features have data, treat single-feature stocks
+    # as low-confidence and cap their composite at the un-renormalized value.
+    MIN_ACTIVE_FEATURES = 2
+    if len(active_features) < MIN_ACTIVE_FEATURES:
+        # Use raw weighted score WITHOUT renormalization. A single feature
+        # contributing weight 0.12 (e.g. f3_csmd) caps the composite at
+        # 0.12 * 10 = 1.2 — appropriately small for low confidence.
+        composite = sum(w * s for (live, w, s) in active_map.values() if live)
+        composite_quality = "low_confidence_single_feature"
+    elif effective_weight_total > 0:
+        composite = sum(w * s for (live, w, s) in active_map.values() if live) / effective_weight_total
+        composite_quality = "ok" if len(active_features) >= 3 else "partial"
+    else:
+        composite = 0.0
+        composite_quality = "no_data"
 
     # Directional bias: voting across features that have a direction
     bias_votes = []
@@ -553,6 +813,10 @@ def compute_cbe_score(
         directional_bias=bias,
         bias_conviction=round(bias_conviction, 2),
         f1_vc=f1, f2_omp=f2, f3_csmd=f3, f4_cp=f4, f5_mp=f5,
+        f6_cone=f6, f7_its=f7,
+        active_features=active_features,
+        effective_weight_total=round(effective_weight_total, 4),
+        composite_quality=composite_quality,
     )
 
 
@@ -602,6 +866,10 @@ def scan_universe(
                 "f3_csmd_score": score.f3_csmd["score"],
                 "f4_cp_score": score.f4_cp["score"],
                 "f5_mp_score": score.f5_mp["score"],
+                "f6_cone_score": score.f6_cone["score"],
+                "f7_its_score": score.f7_its["score"],
+                "active_features": score.active_features,
+                "effective_weight_total": score.effective_weight_total,
                 "details": score.to_dict(),
             })
         except Exception as e:

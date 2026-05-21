@@ -238,4 +238,7 @@ def build_trade_analytics(
             trade.__dict__
             for trade in trades[-10:]
         ],
+        # Full trade history for calibration / per-trade analysis. Kept
+        # alongside recent_trades to avoid breaking downstream consumers.
+        "all_trades": [trade.__dict__ for trade in trades],
     }

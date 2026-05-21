@@ -26,6 +26,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from directional_options.calibration import load_calibrator
 from directional_options.schemas import ContractCandidate, DirectionalSignal, RiskDecision
 
 
@@ -38,6 +39,42 @@ MAX_ALLOCATION_CONFIDENCE = 0.85
 MIN_ALLOCATION_FRACTION = 0.5
 # Top of the curve at max_confidence — strongest signals scale to 1.5×.
 MAX_ALLOCATION_FRACTION = 1.5
+
+# Regime-level edge gate. Backtest on SENSEX (n=65) showed these expectancies
+# per regime (₹):
+#   exploration: +1,889 (n=27, wr 44.4%)
+#   trend:       -2,587 (n=29, wr 34.5%)
+#   breakout:   -11,100 (n=9,  wr 22.2%)
+# Until live data shows otherwise, block breakout and shrink trend allocation.
+REGIME_BLOCKED: set[str] = {"breakout"}
+REGIME_SIZE_MULTIPLIER: dict[str, float] = {
+    "exploration": 1.0,
+    "trend": 0.5,         # halve allocation in trend until edge proves out
+    "micro_trend": 0.7,
+    "breakout": 0.0,      # blocked entirely
+    "chop": 0.0,
+    "risk_off": 0.0,
+}
+
+# Delta-bucket gate. Backtest delta breakdown showed:
+#   convex (0.30-0.45 delta):  +2.88% (n=3)
+#   core   (0.45-0.55 delta):  -5.83% (n=56)  ← theta bleed on ATM
+#   deep   (>0.65 delta):      +9.89% (n=1)
+#   linear (0.55-0.65 delta):  -1.60% (n=3)
+#   lottery (<0.30 delta):    -29.65% (n=3)   ← user warning vindicated
+#
+# Lottery (deep OTM) is blocked outright. The signal/selector should not
+# even propose them at this point. Core gets a size multiplier <1 because
+# its sample dominates and is negative — but we can't block it (most
+# selector picks land here).
+DELTA_BUCKET_BLOCKED: set[str] = {"lottery"}
+DELTA_BUCKET_SIZE_MULTIPLIER: dict[str, float] = {
+    "convex": 1.2,    # small positive sample, modest oversize
+    "core":   0.7,    # dominant sample, negative — shrink
+    "deep":   1.1,    # tiny positive sample, neutral
+    "linear": 0.9,    # tiny mildly negative sample
+    "lottery": 0.0,   # blocked
+}
 
 
 class DirectionalOptionsRiskEngine:
@@ -63,12 +100,35 @@ class DirectionalOptionsRiskEngine:
         daily_realized: float = 0.0,
         weekly_realized: float = 0.0,
     ) -> RiskDecision:
-        # Scale base budgets by the signal's conviction. min_confidence comes
-        # from the signal engine config so the curve is anchored to the same
-        # cutoff used to filter signals upstream.
+        # Scale base budgets by the signal's CALIBRATED conviction.
+        # Raw confidence from the signal engine is uncalibrated and was
+        # shown by backtest to overstate win rate by ~37pp. We use an
+        # isotonic calibrator (fit on actual trade outcomes) to map raw
+        # confidence → realized P(win) before sizing. If no calibrator is
+        # loaded (first run, no history yet), fall back to raw.
         min_confidence = float(self.config.get("min_confidence", 0.58))
-        confidence = float(signal.confidence)
+        raw_confidence = float(signal.confidence)
+        calibrator = load_calibrator()
+        if calibrator is not None:
+            calibrated_conf = calibrator.predict(raw_confidence)
+        else:
+            calibrated_conf = raw_confidence
+        confidence = calibrated_conf
         scaler = self._confidence_multiplier(confidence, min_confidence)
+
+        # Apply regime-specific size multiplier. Backtest showed breakout
+        # regime trades have catastrophic expectancy (−₹11,100 avg, n=9);
+        # trend is mildly negative (−₹2,587, n=29); only exploration is
+        # positive (+₹1,889). Until live evidence updates this, gate sizing.
+        regime_label = str(signal.regime or "").lower()
+        regime_mult = REGIME_SIZE_MULTIPLIER.get(regime_label, 0.5)
+        scaler = scaler * regime_mult
+
+        # Apply delta-bucket size multiplier and gate.
+        delta_bucket = str(candidate.delta_bucket or "").lower()
+        delta_mult = DELTA_BUCKET_SIZE_MULTIPLIER.get(delta_bucket, 0.8)
+        scaler = scaler * delta_mult
+
         risk_budget = equity * float(self.config["risk_pct"]) * scaler
         premium_cap = equity * float(self.config["premium_cap_pct"]) * scaler
         planned_stop_pct = float(self.config["planned_stop_pct"])
@@ -83,6 +143,42 @@ class DirectionalOptionsRiskEngine:
         qty_lots = max(0, min(max_lots_by_risk, max_lots_by_premium))
 
         reasons: list[str] = []
+        # Delta-bucket block: lottery (deep OTM) trades averaged -29.65% in
+        # backtest — the "balance premium outgo and risk" rule the user
+        # called out.
+        if delta_bucket in DELTA_BUCKET_BLOCKED:
+            reasons.append(
+                f"Delta bucket '{delta_bucket}' is blocked at the lane level "
+                f"(backtest avg return was -29.65%). Re-enable after live "
+                f"evidence shows positive expectancy."
+            )
+            return RiskDecision(
+                approved=False,
+                quantity_lots=0,
+                quantity_units=0,
+                premium_at_risk=0.0,
+                max_loss=0.0,
+                risk_budget=round(risk_budget, 2),
+                premium_cap=round(premium_cap, 2),
+                reasons=reasons,
+            )
+        # Regime block: backtest expectancy was catastrophic in this regime.
+        if regime_label in REGIME_BLOCKED:
+            reasons.append(
+                f"Regime '{regime_label}' is blocked at the lane level "
+                f"(backtest expectancy was negative). Re-enable after live "
+                f"data shows positive expectancy."
+            )
+            return RiskDecision(
+                approved=False,
+                quantity_lots=0,
+                quantity_units=0,
+                premium_at_risk=0.0,
+                max_loss=0.0,
+                risk_budget=round(risk_budget, 2),
+                premium_cap=round(premium_cap, 2),
+                reasons=reasons,
+            )
         # Exploration / micro-trend sleeves are *learning bets*. We don't
         # demand positive expected edge from them — that's the whole point
         # of having a small-size lane that records outcomes so RAG can
