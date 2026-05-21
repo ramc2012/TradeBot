@@ -1,36 +1,42 @@
-"""Keep the broker WebSocket subscribed to current ATM option contracts.
+"""Pre-market option subscription manager — pick ATM strikes once,
+subscribe for the day, leave them alone.
 
-Phase 2 of the streaming refactor: extends data_router beyond the 5 spot
-index subscriptions so option premium ticks flow directly into
-live_candle_store via the existing global tick callback, eliminating
-the per-strategy REST polls that currently rebuild option premium
-candles.
+Rationale (corrected from the prior 5-min reconciliation design):
+
+  * Picking ATM is a SPARSE decision — once per session, anchored on
+    the pre-open / overnight spot. Re-picking every 5 minutes churns
+    the broker WebSocket and produces overlapping CE/PE histories
+    that confuse downstream MACD computation.
+
+  * Liquidity check happens at TRADE ENTRY, not at subscription time.
+    atm_watchlist's liquid-strike picker (±1 neighbour with 1.5×
+    volume lift) handles "this specific strike is too thin, pick the
+    next one" inside the strategy entry path. The subscription layer
+    just needs to make sure the candidate strikes are streaming.
+
+  * Subscription scope = ATM ± 1 strike per S2 underlying. Three
+    strikes × CE+PE × 5 indices = 30 contracts — comfortably under
+    Fyers WS limits and gives the strategy three liquid candidates
+    per side to choose from at trade time.
 
 Lifecycle:
-  - Runs on a 5-minute timer during NSE market hours
-  - Asks atm_watchlist for the current ATM strikes of each S2 underlying
-  - Picks ATM and ATM ± 1 strike (CE + PE) per underlying for the
-    nearest monthly expiry — that's 5 × 3 × 2 = 30 contracts, comfortably
-    under the Fyers WS limit
-  - Resolves each contract to the broker WebSocket symbol via the
-    option chain's `symbol` field (Fyers v3 exposes Fyers-WS-ready keys)
-  - Diffs against data_router._subscribed_symbols; calls add /
-    remove_subscriptions to apply the delta
+  - Backend startup during market hours: reconcile once immediately,
+    using the current spot as the ATM anchor.
+  - Scheduled daily at 09:05 IST: pick ATM strikes for the new
+    session based on the pre-open spot snapshot, reconcile WS subs.
+  - No mid-session reconcile — strikes locked for the day even as
+    spot moves. The strategy entry path picks the right strike from
+    the locked set.
 
-DISABLED BY DEFAULT — the env flag OPTION_WS_SUBSCRIPTIONS_ENABLED
-must be set to "1" / "true". Until then this module:
-  - Computes the desired ATM symbol set every cycle
-  - Logs what it WOULD subscribe / unsubscribe
-  - Does NOT call data_router
-
-This lets us verify the symbol-resolution logic against live broker
-responses during quiet hours before flipping the actual subscribe.
-Once stable, set OPTION_WS_SUBSCRIPTIONS_ENABLED=true in .env.
+Disabled by default behind OPTION_WS_SUBSCRIPTIONS_ENABLED. Until set
+to "true", the manager logs what it WOULD subscribe each session-open
+but does not call the broker WS.
 """
 from __future__ import annotations
 
 import asyncio
 import os
+from datetime import datetime, timedelta
 from typing import Any
 
 from loguru import logger
@@ -43,7 +49,18 @@ from paper_engine.base_strategy_agent import _now_ist
 
 # Subscription scope — keep tight to fit within Fyers WS limits.
 S2_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
-STRIKE_NEIGHBOURS = 1  # ATM ± 1 strike → 3 strikes per side
+
+# Session-open trigger time (IST). 09:05 sits between the BSE pre-open
+# auction and the regular session opening tick, giving us a spot anchor
+# from the broker without racing the very first market tick.
+SESSION_OPEN_PICK_HOUR = 9
+SESSION_OPEN_PICK_MINUTE = 5
+
+# Holds the option symbols we locked at the morning's session-open pick
+# so we don't re-pick mid-day even when the spot moves and atm_watchlist
+# starts returning a different ATM strike.
+_locked_option_symbols: set[str] = set()
+_locked_for_date: str | None = None
 
 
 def _is_enabled() -> bool:
@@ -54,32 +71,49 @@ def _is_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
-def _in_nse_hours() -> bool:
+def _market_hours_now() -> bool:
     now = _now_ist()
     if now.weekday() >= 5:
         return False
     minute_of_day = now.hour * 60 + now.minute
-    # Subscribe a bit before open and unsubscribe right at close.
     return 9 * 60 <= minute_of_day <= 15 * 60 + 35
 
 
-async def compute_desired_option_symbols() -> list[str]:
-    """Return the list of broker-WS-ready option symbols that data_router
-    should be subscribed to right now.
+def _next_session_open_pick() -> datetime:
+    """Return the next IST datetime at which we should re-pick ATM.
 
-    Pulled from atm_watchlist_service.get_watchlist (no extra broker
-    call) so we don't add latency. Each watchlist row has the CE/PE
-    side dicts that carry broker-resolved fields used by the existing
-    chain plumbing — we read `live_symbol` first since that's the
-    broker-WS-compatible key when populated, falling back to
-    `trading_symbol`.
+    Always SESSION_OPEN_PICK_HOUR:MM today if that's still in the future,
+    otherwise the same time on the next trading day.
+    """
+    now = _now_ist()
+    target = now.replace(
+        hour=SESSION_OPEN_PICK_HOUR,
+        minute=SESSION_OPEN_PICK_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if target <= now:
+        target = target + timedelta(days=1)
+    while target.weekday() >= 5:
+        target = target + timedelta(days=1)
+    return target
+
+
+async def compute_session_option_symbols() -> list[str]:
+    """Resolve the ATM±1 option symbols to subscribe for today's session.
+
+    Reads atm_watchlist (no extra broker call) which already knows each
+    underlying's nearest active expiry and its ATM-anchored CE/PE pair.
+    Falls back gracefully when a row is missing — we just skip that
+    underlying rather than block the whole pick.
     """
     desired: list[str] = []
     try:
         payload = await atm_watchlist_service.get_watchlist(live_refresh=False)
     except Exception as exc:
-        logger.warning(f"[OptionWS] watchlist load failed: {exc}")
+        logger.warning(f"[OptionWS] watchlist load failed during session pick: {exc}")
         return desired
+
     rows = payload.get("rows") or []
     by_underlying: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -88,8 +122,6 @@ async def compute_desired_option_symbols() -> list[str]:
         underlying = str(row.get("underlying") or "").upper()
         if underlying not in S2_UNDERLYINGS:
             continue
-        # Keep the first row per underlying — atm_watchlist already
-        # picks the nearest active expiry for us.
         by_underlying.setdefault(underlying, row)
 
     for underlying, row in by_underlying.items():
@@ -105,7 +137,7 @@ async def compute_desired_option_symbols() -> list[str]:
             if not broker_key:
                 continue
             desired.append(str(broker_key))
-    # Best-effort de-dup while preserving order.
+
     seen: set[str] = set()
     out: list[str] = []
     for sym in desired:
@@ -115,65 +147,83 @@ async def compute_desired_option_symbols() -> list[str]:
     return out
 
 
-async def reconcile_subscriptions() -> dict[str, Any]:
-    """Compute the desired symbol set + diff against the current data
-    router subscriptions. Returns a summary dict; only mutates the
-    router when OPTION_WS_SUBSCRIPTIONS_ENABLED is true.
+async def perform_session_open_pick() -> dict[str, Any]:
+    """One-shot at session open: pick today's option subscription set,
+    apply it to the broker WS, lock it for the rest of the day.
     """
-    enabled = _is_enabled()
-    in_hours = _in_nse_hours()
-    if not in_hours:
-        return {"enabled": enabled, "in_hours": False, "skipped": True}
+    global _locked_option_symbols, _locked_for_date
 
-    desired = await compute_desired_option_symbols()
-    current = set(data_router.data_router._subscribed_symbols)  # type: ignore[attr-defined]
-    # Only manage the option subset — never drop the spot subscriptions
-    # the live header / market profile / order flow rely on.
-    desired_set = set(desired)
-    to_add = [s for s in desired if s not in current]
-    to_remove = [
-        s for s in current
-        if s not in desired_set
-        and ":NIFTY" in s.upper()  # crude option filter — index option-symbol fragment
-        and "INDEX" not in s.upper()
-    ]
+    enabled = _is_enabled()
+    desired = await compute_session_option_symbols()
+    today_ist = _now_ist().strftime("%Y-%m-%d")
+
+    current_subs = set(data_router.data_router._subscribed_symbols)  # type: ignore[attr-defined]
+    # Manage only the option subset — never touch the spot index subs.
+    locked_to_drop = [s for s in _locked_option_symbols if s not in desired]
+    new_to_add = [s for s in desired if s not in current_subs]
+
     summary = {
         "enabled": enabled,
-        "in_hours": True,
+        "session_date": today_ist,
         "desired_count": len(desired),
-        "current_subs": len(current),
-        "to_add": to_add,
-        "to_remove": to_remove,
+        "current_subs": len(current_subs),
+        "to_add": new_to_add,
+        "to_remove_from_yesterday": locked_to_drop,
+        "applied": False,
     }
+
     if not enabled:
-        if to_add or to_remove:
-            logger.info(
-                f"[OptionWS] (dry-run) would add={len(to_add)} remove={len(to_remove)} "
-                f"sample_add={to_add[:3]} sample_remove={to_remove[:3]}"
-            )
+        logger.info(
+            f"[OptionWS] session-open pick (DRY-RUN) date={today_ist} "
+            f"desired={len(desired)} would_add={len(new_to_add)} "
+            f"yesterday_locked={len(_locked_option_symbols)} sample={desired[:4]}"
+        )
+        _locked_option_symbols = set(desired)
+        _locked_for_date = today_ist
         return summary
-    if to_remove:
-        await data_router.data_router.remove_subscriptions(to_remove)
-    if to_add:
-        await data_router.data_router.add_subscriptions(to_add)
+
+    if locked_to_drop:
+        await data_router.data_router.remove_subscriptions(locked_to_drop)
+    if new_to_add:
+        await data_router.data_router.add_subscriptions(new_to_add)
+
+    _locked_option_symbols = set(desired)
+    _locked_for_date = today_ist
     summary["applied"] = True
+    logger.info(
+        f"[OptionWS] session-open pick applied date={today_ist} "
+        f"locked={len(desired)} added={len(new_to_add)} removed={len(locked_to_drop)}"
+    )
     return summary
 
 
-async def run_subscription_loop(interval_seconds: int = 300) -> None:
-    """Long-running task that reconciles option WS subscriptions every N
-    seconds. Started from main.lifespan when the optional manager is
-    enabled, runs continuously while the backend is up.
+async def run_subscription_loop() -> None:
+    """Long-running task: pick once at session open daily, otherwise idle.
+
+    On backend startup mid-session, picks immediately so we don't wait
+    until tomorrow to start streaming options. Then sleeps until the
+    next 09:05 IST trigger and repeats.
     """
-    while True:
+    # If we boot during market hours, do the pick right now and bind
+    # the lock to today.
+    if _market_hours_now() and _locked_for_date != _now_ist().strftime("%Y-%m-%d"):
         try:
-            summary = await reconcile_subscriptions()
-            if summary.get("applied"):
-                logger.info(
-                    f"[OptionWS] reconciled: desired={summary['desired_count']} "
-                    f"added={len(summary.get('to_add') or [])} "
-                    f"removed={len(summary.get('to_remove') or [])}"
-                )
+            await perform_session_open_pick()
         except Exception as exc:
-            logger.warning(f"[OptionWS] reconcile cycle failed: {exc}")
-        await asyncio.sleep(max(interval_seconds, 60))
+            logger.warning(f"[OptionWS] startup session-open pick failed: {exc}")
+
+    while True:
+        next_pick_at = _next_session_open_pick()
+        sleep_seconds = max(60.0, (next_pick_at - _now_ist()).total_seconds())
+        logger.info(
+            f"[OptionWS] next session-open pick scheduled for "
+            f"{next_pick_at.isoformat()} (sleeping {int(sleep_seconds)}s)"
+        )
+        try:
+            await asyncio.sleep(sleep_seconds)
+        except asyncio.CancelledError:
+            raise
+        try:
+            await perform_session_open_pick()
+        except Exception as exc:
+            logger.warning(f"[OptionWS] scheduled session-open pick failed: {exc}")
