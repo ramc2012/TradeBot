@@ -142,10 +142,6 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-    command: >
-      sh -c "rm -rf .next &&
-             npm run build &&
-             npm run start"
     restart: unless-stopped
 
 volumes:
