@@ -98,11 +98,18 @@ async def ws_ticks(websocket: WebSocket, symbol: str):
         await _stream_tick_snapshot_fallback(websocket, symbol)
         return
 
+    last_payload: str | None = None
     try:
-        async for message in pubsub.listen():
-            if message["type"] == "message":
+        while _socket_is_connected(websocket):
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            if message and message["type"] == "message":
                 data = message["data"]
-                await websocket.send_text(data if isinstance(data, str) else data.decode())
+                payload = data if isinstance(data, str) else data.decode()
+            else:
+                payload = await _tick_snapshot_payload(symbol)
+            if payload != last_payload:
+                await websocket.send_text(payload)
+                last_payload = payload
     except WebSocketDisconnect:
         logger.info(f"[WS] Client disconnected from ticks:{symbol}")
     except Exception as e:
@@ -114,42 +121,46 @@ async def ws_ticks(websocket: WebSocket, symbol: str):
             pass
 
 
-async def _stream_tick_snapshot_fallback(websocket: WebSocket, symbol: str) -> None:
-    """Keep ticker clients fed when Redis pub/sub is unavailable."""
+async def _tick_snapshot_payload(symbol: str) -> str:
     from api.routers.market import _latest_index_tick_snapshot
     from market_data import data_router
 
+    snapshot = await _latest_index_tick_snapshot(
+        symbol,
+        data_router.get_ltp(symbol),
+        source="data_router",
+    )
+    return json.dumps(
+        {
+            "symbol": symbol,
+            "ltp": snapshot.ltp,
+            "open": snapshot.open,
+            "high": snapshot.high,
+            "low": snapshot.low,
+            "close": snapshot.close,
+            "volume": snapshot.volume,
+            "oi": snapshot.oi,
+            "timestamp": snapshot.timestamp or datetime.now(timezone.utc).isoformat(),
+            "source": snapshot.source,
+            "stale": snapshot.stale,
+            "stale_seconds": snapshot.stale_seconds,
+        },
+        separators=(",", ":"),
+    )
+
+
+async def _stream_tick_snapshot_fallback(websocket: WebSocket, symbol: str) -> None:
+    """Keep ticker clients fed when Redis pub/sub is unavailable."""
     last_payload: str | None = None
     try:
         while True:
-            snapshot = await _latest_index_tick_snapshot(
-                symbol,
-                data_router.get_ltp(symbol),
-                source="data_router",
-            )
-            payload = json.dumps(
-                {
-                    "symbol": symbol,
-                    "ltp": snapshot.ltp,
-                    "open": snapshot.open,
-                    "high": snapshot.high,
-                    "low": snapshot.low,
-                    "close": snapshot.close,
-                    "volume": snapshot.volume,
-                    "oi": snapshot.oi,
-                    "timestamp": snapshot.timestamp or datetime.now(timezone.utc).isoformat(),
-                    "source": snapshot.source,
-                    "stale": snapshot.stale,
-                    "stale_seconds": snapshot.stale_seconds,
-                },
-                separators=(",", ":"),
-            )
+            payload = await _tick_snapshot_payload(symbol)
             if not _socket_is_connected(websocket):
                 break
             if payload != last_payload:
                 await websocket.send_text(payload)
                 last_payload = payload
-            await asyncio.sleep(5)
+            await asyncio.sleep(1)
     except WebSocketDisconnect:
         logger.info(f"[WS] Client disconnected from fallback ticks:{symbol}")
     except Exception as exc:

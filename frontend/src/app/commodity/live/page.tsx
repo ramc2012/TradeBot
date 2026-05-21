@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ChevronDown, ChevronRight, CirclePlay, RefreshCcw, Save } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -14,7 +14,6 @@ import {
   getCommodityReports,
   getCommodityStrategyContracts,
   getCommodityWatchlistSnapshot,
-  getLatestTicks,
   runCommodityStrategyOnce,
   startCommodityStrategyAgent,
   updateCommodityStrategyContracts,
@@ -22,6 +21,7 @@ import {
 import {
   createCommodityOverviewSocket,
   createCommodityWatchlistSocket,
+  createTickSocket,
 } from "@/lib/websocket";
 
 const REFRESH_MS = 4_000;
@@ -301,6 +301,32 @@ function formatIST(iso: string | null | undefined): string {
   }
 }
 
+function formatTimeStamp(iso: string | null | undefined): string {
+  if (!iso) return "--";
+  try {
+    return new Date(iso).toLocaleTimeString("en-IN", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function tickAgeLabel(iso: string | null | undefined, staleSeconds?: number | null): string {
+  const explicitAge = Number(staleSeconds);
+  if (Number.isFinite(explicitAge) && explicitAge >= 0) {
+    return explicitAge < 60 ? `${Math.round(explicitAge)}s` : `${Math.round(explicitAge / 60)}m`;
+  }
+  if (!iso) return "--";
+  const time = new Date(iso).getTime();
+  if (!Number.isFinite(time)) return "--";
+  const seconds = Math.max(0, Math.round((Date.now() - time) / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.round(seconds / 60)}m`;
+}
+
 function trajectoryGlyph(t: Trajectory): string {
   if (t === "improving") return "▲";
   if (t === "deteriorating") return "▼";
@@ -372,6 +398,77 @@ function commodityTickKeys(row: WatchRow): string[] {
     .map((value) => String(value || "").trim().toUpperCase())
     .filter(Boolean);
   return Array.from(new Set(keys));
+}
+
+function normalizeTickSymbol(symbol: string | null | undefined): string {
+  return String(symbol || "").trim().toUpperCase();
+}
+
+function normalizeTickPayload(symbol: string, raw: unknown): LatestTickSnapshot | null {
+  const data = raw as Record<string, unknown>;
+  const ltp = Number(data.ltp ?? data.last_price ?? data.price ?? data.close);
+  if (!Number.isFinite(ltp) || ltp <= 0) return null;
+  return {
+    symbol: String(data.symbol || symbol),
+    ltp,
+    close: Number.isFinite(Number(data.close)) ? Number(data.close) : null,
+    stale: Boolean(data.stale),
+    stale_seconds: Number.isFinite(Number(data.stale_seconds)) ? Number(data.stale_seconds) : null,
+    timestamp: String(data.timestamp || data.time || new Date().toISOString()),
+    source: String(data.source || "tick_stream"),
+  };
+}
+
+function useCommodityTickStreams(symbols: string[]): {
+  ticks: Record<string, LatestTickSnapshot>;
+  symbolCount: number;
+} {
+  const [ticks, setTicks] = useState<Record<string, LatestTickSnapshot>>({});
+  const symbolKey = useMemo(
+    () => symbols.map(normalizeTickSymbol).filter(Boolean).sort().join("|"),
+    [symbols],
+  );
+
+  useEffect(() => {
+    const nextSymbols = symbolKey.split("|").filter(Boolean);
+    if (nextSymbols.length === 0) {
+      setTicks({});
+      return;
+    }
+
+    let active = true;
+    setTicks((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([symbol]) => nextSymbols.includes(symbol)),
+      ),
+    );
+    const sockets = nextSymbols.map((symbol) =>
+      createTickSocket(
+        symbol,
+        (raw) => {
+          if (!active) return;
+          const tick = normalizeTickPayload(symbol, raw);
+          if (!tick) return;
+          const keys = [symbol, normalizeTickSymbol(tick.symbol)].filter(Boolean);
+          setTicks((current) => {
+            const next = { ...current };
+            for (const key of keys) next[key] = tick;
+            return next;
+          });
+        },
+      ),
+    );
+
+    return () => {
+      active = false;
+      sockets.forEach((socket) => socket.close());
+    };
+  }, [symbolKey]);
+
+  return {
+    ticks,
+    symbolCount: symbolKey ? symbolKey.split("|").filter(Boolean).length : 0,
+  };
 }
 
 function overlayLiveTicks(rows: WatchRow[], ticks: Record<string, LatestTickSnapshot> | undefined): WatchRow[] {
@@ -768,6 +865,18 @@ function InstrumentWatchlist({
                         {(chg >= 0 ? "+" : "") + formatNumber(chg, 2)}
                       </div>
                     ) : null}
+                    {row.live_tick_time ? (
+                      <div
+                        className={`text-[9.5px] font-normal ${
+                          row.live_tick_stale_seconds != null && row.live_tick_stale_seconds > 10
+                            ? "text-amber-300"
+                            : "text-sky-300"
+                        }`}
+                        title={`${row.live_tick_source || "tick"} · ${formatIST(row.live_tick_time)}`}
+                      >
+                        LTP {formatTimeStamp(row.live_tick_time)} · {tickAgeLabel(row.live_tick_time, row.live_tick_stale_seconds)}
+                      </div>
+                    ) : null}
                   </td>
                   <td className={`${TDR} ${colorForDelta(row.change_pct)}`}>
                     {formatPct(row.change_pct, 2)}
@@ -943,6 +1052,12 @@ function InstrumentDetail({
           </dd>
           <dt className="text-text-muted">Prev close</dt>
           <dd className="text-right font-mono">{formatNumber(row.previous_close, 2)}</dd>
+          <dt className="text-text-muted">LTP stamp</dt>
+          <dd className="text-right font-mono text-[10px]">
+            {row.live_tick_time
+              ? `${formatTimeStamp(row.live_tick_time)} · ${tickAgeLabel(row.live_tick_time, row.live_tick_stale_seconds)}`
+              : "—"}
+          </dd>
           {row.configured_symbol && row.configured_symbol !== row.symbol ? (
             <>
               <dt className="text-text-muted">Configured</dt>
@@ -1561,13 +1676,7 @@ export default function CommodityLivePage() {
       ),
     [runtimeFuturesWatchlist],
   );
-  const liveTickQuery = useQuery({
-    queryKey: ["commodity-live", "latest-ticks", liveTickSymbols],
-    queryFn: async () => (await getLatestTicks(liveTickSymbols)).data as Record<string, LatestTickSnapshot>,
-    enabled: liveTickSymbols.length > 0,
-    refetchInterval: REFRESH_MS,
-    refetchIntervalInBackground: true,
-  });
+  const liveTickStream = useCommodityTickStreams(liveTickSymbols);
   const snapshotFuturesWatchlist = useMemo(
     () => (watchlistSnapshotQuery.data?.contract_catalog?.contracts ?? []).map(snapshotContractToWatchRow),
     [watchlistSnapshotQuery.data?.contract_catalog?.contracts],
@@ -1575,9 +1684,9 @@ export default function CommodityLivePage() {
   const watchlist = useMemo(
     () => overlayLiveTicks(
       runtimeFuturesWatchlist.length > 0 ? runtimeFuturesWatchlist : snapshotFuturesWatchlist,
-      liveTickQuery.data,
+      liveTickStream.ticks,
     ),
-    [liveTickQuery.data, runtimeFuturesWatchlist, snapshotFuturesWatchlist],
+    [liveTickStream.ticks, runtimeFuturesWatchlist, snapshotFuturesWatchlist],
   );
   const runtimeOptionWatchlist = useMemo(
     () => (status.option_watchlist ?? []) as WatchRow[],
@@ -1634,16 +1743,15 @@ export default function CommodityLivePage() {
   const loopActive = Boolean(status.loop_active);
   const usingSnapshotFutures = runtimeFuturesWatchlist.length === 0 && snapshotFuturesWatchlist.length > 0;
   const scanIntervalSeconds = Number(status.scan_interval_seconds ?? 30);
+  const hasLiveTicks = Object.keys(liveTickStream.ticks).length > 0;
   const feedState =
-    liveTickQuery.isFetching
-      ? "refreshing quotes"
-      : liveTickQuery.data
-        ? "quotes 4s"
-        : overviewQuery.hasSnapshot || watchlistSnapshotQuery.hasSnapshot
+    hasLiveTicks
+      ? `tick stream ${Object.keys(liveTickStream.ticks).length}/${liveTickStream.symbolCount || liveTickSymbols.length || 0}`
+      : overviewQuery.hasSnapshot || watchlistSnapshotQuery.hasSnapshot
           ? `scan ${scanIntervalSeconds}s`
           : "loading";
   const feedStateTone =
-    liveTickQuery.data || overviewQuery.isStreamConnected || watchlistSnapshotQuery.isStreamConnected
+    hasLiveTicks || overviewQuery.isStreamConnected || watchlistSnapshotQuery.isStreamConnected
       ? "bg-emerald-500/10 text-emerald-300"
       : overviewQuery.hasSnapshot || watchlistSnapshotQuery.hasSnapshot
         ? "bg-amber-500/10 text-amber-200"
@@ -1808,7 +1916,7 @@ export default function CommodityLivePage() {
               detail={
                 usingSnapshotFutures
                   ? "catalog fallback · scanner offline"
-                  : `${watchlist.length} futures · ${optionWatchlist.length} option pairs · quote poll 4s · scan ${scanIntervalSeconds}s`
+                  : `${watchlist.length} futures · ${optionWatchlist.length} option pairs · tick stream · scan ${scanIntervalSeconds}s`
               }
             >
               <InstrumentWatchlist futuresRows={watchlist} optionRows={optionWatchlist} />
