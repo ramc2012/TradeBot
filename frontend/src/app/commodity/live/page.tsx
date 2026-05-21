@@ -14,6 +14,7 @@ import {
   getCommodityReports,
   getCommodityStrategyContracts,
   getCommodityWatchlistSnapshot,
+  getLatestTicks,
   runCommodityStrategyOnce,
   startCommodityStrategyAgent,
   updateCommodityStrategyContracts,
@@ -47,6 +48,7 @@ type WatchRow = {
   display_name?: string | null;
   price?: number | null;
   previous_close?: number | null;
+  change?: number | null;
   change_pct?: number | null;
   macd?: number | null;
   macd_signal?: number | null;
@@ -71,6 +73,9 @@ type WatchRow = {
   signal_side?: string | null;
   trade_bar_time?: string | null;
   trade_symbol?: string | null;
+  live_tick_source?: string | null;
+  live_tick_time?: string | null;
+  live_tick_stale_seconds?: number | null;
   ce?: Record<string, unknown> | null;
   pe?: Record<string, unknown> | null;
 };
@@ -134,6 +139,16 @@ type CommodityPosition = {
   option_type?: string | null;
   strike?: number | null;
   expiry?: string | null;
+};
+
+type LatestTickSnapshot = {
+  symbol?: string | null;
+  ltp?: number | null;
+  close?: number | null;
+  stale?: boolean | null;
+  stale_seconds?: number | null;
+  timestamp?: string | null;
+  source?: string | null;
 };
 
 type AuditEvent = {
@@ -345,6 +360,39 @@ function snapshotContractToWatchRow(contract: CommoditySnapshotContract): WatchR
     trajectory: "stalled",
     bucket_rationale: detail,
   };
+}
+
+function commodityTickKeys(row: WatchRow): string[] {
+  const keys = [
+    row.symbol,
+    row.active_lookup_symbol,
+    row.selected_lookup_symbol,
+    row.configured_symbol,
+  ]
+    .map((value) => String(value || "").trim().toUpperCase())
+    .filter(Boolean);
+  return Array.from(new Set(keys));
+}
+
+function overlayLiveTicks(rows: WatchRow[], ticks: Record<string, LatestTickSnapshot> | undefined): WatchRow[] {
+  if (!ticks || rows.length === 0) return rows;
+  return rows.map((row) => {
+    const tick = commodityTickKeys(row)
+      .map((key) => ticks[key])
+      .find((candidate) => candidate && Number(candidate.ltp || 0) > 0 && !candidate.stale);
+    if (!tick || Number(tick.ltp || 0) <= 0) return row;
+    const price = Number(tick.ltp);
+    const previousClose = Number(row.previous_close || 0);
+    return {
+      ...row,
+      price,
+      change: previousClose > 0 ? price - previousClose : row.change,
+      change_pct: previousClose > 0 ? ((price - previousClose) / previousClose) * 100 : row.change_pct,
+      live_tick_source: tick.source,
+      live_tick_time: tick.timestamp,
+      live_tick_stale_seconds: tick.stale_seconds,
+    } as WatchRow;
+  });
 }
 
 function enrichFuturesRowsWithActiveContracts(
@@ -1502,13 +1550,34 @@ export default function CommodityLivePage() {
     () => enrichFuturesRowsWithActiveContracts((status.futures_watchlist ?? status.watchlist ?? []) as WatchRow[], contracts),
     [contracts, status.futures_watchlist, status.watchlist],
   );
+  const liveTickSymbols = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          runtimeFuturesWatchlist
+            .flatMap(commodityTickKeys)
+            .filter((symbol) => symbol.startsWith("MCX:")),
+        ),
+      ),
+    [runtimeFuturesWatchlist],
+  );
+  const liveTickQuery = useQuery({
+    queryKey: ["commodity-live", "latest-ticks", liveTickSymbols],
+    queryFn: async () => (await getLatestTicks(liveTickSymbols)).data as Record<string, LatestTickSnapshot>,
+    enabled: liveTickSymbols.length > 0,
+    refetchInterval: REFRESH_MS,
+    refetchIntervalInBackground: true,
+  });
   const snapshotFuturesWatchlist = useMemo(
     () => (watchlistSnapshotQuery.data?.contract_catalog?.contracts ?? []).map(snapshotContractToWatchRow),
     [watchlistSnapshotQuery.data?.contract_catalog?.contracts],
   );
   const watchlist = useMemo(
-    () => (runtimeFuturesWatchlist.length > 0 ? runtimeFuturesWatchlist : snapshotFuturesWatchlist),
-    [runtimeFuturesWatchlist, snapshotFuturesWatchlist],
+    () => overlayLiveTicks(
+      runtimeFuturesWatchlist.length > 0 ? runtimeFuturesWatchlist : snapshotFuturesWatchlist,
+      liveTickQuery.data,
+    ),
+    [liveTickQuery.data, runtimeFuturesWatchlist, snapshotFuturesWatchlist],
   );
   const runtimeOptionWatchlist = useMemo(
     () => (status.option_watchlist ?? []) as WatchRow[],
