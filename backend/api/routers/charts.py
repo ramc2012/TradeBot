@@ -160,14 +160,60 @@ def _compute_bollinger(values: list[float], period: int = 20, num_std: float = 2
     return upper, middle, lower
 
 
-def _aggregate_to_timeframe(rows: list[dict[str, Any]], minutes: int) -> list[dict[str, Any]]:
+def _is_in_market_session(ts_ist: datetime, market: str) -> bool:
+    """Drop out-of-session bars before they make it into the chart.
+
+    underlying_spot_candles can contain stray after-hours / pre-open 1-min
+    rows (synthetic ticks, late broker prints, post-close session writes).
+    Aggregating those into 30-min buckets produces degenerate degenerate
+    O/H/L/C-all-equal bars that show up as visual gaps on the chart.
+    Filter to the relevant exchange's regular session before bucketing.
+    """
+    # Weekends — exchanges closed.
+    if ts_ist.weekday() >= 5:
+        return False
+    minute_of_day = ts_ist.hour * 60 + ts_ist.minute
+    if market == "MCX":
+        # MCX: 09:00 - 23:30 IST
+        return 9 * 60 <= minute_of_day <= 23 * 60 + 30
+    # Default: NSE/BSE equities + indices — 09:15 - 15:30 IST
+    return 9 * 60 + 15 <= minute_of_day <= 15 * 60 + 30
+
+
+def _aggregate_to_timeframe(
+    rows: list[dict[str, Any]],
+    minutes: int,
+    *,
+    market: str = "NSE",
+) -> list[dict[str, Any]]:
     """Aggregate 1-minute bars to the requested timeframe boundary.
 
-    Bucket key = bar-open floored to N-minute IST boundary. Within each
-    bucket: open = first, high = max, low = min, close = last, volume = sum.
+    Bucket key = bar-open floored to N-minute IST boundary inside the
+    regular session. Within each bucket: open = first, high = max,
+    low = min, close = last, volume = sum. Bars outside session hours
+    (e.g. NIFTY 19:30 IST) are dropped before bucketing — see
+    _is_in_market_session.
     """
     if minutes <= 1:
-        return rows
+        # Filter even the 1-min passthrough so non-session ticks don't
+        # paint phantom candles on a 1-min view.
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            ts = row.get("time")
+            if ts is None:
+                continue
+            if isinstance(ts, str):
+                try:
+                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            ts_ist = ts.astimezone(IST)
+            if not _is_in_market_session(ts_ist, market):
+                continue
+            out.append(row)
+        return out
     buckets: dict[datetime, dict[str, Any]] = {}
     order: list[datetime] = []
     for row in rows:
@@ -182,6 +228,8 @@ def _aggregate_to_timeframe(rows: list[dict[str, Any]], minutes: int) -> list[di
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         ts_ist = ts.astimezone(IST)
+        if not _is_in_market_session(ts_ist, market):
+            continue
         bucket_minute = (ts_ist.minute // minutes) * minutes
         bucket_start = ts_ist.replace(minute=bucket_minute, second=0, microsecond=0)
         if bucket_start not in buckets:
@@ -212,6 +260,10 @@ async def _load_underlying_spot(
 ) -> list[dict[str, Any]]:
     """Pull underlying_spot_candles and aggregate to the requested timeframe."""
     minutes = {"15minute": 15, "30minute": 30, "60minute": 60}.get(timeframe, 30)
+    # MCX commodities trade until 23:30 IST; everything else stays on the
+    # NSE/BSE 09:15-15:30 window. Used to filter phantom out-of-session
+    # 1-min rows so the chart doesn't show degenerate 19:30 / 08:00 bars.
+    market = "MCX" if underlying in _COMMODITY_UNDERLYINGS else "NSE"
     # Pull enough 1-min history to cover the lookback in trading hours. ~7
     # hours/day = 420 bars/day; pad to cover weekends.
     days_back = max(lookback_sessions * 2 + 7, 14)
@@ -232,7 +284,9 @@ async def _load_underlying_spot(
         )
         rows = [dict(row._mapping) for row in result.fetchall()]
         if len(rows) >= 30:
-            return rows
+            # Even pre-aggregated rows can include after-hours synthetic
+            # ticks — filter to session before returning.
+            return _aggregate_to_timeframe(rows, 1, market=market)
 
         # Fall back to 1-minute and aggregate.
         result = await session.execute(
@@ -249,7 +303,7 @@ async def _load_underlying_spot(
             {"underlying": underlying, "days": days_back},
         )
         one_min_rows = [dict(row._mapping) for row in result.fetchall()]
-    return _aggregate_to_timeframe(one_min_rows, minutes)
+    return _aggregate_to_timeframe(one_min_rows, minutes, market=market)
 
 
 async def _load_trade_markers(
