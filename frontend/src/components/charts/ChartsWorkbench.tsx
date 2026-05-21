@@ -140,6 +140,8 @@ function ChartsWorkbench() {
     queryKey: ["chart-ohlc", selected, timeframe, lookback],
     queryFn: async () => (await getChartOHLC(selected, timeframe, lookback)).data,
     refetchInterval: 30_000,
+    staleTime: 25_000,
+    refetchOnWindowFocus: false,
     enabled: Boolean(selected),
   });
 

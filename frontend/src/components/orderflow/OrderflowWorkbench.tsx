@@ -966,8 +966,8 @@ export default function OrderflowWorkbench() {
       const response = await getOrderflowSnapshot(selectedSymbol, "3,5,15,30", 5);
       return response.data as OrderflowSnapshot;
     },
-    refetchInterval: 15_000,
-    staleTime: 8_000,
+    refetchInterval: 30_000,
+    staleTime: 25_000,
     retry: 1,
   });
 

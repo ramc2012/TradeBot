@@ -12,6 +12,7 @@ a strategy fired where it was supposed to without reading two charts.
 from __future__ import annotations
 
 import math
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -27,6 +28,15 @@ from db.database import AsyncSessionLocal
 router = APIRouter(prefix="/api/charts", tags=["charts"])
 
 IST = ZoneInfo("Asia/Kolkata")
+
+# Server-side response cache. The chart endpoint pulls 17 days of 1-min
+# bars (~7k rows) and aggregates + computes 8 indicator series — about
+# 100-200ms per call. The frontend polls every 30s. Without a cache,
+# multiple tabs open on the same instrument multiply that load on the
+# backend's async loop for no benefit. 25s TTL is short enough that
+# the user sees a fresh bar within one polling cycle.
+_OHLC_CACHE: dict[tuple[str, str, int], tuple[float, dict[str, Any]]] = {}
+_OHLC_CACHE_TTL = 25.0
 
 # Strategy color palette matches what the frontend uses for trade markers.
 STRATEGY_COLORS: dict[str, str] = {
@@ -394,6 +404,12 @@ async def chart_ohlc(
     if not underlying:
         raise HTTPException(status_code=400, detail="underlying is required")
 
+    cache_key = (underlying, timeframe, lookback_sessions)
+    now_mono = time.monotonic()
+    cached = _OHLC_CACHE.get(cache_key)
+    if cached and (now_mono - cached[0]) < _OHLC_CACHE_TTL:
+        return cached[1]
+
     bars_raw = await _load_underlying_spot(underlying, lookback_sessions, timeframe)
     if not bars_raw:
         return {
@@ -442,7 +458,7 @@ async def chart_ohlc(
         until = datetime.now(timezone.utc)
     trades = await _load_trade_markers(underlying, since=since, until=until)
 
-    return {
+    response = {
         "underlying": underlying,
         "timeframe": timeframe,
         "bar_count": len(bars),
@@ -460,3 +476,10 @@ async def chart_ohlc(
         "trades": trades,
         "strategy_colors": STRATEGY_COLORS,
     }
+    _OHLC_CACHE[cache_key] = (now_mono, response)
+    # Lazy eviction: keep at most ~50 entries so the dict doesn't grow
+    # unbounded as users browse the dropdown.
+    if len(_OHLC_CACHE) > 50:
+        oldest_key = min(_OHLC_CACHE.items(), key=lambda kv: kv[1][0])[0]
+        _OHLC_CACHE.pop(oldest_key, None)
+    return response
