@@ -23,6 +23,12 @@ class DataRouter:
         self._broker: Optional[BrokerAdapter] = None
         self._ws_client: Any = None
         self._subscribed_symbols: List[str] = []
+        # Sticky extras — symbols that the OptionWS subscription manager
+        # (or any future per-strategy subscriber) pins onto the broker
+        # WS regardless of who calls subscribe() afterward. Without this
+        # set, a spot-only resync from auth / _sync_market_data_feed
+        # would wipe a previously-applied option subscription.
+        self._sticky_extras: set[str] = set()
         self._callbacks: Dict[str, List[Callable[[Tick], None]]] = {}
         self._global_callbacks: List[Callable[[Tick], None]] = []
         self._tick_buffer: Dict[str, Tick] = {}  # latest tick per symbol
@@ -53,45 +59,61 @@ class DataRouter:
         await self.stop_mock_feed()
         await self.unsubscribe()
         self._loop = asyncio.get_running_loop()
-        self._subscribed_symbols = symbols
+        # Merge in any sticky extras (e.g. option contracts pinned by the
+        # OptionWS subscription manager). Without this the broker-session
+        # refresh path that periodically resyncs spot indices would wipe
+        # out a previously-applied option subscription set.
+        sticky_extras = [s for s in getattr(self, "_sticky_extras", set()) if s not in symbols]
+        full_set = list(symbols) + sticky_extras
+        self._subscribed_symbols = full_set
         broker_name = getattr(self._broker, "broker_name", "")
         if broker_name == "fyers":
-            broker_symbols = [to_fyers_symbol(symbol) for symbol in symbols]
+            broker_symbols = [to_fyers_symbol(symbol) for symbol in full_set]
         else:
-            broker_symbols = [to_broker_symbol(symbol) for symbol in symbols]
+            broker_symbols = [to_broker_symbol(symbol) for symbol in full_set]
         self._ws_client = await self._broker.subscribe_websocket(
             broker_symbols, self._on_tick
         )
-        logger.info(f"[DataRouter] Subscribed to {len(symbols)} symbols")
+        logger.info(
+            f"[DataRouter] Subscribed to {len(full_set)} symbols "
+            f"(primary={len(symbols)} sticky={len(sticky_extras)})"
+        )
 
     async def add_subscriptions(self, symbols: List[str]) -> int:
         """Append symbols to the WebSocket subscription (idempotent).
 
-        Today implemented as a full re-subscribe with the merged set —
-        the broker WS adapters in this codebase don't yet expose an
-        incremental subscribe API. Returns the count of newly added
-        symbols (zero when all are already subscribed).
+        Each added symbol is also pinned into _sticky_extras so a later
+        spot-only resync from the broker auth flow doesn't drop them.
+        Returns the count of newly added symbols.
         """
         new = [s for s in symbols if s and s not in self._subscribed_symbols]
         if not new:
             return 0
-        merged = list(self._subscribed_symbols) + new
-        await self.subscribe(merged)
-        logger.info(f"[DataRouter] Added {len(new)} subscriptions (total {len(merged)})")
+        for s in new:
+            self._sticky_extras.add(s)
+        # subscribe() will re-merge sticky_extras into the broker call.
+        # Pass the current PRIMARY symbol set as the explicit list so
+        # subscribe doesn't accidentally drop spots when the caller is
+        # an add path. We compute primary as anything currently
+        # subscribed that isn't a sticky extra.
+        primary = [s for s in self._subscribed_symbols if s not in self._sticky_extras]
+        await self.subscribe(primary)
+        logger.info(f"[DataRouter] Added {len(new)} sticky subscriptions")
         return len(new)
 
     async def remove_subscriptions(self, symbols: List[str]) -> int:
         """Drop symbols from the subscription (idempotent).
 
-        Mirrors add_subscriptions — re-subscribes with the reduced set.
-        Returns the count actually removed.
+        Un-sticks each symbol so it can be removed cleanly.
         """
-        drop = {s for s in symbols if s in self._subscribed_symbols}
+        drop = {s for s in symbols if s in self._sticky_extras or s in self._subscribed_symbols}
         if not drop:
             return 0
-        remaining = [s for s in self._subscribed_symbols if s not in drop]
-        await self.subscribe(remaining)
-        logger.info(f"[DataRouter] Removed {len(drop)} subscriptions (total {len(remaining)})")
+        for s in drop:
+            self._sticky_extras.discard(s)
+        primary = [s for s in self._subscribed_symbols if s not in self._sticky_extras and s not in drop]
+        await self.subscribe(primary)
+        logger.info(f"[DataRouter] Removed {len(drop)} subscriptions")
         return len(drop)
 
     async def unsubscribe(self):
