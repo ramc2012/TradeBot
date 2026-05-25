@@ -171,15 +171,16 @@ class S1Auditor:
         ).mappings().all()
 
         # Live signal_bar_time is the wall-clock moment the snapshot was
-        # captured (e.g. 03:46:12) — NOT aligned to the 30-min bar boundary.
-        # Replay keys use the bar-close time (03:45:00). Floor live to the
-        # owning 30-min bar so the subset check can actually compare them.
+        # captured (e.g. 09:44:38). NSE option 30-min bars are anchored to
+        # :15 and :45 (09:15, 09:45, 10:15, ...). Floor live timestamps to
+        # the *owning* :15/:45 bar so keys align with replay's bar-close
+        # times that come from option_premium_candles.time.
         def _floor_30m(ts) -> str:
-            # ts is a tz-aware datetime; floor to nearest 30-min boundary,
-            # preserving timezone for ISO formatting.
-            mins = (ts.minute // 30) * 30
-            floored = ts.replace(minute=mins, second=0, microsecond=0)
-            return floored.isoformat()
+            shifted = ts - timedelta(minutes=15)
+            floor_min = (shifted.minute // 30) * 30
+            floored = shifted.replace(minute=floor_min, second=0, microsecond=0)
+            aligned = floored + timedelta(minutes=15)
+            return aligned.isoformat()
 
         # Key must match ReplaySignal.key() — see audits/replay.py.
         live_keys = [
