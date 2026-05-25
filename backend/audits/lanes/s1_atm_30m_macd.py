@@ -170,14 +170,25 @@ class S1Auditor:
             )
         ).mappings().all()
 
+        # Live signal_bar_time is the wall-clock moment the snapshot was
+        # captured (e.g. 03:46:12) — NOT aligned to the 30-min bar boundary.
+        # Replay keys use the bar-close time (03:45:00). Floor live to the
+        # owning 30-min bar so the subset check can actually compare them.
+        def _floor_30m(ts) -> str:
+            # ts is a tz-aware datetime; floor to nearest 30-min boundary,
+            # preserving timezone for ISO formatting.
+            mins = (ts.minute // 30) * 30
+            floored = ts.replace(minute=mins, second=0, microsecond=0)
+            return floored.isoformat()
+
+        # Key must match ReplaySignal.key() — see audits/replay.py.
         live_keys = [
             (
-                r["signal_bar_time"].replace(microsecond=0).isoformat(),
+                _floor_30m(r["signal_bar_time"]),
                 r["underlying"],
                 str(r["expiry"]),
                 round(float(r["strike"]), 2),
                 r["option_type"],
-                _normalize_reason(r["signal_reason"]),
             )
             for r in live_rows
         ]

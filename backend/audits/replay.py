@@ -23,14 +23,17 @@ class ReplaySignal:
     premium: float
 
     def key(self) -> tuple:
-        # Canonical key for diffing — must match what live recorder hashes on.
+        # Canonical key for diffing. signal_type is intentionally NOT in the
+        # key — the (bar_time, underlying, expiry, strike, option_type) tuple
+        # already uniquely identifies a contract+bar event. Live recorder
+        # uses generic "MACD_ZERO_CROSS" while replay computes explicit
+        # UP/DOWN; the option_type field captures direction either way.
         return (
             self.bar_time.replace(microsecond=0).isoformat(),
             self.underlying,
             self.expiry,
             round(self.strike, 2),
             self.option_type,
-            self.signal_type,
         )
 
 
