@@ -244,8 +244,19 @@ def _load_credentials_from_database() -> dict:
     return payload
 
 
+_credentials_ddl_applied = False  # one-shot: skip CREATE TABLE after first success
+
+
 def _load_credentials_payload_from_database() -> tuple[dict, datetime | None]:
-    """Load broker credentials and the row timestamp from Postgres when available."""
+    """Load broker credentials and the row timestamp from Postgres when available.
+
+    SYNCHRONOUS psycopg2 call — DO NOT invoke directly from an async handler;
+    use `await asyncio.to_thread(_load_credentials_payload_from_database)`
+    instead so the asyncio event loop stays free. Calling it directly from
+    `async def` causes whole-process latency spikes (other endpoints, websocket
+    pings, scheduled tasks all stall while psycopg2 blocks).
+    """
+    global _credentials_ddl_applied
     db_url = _database_url_for_credentials()
     if not db_url:
         return {}, None
@@ -253,15 +264,17 @@ def _load_credentials_payload_from_database() -> tuple[dict, datetime | None]:
     try:
         conn = _connect_credentials_db(db_url)
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS app_runtime_state (
-                    state_key TEXT PRIMARY KEY,
-                    payload JSONB NOT NULL,
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            if not _credentials_ddl_applied:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS app_runtime_state (
+                        state_key TEXT PRIMARY KEY,
+                        payload JSONB NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
                 )
-                """
-            )
+                _credentials_ddl_applied = True
             cur.execute(
                 "SELECT payload, updated_at FROM app_runtime_state WHERE state_key = %s",
                 (_CREDENTIAL_STORE_DB_KEY,),
@@ -596,7 +609,12 @@ def load_persistent_credentials() -> None:
 
 
 def refresh_persistent_credentials(force: bool = False) -> None:
-    """Refresh in-memory credentials from the durable store when another instance updated them."""
+    """Refresh in-memory credentials from the durable store when another instance updated them.
+
+    SYNCHRONOUS — safe from sync code paths and scripts. For async request
+    handlers use `refresh_persistent_credentials_async()` so the underlying
+    psycopg2 call doesn't block the event loop.
+    """
     global _credentials_db_checked_at_monotonic, _credentials_db_updated_at, _broker_credentials
 
     now = monotonic()
@@ -604,6 +622,37 @@ def refresh_persistent_credentials(force: bool = False) -> None:
         return
 
     db_creds, updated_at = _load_credentials_payload_from_database()
+    _credentials_db_checked_at_monotonic = now
+    if not db_creds:
+        return
+    if not force and updated_at is not None and _credentials_db_updated_at is not None and updated_at <= _credentials_db_updated_at:
+        return
+
+    merged_store: dict[str, dict[str, Any]] = dict(_broker_credentials)
+    for broker, values in db_creds.items():
+        existing = merged_store.get(broker, {})
+        merged_store[broker] = {**existing, **dict(values or {})}
+    _broker_credentials = _merge_explicit_env_credentials(merged_store)
+    _broker_credentials, _ = _normalize_broker_credentials(_broker_credentials)
+    for broker, creds in _broker_credentials.items():
+        _apply_credentials_to_settings(broker, creds)
+    _credentials_db_updated_at = updated_at
+
+
+async def refresh_persistent_credentials_async(force: bool = False) -> None:
+    """Async-safe variant — the actual psycopg2 work runs in a thread so the
+    asyncio event loop is not blocked. Use from async request handlers.
+
+    The cache short-circuit fast-path avoids the thread hop entirely when the
+    TTL has not elapsed, so this is essentially free on the steady-state path.
+    """
+    global _credentials_db_checked_at_monotonic, _credentials_db_updated_at, _broker_credentials
+
+    now = monotonic()
+    if not force and (now - _credentials_db_checked_at_monotonic) < _CREDENTIAL_REFRESH_TTL_SECONDS:
+        return
+
+    db_creds, updated_at = await asyncio.to_thread(_load_credentials_payload_from_database)
     _credentials_db_checked_at_monotonic = now
     if not db_creds:
         return
@@ -697,7 +746,7 @@ def _has_saved_fyers_refresh_material() -> bool:
 
 
 async def _refresh_fyers_session_from_saved_credentials() -> bool:
-    refresh_persistent_credentials(force=True)
+    await refresh_persistent_credentials_async(force=True)
     fyers_creds = _broker_credentials.get("fyers", {})
     refresh_token = str(fyers_creds.get("refresh_token") or "").strip()
     pin = str(fyers_creds.get("pin") or settings.FYERS_PIN or "").strip()
@@ -735,7 +784,7 @@ def _next_upstox_expiry_ist(now_utc: datetime) -> datetime:
 
 
 async def get_upstox_token_health(force: bool = False) -> dict:
-    refresh_persistent_credentials(force=force)
+    await refresh_persistent_credentials_async(force=force)
     upstox_creds = _broker_credentials.get("upstox", {})
     active_token = _get_active_session_access_token("upstox")
     analytics_token = str(upstox_creds.get("analytics_token", "")).strip()
@@ -821,7 +870,7 @@ async def get_upstox_token_health(force: bool = False) -> dict:
 
 
 async def get_fyers_token_health(force: bool = False) -> dict:
-    refresh_persistent_credentials(force=force)
+    await refresh_persistent_credentials_async(force=force)
     fyers_creds = _broker_credentials.get("fyers", {})
     active_token = _get_active_session_access_token("fyers")
     saved_token = str(fyers_creds.get("access_token", "")).strip()
@@ -928,7 +977,7 @@ async def get_broker_connection_snapshot(force_validate: bool = False) -> dict[s
             if isinstance(cached, dict) and float(_broker_snapshot_cache.get("expires_at") or 0.0) > monotonic():
                 return dict(cached)
 
-        refresh_persistent_credentials(force=force_validate)
+        await refresh_persistent_credentials_async(force=force_validate)
         step_timeout = (
             _BROKER_SNAPSHOT_FORCE_TIMEOUT_SECONDS
             if force_validate
@@ -1040,7 +1089,7 @@ async def ensure_upstox_session(force_validate: bool = False) -> bool:
     clears `_active_brokers` even though credentials.json still contains a valid
     Upstox access token.
     """
-    refresh_persistent_credentials(force=force_validate)
+    await refresh_persistent_credentials_async(force=force_validate)
     with _active_brokers_lock:
         info = _active_brokers.get("upstox")
     if info:
@@ -1121,7 +1170,7 @@ async def ensure_fyers_session(force_validate: bool = False) -> bool:
     during the same trading day we can usually reuse the saved token until it
     naturally expires.
     """
-    refresh_persistent_credentials(force=force_validate)
+    await refresh_persistent_credentials_async(force=force_validate)
     with _active_brokers_lock:
         info = _active_brokers.get("fyers")
     if info:
@@ -1301,7 +1350,7 @@ async def save_credentials(req: SaveCredentialsRequest):
     Persisted to the durable store and local dev file fallback.
     Also pushed into live settings immediately.
     """
-    refresh_persistent_credentials()
+    await refresh_persistent_credentials_async()
     if req.broker not in BROKER_MAP:
         raise HTTPException(400, f"Unknown broker: {req.broker}")
 
@@ -1355,7 +1404,7 @@ async def get_credentials_status(broker: str):
     Return which credential fields are saved for a broker.
     Values are never returned — only field names and presence.
     """
-    refresh_persistent_credentials()
+    await refresh_persistent_credentials_async()
     if broker not in BROKER_MAP:
         raise HTTPException(400, f"Unknown broker: {broker}")
     creds = _broker_credentials.get(broker, {})
@@ -1384,7 +1433,7 @@ async def get_credentials_status(broker: str):
 @router.get("/all-credentials-status")
 async def all_credentials_status():
     """Return credential field presence for all brokers at once."""
-    refresh_persistent_credentials()
+    await refresh_persistent_credentials_async()
     result = {}
     for broker in BROKER_MAP:
         creds = _broker_credentials.get(broker, {})
@@ -1411,7 +1460,7 @@ async def websocket_token():
 
 @router.get("/telegram-settings")
 async def get_telegram_settings():
-    refresh_persistent_credentials(force=True)
+    await refresh_persistent_credentials_async(force=True)
     saved = _broker_credentials.get("telegram", {})
     return {
         "bot_token_saved": bool(saved.get("bot_token")),
@@ -1424,7 +1473,7 @@ async def get_telegram_settings():
 
 @router.post("/telegram-discover-chats")
 async def telegram_discover_chats(req: TelegramChatLookupRequest):
-    refresh_persistent_credentials()
+    await refresh_persistent_credentials_async()
     saved = _broker_credentials.get("telegram", {})
     bot_token = (req.bot_token or saved.get("bot_token") or "").strip()
     if not bot_token:
@@ -1475,7 +1524,7 @@ async def telegram_discover_chats(req: TelegramChatLookupRequest):
 
 @router.post("/telegram-settings")
 async def save_telegram_settings(req: TelegramSettingsRequest):
-    refresh_persistent_credentials()
+    await refresh_persistent_credentials_async()
     saved = _broker_credentials.get("telegram", {})
     merged = {
         **saved,
@@ -1502,7 +1551,7 @@ async def save_telegram_settings(req: TelegramSettingsRequest):
 
 @router.post("/telegram-test")
 async def send_telegram_test(req: TelegramTestRequest):
-    refresh_persistent_credentials(force=True)
+    await refresh_persistent_credentials_async(force=True)
     saved = _broker_credentials.get("telegram", {})
     bot_token = str(saved.get("bot_token") or "").strip()
     chat_id = str(saved.get("chat_id") or "").strip()
@@ -1542,7 +1591,7 @@ async def send_telegram_test(req: TelegramTestRequest):
 @router.post("/connect-broker")
 async def connect_broker(req: ConnectBrokerRequest):
     """Authenticate with a broker and store session."""
-    refresh_persistent_credentials(force=True)
+    await refresh_persistent_credentials_async(force=True)
     if req.broker not in BROKER_MAP:
         raise HTTPException(400, f"Unknown broker: {req.broker}")
 
@@ -1580,7 +1629,7 @@ async def disconnect_broker(broker: str):
 
 @router.get("/broker-status")
 async def broker_status(force_validate: bool = Query(False)):
-    refresh_persistent_credentials(force=False)
+    await refresh_persistent_credentials_async(force=False)
     snapshot = await get_broker_connection_snapshot(force_validate=force_validate)
     ready_brokers = set(snapshot.get("connected_brokers") or [])
     session_brokers = set(snapshot.get("session_brokers") or [])
@@ -1856,12 +1905,12 @@ def get_active_adapter(broker: Optional[str] = None):
     return None
 
 
-def get_broker_token(broker: str) -> Optional[str]:
+def get_broker_token(broker: str, *, allow_analytics_token: bool = True) -> Optional[str]:
     """Return the access token string for an active broker session or saved token."""
     with _active_brokers_lock:
         info = _active_brokers.get(broker)
     def _saved_token() -> Optional[str]:
-        if broker == "upstox":
+        if broker == "upstox" and allow_analytics_token:
             analytics_token = str(_broker_credentials.get("upstox", {}).get("analytics_token", "")).strip()
             if analytics_token:
                 return analytics_token

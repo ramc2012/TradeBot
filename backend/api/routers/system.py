@@ -545,10 +545,8 @@ async def system_health() -> dict[str, Any]:
             meta={"version": "1.0.0", "generated_at": now_utc.isoformat()},
         )
 
-        postgres_service = await _postgres_service()
-        redis_service = await _redis_service()
+        # Sync helpers run first (cheap, no I/O).
         research_sync_service = _research_sync_service(now_utc)
-        broker_service = await _broker_service(now_utc)
         market_service = _market_data_service()
         nse_strategy_service, nse_lanes = _strategy_service(
             key="nse_strategy",
@@ -560,8 +558,23 @@ async def system_health() -> dict[str, Any]:
             label="Commodity Strategy Supervisor",
             status=commodity_strategy_agent.get_status(),
         )
-        auction_service = await _auction_service()
-        fractal_market_profile_service = await _fractal_market_profile_service()
+
+        # Async checks run in parallel. Previously they were sequential awaits,
+        # multiplying the worst-case latency by the number of services. With
+        # gather the wall time becomes max(per-service) instead of sum.
+        (
+            postgres_service,
+            redis_service,
+            broker_service,
+            auction_service,
+            fractal_market_profile_service,
+        ) = await asyncio.gather(
+            _postgres_service(),
+            _redis_service(),
+            _broker_service(now_utc),
+            _auction_service(),
+            _fractal_market_profile_service(),
+        )
 
         services = [
             backend_service,
