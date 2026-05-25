@@ -26,6 +26,7 @@ from api.routers import charts as charts_router
 from api.routers import system as system_router
 from api.routers import audit as audit_router
 from api.routers import data_quality as data_quality_router
+from api.routers import lane_health as lane_health_router
 from api.routers import notifications as notifications_router
 from directional_options import mount_directional_options_dashboard
 from directional_options.service import directional_options_service
@@ -271,6 +272,7 @@ app.include_router(charts_router.router)
 app.include_router(system_router.router)
 app.include_router(audit_router.router)
 app.include_router(data_quality_router.router)
+app.include_router(lane_health_router.router)
 app.include_router(notifications_router.router)
 
 

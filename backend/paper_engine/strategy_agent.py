@@ -4313,9 +4313,9 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             return None
 
     async def _send_telegram_text(self, message: str) -> None:
-        from api.routers.auth import refresh_persistent_credentials
+        from api.routers.auth import refresh_persistent_credentials_async
 
-        refresh_persistent_credentials()
+        await refresh_persistent_credentials_async()
         if not settings.TELEGRAM_REPORTS_ENABLED:
             return
         if not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_CHAT_ID:
@@ -4332,9 +4332,9 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             logger.warning(f"[Strategy] Telegram failed: {exc}")
 
     async def _maybe_send_telegram_report(self) -> None:
-        from api.routers.auth import refresh_persistent_credentials
+        from api.routers.auth import refresh_persistent_credentials_async
 
-        refresh_persistent_credentials()
+        await refresh_persistent_credentials_async()
         if not settings.TELEGRAM_REPORTS_ENABLED or not settings.TELEGRAM_BOT_TOKEN:
             return
         now = _now_ist()

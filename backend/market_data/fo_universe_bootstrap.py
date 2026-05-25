@@ -12,7 +12,7 @@ from analysis.backtest import MACDBacktester
 from api.routers.auth import (
     ensure_upstox_session,
     get_broker_token,
-    refresh_persistent_credentials,
+    refresh_persistent_credentials_async,
 )
 from db.database import AsyncSessionLocal
 
@@ -130,7 +130,7 @@ async def ensure_fo_underlying_catalog(
             }
             return _last_bootstrap_result
 
-        refresh_persistent_credentials(force=True)
+        await refresh_persistent_credentials_async(force=True)
         await ensure_upstox_session(force_validate=True)
         token = str(get_broker_token("upstox") or "").strip()
         if not token:
