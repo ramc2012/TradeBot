@@ -183,23 +183,33 @@ class S1Auditor:
         ]
 
         diff = diff_signal_sets(replay_signals, live_keys)
+        # Semantics:
+        #   live ⊆ replay  → every live signal must have a precursor zero-cross.
+        #     If a live signal has no zero-cross precursor, the live recorder is
+        #     emitting on a different basis than the documented S1 logic; that
+        #     is a real bug.
+        #   replay ⊃ live  → expected. Live applies further filter gates
+        #     (window, expiry buffer, IV cap, spot-MA, regime, etc.) that pure
+        #     replay does not. The DIFF (replay − live) should be explained by
+        #     the gate_attribution invariant (count of signal_blocked events).
+        live_not_in_replay = diff["missing_from_replay"]  # live with no zero-cross
+        replay_not_in_live = diff["missing_from_live"]    # zero-crosses live filtered
+        subset_ok = len(live_not_in_replay) == 0
         detail = {
             "replay_signals": len(replay_signals),
             "live_signals": len(live_rows),
             "match_count": diff["match_count"],
-            "mismatches": {
-                "missing_from_live": diff["missing_from_live"][:50],
-                "missing_from_replay": diff["missing_from_replay"][:50],
-            },
-            "note": "one-sided: only contracts with live signals are replayed",
+            "live_without_zero_cross_precursor": live_not_in_replay[:50],
+            "zero_crosses_live_filtered_out_count": len(replay_not_in_live),
+            "zero_crosses_live_filtered_out_sample": replay_not_in_live[:25],
+            "note": (
+                "subset check: live ⊆ replay. Excess in replay is expected "
+                "(live applies extra gates; cross-check via gate_attribution)."
+            ),
         }
         if len(replay_signals) == 0 and len(live_rows) == 0:
             return InvariantResult(name="replay_parity", status="na", detail=detail)
-        status = (
-            "pass"
-            if not diff["missing_from_live"] and not diff["missing_from_replay"]
-            else "fail"
-        )
+        status = "pass" if subset_ok else "fail"
         return InvariantResult(name="replay_parity", status=status, detail=detail)
 
     async def _load_candles(self, underlying, expiry, strike, opt, ws, we) -> pd.DataFrame:

@@ -334,10 +334,16 @@ class StrategyEntryMixin:
         snapshot_state = await self._load_strategy1_recent_snapshot_state(rows)
         persist_observation = getattr(self, "_persist_agent_signal_observation", None)
 
-        def _tally(reason: str) -> None:
+        def _tally(reason: str, row: Optional[dict] = None) -> None:
             """Bump per-cycle rejection counter for silent-skip paths that
             never reach persist_raw_signal. This is what surfaces in the
-            status payload's last_run_summary.blocked_reasons."""
+            status payload's last_run_summary.blocked_reasons.
+
+            Also emits a `signal_blocked` row into agent_audit_events so the
+            lane-audit framework's `gate_attribution` invariant can measure
+            *which* gate is doing the blocking. The audit emit is fire-and-
+            forget — failures never raise.
+            """
             summary = runtime.last_run_summary if isinstance(runtime.last_run_summary, dict) else {}
             if not isinstance(runtime.last_run_summary, dict):
                 runtime.last_run_summary = summary
@@ -346,17 +352,40 @@ class StrategyEntryMixin:
             reasons = summary.setdefault("blocked_reasons", {})
             reasons[reason[:80]] = int(reasons.get(reason[:80]) or 0) + 1
 
+            # Fire-and-forget audit emit. Lazy-imported to keep the entry
+            # hot-path import-time cheap and avoid a circular dep.
+            try:
+                from agentic_rag.audit_agent import record_audit_event_sync
+
+                payload: dict[str, Any] = {"gate": reason[:80]}
+                if isinstance(row, dict):
+                    if row.get("expiry"):
+                        payload["expiry"] = str(row["expiry"])
+                    if row.get("strike") is not None:
+                        payload["strike"] = row["strike"]
+                record_audit_event_sync(
+                    market="NSE",
+                    strategy_key=runtime.key,
+                    event_type="signal_blocked",
+                    underlying=(row or {}).get("underlying") if isinstance(row, dict) else None,
+                    severity="debug",
+                    message=f"signal blocked by gate '{reason}'",
+                    payload=payload,
+                )
+            except Exception:  # noqa: BLE001 — audit must never break trading
+                pass
+
         for row in rows:
             underlying = row.get("underlying", "")
             expiry_str = row.get("expiry", "")
 
             if underlying in EXCLUDED_UNDERLYINGS:
-                _tally("excluded_underlying")
+                _tally("excluded_underlying", row)
                 continue
 
             window = window_map.get(underlying)
             if not window:
-                _tally("no_active_window")
+                _tally("no_active_window", row)
                 continue
 
             # Instrument selection (which expiry, which strike) is the
@@ -380,14 +409,14 @@ class StrategyEntryMixin:
                     # snapshot block). Tally the rejection through the
                     # always-available _tally helper instead — same outcome
                     # for the status-payload counter, no UnboundLocalError.
-                    _tally("expiry_day_skip_t0")
+                    _tally("expiry_day_skip_t0", row)
                     continue
 
             if expiry_str:
                 try:
                     opt_expiry = date.fromisoformat(expiry_str)
                     if (opt_expiry - _now_ist().date()).days < 3:
-                        _tally("expiry_within_3_days")
+                        _tally("expiry_within_3_days", row)
                         continue
                 except (ValueError, TypeError):
                     pass
@@ -395,7 +424,7 @@ class StrategyEntryMixin:
             ce_side = row.get("ce")
             pe_side = row.get("pe")
             if not ce_side and not pe_side:
-                _tally("missing_both_sides")
+                _tally("missing_both_sides", row)
                 continue
 
             # Tolerant of single-side rows. The broker option chain for some
@@ -407,7 +436,7 @@ class StrategyEntryMixin:
             ce_macd = ce_snapshot.get("current_macd") if ce_side else None
             pe_macd = pe_snapshot.get("current_macd") if pe_side else None
             if ce_macd is None and pe_macd is None:
-                _tally("no_macd_values")
+                _tally("no_macd_values", row)
                 continue
 
             ce_cross = (
@@ -433,14 +462,14 @@ class StrategyEntryMixin:
                 regime_name = REGIME_BEARISH
                 expected_mp_direction = "PE"
             else:
-                _tally("no_fresh_macd_cross")
+                _tally("no_fresh_macd_cross", row)
                 continue
             quadrant = SimpleNamespace(regime=regime_name)
             self._regime_cache[underlying] = quadrant
 
             latest_bar_time = str(side_snapshot.get("latest_bar_time") or "")
             if not latest_bar_time:
-                _tally("no_latest_bar_time")
+                _tally("no_latest_bar_time", row)
                 continue
 
             strength = abs(float(side_snapshot.get("current_macd") or 0.0))
