@@ -20,6 +20,21 @@ if TYPE_CHECKING:
     from paper_engine.strategy_agent import PaperStrategyAgent
 
 
+def _atr_from_closes(closes: list[float], period: int = 14) -> Optional[float]:
+    """Close-to-close ATR proxy: mean absolute first-difference over the last
+    `period` bars. We don't have OHL per option premium bar in the in-memory
+    closes list, so this is a tight upper-bound on true ATR — fine as a
+    trailing-stop floor where we want some sensitivity but not over-reaction.
+    """
+    if not closes or len(closes) < 2:
+        return None
+    window = closes[-(period + 1):]
+    diffs = [abs(window[i] - window[i - 1]) for i in range(1, len(window))]
+    if not diffs:
+        return None
+    return sum(diffs) / len(diffs)
+
+
 class StrategyExitMixin:
     async def _manage_exits(
         self: "PaperStrategyAgent",
@@ -151,7 +166,25 @@ class StrategyExitMixin:
 
             if pos.phase in (self.PHASE_2, self.PHASE_TRAILING) and return_pct >= EXIT.trail_activation_pct:
                 pos.phase = self.PHASE_TRAILING
-                pos.trailing_stop = _round_or_none(pos.peak_price * (1.0 - EXIT.trail_drawdown_pct / 100.0), 2)
+                # Trail floor = MAX of:
+                #   • peak × (1 − trail_drawdown_pct/100)  — % giveback floor
+                #   • peak − trail_atr_multiplier × premium_ATR(14)  — abs giveback floor
+                # Mirrors the commodity NG playbook which uses max(ATR×1.25,
+                # risk_distance). The higher of the two becomes the stop.
+                pct_floor = pos.peak_price * (1.0 - EXIT.trail_drawdown_pct / 100.0)
+                premium_atr = _atr_from_closes(closes) if closes else None
+                atr_floor = (
+                    pos.peak_price - (premium_atr * EXIT.trail_atr_multiplier)
+                    if premium_atr and premium_atr > 0
+                    else None
+                )
+                if atr_floor is not None:
+                    new_stop = max(pct_floor, atr_floor)
+                else:
+                    new_stop = pct_floor
+                # Stops can only ratchet UP, never down.
+                if pos.trailing_stop is None or new_stop > pos.trailing_stop:
+                    pos.trailing_stop = _round_or_none(new_stop, 2)
 
             ma20_pullback = bool(pos.phase == self.PHASE_TRAILING and option_ma20 is not None and latest_close <= option_ma20)
             if ma20_pullback:

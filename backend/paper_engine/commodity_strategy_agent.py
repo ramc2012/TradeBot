@@ -84,6 +84,12 @@ FUTURES_CONTINUATION_LOOKBACK_BARS = 12
 FUTURES_CONTINUATION_BREAKOUT_LOOKBACK = 4
 FUTURES_TRAIL_ATR_MULTIPLIER = 1.25
 FUTURES_BREAK_EVEN_R_MULTIPLIER = 1.0
+# NEW: intermediate stage between BE (1R) and full target arm (2R).
+# At +1.5R, lock half-R of profit (stop moves to entry ± 0.5R). Rescues
+# trades that retrace from +1.5R back to BE — currently a common loss mode.
+# The 21 May NATURALGAS SELL @ 290.05 → exit @ 275.14 trail_stop (+18,647)
+# is the pattern we're trying to make more frequent.
+FUTURES_PARTIAL_LOCK_R_MULTIPLIER = 1.5
 FUTURES_TARGET_ARM_R_MULTIPLIER = 2.0
 FUTURES_MIN_STOP_PCT = 0.005
 COMMODITY_DAILY_LOSS_LIMIT = 25_000.0
@@ -753,6 +759,9 @@ class CommodityPositionState:
     initial_qty: int
     peak_price: float
     target_reached: bool = False
+    # True once price hits +1.5R and stop has been moved to lock +0.5R.
+    # Idempotent — set once per position so the lock can't be re-armed.
+    partial_lock_armed: bool = False
     expiry: Optional[str] = None
     strike: Optional[float] = None
     option_type: Optional[str] = None
@@ -1020,6 +1029,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     initial_qty=int(row.get("initial_qty") or raw_qty),
                     peak_price=float(row.get("peak_price") or row.get("current_price") or row.get("entry_price") or 0.0),
                     target_reached=bool(row.get("target_reached", False)),
+                    partial_lock_armed=bool(row.get("partial_lock_armed", False)),
                     expiry=row.get("expiry"),
                     strike=float(row["strike"]) if row.get("strike") is not None else None,
                     option_type=row.get("option_type"),
@@ -3021,6 +3031,24 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                         favorable_move = current_price - position.entry_price
                         if favorable_move >= risk_distance * FUTURES_BREAK_EVEN_R_MULTIPLIER:
                             position.stop_price = max(position.stop_price, round(position.entry_price, 2))
+                        # +1.5R intermediate lock: stop = entry + 0.5R. Activates
+                        # before full target_reached so trades retracing from
+                        # +1.5R back toward entry exit with locked profit
+                        # instead of break-even.
+                        if (
+                            not position.target_reached
+                            and not position.partial_lock_armed
+                            and favorable_move >= risk_distance * FUTURES_PARTIAL_LOCK_R_MULTIPLIER
+                        ):
+                            position.partial_lock_armed = True
+                            position.stop_price = max(
+                                position.stop_price,
+                                round(position.entry_price + (risk_distance * 0.5), 2),
+                            )
+                            self._append_commentary(
+                                "info",
+                                f"{position.display_name}: 1.5R partial lock armed (+0.5R secured).",
+                            )
                         if not position.target_reached and position.target_price is not None and current_price >= position.target_price:
                             position.target_reached = True
                             position.stop_price = max(
@@ -3039,6 +3067,21 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                         favorable_move = position.entry_price - current_price
                         if favorable_move >= risk_distance * FUTURES_BREAK_EVEN_R_MULTIPLIER:
                             position.stop_price = min(position.stop_price, round(position.entry_price, 2))
+                        # +1.5R intermediate lock — SELL side.
+                        if (
+                            not position.target_reached
+                            and not position.partial_lock_armed
+                            and favorable_move >= risk_distance * FUTURES_PARTIAL_LOCK_R_MULTIPLIER
+                        ):
+                            position.partial_lock_armed = True
+                            position.stop_price = min(
+                                position.stop_price,
+                                round(position.entry_price - (risk_distance * 0.5), 2),
+                            )
+                            self._append_commentary(
+                                "info",
+                                f"{position.display_name}: 1.5R partial lock armed (+0.5R secured).",
+                            )
                         if not position.target_reached and position.target_price is not None and current_price <= position.target_price:
                             position.target_reached = True
                             position.stop_price = min(

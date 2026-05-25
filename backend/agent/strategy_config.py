@@ -117,8 +117,15 @@ class ExitConfig:
     target_exit_fraction: float = 0.50  # fraction of position to exit at target
 
     # Layer 2: Runner (remaining 50%)
-    trail_activation_pct: float = 100.0   # activate trail after +100%
-    trail_drawdown_pct: float = 20.0      # exit on 20% drop from peak
+    # Was 100% activation — most runners decayed back before reaching it.
+    # 60% mirrors the commodity playbook's "arm trail at +1.5R" idea
+    # translated into option-premium %: typical ATM option risk_distance is
+    # ~40% of entry premium, so +60% corresponds to roughly +1.5R favorable
+    # move on the option side. Then the 25% giveback floor + ATR-points
+    # floor (max of the two) protects both relative and absolute drawdown.
+    trail_activation_pct: float = 60.0    # arm trail after +60% (was 100)
+    trail_drawdown_pct: float = 25.0      # exit on 25% drop from peak (was 20)
+    trail_atr_multiplier: float = 1.5     # NEW: ATR-points floor: peak - 1.5×ATR
     macd_death_min_profit_pct: float = 30.0  # MACD reversal exit only after +30%
 
     # Layer 3: Hard stop
