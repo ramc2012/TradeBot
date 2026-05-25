@@ -199,9 +199,14 @@ class S1Auditor:
             "replay_signals": len(replay_signals),
             "live_signals": len(live_rows),
             "match_count": diff["match_count"],
-            "live_without_zero_cross_precursor": live_not_in_replay[:50],
-            "zero_crosses_live_filtered_out_count": len(replay_not_in_live),
-            "zero_crosses_live_filtered_out_sample": replay_not_in_live[:25],
+            # `mismatches` key is what base.to_db_row reads into the
+            # replay_mismatches jsonb column. We pack the subset-check
+            # findings under that key so the dashboard can render them.
+            "mismatches": {
+                "live_without_zero_cross_precursor": live_not_in_replay[:50],
+                "zero_crosses_live_filtered_out_count": len(replay_not_in_live),
+                "zero_crosses_live_filtered_out_sample": replay_not_in_live[:25],
+            },
             "note": (
                 "subset check: live ⊆ replay. Excess in replay is expected "
                 "(live applies extra gates; cross-check via gate_attribution)."
