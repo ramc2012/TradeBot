@@ -74,6 +74,11 @@ BACKEND_ROOT = Path(__file__).resolve().parent.parent
 PAPER_ROOT = BACKEND_ROOT / "runtime" / "fractal_market_profile"
 REPLAY_ROOT = PAPER_ROOT / "replays"
 
+# Notional paper-account capital. The summary surface reports total_equity,
+# available_capital, and drawdown against this anchor so cross-strategy
+# comparisons match S1/S2/Commodity (all ₹10L).
+FMP_INITIAL_CAPITAL = 1_000_000.0
+
 
 def analytics_root() -> Path:
     return BACKEND_ROOT / "runtime" / "index_analytics_data"

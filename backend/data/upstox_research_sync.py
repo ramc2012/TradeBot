@@ -133,6 +133,7 @@ class SyncSummary:
     underlyings_synced: int = 0
     expiries_discovered: int = 0
     contracts_discovered: int = 0
+    contract_discovery_skipped: int = 0
     spot_candles_stored: int = 0
     selection_spots_refreshed: int = 0
     option_candles_stored: int = 0
@@ -542,7 +543,34 @@ class UpstoxResearchSync:
             return "pending", None
         return "skipped", self.PRIORITY_SKIP_REASON
 
-    async def _discover_contracts(self, limit: int) -> tuple[int, int]:
+    @staticmethod
+    def _is_expired_contract_discovery_auth_error(exc: UpstoxAuthError) -> bool:
+        return str(exc).startswith("Expired contracts API rejected the Upstox token")
+
+    async def _mark_contract_discovery_skipped(
+        self,
+        *,
+        underlying: str,
+        expiry: date,
+    ) -> None:
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                text("""
+                    UPDATE fo_expiry_catalog
+                    SET contracts_discovered_at = NOW(),
+                        contract_count = 0,
+                        updated_at = NOW()
+                    WHERE underlying = :underlying
+                      AND expiry = :expiry
+                """),
+                {
+                    "underlying": underlying,
+                    "expiry": expiry,
+                },
+            )
+            await session.commit()
+
+    async def _discover_contracts(self, limit: int) -> tuple[int, int, int]:
         discovery_cutoff = self._expired_contract_discovery_to_date()
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -577,6 +605,7 @@ class UpstoxResearchSync:
 
         discovered_expiries = 0
         contract_rows = 0
+        skipped_expiries = 0
         for row in rows:
             underlying = row.underlying
             expiry = row.expiry
@@ -588,6 +617,18 @@ class UpstoxResearchSync:
             try:
                 contracts = await self.client._fetch_expired_contracts(underlying, expiry)
             except UpstoxAuthError as exc:
+                if self._is_expired_contract_discovery_auth_error(exc):
+                    logger.warning(
+                        "Skipping expired-contract discovery for "
+                        f"{underlying} {expiry}: {exc}"
+                    )
+                    await self._mark_contract_discovery_skipped(
+                        underlying=underlying,
+                        expiry=expiry,
+                    )
+                    discovered_expiries += 1
+                    skipped_expiries += 1
+                    continue
                 logger.error(
                     f"Stopping contract discovery because Upstox authentication failed: {exc}"
                 )
@@ -676,7 +717,7 @@ class UpstoxResearchSync:
                 f"Discovered {len(payload)} contracts for {underlying} {expiry}"
             )
 
-        return discovered_expiries, contract_rows
+        return discovered_expiries, contract_rows, skipped_expiries
 
     async def _reprioritize_contract_backlog(self, expiry_limit: Optional[int] = None) -> int:
         limit_clause = ""
@@ -1486,7 +1527,11 @@ class UpstoxResearchSync:
                 f"({backlog_before['pending_contracts']} pending > focus threshold)."
             )
         else:
-            discovered_expiries, summary.contracts_discovered = await self._discover_contracts(
+            (
+                discovered_expiries,
+                summary.contracts_discovered,
+                summary.contract_discovery_skipped,
+            ) = await self._discover_contracts(
                 limit=expiry_limit
             )
         await self._reprioritize_contract_backlog()

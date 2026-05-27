@@ -78,6 +78,28 @@ type WatchRow = {
   live_tick_stale_seconds?: number | null;
   ce?: Record<string, unknown> | null;
   pe?: Record<string, unknown> | null;
+  // Order-flow + MP-extension fields published by the commodity agent's
+  // _analyze_futures_symbol (see backend/paper_engine/commodity_strategy_agent.py).
+  cvd_latest?: number | null;
+  cvd_session?: number | null;
+  cvd_window_delta?: number | null;
+  cvd_agrees?: boolean | null;
+  vwap?: number | null;
+  vwap_upper?: number | null;
+  vwap_lower?: number | null;
+  cvd_divergence?: { kind?: string; strength?: number } | null;
+  hvn_count?: number | null;
+  lvn_count?: number | null;
+  ib_extended_above?: boolean | null;
+  ib_extended_below?: boolean | null;
+  ib_extension_pct?: number | null;
+  mp_direction?: string | null;
+  // Core Market Profile levels — critical for mean-reversion entries.
+  mp_poc?: number | null;
+  mp_vah?: number | null;
+  mp_val?: number | null;
+  mp_ib_high?: number | null;
+  mp_ib_low?: number | null;
 };
 
 type CommoditySnapshotContract = {
@@ -271,6 +293,15 @@ function formatPct(n: number | null | undefined, decimals = 2): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "--";
   const sign = n > 0 ? "+" : "";
   return `${sign}${Number(n).toFixed(decimals)}%`;
+}
+
+function formatSigned(n: number | null | undefined, decimals = 0): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return "--";
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${Number(n).toLocaleString("en-IN", {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  })}`;
 }
 
 function timeframeLabel(value: unknown, fallback: string): string {
@@ -893,8 +924,39 @@ function InstrumentWatchlist({
                   <td className="px-2 py-1.5 align-middle text-[10.5px] uppercase text-text-secondary">
                     {regimeShort(row.regime)}
                   </td>
-                  <td className="px-2 py-1.5 align-middle text-[10.5px] uppercase text-text-secondary">
-                    {mpShort(row.mp_day_type || row.mp_status)}
+                  <td className="px-2 py-1.5 align-middle text-[10.5px] text-text-secondary" title="Market Profile day type · price position vs Value Area · POC level">
+                    {(() => {
+                      const px = row.price != null ? Number(row.price) : null;
+                      const poc = row.mp_poc != null ? Number(row.mp_poc) : null;
+                      const vah = row.mp_vah != null ? Number(row.mp_vah) : null;
+                      const val = row.mp_val != null ? Number(row.mp_val) : null;
+                      // Zone vs Value Area — a key mean-reversion signal.
+                      let zone: "above" | "inside" | "below" | null = null;
+                      if (px != null && vah != null && val != null) {
+                        zone = px > vah ? "above" : px < val ? "below" : "inside";
+                      }
+                      const zoneLabel =
+                        zone === "above" ? "↑VAH" : zone === "below" ? "↓VAL" : zone === "inside" ? "in VA" : null;
+                      const zoneClr =
+                        zone === "above"
+                          ? "text-emerald-300"
+                          : zone === "below"
+                            ? "text-rose-300"
+                            : "text-text-muted";
+                      return (
+                        <div>
+                          <div className="uppercase">{mpShort(row.mp_day_type || row.mp_status)}</div>
+                          {poc != null ? (
+                            <div className="mt-0.5 font-mono text-[10px] text-text-muted">
+                              POC {formatNumber(poc, poc >= 1000 ? 0 : 2)}
+                            </div>
+                          ) : null}
+                          {zoneLabel ? (
+                            <div className={`mt-0.5 font-mono text-[10px] ${zoneClr}`}>{zoneLabel}</div>
+                          ) : null}
+                        </div>
+                      );
+                    })()}
                   </td>
                   <td className="px-2 py-1.5 align-middle text-[10.5px] uppercase text-text-secondary">
                     {sigShort(sigVal)}
@@ -1032,6 +1094,54 @@ function InstrumentDetail({
   const ceVol = Number(ce?.volume ?? 0);
   const peVol = Number(pe?.volume ?? 0);
 
+  // Order-flow + MP-extension snapshot derived from the new backend
+  // fields. None of these affect existing logic — they only render in
+  // the expanded drawer.
+  const vwap = row.vwap;
+  const price = row.price;
+  const vwapDelta = price != null && vwap != null ? Number(price) - Number(vwap) : null;
+  const vwapPct = vwapDelta != null && vwap ? (vwapDelta / Number(vwap)) * 100 : null;
+  const cvdSession = row.cvd_session;
+  const cvdWindow = row.cvd_window_delta;
+  const cvdAgrees = row.cvd_agrees;
+  const cvdDiv = row.cvd_divergence;
+  const ibPct = row.ib_extension_pct;
+  const ibDir = row.ib_extended_above ? "up" : row.ib_extended_below ? "down" : "inside";
+  const hvn = row.hvn_count;
+  const lvn = row.lvn_count;
+  const mpDir = row.mp_direction;
+
+  // ── Value-Area mean-reversion context ────────────────────────────
+  // Mean-reversion entries are strongest when price has rejected outside
+  // value (above VAH or below VAL) and is rotating back toward the POC.
+  const px = price != null ? Number(price) : null;
+  const poc = row.mp_poc != null ? Number(row.mp_poc) : null;
+  const vah = row.mp_vah != null ? Number(row.mp_vah) : null;
+  const val = row.mp_val != null ? Number(row.mp_val) : null;
+  const ibH = row.mp_ib_high != null ? Number(row.mp_ib_high) : null;
+  const ibL = row.mp_ib_low != null ? Number(row.mp_ib_low) : null;
+  // Zone vs VA
+  let vaZone: "above" | "inside" | "below" | null = null;
+  if (px != null && vah != null && val != null) {
+    vaZone = px > vah ? "above" : px < val ? "below" : "inside";
+  }
+  // Distance from key levels (signed, as % of price for readability)
+  const distPocPct = px != null && poc ? ((px - poc) / poc) * 100 : null;
+  const distVahPct = px != null && vah ? ((px - vah) / vah) * 100 : null;
+  const distValPct = px != null && val ? ((px - val) / val) * 100 : null;
+  // Mean-reversion hint: above VAH or below VAL + CVD divergence is the
+  // classic exhaustion setup. Inside VA = no mean-revert edge.
+  const meanRevHint =
+    vaZone === "above" && cvdDiv?.kind === "bearish"
+      ? { dir: "short", target: poc, why: "above VAH + bearish CVD divergence → revert toward POC" }
+      : vaZone === "below" && cvdDiv?.kind === "bullish"
+        ? { dir: "long", target: poc, why: "below VAL + bullish CVD divergence → revert toward POC" }
+        : vaZone === "above"
+          ? { dir: "watch", target: vah, why: "extended above VAH — watch for rejection back to VAH/POC" }
+          : vaZone === "below"
+            ? { dir: "watch", target: val, why: "extended below VAL — watch for reclaim of VAL/POC" }
+            : null;
+
   return (
     <div className="grid grid-cols-12 gap-3">
       {/* Futures stats column */}
@@ -1070,8 +1180,160 @@ function InstrumentDetail({
           <dd className="text-right font-mono text-[10px]">{formatIST(row.bar_time)}</dd>
         </dl>
       </div>
+      {/* Order flow + MP extension column */}
+      <div className="col-span-12 lg:col-span-3">
+        <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-amber-300/80" title="Bar-level CVD, anchored VWAP, Initial Balance extension, and volume-by-price clusters. The CVD-agreement gate uses these.">
+          Flow · MP ext
+        </div>
+
+        {/* Value-area block — critical for mean-reversion entries */}
+        {(poc != null || vah != null || val != null) ? (
+          <div className="mt-1.5 rounded-md border border-bg-active/30 bg-bg-secondary/20 px-2 py-1.5">
+            <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.14em] text-text-muted">
+              <span>Value Area</span>
+              {vaZone ? (
+                <span
+                  className={
+                    vaZone === "above"
+                      ? "text-emerald-300"
+                      : vaZone === "below"
+                        ? "text-rose-300"
+                        : "text-sky-300"
+                  }
+                  title={
+                    vaZone === "above"
+                      ? "Price above VAH — overbought relative to today's value"
+                      : vaZone === "below"
+                        ? "Price below VAL — oversold relative to today's value"
+                        : "Price inside Value Area — balanced"
+                  }
+                >
+                  {vaZone === "above" ? "↑ above VA" : vaZone === "below" ? "↓ below VA" : "inside VA"}
+                </span>
+              ) : null}
+            </div>
+            <dl className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
+              <dt className="text-text-muted">POC</dt>
+              <dd className="text-right font-mono">
+                {poc != null ? formatNumber(poc, poc >= 1000 ? 2 : 2) : "—"}
+                {distPocPct != null ? (
+                  <span className={`ml-1 text-[10px] ${distPocPct > 0 ? "text-emerald-300" : distPocPct < 0 ? "text-rose-300" : "text-text-muted"}`}>
+                    ({distPocPct >= 0 ? "+" : ""}{distPocPct.toFixed(2)}%)
+                  </span>
+                ) : null}
+              </dd>
+              <dt className="text-text-muted">VAH</dt>
+              <dd className="text-right font-mono">
+                {vah != null ? formatNumber(vah, vah >= 1000 ? 2 : 2) : "—"}
+                {distVahPct != null ? (
+                  <span className="ml-1 text-[10px] text-text-muted">
+                    ({distVahPct >= 0 ? "+" : ""}{distVahPct.toFixed(2)}%)
+                  </span>
+                ) : null}
+              </dd>
+              <dt className="text-text-muted">VAL</dt>
+              <dd className="text-right font-mono">
+                {val != null ? formatNumber(val, val >= 1000 ? 2 : 2) : "—"}
+                {distValPct != null ? (
+                  <span className="ml-1 text-[10px] text-text-muted">
+                    ({distValPct >= 0 ? "+" : ""}{distValPct.toFixed(2)}%)
+                  </span>
+                ) : null}
+              </dd>
+              {ibH != null ? (
+                <>
+                  <dt className="text-text-muted">IB high</dt>
+                  <dd className="text-right font-mono">{formatNumber(ibH, ibH >= 1000 ? 2 : 2)}</dd>
+                </>
+              ) : null}
+              {ibL != null ? (
+                <>
+                  <dt className="text-text-muted">IB low</dt>
+                  <dd className="text-right font-mono">{formatNumber(ibL, ibL >= 1000 ? 2 : 2)}</dd>
+                </>
+              ) : null}
+            </dl>
+            {meanRevHint ? (
+              <div className="mt-1.5 rounded border-l-2 border-amber-300/60 bg-bg-primary/30 px-1.5 py-1 text-[10px] leading-snug">
+                <span
+                  className={
+                    meanRevHint.dir === "long"
+                      ? "font-semibold text-emerald-300"
+                      : meanRevHint.dir === "short"
+                        ? "font-semibold text-rose-300"
+                        : "font-semibold text-amber-300"
+                  }
+                >
+                  {meanRevHint.dir.toUpperCase()}-revert{meanRevHint.target != null ? ` → ${formatNumber(meanRevHint.target, meanRevHint.target >= 1000 ? 2 : 2)}` : ""}
+                </span>
+                <div className="mt-0.5 text-text-muted">{meanRevHint.why}</div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        <dl className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
+          <dt className="text-text-muted" title="VWAP (volume-weighted average price) anchored at session open">VWAP</dt>
+          <dd className={`text-right font-mono ${vwapDelta != null && vwapDelta > 0 ? "text-emerald-300" : vwapDelta != null && vwapDelta < 0 ? "text-rose-300" : ""}`}>
+            {vwap != null ? formatNumber(Number(vwap), 2) : "—"}
+            {vwapPct != null ? (
+              <span className="ml-1 text-[10px] text-text-muted">
+                ({vwapPct >= 0 ? "+" : ""}{vwapPct.toFixed(2)}%)
+              </span>
+            ) : null}
+          </dd>
+          <dt className="text-text-muted" title="Cumulative volume delta over the entire session (Lee-Ready bar approximation)">Sess CVD</dt>
+          <dd className={`text-right font-mono ${cvdSession != null && cvdSession > 0 ? "text-emerald-300" : cvdSession != null && cvdSession < 0 ? "text-rose-300" : ""}`}>
+            {cvdSession != null ? formatSigned(cvdSession, 0) : "—"}
+          </dd>
+          <dt className="text-text-muted" title="CVD change over the last 6 bars">Δ6 CVD</dt>
+          <dd className={`text-right font-mono ${cvdWindow != null && cvdWindow > 0 ? "text-emerald-300" : cvdWindow != null && cvdWindow < 0 ? "text-rose-300" : ""}`}>
+            {cvdWindow != null ? formatSigned(cvdWindow, 0) : "—"}
+          </dd>
+          <dt className="text-text-muted" title="Is CVD aligned with the current MACD-cross direction? The gate blocks entries when this is false.">Gate</dt>
+          <dd className="text-right font-mono text-[10.5px]">
+            {cvdAgrees == null ? (
+              <span className="text-text-muted">—</span>
+            ) : cvdAgrees ? (
+              <span className="text-emerald-300">✓ aligned</span>
+            ) : (
+              <span className="text-rose-300">✗ disagree</span>
+            )}
+          </dd>
+          <dt className="text-text-muted" title="IB = Initial Balance (first 1-hour range). >50% extension = directional day.">IB ext</dt>
+          <dd className="text-right font-mono">
+            <span className={ibDir === "up" ? "text-emerald-300" : ibDir === "down" ? "text-rose-300" : "text-text-muted"}>
+              {ibDir}
+            </span>
+            {ibPct != null ? (
+              <span className="ml-1 text-[10px] text-text-muted">{(ibPct * 100).toFixed(0)}%</span>
+            ) : null}
+          </dd>
+          <dt className="text-text-muted" title="High-volume nodes (S/R) and low-volume nodes (fast-move zones)">VbP</dt>
+          <dd className="text-right font-mono text-[10.5px] text-text-muted">
+            HVN {hvn ?? "—"} · LVN {lvn ?? "—"}
+          </dd>
+          {mpDir ? (
+            <>
+              <dt className="text-text-muted">MP dir</dt>
+              <dd className="text-right font-mono text-[10.5px]">{mpDir}</dd>
+            </>
+          ) : null}
+          {cvdDiv && cvdDiv.kind ? (
+            <>
+              <dt className="text-text-muted" title="Divergence between price and CVD over the recent lookback window">Divergence</dt>
+              <dd className={`text-right font-mono text-[10.5px] ${cvdDiv.kind === "bullish" ? "text-emerald-300" : "text-rose-300"}`}>
+                {cvdDiv.kind}
+                {cvdDiv.strength != null ? (
+                  <span className="ml-1 text-[10px] text-text-muted">({cvdDiv.strength.toFixed(2)})</span>
+                ) : null}
+              </dd>
+            </>
+          ) : null}
+        </dl>
+      </div>
       {/* CE leg */}
-      <div className="col-span-12 sm:col-span-6 lg:col-span-4">
+      <div className="col-span-12 sm:col-span-6 lg:col-span-3">
         <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-300/80">
           CE leg · {ceTimeframe}
         </div>
@@ -1108,7 +1370,7 @@ function InstrumentDetail({
         )}
       </div>
       {/* PE leg */}
-      <div className="col-span-12 sm:col-span-6 lg:col-span-4">
+      <div className="col-span-12 sm:col-span-6 lg:col-span-3">
         <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-rose-300/80">
           PE leg · {peTimeframe}
         </div>
@@ -1144,19 +1406,17 @@ function InstrumentDetail({
           <div className="mt-1.5 text-[11px] italic text-text-muted">No PE leg.</div>
         )}
       </div>
-      {/* Rationale column */}
-      <div className="col-span-12 lg:col-span-1">
-        {row.bucket_rationale || row.signal_validation_detail ? (
-          <>
-            <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-muted">
-              Why
-            </div>
-            <div className="mt-1.5 text-[10.5px] leading-snug text-text-muted">
-              {row.bucket_rationale || row.signal_validation_detail}
-            </div>
-          </>
-        ) : null}
-      </div>
+      {/* Rationale row — full width under the four columns */}
+      {row.bucket_rationale || row.signal_validation_detail ? (
+        <div className="col-span-12 border-t border-bg-active/15 pt-2">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-muted">
+            Why
+          </div>
+          <div className="mt-1.5 text-[10.5px] leading-snug text-text-muted">
+            {row.bucket_rationale || row.signal_validation_detail}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -58,9 +58,11 @@ def _strategy_readiness_fields(
     watchlist_rows_today: int,
     watchlist_rows_latest: int,
     watchlist_age_seconds: Optional[float],
+    market_open: bool = False,
 ) -> dict[str, Any]:
+    today_session_ready = watchlist_rows_today >= STRATEGY_MIN_LATEST_UNDERLYINGS
     today_ready = (
-        bool(watchlist_rows_today)
+        today_session_ready
         and watchlist_age_seconds is not None
         and watchlist_age_seconds <= STRATEGY_LIVE_WATCHLIST_MAX_AGE_SECONDS
     )
@@ -73,6 +75,12 @@ def _strategy_readiness_fields(
     readiness_mode = "live" if today_ready else "latest_session" if latest_session_ready else "missing"
     if today_ready:
         execution_mode = "live"
+    elif market_open and watchlist_rows_today and not today_session_ready:
+        execution_mode = "partial_live_session"
+    elif market_open and watchlist_rows_today:
+        execution_mode = "stale_live_session"
+    elif market_open and latest_session_ready:
+        execution_mode = "missing_live_session"
     elif latest_session_execution_ready:
         execution_mode = "latest_session"
     elif latest_session_ready and watchlist_age_seconds is not None:
@@ -81,14 +89,55 @@ def _strategy_readiness_fields(
         execution_mode = "catalog_only"
     else:
         execution_mode = "missing"
+    execution_ready = today_ready or (latest_session_execution_ready and not market_open)
     return {
         "ready": today_ready or latest_session_ready,
-        "execution_ready": today_ready or latest_session_execution_ready,
+        "execution_ready": execution_ready,
         "readiness_mode": readiness_mode,
         "execution_mode": execution_mode,
+        "market_open": market_open,
+        "today_session_ready": today_session_ready,
         "latest_session_ready": latest_session_ready,
         "max_live_age_seconds": STRATEGY_LIVE_WATCHLIST_MAX_AGE_SECONDS,
         "max_execution_age_seconds": STRATEGY_EXECUTION_MAX_WATCHLIST_AGE_SECONDS,
+    }
+
+
+def _index_spot_readiness_fields(
+    per_symbol: dict[str, str],
+    *,
+    market_open: bool,
+    now_utc: datetime | None = None,
+) -> dict[str, Any]:
+    if not market_open:
+        return {
+            "index_spot_ready": True,
+            "index_spot_missing": [],
+            "index_spot_stale": {},
+            "max_index_spot_age_seconds": STRATEGY_LIVE_WATCHLIST_MAX_AGE_SECONDS,
+        }
+
+    now = now_utc or datetime.now(UTC)
+    missing: list[str] = []
+    stale: dict[str, float] = {}
+    for symbol in NSE_INDEX_SCOPE:
+        latest_time = per_symbol.get(symbol)
+        if not latest_time:
+            missing.append(symbol)
+            continue
+        try:
+            age_seconds = max(0.0, (now - _parse_time(latest_time)).total_seconds())
+        except Exception:
+            missing.append(symbol)
+            continue
+        if age_seconds > STRATEGY_LIVE_WATCHLIST_MAX_AGE_SECONDS:
+            stale[symbol] = age_seconds
+
+    return {
+        "index_spot_ready": not missing and not stale,
+        "index_spot_missing": missing,
+        "index_spot_stale": stale,
+        "max_index_spot_age_seconds": STRATEGY_LIVE_WATCHLIST_MAX_AGE_SECONDS,
     }
 
 
@@ -619,13 +668,30 @@ class MarketIntelligenceRuntime:
 
         watchlist_rows_today = int(today_row.get("underlyings") or 0)
         watchlist_rows_latest = int(latest_row.get("underlyings") or 0)
+        market_open = now.weekday() < 5 and SESSION_OPEN <= now.time() <= time(15, 30)
         readiness = _strategy_readiness_fields(
             watchlist_rows_today=watchlist_rows_today,
             watchlist_rows_latest=watchlist_rows_latest,
             watchlist_age_seconds=watchlist_age_seconds,
+            market_open=market_open,
         )
+        index_spot_readiness = _index_spot_readiness_fields(
+            per_symbol,
+            market_open=market_open,
+        )
+        if readiness.get("execution_ready") and not index_spot_readiness.get("index_spot_ready"):
+            readiness = {
+                **readiness,
+                "execution_ready": False,
+                "execution_mode": (
+                    "shared_spot_missing"
+                    if index_spot_readiness.get("index_spot_missing")
+                    else "shared_spot_stale"
+                ),
+            }
         return {
             **readiness,
+            **index_spot_readiness,
             "watchlist_rows_today": watchlist_rows_today,
             "watchlist_rows_latest": watchlist_rows_latest,
             "latest_ce_ready": int(latest_row.get("ce_ready") or 0),

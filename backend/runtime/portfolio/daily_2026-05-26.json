@@ -1,0 +1,23 @@
+{
+  "session_date": "2026-05-26",
+  "generated_at": "2026-05-26T15:27:36.295877+00:00",
+  "per_strategy": {
+    "directional_options": {
+      "open_events": 1,
+      "mark_events": 0,
+      "close_events": 5,
+      "realized_total": -10080.5,
+      "unrealized_open": 0.0,
+      "wins": 0,
+      "losses": 2,
+      "breakeven": 3,
+      "last_event_ts": "2026-05-26T15:24:43.061956+00:00"
+    }
+  },
+  "totals": {
+    "realized": -10080.5,
+    "unrealized_open": 0.0,
+    "open_events": 1,
+    "close_events": 5
+  }
+}

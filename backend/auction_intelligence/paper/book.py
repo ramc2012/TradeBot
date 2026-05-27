@@ -15,6 +15,13 @@ from auction_intelligence.schemas import AnalysisBundle, PaperPositionRecord
 from market_data.option_history import option_history_service
 
 
+# Notional paper-account capital for the Auction Intelligence lane. The
+# summary surface reports total_equity, available_capital, drawdown, and
+# Sharpe against this anchor so cross-strategy comparisons (S1/S2/Commodity/
+# FMP all at ₹10L) are apples-to-apples.
+AI_INITIAL_CAPITAL = 1_000_000.0
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -39,6 +46,15 @@ def _same_contract(position: dict[str, Any], execution: Any) -> bool:
         and str(position.get("expiry") or "") == str(getattr(execution, "expiry", None) or "")
         and float(position.get("strike") or 0.0) == float(getattr(execution, "strike", None) or 0.0)
     )
+
+
+def _as_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class PaperPositionBook:
@@ -151,6 +167,17 @@ class PaperPositionBook:
                         now=now,
                         execution=None,
                     )
+                    exit_reason = self._exit_reason_for_position(primary, bundle=bundle)
+                    if exit_reason is not None:
+                        await self._close_position(
+                            position=primary,
+                            bundle=bundle,
+                            now=now,
+                            reason=exit_reason,
+                            execution=None,
+                        )
+                        open_positions.remove(primary)
+                        closed_positions.append(primary)
                     continue
 
                 if primary.get("signal_action") == decision.action and _same_contract(primary, execution):
@@ -161,6 +188,17 @@ class PaperPositionBook:
                         now=now,
                         execution=execution,
                     )
+                    exit_reason = self._exit_reason_for_position(primary, bundle=bundle)
+                    if exit_reason is not None:
+                        await self._close_position(
+                            position=primary,
+                            bundle=bundle,
+                            now=now,
+                            reason=exit_reason,
+                            execution=execution,
+                        )
+                        open_positions.remove(primary)
+                        closed_positions.append(primary)
                     continue
 
                 close_reason = "signal_flip" if primary.get("signal_action") != decision.action else "contract_roll"
@@ -208,12 +246,89 @@ class PaperPositionBook:
         position["latest_premium"] = latest_premium
         position["latest_spot_price"] = latest_spot
         position["regime_last"] = str(bundle.regime.label)
-        position["stop_price"] = decision.stop_price
-        position["target_price"] = decision.target_price
+        if position.get("stop_price") is None and decision.stop_price is not None:
+            position["stop_price"] = decision.stop_price
+        if position.get("target_price") is None and decision.target_price is not None:
+            position["target_price"] = decision.target_price
         position["execution_style"] = getattr(execution, "style", None) or position.get("execution_style")
         entry_premium = float(position.get("entry_premium") or latest_premium or 0.0)
         quantity = int(position.get("quantity") or 0)
         position["unrealized_pnl"] = round((latest_premium - entry_premium) * quantity, 2)
+
+    def _exit_reason_for_position(
+        self,
+        position: dict[str, Any],
+        *,
+        bundle: AnalysisBundle,
+    ) -> Optional[str]:
+        session_date = self._session_date(bundle)
+        expiry = self._position_expiry(position)
+        if expiry is not None and session_date is not None and expiry < session_date:
+            return "expired_contract"
+
+        latest_premium = _as_float(position.get("latest_premium"))
+        if latest_premium is not None and latest_premium <= 0:
+            return "premium_zero"
+
+        latest_spot = _as_float(position.get("latest_spot_price"))
+        action = str(position.get("signal_action") or "").upper()
+        stop = _as_float(position.get("stop_price"))
+        target = _as_float(position.get("target_price"))
+        premium_based = self._risk_levels_are_premium_based(position, stop=stop, target=target)
+        latest_value = latest_premium if premium_based else latest_spot
+        if latest_value is None:
+            return None
+        if action == "LONG":
+            if stop is not None and latest_value <= stop:
+                return "stop_loss"
+            if target is not None and latest_value >= target:
+                return "target_hit"
+        elif action == "SHORT":
+            if stop is not None and latest_value >= stop:
+                return "stop_loss"
+            if target is not None and latest_value <= target:
+                return "target_hit"
+        return None
+
+    @staticmethod
+    def _risk_levels_are_premium_based(
+        position: dict[str, Any],
+        *,
+        stop: Optional[float],
+        target: Optional[float],
+    ) -> bool:
+        levels = [value for value in (stop, target) if value is not None and value > 0]
+        if not levels:
+            return False
+        entry_premium = _as_float(position.get("entry_premium"))
+        entry_spot = _as_float(position.get("entry_spot_price"))
+        if entry_premium is None or entry_premium <= 0 or entry_spot is None or entry_spot <= 0:
+            return False
+        return max(levels) <= max(entry_premium * 5.0, entry_spot * 0.25)
+
+    @staticmethod
+    def _session_date(bundle: AnalysisBundle) -> Optional[date]:
+        raw = getattr(bundle.market_profile, "session_date", None)
+        if isinstance(raw, date):
+            return raw
+        if raw:
+            try:
+                return date.fromisoformat(str(raw)[:10])
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _position_expiry(position: dict[str, Any]) -> Optional[date]:
+        raw = position.get("expiry")
+        if isinstance(raw, date):
+            return raw
+        if raw:
+            try:
+                return date.fromisoformat(str(raw)[:10])
+            except ValueError:
+                return None
+        return None
 
     async def _close_position(
         self,
@@ -387,7 +502,66 @@ class PaperPositionBook:
         closed_positions = self._filter_positions(state.get("closed_positions", []), symbol=symbol)
         realized = sum(float(item.get("realized_pnl") or 0.0) for item in closed_positions)
         unrealized = sum(float(item.get("unrealized_pnl") or 0.0) for item in open_positions)
+
+        # Capital accounting — turns AI from "PnL ticker" into a funded
+        # paper-trading lane matching S1/S2/Commodity/FMP (all ₹10L).
+        # Premium × quantity is the cash locked against each open option.
+        initial_capital = AI_INITIAL_CAPITAL
+        reserved_margin = round(
+            sum(
+                float(p.get("entry_premium") or 0.0) * float(p.get("quantity") or 0)
+                for p in open_positions
+            ),
+            2,
+        )
+        total_equity = round(initial_capital + realized + unrealized, 2)
+        available_capital = round(initial_capital + realized - reserved_margin, 2)
+        total_return_pct = round(
+            ((total_equity - initial_capital) / initial_capital) * 100.0, 4
+        ) if initial_capital else 0.0
+
+        # Equity curve walk over closed trades — simple deterministic drawdown
+        # without any snapshot loop. Per-trade returns drive a rough Sharpe.
+        closed_sorted = sorted(
+            closed_positions,
+            key=lambda r: str(r.get("closed_at") or r.get("updated_at") or ""),
+        )
+        running_equity = initial_capital
+        peak = initial_capital
+        max_dd = 0.0
+        trade_returns_pct: list[float] = []
+        wins = 0
+        losses = 0
+        for row in closed_sorted:
+            pnl = float(row.get("realized_pnl") or 0.0)
+            pre_equity = running_equity if running_equity > 0 else initial_capital
+            running_equity = max(0.0, running_equity + pnl)
+            if running_equity > peak:
+                peak = running_equity
+            if peak > 0:
+                dd = (peak - running_equity) / peak
+                max_dd = max(max_dd, dd)
+            if pre_equity > 0:
+                trade_returns_pct.append((pnl / pre_equity) * 100.0)
+            if pnl > 0:
+                wins += 1
+            elif pnl < 0:
+                losses += 1
+
+        sharpe = 0.0
+        if len(trade_returns_pct) >= 2:
+            mean = sum(trade_returns_pct) / len(trade_returns_pct)
+            var = sum((r - mean) ** 2 for r in trade_returns_pct) / max(
+                len(trade_returns_pct) - 1, 1
+            )
+            stdev = var ** 0.5
+            if stdev > 0:
+                sharpe = round(mean / stdev, 4)
+
+        win_rate = (wins / (wins + losses)) if (wins + losses) else 0.0
+
         return {
+            # legacy fields (kept for backward compatibility)
             "symbol_filter": symbol or None,
             "open_count": len(open_positions),
             "closed_count": len(closed_positions),
@@ -396,6 +570,16 @@ class PaperPositionBook:
             "latest_opened_at": open_positions[0].get("opened_at") if open_positions else None,
             "latest_closed_at": closed_positions[0].get("closed_at") if closed_positions else None,
             "last_synced_at": state.get("last_synced_at"),
+            # new capital fields — mirror S1/S2/Commodity/FMP
+            "initial_capital": initial_capital,
+            "available_capital": available_capital,
+            "reserved_margin": reserved_margin,
+            "total_equity": total_equity,
+            "total_return_pct": total_return_pct,
+            "max_drawdown": round(max_dd, 4),
+            "sharpe_ratio": sharpe,
+            "total_trades": wins + losses,
+            "win_rate": round(win_rate, 4),
         }
 
     def _filter_positions(self, positions: list[dict[str, Any]], *, symbol: str | None) -> list[dict[str, Any]]:

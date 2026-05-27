@@ -40,7 +40,7 @@ export default function AgentPage() {
           Strategy Agent
         </h1>
         <div className="mt-1 text-xs text-text-muted">
-          Live monitor for both paper runtimes: Strategy 1 on 30-minute ATM options and Strategy 2 on 5-minute index options with Market Profile gating.
+          Live monitor for both paper runtimes: Strategy 1 on 30-minute ATM options and Strategy 2 on 15-minute index options with Market Profile gating.
         </div>
       </div>
 

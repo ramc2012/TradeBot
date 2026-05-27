@@ -1,0 +1,121 @@
+# Sniper Paper — main configuration.
+# Sensitive values (Fyers credentials) go in secrets.yaml (gitignored).
+
+env: production    # production | replay | local
+
+deployment:
+  host: "15.206.56.206"
+  api_port: 8001    # 8000 = nomad-curie backend
+  static_ip_registered_with_fyers: true
+
+database:
+  # Reuses the nomad-curie TimescaleDB. Tables are prefixed paper_* to isolate.
+  dsn_env: "PAPER_DB_DSN"
+  # Falls back to this if env var unset. NEVER commit real creds here.
+  dsn_default: "postgresql://nomadcurie:nomadcurie@localhost:5433/nomadcurie"
+  schema: "public"
+  table_prefix: "paper_"
+
+redis:
+  url_env: "PAPER_REDIS_URL"
+  url_default: "redis://localhost:6379/2"   # db 2 to isolate from nomad-curie
+  tick_channel: "sniper_paper:ticks"
+
+fyers:
+  # Credentials live in secrets.yaml (FYERS_APP_ID, FYERS_SECRET_ID, FYERS_ACCESS_TOKEN).
+  daily_auth_at_ist: "08:50"
+  reconnect_backoff_seconds: [5, 15, 30, 60, 120]
+  websocket_lite_mode: false
+
+# Instruments — symbols are Fyers-format. Contract codes (25NOV / 25DEC) need monthly rotation.
+# `near_month_symbol` is what we subscribe to; rotation tool updates these.
+instruments:
+  - name: NIFTY
+    exchange: NSE
+    near_month_symbol: "NSE:NIFTY25NOVFUT"
+    spot_symbol: "NSE:NIFTY50-INDEX"
+    lot_size: 50
+    tick_size: 0.05
+    trading_hours_ist: { open: "09:15", close: "15:30" }
+    model_in_distribution: true       # v0 model trained on NIFTY → OK
+  - name: SENSEX
+    exchange: BSE
+    near_month_symbol: "BSE:SENSEX25NOVFUT"
+    spot_symbol: "BSE:SENSEX-INDEX"
+    lot_size: 10
+    tick_size: 0.05
+    trading_hours_ist: { open: "09:15", close: "15:30" }
+    model_in_distribution: false      # OOD — v0 model not trained on SENSEX
+  - name: CRUDE
+    exchange: MCX
+    near_month_symbol: "MCX:CRUDEOIL25NOVFUT"
+    spot_symbol: null                 # commodity, no spot index
+    lot_size: 100
+    tick_size: 1.0
+    trading_hours_ist: { open: "09:00", close: "23:30" }
+    model_in_distribution: false      # OOD — v0 model not trained on commodity
+
+# Risk governor — kill switches.
+risk:
+  daily_loss_cap_inr: 5000
+  max_open_positions_total: 3
+  max_open_positions_per_instrument: 1
+  consecutive_loss_kill_switch: 3
+  max_signals_per_day: 30
+  reject_signals_outside_trading_hours: true
+  # Whether to allow OOD predictions to enter paper trades. If false, only
+  # model_in_distribution instruments can trade; SENSEX/CRUDE produce signals
+  # but are auto-skipped at the risk layer until a per-instrument model exists.
+  allow_ood_paper_trades: true
+
+# Signal engine — EV gate.
+signal:
+  decision_cadence_seconds: 30
+  ev_threshold_R: 0.20
+  min_p_win: 0.50
+  min_liquidity_lots: 10
+  setup_families:
+    - va_rejection
+    - va_acceptance
+    - ib_breakout
+    - lvn_rejection
+    - poc_magnet
+    - failed_auction
+
+# Cost model — same params as sniper-phase0; recalibrate slippage from paper fills after 30 days.
+costs:
+  brokerage_per_order_inr: 20.0
+  exchange_txn_charge_bps:
+    NSE: 0.345
+    BSE: 0.375        # BSE F&O is slightly higher
+    MCX: 0.260
+  sebi_charge_bps: 0.001
+  stt_bps_sell_side:
+    NSE: 1.25
+    BSE: 1.25
+    MCX: 1.00
+  stamp_duty_bps_buy_side: 0.2
+  gst_on_brokerage_pct: 18.0
+  gst_on_exchange_pct: 18.0
+  slippage_bps_default: 1.5
+  slippage_bps_event_day: 3.0
+
+# Model
+model:
+  artifact_dir: "./artifacts"
+  active_model_pointer: "./artifacts/ACTIVE"   # text file containing path to active .txt
+  predict_features:
+    - mp_dist_poc_pct
+    - mp_dist_vah_pct
+    - mp_dist_val_pct
+    - mp_in_value_area
+    - mp_ib_position
+    - mp_va_width_pct
+    - mp_prev_dist_poc_pct
+    - mp_prev_dist_vah_pct
+    - mp_prev_dist_val_pct
+    - ctx_minutes_into_session
+    - ctx_dow
+    - ctx_is_expiry_day
+    - ctx_overnight_gap_pct
+    - ctx_atr_14d

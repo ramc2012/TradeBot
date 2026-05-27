@@ -2,7 +2,7 @@
 
 Strategy split on this desk:
 - Strategy 1: MCX options, 30-minute MACD zero-cross on liquid CE/PE contracts
-- Strategy 2: MCX futures, 15-minute MACD zero-cross with Market Profile confirmation
+- Strategy 2: MCX futures, 15-minute MACD-above/below-zero with Market Profile confirmation
 """
 from __future__ import annotations
 
@@ -21,6 +21,15 @@ from agentic_rag.audit_agent import record_audit_event
 from analysis.indicators_agent import IndicatorContext, indicators_agent
 from analysis.macd_engine import compute_ema
 from analysis.signal_classifier import classify_signal_bucket
+from analytics.market_profile_ext import (
+    ib_extension as compute_ib_extension,
+    market_profile_ext_snapshot,
+)
+from analytics.orderflow import (
+    bar_cvd,
+    cvd_agrees_with,
+    orderflow_snapshot,
+)
 from analytics.technicals import compute_rsi, latest_macd_rsi
 from api.routers.auth import (
     ensure_fyers_session,
@@ -55,6 +64,7 @@ from paper_engine.base_strategy_agent import (
     _parse_iso_timestamp,
     _round_or_none,
     _serialize_trade_history,
+    _split_today_history,
 )
 from paper_engine.order_book import PaperOrder, PaperOrderBook
 from paper_engine.portfolio import PaperPortfolio, VirtualPosition
@@ -67,7 +77,7 @@ DEFAULT_COMMODITY_MARGIN_PCT = 0.15
 DEFAULT_COMMODITY_REPORTS_MAX = 40
 DEFAULT_COMMODITY_ORDERS_MAX = 80
 DEFAULT_COMMODITY_COMMENTARY_MAX = 80
-DEFAULT_COMMODITY_SIGNAL_AUDIT_MAX = 120
+DEFAULT_COMMODITY_SIGNAL_AUDIT_MAX = 600
 DEFAULT_COMMODITY_INITIAL_CAPITAL = 1_000_000.0
 DEFAULT_COMMODITY_ARCHIVE_DIR = Path(__file__).resolve().parent.parent / "runtime" / "commodity_archive"
 DEFAULT_COMMODITY_SCAN_TIMEOUT_SECONDS = 120
@@ -1278,6 +1288,42 @@ class CommodityStrategyAgent(BaseStrategyAgent):
     def _active_futures_symbols(self) -> dict[str, str]:
         return {symbol: self._active_futures_symbol(symbol) for symbol in self._symbols}
 
+    @staticmethod
+    def _cvd_agrees_loose(signal: str, cvd_window) -> bool:
+        """Looser CVD-agreement check used by the entry gate.
+
+        The plain `cvd_agrees_with` rejects whenever the strict first-to-last
+        delta points the wrong way — that's too aggressive in chop, where
+        CVD wobbles around zero even when the trade is fine. Here we accept
+        if EITHER:
+          * The recent half of the window agrees (more weight to fresh flow), OR
+          * The full-window delta agrees AND is large enough to matter, OR
+          * The full-window delta is small (≤ 5 % of the window magnitude)
+            — i.e. CVD is essentially flat, not actively disagreeing.
+        """
+        if not cvd_window or len(cvd_window) < 2 or signal not in {"BUY", "SELL"}:
+            return False
+        full_delta = cvd_window[-1] - cvd_window[0]
+        # Recent half — quickest signal in the window.
+        half = max(len(cvd_window) // 2, 1)
+        recent_delta = cvd_window[-1] - cvd_window[-half - 1] if len(cvd_window) > half else full_delta
+        # "Magnitude" yardstick — peak-to-trough range over the window.
+        window_range = max(cvd_window) - min(cvd_window)
+        flat_threshold = window_range * 0.05
+        # BUY accepts when CVD is up OR essentially flat; SELL accepts the inverse.
+        if signal == "BUY":
+            if recent_delta > 0:
+                return True
+            if full_delta > 0:
+                return True
+            return abs(full_delta) <= flat_threshold
+        # SELL
+        if recent_delta < 0:
+            return True
+        if full_delta < 0:
+            return True
+        return abs(full_delta) <= flat_threshold
+
     async def ensure_selected_option_setup_locks(self) -> dict[str, str]:
         self._refresh_state_from_store()
         missing_symbols = {
@@ -1536,7 +1582,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "position_cap": lane_map["commodity_futures"].descriptor.position_cap,
                 "lots_per_trade": self._lots_per_trade,
                 "broker": "upstox primary · fyers fallback",
-                "notes": "Entries use live 15-minute bars, accept fresh zero-crosses plus continuation breakouts only on trend-day MP, and keep hard stops live while delaying soft exits until the trade has had time to work. MCX futures quotes/history prefer Upstox and fall back to FYERS.",
+                "notes": "Entries use live 15-minute bars, accept MACD above/below zero when Market Profile allows the direction, and keep hard stops live while delaying soft exits until the trade has had time to work. MCX futures quotes/history prefer Upstox and fall back to FYERS.",
             },
             {
                 "key": "commodity_options",
@@ -1565,7 +1611,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             signal = str(row.get("signal") or "")
             raw_signal = str(row.get("raw_signal") or "")
             continuation_signal = str(row.get("continuation_signal") or "")
-            candidate_signal = signal or raw_signal or continuation_signal
+            candidate_signal = signal or str(row.get("candidate_signal") or "") or raw_signal or continuation_signal
             bar_time = str(row.get("bar_time") or "")
             spec = get_commodity_contract_spec(symbol)
             price = float(row.get("price") or 0.0)
@@ -1573,7 +1619,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             event_reason = _commodity_event_block_reason(underlying)
             risk_block = self._entry_risk_block(underlying)
             validation = "waiting_cross"
-            validation_detail = "Waiting for a live 15-minute MACD cross or a continuation breakout."
+            validation_detail = "Waiting for 15-minute MACD to move beyond zero and for Market Profile to allow the trade."
             if row.get("reason") == "insufficient_data":
                 validation = "warming_up"
                 validation_detail = "More 15-minute candles are required before futures MACD is valid."
@@ -1581,7 +1627,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 validation = "mp_warming_up"
                 validation_detail = "Market Profile needs more intraday periods before confirming direction."
             elif candidate_signal in {"BUY", "SELL"} and signal != candidate_signal:
-                validation = "mp_conflict" if row.get("mp_direction") else "mp_pending"
+                if row.get("cvd_block_active"):
+                    validation = "cvd_disagrees"
+                else:
+                    validation = "mp_conflict" if row.get("mp_direction") else "mp_pending"
                 validation_detail = str(
                     row.get("signal_validation_detail")
                     or "Signal candidate fired, but Market Profile confirmation is missing or opposite."
@@ -1624,7 +1673,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                             or (
                                 "15-minute continuation setup and Market Profile are aligned for entry."
                                 if row.get("entry_style") == "continuation"
-                                else "15-minute MACD and Market Profile are aligned for entry."
+                                else "15-minute MACD is beyond zero and Market Profile is aligned for entry."
                             )
                         )
 
@@ -2107,6 +2156,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         mp_day_type = "balance"
         mp_reason = "mp_pending"
         mp_status = "warming_up"
+        cvd_block_active = False
         signal = None
         signal_reason = analysis.get("reason")
         entry_style: Optional[str] = "fresh_cross" if analysis.get("signal") in {"BUY", "SELL"} else None
@@ -2116,7 +2166,56 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             candidate_signal = analysis.get("continuation_signal")
             candidate_reason = analysis.get("continuation_reason") or analysis.get("reason")
             entry_style = "continuation"
+        if candidate_signal not in {"BUY", "SELL"}:
+            macd_value = analysis.get("macd")
+            try:
+                macd_float = float(macd_value) if macd_value is not None else None
+            except (TypeError, ValueError):
+                macd_float = None
+            if macd_float is not None and macd_float > 0:
+                candidate_signal = "BUY"
+                candidate_reason = "macd_above_zero"
+                entry_style = "macd_above_zero"
+            elif macd_float is not None and macd_float < 0:
+                candidate_signal = "SELL"
+                candidate_reason = "macd_below_zero"
+                entry_style = "macd_below_zero"
         validation_detail = ""
+
+        # ── Order-flow + MP-extension snapshots ──────────────────────────
+        # Anchor at today's session start so CVD/VWAP reflect intraday flow,
+        # not the full multi-day candle buffer. `orderflow_snapshot` infers
+        # the anchor from the `time` field on candles.
+        session_anchor_idx = None
+        if candles and session_rows:
+            try:
+                first_session_time = session_rows[0].get("time")
+                for idx, c in enumerate(candles):
+                    if c.get("time") == first_session_time:
+                        session_anchor_idx = idx
+                        break
+            except Exception:
+                session_anchor_idx = None
+        of_snapshot = orderflow_snapshot(candles, anchor_index=session_anchor_idx)
+        # Trailing CVD window — last 6 bars (~90m on 15m) used by the gate
+        # to confirm flow direction agrees with the signal.
+        cvd_series = bar_cvd(candles)
+        cvd_window = cvd_series[-6:] if len(cvd_series) >= 2 else []
+
+        # IB extension flag (price vs session IB) — useful even before the
+        # bigger ext snapshot is built; cheap to compute.
+        ib_ext = None
+        if profile is not None and price > 0:
+            try:
+                ib_ext = compute_ib_extension(
+                    {
+                        "ibh": getattr(profile, "initial_balance_high", None),
+                        "ibl": getattr(profile, "initial_balance_low", None),
+                    },
+                    current_price=price,
+                )
+            except Exception:
+                ib_ext = None
         if profile and len(session_rows) >= FUTURES_MP_MIN_PERIODS:
             mp_status = "ready"
             mp_direction, mp_day_type, mp_reason = self._classify_market_profile(
@@ -2124,27 +2223,67 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 current_price=price or float(latest_close or 0.0),
                 session_rows=session_rows,
             )
-            if (
-                candidate_signal in {"BUY", "SELL"}
-                and entry_style == "continuation"
-                and mp_day_type not in {"trend_up", "trend_down"}
-            ):
+            # MP gate (relaxed): the gate's job is to filter out setups where
+            # the day-profile clearly *opposes* the signal. We do NOT require
+            # a perfect direction match — neutral MP ("balance") used to block
+            # every fresh MACD cross even when the day-profile wasn't actually
+            # contradicting it. That cost CRUDE-style entries by 30–60 minutes.
+            #
+            # Rules:
+            #   - Block only when mp_direction is the OPPOSITE of the signal.
+            #   - Continuation setups still prefer trend-day MP, but matching
+            #     balance-above/below-POC counts as aligned (the trend just
+            #     hasn't extended yet).
+            _opposite = {"BUY": "SELL", "SELL": "BUY"}
+            mp_opposes = mp_direction is not None and mp_direction == _opposite.get(candidate_signal)
+
+            aligned_balance_day = (
+                (candidate_signal == "BUY" and mp_day_type == "balance_above_poc")
+                or (candidate_signal == "SELL" and mp_day_type == "balance_below_poc")
+            )
+            trend_day = mp_day_type in {"trend_up", "trend_down"}
+
+            if candidate_signal in {"BUY", "SELL"} and entry_style == "continuation" and not (trend_day or aligned_balance_day):
                 validation_detail = (
-                    f"15-minute continuation fired {candidate_signal}, but continuation entries require a trend-day MP gate."
+                    f"15-minute continuation fired {candidate_signal}, but continuation entries "
+                    f"require a trend day or matching balance-above/below-POC (MP day = {mp_day_type})."
                 )
-            elif candidate_signal in {"BUY", "SELL"} and candidate_signal == mp_direction:
-                signal = candidate_signal
-                signal_reason = f"{candidate_reason}_{mp_reason}"
+            elif candidate_signal in {"BUY", "SELL"} and mp_opposes:
+                setup_label = "continuation" if entry_style == "continuation" else "MACD above/below zero"
                 validation_detail = (
-                    "15-minute continuation setup still aligns with the current MP gate."
-                    if entry_style == "continuation"
-                    else "15-minute MACD cross matches the current MP gate."
+                    f"15-minute {setup_label} fired {candidate_signal}, "
+                    f"but MP gate explicitly says {mp_direction}. Skipping entry."
                 )
             elif candidate_signal in {"BUY", "SELL"}:
-                setup_label = "continuation" if entry_style == "continuation" else "MACD cross"
-                validation_detail = (
-                    f"15-minute {setup_label} fired {candidate_signal}, but MP gate is {mp_direction or 'neutral'}."
-                )
+                # MP gate would accept. Now check CVD agreement as a soft
+                # filter — bar-level CVD trending opposite to the signal is
+                # a flow red flag (price moves up but volume is selling).
+                cvd_ok = self._cvd_agrees_loose(candidate_signal, cvd_window)
+                if cvd_window and not cvd_ok:
+                    # Block the entry but expose the why so it shows up on
+                    # the dashboard. This is a *soft* filter — when CVD
+                    # disagrees the trade tends to whipsaw, so we'd rather
+                    # wait for the next bar to confirm.
+                    setup_label = "continuation" if entry_style == "continuation" else "MACD above/below zero"
+                    validation_detail = (
+                        f"15-minute {setup_label} fired {candidate_signal} and MP gate cleared, "
+                        f"but bar-CVD over the last {len(cvd_window)} bars is disagreeing — skipping."
+                    )
+                    # Flag so the decorator can label this `cvd_disagrees`
+                    # instead of the misleading `mp_pending`.
+                    cvd_block_active = True
+                else:
+                    signal = candidate_signal
+                    if mp_direction == candidate_signal:
+                        alignment_note = "MP gate confirms"
+                    else:
+                        alignment_note = f"MP gate neutral ({mp_day_type})"
+                    cvd_note = " · CVD aligned" if cvd_ok else " · CVD warmup"
+                    signal_reason = f"{candidate_reason}_{mp_reason}"
+                    validation_detail = (
+                        f"15-minute {'continuation setup' if entry_style == 'continuation' else 'MACD above/below zero'} fired; "
+                        f"{alignment_note}{cvd_note}."
+                    )
         elif session_rows:
             validation_detail = f"Only {len(session_rows)} intraday periods are available for Market Profile."
         else:
@@ -2159,6 +2298,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "change": _round_or_none(change, 2),
             "change_pct": _round_or_none(change_pct, 2),
             "signal": signal,
+            "candidate_signal": candidate_signal,
+            "candidate_reason": candidate_reason,
             "raw_signal": analysis.get("signal"),
             "continuation_signal": analysis.get("continuation_signal"),
             "continuation_reason": analysis.get("continuation_reason"),
@@ -2184,6 +2325,31 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "mp_ib_low": _round_or_none(getattr(profile, "initial_balance_low", None), 2),
             "mp_periods": getattr(profile, "period_count", len(session_rows)),
             "mp_session_date": session_date.isoformat() if session_date else None,
+            # ── New: order-flow + MP-extension surface ──────────────────
+            "cvd_latest": _round_or_none(of_snapshot.get("cvd_latest"), 0),
+            "cvd_session": _round_or_none(of_snapshot.get("cvd_anchored_latest"), 0),
+            "cvd_block_active": cvd_block_active,
+            "cvd_window_delta": (
+                _round_or_none(cvd_window[-1] - cvd_window[0], 0)
+                if len(cvd_window) >= 2 else None
+            ),
+            "cvd_agrees": (
+                cvd_agrees_with(candidate_signal, cvd_window)
+                if candidate_signal in {"BUY", "SELL"} else None
+            ),
+            "vwap": _round_or_none(of_snapshot.get("vwap_latest"), 2),
+            "vwap_upper": _round_or_none(of_snapshot.get("vwap_upper_latest"), 2),
+            "vwap_lower": _round_or_none(of_snapshot.get("vwap_lower_latest"), 2),
+            "cvd_divergence": of_snapshot.get("divergence"),
+            "hvn_count": of_snapshot.get("hvn_count"),
+            "lvn_count": of_snapshot.get("lvn_count"),
+            "ib_extended_above": ib_ext.extended_above if ib_ext else None,
+            "ib_extended_below": ib_ext.extended_below if ib_ext else None,
+            "ib_extension_pct": (
+                ib_ext.extension_above_pct if ib_ext and ib_ext.extended_above
+                else ib_ext.extension_below_pct if ib_ext and ib_ext.extended_below
+                else None
+            ),
         }
 
     async def _build_option_watchlist(self) -> list[dict[str, Any]]:
@@ -2768,6 +2934,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     live_quotes=futures_quote_map,
                 )
                 self._audit_futures_watchlist(futures_rows)
+                # Persist immediately so concurrent get_status refreshes from
+                # the API (e.g. dashboard polling) cannot reload an older DB
+                # snapshot and wipe the audit additions we just made.
+                self._persist_state()
                 # Unified commodity data path: every scan, push fresh 1-minute
                 # bars for each configured commodity into underlying_spot_candles
                 # so every downstream strategy (directional long options, MP,
@@ -2838,6 +3008,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     except Exception as exc:
                         data_quality_snapshot = {"overall": "unknown", "error": str(exc)}
                 option_rows = self._overlay_live_option_quotes(option_rows, option_quote_map)
+                self._audit_option_watchlist(option_rows)
+                # Same reason as the futures audit: persist immediately so the
+                # next concurrent refresh from the API doesn't roll us back.
+                self._persist_state()
 
                 latest_prices = {
                     row["symbol"]: float(row["price"])
@@ -2994,11 +3168,40 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         if missing_option_symbols:
             live_option_quotes.update(await self._safe_get_ltp(adapter, missing_option_symbols))
 
+        # Build a root → active-row lookup so we can detect stranded
+        # positions that survived a contract rollover (e.g. a MAY position
+        # left behind after the agent rolled to JUN). Without this they
+        # never get managed and quietly stay open forever.
+        rows_by_root: dict[str, dict[str, Any]] = {}
+        for row in futures_rows:
+            root = (extract_commodity_root(str(row.get("symbol") or "")) or "").upper()
+            if root and root not in rows_by_root:
+                rows_by_root[root] = row
+
         for position_key, position in list(self._runtime.positions.items()):
             reason: Optional[str] = None
             if position.strategy_key == "commodity_futures":
                 row = futures_map.get(position.symbol)
                 if not row:
+                    # The exact symbol isn't being scanned this cycle. Two
+                    # cases: (a) data gap — skip and wait; (b) contract
+                    # rolled over — the active futures for this root is a
+                    # different symbol now and the position is stranded.
+                    root = (extract_commodity_root(position.symbol) or "").upper()
+                    rolled_row = rows_by_root.get(root)
+                    rolled_symbol = str((rolled_row or {}).get("symbol") or "")
+                    if rolled_row and rolled_symbol and rolled_symbol != position.symbol:
+                        # Close on the new active contract's latest price —
+                        # the legacy contract no longer trades, so the next
+                        # active month's mark is the best available exit.
+                        exit_price = float(rolled_row.get("price") or position.current_price or 0.0)
+                        await self._close_futures_position(
+                            position_key,
+                            position,
+                            exit_price,
+                            "expired_contract",
+                            actor="strategy_agent_rollover",
+                        )
                     continue
                 current_price = float(row.get("price") or position.current_price)
                 position.current_price = current_price
@@ -3753,7 +3956,11 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             )
             if not symbol or not bar_time:
                 continue
-            if not candidate_signal and validation in {"waiting_cross", "warming_up", "mp_warming_up"}:
+            # Heartbeat audit: log one row per (bar, symbol, validation, signal)
+            # tuple so the operator can see the agent is scanning even on calm
+            # bars. Skip only data-warmup states where no decision could be
+            # made — logging those would be noise.
+            if validation in {"warming_up", "mp_warming_up"}:
                 continue
             self._append_signal_audit(
                 {
@@ -3784,6 +3991,44 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     "detail": row.get("signal_validation_detail"),
                     "price": row.get("price"),
                     "regime": row.get("regime"),
+                    "runtime_retained": bool(row.get("runtime_retained")),
+                }
+            )
+
+    def _audit_option_watchlist(self, rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            trade_symbol = str(row.get("trade_symbol") or row.get("symbol") or "").strip()
+            bar_time = str(row.get("trade_bar_time") or row.get("bar_time") or "").strip()
+            validation = str(row.get("signal_validation") or "").strip()
+            signal_side = str(row.get("signal_side") or "").strip()
+            if not trade_symbol or not bar_time:
+                continue
+            if validation in {"warming_up", "mp_warming_up"}:
+                continue
+            self._append_signal_audit(
+                {
+                    "audit_key": ":".join(
+                        [
+                            "commodity_options",
+                            trade_symbol,
+                            bar_time,
+                            validation or "unknown",
+                            signal_side or "none",
+                        ]
+                    ),
+                    "time": _now_ist().isoformat(),
+                    "lane": "commodity_options",
+                    "symbol": trade_symbol,
+                    "underlying": row.get("underlying") or row.get("symbol"),
+                    "bar_time": bar_time,
+                    "signal": signal_side or None,
+                    "raw_signal": row.get("raw_signal"),
+                    "validation": validation,
+                    "detail": row.get("signal_validation_detail"),
+                    "price": row.get("trade_price") or row.get("price"),
+                    "regime": row.get("regime"),
+                    "expiry": row.get("expiry"),
+                    "entry_iv_pct": row.get("entry_iv_pct"),
                     "runtime_retained": bool(row.get("runtime_retained")),
                 }
             )
@@ -4002,7 +4247,11 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 }
                 for position in self._runtime.positions.values()
             ],
-            "trade_history": _serialize_trade_history(self._runtime.portfolio),
+            **(lambda all_trades: {
+                "trade_history": list(reversed(all_trades)),
+                "today_trades": _split_today_history(all_trades)[0],
+                "historical_trades": _split_today_history(all_trades)[1],
+            })(_serialize_trade_history(self._runtime.portfolio)),
             "orders": list(self._runtime.orders),
             "reports": [asdict(report) for report in self._runtime.reports],
             "commentary": [asdict(entry) for entry in self._commentary],
@@ -4054,6 +4303,14 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             order_book=PaperOrderBook(on_fill=None),
         )
         self._runtime.order_book._on_fill = self._runtime.portfolio.on_fill
+        # Defensively wipe the portfolio's history series so any prior
+        # snapshot accumulation (drawdown / sharpe / peak_equity) doesn't
+        # bleed into the fresh paper account on the dashboard.
+        self._runtime.portfolio._trade_history = []
+        self._runtime.portfolio._equity_curve = []
+        self._runtime.portfolio._daily_pnl = defaultdict(float)
+        self._runtime.portfolio._peak_equity = self._runtime.portfolio.initial_capital
+        self._runtime.portfolio._positions = {}
         self._commentary = []
         self._runtime.processed_signals = {}
         self._kill_switch_active = False

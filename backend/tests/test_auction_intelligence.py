@@ -328,6 +328,7 @@ def test_regime_engine_classifies_higher_acceptance() -> None:
 def test_service_produces_swing_execution_plan_and_journal(tmp_path) -> None:
     config = clone_default_config()
     config["agents"]["swing"]["enable_acceptance_continuation_long"] = True
+    config["risk"]["max_symbol_exposure"] = 1.0
     config["paper_trading"]["journal_root"] = str(tmp_path)
     service = AuctionIntelligenceService(config)
     start = datetime(2026, 4, 1, 9, 15)
@@ -1100,6 +1101,7 @@ def test_option_mapper_ntm_volx_can_shift_selection_toward_atm_pressure(monkeypa
 def test_service_records_option_paper_proposal(tmp_path, monkeypatch) -> None:
     config = clone_default_config()
     config["agents"]["swing"]["enable_acceptance_continuation_long"] = True
+    config["risk"]["max_symbol_exposure"] = 1.0
     config["paper_trading"]["journal_root"] = str(tmp_path)
     service = AuctionIntelligenceService(config)
 
@@ -1251,6 +1253,90 @@ def test_paper_position_book_closes_open_position_on_flat_signal(tmp_path, monke
     assert state["open_positions"] == []
     assert state["closed_positions"][0]["close_reason"] == "flat_signal"
     assert state["closed_positions"][0]["realized_pnl"] == 750.0
+
+
+def test_paper_position_book_closes_on_underlying_stop_without_reopening(tmp_path, monkeypatch) -> None:
+    service = PaperTradingService(str(tmp_path))
+    premiums = iter([82.0, 68.0, 68.0])
+
+    async def _fake_latest_option_candle(**kwargs):
+        return [{"close": next(premiums)}]
+
+    monkeypatch.setattr("auction_intelligence.paper.book.option_history_service.load_candles", _fake_latest_option_candle)
+
+    open_bundle = AnalysisBundle(
+        config_scope={},
+        market_profile=_make_profile_snapshot(symbol="NIFTY FUT", close_price=22510.0),
+        prior_market_profile=None,
+        order_flow=_make_order_flow_snapshot(),
+        regime=RegimeAssessment(label="trend_day", confidence=0.78, allowed_directions=["LONG"], reasons=["Trend day."]),
+        agent_decisions=[
+            AgentDecision(
+                agent_name="swing",
+                action="LONG",
+                confidence=0.78,
+                entry_price=22510.0,
+                stop_price=22480.0,
+                target_price=22620.0,
+                quantity=75,
+                sleeve_fraction=0.35,
+                rationale=["Acceptance continuation long."],
+            )
+        ],
+        risk=RiskDecision(allowed=True, kill_switch=False, max_size_multiplier=1.0, reasons=[]),
+        execution_plan=[
+            ExecutionInstruction(
+                agent_name="swing",
+                symbol="NIFTY22500CE",
+                action="LONG",
+                style="PASSIVE",
+                order_type="LIMIT",
+                limit_price=82.0,
+                slices=2,
+                cancel_after_seconds=30,
+                rationale=["Mapped to ATM CE."],
+                quantity=75,
+                broker_action="BUY",
+                underlying_symbol="NIFTY",
+                instrument_type="CE",
+                expiry="2026-04-16",
+                strike=22500.0,
+                option_type="CE",
+                instrument_key="NIFTY|CE22500",
+                trading_symbol="NIFTY22500CE",
+                lot_size=75,
+                premium=82.0,
+                spot_price=22510.0,
+                moneyness="ATM",
+                expiry_kind="weekly",
+                days_to_expiry=6,
+                selection_reason="swing LONG mapped to CE ATM",
+            )
+        ],
+    )
+
+    assert asyncio.run(service.sync_positions(open_bundle))["open_count"] == 1
+
+    stopped_bundle = replace(
+        open_bundle,
+        market_profile=_make_profile_snapshot(symbol="NIFTY FUT", close_price=22470.0),
+        execution_plan=[
+            replace(
+                open_bundle.execution_plan[0],
+                limit_price=None,
+                premium=None,
+                spot_price=22470.0,
+            )
+        ],
+    )
+
+    close_summary = asyncio.run(service.sync_positions(stopped_bundle))
+    state = asyncio.run(service.book.list_positions(symbol="NIFTY"))
+
+    assert close_summary["open_count"] == 0
+    assert close_summary["closed_count"] == 1
+    assert state["closed_positions"][0]["close_reason"] == "stop_loss"
+    assert state["closed_positions"][0]["realized_pnl"] == -1050.0
 
 
 def test_swing_agent_uses_contract_aware_margin_sizing() -> None:
@@ -2750,6 +2836,33 @@ def test_paper_service_resolves_relative_root_under_backend_runtime() -> None:
     assert service.writer.root == Path(__file__).resolve().parents[1] / "runtime" / "auction_intelligence"
 
 
+def test_paper_service_journal_and_status_surface(tmp_path) -> None:
+    service = PaperTradingService(str(tmp_path))
+    service.writer.append(
+        "nifty_fut",
+        {
+            "recorded_at": "2026-04-03T10:10:00+00:00",
+            "symbol": "NIFTY FUT",
+            "underlying_symbol": "NIFTY",
+            "trading_symbol": "NIFTY26APR22500CE",
+            "agent_name": "swing",
+            "action": "LONG",
+            "confidence": 0.78,
+            "premium": 184.5,
+            "execution_style": "PASSIVE",
+        },
+    )
+
+    journal = service.journal(symbol="NIFTY", limit=10)
+    status = asyncio.run(service.status())
+
+    assert journal["total_records"] == 1
+    assert journal["summary"]["action_breakdown"]["LONG"] == 1
+    assert status["mode"] == "paper"
+    assert status["journal_record_count"] == 1
+    assert status["summary"]["open_count"] == 0
+
+
 def test_paper_positions_endpoint_returns_open_and_closed_positions(monkeypatch) -> None:
     monkeypatch.setattr(
         auction_intelligence_router._paper_book,
@@ -2780,6 +2893,94 @@ def test_paper_positions_endpoint_returns_open_and_closed_positions(monkeypatch)
     assert payload["summary"]["open_count"] == 1
     assert payload["open_positions"][0]["trading_symbol"] == "NIFTY26APR22500CE"
     assert payload["closed_positions"][0]["trading_symbol"] == "NIFTY26APR22400PE"
+
+
+def test_paper_status_endpoint_returns_automation_and_book(monkeypatch) -> None:
+    monkeypatch.setattr(
+        auction_intelligence_router._paper_service,
+        "status",
+        AsyncMock(
+            return_value={
+                "mode": "paper",
+                "summary": {"open_count": 1, "total_equity": 1_002_500.0},
+                "open_positions": [{"position_id": "open-1"}],
+                "journal_record_count": 3,
+            }
+        ),
+    )
+
+    class _Supervisor:
+        def get_runner_status(self, key):
+            return {"key": key, "enabled": True, "loop_active": True}
+
+    monkeypatch.setattr(
+        "core.market_hours_paper_supervisor.market_hours_paper_supervisor",
+        _Supervisor(),
+    )
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.get("/api/auction-intelligence/paper-status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mode"] == "paper"
+    assert payload["summary"]["open_count"] == 1
+    assert payload["automation"]["key"] == "auction_intelligence"
+
+
+def test_paper_proposal_without_body_runs_live_paper_cycle(monkeypatch) -> None:
+    monkeypatch.setattr(
+        auction_intelligence_router,
+        "capture_live_paper_cycle",
+        AsyncMock(
+            return_value={
+                "symbol_code": "NIFTY",
+                "decision_count": 3,
+                "execution_count": 1,
+                "journal_path_count": 1,
+                "paper_positions_summary": {"open_count": 1},
+            }
+        ),
+    )
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.post("/api/auction-intelligence/paper-proposal", params={"symbol": "NIFTY"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbol_code"] == "NIFTY"
+    assert payload["paper_positions_summary"]["open_count"] == 1
+
+
+def test_paper_run_once_endpoint_runs_market_cycle(monkeypatch) -> None:
+    monkeypatch.setattr(
+        auction_intelligence_router,
+        "run_market_hours_cycle",
+        AsyncMock(
+            return_value={
+                "symbols_requested": ["BANKNIFTY"],
+                "symbols_completed": ["BANKNIFTY"],
+                "result_count": 1,
+                "failure_count": 0,
+                "results": [],
+            }
+        ),
+    )
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.post("/api/auction-intelligence/paper-run-once", params={"symbol": "BANKNIFTY"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbols_requested"] == ["BANKNIFTY"]
+    assert payload["failure_count"] == 0
 
 
 def test_mp_dashboard_endpoint_returns_aggregated_structure(monkeypatch) -> None:
@@ -2920,10 +3121,14 @@ def test_mp_rows_uses_durable_cache_when_live_bridge_misses(monkeypatch) -> None
     async def _skip_durable_persist(*args, **kwargs):
         return 0
 
+    async def _no_live_candidates(*args, **kwargs):
+        return [], {"live_error": "bridge offline", "live_bridge": [], "live_rejected": False}
+
     monkeypatch.setattr(auction_intelligence_router, "_safe_csv", lambda path: [old_row])
     monkeypatch.setattr(auction_intelligence_router, "build_live_analysis", _offline_live)
     monkeypatch.setattr(auction_intelligence_router, "_load_durable_mp_rows", _durable_rows)
     monkeypatch.setattr(auction_intelligence_router, "_persist_durable_mp_rows", _skip_durable_persist)
+    monkeypatch.setattr(auction_intelligence_router, "_collect_live_mp_candidate_rows", _no_live_candidates)
     monkeypatch.setattr(auction_intelligence_router, "_build_db_spot_mp_row", _no_db_spot_row)
     monkeypatch.setattr(auction_intelligence_router, "_build_live_mp_row_from_fmp", lambda *args, **kwargs: None)
     monkeypatch.setattr(auction_intelligence_router, "_FMP_LIVE_MP_TIMEOUT_SECONDS", 0.001)

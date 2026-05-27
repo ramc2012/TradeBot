@@ -974,19 +974,25 @@ async def get_agent_comments(limit: int = 20) -> list[dict]:
 async def get_strategy_trades(
     strategy: str = "target_50pct",
     underlying: str = "SENSEX",
-    limit: int = 50,
-    source: str = Query("auto", description="'live' for agent only, 'csv' for backtest only, 'auto' for both"),
+    limit: int = 0,
+    source: str = Query("live", description="'live' for agent only (default), 'csv' for backtest only, 'auto' for both"),
 ) -> dict:
-    """Return live paper-trading trade history + CSV backtested trades."""
-    trades = []
+    """Return strategy-triggered trades split into today vs history.
 
-    # Live trades from the paper strategy agent
+    Default 'source=live' returns only trades fired by the live paper agents
+    (no backtest contamination). Set source='auto' or 'csv' to include the
+    historical CSV backtest. Use limit=0 (default) for the full list.
+    """
+    trades: list[dict] = []
+
+    # Live trades from the paper strategy agent (closed trade_history only;
+    # don't re-emit exit events — they duplicate trades already in the history
+    # and surface as rows with blank entry_time / entry_price).
     if source in ("auto", "live"):
         agent_status = paper_strategy_agent.get_status()
         strats = agent_status.get("strategies", [])
         for strat in strats:
-            live_trades = strat.get("trade_history", [])
-            for t in live_trades:
+            for t in strat.get("trade_history", []):
                 entry_price = t.get("entry_price", 0) or 0
                 exit_price = t.get("exit_price", 0) or 0
                 pnl = t.get("pnl", 0) or 0
@@ -994,9 +1000,10 @@ async def get_strategy_trades(
                     ((exit_price - entry_price) / entry_price * 100.0)
                     if entry_price > 0 else 0
                 )
+                sym = t.get("symbol") or ""
                 trades.append({
                     "source": f"LIVE_{strat.get('key', 'paper').upper()}",
-                    "underlying": (t.get("symbol") or "").split(":")[1] if ":" in (t.get("symbol") or "") else t.get("symbol", ""),
+                    "underlying": sym.split(":")[1] if ":" in sym else sym,
                     "expiry": t.get("expiry", ""),
                     "option_type": t.get("option_type", ""),
                     "entry_time": t.get("entry_time", ""),
@@ -1009,26 +1016,7 @@ async def get_strategy_trades(
                     "alloc": 0.2,
                 })
 
-        # Also include live recent events (entries/exits)
-        for strat_info in strats:
-            for event in strat_info.get("recent_events", []):
-                if str(event.get("event", "")).lower() in ("exit", "partial_exit"):
-                    trades.append({
-                        "source": f"LIVE_{strat_info.get('key', 'paper').upper()}",
-                        "underlying": event.get("underlying", ""),
-                        "expiry": "",
-                        "option_type": event.get("option_type", ""),
-                        "entry_time": "",
-                        "entry_price": 0,
-                        "exit_time": event.get("time", ""),
-                        "exit_price": event.get("price", 0),
-                        "exit_reason": event.get("reason", ""),
-                        "blended_return": 0,
-                        "pnl": event.get("pnl", 0),
-                        "alloc": 0.2,
-                    })
-
-    # CSV backtested trades (fallback/supplement)
+    # CSV backtested trades — only when explicitly requested.
     if source in ("auto", "csv"):
         tr_path = DATA_ROOT / "staggered_exit" / "trade_results.csv"
         if tr_path.exists():
@@ -1058,11 +1046,38 @@ async def get_strategy_trades(
                     "alloc": poc_lookup.get(r.get("entry_time", ""), 0.2),
                 })
 
-    # Sort by entry/exit time desc, return most recent
-    trades.sort(key=lambda t: t.get("entry_time") or t.get("exit_time", ""), reverse=True)
+    # Sort recent-first. Prefer exit_time (when it exists) so closed trades
+    # land in chronological order of when they completed.
+    trades.sort(
+        key=lambda t: t.get("exit_time") or t.get("entry_time") or "",
+        reverse=True,
+    )
+
+    # Split into today vs history using IST session date.
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    _IST = _tz(_td(hours=5, minutes=30))
+    today_date = _dt.now(_IST).date()
+    today: list[dict] = []
+    history: list[dict] = []
+    for t in trades:
+        ts_text = t.get("exit_time") or t.get("entry_time") or ""
+        try:
+            ts = _dt.fromisoformat(str(ts_text).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=_IST)
+            bucket_date = ts.astimezone(_IST).date()
+        except Exception:
+            bucket_date = None
+        (today if bucket_date == today_date else history).append(t)
+
+    capped = trades if limit <= 0 else trades[:limit]
     return {
         "total": len(trades),
-        "trades": trades[:limit],
+        "today_count": len(today),
+        "history_count": len(history),
+        "today": today,
+        "history": history,
+        "trades": capped,  # backward-compat: combined recent-first list
     }
 
 

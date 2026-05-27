@@ -115,6 +115,36 @@ def _serialize_trade_history(portfolio: PaperPortfolio) -> list[dict[str, Any]]:
     return rows
 
 
+def _sort_trades_recent_first(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return trades sorted by exit_time (fallback: entry_time) descending."""
+    def _key(row: dict[str, Any]) -> str:
+        return str(row.get("exit_time") or row.get("entry_time") or "")
+
+    return sorted(rows, key=_key, reverse=True)
+
+
+def _split_today_history(
+    rows: Sequence[dict[str, Any]],
+    *,
+    session_date: Optional[date] = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split serialized trades into (today, history) using IST session date.
+
+    A trade lands in 'today' if its exit_time falls on today's IST date.
+    Each bucket is sorted recent-first.
+    """
+    if session_date is None:
+        session_date = datetime.now(IST).date()
+    today: list[dict[str, Any]] = []
+    history: list[dict[str, Any]] = []
+    for row in rows:
+        ts_text = str(row.get("exit_time") or row.get("entry_time") or "")
+        ts = _parse_iso_timestamp(ts_text)
+        bucket = today if ts is not None and ts.astimezone(IST).date() == session_date else history
+        bucket.append(row)
+    return _sort_trades_recent_first(today), _sort_trades_recent_first(history)
+
+
 def _deserialize_trade_history(rows: Sequence[dict[str, Any]]) -> list[TradeRecord]:
     trades: list[TradeRecord] = []
     for row in rows:

@@ -4,6 +4,7 @@ import asyncio
 from datetime import date
 
 from data.run_upstox_research_sync import _planned_sleep_seconds
+from analysis.backtest import UpstoxAuthError
 from data.upstox_research_sync import UpstoxResearchSync
 
 
@@ -152,3 +153,15 @@ def test_expired_contract_discovery_to_date_does_not_scan_future_expiries() -> N
     )
 
     assert sync._expired_contract_discovery_to_date(today=date(2026, 4, 1)) == date(2026, 4, 1)
+
+
+def test_expired_contract_auth_errors_are_soft_for_discovery_only() -> None:
+    soft_error = UpstoxAuthError(
+        "Expired contracts API rejected the Upstox token for HDFCBANK 2026-05-26 (HTTP 401)."
+    )
+    hard_error = UpstoxAuthError(
+        "Historical candle API rejected the Upstox token for NSE_EQ|TEST (HTTP 401)."
+    )
+
+    assert UpstoxResearchSync._is_expired_contract_discovery_auth_error(soft_error) is True
+    assert UpstoxResearchSync._is_expired_contract_discovery_auth_error(hard_error) is False

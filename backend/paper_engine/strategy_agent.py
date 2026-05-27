@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -69,6 +70,7 @@ from agent.window_calculator import (
     get_all_strategy1_scan_windows,
     days_remaining_in_window,
 )
+from analytics.orderflow import bar_cvd, cvd_agrees_with, orderflow_snapshot
 from analytics.technicals import latest_macd_rsi
 from core.config import settings
 from api.routers.auth import (
@@ -91,6 +93,7 @@ from paper_engine.base_strategy_agent import (
     _round_or_none,
     _serialize_equity_curve,
     _serialize_trade_history,
+    _split_today_history,
     _deserialize_equity_curve,
     _deserialize_trade_history,
 )
@@ -164,14 +167,16 @@ def _report_interval_seconds(value: str) -> int:
 
 
 STRATEGY2_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
+STRATEGY2_OPTION_TIMEFRAME = "15minute"
+STRATEGY2_OPTION_BAR_MINUTES = 15
 STRATEGY2_ENTRY_CUTOFF = time(15, 0)
 STRATEGY2_FORCE_EXIT = time(15, 20)
 # Anti-churn: ignore a market-profile direction flip if the position has been
-# open less than this many 5-minute bars. Friday's session had four entries
+# open less than this many signal bars. Friday's session had four entries
 # all closed within 0-2 bars on `mp_gate_flip` for losses between -0% and -6%.
 # Stop / target / macd_reversal exits still fire immediately.
 STRATEGY2_MIN_HOLD_BARS = 3
-STRATEGY2_MIN_HOLD_SECONDS = STRATEGY2_MIN_HOLD_BARS * 5 * 60
+STRATEGY2_MIN_HOLD_SECONDS = STRATEGY2_MIN_HOLD_BARS * STRATEGY2_OPTION_BAR_MINUTES * 60
 STRATEGY2_SPOT_CACHE_TTL_SECONDS = 90
 STRATEGY2_HARD_STOP_PCT = 18.0
 STRATEGY2_TARGET_PCT = 35.0
@@ -573,8 +578,8 @@ class _Strategy1LaneAgent(_BaseNSEStrategyLaneAgent):
 class _Strategy2LaneAgent(_BaseNSEStrategyLaneAgent):
     descriptor = StrategyLaneDescriptor(
         key="index_mp_strategy",
-        label="Strategy 2 · 5m Index MACD + MP",
-        timeframe="5minute",
+        label="Strategy 2 · 15m Index MACD + MP",
+        timeframe=STRATEGY2_OPTION_TIMEFRAME,
         instrument_scope="NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX ATM options",
         execution_mode="paper_execution",
         position_cap=STRATEGY2_MAX_POSITIONS,
@@ -585,7 +590,7 @@ class _Strategy2LaneAgent(_BaseNSEStrategyLaneAgent):
         self.runtime.meta = {
             **(self.runtime.meta or {}),
             "mode": "market_closed",
-            "scan_interval": self.runtime.meta.get("scan_interval", "5minute") if self.runtime.meta else "5minute",
+            "scan_interval": STRATEGY2_OPTION_TIMEFRAME,
             "watchlist_rows": self.runtime.meta.get("watchlist_rows", len(self.runtime.signal_lane)) if self.runtime.meta else len(self.runtime.signal_lane),
             "updated_at": started_at.isoformat(),
             "market_state": "closed",
@@ -595,7 +600,7 @@ class _Strategy2LaneAgent(_BaseNSEStrategyLaneAgent):
         super().on_broker_unavailable(started_at, broker_snapshot, message)
         self.runtime.meta = {
             **(self.runtime.meta or {}),
-            "scan_interval": self.runtime.meta.get("scan_interval", "5minute") if self.runtime.meta else "5minute",
+            "scan_interval": STRATEGY2_OPTION_TIMEFRAME,
             "watchlist_rows": 0,
         }
 
@@ -610,7 +615,7 @@ class _Strategy2LaneAgent(_BaseNSEStrategyLaneAgent):
         self.runtime.meta = {
             **(self.runtime.meta or {}),
             "mode": "no_watchlist",
-            "scan_interval": self.runtime.meta.get("scan_interval", "5minute") if self.runtime.meta else "5minute",
+            "scan_interval": STRATEGY2_OPTION_TIMEFRAME,
             "watchlist_rows": 0,
             "updated_at": started_at.isoformat(),
         }
@@ -651,7 +656,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
     def __init__(self) -> None:
         self._sync_state_file_override()
         self._strategy1 = self._build_runtime("macd_strategy", "Strategy 1 · 30m ATM MACD")
-        self._strategy2 = self._build_runtime("index_mp_strategy", "Strategy 2 · 5m Index MACD + MP")
+        self._strategy2 = self._build_runtime("index_mp_strategy", "Strategy 2 · 15m Index MACD + MP")
         self._strategy_agents: list[_BaseNSEStrategyLaneAgent] = [
             _Strategy1LaneAgent(self, self._strategy1),
             _Strategy2LaneAgent(self, self._strategy2),
@@ -1458,7 +1463,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         s2_message = (
             f"Prepared for next index session: {len(index_rows)} index lanes, "
             f"{trend_aligned_count} trend-aligned and {waiting_count} waiting. "
-            "No Strategy 2 entries are opened while market is closed; first live 5-minute bar must re-confirm."
+            "No Strategy 2 entries are opened while market is closed; first live 15-minute bar must re-confirm."
         )
         self._strategy2.last_scan_at = started_at.isoformat()
         self._strategy2.last_message = s2_message
@@ -1467,7 +1472,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             **(self._strategy2.meta or {}),
             "mode": "prepared_market_closed",
             "market_state": "closed",
-            "scan_interval": self._strategy2.meta.get("scan_interval", "5minute") if self._strategy2.meta else "5minute",
+            "scan_interval": STRATEGY2_OPTION_TIMEFRAME,
             "watchlist_rows": len(index_rows),
             "updated_at": started_at.isoformat(),
             "instrument_universe": [symbol for symbol in STRATEGY2_UNDERLYINGS if symbol in set(index_underlyings or STRATEGY2_UNDERLYINGS)],
@@ -1943,8 +1948,8 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 for row in pe_minute_rows
                 if (_parse_iso_timestamp(row.get("time")) or datetime.min.replace(tzinfo=IST)) <= started_at
             ]
-            ce_candles = option_history_service._aggregate_rows(ce_slice, 5)
-            pe_candles = option_history_service._aggregate_rows(pe_slice, 5)
+            ce_candles = option_history_service._aggregate_rows(ce_slice, STRATEGY2_OPTION_BAR_MINUTES)
+            pe_candles = option_history_service._aggregate_rows(pe_slice, STRATEGY2_OPTION_BAR_MINUTES)
             ce_closes = [float(item["close"]) for item in ce_candles if item.get("close") is not None]
             pe_closes = [float(item["close"]) for item in pe_candles if item.get("close") is not None]
             ce_symbol = str(ce.get("instrument_key") or ce.get("trading_symbol") or f"{underlying}:CE")
@@ -1956,9 +1961,15 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     ce_closes,
                     "CE",
                     symbol=ce_symbol,
+                    timeframe=STRATEGY2_OPTION_TIMEFRAME,
                     last_bar_time=ce_last_bar_time,
                 )
-                macd_line, _, _ = _strategy_macd(ce_closes, symbol=ce_symbol, last_bar_time=ce_last_bar_time) if len(ce_closes) >= MACD_MIN_BARS else ([], [], [])
+                macd_line, _, _ = _strategy_macd(
+                    ce_closes,
+                    symbol=ce_symbol,
+                    timeframe=STRATEGY2_OPTION_TIMEFRAME,
+                    last_bar_time=ce_last_bar_time,
+                ) if len(ce_closes) >= MACD_MIN_BARS else ([], [], [])
                 macd_value = macd_line[-1] if macd_line else None
                 aligned = macd_value is not None and macd_value > 0
                 option_last_bar_time = ce_last_bar_time
@@ -1967,9 +1978,15 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     pe_closes,
                     "PE",
                     symbol=pe_symbol,
+                    timeframe=STRATEGY2_OPTION_TIMEFRAME,
                     last_bar_time=pe_last_bar_time,
                 )
-                macd_line, _, _ = _strategy_macd(pe_closes, symbol=pe_symbol, last_bar_time=pe_last_bar_time) if len(pe_closes) >= MACD_MIN_BARS else ([], [], [])
+                macd_line, _, _ = _strategy_macd(
+                    pe_closes,
+                    symbol=pe_symbol,
+                    timeframe=STRATEGY2_OPTION_TIMEFRAME,
+                    last_bar_time=pe_last_bar_time,
+                ) if len(pe_closes) >= MACD_MIN_BARS else ([], [], [])
                 macd_value = macd_line[-1] if macd_line else None
                 aligned = macd_value is not None and macd_value < 0
                 option_last_bar_time = pe_last_bar_time
@@ -1977,15 +1994,15 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 continue
 
             status = "waiting-cross"
-            instruction = f"{underlying}: MP gate is {day_type}, waiting for the next MACD trigger."
+            instruction = f"{underlying}: MP gate is {day_type}, waiting for MACD to align with zero."
             if fresh_cross:
                 status = "entry-ready"
                 entry_ready_count += 1
                 instruction = f"{underlying}: {direction} zero-cross confirmed with MP {day_type} gate."
             elif aligned:
-                status = "trend-aligned"
-                trend_aligned_count += 1
-                instruction = f"{underlying}: MP {day_type} gate is aligned; waiting for the next fresh trigger."
+                status = "entry-ready"
+                entry_ready_count += 1
+                instruction = f"{underlying}: MP {day_type} gate is aligned and {direction} MACD is beyond zero."
 
             side_closes = ce_closes if direction == "CE" else pe_closes
             latest_hist_val: Optional[float] = None
@@ -1993,7 +2010,12 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             try:
                 if len(side_closes) >= MACD_MIN_BARS:
                     side_symbol = ce_symbol if direction == "CE" else pe_symbol
-                    _, _, side_hist = _strategy_macd(side_closes, symbol=side_symbol, last_bar_time=option_last_bar_time)
+                    _, _, side_hist = _strategy_macd(
+                        side_closes,
+                        symbol=side_symbol,
+                        timeframe=STRATEGY2_OPTION_TIMEFRAME,
+                        last_bar_time=option_last_bar_time,
+                    )
                     if side_hist:
                         latest_hist_val = side_hist[-1]
                         if len(side_hist) >= 2:
@@ -2050,7 +2072,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             runtime.signal_lane = [latest_signals[underlying] for underlying in STRATEGY2_UNDERLYINGS if underlying in latest_signals]
             runtime.meta = {
                 "mode": "historical_recovery",
-                "scan_interval": "5minute",
+                "scan_interval": STRATEGY2_OPTION_TIMEFRAME,
                 "watchlist_rows": len(runtime.signal_lane),
                 "updated_at": (last_seen_at or datetime.combine(trading_day, time(15, 20), tzinfo=IST)).isoformat(),
                 "pipeline": [latest_pipeline[underlying] for underlying in STRATEGY2_UNDERLYINGS if underlying in latest_pipeline],
@@ -2628,7 +2650,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             runtime.meta = {
                 **(runtime.meta or {}),
                 "mode": "no_index_rows",
-                "scan_interval": runtime.meta.get("scan_interval", "5minute") if runtime.meta else "5minute",
+                "scan_interval": STRATEGY2_OPTION_TIMEFRAME,
                 "watchlist_rows": 0,
                 "updated_at": started_at.isoformat(),
                 "pipeline": [contexts[underlying]["pipeline"] for underlying in STRATEGY2_UNDERLYINGS],
@@ -2667,7 +2689,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             await self._persist_agent_signal_observation(runtime, signal, row=row)
         runtime.meta = {
             "mode": "live_scan",
-            "scan_interval": "5minute",
+            "scan_interval": STRATEGY2_OPTION_TIMEFRAME,
             "watchlist_rows": len(index_rows),
             "updated_at": started_at.isoformat(),
             "pipeline": [
@@ -2781,10 +2803,10 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         if raw_status in {"entry-ready", "conditions_met", "active"}:
             instruction = (
                 f"{instruction} Closed-market zero-crosses are monitoring context only; "
-                "re-confirm on the first live 5-minute bar before entry."
+                "re-confirm on the first live 15-minute bar before entry."
             )
         else:
-            instruction = f"{instruction} Re-confirm on the first live 5-minute bar before entry."
+            instruction = f"{instruction} Re-confirm on the first live 15-minute bar before entry."
 
         prepared = {
             **signal,
@@ -2868,6 +2890,26 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 )
                 continue
 
+            # ── CVD-agreement gate ──────────────────────────────────────
+            # S2 buys premium directly. For the entry to make sense, the
+            # chosen side's bar-CVD over the last 6 bars should be rising
+            # (more premium accumulation, not distribution). When it
+            # disagrees we wait for the next bar instead of paying up
+            # into a fading move.
+            cvd_window = (
+                context.get("ce_cvd_window")
+                if direction == "CE"
+                else context.get("pe_cvd_window")
+            ) or []
+            if cvd_window and len(cvd_window) >= 2 and not cvd_agrees_with("BUY", cvd_window):
+                self._append_commentary(
+                    runtime.label,
+                    f"{row['underlying']} {direction} signal valid but bar-CVD disagreeing "
+                    f"({cvd_window[0]:.0f} → {cvd_window[-1]:.0f}); skipping entry.",
+                    tone="warning",
+                )
+                continue
+
             candidate = {
                 "row": row,
                 "side": side,
@@ -2879,7 +2921,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 "strength": abs(float(context.get("ce_macd_value") or 0.0))
                 if direction == "CE"
                 else abs(float(context.get("pe_macd_value") or 0.0)),
-                "reason": f"strategy2_{context.get('gate_reason')}_macd_zero_cross",
+                "reason": f"strategy2_{context.get('gate_reason')}_{context.get('entry_reason') or 'macd_above_zero'}",
                 "rsi": latest_macd_rsi(closes).get("rsi"),
                 "opt_type": direction,
                 "iv_pct": _round_or_none(float(side.get("iv") or 0.0) * 100.0, 1) if side.get("iv") is not None else None,
@@ -2914,7 +2956,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         if opened:
             self._append_commentary(
                 runtime.label,
-                f"Opened {opened} Strategy 2 position{'s' if opened != 1 else ''} from live 5-minute index signals.",
+                f"Opened {opened} Strategy 2 position{'s' if opened != 1 else ''} from live 15-minute index signals.",
                 tone="info",
             )
 
@@ -2936,7 +2978,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 continue
 
             side = row.get("ce") if pos.option_type == "CE" else row.get("pe")
-            candles = await self._load_candles(row, side or {}, interval="5minute", limit=96) if side else []
+            candles = await self._load_candles(row, side or {}, interval=STRATEGY2_OPTION_TIMEFRAME, limit=96) if side else []
             closes = [float(c["close"]) for c in candles if c.get("close")] if candles else []
             live_observed_at: Optional[str] = None
             direct_quote = live_quotes.get(pos.symbol)
@@ -2956,6 +2998,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 macd_line, _, _ = _strategy_macd(
                     closes,
                     symbol=pos.instrument_key or pos.trading_symbol or pos.symbol,
+                    timeframe=STRATEGY2_OPTION_TIMEFRAME,
                     last_bar_time=last_bar_time,
                 )
                 pos.macd_line = macd_line
@@ -3031,7 +3074,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "strength": "standby",
             "status": "waiting",
             "freshness": "missing",
-            "instruction": f"{underlying}: waiting for live 1-minute spot rows and 5-minute option candles.",
+            "instruction": f"{underlying}: waiting for live 1-minute spot rows and 15-minute option candles.",
             **classify_status_bucket(
                 has_position=self._has_underlying_position(self._strategy2, underlying),
                 status="waiting",
@@ -3053,8 +3096,8 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 "can_enter": False,
             }
 
-        ce_candles = await self._load_candles(row, ce_side, interval="5minute", limit=96)
-        pe_candles = await self._load_candles(row, pe_side, interval="5minute", limit=96)
+        ce_candles = await self._load_candles(row, ce_side, interval=STRATEGY2_OPTION_TIMEFRAME, limit=96)
+        pe_candles = await self._load_candles(row, pe_side, interval=STRATEGY2_OPTION_TIMEFRAME, limit=96)
         ce_closes = [float(item["close"]) for item in ce_candles if item.get("close")] if ce_candles else []
         pe_closes = [float(item["close"]) for item in pe_candles if item.get("close")] if pe_candles else []
         option_last_bar_time = (
@@ -3066,14 +3109,50 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         ce_last_bar_time = str(ce_candles[-1].get("time") or "") if ce_candles else None
         pe_last_bar_time = str(pe_candles[-1].get("time") or "") if pe_candles else None
 
-        ce_macd_line, _, _ = _strategy_macd(ce_closes, symbol=ce_symbol, last_bar_time=ce_last_bar_time) if len(ce_closes) >= MACD_MIN_BARS else ([], [], [])
-        pe_macd_line, _, _ = _strategy_macd(pe_closes, symbol=pe_symbol, last_bar_time=pe_last_bar_time) if len(pe_closes) >= MACD_MIN_BARS else ([], [], [])
+        ce_macd_line, _, _ = _strategy_macd(
+            ce_closes,
+            symbol=ce_symbol,
+            timeframe=STRATEGY2_OPTION_TIMEFRAME,
+            last_bar_time=ce_last_bar_time,
+        ) if len(ce_closes) >= MACD_MIN_BARS else ([], [], [])
+        pe_macd_line, _, _ = _strategy_macd(
+            pe_closes,
+            symbol=pe_symbol,
+            timeframe=STRATEGY2_OPTION_TIMEFRAME,
+            last_bar_time=pe_last_bar_time,
+        ) if len(pe_closes) >= MACD_MIN_BARS else ([], [], [])
         ce_macd_value = ce_macd_line[-1] if ce_macd_line else None
         pe_macd_value = pe_macd_line[-1] if pe_macd_line else None
-        fresh_ce, _, _ = detect_macd_zero_cross(ce_closes, "CE", symbol=ce_symbol, last_bar_time=ce_last_bar_time)
-        fresh_pe, _, _ = detect_macd_zero_cross(pe_closes, "PE", symbol=pe_symbol, last_bar_time=pe_last_bar_time)
+        fresh_ce, _, _ = detect_macd_zero_cross(
+            ce_closes,
+            "CE",
+            symbol=ce_symbol,
+            timeframe=STRATEGY2_OPTION_TIMEFRAME,
+            last_bar_time=ce_last_bar_time,
+        )
+        fresh_pe, _, _ = detect_macd_zero_cross(
+            pe_closes,
+            "PE",
+            symbol=pe_symbol,
+            timeframe=STRATEGY2_OPTION_TIMEFRAME,
+            last_bar_time=pe_last_bar_time,
+        )
         ce_aligned = ce_macd_value is not None and ce_macd_value > 0
         pe_aligned = pe_macd_value is not None and pe_macd_value < 0
+
+        # ── Order-flow on option premium candles ────────────────────────
+        # S2 trades option premium directly (long CE or long PE). CVD on
+        # the chosen side's candles tells us whether premium accumulation
+        # actually agrees with the MACD trigger. For a CE entry we want
+        # CE CVD trending up; for a PE entry we want PE CVD trending up.
+        # `orderflow_snapshot` returns recent values; `bar_cvd(...)[-6:]`
+        # gives the 6-bar window used by the gate (about 90 minutes on 15m bars).
+        ce_orderflow = orderflow_snapshot(ce_candles) if ce_candles else {}
+        pe_orderflow = orderflow_snapshot(pe_candles) if pe_candles else {}
+        ce_cvd_full = bar_cvd(ce_candles) if ce_candles else []
+        pe_cvd_full = bar_cvd(pe_candles) if pe_candles else []
+        ce_cvd_window = ce_cvd_full[-6:] if len(ce_cvd_full) >= 2 else []
+        pe_cvd_window = pe_cvd_full[-6:] if len(pe_cvd_full) >= 2 else []
 
         if settings.NSE_STRATEGY_BYPASS_MARKET_PROFILE_GATE:
             current_spot = float(row.get("spot_price") or 0.0)
@@ -3087,16 +3166,19 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 return "CE" if abs(float(ce_macd_value or 0.0)) >= abs(float(pe_macd_value or 0.0)) else "PE"
 
             direction = None
+            entry_reason = None
             if fresh_ce and not fresh_pe:
                 direction = "CE"
                 status = "entry-ready"
                 instruction = f"{underlying}: CE zero-cross confirmed while Market Profile gate is bypassed for test mode."
                 can_enter = True
+                entry_reason = "macd_zero_cross"
             elif fresh_pe and not fresh_ce:
                 direction = "PE"
                 status = "entry-ready"
                 instruction = f"{underlying}: PE zero-cross confirmed while Market Profile gate is bypassed for test mode."
                 can_enter = True
+                entry_reason = "macd_zero_cross"
             elif fresh_ce and fresh_pe:
                 direction = _stronger_direction()
                 status = "entry-ready"
@@ -3105,27 +3187,31 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     "Market Profile gate is bypassed for test mode."
                 )
                 can_enter = True
+                entry_reason = "macd_zero_cross"
             elif ce_aligned and not pe_aligned:
                 direction = "CE"
-                status = "trend-aligned"
+                status = "entry-ready"
                 instruction = f"{underlying}: CE MACD stays above zero while Market Profile gate is bypassed for test mode."
-                can_enter = False
+                can_enter = True
+                entry_reason = "macd_above_zero"
             elif pe_aligned and not ce_aligned:
                 direction = "PE"
-                status = "trend-aligned"
+                status = "entry-ready"
                 instruction = f"{underlying}: PE MACD stays aligned while Market Profile gate is bypassed for test mode."
-                can_enter = False
+                can_enter = True
+                entry_reason = "macd_below_zero"
             elif ce_aligned and pe_aligned:
                 direction = _stronger_direction()
-                status = "trend-aligned"
+                status = "entry-ready"
                 instruction = (
                     f"{underlying}: Both option sides are aligned; using the stronger MACD while "
                     "Market Profile gate is bypassed for test mode."
                 )
-                can_enter = False
+                can_enter = True
+                entry_reason = "macd_above_zero" if direction == "CE" else "macd_below_zero"
             else:
                 status = "waiting-cross"
-                instruction = f"{underlying}: Market Profile gate is bypassed for test mode; waiting for CE or PE zero-cross."
+                instruction = f"{underlying}: Market Profile gate is bypassed for test mode; waiting for MACD to align with zero."
                 can_enter = False
 
             option_fresh = _parse_iso_timestamp(option_last_bar_time)
@@ -3147,6 +3233,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     _, _, side_hist = _strategy_macd(
                         side_closes_live,
                         symbol=side_symbol,
+                        timeframe=STRATEGY2_OPTION_TIMEFRAME,
                         last_bar_time=side_last_bar_time,
                     )
                     if side_hist:
@@ -3165,6 +3252,12 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 recent_cross_bars_ago=0 if (fresh_ce or fresh_pe) else None,
             )
 
+            # Pick the active-side orderflow snapshot for surface fields.
+            active_of = ce_orderflow if direction == "CE" else pe_orderflow if direction == "PE" else {}
+            active_cvd_window = ce_cvd_window if direction == "CE" else pe_cvd_window if direction == "PE" else []
+            cvd_agrees = (
+                cvd_agrees_with("BUY", active_cvd_window) if direction in {"CE", "PE"} else None
+            )
             signal = {
                 "strategy": "Strategy 2",
                 "source": "live_scan",
@@ -3174,6 +3267,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 "as_of": started_at.isoformat(),
                 "direction": direction,
                 "reason": gate_reason,
+                "entry_reason": entry_reason,
                 "strength": "strong" if status == "entry-ready" else "monitoring",
                 "status": status,
                 "freshness": freshness,
@@ -3189,6 +3283,16 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 "spot_last_time": spot_last_time,
                 "spot_source": spot_source,
                 "spot_session_date": session_date.isoformat(),
+                "ce_cvd_session": _round_or_none(ce_orderflow.get("cvd_anchored_latest"), 0),
+                "pe_cvd_session": _round_or_none(pe_orderflow.get("cvd_anchored_latest"), 0),
+                "ce_vwap": _round_or_none(ce_orderflow.get("vwap_latest"), 2),
+                "pe_vwap": _round_or_none(pe_orderflow.get("vwap_latest"), 2),
+                "cvd_window_delta": (
+                    _round_or_none(active_cvd_window[-1] - active_cvd_window[0], 0)
+                    if len(active_cvd_window) >= 2 else None
+                ),
+                "cvd_agrees": cvd_agrees,
+                "cvd_divergence": active_of.get("divergence"),
                 **bucket_info,
             }
             pipeline = {
@@ -3203,6 +3307,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 "direction": direction,
                 "day_type": day_type,
                 "gate_reason": gate_reason,
+                "entry_reason": entry_reason,
                 "signal": signal,
                 "pipeline": pipeline,
                 "can_enter": can_enter,
@@ -3211,6 +3316,10 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 "ce_closes": ce_closes,
                 "pe_closes": pe_closes,
                 "ce_candles": ce_candles,
+                "ce_cvd_window": ce_cvd_window,
+                "pe_cvd_window": pe_cvd_window,
+                "ce_orderflow": ce_orderflow,
+                "pe_orderflow": pe_orderflow,
                 "pe_candles": pe_candles,
                 "ce_macd_line": ce_macd_line,
                 "pe_macd_line": pe_macd_line,
@@ -3271,31 +3380,36 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             today_rows=session_rows,
         )
 
+        entry_reason = None
         if direction == "CE":
             if fresh_ce:
                 status = "entry-ready"
                 instruction = f"{underlying}: CE zero-cross confirmed with MP {day_type} gate above POC {profile.poc:.0f}."
                 can_enter = True
+                entry_reason = "macd_zero_cross"
             elif ce_aligned:
-                status = "trend-aligned"
-                instruction = f"{underlying}: MP gate stays bullish ({day_type}). CE MACD is above zero; waiting for the next fresh trigger."
-                can_enter = False
+                status = "entry-ready"
+                instruction = f"{underlying}: MP gate is bullish ({day_type}) and CE MACD is above zero."
+                can_enter = True
+                entry_reason = "macd_above_zero"
             else:
                 status = "waiting-cross"
-                instruction = f"{underlying}: MP gate is bullish ({day_type}) but CE MACD has not crossed yet."
+                instruction = f"{underlying}: MP gate is bullish ({day_type}) but CE MACD is not above zero yet."
                 can_enter = False
         elif direction == "PE":
             if fresh_pe:
                 status = "entry-ready"
                 instruction = f"{underlying}: PE zero-cross confirmed with MP {day_type} gate below POC {profile.poc:.0f}."
                 can_enter = True
+                entry_reason = "macd_zero_cross"
             elif pe_aligned:
-                status = "trend-aligned"
-                instruction = f"{underlying}: MP gate stays bearish ({day_type}). PE MACD is aligned; waiting for the next fresh trigger."
-                can_enter = False
+                status = "entry-ready"
+                instruction = f"{underlying}: MP gate is bearish ({day_type}) and PE MACD is below zero."
+                can_enter = True
+                entry_reason = "macd_below_zero"
             else:
                 status = "waiting-cross"
-                instruction = f"{underlying}: MP gate is bearish ({day_type}) but PE MACD has not crossed yet."
+                instruction = f"{underlying}: MP gate is bearish ({day_type}) but PE MACD is not below zero yet."
                 can_enter = False
         else:
             status = "standby"
@@ -3328,6 +3442,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 _, _, side_hist = _strategy_macd(
                     side_closes_live,
                     symbol=side_symbol,
+                    timeframe=STRATEGY2_OPTION_TIMEFRAME,
                     last_bar_time=side_last_bar_time,
                 )
                 if side_hist:
@@ -3346,6 +3461,11 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             recent_cross_bars_ago=0 if (fresh_ce or fresh_pe) else None,
         )
 
+        active_of_full = ce_orderflow if direction == "CE" else pe_orderflow if direction == "PE" else {}
+        active_cvd_window_full = ce_cvd_window if direction == "CE" else pe_cvd_window if direction == "PE" else []
+        cvd_agrees_full = (
+            cvd_agrees_with("BUY", active_cvd_window_full) if direction in {"CE", "PE"} else None
+        )
         signal = {
             "strategy": "Strategy 2",
             "source": "live_scan",
@@ -3355,6 +3475,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "as_of": started_at.isoformat(),
             "direction": direction,
             "reason": gate_reason,
+            "entry_reason": entry_reason,
             "strength": "strong" if status == "entry-ready" else "monitoring",
             "status": status,
             "freshness": freshness,
@@ -3370,6 +3491,16 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "spot_last_time": spot_last_time,
             "spot_source": spot_source,
             "spot_session_date": session_date.isoformat() if session_date else None,
+            "ce_cvd_session": _round_or_none(ce_orderflow.get("cvd_anchored_latest"), 0),
+            "pe_cvd_session": _round_or_none(pe_orderflow.get("cvd_anchored_latest"), 0),
+            "ce_vwap": _round_or_none(ce_orderflow.get("vwap_latest"), 2),
+            "pe_vwap": _round_or_none(pe_orderflow.get("vwap_latest"), 2),
+            "cvd_window_delta": (
+                _round_or_none(active_cvd_window_full[-1] - active_cvd_window_full[0], 0)
+                if len(active_cvd_window_full) >= 2 else None
+            ),
+            "cvd_agrees": cvd_agrees_full,
+            "cvd_divergence": active_of_full.get("divergence"),
             **bucket_info,
         }
         pipeline = {
@@ -3386,6 +3517,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "direction": direction,
             "day_type": day_type,
             "gate_reason": gate_reason,
+            "entry_reason": entry_reason,
             "signal": signal,
             "pipeline": pipeline,
             "can_enter": can_enter,
@@ -3395,6 +3527,10 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "pe_closes": pe_closes,
             "ce_candles": ce_candles,
             "pe_candles": pe_candles,
+            "ce_cvd_window": ce_cvd_window,
+            "pe_cvd_window": pe_cvd_window,
+            "ce_orderflow": ce_orderflow,
+            "pe_orderflow": pe_orderflow,
             "ce_macd_line": ce_macd_line,
             "pe_macd_line": pe_macd_line,
             "ce_macd_value": ce_macd_value,
@@ -4755,7 +4891,11 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                         for pos in runtime.positions.values()
                     ],
                     "recent_events": [asdict(event) for event in runtime.recent_events],
-                    "trade_history": [
+                    **(lambda all_trades: {
+                        "trade_history": all_trades,
+                        "today_trades": _split_today_history(all_trades)[0],
+                        "historical_trades": _split_today_history(all_trades)[1],
+                    })([
                         {
                             "symbol": trade.symbol,
                             "action": trade.action,
@@ -4770,8 +4910,8 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                             "strike": trade.strike,
                             "option_type": trade.option_type,
                         }
-                        for trade in reversed(runtime.portfolio._trade_history[-20:])
-                    ],
+                        for trade in reversed(runtime.portfolio._trade_history)
+                    ]),
                     "last_scan_at": runtime.last_scan_at,
                     "last_message": runtime.last_message,
                     "signals": runtime.signal_lane
@@ -4830,6 +4970,14 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 prior_trades[runtime.key] = 0
             session_id = f"{runtime.key}-paper"
             runtime.portfolio = PaperPortfolio(initial_capital=1_000_000.0, session_id=session_id)
+            # PaperPortfolio.__init__ starts with empty curves, but defensively
+            # re-zero them here so any prior reference cached elsewhere still
+            # surfaces a clean drawdown / sharpe series on the dashboard.
+            runtime.portfolio._trade_history = []
+            runtime.portfolio._equity_curve = []
+            runtime.portfolio._daily_pnl = defaultdict(float)
+            runtime.portfolio._peak_equity = runtime.portfolio.initial_capital
+            runtime.portfolio._positions = {}
             runtime.order_book = PaperOrderBook(on_fill=runtime.portfolio.on_fill)
             runtime.positions = {}
             runtime.signal_lane = []

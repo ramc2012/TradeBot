@@ -199,7 +199,9 @@ async def test_refresh_nse_watchlists_limits_full_universe_refresh_to_stock_mont
             },
         }
 
-    async def fake_get_watchlist(expiry=None, symbols=None, *, live_refresh=False):
+    async def fake_get_watchlist(expiry=None, symbols=None, *, live_refresh=False, force_rebuild=False):
+        assert live_refresh is True
+        assert force_rebuild is (symbols is None)
         observed_requests.append((expiry, tuple(symbols or ())))
         return {
             "build_status": "ready",
@@ -234,6 +236,7 @@ def test_strategy_readiness_blocks_stale_latest_session_for_execution() -> None:
         watchlist_rows_today=0,
         watchlist_rows_latest=171,
         watchlist_age_seconds=14 * 24 * 60 * 60,
+        market_open=False,
     )
     assert stale["ready"] is True
     assert stale["execution_ready"] is False
@@ -244,6 +247,7 @@ def test_strategy_readiness_blocks_stale_latest_session_for_execution() -> None:
         watchlist_rows_today=0,
         watchlist_rows_latest=171,
         watchlist_age_seconds=60 * 60,
+        market_open=False,
     )
     assert fresh["ready"] is True
     assert fresh["execution_ready"] is True
@@ -253,6 +257,69 @@ def test_strategy_readiness_blocks_stale_latest_session_for_execution() -> None:
         watchlist_rows_today=171,
         watchlist_rows_latest=171,
         watchlist_age_seconds=120,
+        market_open=True,
     )
     assert live["execution_ready"] is True
     assert live["execution_mode"] == "live"
+
+
+def test_strategy_readiness_requires_live_watchlist_during_market_hours() -> None:
+    partial_session = market_intelligence_module._strategy_readiness_fields(
+        watchlist_rows_today=36,
+        watchlist_rows_latest=171,
+        watchlist_age_seconds=90,
+        market_open=True,
+    )
+    assert partial_session["ready"] is True
+    assert partial_session["today_session_ready"] is False
+    assert partial_session["execution_ready"] is False
+    assert partial_session["execution_mode"] == "partial_live_session"
+
+    previous_session = market_intelligence_module._strategy_readiness_fields(
+        watchlist_rows_today=0,
+        watchlist_rows_latest=171,
+        watchlist_age_seconds=60 * 60,
+        market_open=True,
+    )
+    assert previous_session["ready"] is True
+    assert previous_session["execution_ready"] is False
+    assert previous_session["readiness_mode"] == "latest_session"
+    assert previous_session["execution_mode"] == "missing_live_session"
+
+    stale_today = market_intelligence_module._strategy_readiness_fields(
+        watchlist_rows_today=171,
+        watchlist_rows_latest=171,
+        watchlist_age_seconds=30 * 60,
+        market_open=True,
+    )
+    assert stale_today["ready"] is True
+    assert stale_today["execution_ready"] is False
+    assert stale_today["execution_mode"] == "stale_live_session"
+
+
+def test_index_spot_readiness_requires_fresh_index_rows_during_market_hours() -> None:
+    now = datetime.fromisoformat("2026-05-27T04:00:00+00:00")
+    fresh = {
+        symbol: "2026-05-27T03:58:00+00:00"
+        for symbol in market_intelligence_module.NSE_INDEX_SCOPE
+    }
+    ready = market_intelligence_module._index_spot_readiness_fields(
+        fresh,
+        market_open=True,
+        now_utc=now,
+    )
+    assert ready["index_spot_ready"] is True
+    assert ready["index_spot_missing"] == []
+    assert ready["index_spot_stale"] == {}
+
+    stale = dict(fresh)
+    stale["NIFTY"] = "2026-05-22T09:59:00+00:00"
+    stale.pop("SENSEX")
+    blocked = market_intelligence_module._index_spot_readiness_fields(
+        stale,
+        market_open=True,
+        now_utc=now,
+    )
+    assert blocked["index_spot_ready"] is False
+    assert blocked["index_spot_missing"] == ["SENSEX"]
+    assert "NIFTY" in blocked["index_spot_stale"]

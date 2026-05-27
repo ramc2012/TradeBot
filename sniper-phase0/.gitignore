@@ -1,0 +1,12 @@
+data/raw/
+data/processed/
+data/external/
+*.parquet
+*.provenance.json
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+.ipynb_checkpoints/

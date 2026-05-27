@@ -52,7 +52,7 @@ import { isBrokerReady } from "@/lib/broker-status";
 import { createStrategyOverviewSocket } from "@/lib/websocket";
 
 type StrategyTab = "portfolio" | "signals" | "operations";
-type StrategyDetailTab = "instruments" | "positions" | "history" | "portfolio" | "performance";
+type StrategyDetailTab = "instruments" | "positions" | "history" | "portfolio" | "performance" | "flow";
 type InstrumentCategory = "conditions_met" | "watch" | "avoid";
 
 type StrategyComment = {
@@ -286,11 +286,12 @@ function MetricTile({
   detail?: string;
   tone?: string;
 }) {
+  // `detail` is intentionally rendered only as a hover tooltip to keep the
+  // tile compact. The full text remains accessible via the wrapper's title.
   return (
     <div className="rounded-lg border border-bg-border bg-bg-secondary/35 px-3 py-2" title={detail || label}>
       <div className="text-[10px] uppercase tracking-[0.1em] text-text-muted">{label}</div>
       <div className={clsx("mt-1 font-mono text-base font-semibold text-text-primary", tone)}>{value}</div>
-      {detail ? <div className="truncate text-[10px] text-text-muted">{detail}</div> : null}
     </div>
   );
 }
@@ -374,19 +375,21 @@ function TabButton({
   detail: string;
   onClick: () => void;
 }) {
+  // `detail` survives as a hover-only help tip on the whole tab to keep
+  // the tab strip dense and scannable.
   return (
     <button
       type="button"
       onClick={onClick}
+      title={detail}
       className={clsx(
-        "rounded-lg border px-3 py-2 text-left transition-colors",
+        "rounded-lg border px-3 py-2 text-center transition-colors",
         active
           ? "border-accent-blue/40 bg-accent-blue/10 text-text-primary"
           : "border-bg-border bg-bg-secondary/25 text-text-secondary hover:border-bg-active hover:text-text-primary",
       )}
     >
-      <div className="text-xs font-semibold uppercase tracking-[0.1em]" title={detail}>{label}</div>
-      <div className="truncate text-[10px] text-text-muted">{detail}</div>
+      <div className="text-xs font-semibold uppercase tracking-[0.1em]">{label}</div>
     </button>
   );
 }
@@ -1206,13 +1209,24 @@ export default function StrategyPage() {
           <MetricTile label="Strategy P&L" value={formatSigned(selectedStrategy?.summary.realized_pnl, 0)} detail={`${selectedStrategy?.summary.total_trades || 0} closed trades`} tone={pnlTone(selectedStrategy?.summary.realized_pnl)} />
         </div>
 
-        <div className="mt-4 flex flex-wrap gap-2">
-          <DetailTabButton active={activeStrategyTab === "instruments"} label="Priority Instruments" count={selectedCandidates.length} onClick={() => setActiveStrategyTab("instruments")} />
-          <DetailTabButton active={activeStrategyTab === "positions"} label="Trade Positions" count={selectedStrategy?.positions?.length || 0} onClick={() => setActiveStrategyTab("positions")} />
-          <DetailTabButton active={activeStrategyTab === "history"} label="Trade History" count={selectedStrategy?.trade_history?.length || 0} onClick={() => setActiveStrategyTab("history")} />
-          <DetailTabButton active={activeStrategyTab === "portfolio"} label="Strategy Portfolio" count={selectedPortfolioRows.length} onClick={() => setActiveStrategyTab("portfolio")} />
-          <DetailTabButton active={activeStrategyTab === "performance"} label="Performance Metrics" onClick={() => setActiveStrategyTab("performance")} />
-        </div>
+        {(() => {
+          const isCommodity = (selectedStrategy?.key || "").startsWith("commodity");
+          const commodityFlowRows: any[] = isCommodity
+            ? (strategyDesk?.commodityStatus?.futures_watchlist || [])
+            : [];
+          return (
+            <div className="mt-4 flex flex-wrap gap-2">
+              <DetailTabButton active={activeStrategyTab === "instruments"} label="Priority Instruments" count={selectedCandidates.length} onClick={() => setActiveStrategyTab("instruments")} />
+              <DetailTabButton active={activeStrategyTab === "positions"} label="Trade Positions" count={selectedStrategy?.positions?.length || 0} onClick={() => setActiveStrategyTab("positions")} />
+              <DetailTabButton active={activeStrategyTab === "history"} label="Trade History" count={selectedStrategy?.trade_history?.length || 0} onClick={() => setActiveStrategyTab("history")} />
+              <DetailTabButton active={activeStrategyTab === "portfolio"} label="Strategy Portfolio" count={selectedPortfolioRows.length} onClick={() => setActiveStrategyTab("portfolio")} />
+              <DetailTabButton active={activeStrategyTab === "performance"} label="Performance Metrics" onClick={() => setActiveStrategyTab("performance")} />
+              {isCommodity ? (
+                <DetailTabButton active={activeStrategyTab === "flow"} label="MCX Futures Flow" count={commodityFlowRows.length} onClick={() => setActiveStrategyTab("flow")} />
+              ) : null}
+            </div>
+          );
+        })()}
 
         {activeStrategyTab === "instruments" ? (
           <div className="mt-4 grid gap-4 xl:grid-cols-3">
@@ -1305,38 +1319,72 @@ export default function StrategyPage() {
           </div>
         ) : null}
 
-        {activeStrategyTab === "history" ? (
-          <div className="mt-4 overflow-x-auto rounded-2xl border border-bg-border bg-bg-primary/25 p-3">
-            <table className="w-full min-w-[1180px] text-left text-xs">
-              <thead className="text-text-muted">
-                <tr className="border-b border-bg-border">
-                  <th className="pb-2 pr-3">Underlying</th>
-                  <th className="pb-2 pr-3">Contract</th>
-                  <th className="pb-2 pr-3">Entry</th>
-                  <th className="pb-2 pr-3">Exit</th>
-                  <th className="pb-2 pr-3">Reason</th>
-                  <th className="pb-2">P&L</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(selectedStrategy?.trade_history || []).length ? (
-                  (selectedStrategy?.trade_history || []).map((trade: any) => (
-                    <tr key={`${trade.symbol}-${trade.exit_time || trade.entry_time}`} className="border-b border-bg-border/40">
-                      <td className="py-3 pr-3 font-semibold text-text-primary">{tradeUnderlying(trade)}</td>
-                      <td className="py-3 pr-3 font-mono text-text-secondary">{strategyContractLabel(trade.option_type, trade.strike, trade.expiry)}</td>
-                      <td className="py-3 pr-3 font-mono text-text-secondary">{formatNumber(trade.entry_price)} · {formatTimestamp(trade.entry_time)}</td>
-                      <td className="py-3 pr-3 font-mono text-text-secondary">{formatNumber(trade.exit_price)} · {formatTimestamp(trade.exit_time)}</td>
-                      <td className="py-3 pr-3 text-text-muted">{prettify(trade.action || trade.instrument_type)}</td>
-                      <td className={clsx("py-3 font-mono font-semibold", pnlTone(trade.pnl))}>{formatSigned(trade.pnl, 0)}</td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr><td colSpan={6} className="py-10 text-center text-sm text-text-muted">No closed trade history for this strategy.</td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        ) : null}
+        {activeStrategyTab === "history" ? (() => {
+          // Backend now ships `today_trades` and `historical_trades` (recent-first).
+          // Fall back to `trade_history` if a legacy payload arrives.
+          const allRows: any[] = selectedStrategy?.trade_history || [];
+          const todayRows: any[] =
+            (selectedStrategy as any)?.today_trades?.length
+              ? (selectedStrategy as any).today_trades
+              : allRows.filter((t) => {
+                  const ts = t.exit_time || t.entry_time || "";
+                  return ts.slice(0, 10) === new Date().toISOString().slice(0, 10);
+                });
+          const historyRows: any[] =
+            (selectedStrategy as any)?.historical_trades?.length
+              ? (selectedStrategy as any).historical_trades
+              : allRows.filter((t) => !todayRows.includes(t));
+
+          const renderRow = (trade: any) => (
+            <tr key={`${trade.symbol}-${trade.exit_time || trade.entry_time}`} className="border-b border-bg-border/40">
+              <td className="py-3 pr-3 font-semibold text-text-primary">{tradeUnderlying(trade)}</td>
+              <td className="py-3 pr-3 font-mono text-text-secondary">{strategyContractLabel(trade.option_type, trade.strike, trade.expiry)}</td>
+              <td className="py-3 pr-3 font-mono text-text-secondary">{formatNumber(trade.entry_price)} · {formatTimestamp(trade.entry_time)}</td>
+              <td className="py-3 pr-3 font-mono text-text-secondary">{formatNumber(trade.exit_price)} · {formatTimestamp(trade.exit_time)}</td>
+              <td className="py-3 pr-3 text-text-muted">{prettify(trade.action || trade.instrument_type)}</td>
+              <td className={clsx("py-3 font-mono font-semibold", pnlTone(trade.pnl))}>{formatSigned(trade.pnl, 0)}</td>
+            </tr>
+          );
+
+          const renderTable = (rows: any[], emptyText: string) => (
+            <div className="overflow-x-auto rounded-2xl border border-bg-border bg-bg-primary/25 p-3">
+              <table className="w-full min-w-[1180px] text-left text-xs">
+                <thead className="text-text-muted">
+                  <tr className="border-b border-bg-border">
+                    <th className="pb-2 pr-3">Underlying</th>
+                    <th className="pb-2 pr-3">Contract</th>
+                    <th className="pb-2 pr-3">Entry</th>
+                    <th className="pb-2 pr-3">Exit</th>
+                    <th className="pb-2 pr-3">Reason</th>
+                    <th className="pb-2">P&L</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.length ? rows.map(renderRow) : (
+                    <tr><td colSpan={6} className="py-10 text-center text-sm text-text-muted">{emptyText}</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          );
+
+          return (
+            <div className="mt-4 space-y-4">
+              <div>
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">
+                  Today · {todayRows.length}
+                </div>
+                {renderTable(todayRows, "No trades closed today for this strategy.")}
+              </div>
+              <div>
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">
+                  History · {historyRows.length}
+                </div>
+                {renderTable(historyRows, "No prior trade history for this strategy.")}
+              </div>
+            </div>
+          );
+        })() : null}
 
         {activeStrategyTab === "portfolio" ? (
           <div className="mt-4 grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
@@ -1395,6 +1443,110 @@ export default function StrategyPage() {
             </div>
           </div>
         ) : null}
+
+        {activeStrategyTab === "flow" && (selectedStrategy?.key || "").startsWith("commodity") ? (() => {
+          const commodityRows: any[] = strategyDesk?.commodityStatus?.futures_watchlist || [];
+          if (!commodityRows.length) {
+            return (
+              <div className="mt-4 rounded-2xl border border-dashed border-bg-border px-3 py-12 text-center text-xs text-text-muted">
+                No MCX futures rows yet. The agent will populate this once the market opens or a session replay loads.
+              </div>
+            );
+          }
+          return (
+            <div className="mt-4 rounded-2xl border border-bg-border bg-bg-primary/25 p-3">
+              <PanelHeader
+                icon={<CandlestickChart size={16} className="text-accent-amber" />}
+                title="MCX Futures Flow"
+                detail="Per-symbol MACD + MP gate state plus bar-CVD, anchored VWAP, and IB extension. CVD-agreement filters fresh MACD crosses before entry."
+                meta={`${commodityRows.length} rows`}
+              />
+              <div className="mt-4 overflow-x-auto">
+                <table className="w-full min-w-[1700px] text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-bg-border text-text-muted">
+                      <th className="pb-2 pr-3">Symbol</th>
+                      <th className="pb-2 pr-3">Price · vs VWAP</th>
+                      <th className="pb-2 pr-3">MACD</th>
+                      <th className="pb-2 pr-3">Regime / MP</th>
+                      <th className="pb-2 pr-3" title="Bar-CVD: session-anchored CVD + 6-bar trend">CVD</th>
+                      <th className="pb-2 pr-3" title="Initial Balance: 1-hour opening range. Extension > 50% = directional day.">IB Ext</th>
+                      <th className="pb-2 pr-3" title="Volume-by-price clusters">VbP</th>
+                      <th className="pb-2">Validation</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {commodityRows.map((row: any) => {
+                      const price = row.price;
+                      const vwap = row.vwap;
+                      const vwapDelta = price != null && vwap != null ? price - vwap : null;
+                      const vwapPct = vwapDelta != null && vwap ? (vwapDelta / vwap) * 100 : null;
+                      const ibPct = row.ib_extension_pct;
+                      const ibDir = row.ib_extended_above ? "up" : row.ib_extended_below ? "down" : "inside";
+                      return (
+                        <tr key={row.symbol} className="border-b border-bg-border/40 align-top">
+                          <td className="py-3 pr-3">
+                            <div className="font-medium text-text-primary">{row.underlying}</div>
+                            <div className="mt-1 text-[11px] text-text-muted">{row.symbol}</div>
+                          </td>
+                          <td className="py-3 pr-3 font-mono text-text-secondary">
+                            <div>{price != null ? formatNumber(price) : "--"}</div>
+                            {vwap != null ? (
+                              <div className={clsx("mt-1 text-[11px]", vwapDelta != null && vwapDelta > 0 ? "text-accent-green" : vwapDelta != null && vwapDelta < 0 ? "text-accent-red" : "text-text-muted")}>
+                                VWAP {formatNumber(vwap)}{vwapPct != null ? ` (${vwapPct >= 0 ? "+" : ""}${vwapPct.toFixed(2)}%)` : ""}
+                              </div>
+                            ) : null}
+                          </td>
+                          <td className="py-3 pr-3 font-mono text-text-secondary">
+                            <div>{row.macd != null ? formatNumber(row.macd, 2) : "--"}</div>
+                            <div className="mt-1 text-[11px] text-text-muted">
+                              hist {row.macd_histogram != null ? formatNumber(row.macd_histogram, 2) : "--"}
+                            </div>
+                          </td>
+                          <td className="py-3 pr-3 text-text-secondary">
+                            <StatusBadge label={prettify(row.regime)} tone={row.regime} />
+                            {row.mp_day_type ? (
+                              <div className="mt-1 text-[11px] text-text-muted">MP: {prettify(row.mp_day_type)}{row.mp_direction ? ` (${row.mp_direction})` : ""}</div>
+                            ) : null}
+                          </td>
+                          <td className="py-3 pr-3 font-mono text-text-secondary">
+                            <div className={clsx(row.cvd_session != null && row.cvd_session > 0 ? "text-accent-green" : row.cvd_session != null && row.cvd_session < 0 ? "text-accent-red" : "text-text-muted")}>
+                              sess {row.cvd_session != null ? formatSigned(row.cvd_session, 0) : "--"}
+                            </div>
+                            <div className="mt-1 text-[11px] text-text-muted">
+                              Δ6 {row.cvd_window_delta != null ? formatSigned(row.cvd_window_delta, 0) : "--"}
+                            </div>
+                            {row.cvd_agrees != null ? (
+                              <div className="mt-1">
+                                <StatusBadge label={row.cvd_agrees ? "✓ aligned" : "✗ disagree"} tone={row.cvd_agrees ? "ready" : "error"} />
+                              </div>
+                            ) : null}
+                          </td>
+                          <td className="py-3 pr-3 font-mono text-text-secondary">
+                            <StatusBadge label={ibDir} tone={ibDir === "up" ? "ready" : ibDir === "down" ? "error" : "idle"} />
+                            {ibPct != null ? (
+                              <div className="mt-1 text-[11px] text-text-muted">{(ibPct * 100).toFixed(0)}% of IB</div>
+                            ) : null}
+                          </td>
+                          <td className="py-3 pr-3 font-mono text-[11px] text-text-muted">
+                            HVN {row.hvn_count ?? "--"} · LVN {row.lvn_count ?? "--"}
+                            {row.cvd_divergence ? (
+                              <div className="mt-1 text-accent-amber">div: {row.cvd_divergence.kind}</div>
+                            ) : null}
+                          </td>
+                          <td className="py-3 text-text-muted text-[11px]" title={row.signal_validation_detail}>
+                            <StatusBadge label={prettify(row.signal_validation)} tone={row.signal_validation === "ready" ? "ready" : "idle"} />
+                            <div className="mt-1 truncate max-w-[260px]">{row.signal_validation_detail || ""}</div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        })() : null}
       </section>
 
       <section className="rounded-xl border border-bg-border bg-bg-secondary/20 p-3">
@@ -1732,13 +1884,13 @@ export default function StrategyPage() {
         <div className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
           <PanelHeader
             icon={<CandlestickChart size={16} className="text-accent-green" />}
-            title="Strategy 2 · 5m Index MACD + MP"
+            title="Strategy 2 · 15m Index MACD + MP"
             detail="This lane is the live MP-confirmed options workflow. Market Profile context is surfaced with the option trigger so each index row reads like an actionable trading lane rather than a CSV monitor."
             meta={`${strategy2Rows.length} rows`}
           />
 
           <div className="mt-4 overflow-x-auto">
-            <table className="w-full min-w-[1600px] text-left text-xs">
+            <table className="w-full min-w-[1700px] text-left text-xs">
               <thead>
                 <tr className="border-b border-bg-border text-text-muted">
                   <th className="pb-2 pr-3">Index</th>
@@ -1746,44 +1898,67 @@ export default function StrategyPage() {
                   <th className="pb-2 pr-3">Status</th>
                   <th className="pb-2 pr-3">MP Context</th>
                   <th className="pb-2 pr-3">Spot / Value Area</th>
+                  <th className="pb-2 pr-3" title="Bar-CVD agreement + window delta on the chosen side">Flow</th>
                   <th className="pb-2 pr-3">Freshness</th>
                   <th className="pb-2">Instruction</th>
                 </tr>
               </thead>
               <tbody>
                 {strategy2Rows.length ? (
-                  strategy2Rows.map((row) => (
-                    <tr key={row._id} className="border-b border-bg-border/40 align-top">
-                      <td className="py-3 pr-3">
-                        <div className="font-medium text-text-primary">{row.underlying}</div>
-                        <div className="mt-1 text-[11px] text-text-muted">{row.as_of || "--"}</div>
-                      </td>
-                      <td className="py-3 pr-3">
-                        {row.direction ? <StatusBadge label={row.direction} tone={row.direction} /> : <span className="text-text-muted">--</span>}
-                      </td>
-                      <td className="py-3 pr-3">
-                        <StatusBadge label={prettify(row.status)} tone={row.status || row.freshness} />
-                      </td>
-                      <td className="py-3 pr-3 text-text-secondary">
-                        <div>{prettify(row.reason)}</div>
-                        {row.mp_day_type ? <div className="mt-1 text-[11px] text-text-muted">{prettify(row.mp_day_type)}</div> : null}
-                      </td>
-                      <td className="py-3 pr-3 font-mono text-text-secondary">
-                        <div>spot {row.spot_price != null ? formatNumber(row.spot_price) : "--"}</div>
-                        <div className="mt-1">POC {row.poc != null ? formatNumber(row.poc) : "--"} · VA {row.val != null ? formatNumber(row.val) : "--"} / {row.vah != null ? formatNumber(row.vah) : "--"}</div>
-                      </td>
-                      <td className="py-3 pr-3 text-text-secondary">
-                        <StatusBadge label={row.freshness || "unknown"} tone={freshnessTone(row.freshness)} />
-                        <div className="mt-2 text-[11px] text-text-muted">
-                          {row.spot_source ? `${row.spot_source} spot` : "--"} · option {row.option_last_bar_time || "--"}
-                        </div>
-                      </td>
-                      <td className="py-3 text-text-muted">{row.instruction || "--"}</td>
-                    </tr>
-                  ))
+                  strategy2Rows.map((rowTyped) => {
+                    // The orderflow fields are added by the backend (see
+                    // commodity_strategy_agent + strategy_agent S2 path) but
+                    // don't appear in the front-end's SignalRow type because
+                    // that's narrower. Cast to any for new fields.
+                    const row = rowTyped as any;
+                    const sideVwap = row.direction === "CE" ? row.ce_vwap : row.direction === "PE" ? row.pe_vwap : null;
+                    const sideCvd = row.direction === "CE" ? row.ce_cvd_session : row.direction === "PE" ? row.pe_cvd_session : null;
+                    return (
+                      <tr key={row._id} className="border-b border-bg-border/40 align-top">
+                        <td className="py-3 pr-3">
+                          <div className="font-medium text-text-primary">{row.underlying}</div>
+                          <div className="mt-1 text-[11px] text-text-muted">{row.as_of || "--"}</div>
+                        </td>
+                        <td className="py-3 pr-3">
+                          {row.direction ? <StatusBadge label={row.direction} tone={row.direction} /> : <span className="text-text-muted">--</span>}
+                        </td>
+                        <td className="py-3 pr-3">
+                          <StatusBadge label={prettify(row.status)} tone={row.status || row.freshness} />
+                        </td>
+                        <td className="py-3 pr-3 text-text-secondary">
+                          <div>{prettify(row.reason)}</div>
+                          {row.mp_day_type ? <div className="mt-1 text-[11px] text-text-muted">{prettify(row.mp_day_type)}</div> : null}
+                        </td>
+                        <td className="py-3 pr-3 font-mono text-text-secondary">
+                          <div>spot {row.spot_price != null ? formatNumber(row.spot_price) : "--"}</div>
+                          <div className="mt-1">POC {row.poc != null ? formatNumber(row.poc) : "--"} · VA {row.val != null ? formatNumber(row.val) : "--"} / {row.vah != null ? formatNumber(row.vah) : "--"}</div>
+                        </td>
+                        <td className="py-3 pr-3 font-mono text-text-secondary" title="CVD = cumulative volume delta (Lee-Ready bar approximation)">
+                          {row.cvd_agrees == null ? (
+                            <span className="text-text-muted">—</span>
+                          ) : (
+                            <StatusBadge label={row.cvd_agrees ? "✓ aligned" : "✗ disagree"} tone={row.cvd_agrees ? "ready" : "error"} />
+                          )}
+                          <div className="mt-1 text-[11px] text-text-muted">
+                            Δ{row.cvd_window_delta != null ? formatSigned(row.cvd_window_delta, 0) : "--"} · sess {sideCvd != null ? formatSigned(sideCvd, 0) : "--"}
+                          </div>
+                          {sideVwap != null ? (
+                            <div className="mt-0.5 text-[11px] text-text-muted">VWAP {formatNumber(sideVwap)}</div>
+                          ) : null}
+                        </td>
+                        <td className="py-3 pr-3 text-text-secondary">
+                          <StatusBadge label={row.freshness || "unknown"} tone={freshnessTone(row.freshness)} />
+                          <div className="mt-2 text-[11px] text-text-muted">
+                            {row.spot_source ? `${row.spot_source} spot` : "--"} · option {row.option_last_bar_time || "--"}
+                          </div>
+                        </td>
+                        <td className="py-3 text-text-muted">{row.instruction || "--"}</td>
+                      </tr>
+                    );
+                  })
                 ) : (
                   <tr>
-                    <td colSpan={7} className="py-10 text-center text-sm text-text-muted">
+                    <td colSpan={8} className="py-10 text-center text-sm text-text-muted">
                       No Strategy 2 signal rows are available.
                     </td>
                   </tr>
@@ -1792,6 +1967,7 @@ export default function StrategyPage() {
             </table>
           </div>
         </div>
+
       </section>
 
       <section className={clsx("space-y-4", activeTab !== "operations" && "hidden")}>

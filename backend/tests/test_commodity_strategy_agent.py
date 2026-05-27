@@ -1147,7 +1147,10 @@ def test_analyze_futures_symbol_uses_continuation_signal_when_mp_aligns(monkeypa
     async def fake_load_history(self, symbol: str, *, interval: str, lookback_days: int = 0):
         assert symbol == "MCX:CRUDEOIL26MAYFUT"
         assert interval == "15minute"
-        return _build_candles([8700.0 + (index * 2.0) for index in range(40)])
+        # Candles must trend DOWN so bar-CVD agrees with the SELL signal
+        # — the order-flow gate added in May 2026 blocks entries whose
+        # flow contradicts the signal direction.
+        return _build_candles([9000.0 - (index * 8.0) for index in range(40)])
 
     def fake_evaluate(*args, **kwargs):
         return {
@@ -1201,7 +1204,120 @@ def test_analyze_futures_symbol_uses_continuation_signal_when_mp_aligns(monkeypa
     assert "continuation" in row["signal_validation_detail"]
 
 
-def test_analyze_futures_symbol_blocks_continuation_without_trend_day_mp(monkeypatch, tmp_path: Path) -> None:
+def test_analyze_futures_symbol_uses_macd_above_zero_when_mp_aligns(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    async def fake_load_history(self, symbol: str, *, interval: str, lookback_days: int = 0):
+        assert symbol == "MCX:CRUDEOIL26MAYFUT"
+        assert interval == "15minute"
+        return _build_candles([8500.0 + (index * 8.0) for index in range(40)])
+
+    def fake_evaluate(*args, **kwargs):
+        return {
+            "signal": None,
+            "reason": "no_cross",
+            "regime": "bullish",
+            "latest_close": 8812.0,
+            "previous_close": 8804.0,
+            "macd": 18.2,
+            "macd_signal": 16.5,
+            "macd_histogram": 1.7,
+            "atr": 72.0,
+            "bar_time": "2026-04-16T19:00:00+05:30",
+            "recent_cross_signal": "BUY",
+            "recent_cross_bars_ago": 3,
+            "continuation_signal": None,
+            "continuation_reason": None,
+        }
+
+    monkeypatch.setattr(CommodityStrategyAgent, "_load_history", fake_load_history)
+    monkeypatch.setattr(commodity_module, "evaluate_commodity_signal", fake_evaluate)
+    monkeypatch.setattr(
+        commodity_module,
+        "_latest_session_rows",
+        lambda candles: (list(candles), datetime(2026, 4, 16, 19, 0, tzinfo=UTC).date()),
+    )
+    monkeypatch.setattr(CommodityStrategyAgent, "_build_market_profile", lambda self, symbol, rows: object())
+    monkeypatch.setattr(
+        CommodityStrategyAgent,
+        "_classify_market_profile",
+        lambda self, **kwargs: ("BUY", "trend_up", "mp_trend_up"),
+    )
+
+    agent = CommodityStrategyAgent()
+    row = asyncio.run(agent._analyze_futures_symbol("MCX:CRUDEOIL26MAYFUT", 8815.0))
+
+    assert row is not None
+    assert row["signal"] == "BUY"
+    assert row["candidate_signal"] == "BUY"
+    assert row["entry_style"] == "macd_above_zero"
+    assert row["reason"] == "macd_above_zero_mp_trend_up"
+    assert "MACD above/below zero" in row["signal_validation_detail"]
+
+
+def test_analyze_futures_symbol_blocks_continuation_when_mp_opposes(monkeypatch, tmp_path: Path) -> None:
+    """Continuation BUY is blocked when MP day-type opposes the signal.
+
+    Updated semantics (May 2026 MP gate tuning):
+      - Continuation accepts trend-day MP *or* matching balance-above/below-POC.
+      - It is only blocked when MP is clearly the opposite of the signal,
+        or when MP day-type is balance/neutral without alignment.
+    """
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    async def fake_load_history(self, symbol: str, *, interval: str, lookback_days: int = 0):
+        return _build_candles([8700.0 + (index * 2.0) for index in range(40)])
+
+    def fake_evaluate(*args, **kwargs):
+        return {
+            "signal": None,
+            "reason": "no_cross",
+            "regime": "bullish",
+            "latest_close": 8800.0,
+            "previous_close": 8790.0,
+            "macd": 18.2,
+            "macd_signal": 16.5,
+            "macd_histogram": 1.7,
+            "atr": 72.0,
+            "bar_time": "2026-04-16T19:00:00+05:30",
+            "recent_cross_signal": "BUY",
+            "recent_cross_bars_ago": 2,
+            "continuation_signal": "BUY",
+            "continuation_reason": "macd_continuation_breakout_up",
+        }
+
+    monkeypatch.setattr(CommodityStrategyAgent, "_load_history", fake_load_history)
+    monkeypatch.setattr(commodity_module, "evaluate_commodity_signal", fake_evaluate)
+    monkeypatch.setattr(
+        commodity_module,
+        "_latest_session_rows",
+        lambda candles: (list(candles), datetime(2026, 4, 16, 19, 0, tzinfo=UTC).date()),
+    )
+    monkeypatch.setattr(CommodityStrategyAgent, "_build_market_profile", lambda self, symbol, rows: object())
+    # MP says SELL (opposite of continuation BUY) — gate must block.
+    monkeypatch.setattr(
+        CommodityStrategyAgent,
+        "_classify_market_profile",
+        lambda self, **kwargs: ("SELL", "balance_below_poc", "holding_below_poc"),
+    )
+
+    agent = CommodityStrategyAgent()
+
+    row = asyncio.run(agent._analyze_futures_symbol("MCX:CRUDEOIL26MAYFUT", 8805.0))
+
+    assert row is not None
+    assert row["signal"] is None
+    assert row["entry_style"] == "continuation"
+    # Blocked by either the continuation-needs-trend gate or the MP-opposes
+    # gate, depending on day-type. Either message is acceptable.
+    detail = row["signal_validation_detail"]
+    assert "continuation" in detail or "MP gate" in detail
+
+
+def test_analyze_futures_symbol_allows_continuation_on_balance_above_poc(monkeypatch, tmp_path: Path) -> None:
+    """Continuation BUY now passes when MP day is balance_above_poc (was blocked before)."""
     config_path = tmp_path / "commodity_strategy.json"
     monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
 
@@ -1245,9 +1361,8 @@ def test_analyze_futures_symbol_blocks_continuation_without_trend_day_mp(monkeyp
     row = asyncio.run(agent._analyze_futures_symbol("MCX:CRUDEOIL26MAYFUT", 8805.0))
 
     assert row is not None
-    assert row["signal"] is None
+    assert row["signal"] == "BUY"
     assert row["entry_style"] == "continuation"
-    assert "trend-day MP gate" in row["signal_validation_detail"]
 
 
 def test_futures_entry_uses_minimum_half_percent_stop(tmp_path: Path, monkeypatch) -> None:
@@ -1276,6 +1391,60 @@ def test_futures_entry_uses_minimum_half_percent_stop(tmp_path: Path, monkeypatc
     position = agent._runtime.positions["commodity_futures:MCX:CRUDEOIL26MAYFUT"]  # type: ignore[attr-defined]
     assert position.stop_price == pytest.approx(9950.0)
     assert position.target_price == pytest.approx(10100.0)
+
+
+def test_analyze_futures_symbol_cvd_gate_blocks_buy_when_flow_disagrees(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """When MACD signal is BUY but bar-CVD over the last 6 bars is negative,
+    the CVD-agreement gate blocks the entry even though MP would allow it.
+    """
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    async def fake_load_history(self, symbol: str, *, interval: str, lookback_days: int = 0):
+        # Trending DOWN -> bar-CVD will be negative -> BUY gate fails
+        return _build_candles([9000.0 - (index * 10.0) for index in range(40)])
+
+    def fake_evaluate(*args, **kwargs):
+        return {
+            "signal": "BUY",  # fresh cross
+            "reason": "macd_zero_cross_up",
+            "regime": "bullish",
+            "latest_close": 8610.0,
+            "previous_close": 8620.0,
+            "macd": 0.5,
+            "macd_signal": -0.2,
+            "macd_histogram": 0.7,
+            "atr": 50.0,
+            "bar_time": "2026-04-16T19:00:00+05:30",
+            "recent_cross_signal": "BUY",
+            "recent_cross_bars_ago": 0,
+            "continuation_signal": None,
+            "continuation_reason": None,
+        }
+
+    monkeypatch.setattr(CommodityStrategyAgent, "_load_history", fake_load_history)
+    monkeypatch.setattr(commodity_module, "evaluate_commodity_signal", fake_evaluate)
+    monkeypatch.setattr(
+        commodity_module,
+        "_latest_session_rows",
+        lambda candles: (list(candles), datetime(2026, 4, 16, 19, 0, tzinfo=UTC).date()),
+    )
+    monkeypatch.setattr(CommodityStrategyAgent, "_build_market_profile", lambda self, symbol, rows: object())
+    monkeypatch.setattr(
+        CommodityStrategyAgent,
+        "_classify_market_profile",
+        lambda self, **kwargs: ("BUY", "trend_up", "mp_trend_up"),
+    )
+
+    agent = CommodityStrategyAgent()
+    row = asyncio.run(agent._analyze_futures_symbol("MCX:CRUDEOIL26MAYFUT", 8615.0))
+
+    assert row is not None
+    assert row["signal"] is None  # gated by CVD even though MP would allow
+    assert row["cvd_agrees"] is False
+    assert "CVD" in row["signal_validation_detail"]
 
 
 def test_futures_signal_blocks_after_recent_stop_cooldown(tmp_path: Path, monkeypatch) -> None:
@@ -1698,3 +1867,157 @@ def test_archive_and_reset_paper_account_writes_snapshot(tmp_path: Path, monkeyp
     status = agent.get_status()
     assert status["summary"]["initial_capital"] == pytest.approx(1_000_000.0)
     assert status["summary"]["realized_pnl"] == pytest.approx(0.0)
+
+
+def test_manage_positions_closes_stranded_post_rollover_contract(tmp_path: Path, monkeypatch) -> None:
+    """A position whose configured futures symbol no longer appears in the
+    scanned futures_rows (because the agent rolled to the next month) must
+    be auto-closed as `expired_contract` at the new active contract's mark.
+
+    This guards the May→June rollover that the live agent missed on 2026-05-27.
+    """
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    agent = CommodityStrategyAgent()
+    # Open NATURALGAS position on the (now expired) MAY contract.
+    position = commodity_module.CommodityPositionState(
+        position_key="commodity_futures:MCX:NATURALGAS26MAYFUT",
+        symbol="MCX:NATURALGAS26MAYFUT",
+        live_symbol="MCX:NATURALGAS26MAYFUT",
+        underlying="NATURALGAS",
+        strategy_key="commodity_futures",
+        strategy_title="Strategy 2 · Futures",
+        instrument_type="FUT",
+        action="BUY",
+        qty=1250,
+        lots=1,
+        lot_size=1250,
+        entry_price=280.0,
+        current_price=280.0,
+        stop_price=275.0,
+        target_price=290.0,
+        regime="bullish",
+        signal_reason="macd_zero_cross_up_mp_balanced",
+        atr=2.0,
+        macd_value=0.5,
+        mp_poc=279.0,
+        mp_vah=281.0,
+        mp_val=277.0,
+        entered_at="2026-05-26T22:53:00+05:30",
+        entry_bar_time="2026-05-26T22:30:00+05:30",
+        contract_unit_label="1250 MMBtu",
+        quote_unit_label="Rs / MMBtu",
+        display_name="Natural Gas",
+        initial_qty=1250,
+        peak_price=280.0,
+        entry_style="fresh_cross",
+        last_reviewed_bar_time="2026-05-26T22:30:00+05:30",
+    )
+    agent._runtime.positions[position.position_key] = position  # type: ignore[attr-defined]
+
+    # The live close path goes through order_book → portfolio.on_fill,
+    # which can only book a trade when a matching opposing VirtualPosition
+    # exists on the portfolio. Register the BUY side here so the
+    # subsequent SELL (from the auto-close) generates a TradeRecord.
+    from datetime import datetime as _dt, timezone as _tz
+    agent._runtime.portfolio._positions["seed-buy-naturalgas-may"] = commodity_module.VirtualPosition(  # type: ignore[attr-defined]
+        symbol="MCX:NATURALGAS26MAYFUT",
+        action="BUY",
+        qty=1250,
+        avg_price=280.0,
+        current_price=280.0,
+        instrument_type="FUT",
+        opened_at=_dt(2026, 5, 26, 22, 53, tzinfo=_tz.utc),
+    )
+
+    # The agent has rolled forward: today's futures_rows carry the active
+    # JUN contract instead of the MAY one we hold.
+    rolled_row = {
+        "symbol": "MCX:NATURALGAS26JUNFUT",
+        "underlying": "NATURALGAS",
+        "price": 285.0,
+        "macd": 0.4,
+        "bar_time": "2026-05-27T09:30:00+05:30",
+        "mp_poc": 283.0,
+        "mp_vah": 286.0,
+        "mp_val": 282.0,
+    }
+
+    asyncio.run(agent._manage_positions(object(), [rolled_row], []))
+
+    # Stranded MAY position should be auto-closed at the JUN mark (₹285).
+    assert position.position_key not in agent._runtime.positions  # type: ignore[attr-defined]
+    # Read trade history straight from the in-memory portfolio — calling
+    # the public `get_trade_history()` would reload from the empty test
+    # config file and hide what we just recorded.
+    trades = agent._runtime.portfolio._trade_history  # type: ignore[attr-defined]
+    assert trades, "stranded close should be recorded in portfolio trade history"
+    last = trades[-1]
+    assert last.symbol == "MCX:NATURALGAS26MAYFUT"
+    # Market-order fill applies a small slippage to the rolled-row mark,
+    # so accept any exit price within 1% of the mark. The critical thing
+    # is that the close fired on the JUN price, not on a stale MAY mark.
+    assert last.exit_price == pytest.approx(285.0, rel=0.02)
+    # PnL on a long: (exit − entry) × qty ≈ (285 − 280) × 1250 = 6250 ± slippage.
+    expected_pnl = (last.exit_price - 280.0) * 1250
+    assert last.pnl == pytest.approx(expected_pnl, rel=1e-3)
+    assert last.pnl > 5500, "PnL should reflect the JUN exit, not a stale price"
+
+
+def test_manage_positions_skips_when_no_active_row_for_root(tmp_path: Path, monkeypatch) -> None:
+    """If the position's symbol isn't in futures_rows AND no other row
+    shares the same root (e.g. transient data gap), the agent must NOT
+    falsely close the position — it should just skip and wait."""
+    config_path = tmp_path / "commodity_strategy.json"
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+
+    agent = CommodityStrategyAgent()
+    position = commodity_module.CommodityPositionState(
+        position_key="commodity_futures:MCX:CRUDEOIL26JUNFUT",
+        symbol="MCX:CRUDEOIL26JUNFUT",
+        live_symbol="MCX:CRUDEOIL26JUNFUT",
+        underlying="CRUDEOIL",
+        strategy_key="commodity_futures",
+        strategy_title="Strategy 2 · Futures",
+        instrument_type="FUT",
+        action="BUY",
+        qty=100,
+        lots=1,
+        lot_size=100,
+        entry_price=8900.0,
+        current_price=8900.0,
+        stop_price=8850.0,
+        target_price=9000.0,
+        regime="bullish",
+        signal_reason="macd_zero_cross_up_mp_trend_up",
+        atr=20.0,
+        macd_value=5.0,
+        mp_poc=8910.0,
+        mp_vah=8950.0,
+        mp_val=8870.0,
+        entered_at="2026-05-26T12:00:00+05:30",
+        entry_bar_time="2026-05-26T11:45:00+05:30",
+        contract_unit_label="100 BBL",
+        quote_unit_label="Rs / BBL",
+        display_name="Crude Oil",
+        initial_qty=100,
+        peak_price=8900.0,
+        entry_style="fresh_cross",
+        last_reviewed_bar_time="2026-05-26T11:45:00+05:30",
+    )
+    agent._runtime.positions[position.position_key] = position  # type: ignore[attr-defined]
+
+    # futures_rows has only GOLD — no row for CRUDEOIL root at all.
+    unrelated_row = {
+        "symbol": "MCX:GOLD26JUNFUT",
+        "underlying": "GOLD",
+        "price": 157900.0,
+        "bar_time": "2026-05-27T09:30:00+05:30",
+    }
+
+    asyncio.run(agent._manage_positions(object(), [unrelated_row], []))
+
+    # Position should still be open — data gap, not a rollover.
+    assert position.position_key in agent._runtime.positions  # type: ignore[attr-defined]
+    assert agent.get_trade_history() == []

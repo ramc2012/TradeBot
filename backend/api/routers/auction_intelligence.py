@@ -14,7 +14,11 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from auction_intelligence import AuctionIntelligenceService
-from auction_intelligence.automation import build_shadow_records_from_snapshot
+from auction_intelligence.automation import (
+    build_shadow_records_from_snapshot,
+    capture_live_paper_cycle,
+    run_market_hours_cycle,
+)
 from auction_intelligence.analytics import MPAnalyticsEngine
 from auction_intelligence.config import clone_default_config
 from auction_intelligence.demo import (
@@ -31,7 +35,7 @@ from auction_intelligence.live import (
     build_live_validation_series,
 )
 from auction_intelligence.market_profile.engine import MarketProfileEngine
-from auction_intelligence.paper import PaperPositionBook
+from auction_intelligence.paper import PaperPositionBook, PaperTradingService
 from auction_intelligence.paper.journal import JournalReader
 from auction_intelligence.shadow import ShadowPersistenceService
 from auction_intelligence.validation.gate_b import GateBValidator
@@ -55,6 +59,7 @@ _validation_store = ValidationPersistenceService()
 _shadow_store = ShadowPersistenceService()
 _paper_journal = JournalReader(clone_default_config()["paper_trading"]["journal_root"])
 _paper_book = PaperPositionBook(clone_default_config()["paper_trading"]["journal_root"])
+_paper_service = PaperTradingService(clone_default_config()["paper_trading"]["journal_root"])
 
 
 class BarPayload(BaseModel):
@@ -252,11 +257,14 @@ async def summary() -> dict:
     from core.market_hours_paper_supervisor import market_hours_paper_supervisor
 
     automation = market_hours_paper_supervisor.get_runner_status("auction_intelligence")
+    paper_status = await _paper_service.status()
     return {
         "module": "auction_intelligence",
-        "description": "Separate Market Profile + order-flow strategy stack",
+        "description": "Market Profile + order-flow paper-trading strategy stack",
+        "mode": "paper_trading",
         "auto_started": bool(automation.get("enabled") and automation.get("loop_active")),
         "automation": automation,
+        "paper_trading": paper_status,
         "mvp_scope": config["mvp_scope"],
         "deployable_first_sleeve": "swing",
         "validation_gates": [
@@ -282,6 +290,10 @@ async def summary() -> dict:
             "/api/auction-intelligence/live-snapshot",
             "/api/auction-intelligence/analyze",
             "/api/auction-intelligence/paper-proposal",
+            "/api/auction-intelligence/paper-run-once",
+            "/api/auction-intelligence/paper-status",
+            "/api/auction-intelligence/paper-journal",
+            "/api/auction-intelligence/paper-positions",
             "/api/auction-intelligence/validate-gate-a",
             "/api/auction-intelligence/validate-gate-b",
             "/api/auction-intelligence/shadow-record-live",
@@ -455,6 +467,26 @@ async def paper_positions(symbol: str | None = None, status: str = "all", limit:
     )
 
 
+@router.get("/paper-status")
+async def paper_status() -> dict:
+    from core.market_hours_paper_supervisor import market_hours_paper_supervisor
+
+    payload = await _paper_service.status()
+    payload["automation"] = market_hours_paper_supervisor.get_runner_status("auction_intelligence")
+    return payload
+
+
+@router.post("/paper-run-once")
+async def paper_run_once(symbol: str | None = Query(None)) -> dict:
+    symbols = [_normalize_symbol_filter(symbol)] if _normalize_symbol_filter(symbol) else None
+    try:
+        return await run_market_hours_cycle(symbols=symbols)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @router.post("/analyze")
 async def analyze(request: AnalysisRequest) -> dict:
     service = _service()
@@ -472,7 +504,18 @@ async def analyze(request: AnalysisRequest) -> dict:
 
 
 @router.post("/paper-proposal")
-async def paper_proposal(request: AnalysisRequest) -> dict:
+async def paper_proposal(
+    request: AnalysisRequest | None = Body(default=None),
+    symbol: str | None = Query(None),
+) -> dict:
+    if request is None:
+        try:
+            return await capture_live_paper_cycle(symbol or "NIFTY")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
     service = _service()
     bundle, journal_paths, paper_positions = await service.analyze_and_record_option_paper(
         session=SessionContext(**request.session.model_dump()),

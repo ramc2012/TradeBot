@@ -485,6 +485,11 @@ async def test_paper_store_calculates_short_futures_pnl(tmp_path: Path) -> None:
     }
     await store.record_signal(actionable_snapshot)
 
+    # Backdate `opened_at` past the 5-minute minimum-hold guard so the
+    # subsequent FLAT snapshot actually closes the position (rather than
+    # being treated as same-cycle thrashing noise — see paper.py).
+    _backdate_open(store, minutes=10)
+
     flat_snapshot = {
         "symbol_code": "CRUDEOIL",
         "session": {"session_date": "2026-05-19", "last_price": 9950.0},
@@ -794,6 +799,12 @@ async def test_paper_store_tracks_open_and_closed_positions(tmp_path: Path) -> N
     assert summary["open_positions"] == 1
     assert summary["closed_positions"] == 0
 
+    # Backdate so the FLAT follow-up passes the minimum-hold guard.
+    _backdate_open(store, minutes=10)
+    # Bump the latest_premium too, otherwise the "stalled refresh" guard
+    # would still hold the position open at entry premium.
+    _bump_latest_premium(store, delta=0.5)
+
     flat_snapshot = {
         "symbol_code": "NIFTY",
         "session": {"session_date": "2026-04-02"},
@@ -822,3 +833,287 @@ async def test_paper_store_tracks_open_and_closed_positions(tmp_path: Path) -> N
     assert summary["closed_positions"] == 1
     assert positions["summary"]["closed_positions"] == 1
     assert positions["closed_positions"][0]["close_reason"] == "flat_snapshot"
+
+
+# ── Auto-exit + sticky-level tests for the upgraded FMP paper engine ────────
+
+
+def _backdate_open(store: FMPPaperStore, *, minutes: int) -> None:
+    """Rewind every open position's `opened_at` by N minutes.
+
+    The paper engine's FLAT-close path now refuses to close positions
+    held less than 5 minutes (anti-thrash guard). Tests that want to
+    exercise the close path without sleeping use this helper to make
+    the position "old enough" for the close to fire.
+    """
+    state = store._load_positions()
+    delta = timedelta(minutes=minutes)
+    for row in state.get("open_positions", []):
+        opened = row.get("opened_at")
+        if not opened:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(opened).replace("Z", "+00:00")) - delta
+            row["opened_at"] = ts.isoformat()
+        except ValueError:
+            continue
+    store._save_positions(state)
+
+
+def _bump_latest_premium(store: FMPPaperStore, *, delta: float) -> None:
+    """Nudge `latest_premium` away from `entry_premium` on every open
+    position so the "stalled-refresh" guard lets the close fire."""
+    state = store._load_positions()
+    for row in state.get("open_positions", []):
+        latest = row.get("latest_premium")
+        try:
+            row["latest_premium"] = float(latest) + delta
+        except (TypeError, ValueError):
+            continue
+    store._save_positions(state)
+
+
+def _option_open_snapshot(
+    *,
+    underlying: str = "NIFTY",
+    session_date: str = "2026-04-02",
+    last_price: float | None = None,
+    action: str = "LONG",
+    stop_level: float = 80.0,
+    target_level: float = 280.0,
+    premium: float = 186.5,
+    instrument_key: str = "nifty-22550-ce",
+) -> dict:
+    session: dict = {"session_date": session_date}
+    if last_price is not None:
+        session["last_price"] = last_price
+    return {
+        "symbol_code": underlying,
+        "session": session,
+        "current_signal": {
+            "hourly_number": 3,
+            "setup_name": "hourly_ib_breakout_call",
+            "action": action,
+            "confidence": 0.8,
+            "horizon": "swing",
+            "daily_shape": "Elongated",
+            "hourly_shape": "Elongated",
+            "entry_trigger": 22540.0,
+            # Premium-based risk levels by default (small relative to premium).
+            "stop_level": stop_level,
+            "target_level": target_level,
+            "filters": [],
+            "rationale": ["Aligned breakout."],
+            "order_flow_bias": {"delta": 100.0},
+            "actionable": True,
+            "options": {
+                "option_type": "CE",
+                "strike": 22550.0,
+                "expiry": "2026-04-09",
+                "premium": premium,
+                "trading_symbol": "NIFTY 22550 CE",
+                "instrument_key": instrument_key,
+                "lot_size": 65,
+            },
+        },
+    }
+
+
+def _flat_followup_snapshot(
+    *,
+    session_date: str = "2026-04-02",
+    last_price: float = 22550.0,
+    underlying: str = "NIFTY",
+) -> dict:
+    return {
+        "symbol_code": underlying,
+        "session": {"session_date": session_date, "last_price": last_price},
+        "current_signal": {
+            "setup_name": "no_trade",
+            "action": "FLAT",
+            "confidence": 0.2,
+            "filters": [],
+            "rationale": [],
+            "actionable": False,
+            "options": None,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_auto_exit_stop_loss_on_premium_based_stop(tmp_path: Path) -> None:
+    """Premium-based stop (≤ 5× entry premium) triggers a stop_loss exit
+    on the next snapshot when the option premium drops to or below stop."""
+    store = FMPPaperStore(tmp_path)
+    # Open: entry 186.5, stop 80, target 280 — all premium-scaled.
+    await store.record_signal(
+        _option_open_snapshot(stop_level=80.0, target_level=280.0, premium=186.5)
+    )
+
+    # Next snapshot: option premium has collapsed to 50 (below the 80 stop).
+    # The second open call overlays the new premium via record_signal's
+    # refresh path; the auto-exit check then runs before any further logic.
+    stop_hit = _option_open_snapshot(stop_level=80.0, target_level=280.0, premium=50.0)
+    summary = await store.record_signal(stop_hit)
+    positions = await store.list_positions(symbol="NIFTY", status="all", limit=10)
+
+    assert summary["open_positions"] == 0
+    assert summary["closed_positions"] == 1
+    closed = positions["closed_positions"][0]
+    assert closed["close_reason"] == "stop_loss"
+    # PnL is (exit - entry) * qty for a LONG; exit_premium gets stamped
+    # from latest_premium after refresh, which the second snapshot supplies.
+    assert closed["exit_premium"] == 50.0
+    assert closed["realized_pnl"] == pytest.approx((50.0 - 186.5) * 65, rel=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_auto_exit_target_hit_on_premium_based_target(tmp_path: Path) -> None:
+    store = FMPPaperStore(tmp_path)
+    await store.record_signal(
+        _option_open_snapshot(stop_level=80.0, target_level=280.0, premium=186.5)
+    )
+    target_hit = _option_open_snapshot(stop_level=80.0, target_level=280.0, premium=300.0)
+    summary = await store.record_signal(target_hit)
+    positions = await store.list_positions(symbol="NIFTY", status="all", limit=10)
+    assert summary["open_positions"] == 0
+    assert summary["closed_positions"] == 1
+    assert positions["closed_positions"][0]["close_reason"] == "target_hit"
+
+
+@pytest.mark.asyncio
+async def test_spot_based_stops_do_not_falsely_trigger(tmp_path: Path) -> None:
+    """The legacy FMP signals carry spot-level stops (e.g. 22505 for a
+    ₹186 NIFTY option). Those must NOT trigger a stop-loss exit just
+    because the spot stop value happens to be larger than the option
+    premium."""
+    store = FMPPaperStore(tmp_path)
+    await store.record_signal(
+        _option_open_snapshot(stop_level=22505.0, target_level=22620.0, premium=186.5)
+    )
+    # Past min-hold + premium moved → FLAT will close cleanly.
+    _backdate_open(store, minutes=10)
+    _bump_latest_premium(store, delta=0.5)
+    # FLAT follow-up — should close as flat_snapshot, not stop_loss, even
+    # though premium (186.5) is well below the spot stop (22505).
+    summary = await store.record_signal(_flat_followup_snapshot())
+    positions = await store.list_positions(symbol="NIFTY", status="all", limit=10)
+    assert summary["closed_positions"] == 1
+    assert positions["closed_positions"][0]["close_reason"] == "flat_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_auto_exit_expired_contract(tmp_path: Path) -> None:
+    """A position whose expiry is before the current session date should
+    be force-closed with `expired_contract` even on a stale signal."""
+    store = FMPPaperStore(tmp_path)
+    snapshot = _option_open_snapshot(session_date="2026-04-08", premium=186.5)
+    await store.record_signal(snapshot)
+
+    # Next session is *after* expiry 2026-04-09. Send a benign refresh.
+    expired_snapshot = _option_open_snapshot(session_date="2026-04-10", premium=186.5)
+    summary = await store.record_signal(expired_snapshot)
+    positions = await store.list_positions(symbol="NIFTY", status="all", limit=10)
+    assert summary["closed_positions"] == 1
+    assert positions["closed_positions"][0]["close_reason"] == "expired_contract"
+
+
+@pytest.mark.asyncio
+async def test_auto_exit_premium_zero_for_options(tmp_path: Path) -> None:
+    """An option whose premium hits zero is force-closed (zero premium
+    means the contract is effectively worthless)."""
+    store = FMPPaperStore(tmp_path)
+    await store.record_signal(_option_open_snapshot(premium=186.5))
+    summary = await store.record_signal(_option_open_snapshot(premium=0.0))
+    positions = await store.list_positions(symbol="NIFTY", status="all", limit=10)
+    assert summary["closed_positions"] == 1
+    assert positions["closed_positions"][0]["close_reason"] == "premium_zero"
+
+
+@pytest.mark.asyncio
+async def test_sticky_stop_target_levels_when_signal_drops_them(tmp_path: Path) -> None:
+    """If a refresh snapshot doesn't carry stop/target (or carries zeros),
+    the existing levels should be retained — wiping them silently loses
+    the original risk plan and was the bug that prompted this rewrite."""
+    store = FMPPaperStore(tmp_path)
+    await store.record_signal(
+        _option_open_snapshot(stop_level=80.0, target_level=280.0, premium=186.5)
+    )
+    # Same-direction refresh with no fresh risk levels.
+    refresh = _option_open_snapshot(stop_level=0.0, target_level=0.0, premium=190.0)
+    await store.record_signal(refresh)
+    positions = await store.list_positions(symbol="NIFTY", status="open", limit=10)
+    assert positions["open_positions"], "position should still be open"
+    open_row = positions["open_positions"][0]
+    assert open_row["stop_level"] == 80.0
+    assert open_row["target_level"] == 280.0
+    # New premium did get refreshed though.
+    assert open_row["latest_premium"] == 190.0
+
+
+@pytest.mark.asyncio
+async def test_dedupe_removes_duplicate_matching_positions(tmp_path: Path) -> None:
+    """If the on-disk state has duplicate same-contract / same-action
+    positions, the next refresh should keep one and close the rest with
+    `dedupe_repair`."""
+    store = FMPPaperStore(tmp_path)
+    # Open one normally, then plant a duplicate directly on disk to
+    # simulate the corrupt state we're guarding against.
+    await store.record_signal(_option_open_snapshot(premium=186.5))
+    state = store._load_positions()
+    duplicate = dict(state["open_positions"][0])
+    duplicate["position_id"] = "dupe"
+    state["open_positions"].append(duplicate)
+    store._save_positions(state)
+
+    # Same-direction refresh — should dedupe.
+    await store.record_signal(_option_open_snapshot(premium=190.0))
+    positions = await store.list_positions(symbol="NIFTY", status="all", limit=10)
+    assert len(positions["open_positions"]) == 1
+    closed = positions["closed_positions"]
+    assert any(row.get("close_reason") == "dedupe_repair" for row in closed)
+
+
+@pytest.mark.asyncio
+async def test_signal_flip_closes_existing_and_opens_new(tmp_path: Path) -> None:
+    store = FMPPaperStore(tmp_path)
+    await store.record_signal(
+        _option_open_snapshot(action="LONG", premium=186.5)
+    )
+    # Flip to SHORT — different action, different contract entirely.
+    flipped = _option_open_snapshot(action="SHORT", premium=190.0)
+    flipped["current_signal"]["options"]["option_type"] = "PE"
+    flipped["current_signal"]["options"]["instrument_key"] = "nifty-22550-pe"
+    flipped["current_signal"]["options"]["trading_symbol"] = "NIFTY 22550 PE"
+    await store.record_signal(flipped)
+    positions = await store.list_positions(symbol="NIFTY", status="all", limit=10)
+    assert len(positions["open_positions"]) == 1
+    assert positions["open_positions"][0]["action"] == "SHORT"
+    assert any(row.get("close_reason") == "signal_flip" for row in positions["closed_positions"])
+
+
+@pytest.mark.asyncio
+async def test_flat_close_blocked_within_min_hold(tmp_path: Path) -> None:
+    """A FLAT snapshot arriving within 5 minutes of the open should leave
+    the position alone — the 4 zero-PnL trades we observed in production
+    were all this pattern (open immediately followed by FLAT at unchanged
+    premium)."""
+    store = FMPPaperStore(tmp_path)
+    await store.record_signal(_option_open_snapshot(premium=186.5))
+    # No backdate — opened_at is essentially "now". FLAT should be ignored.
+    summary = await store.record_signal(_flat_followup_snapshot())
+    assert summary["open_positions"] == 1, "FLAT during min-hold should not close"
+    assert summary["closed_positions"] == 0
+
+
+@pytest.mark.asyncio
+async def test_flat_close_blocked_when_premium_refresh_stalls(tmp_path: Path) -> None:
+    """Even after the min-hold window expires, refuse to close at exactly
+    the entry premium — that's the "premium refresh stalled" signature."""
+    store = FMPPaperStore(tmp_path)
+    await store.record_signal(_option_open_snapshot(premium=186.5))
+    # Past min-hold but premium has not moved — refresh likely stalled.
+    _backdate_open(store, minutes=10)
+    summary = await store.record_signal(_flat_followup_snapshot())
+    assert summary["open_positions"] == 1, "stalled refresh should not lock in fake PnL"
+    assert summary["closed_positions"] == 0

@@ -1,0 +1,17 @@
+configs/secrets.yaml
+configs/local.*.yaml
+artifacts/*.txt
+artifacts/*.json
+artifacts/*.pkl
+!artifacts/.gitkeep
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+*.log
+*.sqlite
+data/
+.env
+.env.*

@@ -1,0 +1,25 @@
+# Feature family toggles for ablation studies.
+# Default: all on. Switch off to measure contribution of each family.
+
+market_profile:
+  enabled: true
+  use_value_area: true
+  use_poc_distance: true
+  use_lvn_hvn: true
+  use_ib_position: true
+  use_va_migration: true
+
+order_flow:
+  enabled: true
+  inferred_delta_windows_sec: [5, 30, 300]
+  imbalance_levels: 5
+  apparent_absorption: true
+  sweep_detector: true
+
+context:
+  enabled: true
+  use_session_time: true
+  use_day_of_week: true
+  use_expiry_distance: true
+  use_atr_regime: true
+  use_overnight_gap: true

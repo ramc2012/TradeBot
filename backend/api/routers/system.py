@@ -683,6 +683,7 @@ async def system_overview() -> dict[str, Any]:
                 "connected_brokers": auction.get("connected_brokers") or [],
                 "deployable_first_sleeve": auction.get("deployable_first_sleeve"),
                 "validation_gates": auction.get("validation_gates") or [],
+                "paper_trading": auction.get("paper_trading") or {},
             },
             "blockers": [
                 item for item in health.get("services", [])

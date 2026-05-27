@@ -504,7 +504,7 @@ def test_get_status_exposes_next_scan_and_runtime_timestamps() -> None:
     assert status["strategies"][0]["agent"]["key"] == "macd_strategy"
     assert status["strategies"][0]["last_message"] == "Scanned 218 instruments."
     assert status["strategies"][1]["key"] == "index_mp_strategy"
-    assert status["strategies"][1]["agent"]["timeframe"] == "5minute"
+    assert status["strategies"][1]["agent"]["timeframe"] == "15minute"
     assert status["strategies"][1]["last_message"] == "Scanned 5 indices."
 
 
@@ -746,6 +746,84 @@ def test_strategy2_signal_context_can_bypass_market_profile_gate(monkeypatch) ->
     assert context["can_enter"] is True
     assert context["signal"]["status"] == "entry-ready"
     assert context["signal"]["instruction"].startswith("SENSEX: CE zero-cross confirmed while Market Profile gate is bypassed")
+
+
+def test_strategy2_signal_context_enters_when_mp_confirms_macd_above_zero(monkeypatch) -> None:
+    agent = PaperStrategyAgent()
+    started_at = datetime(2026, 4, 16, 10, 30, tzinfo=strategy_agent_module.IST)
+    requested_intervals: list[str] = []
+
+    def _candles(option_type: str) -> list[dict]:
+        base = datetime(2026, 4, 16, 9, 15, tzinfo=strategy_agent_module.IST)
+        start = 100.0 if option_type == "CE" else 90.0
+        return [
+            {
+                "time": (base + timedelta(minutes=15 * index)).isoformat(),
+                "open": start + index,
+                "high": start + index,
+                "low": start + index,
+                "close": start + index,
+                "volume": 1000 + index,
+            }
+            for index in range(40)
+        ]
+
+    async def fake_load_candles(_row, side, *, interval="5minute", limit=96):
+        requested_intervals.append(interval)
+        return _candles(side.get("option_type"))
+
+    async def fake_spot_rows(_underlying, _started_at):
+        base = datetime(2026, 4, 16, 9, 15, tzinfo=strategy_agent_module.IST)
+        return (
+            [
+                {
+                    "time": (base + timedelta(minutes=index)).isoformat(),
+                    "open": 22000.0 + index,
+                    "high": 22000.0 + index,
+                    "low": 22000.0 + index,
+                    "close": 22000.0 + index,
+                    "volume": 1000,
+                }
+                for index in range(90)
+            ],
+            "test",
+        )
+
+    class _Profile:
+        poc = 22050.0
+        vah = 22075.0
+        val = 22025.0
+
+    def fake_strategy_macd(closes, *, symbol=None, timeframe="5minute", last_bar_time=None):
+        assert timeframe == "15minute"
+        if str(symbol).endswith(":CE"):
+            return [0.25, 0.40], [0.1, 0.2], [0.15, 0.2]
+        return [0.15, 0.20], [0.1, 0.15], [0.05, 0.05]
+
+    monkeypatch.setattr(strategy_agent_module.settings, "NSE_STRATEGY_BYPASS_MARKET_PROFILE_GATE", False)
+    monkeypatch.setattr(agent, "_load_candles", fake_load_candles)
+    monkeypatch.setattr(agent, "_load_strategy2_spot_rows", fake_spot_rows)
+    monkeypatch.setattr(strategy_agent_module.market_profile_builder, "build_profile_from_rows", lambda *args, **kwargs: _Profile())
+    monkeypatch.setattr(agent, "_classify_strategy2_market_profile", lambda **kwargs: ("CE", "trend_up", "mp_trend_up"))
+    monkeypatch.setattr(strategy_agent_module, "detect_macd_zero_cross", lambda *args, **kwargs: (False, None, None))
+    monkeypatch.setattr(strategy_agent_module, "_strategy_macd", fake_strategy_macd)
+
+    row = {
+        "underlying": "NIFTY",
+        "expiry": "2026-04-16",
+        "spot_price": 22090.0,
+        "ce": {"option_type": "CE", "ltp": 140.0},
+        "pe": {"option_type": "PE", "ltp": 85.0},
+    }
+
+    context = asyncio.run(agent._build_strategy2_signal_context(row, started_at))
+
+    assert requested_intervals == ["15minute", "15minute"]
+    assert context["direction"] == "CE"
+    assert context["can_enter"] is True
+    assert context["entry_reason"] == "macd_above_zero"
+    assert context["signal"]["status"] == "entry-ready"
+    assert context["signal"]["entry_reason"] == "macd_above_zero"
 
 
 def test_market_closed_keeps_strategy2_last_signal_snapshot(monkeypatch) -> None:
