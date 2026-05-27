@@ -7,16 +7,20 @@ import {
   Activity,
   AlertCircle,
   ArrowRight,
+  BookOpen,
   Bot,
   CandlestickChart,
   CheckCircle2,
   ChevronRight,
+  Clock3,
   Gauge,
   Layers3,
   Loader2,
+  PlayCircle,
   Radar,
   RefreshCw,
   ShieldCheck,
+  Wallet,
   Workflow,
   Zap,
 } from "lucide-react";
@@ -44,7 +48,11 @@ import {
   getAuctionIntelligenceGateCValidation,
   runAuctionIntelligenceGateAValidation,
   getAuctionIntelligenceLiveSnapshot,
+  getAuctionIntelligencePaperJournal,
+  getAuctionIntelligencePaperPositions,
+  getAuctionIntelligencePaperStatus,
   getAuctionIntelligenceSummary,
+  runAuctionIntelligencePaperRunOnce,
   runAuctionIntelligencePaperProposal,
   runAuctionIntelligenceShadowBackfill,
   getAuctionIntelligenceMPDataStatus,
@@ -419,6 +427,115 @@ type DefaultConfigResponse = {
   };
 };
 
+type PaperAutomationStatus = {
+  key?: string;
+  label?: string;
+  enabled?: boolean;
+  interval_seconds?: number;
+  loop_active?: boolean;
+  running?: boolean;
+  last_started_at?: string | null;
+  last_success_at?: string | null;
+  last_finished_at?: string | null;
+  next_run_at?: string | null;
+  last_error?: string | null;
+  last_message?: string | null;
+  last_result_meta?: Record<string, unknown>;
+};
+
+type PaperPosition = {
+  position_id: string;
+  status: string;
+  opened_at?: string | null;
+  closed_at?: string | null;
+  symbol?: string | null;
+  agent_name?: string | null;
+  signal_action?: string | null;
+  trading_symbol?: string | null;
+  option_type?: string | null;
+  strike?: number | null;
+  expiry?: string | null;
+  quantity?: number | null;
+  entry_premium?: number | null;
+  latest_premium?: number | null;
+  exit_premium?: number | null;
+  entry_confidence?: number | null;
+  latest_confidence?: number | null;
+  unrealized_pnl?: number | null;
+  realized_pnl?: number | null;
+  moneyness?: string | null;
+  days_to_expiry?: number | null;
+  close_reason?: string | null;
+};
+
+type PaperPositionSummary = {
+  open_count: number;
+  closed_count: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  latest_opened_at?: string | null;
+  latest_closed_at?: string | null;
+  last_synced_at?: string | null;
+  initial_capital?: number | null;
+  available_capital?: number | null;
+  reserved_margin?: number | null;
+  total_equity?: number | null;
+  total_return_pct?: number | null;
+  max_drawdown?: number | null;
+  sharpe_ratio?: number | null;
+  total_trades?: number | null;
+  win_rate?: number | null;
+};
+
+type PaperPositionsResponse = {
+  symbol_filter?: string | null;
+  status: string;
+  summary: PaperPositionSummary;
+  open_positions: PaperPosition[];
+  closed_positions: PaperPosition[];
+};
+
+type PaperJournalRecord = {
+  recorded_at?: string | null;
+  symbol?: string | null;
+  regime?: string | null;
+  agent_name?: string | null;
+  action?: string | null;
+  confidence?: number | null;
+  quantity?: number | null;
+  premium?: number | null;
+  trading_symbol?: string | null;
+  moneyness?: string | null;
+  expiry?: string | null;
+  days_to_expiry?: number | null;
+  selection_reason?: string | null;
+  execution_style?: string | null;
+};
+
+type PaperJournalResponse = {
+  symbol_filter?: string | null;
+  count: number;
+  total_records: number;
+  summary: {
+    latest_recorded_at?: string | null;
+    avg_confidence?: number | null;
+    avg_premium?: number | null;
+    action_breakdown?: Record<string, number>;
+    style_breakdown?: Record<string, number>;
+    agent_breakdown?: Record<string, number>;
+  };
+  records: PaperJournalRecord[];
+};
+
+type PaperStatusResponse = PaperPositionsResponse & {
+  mode?: string;
+  journal_root?: string;
+  positions_path?: string;
+  latest_journal_recorded_at?: string | null;
+  journal_record_count?: number;
+  automation?: PaperAutomationStatus;
+};
+
 type ValidationResponse = {
   gate: string;
   label: string;
@@ -540,6 +657,12 @@ function formatSigned(value: number | null | undefined, digits = 2) {
   if (value === null || value === undefined) return "—";
   const prefix = value > 0 ? "+" : "";
   return `${prefix}${value.toFixed(digits)}`;
+}
+
+function formatMoney(value: number | null | undefined, digits = 0) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  const prefix = value > 0 ? "+" : value < 0 ? "-" : "";
+  return `${prefix}₹${Math.abs(value).toLocaleString("en-IN", { maximumFractionDigits: digits })}`;
 }
 
 function formatRawPct(value: number | null | undefined, digits = 0) {
@@ -1398,6 +1521,41 @@ export default function AuctionIntelligenceWorkspace() {
     enabled: Boolean(mpDataStatusQuery.data),
   });
 
+  const paperStatusQuery = useQuery<PaperStatusResponse>({
+    queryKey: ["auction-intelligence", "paper-status"],
+    queryFn: async () => (await getAuctionIntelligencePaperStatus()).data,
+    staleTime: 15_000,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: false,
+  });
+
+  const paperPositionsQuery = useQuery<PaperPositionsResponse>({
+    queryKey: ["auction-intelligence", "paper-positions", deferredSymbol],
+    queryFn: async () => (await getAuctionIntelligencePaperPositions(deferredSymbol, "all", 16)).data,
+    staleTime: 15_000,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: false,
+  });
+
+  const paperJournalQuery = useQuery<PaperJournalResponse>({
+    queryKey: ["auction-intelligence", "paper-journal", deferredSymbol],
+    queryFn: async () => (await getAuctionIntelligencePaperJournal(deferredSymbol, 16)).data,
+    staleTime: 15_000,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: false,
+  });
+
+  const paperRunOnce = useMutation({
+    mutationFn: async () => (await runAuctionIntelligencePaperRunOnce(deferredSymbol)).data,
+    onSuccess: async () => {
+      await Promise.all([
+        paperStatusQuery.refetch(),
+        paperPositionsQuery.refetch(),
+        paperJournalQuery.refetch(),
+      ]);
+    },
+  });
+
   const paperProposal = useMutation({
     mutationFn: async () => {
       if (!validationQuery.data) throw new Error("No validation payload loaded");
@@ -1412,6 +1570,13 @@ export default function AuctionIntelligenceWorkspace() {
         trades: request.trades,
       };
       return (await runAuctionIntelligencePaperProposal(payload)).data;
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        paperStatusQuery.refetch(),
+        paperPositionsQuery.refetch(),
+        paperJournalQuery.refetch(),
+      ]);
     },
   });
 
@@ -1461,19 +1626,33 @@ export default function AuctionIntelligenceWorkspace() {
   const gateB = gateBQuery.data;
   const gateC = gateCQuery.data;
   const canaryReadiness = canaryReadinessQuery.data;
+  const paperStatus = paperStatusQuery.data;
+  const paperPositions = paperPositionsQuery.data ?? paperStatus;
+  const paperJournal = paperJournalQuery.data;
+  const paperSummary = paperPositions?.summary ?? paperStatus?.summary;
+  const paperAutomation = paperStatus?.automation;
+  const paperLoopActive = Boolean(paperAutomation?.enabled && paperAutomation?.loop_active);
+  const paperOpenPositions = paperPositions?.open_positions ?? [];
+  const paperClosedPositions = paperPositions?.closed_positions ?? [];
+  const paperJournalRecords = paperJournal?.records ?? [];
   const liveSnapshotUnavailable = deferredMode === "live" && summaryQuery.isSuccess && !liveReady && !payload;
   const validationFailure = validationQuery.isError && !payload
     ? validationQuery.error
     : paperProposal.isError
       ? paperProposal.error
-      : shadowBackfill.isError
-        ? shadowBackfill.error
-        : null;
+      : paperRunOnce.isError
+        ? paperRunOnce.error
+        : shadowBackfill.isError
+          ? shadowBackfill.error
+          : null;
   const auxiliaryFailure = !validationFailure && (
     gateAQuery.isError
     || gateBQuery.isError
     || gateCQuery.isError
     || canaryReadinessQuery.isError
+    || paperStatusQuery.isError
+    || paperPositionsQuery.isError
+    || paperJournalQuery.isError
     || mpDataStatusQuery.isError
     || mpSignalsQuery.isError
     || mpOpenSignalQuery.isError
@@ -1711,6 +1890,180 @@ export default function AuctionIntelligenceWorkspace() {
           </div>
         </section>
       )}
+
+      <section className={sectionChrome("p-5")} data-testid="auction-paper-trading-system">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-text-muted">
+              <Wallet size={14} className="text-accent-green" />
+              Paper Trading System
+            </div>
+            <h2 className="mt-2 font-mono text-xl font-semibold uppercase tracking-[0.04em] text-text-primary">
+              Auction Intelligence paper desk
+            </h2>
+            <div className="mt-2 max-w-3xl text-sm text-text-secondary">
+              Persisted paper positions, journal records, capital, and the market-hours automation loop for the selected Auction IQ strategy.
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <ActionPill
+              label={paperLoopActive ? "auto active" : paperAutomation?.enabled ? "auto idle" : "auto off"}
+              className={paperLoopActive ? "bg-accent-green/12 text-accent-green border-accent-green/25" : "bg-accent-amber/12 text-accent-amber border-accent-amber/25"}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                paperStatusQuery.refetch();
+                paperPositionsQuery.refetch();
+                paperJournalQuery.refetch();
+              }}
+              className="inline-flex items-center justify-center gap-2 rounded-sm border border-[#2a2a2a] bg-[#050505] px-3 py-2 font-mono text-xs font-medium text-text-primary transition-colors hover:border-accent-blue/30 hover:bg-accent-blue/10"
+            >
+              {paperStatusQuery.isFetching || paperPositionsQuery.isFetching || paperJournalQuery.isFetching ? (
+                <Loader2 size={15} className="animate-spin" />
+              ) : (
+                <RefreshCw size={15} />
+              )}
+              Refresh book
+            </button>
+            <button
+              type="button"
+              disabled={paperRunOnce.isPending}
+              onClick={() => paperRunOnce.mutate()}
+              className="inline-flex items-center justify-center gap-2 rounded-sm border border-accent-green/30 bg-accent-green/12 px-3 py-2 font-mono text-xs font-medium text-accent-green transition-colors hover:bg-accent-green/18 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {paperRunOnce.isPending ? <Loader2 size={15} className="animate-spin" /> : <PlayCircle size={15} />}
+              Run paper cycle
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+          <SmallMetric
+            label="Mode"
+            value={(paperStatus?.mode ?? "paper").replaceAll("_", " ")}
+            hint={paperAutomation?.running ? "Automation cycle is running now." : "Paper-only execution, no live orders."}
+          />
+          <SmallMetric
+            label="Open positions"
+            value={String(paperSummary?.open_count ?? paperOpenPositions.length)}
+            hint={`${paperSummary?.closed_count ?? paperClosedPositions.length} closed paper trades in the book.`}
+          />
+          <SmallMetric
+            label="Total equity"
+            value={formatMoney(paperSummary?.total_equity ?? paperSummary?.available_capital)}
+            hint={`Available ${formatMoney(paperSummary?.available_capital)} · reserved ${formatMoney(paperSummary?.reserved_margin)}`}
+          />
+          <SmallMetric
+            label="P&L"
+            value={formatMoney((paperSummary?.realized_pnl ?? 0) + (paperSummary?.unrealized_pnl ?? 0))}
+            hint={`Realized ${formatMoney(paperSummary?.realized_pnl)} · open ${formatMoney(paperSummary?.unrealized_pnl)}`}
+          />
+          <SmallMetric
+            label="Next run"
+            value={formatISTTime(paperAutomation?.next_run_at)}
+            hint={`Interval ${paperAutomation?.interval_seconds ?? 180}s · last sync ${formatISTTime(paperSummary?.last_synced_at)}`}
+          />
+        </div>
+
+        <div className="mt-5 grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
+          <div className="rounded-sm border border-[#2a2a2a] bg-[#050505]">
+            <div className="flex items-center justify-between border-b border-[#2a2a2a] px-4 py-3">
+              <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-text-muted">
+                <Activity size={13} className="text-accent-blue" />
+                Open Paper Positions
+              </div>
+              <div className="font-mono text-xs text-text-secondary">{deferredSymbol}</div>
+            </div>
+            <div className="divide-y divide-white/5">
+              {paperOpenPositions.slice(0, 5).map((position) => (
+                <div key={position.position_id} className="grid gap-3 px-4 py-3 text-sm md:grid-cols-[minmax(0,1fr)_110px_110px] md:items-center">
+                  <div className="min-w-0">
+                    <div className="truncate font-mono text-text-primary">
+                      {position.trading_symbol ?? position.position_id}
+                    </div>
+                    <div className="mt-1 text-xs text-text-secondary">
+                      {position.agent_name ?? "paper agent"} · {position.signal_action ?? "paper"} · opened {formatISTTime(position.opened_at)}
+                    </div>
+                  </div>
+                  <div className="font-mono text-xs text-text-secondary">
+                    Qty <span className="text-text-primary">{position.quantity ?? "—"}</span>
+                    <br />
+                    LTP <span className="text-text-primary">{formatPrice(position.latest_premium)}</span>
+                  </div>
+                  <div className={clsx("font-mono text-sm font-semibold", terminalTone(position.unrealized_pnl))}>
+                    {formatMoney(position.unrealized_pnl)}
+                  </div>
+                </div>
+              ))}
+              {!paperOpenPositions.length && (
+                <div className="px-4 py-8 text-center text-sm text-text-secondary">
+                  No open paper positions for {deferredSymbol}. The automation is still visible and will update this book when a trade is accepted.
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-sm border border-[#2a2a2a] bg-[#050505]">
+            <div className="flex items-center justify-between border-b border-[#2a2a2a] px-4 py-3">
+              <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-text-muted">
+                <BookOpen size={13} className="text-accent-amber" />
+                Latest Paper Journal
+              </div>
+              <div className="font-mono text-xs text-text-secondary">{paperJournal?.total_records ?? paperStatus?.journal_record_count ?? 0} records</div>
+            </div>
+            <div className="divide-y divide-white/5">
+              {paperJournalRecords.slice(0, 5).map((record, index) => (
+                <div key={`${record.recorded_at ?? "record"}-${index}`} className="grid gap-3 px-4 py-3 text-sm md:grid-cols-[82px_minmax(0,1fr)_84px] md:items-center">
+                  <div className="font-mono text-xs text-text-secondary">{formatISTTime(record.recorded_at)}</div>
+                  <div className="min-w-0">
+                    <div className="truncate font-mono text-text-primary">
+                      {record.trading_symbol ?? record.symbol ?? deferredSymbol}
+                    </div>
+                    <div className="mt-1 truncate text-xs text-text-secondary">
+                      {record.agent_name ?? "paper agent"} · {record.regime ?? "regime pending"} · {record.execution_style ?? "paper"}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <ActionPill label={record.action ?? "paper"} className={toneForAction(record.action ?? "WAIT")} />
+                  </div>
+                </div>
+              ))}
+              {!paperJournalRecords.length && (
+                <div className="px-4 py-8 text-center text-sm text-text-secondary">
+                  No paper journal rows for {deferredSymbol} yet.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3 text-sm text-text-secondary md:grid-cols-3">
+          <div className="rounded-sm border border-white/6 bg-black/20 p-3">
+            <div className="flex items-center gap-2 font-semibold text-text-primary">
+              <Clock3 size={14} className="text-accent-blue" />
+              Automation
+            </div>
+            <div className="mt-2">
+              {paperAutomation?.last_error
+                ? paperAutomation.last_error
+                : paperAutomation?.last_message ?? "Market-hours runner is waiting for the next eligible session window."}
+            </div>
+          </div>
+          <div className="rounded-sm border border-white/6 bg-black/20 p-3">
+            <div className="font-semibold text-text-primary">Closed book</div>
+            <div className="mt-2">
+              {paperClosedPositions.length
+                ? `${paperClosedPositions.length} recent closed rows loaded. Latest close ${formatISTTime(paperSummary?.latest_closed_at)}.`
+                : "No closed paper trades are loaded for this symbol."}
+            </div>
+          </div>
+          <div className="rounded-sm border border-white/6 bg-black/20 p-3">
+            <div className="font-semibold text-text-primary">Journal root</div>
+            <div className="mt-2 break-all font-mono text-xs">{paperStatus?.journal_root ?? "runtime/auction_intelligence"}</div>
+          </div>
+        </div>
+      </section>
 
       <AuctionTerminalWorkbench
         symbol={mpUnderlying}

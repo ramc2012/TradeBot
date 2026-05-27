@@ -499,6 +499,10 @@ export const runAuctionIntelligenceAnalysis = (payload: object) =>
   api.post("/api/auction-intelligence/analyze", payload);
 export const runAuctionIntelligencePaperProposal = (payload: object) =>
   api.post("/api/auction-intelligence/paper-proposal", payload);
+export const getAuctionIntelligencePaperStatus = () =>
+  api.get("/api/auction-intelligence/paper-status");
+export const runAuctionIntelligencePaperRunOnce = (symbol?: string) =>
+  api.post("/api/auction-intelligence/paper-run-once", null, { params: { symbol } });
 export const runAuctionIntelligenceGateAValidation = (payload: object) =>
   api.post("/api/auction-intelligence/validate-gate-a", payload);
 export const getAuctionIntelligenceGateBValidation = (
