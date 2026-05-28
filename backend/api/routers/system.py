@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter
 from loguru import logger
+from pydantic import BaseModel
 from sqlalchemy import text
 
 from api.routers.analysis import _load_research_sync_runtime_state, _parse_iso_datetime
@@ -17,6 +18,7 @@ from api.routers.trading import _get_or_create_paper_session, _risk_manager
 from auction_intelligence.config import clone_default_config
 from core.config import settings
 from core.market_hours_paper_supervisor import market_hours_paper_supervisor
+from core.trading_calendar import trading_calendar
 from db.database import AsyncSessionLocal
 from db.redis_client import get_redis
 from fractal_market_profile.service import fmp_service
@@ -34,6 +36,11 @@ _health_cache: dict[str, Any] = {"payload": None, "expires_at": 0.0}
 _health_cache_lock = asyncio.Lock()
 _overview_cache: dict[str, Any] = {"payload": None, "expires_at": 0.0}
 _overview_cache_lock = asyncio.Lock()
+
+
+class TradingCalendarSettingsRequest(BaseModel):
+    enabled: bool = True
+    exchanges: dict[str, Any]
 
 
 def _service(
@@ -522,6 +529,19 @@ async def _fractal_market_profile_service() -> dict[str, Any]:
 @router.get("/automation-status")
 async def automation_status() -> dict[str, Any]:
     return market_hours_paper_supervisor.get_status()
+
+
+@router.get("/trading-calendar")
+async def get_trading_calendar() -> dict[str, Any]:
+    return trading_calendar.status_payload()
+
+
+@router.put("/trading-calendar")
+async def update_trading_calendar(body: TradingCalendarSettingsRequest) -> dict[str, Any]:
+    trading_calendar.update(body.model_dump())
+    _health_cache["expires_at"] = 0.0
+    _overview_cache["expires_at"] = 0.0
+    return trading_calendar.status_payload()
 
 
 @router.get("/health")

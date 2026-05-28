@@ -6,6 +6,7 @@ import {
   getIciciLoginUrl, connectIciciBreeze, connectFivepaisa,
   disconnectBroker, getRiskStatus, updateRiskConfig,
   getTelegramSettings, saveTelegramSettings, discoverTelegramChats, sendTelegramTest,
+  getTradingCalendar, updateTradingCalendar,
   describeApiError,
 } from "@/lib/api";
 import { api } from "@/lib/api";
@@ -17,7 +18,7 @@ import { clsx } from "clsx";
 import {
   CheckCircle2, XCircle, Eye, EyeOff, ExternalLink, RefreshCw,
   ChevronDown, ChevronUp, Loader2, Plug, Unplug, AlertCircle, Save,
-  Copy, Info, Send,
+  Copy, Info, Send, CalendarDays, ShieldCheck,
 } from "lucide-react";
 
 const SETTINGS_TABS = [
@@ -1211,6 +1212,208 @@ function ICICIBreezeCard({ status, onRefresh }: { status: BrokerStatusEntry | un
   );
 }
 
+type TradingCalendarException = {
+  date: string;
+  name?: string;
+  status: "closed" | "partial" | "open";
+  sessions?: string[];
+};
+
+type TradingCalendarExchangeConfig = {
+  enabled: boolean;
+  sessions: Array<{ key: string; label?: string; open: string; close: string }>;
+  exceptions: TradingCalendarException[];
+};
+
+function formatCalendarLines(exceptions: TradingCalendarException[] = []): string {
+  return exceptions
+    .map((item) => {
+      const sessions = (item.sessions || []).join(",");
+      const status = item.status === "partial" && sessions ? `partial:${sessions}` : item.status;
+      return [item.date, status, item.name || ""].join(" | ").trim();
+    })
+    .join("\n");
+}
+
+function parseCalendarLines(value: string): TradingCalendarException[] {
+  return value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const parts = line.split("|").map((part) => part.trim());
+      const date = parts[0] || "";
+      const statusText = (parts[1] || "closed").toLowerCase();
+      const [rawStatus, rawSessions] = statusText.split(":", 2);
+      const status = rawStatus === "partial" ? "partial" : rawStatus === "open" ? "open" : "closed";
+      const sessions = rawSessions
+        ? rawSessions.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean)
+        : [];
+      return {
+        date,
+        status,
+        sessions,
+        name: parts.slice(2).join(" | "),
+      } as TradingCalendarException;
+    })
+    .filter((item) => /^\d{4}-\d{2}-\d{2}$/.test(item.date));
+}
+
+function CalendarStatusTile({ label, status }: { label: string; status?: any }) {
+  const open = Boolean(status?.is_open);
+  const sessionLabel = status?.active_session?.label || status?.active_session?.key;
+  return (
+    <div className="rounded border border-bg-border bg-bg-secondary/40 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-xs font-semibold uppercase tracking-wide text-text-muted">{label}</div>
+        <StatusBadge connected={open} warning={!open && status?.reason !== "outside_session"} label={open ? "OPEN" : "CLOSED"} />
+      </div>
+      <div className="mt-2 text-sm font-mono text-text-primary">
+        {open ? sessionLabel || "Trading" : status?.reason || "closed"}
+      </div>
+      <div className="mt-1 text-xs text-text-muted">
+        Next: {status?.next_open_at ? new Date(status.next_open_at).toLocaleString() : "—"}
+      </div>
+    </div>
+  );
+}
+
+function TradingCalendarCard() {
+  const qc = useQueryClient();
+  const [enabled, setEnabled] = useState(true);
+  const [nseLines, setNseLines] = useState("");
+  const [mcxLines, setMcxLines] = useState("");
+  const [msg, setMsg] = useState("");
+
+  const { data, isLoading, isError, error } = useQuery({
+    queryKey: ["tradingCalendar"],
+    queryFn: () => getTradingCalendar().then((r) => r.data),
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  });
+
+  useEffect(() => {
+    const config = data?.config;
+    if (!config) return;
+    setEnabled(Boolean(config.enabled));
+    setNseLines(formatCalendarLines(config.exchanges?.NSE?.exceptions || []));
+    setMcxLines(formatCalendarLines(config.exchanges?.MCX?.exceptions || []));
+  }, [data]);
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      const config = data?.config || {};
+      const nse: TradingCalendarExchangeConfig = config.exchanges?.NSE || {
+        enabled: true,
+        sessions: [{ key: "regular", label: "Regular", open: "09:15", close: "15:30" }],
+        exceptions: [],
+      };
+      const mcx: TradingCalendarExchangeConfig = config.exchanges?.MCX || {
+        enabled: true,
+        sessions: [
+          { key: "morning", label: "Morning", open: "09:00", close: "17:00" },
+          { key: "evening", label: "Evening", open: "17:00", close: "23:30" },
+        ],
+        exceptions: [],
+      };
+      return updateTradingCalendar({
+        enabled,
+        exchanges: {
+          NSE: { ...nse, exceptions: parseCalendarLines(nseLines) },
+          MCX: { ...mcx, exceptions: parseCalendarLines(mcxLines) },
+        },
+      }).then((r) => r.data);
+    },
+    onSuccess: (payload) => {
+      qc.setQueryData(["tradingCalendar"], payload);
+      qc.invalidateQueries({ queryKey: ["riskStatus"] });
+      qc.invalidateQueries({ queryKey: ["brokerStatus"] });
+      setMsg("Trading calendar saved");
+      setTimeout(() => setMsg(""), 2500);
+    },
+    onError: (error: any) => {
+      setMsg(describeApiError(error, "Failed to save trading calendar"));
+    },
+  });
+
+  const nseStatus = data?.status?.NSE;
+  const mcxStatus = data?.status?.MCX;
+
+  return (
+    <div className="card p-4 space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <CalendarDays size={15} className="text-accent-blue" />
+          <div>
+            <div className="text-sm font-semibold text-text-primary">Trading Calendar Gate</div>
+            <div className="text-xs text-text-muted">Paper entries follow NSE and MCX exchange sessions.</div>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setEnabled((value) => !value)}
+          className={clsx(
+            "inline-flex items-center gap-1 rounded border px-2 py-1 text-xs font-semibold",
+            enabled
+              ? "border-accent-green/30 bg-accent-green/10 text-accent-green"
+              : "border-bg-border bg-bg-secondary text-text-muted",
+          )}
+        >
+          <ShieldCheck size={12} />
+          {enabled ? "Gate On" : "Gate Off"}
+        </button>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        <CalendarStatusTile label="NSE" status={nseStatus} />
+        <CalendarStatusTile label="MCX" status={mcxStatus} />
+      </div>
+
+      {isError && (
+        <div className="rounded border border-accent-amber/20 bg-accent-amber/5 px-3 py-2 text-xs text-accent-amber">
+          {describeApiError(error, "Trading calendar settings are unavailable.")}
+        </div>
+      )}
+
+      <div className="grid gap-3 md:grid-cols-2">
+        <div>
+          <label className="mb-1 block text-xs text-text-muted">NSE exceptions</label>
+          <textarea
+            value={nseLines}
+            onChange={(event) => setNseLines(event.target.value)}
+            className="terminal-input min-h-[170px] w-full resize-y font-mono text-xs"
+            spellCheck={false}
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs text-text-muted">MCX exceptions</label>
+          <textarea
+            value={mcxLines}
+            onChange={(event) => setMcxLines(event.target.value)}
+            className="terminal-input min-h-[170px] w-full resize-y font-mono text-xs"
+            spellCheck={false}
+          />
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-xs text-text-muted">
+          Format: <code>YYYY-MM-DD | closed</code> or <code>YYYY-MM-DD | partial:evening</code>
+        </div>
+        <button
+          onClick={() => saveMutation.mutate()}
+          disabled={saveMutation.isPending || isLoading || !data}
+          className="inline-flex items-center gap-1 rounded border border-accent-blue/30 bg-accent-blue/15 px-3 py-1.5 text-xs text-accent-blue hover:bg-accent-blue/25 disabled:opacity-50"
+        >
+          {saveMutation.isPending ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
+          Save Calendar
+        </button>
+      </div>
+      {msg && <div className="text-xs text-text-muted">{msg}</div>}
+    </div>
+  );
+}
+
 // ── Main Settings Page ────────────────────────────────────────────────────────
 
 export default function SettingsPage() {
@@ -1294,6 +1497,12 @@ export default function SettingsPage() {
         <UpstoxCard status={statusMap["upstox"]} onRefresh={handleRefresh} />
         <FivePaisaCard status={statusMap["fivepaisa"]} onRefresh={handleRefresh} />
         <ICICIBreezeCard status={statusMap["icici_breeze"]} onRefresh={handleRefresh} />
+      </section>
+
+      {/* Trading Calendar */}
+      <section className="space-y-3">
+        <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">Trading Calendar</h2>
+        <TradingCalendarCard />
       </section>
 
       {/* Risk Controls */}

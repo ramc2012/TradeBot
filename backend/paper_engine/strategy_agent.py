@@ -73,6 +73,7 @@ from agent.window_calculator import (
 from analytics.orderflow import bar_cvd, cvd_agrees_with, orderflow_snapshot
 from analytics.technicals import latest_macd_rsi
 from core.config import settings
+from core.trading_calendar import trading_calendar
 from api.routers.auth import (
     ensure_fyers_session,
     get_active_adapter,
@@ -115,10 +116,7 @@ from paper_engine.strategy_agent_state import (
 
 
 def _in_market_hours(now: Optional[datetime] = None) -> bool:
-    current = now or _now_ist()
-    if current.weekday() >= 5:
-        return False
-    return time(9, 15) <= current.time() <= time(15, 30)
+    return trading_calendar.is_exchange_open("NSE", now or _now_ist())
 
 def _looks_like_stale_blocking_message(message: Optional[str]) -> bool:
     text = str(message or "").lower()
@@ -2112,7 +2110,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 except Exception as exc:
                     data_quality_snapshot = {"overall": "unknown", "error": str(exc)}
 
-                if not force and not _in_market_hours(started_at):
+                if not _in_market_hours(started_at):
                     local_only_mode = settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY
                     try:
                         market_intelligence_health = await market_intelligence_runtime.get_strategy_health()
@@ -4847,6 +4845,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "last_error": self._last_error,
             "last_message": self._last_message,
             "data_health": self._last_data_health,
+            "trading_calendar": trading_calendar.exchange_status("NSE"),
             "target_expiry": self._last_expiry,
             "candidate_expiries": self._last_candidate_expiries,
             "active_windows": len(self._active_windows),

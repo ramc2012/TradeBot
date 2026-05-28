@@ -15,6 +15,7 @@ from sqlalchemy import text
 from api.routers.auth import ensure_fyers_session, ensure_upstox_session, get_active_adapter
 from db.redis_client import get_redis
 from core.config import settings
+from core.trading_calendar import trading_calendar
 from db.database import AsyncSessionLocal
 from market_data.option_chain import OC_TTL, option_chain_service
 from market_data.symbols import to_broker_symbol, to_fyers_symbol
@@ -668,7 +669,7 @@ class MarketIntelligenceRuntime:
 
         watchlist_rows_today = int(today_row.get("underlyings") or 0)
         watchlist_rows_latest = int(latest_row.get("underlyings") or 0)
-        market_open = now.weekday() < 5 and SESSION_OPEN <= now.time() <= time(15, 30)
+        market_open = trading_calendar.is_exchange_open("NSE", now)
         readiness = _strategy_readiness_fields(
             watchlist_rows_today=watchlist_rows_today,
             watchlist_rows_latest=watchlist_rows_latest,

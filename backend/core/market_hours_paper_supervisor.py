@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable
 from loguru import logger
 
 from core.config import settings
+from core.trading_calendar import trading_calendar
 from paper_engine.base_strategy_agent import _now_ist
 
 
@@ -18,15 +19,11 @@ NextOpenFn = Callable[[datetime], datetime]
 
 
 def _in_nse_market_hours(now: datetime) -> bool:
-    if now.weekday() >= 5:
-        return False
-    return time(9, 15) <= now.time() <= time(15, 30)
+    return trading_calendar.is_exchange_open("NSE", now)
 
 
 def _in_mcx_market_hours(now: datetime) -> bool:
-    if now.weekday() >= 5:
-        return False
-    return time(9, 0) <= now.time() <= time(23, 30)
+    return trading_calendar.is_exchange_open("MCX", now)
 
 
 def _in_gann_market_hours(now: datetime) -> bool:
@@ -34,21 +31,11 @@ def _in_gann_market_hours(now: datetime) -> bool:
 
 
 def _next_nse_market_open(now: datetime) -> datetime:
-    next_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    if now >= next_open:
-        next_open += timedelta(days=1)
-    while next_open.weekday() >= 5:
-        next_open += timedelta(days=1)
-    return next_open
+    return trading_calendar.next_exchange_open("NSE", now)
 
 
 def _next_mcx_market_open(now: datetime) -> datetime:
-    next_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
-    if now >= next_open:
-        next_open += timedelta(days=1)
-    while next_open.weekday() >= 5:
-        next_open += timedelta(days=1)
-    return next_open
+    return trading_calendar.next_exchange_open("MCX", now)
 
 
 def _next_gann_market_open(now: datetime) -> datetime:
@@ -58,7 +45,7 @@ def _next_gann_market_open(now: datetime) -> datetime:
 
 
 def _should_run_post_close_catchup(now: datetime) -> bool:
-    return now.weekday() < 5 and now.time() > time(15, 30)
+    return trading_calendar.has_exchange_session("NSE", now.date()) and now.time() > time(15, 30)
 
 
 @dataclass
@@ -723,6 +710,7 @@ class MarketHoursPaperSupervisor:
             "any_runner_market_open": any_runner_market_open,
             "now_ist": now.isoformat(),
             "next_market_open_ist": next_open.isoformat(),
+            "trading_calendar": trading_calendar.status_payload(now).get("status"),
             "runner_count": len(runners),
             "healthy_runner_count": healthy_runner_count,
             "runners": runners,

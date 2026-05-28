@@ -42,6 +42,7 @@ from auction_intelligence.market_profile.engine import MarketProfileEngine
 from auction_intelligence.schemas import MarketBar
 from brokers.base import BrokerAdapter
 from core.config import settings
+from core.trading_calendar import trading_calendar
 from core.runtime_state import load_runtime_state, save_runtime_state
 from market_data.commodity_atm_watchlist import commodity_atm_watchlist_service
 from market_data.commodity_contract_specs import (
@@ -147,10 +148,7 @@ def _canonicalize_symbol(raw_symbol: str) -> str:
 
 
 def _in_commodity_hours(now: Optional[datetime] = None) -> bool:
-    current = now or _now_ist()
-    if current.weekday() >= 5:
-        return False
-    return time(9, 0) <= current.time() <= time(23, 30)
+    return trading_calendar.is_exchange_open("MCX", now or _now_ist())
 
 
 def _normalize_iv_pct(value: Any) -> Optional[float]:
@@ -2848,7 +2846,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     self._append_commentary("warning", self._last_message)
                     return self.get_status(refresh=False)
 
-                if not force and not _in_commodity_hours(started_at):
+                if not _in_commodity_hours(started_at):
                     self._append_commentary("idle", "Commodity market closed. Refreshing next-session preparation state.")
                     return await self._prepare_closed_market_state(started_at)
 
@@ -4196,6 +4194,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "last_run_at": self._last_run_at,
             "last_error": last_error,
             "last_message": last_message,
+            "trading_calendar": trading_calendar.exchange_status("MCX"),
             "config": {
                 "symbols": list(self._symbols),
                 "selected_option_expiries": dict(self._selected_option_expiries),

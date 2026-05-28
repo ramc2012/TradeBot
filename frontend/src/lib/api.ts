@@ -157,6 +157,8 @@ export const getBrokerStatus = (options?: { forceValidate?: boolean }) =>
   });
 export const getSystemHealth = () => api.get("/api/system/health");
 export const getSystemOverview = () => api.get("/api/system/overview");
+export const getTradingCalendar = () => api.get("/api/system/trading-calendar");
+export const updateTradingCalendar = (payload: object) => api.put("/api/system/trading-calendar", payload);
 
 export const getFyersAuthUrl = () => api.get("/api/auth/fyers/auth-url");
 export const getUpstoxAuthUrl = () => api.get("/api/auth/upstox/auth-url");
