@@ -76,6 +76,13 @@ class AlphaEngineConfig:
     sectors_to_keep: int = 4
     stocks_per_sector: int = 5
     composite_gate: float = COMPOSITE_GATE
+    # Universe mode controls L3 breadth:
+    #   "full"          → score EVERY qualified F&O instrument (~221 names)
+    #                     using sector RS as context, not a filter. Sector
+    #                     winners still surface in the L2 panel for UI.
+    #   "winners_only"  → legacy behaviour: top stocks_per_sector inside the
+    #                     top sectors_to_keep winning sectors (~20 names).
+    universe_mode: str = "full"
     # Soft floors on option side. A stock with extremely thin options is
     # excluded *before* scoring (saves compute, also avoids false
     # 90+ scores for names you can't actually trade).
@@ -262,6 +269,89 @@ async def rank_stocks_in_winners(
         "per_sector": per_sector,
         "candidates": stock_rows,
         "candidate_count": len(stock_rows),
+    }
+
+
+async def rank_stocks_full_universe(
+    sector_payload: dict[str, Any],
+    *,
+    fno_universe: set[str],
+    timeframe: str,
+) -> dict[str, Any]:
+    """Score the *entire* F&O universe, not just winning-sector members.
+
+    Pulls per-stock RS data from `stocks_by_sector` (populated for ALL 13
+    sectors by SectorRotationTracker, not just winners). Symbols not
+    mapped to any sector get sector_code=None — they're still scored,
+    just without a sector RS context. This makes the alpha engine
+    behave like a universe-wide screener: top performers naturally bubble
+    up from the composite scoring rather than being pre-filtered.
+    """
+    quadrant_priority = {"leading": 0, "improving": 1, "weakening": 2, "lagging": 3}
+    stocks_by_sector = sector_payload.get("stocks_by_sector") or {}
+    sector_meta_by_code: dict[str, dict[str, Any]] = {}
+    for row in sector_payload.get("watchlist") or []:
+        code = str(row.get("code") or "")
+        if code:
+            sector_meta_by_code[code] = row
+
+    candidates: list[dict[str, Any]] = []
+    seen_symbols: set[str] = set()
+
+    # Pass 1 — every stock that's in a sector slice gets enriched with RS.
+    for sector_code, sector_bundle in stocks_by_sector.items():
+        if not isinstance(sector_bundle, dict):
+            continue
+        sector_info = sector_bundle.get("sector") or sector_meta_by_code.get(sector_code) or {}
+        rrg_points = list((sector_bundle.get("rrg") or {}).get("points") or [])
+        for point in rrg_points:
+            symbol = str(point.get("code") or point.get("symbol") or "").upper()
+            if not symbol or symbol not in fno_universe or symbol in seen_symbols:
+                continue
+            seen_symbols.add(symbol)
+            candidates.append(
+                {
+                    "instrument": symbol,
+                    "sector_code": sector_code,
+                    "sector_name": sector_info.get("name"),
+                    "sector_rs_pct": float(sector_info.get("relative_strength_pct") or 0.0),
+                    "sector_quadrant": sector_info.get("quadrant"),
+                    "stock_rs_pct": float(point.get("relative_strength_pct") or 0.0),
+                    "stock_quadrant": str(point.get("quadrant") or "lagging"),
+                }
+            )
+
+    # Pass 2 — F&O symbols missing from any sector slice still need to be
+    # in the universe (they're tradeable but unclassified). Score with
+    # sector_code=None so L4 can still compute trend / MP / OF on them.
+    for symbol in sorted(fno_universe):
+        if symbol in seen_symbols:
+            continue
+        candidates.append(
+            {
+                "instrument": symbol,
+                "sector_code": None,
+                "sector_name": None,
+                "sector_rs_pct": 0.0,
+                "sector_quadrant": None,
+                "stock_rs_pct": 0.0,
+                "stock_quadrant": "unclassified",
+            }
+        )
+
+    # Stable ordering: leading/improving first, then by stock RS pct so the
+    # supervisor can short-circuit if it runs out of compute budget.
+    candidates.sort(
+        key=lambda row: (
+            quadrant_priority.get(str(row.get("stock_quadrant") or "lagging"), 99),
+            -float(row.get("stock_rs_pct") or 0.0),
+            str(row.get("instrument") or ""),
+        )
+    )
+    return {
+        "candidates": candidates,
+        "candidate_count": len(candidates),
+        "mode": "full",
     }
 
 
@@ -723,12 +813,26 @@ async def run_alpha_pipeline(config: AlphaEngineConfig | None = None) -> dict[st
         config.timeframe,
         keep_top=config.sectors_to_keep,
     )
-    stock_layer = await rank_stocks_in_winners(
-        sector_layer.get("winners") or [],
-        timeframe=config.timeframe,
-        stocks_per_sector=config.stocks_per_sector,
-        fno_universe=fno_universe,
-    )
+    # L3 — universe_mode picks between full-universe coverage and the
+    # legacy winners-only narrowing. Full mode is the new default since
+    # the user's brief explicitly asked for "watchlist for the entire
+    # qualified F&O universe".
+    if config.universe_mode == "full":
+        from analytics.sector import SectorRotationTracker
+        tracker = SectorRotationTracker()
+        full_sector_payload = await tracker.get_sector_rotation(config.timeframe)
+        stock_layer = await rank_stocks_full_universe(
+            full_sector_payload,
+            fno_universe=fno_universe,
+            timeframe=config.timeframe,
+        )
+    else:
+        stock_layer = await rank_stocks_in_winners(
+            sector_layer.get("winners") or [],
+            timeframe=config.timeframe,
+            stocks_per_sector=config.stocks_per_sector,
+            fno_universe=fno_universe,
+        )
     enriched = await score_option_candidates(
         list(stock_layer.get("candidates") or []),
         config=config,
@@ -801,10 +905,12 @@ async def run_alpha_pipeline(config: AlphaEngineConfig | None = None) -> dict[st
         "sector_layer": sector_layer,
         "stock_layer_summary": {
             "candidate_count": stock_layer.get("candidate_count"),
+            "mode": stock_layer.get("mode") or ("winners_only" if config.universe_mode != "full" else "full"),
             "sectors_scanned": list((stock_layer.get("per_sector") or {}).keys()),
         },
         "config": {
             "timeframe": config.timeframe,
+            "universe_mode": config.universe_mode,
             "sectors_to_keep": config.sectors_to_keep,
             "stocks_per_sector": config.stocks_per_sector,
             "composite_gate": config.composite_gate,

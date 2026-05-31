@@ -303,3 +303,85 @@ def test_alpha_engine_config_defaults():
     assert cfg.sectors_to_keep == 4
     assert cfg.stocks_per_sector == 5
     assert cfg.composite_gate == 80.0
+    # Default is the new full-universe mode per user spec ("create a
+    # watchlist for the entire qualified F&O universe").
+    assert cfg.universe_mode == "full"
+
+
+class TestFullUniverseRanker:
+    """Tests for rank_stocks_full_universe — pure data shaping; no DB."""
+
+    def test_covers_every_fno_symbol(self):
+        import asyncio
+        from cbe_scanner.alpha_engine import rank_stocks_full_universe
+
+        sector_payload = {
+            "watchlist": [
+                {"code": "BANKING", "name": "Banking", "relative_strength_pct": 5.0, "quadrant": "leading"},
+                {"code": "IT", "name": "IT", "relative_strength_pct": -2.0, "quadrant": "lagging"},
+            ],
+            "stocks_by_sector": {
+                "BANKING": {
+                    "sector": {"name": "Banking", "relative_strength_pct": 5.0, "quadrant": "leading"},
+                    "rrg": {
+                        "points": [
+                            {"code": "HDFCBANK", "relative_strength_pct": 7.0, "quadrant": "leading"},
+                            {"code": "ICICIBANK", "relative_strength_pct": 4.0, "quadrant": "improving"},
+                        ],
+                    },
+                },
+                "IT": {
+                    "sector": {"name": "IT", "relative_strength_pct": -2.0, "quadrant": "lagging"},
+                    "rrg": {
+                        "points": [
+                            {"code": "TCS", "relative_strength_pct": -3.0, "quadrant": "lagging"},
+                        ],
+                    },
+                },
+            },
+        }
+        # F&O universe includes 4 names; 1 of them is not in any sector slice.
+        fno = {"HDFCBANK", "ICICIBANK", "TCS", "RELIANCE"}
+        result = asyncio.get_event_loop().run_until_complete(
+            rank_stocks_full_universe(sector_payload, fno_universe=fno, timeframe="weekly")
+        )
+        symbols = {c["instrument"] for c in result["candidates"]}
+        assert symbols == fno  # every F&O symbol present
+        assert result["mode"] == "full"
+
+        sector_for = {c["instrument"]: c["sector_code"] for c in result["candidates"]}
+        assert sector_for["HDFCBANK"] == "BANKING"
+        assert sector_for["TCS"] == "IT"
+        assert sector_for["RELIANCE"] is None  # unclassified — kept in universe
+
+    def test_orders_leading_quadrants_first(self):
+        import asyncio
+        from cbe_scanner.alpha_engine import rank_stocks_full_universe
+
+        sector_payload = {
+            "watchlist": [],
+            "stocks_by_sector": {
+                "BANKING": {
+                    "sector": {"relative_strength_pct": 0.0, "quadrant": "leading"},
+                    "rrg": {
+                        "points": [
+                            {"code": "STK_LAGGING", "relative_strength_pct": -5.0, "quadrant": "lagging"},
+                            {"code": "STK_LEADING", "relative_strength_pct": 8.0, "quadrant": "leading"},
+                            {"code": "STK_IMPROVING", "relative_strength_pct": 3.0, "quadrant": "improving"},
+                        ],
+                    },
+                },
+            },
+        }
+        result = asyncio.get_event_loop().run_until_complete(
+            rank_stocks_full_universe(
+                sector_payload,
+                fno_universe={"STK_LEADING", "STK_IMPROVING", "STK_LAGGING"},
+                timeframe="weekly",
+            )
+        )
+        order = [c["instrument"] for c in result["candidates"]]
+        # leading < improving < lagging
+        assert order[0] == "STK_LEADING"
+        assert order[1] == "STK_IMPROVING"
+        assert order[2] == "STK_LAGGING"
