@@ -24,7 +24,7 @@
 
 import { Fragment, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { CirclePlay, RefreshCcw, X } from "lucide-react";
+import { CirclePlay, RefreshCcw, Settings, X } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 
@@ -46,6 +46,17 @@ import {
 // cold-start primer + a heartbeat so we recover from a transient socket drop.
 const PRIMER_POLL_MS = 5_000;       // first ~minute, until socket connects
 const HEARTBEAT_POLL_MS = 60_000;   // steady-state, only kicks in if socket dies
+
+// ─── Bottom tabs ──────────────────────────────────────────────────────────
+type BottomTabKey = "queue" | "orders" | "trades" | "expiry" | "stats" | "audit";
+const BOTTOM_TABS: { key: BottomTabKey; label: string }[] = [
+  { key: "queue", label: "Queue" },
+  { key: "orders", label: "Orders" },
+  { key: "trades", label: "Trades" },
+  { key: "expiry", label: "Expiry" },
+  { key: "stats", label: "Stats" },
+  { key: "audit", label: "Audit" },
+];
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -663,6 +674,383 @@ function ActionQueue({
   );
 }
 
+// ─── Orders tab ────────────────────────────────────────────────────────────
+
+function OrdersTab({ orders, onSelect }: { orders: Order[]; onSelect: (sym: string) => void }) {
+  if (orders.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center text-[11px] text-text-muted">
+        No orders this session.
+      </div>
+    );
+  }
+  return (
+    <div className="overflow-y-auto" style={{ maxHeight: 160 }}>
+      <table className="w-full text-[10.5px]">
+        <thead className="sticky top-0 bg-bg-primary text-[9.5px] uppercase tracking-wider text-text-muted">
+          <tr>
+            <th className="px-2 py-1 text-left">Time</th>
+            <th className="px-2 text-left">Symbol</th>
+            <th className="px-2 text-left">Flow</th>
+            <th className="px-2 text-left">Action</th>
+            <th className="px-2 text-right">Qty</th>
+            <th className="px-2 text-right">Fill</th>
+            <th className="px-2 text-left">Reason</th>
+          </tr>
+        </thead>
+        <tbody>
+          {orders.slice(0, 60).map((o, idx) => (
+            <tr
+              key={`${o.time}-${idx}`}
+              className="cursor-pointer border-t border-bg-secondary/15 hover:bg-bg-secondary/20"
+              onClick={() => o.symbol && onSelect(o.symbol)}
+            >
+              <td className="px-2 py-0.5 font-mono text-text-muted">{formatTime(o.time)}</td>
+              <td className="px-2 font-mono">{o.symbol}</td>
+              <td className="px-2">{o.flow}</td>
+              <td className={`px-2 ${o.action === "BUY" ? "text-emerald-300" : "text-rose-300"}`}>{o.action}</td>
+              <td className="px-2 text-right font-mono">{o.qty}</td>
+              <td className="px-2 text-right font-mono">{formatNumber(o.fill_price, 2)}</td>
+              <td className="px-2 text-text-muted">{o.reason}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ─── Trades tab ────────────────────────────────────────────────────────────
+
+function TradesTab({ trades, onSelect }: { trades: TradeRow[]; onSelect: (sym: string) => void }) {
+  if (trades.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center text-[11px] text-text-muted">
+        No closed trades yet.
+      </div>
+    );
+  }
+  const sorted = [...trades].sort(
+    (a, b) => new Date(b.exit_time || "").getTime() - new Date(a.exit_time || "").getTime(),
+  );
+  return (
+    <div className="overflow-y-auto" style={{ maxHeight: 160 }}>
+      <table className="w-full text-[10.5px]">
+        <thead className="sticky top-0 bg-bg-primary text-[9.5px] uppercase tracking-wider text-text-muted">
+          <tr>
+            <th className="px-2 py-1 text-left">Exited</th>
+            <th className="px-2 text-left">Symbol</th>
+            <th className="px-2 text-left">Side</th>
+            <th className="px-2 text-right">Entry</th>
+            <th className="px-2 text-right">Exit</th>
+            <th className="px-2 text-right">P&L</th>
+            <th className="px-2 text-left">Reason</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.slice(0, 80).map((t, idx) => (
+            <tr
+              key={`${t.exit_time}-${idx}`}
+              className="cursor-pointer border-t border-bg-secondary/15 hover:bg-bg-secondary/20"
+              onClick={() => t.symbol && onSelect(t.symbol)}
+            >
+              <td className="px-2 py-0.5 font-mono text-text-muted">{formatIST(t.exit_time)}</td>
+              <td className="px-2 font-mono">{t.symbol}</td>
+              <td className={`px-2 ${t.action === "BUY" ? "text-emerald-300" : "text-rose-300"}`}>{t.action}</td>
+              <td className="px-2 text-right font-mono">{formatNumber(t.entry_price, 2)}</td>
+              <td className="px-2 text-right font-mono">{formatNumber(t.exit_price, 2)}</td>
+              <td className={`px-2 text-right font-mono ${Number(t.pnl ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                {formatSigned(Number(t.pnl ?? 0))}
+              </td>
+              <td className="px-2 text-text-muted">{t.reason}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ─── Expiry tab ────────────────────────────────────────────────────────────
+// MCX symbols encode the contract month: MCX:GOLD26JUNFUT → June 2026.
+// We surface days-to-expiry per row plus a heads-up when the next contract
+// month is closer than 10 trading days (typical roll window for MCX).
+
+const MONTH_INDEX: Record<string, number> = {
+  JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5,
+  JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11,
+};
+
+function parseMCXExpiry(symbol: string | null | undefined): Date | null {
+  if (!symbol) return null;
+  const m = String(symbol).toUpperCase().match(/^MCX:[A-Z0-9]+?(\d{2})([A-Z]{3})FUT$/);
+  if (!m) return null;
+  const yy = parseInt(m[1], 10);
+  const mi = MONTH_INDEX[m[2]];
+  if (mi === undefined) return null;
+  // Last day of the contract month — close enough for the roll-window calc;
+  // most MCX futures expire on the last business day of the month.
+  return new Date(Date.UTC(2000 + yy, mi + 1, 0));
+}
+
+function daysTo(date: Date | null): number | null {
+  if (!date) return null;
+  const ms = date.getTime() - Date.now();
+  return Math.ceil(ms / (1000 * 60 * 60 * 24));
+}
+
+function ExpiryTab({ rows }: { rows: WatchRow[] }) {
+  if (rows.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center text-[11px] text-text-muted">
+        No instruments yet.
+      </div>
+    );
+  }
+  return (
+    <div className="overflow-y-auto" style={{ maxHeight: 160 }}>
+      <table className="w-full text-[10.5px]">
+        <thead className="sticky top-0 bg-bg-primary text-[9.5px] uppercase tracking-wider text-text-muted">
+          <tr>
+            <th className="px-2 py-1 text-left">Underlying</th>
+            <th className="px-2 text-left">Active contract</th>
+            <th className="px-2 text-left">Expiry</th>
+            <th className="px-2 text-right">DTE</th>
+            <th className="px-2 text-left">Roll status</th>
+            <th className="px-2 text-right">Lot · Tick</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => {
+            const exp = parseMCXExpiry(row.symbol);
+            const dte = daysTo(exp);
+            const rolling = dte !== null && dte <= 10;
+            const expired = dte !== null && dte < 0;
+            const status = expired
+              ? { label: "expired · roll now", tone: "text-rose-400" }
+              : rolling
+                ? { label: `roll window · ${dte}d`, tone: "text-amber-300" }
+                : { label: dte === null ? "—" : "active", tone: "text-emerald-300" };
+            return (
+              <tr key={String(row.symbol || row.underlying)} className="border-t border-bg-secondary/15">
+                <td className="px-2 py-0.5 font-medium">{row.display_name || row.underlying}</td>
+                <td className="px-2 font-mono">{row.symbol}</td>
+                <td className="px-2 font-mono">
+                  {exp ? exp.toISOString().slice(0, 10) : "—"}
+                </td>
+                <td className="px-2 text-right font-mono">{dte ?? "—"}</td>
+                <td className={`px-2 ${status.tone}`}>{status.label}</td>
+                <td className="px-2 text-right font-mono text-text-muted">
+                  {row.lot_size ?? "—"}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ─── Stats tab ─────────────────────────────────────────────────────────────
+
+function StatsTab({
+  summary,
+  trades,
+  positions,
+}: {
+  summary: Record<string, unknown>;
+  trades: TradeRow[];
+  positions: CommodityPosition[];
+}) {
+  const wins = trades.filter((t) => Number(t.pnl ?? 0) > 0);
+  const losses = trades.filter((t) => Number(t.pnl ?? 0) < 0);
+  const grossProfit = wins.reduce((acc, t) => acc + Number(t.pnl ?? 0), 0);
+  const grossLoss = Math.abs(losses.reduce((acc, t) => acc + Number(t.pnl ?? 0), 0));
+  const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : 0;
+  const winRate = trades.length > 0 ? wins.length / trades.length : 0;
+  const avgWin = wins.length > 0 ? grossProfit / wins.length : 0;
+  const avgLoss = losses.length > 0 ? grossLoss / losses.length : 0;
+  const totalPnl = trades.reduce((acc, t) => acc + Number(t.pnl ?? 0), 0);
+  const realized = Number(summary.realized_pnl ?? totalPnl);
+  const totalEquity = Number(summary.total_equity ?? 0);
+  const initialCapital = Number(summary.initial_capital ?? 1_000_000);
+  const maxDD = Number(summary.max_drawdown ?? 0);
+  const openPnl = positions.reduce((acc, p) => acc + Number(p.unrealized_pnl ?? 0), 0);
+
+  // Per-underlying breakdown
+  const byUnderlying = useMemo(() => {
+    const map: Record<string, { trades: number; pnl: number }> = {};
+    for (const t of trades) {
+      const root = String(t.symbol || "")
+        .replace(/^MCX:/, "")
+        .replace(/\d{2}[A-Z]{3}FUT$/, "");
+      if (!map[root]) map[root] = { trades: 0, pnl: 0 };
+      map[root].trades += 1;
+      map[root].pnl += Number(t.pnl ?? 0);
+    }
+    return Object.entries(map)
+      .map(([k, v]) => ({ underlying: k, ...v }))
+      .sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
+  }, [trades]);
+
+  return (
+    <div className="overflow-y-auto" style={{ maxHeight: 160 }}>
+      <div className="grid grid-cols-12 gap-2 text-[11px]">
+        <StatTile k="Equity" v={formatINR(totalEquity)} cols={2} tone={totalEquity >= initialCapital ? "text-emerald-300" : "text-rose-300"} />
+        <StatTile k="Realized" v={formatINR(realized)} cols={2} tone={realized >= 0 ? "text-emerald-300" : "text-rose-300"} />
+        <StatTile k="Unrealized" v={formatINR(openPnl)} cols={2} tone={openPnl >= 0 ? "text-emerald-300" : "text-rose-300"} />
+        <StatTile k="Trades" v={String(trades.length)} cols={1} />
+        <StatTile k="Win rate" v={`${(winRate * 100).toFixed(0)}%`} cols={1} />
+        <StatTile k="Profit factor" v={Number.isFinite(profitFactor) ? profitFactor.toFixed(2) : "∞"} cols={2} />
+        <StatTile k="Max DD" v={`${(maxDD * 100).toFixed(1)}%`} cols={2} tone={maxDD > 0.1 ? "text-amber-300" : ""} />
+        <StatTile k="Avg win" v={formatINR(avgWin)} cols={2} />
+        <StatTile k="Avg loss" v={formatINR(-avgLoss)} cols={2} />
+        <StatTile k="W / L" v={`${wins.length} / ${losses.length}`} cols={2} />
+        <StatTile k="Open positions" v={String(positions.length)} cols={2} />
+        <StatTile k="Initial" v={formatINR(initialCapital)} cols={2} />
+      </div>
+      {byUnderlying.length > 0 ? (
+        <div className="mt-2 rounded bg-bg-secondary/15 px-2 py-1.5">
+          <div className="mb-1 text-[9.5px] uppercase tracking-wider text-text-muted">
+            Per-underlying P&L
+          </div>
+          <table className="w-full text-[10.5px]">
+            <tbody>
+              {byUnderlying.map((u) => (
+                <tr key={u.underlying}>
+                  <td className="py-0.5">{u.underlying}</td>
+                  <td className="text-right font-mono text-text-muted">{u.trades} tr</td>
+                  <td className={`text-right font-mono ${u.pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                    {formatSigned(u.pnl)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function StatTile({
+  k,
+  v,
+  cols = 2,
+  tone,
+}: {
+  k: string;
+  v: string;
+  cols?: number;
+  tone?: string;
+}) {
+  const span = `col-span-${cols}`;
+  return (
+    <div className={`${span} rounded bg-bg-secondary/15 px-2 py-1`}>
+      <div className="text-[9px] uppercase tracking-wider text-text-muted">{k}</div>
+      <div className={`mt-0.5 font-mono text-[12px] ${tone || "text-text-primary"}`}>{v}</div>
+    </div>
+  );
+}
+
+// ─── Strategy settings modal ──────────────────────────────────────────────
+// Read-only surface of the agent's current MP+OF parameters and risk caps.
+// PUT endpoints to mutate these can be added later; for now this is a
+// transparent "what the agent will do" panel — replaces what the old
+// /strategy page used to hold for the commodity sleeve.
+
+function StrategyModal({
+  config,
+  strategies,
+  onClose,
+}: {
+  config: Record<string, unknown>;
+  strategies: Record<string, unknown>[];
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const meta = strategies[0] || {};
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="relative max-h-[88vh] w-full max-w-3xl overflow-y-auto rounded-lg bg-bg-primary p-5 ring-1 ring-bg-secondary/40"
+      >
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute right-3 top-3 rounded p-1 text-text-muted hover:bg-bg-secondary/30 hover:text-text-primary"
+        >
+          <X className="h-4 w-4" />
+        </button>
+
+        <div className="mb-3">
+          <div className="text-base font-semibold text-text-primary">
+            {String(meta.title || "MP+OF Futures")} · settings
+          </div>
+          <div className="text-[11px] text-text-muted">
+            {String(meta.instrument || "")} · {String(meta.broker || "")}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-12 gap-3 text-[11.5px]">
+          <Section title="Signal engine" cols={6}>
+            <Row k="Timeframe" v={String(config.futures_timeframe ?? "1minute")} />
+            <Row k="MP period (min)" v={String(config.mp_period_minutes ?? 15)} />
+            <Row k="MP min periods" v={String(config.mp_min_periods ?? 4)} />
+            <Row k="CVD anchor hour IST" v={String(config.cvd_anchor_hour_ist ?? 9)} />
+            <Row k="Min stop %" v={`${(Number(config.futures_min_stop_pct ?? 0) * 100).toFixed(2)}%`} />
+            <Row k="Trail × ATR" v={String(config.futures_trail_atr_multiplier ?? "—")} />
+            <Row k="Target × R" v={String(config.futures_target_arm_r_multiplier ?? "—")} />
+            <Row k="Min hold (bars)" v={String(config.futures_min_hold_bars ?? "—")} />
+          </Section>
+
+          <Section title="Risk caps" cols={6}>
+            <Row k="Lots per trade" v={String(config.lots_per_trade ?? 1)} />
+            <Row k="Daily loss cap" v={formatINR(Number(config.commodity_daily_loss_limit ?? 0))} />
+            <Row k="Per-underlying loss" v={formatINR(Number(config.commodity_underlying_daily_loss_limit ?? 0))} />
+            <Row k="Max drawdown" v={`${Number(config.commodity_max_drawdown_pct ?? 0).toFixed(1)}%`} />
+            <Row k="Stop cooldown" v={`${config.commodity_stop_cooldown_minutes ?? "—"} min`} />
+          </Section>
+
+          <Section title="Universe" cols={12}>
+            <div className="col-span-2 grid grid-cols-4 gap-1 text-[10.5px]">
+              {((config.symbols as string[]) || []).map((s) => (
+                <span key={s} className="rounded bg-bg-secondary/25 px-1.5 py-0.5 font-mono text-text-secondary">
+                  {s.replace(/^MCX:/, "").replace(/\d{2}[A-Z]{3}FUT$/, "")}
+                </span>
+              ))}
+            </div>
+          </Section>
+
+          <Section title="Triggers (priority high → low)" cols={12}>
+            <div className="col-span-2 grid grid-cols-5 gap-2 text-[10.5px]">
+              {["open_drive", "ib_break", "failed_auction", "va_migration", "lvn_fade"].map((t) => (
+                <div key={t} className="rounded bg-bg-secondary/20 px-2 py-1">
+                  <div className="text-[9.5px] uppercase tracking-wider text-text-muted">{triggerLabel(t)}</div>
+                </div>
+              ))}
+            </div>
+          </Section>
+
+          <div className="col-span-12 rounded bg-bg-secondary/15 px-3 py-2 text-[11px] text-text-secondary">
+            {String((meta.notes as string) || "MP+OF futures sleeve. Triggers evaluate on closed 1-min bars.")}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Audit feed ────────────────────────────────────────────────────────────
 
 function AuditFeed({ events }: { events: AuditEvent[] }) {
@@ -998,6 +1386,8 @@ export default function CommodityLivePage() {
   // ── Derive view models ──────────────────────────────────────────────
   const status = (overviewQuery.data?.status ?? {}) as StatusPayload;
   const summary = (status.summary ?? {}) as Record<string, unknown>;
+  const config = (status.config ?? {}) as Record<string, unknown>;
+  const strategies = (status.strategies ?? []) as Record<string, unknown>[];
 
   // Socket-streamed positions / orders / trade history are inside the
   // overview payload. No more separate polls for those.
@@ -1061,8 +1451,10 @@ export default function CommodityLivePage() {
     return map;
   }, [positions]);
 
-  // ── Selection (modal) ──────────────────────────────────────────────
+  // ── Selection + UI state ───────────────────────────────────────────
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
+  const [bottomTab, setBottomTab] = useState<BottomTabKey>("queue");
+  const [strategyModalOpen, setStrategyModalOpen] = useState(false);
   const selectedRow = useMemo(
     () => rows.find((r) => r.symbol === selectedSymbol) || null,
     [rows, selectedSymbol],
@@ -1190,6 +1582,15 @@ export default function CommodityLivePage() {
             <RefreshCcw className="h-3.5 w-3.5" />
             Scan
           </button>
+          <button
+            type="button"
+            onClick={() => setStrategyModalOpen(true)}
+            className="inline-flex items-center gap-1 rounded-md bg-bg-secondary/25 px-2 py-1 text-[11px] text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary"
+            title="MP+OF rules · risk caps · universe"
+          >
+            <Settings className="h-3.5 w-3.5" />
+            Strategy
+          </button>
           <Link
             href="/settings"
             className="rounded-md bg-bg-secondary/25 px-2 py-1 text-[11px] text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary"
@@ -1237,33 +1638,80 @@ export default function CommodityLivePage() {
           </table>
         </div>
 
-        {/* ── Footer: action queue · audit feed ──────────────────── */}
-        <div className="mt-2 grid flex-1 min-h-0 grid-cols-12 gap-2">
-          <div className="col-span-12 lg:col-span-5 rounded-md border border-bg-secondary/30 p-2">
-            <div className="mb-1 flex items-baseline justify-between">
-              <div className="text-[10px] uppercase tracking-[0.14em] text-text-muted">
-                Action Queue
-              </div>
-              <div className="text-[10px] text-text-muted">
-                {armedCount} armed · priority × confidence
-              </div>
-            </div>
-            <ActionQueue
-              rows={rows}
-              onSelect={(sym) => setSelectedSymbol(sym)}
-            />
-          </div>
-          <div className="col-span-12 lg:col-span-7 rounded-md border border-bg-secondary/30 p-2">
-            <div className="mb-1 flex items-baseline justify-between">
-              <div className="text-[10px] uppercase tracking-[0.14em] text-text-muted">
-                Audit feed · mp_signal.*
-              </div>
-              <div className="text-[10px] text-text-muted">{auditEvents.length} events</div>
-            </div>
-            <AuditFeed events={auditEvents} />
+        {/* ── Tabbed footer: queue · orders · trades · expiry · stats · audit ── */}
+        <div className="mt-2 flex flex-1 min-h-0 flex-col rounded-md border border-bg-secondary/30">
+          <nav className="flex items-baseline gap-1 border-b border-bg-secondary/30 px-1.5 py-1">
+            {BOTTOM_TABS.map((t) => {
+              const isActive = bottomTab === t.key;
+              const count =
+                t.key === "queue"
+                  ? armedCount
+                  : t.key === "orders"
+                    ? orders.length
+                    : t.key === "trades"
+                      ? trades.length
+                      : t.key === "audit"
+                        ? auditEvents.length
+                        : null;
+              return (
+                <button
+                  key={t.key}
+                  type="button"
+                  onClick={() => setBottomTab(t.key)}
+                  className={`rounded px-2 py-0.5 text-[10.5px] uppercase tracking-[0.14em] transition-colors ${
+                    isActive
+                      ? "bg-bg-secondary/50 text-text-primary"
+                      : "text-text-muted hover:bg-bg-secondary/20 hover:text-text-primary"
+                  }`}
+                >
+                  {t.label}
+                  {count !== null ? (
+                    <span className="ml-1 text-[9.5px] text-text-muted">{count}</span>
+                  ) : null}
+                </button>
+              );
+            })}
+            <span className="ml-auto text-[10px] text-text-muted">
+              {bottomTab === "queue"
+                ? "priority × confidence"
+                : bottomTab === "orders"
+                  ? "newest first · click row → instrument modal"
+                  : bottomTab === "trades"
+                    ? "closed trades · newest first"
+                    : bottomTab === "expiry"
+                      ? "MCX futures · roll window 10d"
+                      : bottomTab === "stats"
+                        ? "portfolio statistics"
+                        : "mp_signal.* events"}
+            </span>
+          </nav>
+          <div className="flex-1 min-h-0 overflow-hidden px-2 py-1">
+            {bottomTab === "queue" ? (
+              <ActionQueue rows={rows} onSelect={(sym) => setSelectedSymbol(sym)} />
+            ) : null}
+            {bottomTab === "orders" ? (
+              <OrdersTab orders={orders} onSelect={(sym) => setSelectedSymbol(sym)} />
+            ) : null}
+            {bottomTab === "trades" ? (
+              <TradesTab trades={trades} onSelect={(sym) => setSelectedSymbol(sym)} />
+            ) : null}
+            {bottomTab === "expiry" ? <ExpiryTab rows={rows} /> : null}
+            {bottomTab === "stats" ? (
+              <StatsTab summary={summary} trades={trades} positions={positions} />
+            ) : null}
+            {bottomTab === "audit" ? <AuditFeed events={auditEvents} /> : null}
           </div>
         </div>
       </main>
+
+      {/* ── Strategy modal ─────────────────────────────────────────── */}
+      {strategyModalOpen ? (
+        <StrategyModal
+          config={config}
+          strategies={strategies}
+          onClose={() => setStrategyModalOpen(false)}
+        />
+      ) : null}
 
       {/* ── Detail modal ───────────────────────────────────────────── */}
       {selectedRow ? (
