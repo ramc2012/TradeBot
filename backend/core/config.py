@@ -57,7 +57,16 @@ class Settings(BaseSettings):
     RESEARCH_SYNC_AUTO_ENABLED: bool = False
     RESEARCH_SYNC_EMBEDDED_ENABLED: bool = False
     STRATEGY_SPOT_SYNC_ENABLED: bool = False
+    # Legacy global bypass flag — used as a fallback when the per-lane
+    # flags aren't set. Kept for backward compatibility with the prod .env;
+    # new code should consult NSE_S1_/NSE_S2_BYPASS_MARKET_PROFILE_GATE.
     NSE_STRATEGY_BYPASS_MARKET_PROFILE_GATE: bool = False
+    # Per-lane bypass flags. S1 (monthly options, 30m MACD) is currently
+    # kept on bypass to preserve paper-book continuity; S2 transitioned to
+    # the MP+OF engine where the gate is the signal itself, so its bypass
+    # is vestigial but kept for emergency rollback.
+    NSE_S1_BYPASS_MARKET_PROFILE_GATE: bool = True
+    NSE_S2_BYPASS_MARKET_PROFILE_GATE: bool = False
     PAPER_TRADING_ONLY: bool = False
     PAPER_RUNTIME_PREWARM_ENABLED: bool = True
     MARKET_HOURS_PAPER_SUPERVISOR_ENABLED: bool = True

@@ -3152,7 +3152,14 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         ce_cvd_window = ce_cvd_full[-6:] if len(ce_cvd_full) >= 2 else []
         pe_cvd_window = pe_cvd_full[-6:] if len(pe_cvd_full) >= 2 else []
 
-        if settings.NSE_STRATEGY_BYPASS_MARKET_PROFILE_GATE:
+        # S2's MP gate. Defaults to False (gate enforced) — this lane is
+        # transitioning to the MP+OF engine where the auction itself is
+        # the signal, so the bypass path stays here only for emergency
+        # rollback. Legacy global flag is honored as a fallback.
+        if (
+            settings.NSE_S2_BYPASS_MARKET_PROFILE_GATE
+            or settings.NSE_STRATEGY_BYPASS_MARKET_PROFILE_GATE
+        ):
             current_spot = float(row.get("spot_price") or 0.0)
             day_type = "bypassed"
             gate_reason = "market_profile_gate_bypassed"

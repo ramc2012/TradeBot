@@ -236,7 +236,13 @@ class StrategyEntryMixin:
         underlying: str,
         expected_direction: str,
     ) -> dict[str, Any]:
-        if settings.NSE_STRATEGY_BYPASS_MARKET_PROFILE_GATE:
+        # Per-lane gate. S1's flag defaults to True (paper book stays
+        # MACD-only, no MP enforcement); the legacy global flag is honored
+        # as a fallback so older .env files keep working.
+        if (
+            settings.NSE_S1_BYPASS_MARKET_PROFILE_GATE
+            or settings.NSE_STRATEGY_BYPASS_MARKET_PROFILE_GATE
+        ):
             return {
                 "confirmed": True,
                 "direction": expected_direction,
