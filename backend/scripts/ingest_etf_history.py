@@ -29,15 +29,14 @@ from sqlalchemy import text
 from db.database import AsyncSessionLocal
 
 
-# Verified Upstox instrument keys for the NSE ETFs we use as asset-class proxies.
-# Source: https://upstox.com/docs/api/instruments + manual cross-check.
-# Symbols here are what we want stored in `underlying_spot_candles.underlying`.
+# Verified Upstox instrument keys (resolved from Upstox NSE master 2026-05-31).
+# `underlying` is the canonical name we'll store in underlying_spot_candles.
 ETF_TARGETS: list[dict[str, str]] = [
     {"underlying": "GOLDBEES",   "instrument_key": "NSE_EQ|INF204KB17I5", "trading_symbol": "GOLDBEES"},
-    {"underlying": "SILVERBEES", "instrument_key": "NSE_EQ|INF204KB14I2", "trading_symbol": "SILVERBEES"},
-    # Bharat Bond ETF April 2031 maturity series.
-    {"underlying": "BBETF",      "instrument_key": "NSE_EQ|INF917L01EC7", "trading_symbol": "BBETF"},
-    {"underlying": "LIQUIDBEES", "instrument_key": "NSE_EQ|INF204KA1AA2", "trading_symbol": "LIQUIDBEES"},
+    {"underlying": "SILVERBEES", "instrument_key": "NSE_EQ|INF204KC1402", "trading_symbol": "SILVERBEES"},
+    # Bharat Bond ETF April 2031 series — most liquid of the BB-ETF maturities.
+    {"underlying": "BBETF",      "instrument_key": "NSE_EQ|INF754K01LE1", "trading_symbol": "EBBETF0431"},
+    {"underlying": "LIQUIDBEES", "instrument_key": "NSE_EQ|INF732E01037", "trading_symbol": "LIQUIDBEES"},
 ]
 
 
