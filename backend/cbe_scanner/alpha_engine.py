@@ -381,7 +381,7 @@ async def _fetch_daily_closes(session, symbol: str, *, lookback_days: int = 220)
             SELECT close FROM daily ORDER BY d ASC
             """
         ),
-        {"underlying": symbol, "days": int(lookback_days)},
+        {"underlying": symbol, "days": str(int(lookback_days))},
     )
     return [float(r[0]) for r in result.fetchall() if r[0] is not None]
 
