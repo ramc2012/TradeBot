@@ -2379,7 +2379,7 @@ function InstrumentDetailModal({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="relative max-h-[92vh] w-full max-w-5xl overflow-y-auto rounded-lg bg-bg-primary p-5 ring-1 ring-bg-secondary/40"
+        className="relative max-h-[94vh] w-full max-w-[1500px] overflow-y-auto rounded-lg bg-bg-primary p-5 ring-1 ring-bg-secondary/40"
       >
         <button
           type="button"
@@ -2412,17 +2412,79 @@ function InstrumentDetailModal({
           </div>
         </div>
 
-        {/* Today's TPO + reference legend + historical TPO grid */}
+        {/* ── Hero charts: Yesterday LEFT of Today, full width ──────────── */}
+        {/*
+         * Classic split-profile layout (Sierra Chart / IRT / Bookmap):
+         * the completed prior session sits on the LEFT, today's developing
+         * profile on the RIGHT. The eye reads left-to-right in time and the
+         * chart area gets the full modal width — every other panel (refs,
+         * OF, validation, week/month) drops to the bottom strip.
+         *
+         * Width split is 40 / 60: yesterday's full session vs today's
+         * partial session, biased toward today since it's the active read.
+         */}
         <div className="mb-4 grid grid-cols-12 gap-3">
-          {/* Today */}
+          {/* Yesterday (completed prior session) */}
+          <div className="col-span-5">
+            <div className="mb-1 flex items-baseline justify-between text-[10px] uppercase tracking-[0.14em] text-text-muted">
+              <span className="flex items-center gap-1.5">
+                <span style={{ color: refColors.Yesterday }}>Yesterday</span>
+                <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-semibold tracking-wider text-emerald-300">
+                  FINAL
+                </span>
+              </span>
+              <span>
+                {yesterday?.date ? <span className="font-mono">{yesterday.date}</span> : "—"}
+                {yesterday?.tick_size
+                  ? ` · tick ${formatNumber(Number(yesterday.tick_size), 2)}`
+                  : ""}
+              </span>
+            </div>
+            {yesterday && yesterday.tpo_letters && Object.keys(yesterday.tpo_letters).length > 0 ? (
+              <TPOChart
+                letters={yesterday.tpo_letters}
+                poc={yesterday.poc}
+                vah={yesterday.vah}
+                val={yesterday.val}
+                high={yesterday.high}
+                low={yesterday.low}
+                tickSize={yesterday.tick_size}
+                pocBaseColor={refColors.Yesterday + "33"}
+                height={520}
+              />
+            ) : (
+              <div
+                className="flex flex-col items-center justify-center gap-2 rounded-md bg-bg-secondary/25 text-[11px] uppercase tracking-wide text-text-muted ring-1 ring-bg-secondary/40"
+                style={{ height: 520 }}
+              >
+                <span>Last-day TPO not yet on file</span>
+                {yesterday && (yesterday.poc != null || yesterday.vah != null || yesterday.val != null) ? (
+                  <div className="space-y-1 font-mono text-[10px] normal-case tracking-normal">
+                    <div className="flex gap-3">
+                      <span className="text-text-muted">VAH</span>
+                      <span>{yesterday.vah != null ? formatNumber(Number(yesterday.vah), 2) : "—"}</span>
+                    </div>
+                    <div className="flex gap-3">
+                      <span className="text-text-muted">POC</span>
+                      <span className="text-amber-300">{yesterday.poc != null ? formatNumber(Number(yesterday.poc), 2) : "—"}</span>
+                    </div>
+                    <div className="flex gap-3">
+                      <span className="text-text-muted">VAL</span>
+                      <span>{yesterday.val != null ? formatNumber(Number(yesterday.val), 2) : "—"}</span>
+                    </div>
+                  </div>
+                ) : (
+                  <span className="normal-case tracking-normal">Builds on first session that closes after deploy.</span>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Today (developing) */}
           <div className="col-span-7">
             <div className="mb-1 flex items-baseline justify-between text-[10px] uppercase tracking-[0.14em] text-text-muted">
               <span className="flex items-center gap-1.5">
                 <span>Today · {row.mp_day_type || "—"}</span>
-                {/* "Developing" is the standard MP term for an unfinished
-                    session — IB and the value area can still shift until
-                    the close. We mark it explicitly so the desk doesn't
-                    mistake the live numbers for a settled auction. */}
                 {(() => {
                   const periods = Number(row.mp_periods ?? 0);
                   const isDeveloping = periods < 13; // ~6.5h MCX session at 30m
@@ -2463,121 +2525,123 @@ function InstrumentDetailModal({
               tickSize={row.mp_tick_size as number | undefined}
               price={Number(row.price ?? 0)}
               references={todayReferences}
-              height={460}
+              height={520}
             />
-            {row.signal_validation_detail ? (
-              <div className="mt-2 rounded bg-bg-secondary/15 px-3 py-1.5 text-[11px] text-text-secondary">
-                {row.signal_validation_detail}
-              </div>
-            ) : null}
           </div>
+        </div>
 
-          {/* Sidebar: reference legend + OF micro */}
-          <div className="col-span-5 flex flex-col gap-2">
-            <div className="rounded bg-bg-secondary/15 p-2 ring-1 ring-bg-secondary/30">
-              <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-text-muted">
-                References on today's chart
+        {/* ── Bottom strip: references + OF + validation ────────────────── */}
+        <div className="mb-4 grid grid-cols-12 gap-3">
+          <div className="col-span-3 rounded bg-bg-secondary/15 p-2 ring-1 ring-bg-secondary/30">
+            <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-text-muted">
+              References on today's chart
+            </div>
+            {todayReferences.length === 0 ? (
+              <div className="text-[11px] text-text-muted">
+                Building history — references appear as snapshots persist.
               </div>
-              {todayReferences.length === 0 ? (
-                <div className="text-[11px] text-text-muted">
-                  Building history — references appear as snapshots persist.
-                </div>
-              ) : (
-                <ul className="space-y-0.5 text-[11px] font-mono">
-                  {todayReferences.map((r) => (
-                    <li key={r.label + r.price} className="flex items-center gap-2">
-                      <span
-                        className="inline-flex h-4 w-6 items-center justify-center rounded text-[9px] font-semibold"
-                        style={{ background: r.color + "33", color: r.color }}
-                      >
-                        {r.label}
-                      </span>
-                      <span className="text-text-secondary">POC</span>
-                      <span className="ml-auto">{formatNumber(r.price, 2)}</span>
-                    </li>
-                  ))}
-                </ul>
+            ) : (
+              <ul className="space-y-0.5 text-[11px] font-mono">
+                {todayReferences.map((r) => (
+                  <li key={r.label + r.price} className="flex items-center gap-2">
+                    <span
+                      className="inline-flex h-4 w-6 items-center justify-center rounded text-[9px] font-semibold"
+                      style={{ background: r.color + "33", color: r.color }}
+                    >
+                      {r.label}
+                    </span>
+                    <span className="text-text-secondary">POC</span>
+                    <span className="ml-auto">{formatNumber(r.price, 2)}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div className="col-span-4 rounded bg-bg-secondary/15 p-2 ring-1 ring-bg-secondary/30">
+            <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-text-muted">
+              Order-flow now
+            </div>
+            <div className="grid grid-cols-3 gap-y-1 text-[11px] font-mono">
+              <KV label="VWAP" v={formatNumber(Number(row.vwap ?? 0), 2)} />
+              <KV
+                label="CVD"
+                v={formatSigned(Number(row.cvd_session ?? row.cvd_latest ?? 0))}
+                tone={Number(row.cvd_session ?? row.cvd_latest ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}
+              />
+              <KV label="ATR(1m)" v={formatNumber(Number(row.atr ?? 0), 2)} />
+              <KV label="Regime" v={String(row.regime || "—")} />
+              <KV label="Confidence" v={`${Math.round(Number(row.confidence ?? 0) * 100)}%`} />
+              <KV label="Trigger" v={triggerLabel(row.entry_style)} />
+            </div>
+          </div>
+          <div className="col-span-5 rounded bg-bg-secondary/15 p-2 ring-1 ring-bg-secondary/30">
+            <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-text-muted">
+              Trigger evidence
+            </div>
+            <div className="text-[11px] text-text-secondary">
+              {row.signal_validation_detail || (
+                <span className="text-text-muted">No active trigger this bar.</span>
               )}
             </div>
-            <div className="rounded bg-bg-secondary/15 p-2 ring-1 ring-bg-secondary/30">
-              <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-text-muted">
-                Order-flow now
-              </div>
-              <div className="grid grid-cols-2 gap-y-1 text-[11px] font-mono">
-                <KV label="VWAP" v={formatNumber(Number(row.vwap ?? 0), 2)} />
-                <KV
-                  label="CVD"
-                  v={formatSigned(Number(row.cvd_session ?? row.cvd_latest ?? 0))}
-                  tone={Number(row.cvd_session ?? row.cvd_latest ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}
-                />
-                <KV label="ATR(1m)" v={formatNumber(Number(row.atr ?? 0), 2)} />
-                <KV label="Regime" v={String(row.regime || "—")} />
-                <KV label="Confidence" v={`${Math.round(Number(row.confidence ?? 0) * 100)}%`} />
-                <KV label="Trigger" v={triggerLabel(row.entry_style)} />
-              </div>
-            </div>
           </div>
         </div>
 
-        {/* Historical TPO grid — yesterday + week + month profiles */}
-        <div className="mb-4">
-          <div className="mb-1 flex items-baseline justify-between text-[10px] uppercase tracking-[0.14em] text-text-muted">
-            <span>Historical profiles</span>
-            <span>
-              {historyQuery.isLoading
-                ? "loading…"
-                : historicalPeriods.length === 0
-                  ? "building — first snapshot persists at session close"
-                  : `${historicalPeriods.length} period${historicalPeriods.length === 1 ? "" : "s"} on file`}
-            </span>
-          </div>
-          {historicalPeriods.length > 0 ? (
-            <div className="grid grid-cols-5 gap-2">
-              {historicalPeriods.map((p) => (
-                <div
-                  key={p.label}
-                  className="rounded bg-bg-secondary/15 p-1.5 ring-1 ring-bg-secondary/30"
-                >
-                  <div className="mb-1 flex items-baseline justify-between text-[9.5px] uppercase tracking-[0.14em] text-text-muted">
-                    <span style={{ color: refColors[p.label] }}>{p.label}</span>
-                    {p.date ? <span className="font-mono">{p.date}</span> : null}
-                  </div>
-                  {p.tpo_letters && Object.keys(p.tpo_letters).length > 0 ? (
-                    <TPOChart
-                      letters={p.tpo_letters}
-                      poc={p.poc}
-                      vah={p.vah}
-                      val={p.val}
-                      high={p.high}
-                      low={p.low}
-                      tickSize={p.tick_size}
-                      pocBaseColor={(refColors[p.label] || "#fbbf24") + "33"}
-                      height={210}
-                    />
-                  ) : (
-                    <div className="space-y-1 px-1 py-2 text-[10px] font-mono">
-                      <div className="flex justify-between">
-                        <span className="text-text-muted">VAH</span>
-                        <span>{p.vah != null ? formatNumber(Number(p.vah), 2) : "—"}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-text-muted">POC</span>
-                        <span className="text-amber-300">{p.poc != null ? formatNumber(Number(p.poc), 2) : "—"}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-text-muted">VAL</span>
-                        <span>{p.val != null ? formatNumber(Number(p.val), 2) : "—"}</span>
-                      </div>
-                      <div className="mt-1 text-[9px] uppercase tracking-wide text-text-muted">
-                        TPO letters not stored
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ))}
+        {/* ── Week / month profiles (only on demand, below the hero) ────── */}
+        {historicalPeriods.filter((p) => p.label !== "Yesterday").length > 0 ? (
+          <div className="mb-4">
+            <div className="mb-1 flex items-baseline justify-between text-[10px] uppercase tracking-[0.14em] text-text-muted">
+              <span>Week / month profiles</span>
+              <span>
+                {historyQuery.isLoading
+                  ? "loading…"
+                  : `${historicalPeriods.filter((p) => p.label !== "Yesterday").length} on file`}
+              </span>
             </div>
-          ) : null}
-        </div>
+            <div className="grid grid-cols-4 gap-2">
+              {historicalPeriods
+                .filter((p) => p.label !== "Yesterday")
+                .map((p) => (
+                  <div
+                    key={p.label}
+                    className="rounded bg-bg-secondary/15 p-1.5 ring-1 ring-bg-secondary/30"
+                  >
+                    <div className="mb-1 flex items-baseline justify-between text-[9.5px] uppercase tracking-[0.14em] text-text-muted">
+                      <span style={{ color: refColors[p.label] }}>{p.label}</span>
+                      {p.date ? <span className="font-mono">{p.date}</span> : null}
+                    </div>
+                    {p.tpo_letters && Object.keys(p.tpo_letters).length > 0 ? (
+                      <TPOChart
+                        letters={p.tpo_letters}
+                        poc={p.poc}
+                        vah={p.vah}
+                        val={p.val}
+                        high={p.high}
+                        low={p.low}
+                        tickSize={p.tick_size}
+                        pocBaseColor={(refColors[p.label] || "#fbbf24") + "33"}
+                        height={220}
+                      />
+                    ) : (
+                      <div className="space-y-1 px-1 py-2 text-[10px] font-mono">
+                        <div className="flex justify-between">
+                          <span className="text-text-muted">VAH</span>
+                          <span>{p.vah != null ? formatNumber(Number(p.vah), 2) : "—"}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-text-muted">POC</span>
+                          <span className="text-amber-300">{p.poc != null ? formatNumber(Number(p.poc), 2) : "—"}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-text-muted">VAL</span>
+                          <span>{p.val != null ? formatNumber(Number(p.val), 2) : "—"}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+            </div>
+          </div>
+        ) : null}
 
         {/* Position card (visual gauge, not a table) */}
         {position ? (
