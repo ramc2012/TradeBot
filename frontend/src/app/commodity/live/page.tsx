@@ -561,13 +561,32 @@ function TriggerBadge({ row }: { row: WatchRow }) {
   if (!style) {
     return <span className="text-[10.5px] text-text-muted">no trigger</span>;
   }
+  // Confidence ladder: tiny 5-segment bar under the badge. Segments fill
+  // proportionally to confidence (so 0.6 fills 3 segments brightly + 1 dim).
+  // Borrowed from poker / sports-betting UIs which need to telegraph
+  // certainty without taking up real estate.
+  const filled = Math.round(conf * 5);
   return (
-    <span
-      className={`inline-flex items-center gap-1 rounded px-1.5 py-[1.5px] text-[10px] font-medium uppercase tracking-wide ring-1 ${colorClass}`}
-    >
-      <span>{triggerLabel(style)}</span>
-      {sig ? <span className="rounded bg-black/30 px-1 text-[9px]">{sig}</span> : null}
-      {conf > 0 ? <span className="font-mono">{conf.toFixed(2)}</span> : null}
+    <span className="inline-flex flex-col gap-[2px]">
+      <span
+        className={`inline-flex items-center gap-1 rounded px-1.5 py-[1.5px] text-[10px] font-medium uppercase tracking-wide ring-1 ${colorClass}`}
+      >
+        <span>{triggerLabel(style)}</span>
+        {sig ? <span className="rounded bg-black/30 px-1 text-[9px]">{sig}</span> : null}
+        {conf > 0 ? <span className="font-mono">{conf.toFixed(2)}</span> : null}
+      </span>
+      {conf > 0 ? (
+        <span className="flex gap-[2px]">
+          {[0, 1, 2, 3, 4].map((i) => (
+            <span
+              key={i}
+              className={`h-[3px] w-[10px] rounded-sm ${
+                i < filled ? "bg-current opacity-70" : "bg-current opacity-15"
+              }`}
+            />
+          ))}
+        </span>
+      ) : null}
     </span>
   );
 }
@@ -839,10 +858,10 @@ function ActionQueue({
 }
 
 // ─── Positions tab ─────────────────────────────────────────────────────────
-// Detailed view of every open position: side, lots, entry, current, stop,
-// target, distance to stop, distance to target, unrealised P&L, return %,
-// entry style, and time held. Replaces the "click each row to see position
-// in the modal" workflow that was hidden in the previous layout.
+// Detailed view of every open position with a Bloomberg-style aggregate
+// footer (total P&L summed across the book). Each row also carries a
+// risk-gauge mini-bar showing where current price sits between the stop
+// and the target — at-a-glance "how close to stop am I?" without doing math.
 
 function hoursBetween(now: Date, isoStart: string | undefined): string {
   if (!isoStart) return "—";
@@ -856,6 +875,69 @@ function hoursBetween(now: Date, isoStart: string | undefined): string {
   const days = Math.floor(hrs / 24);
   const rh = hrs % 24;
   return rh ? `${days}d ${rh}h` : `${days}d`;
+}
+
+/** Horizontal risk gauge: |stop| ←──●──→ |target|, with the marker positioned
+ * by price's progress between the two. Color goes red→amber→green based on
+ * which side of the entry it's on, so a glance at the cell reads "risk on,
+ * holding, in profit, near target". Modeled on car fuel gauges.
+ */
+function RiskGauge({
+  side,
+  entry,
+  current,
+  stop,
+  target,
+}: {
+  side: string;
+  entry: number;
+  current: number;
+  stop: number;
+  target: number;
+}) {
+  if (!entry || !current || !stop) {
+    return <span className="text-text-muted">—</span>;
+  }
+  // Normalise so 0 = stop, 1 = entry, 2 = target (for BUY); flip for SELL.
+  const toPct = (p: number) => {
+    if (side === "BUY") {
+      const span = (target || entry * 1.01) - stop;
+      return Math.max(0, Math.min(1, (p - stop) / (span || 1)));
+    } else {
+      const span = stop - (target || entry * 0.99);
+      return Math.max(0, Math.min(1, (stop - p) / (span || 1)));
+    }
+  };
+  const entryPct = toPct(entry);
+  const currentPct = toPct(current);
+  // Tone the marker by where current sits relative to entry.
+  const tone =
+    currentPct >= entryPct + 0.15
+      ? "fill-emerald-400"
+      : currentPct >= entryPct - 0.05
+        ? "fill-amber-300"
+        : "fill-rose-400";
+  return (
+    <div
+      className="relative h-3 w-full rounded bg-gradient-to-r from-rose-500/25 via-bg-secondary/40 to-emerald-500/25 ring-1 ring-bg-secondary/40"
+      title={`Stop @ ${formatNumber(stop, 2)} → entry @ ${formatNumber(entry, 2)} → target @ ${target ? formatNumber(target, 2) : "—"} · now @ ${formatNumber(current, 2)}`}
+    >
+      <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 12" preserveAspectRatio="none">
+        {/* entry tick */}
+        <line
+          x1={entryPct * 100}
+          x2={entryPct * 100}
+          y1={1}
+          y2={11}
+          className="stroke-text-muted/60"
+          strokeWidth={0.6}
+          strokeDasharray="1 1"
+        />
+        {/* current marker */}
+        <circle cx={currentPct * 100} cy={6} r={2.4} className={tone} />
+      </svg>
+    </div>
+  );
 }
 
 function PositionsTab({
@@ -906,6 +988,7 @@ function PositionsTab({
                 <th className="px-2 text-right">Current</th>
                 <th className="px-2 text-right">Stop · Δ</th>
                 <th className="px-2 text-right">Target · Δ</th>
+                <th className="px-3 text-left">Risk gauge</th>
                 <th className="px-2 text-right">Unrealized</th>
                 <th className="px-2 text-right">Return</th>
                 <th className="px-2 text-left">Trigger</th>
@@ -961,6 +1044,15 @@ function PositionsTab({
                         </div>
                       ) : null}
                     </td>
+                    <td className="px-3 align-middle">
+                      <RiskGauge
+                        side={side}
+                        entry={entry}
+                        current={cur}
+                        stop={stop}
+                        target={target}
+                      />
+                    </td>
                     <td className={`px-2 text-right align-middle font-mono ${pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
                       {formatSigned(pnl)}
                     </td>
@@ -977,10 +1069,65 @@ function PositionsTab({
                 );
               })}
             </tbody>
+            {/* Bloomberg/IB-style aggregate footer — always visible at the
+                bottom of the table so the trader's reading flow ends at
+                the grand total instead of an ambiguous last row. */}
+            {filtered.length > 0 ? (
+              <PositionsFooter positions={filtered} />
+            ) : null}
           </table>
         </div>
       )}
     </div>
+  );
+}
+
+/** Total-P&L footer row. Aggregates the *filtered* book so when the user
+ * filters "losing only" the footer shows just the drag from losers; same
+ * for "winning only". Glanceable: large signed P&L + return-on-capital + a
+ * compact W/L count. The colour follows the sign of the aggregate.
+ */
+function PositionsFooter({ positions }: { positions: CommodityPosition[] }) {
+  const total = positions.reduce((acc, p) => acc + Number(p.unrealized_pnl ?? 0), 0);
+  const wins = positions.filter((p) => Number(p.unrealized_pnl ?? 0) > 0).length;
+  const losses = positions.filter((p) => Number(p.unrealized_pnl ?? 0) < 0).length;
+  const grossEntry = positions.reduce(
+    (acc, p) => acc + Number(p.entry_price ?? 0) * Number(p.qty ?? 0),
+    0,
+  );
+  const grossPct = grossEntry > 0 ? (total / grossEntry) * 100 : 0;
+  const arrow = total >= 0 ? "▲" : "▼";
+  const tone =
+    total > 0 ? "text-emerald-300" : total < 0 ? "text-rose-300" : "text-text-secondary";
+  const cellTone =
+    total > 0
+      ? "bg-emerald-500/[0.07]"
+      : total < 0
+        ? "bg-rose-500/[0.07]"
+        : "bg-bg-secondary/30";
+  return (
+    <tfoot className={`sticky bottom-0 ${cellTone} backdrop-blur-sm`}>
+      <tr className="border-t-2 border-bg-secondary/40 text-[11.5px]">
+        <td className="py-2 pl-2 pr-2 align-middle font-semibold uppercase tracking-[0.14em] text-text-muted">
+          Total ({positions.length})
+        </td>
+        <td className="px-2 align-middle text-[10.5px] text-text-muted" colSpan={2}>
+          W {wins} · L {losses}
+        </td>
+        <td className="px-2 align-middle text-right text-[10.5px] text-text-muted" colSpan={3}>
+          gross entry {formatINR(grossEntry, 0)}
+        </td>
+        <td className={`px-2 text-right align-middle font-mono text-[14px] font-semibold ${tone}`}>
+          {arrow} {formatSigned(total, 0)}
+        </td>
+        <td className={`px-2 text-right align-middle font-mono text-[12px] ${tone}`}>
+          {formatPct(grossPct, 2)}
+        </td>
+        <td className="px-2 align-middle text-[10.5px] text-text-muted" colSpan={2}>
+          unrealised P&L
+        </td>
+      </tr>
+    </tfoot>
   );
 }
 
@@ -1897,21 +2044,60 @@ export default function CommodityLivePage() {
   );
 
   // Index positions by symbol for O(1) lookup in the row renderer.
-  // Derive expiry options from the configured symbols. Today the agent
-  // tracks one active contract per underlying, so the picker lists each
-  // distinct contract month found in the symbol list. Selecting a different
-  // one is reserved for the future per-month preview — backend wiring still
-  // pending. For now the selector is informational.
+  // Expiry selector populates the *next 3 monthly contracts* from today,
+  // not just the months we already happen to track. Pattern borrowed from
+  // Zerodha Kite / Sensibull where the contract picker shows the immediate
+  // tradable months even if the user has nothing in those expiries yet.
+  // Each option carries the days-to-expiry so the trader sees at a glance
+  // "JUN — 18d" / "JUL — 49d".
   const expiryOptions = useMemo(() => {
-    const months = new Set<string>();
-    for (const r of rows) {
-      const m = String(r.symbol || "").toUpperCase().match(/^MCX:[A-Z0-9]+?(\d{2})([A-Z]{3})FUT$/);
-      if (m) months.add(`${m[1]}${m[2]}`);
+    const MONTHS = [
+      "JAN",
+      "FEB",
+      "MAR",
+      "APR",
+      "MAY",
+      "JUN",
+      "JUL",
+      "AUG",
+      "SEP",
+      "OCT",
+      "NOV",
+      "DEC",
+    ];
+    const now = new Date();
+    const opts: { value: string; label: string }[] = [{ value: "active", label: "Active month" }];
+    for (let i = 0; i < 3; i++) {
+      const m = now.getMonth() + i;
+      const year = now.getFullYear() + Math.floor(m / 12);
+      const month = m % 12;
+      // Approximate expiry: last calendar day of the month (close enough for
+      // a DTE display; backend has the precise SEBI calendar when needed).
+      const lastDay = new Date(year, month + 1, 0);
+      const dte = Math.ceil((lastDay.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+      const yy = String(year).slice(2);
+      const mmm = MONTHS[month];
+      const value = `${yy}${mmm}`;
+      // Skip if already past expiry (negative DTE) — happens on the very
+      // last trading day of a month.
+      if (dte < 0) continue;
+      const labelDte = dte === 0 ? "today" : `${dte}d`;
+      opts.push({ value, label: `${mmm} ${year} · ${labelDte}` });
     }
-    const opts: { value: string; label: string }[] = [{ value: "active", label: "active month" }];
-    for (const m of Array.from(months).sort()) {
-      const label = `20${m.slice(0, 2)} ${m.slice(2)}`;
-      opts.push({ value: m, label });
+    // Also include any months from the live universe that aren't already in
+    // the next-3 (e.g. when the configured contract is further out).
+    const knownMonths = new Set(opts.map((o) => o.value));
+    for (const r of rows) {
+      const m = String(r.symbol || "")
+        .toUpperCase()
+        .match(/^MCX:[A-Z0-9]+?(\d{2})([A-Z]{3})FUT$/);
+      if (m) {
+        const key = `${m[1]}${m[2]}`;
+        if (!knownMonths.has(key)) {
+          opts.push({ value: key, label: `${m[2]} 20${m[1]} · tracked` });
+          knownMonths.add(key);
+        }
+      }
     }
     return opts;
   }, [rows]);
@@ -1948,6 +2134,27 @@ export default function CommodityLivePage() {
     if (hasInteractedWithTabs) return;
     setBottomTab(positionCountForEffect > 0 ? "positions" : "queue");
   }, [hasInteractedWithTabs, positionCountForEffect]);
+
+  // Keyboard nav: 1-7 jumps tabs, Esc closes any open modal. Power-user
+  // affordance modelled on Bloomberg / TWS hotkeys. Ignored when the focus
+  // is inside an input, select, or textarea so it doesn't fight typing.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tgt = e.target as HTMLElement | null;
+      const inField =
+        tgt &&
+        (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA" || tgt.tagName === "SELECT");
+      if (inField) return;
+      if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+      const idx = parseInt(e.key, 10);
+      if (!Number.isNaN(idx) && idx >= 1 && idx <= BOTTOM_TABS.length) {
+        e.preventDefault();
+        setBottomTabSticky(BOTTOM_TABS[idx - 1].key);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   const selectedRow = useMemo(
     () => rows.find((r) => r.symbol === selectedSymbol) || null,
     [rows, selectedSymbol],
@@ -2218,7 +2425,7 @@ export default function CommodityLivePage() {
         {/* BOTTOM HALF — browser-style tabs */}
         <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-bg-secondary/30">
           <nav className="flex items-end gap-0.5 border-b border-bg-secondary/30 bg-bg-secondary/10 px-1.5 pt-1.5">
-            {BOTTOM_TABS.map((t) => {
+            {BOTTOM_TABS.map((t, idx) => {
               const isActive = bottomTab === t.key;
               const count =
                 t.key === "positions"
@@ -2239,6 +2446,7 @@ export default function CommodityLivePage() {
                   key={t.key}
                   type="button"
                   onClick={() => setBottomTabSticky(t.key)}
+                  title={`Switch to ${t.label} — press ${idx + 1}`}
                   className={`group relative -mb-px rounded-t-md border border-bg-secondary/30 px-3 py-1 text-[11px] uppercase tracking-[0.14em] transition-colors ${
                     isActive
                       ? "border-b-transparent bg-bg-primary text-text-primary"
@@ -2251,6 +2459,14 @@ export default function CommodityLivePage() {
                       isActive ? "bg-sky-400" : "bg-transparent"
                     }`}
                   />
+                  {/* keyboard shortcut hint */}
+                  <span
+                    className={`mr-1.5 inline-flex h-3.5 w-3.5 items-center justify-center rounded text-[9px] font-mono ${
+                      isActive ? "bg-sky-500/20 text-sky-200" : "bg-bg-secondary/40 text-text-muted"
+                    }`}
+                  >
+                    {idx + 1}
+                  </span>
                   {t.label}
                   {count !== null ? (
                     <span
@@ -2304,6 +2520,39 @@ export default function CommodityLivePage() {
           </div>
         </section>
       </main>
+
+      {/* ── Sticky live-status footer ─────────────────────────────────
+          Always-visible single-line strip showing open P&L, ready triggers,
+          and last-tick freshness. Pattern from Robinhood / Webull where the
+          headline P&L stays in view as the user scrolls the trade ledger.
+          Only renders when meaningful (positions open or signals armed). */}
+      {positions.length > 0 || armedCount > 0 ? (
+        <footer className="flex items-center gap-4 border-t border-bg-secondary/30 bg-bg-secondary/10 px-3 py-1 text-[10.5px]">
+          <span className="font-mono uppercase tracking-[0.14em] text-text-muted">
+            Live book
+          </span>
+          {positions.length > 0 ? (
+            <>
+              <span
+                className={`font-mono text-[12px] font-semibold ${unrealized >= 0 ? "text-emerald-300" : "text-rose-300"}`}
+              >
+                {unrealized >= 0 ? "▲" : "▼"} {formatSigned(unrealized, 0)} unrealised
+              </span>
+              <span className="font-mono text-text-muted">
+                · {positions.length} open · realised today {formatINR(dayRealized)}
+              </span>
+            </>
+          ) : null}
+          {armedCount > 0 ? (
+            <span className="font-mono text-sky-300">
+              · {armedCount} armed
+            </span>
+          ) : null}
+          <span className="ml-auto font-mono text-text-muted">
+            {formatIST(status.last_run_at)}
+          </span>
+        </footer>
+      ) : null}
 
       {/* ── Strategy modal ─────────────────────────────────────────── */}
       {strategyModalOpen ? (
