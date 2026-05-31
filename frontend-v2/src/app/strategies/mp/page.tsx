@@ -1,12 +1,5 @@
-import DeskStub from "@/components/strategies/DeskStub";
+import MPIntelligenceDashboard from "@/components/v1-mp-intelligence/MPIntelligenceDashboard";
 
-export default function Page() {
-  return (
-    <DeskStub
-      title="MP Live"
-      description="Market profile intelligence dashboard — profile shapes, CVD, day-type analytics, drift alerts."
-      v1Href="http://localhost:3000/mp-intelligence"
-      v1Label="Open MP Live in v1"
-    />
-  );
+export default function MPIntelligencePage() {
+  return <MPIntelligenceDashboard />;
 }

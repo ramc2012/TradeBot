@@ -20,14 +20,11 @@ const REDIRECTS = [
   { source: "/gann-tp-delta",             destination: "/strategies/gann" },
   { source: "/commodity",                 destination: "/strategies/commodity" },
 
-  // System surfaces → /system?tab=…
-  { source: "/health",                    destination: "/system?tab=health" },
-  { source: "/lane-health",               destination: "/system?tab=lanes" },
-
-  // Research surfaces → /research?tab=…
-  { source: "/analysis",                  destination: "/research?tab=validation" },
-  { source: "/backtester",                destination: "/research?tab=backtests" },
-  { source: "/data",                      destination: "/research?tab=data" },
+  // /health, /lane-health, /analysis, /backtester, /data — KEEP these as
+  // first-class standalone v2 routes so direct URL access keeps working.
+  // /system and /research surface them as cards/links instead of
+  // redirecting them away. (If we want to consolidate later, swap the
+  // links for embeds or re-add the redirects.)
 
   // Live variants — keep the /strategies/<name>/live shape.
   { source: "/strategy/live",                  destination: "/strategies/nse/live" },

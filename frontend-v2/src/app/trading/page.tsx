@@ -1,12 +1,6 @@
-import PageStub from "@/components/PageStub";
+"use client";
+import StrategyDashboard from "@/components/v1-trading/StrategyDashboard";
 
-export default function Page() {
-  return (
-    <PageStub
-      title="Execution"
-      description="Live strategy positions, orders, risk status, kill-switch."
-      v1Href="http://localhost:3000/trading"
-      v1Label="Open Execution in v1"
-    />
-  );
+export default function TradingPage() {
+  return <StrategyDashboard />;
 }

@@ -91,16 +91,21 @@ const NAV_GROUPS: { title: string; subtitle?: string; items: NavItem[] }[] = [
     title: "Research",
     subtitle: "Non-live — backtests, LLM",
     items: [
-      { href: "/research",       label: "Research", icon: FlaskConical },
-      { href: "/macro-research", label: "Macro",    icon: BarChart3 },
-      { href: "/agent",          label: "Agent",    icon: Bot },
+      { href: "/research",       label: "Research",   icon: FlaskConical, matchers: ["/research", "/analysis", "/backtester", "/data"] },
+      { href: "/analysis",       label: "Validation", icon: FlaskConical },
+      { href: "/backtester",     label: "Backtester", icon: FlaskConical },
+      { href: "/data",           label: "Data ingest",icon: FlaskConical },
+      { href: "/macro-research", label: "Macro",      icon: BarChart3 },
+      { href: "/agent",          label: "Agent",      icon: Bot },
     ],
   },
   {
     title: "System",
     items: [
-      { href: "/system",   label: "Health & Lanes", icon: Heart },
-      { href: "/settings", label: "Settings",       icon: Settings },
+      { href: "/system",      label: "System hub",     icon: Heart, matchers: ["/system", "/health", "/lane-health"] },
+      { href: "/health",      label: "Service health", icon: Heart },
+      { href: "/lane-health", label: "Lane invariants",icon: Heart },
+      { href: "/settings",    label: "Settings",       icon: Settings },
     ],
   },
 ];

@@ -14,7 +14,6 @@
  * endpoints v1 used (/api/system/overview, /api/lane-health, etc.).
  * Until those clients are written we stub with links into v1.
  */
-import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link as LinkIcon, ServerCog, ShieldAlert, TrendingUp, Wallet } from "lucide-react";
 import Link from "next/link";
@@ -22,6 +21,8 @@ import { clsx } from "clsx";
 
 import { MetricTile, REFRESH_MS, Section, formatIST, serviceStateTone, useUrlTab } from "@/components/desk-ui";
 import { api as apiClient } from "@/lib/api";
+import LaneHealthEmbed from "@/app/lane-health/page";
+import HealthEmbed from "@/app/health/page";
 
 const TABS = [
   { key: "services", label: "Services", icon: ServerCog },
@@ -142,23 +143,16 @@ export default function SystemPage() {
         </div>
       ) : null}
 
-      {tab === "lanes" ? <StubLink title="Lane invariants" v1Href="http://localhost:3000/lane-health" /> : null}
-      {tab === "brokers" ? <StubLink title="Broker connectivity" v1Href="http://localhost:3000/settings" /> : null}
-      {tab === "budgets" ? <StubLink title="API budgets" v1Href="http://localhost:3000/health" /> : null}
+      {tab === "lanes" ? <LaneHealthEmbed /> : null}
+      {tab === "brokers" ? (
+        <Section title="Broker connectivity">
+          <p className="text-sm text-text-secondary">Brokers are managed under Settings.</p>
+          <Link href="/settings" className="mt-2 inline-block rounded-lg border border-accent-blue/35 bg-accent-blue/10 px-3 py-2 text-sm font-semibold text-accent-blue hover:border-accent-blue/55">
+            Open Settings →
+          </Link>
+        </Section>
+      ) : null}
+      {tab === "budgets" ? <HealthEmbed /> : null}
     </div>
-  );
-}
-
-function StubLink({ title, v1Href }: { title: string; v1Href: string }) {
-  return (
-    <Section title={title}>
-      <p className="text-sm text-text-secondary">
-        This tab will host the v2 rebuild. Until then, the v1 component
-        is available:
-      </p>
-      <Link href={v1Href} target="_blank" className="mt-2 inline-block rounded-lg border border-accent-blue/35 bg-accent-blue/10 px-3 py-2 text-sm font-semibold text-accent-blue hover:border-accent-blue/55">
-        Open v1 view →
-      </Link>
-    </Section>
   );
 }

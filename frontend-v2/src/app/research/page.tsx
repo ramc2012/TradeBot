@@ -12,7 +12,9 @@ import { clsx } from "clsx";
 import { Database, FlaskConical, GitCompare } from "lucide-react";
 
 import { Section, useUrlTab } from "@/components/desk-ui";
-import PageStub from "@/components/PageStub";
+import BacktesterEmbed from "@/app/backtester/page";
+import ValidationEmbed from "@/app/analysis/page";
+import DataIngestEmbed from "@/app/data/page";
 
 const TABS = [
   { key: "backtests",  label: "Backtests",  icon: GitCompare },
@@ -50,32 +52,9 @@ export default function ResearchPage() {
         ))}
       </nav>
 
-      {tab === "backtests" ? (
-        <PageStub
-          title="Backtests"
-          description="Manual backtest runner with walk-forward windows."
-          v1Href="http://localhost:3000/backtester"
-          v1Label="Open backtester in v1"
-        />
-      ) : null}
-
-      {tab === "data" ? (
-        <PageStub
-          title="F&O data ingest"
-          description="Start / monitor option-candle and index-analytics downloads."
-          v1Href="http://localhost:3000/data"
-          v1Label="Open data console in v1"
-        />
-      ) : null}
-
-      {tab === "validation" ? (
-        <PageStub
-          title="Validation reports"
-          description="Walk-forward + Greeks-sync validation against the MACD-on-premium thesis."
-          v1Href="http://localhost:3000/analysis"
-          v1Label="Open validation in v1"
-        />
-      ) : null}
+      {tab === "backtests" ? <BacktesterEmbed /> : null}
+      {tab === "data" ? <DataIngestEmbed /> : null}
+      {tab === "validation" ? <ValidationEmbed /> : null}
     </div>
   );
 }
