@@ -358,6 +358,9 @@ async def score_option_candidates(
                     "weekly_close_vs_ema20": weekly.get("close_vs_ema20"),
                     "weekly_trend": weekly.get("trend"),
                     "directional_bias": bias,
+                    # Last 30 EOD closes for the row's sparkline. Rounded
+                    # to 2dp to keep the JSON payload compact.
+                    "recent_closes_30d": [round(c, 2) for c in daily_closes[-30:]],
                 }
             )
     return enriched

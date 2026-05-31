@@ -42,15 +42,20 @@ type CompositeComponents = {
   asset?: number;
   sector?: number;
   stock?: number;
-  market_profile?: number;
-  order_flow?: number;
-  mp_source?: "live" | "proxy";
-  of_source?: "live" | "proxy";
-  trend_score?: number;
-  atr_expansion?: number;
-  volume_score?: number;
-  oi_score?: number;
-  iv_score?: number;
+  macd?: number;
+  rsi?: number;
+};
+
+type MacdMeta = {
+  label?: string;
+  line?: number;
+  signal?: number;
+  cross_today?: boolean;
+};
+
+type RsiMeta = {
+  label?: string;
+  rsi?: number;
 };
 
 type AlphaRow = {
@@ -66,20 +71,21 @@ type AlphaRow = {
   stock_quadrant?: string;
   stock_rs_pct?: number;
   stock_rank_in_sector?: number;
-  trend_score?: number;
-  atr_expansion?: number;
-  volume_score?: number;
-  oi_score?: number;
-  iv_score?: number;
-  mp_score?: number;
-  of_score?: number;
-  atm_strike?: number;
-  atm_oi?: number;
-  atm_volume?: number;
+  // v3 indicators (MACD + RSI + RRG + weekly)
+  macd_line?: number;
+  macd_signal?: number;
+  macd_hist?: number;
+  macd_bullish?: boolean;
+  macd_score?: number;
+  macd_meta?: MacdMeta;
+  rsi_14?: number;
+  rsi_score?: number;
+  rsi_meta?: RsiMeta;
+  weekly_close_vs_ema20?: number;
+  weekly_trend?: "up" | "down" | "flat" | "unknown" | string;
   latest_close?: number;
+  recent_closes_30d?: number[];
   composite_components?: CompositeComponents;
-  mp_meta?: { classification?: string; confidence?: number };
-  of_meta?: { cvd_latest?: number; vwap_latest?: number };
 };
 
 type SectorWinner = {
@@ -383,81 +389,173 @@ function SectorLayerPanel({ winners, ranked }: { winners?: SectorWinner[]; ranke
 }
 
 // ── Ranked alpha candidates ───────────────────────────────────────────────
+// 30-day EOD sparkline. Pure SVG, no recharts — keeps render cheap when
+// the table has 200+ rows. Green line if up over the window, red if down.
+function Sparkline({
+  data,
+  width = 96,
+  height = 28,
+}: {
+  data?: number[];
+  width?: number;
+  height?: number;
+}) {
+  if (!data || data.length < 2) {
+    return <span className="text-[10px] text-text-muted">—</span>;
+  }
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  const step = width / (data.length - 1);
+  const points = data
+    .map((v, i) => `${(i * step).toFixed(2)},${(height - ((v - min) / range) * height).toFixed(2)}`)
+    .join(" ");
+  const up = data[data.length - 1] >= data[0];
+  const stroke = up ? "#34d399" : "#f87171";
+  const fill = up ? "rgba(52,211,153,0.12)" : "rgba(248,113,113,0.12)";
+  // Area path so the fill closes at bottom — gives the chart visual weight.
+  const areaPath =
+    `M 0,${height} L ${points.split(" ").join(" L ")} L ${width},${height} Z`;
+  const lastVal = data[data.length - 1];
+  return (
+    <svg width={width} height={height} className="block" aria-label={`30-day sparkline last=${lastVal}`}>
+      <path d={areaPath} fill={fill} stroke="none" />
+      <polyline points={points} fill="none" stroke={stroke} strokeWidth={1.4} />
+    </svg>
+  );
+}
+
+function macdCellTone(score: number | undefined, cross_today: boolean | undefined) {
+  if (score === undefined) return "text-text-muted";
+  if (cross_today && score >= 80) return "text-accent-green font-semibold";
+  if (score >= 75) return "text-accent-green";
+  if (score >= 55) return "text-text-primary";
+  if (score >= 40) return "text-accent-amber";
+  return "text-accent-red";
+}
+
+function rsiCellTone(rsi: number | undefined) {
+  if (rsi === undefined || rsi === null) return "text-text-muted";
+  if (rsi >= 70) return "text-accent-red";       // overbought
+  if (rsi >= 50) return "text-accent-green";     // healthy uptrend
+  if (rsi >= 40) return "text-text-primary";     // neutral
+  if (rsi >= 30) return "text-accent-amber";     // weakening
+  return "text-accent-red";                       // oversold
+}
+
+function weeklyChipTone(trend: string | undefined) {
+  switch ((trend || "").toLowerCase()) {
+    case "up":
+      return "border-accent-green/40 bg-accent-green/10 text-accent-green";
+    case "down":
+      return "border-accent-red/40 bg-accent-red/10 text-accent-red";
+    case "flat":
+      return "border-bg-border bg-bg-secondary/40 text-text-secondary";
+    default:
+      return "border-bg-border bg-bg-primary/30 text-text-muted";
+  }
+}
+
 function RankedScanTable({ rows }: { rows: AlphaRow[] }) {
   if (!rows.length) {
     return <EmptyState text="Run an alpha scan to populate the ranked candidates." />;
   }
   return (
     <div className="overflow-hidden rounded-lg border border-bg-border">
-      <div className="max-h-[560px] overflow-auto">
+      <div className="max-h-[620px] overflow-auto">
         <table className="min-w-full border-separate border-spacing-0 text-sm">
           <thead className="sticky top-0 z-10 bg-bg-card text-[11px] uppercase tracking-[0.12em] text-text-muted">
             <tr>
               <th className="border-b border-bg-border px-3 py-2 text-left font-semibold">#</th>
               <th className="border-b border-bg-border px-3 py-2 text-left font-semibold">Symbol</th>
               <th className="border-b border-bg-border px-3 py-2 text-left font-semibold">Sector</th>
+              <th className="border-b border-bg-border px-3 py-2 text-center font-semibold" title="Stock RRG quadrant">RRG</th>
               <th className="border-b border-bg-border px-3 py-2 text-left font-semibold">Bias</th>
               <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Alpha</th>
               <th className="border-b border-bg-border px-3 py-2 text-center font-semibold">Gate</th>
-              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Sec RS%</th>
-              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Stk RS%</th>
-              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Trend</th>
-              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">MP</th>
-              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">OF</th>
-              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">ATM OI</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold" title="Sector RS vs Nifty50">Sec RS%</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold" title="Stock RS">Stk RS%</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold" title="Daily MACD signal score">MACD</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold" title="14-period RSI">RSI</th>
+              <th className="border-b border-bg-border px-3 py-2 text-center font-semibold" title="20-week EMA trend filter">Weekly</th>
+              <th className="border-b border-bg-border px-3 py-2 text-center font-semibold" title="Last 30 EOD closes">30d EOD</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((row, index) => (
-              <tr key={row.instrument} className="border-b border-bg-border/70 bg-bg-secondary/10 hover:bg-bg-hover/60">
-                <td className="border-b border-bg-border/60 px-3 py-2 font-mono text-xs text-text-muted">{index + 1}</td>
-                <td className="border-b border-bg-border/60 px-3 py-2 font-semibold text-text-primary">{row.instrument}</td>
-                <td className="border-b border-bg-border/60 px-3 py-2 text-xs text-text-secondary">{row.sector_code || "—"}</td>
-                <td className="border-b border-bg-border/60 px-3 py-2">
-                  <span
+            {rows.map((row, index) => {
+              const macd = row.macd_meta || {};
+              const rsi = row.rsi_14;
+              return (
+                <tr key={row.instrument} className="border-b border-bg-border/70 bg-bg-secondary/10 hover:bg-bg-hover/60">
+                  <td className="border-b border-bg-border/60 px-3 py-2 font-mono text-xs text-text-muted">{index + 1}</td>
+                  <td className="border-b border-bg-border/60 px-3 py-2 font-semibold text-text-primary">{row.instrument}</td>
+                  <td className="border-b border-bg-border/60 px-3 py-2 text-xs text-text-secondary">{row.sector_code || "—"}</td>
+                  <td className="border-b border-bg-border/60 px-3 py-2 text-center">
+                    <span className={clsx("text-[10px] uppercase", toneForQuadrant(row.stock_quadrant))}>
+                      {row.stock_quadrant ? row.stock_quadrant.slice(0, 4) : "—"}
+                    </span>
+                  </td>
+                  <td className="border-b border-bg-border/60 px-3 py-2">
+                    <span
+                      className={clsx(
+                        "rounded-md border px-2 py-1 text-[10px] uppercase",
+                        toneForBias(row.directional_bias),
+                      )}
+                    >
+                      {row.directional_bias}
+                    </span>
+                  </td>
+                  <td
                     className={clsx(
-                      "rounded-md border px-2 py-1 text-[10px] uppercase",
-                      toneForBias(row.directional_bias),
+                      "border-b border-bg-border/60 px-3 py-2 text-right font-mono font-semibold",
+                      toneForGate(row.gate_passed, row.composite_alpha_score),
                     )}
                   >
-                    {row.directional_bias}
-                  </span>
-                </td>
-                <td
-                  className={clsx(
-                    "border-b border-bg-border/60 px-3 py-2 text-right font-mono font-semibold",
-                    toneForGate(row.gate_passed, row.composite_alpha_score),
-                  )}
-                >
-                  {fmtNum(row.composite_alpha_score, 1)}
-                </td>
-                <td className="border-b border-bg-border/60 px-3 py-2 text-center">
-                  {row.gate_passed ? (
-                    <CheckCircle2 size={14} className="mx-auto text-accent-green" />
-                  ) : (
-                    <span className="text-[10px] text-text-muted">·</span>
-                  )}
-                </td>
-                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs text-text-secondary">
-                  {fmtNum(row.sector_rs_pct, 2)}
-                </td>
-                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs text-text-secondary">
-                  {fmtNum(row.stock_rs_pct, 2)}
-                </td>
-                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs text-text-secondary">
-                  {fmtNum(row.trend_score, 2)}
-                </td>
-                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs text-text-secondary">
-                  <span title={row.mp_meta?.classification || ""}>{fmtNum(row.mp_score, 1)}</span>
-                </td>
-                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs text-text-secondary">
-                  {fmtNum(row.of_score, 1)}
-                </td>
-                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs text-text-secondary">
-                  {fmtCompact(row.atm_oi)}
-                </td>
-              </tr>
-            ))}
+                    {fmtNum(row.composite_alpha_score, 1)}
+                  </td>
+                  <td className="border-b border-bg-border/60 px-3 py-2 text-center">
+                    {row.gate_passed ? (
+                      <CheckCircle2 size={14} className="mx-auto text-accent-green" />
+                    ) : (
+                      <span className="text-[10px] text-text-muted">·</span>
+                    )}
+                  </td>
+                  <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs text-text-secondary">
+                    {fmtNum(row.sector_rs_pct, 2)}
+                  </td>
+                  <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs text-text-secondary">
+                    {fmtNum(row.stock_rs_pct, 2)}
+                  </td>
+                  <td
+                    className={clsx(
+                      "border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs",
+                      macdCellTone(row.macd_score, macd.cross_today),
+                    )}
+                    title={`${macd.label || ""}${macd.cross_today ? " · CROSS today" : ""} · line=${fmtNum(macd.line, 2)} sig=${fmtNum(macd.signal, 2)}`}
+                  >
+                    {fmtNum(row.macd_score, 1)}
+                    {macd.cross_today ? <span className="ml-1 text-accent-blue">✦</span> : null}
+                  </td>
+                  <td
+                    className={clsx(
+                      "border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs",
+                      rsiCellTone(rsi),
+                    )}
+                    title={`${row.rsi_meta?.label || ""} (score ${fmtNum(row.rsi_score, 1)})`}
+                  >
+                    {rsi === undefined || rsi === null ? "—" : fmtNum(rsi, 1)}
+                  </td>
+                  <td className="border-b border-bg-border/60 px-3 py-2 text-center">
+                    <span className={clsx("inline-block rounded border px-1.5 py-0.5 text-[10px] uppercase", weeklyChipTone(row.weekly_trend))}>
+                      {row.weekly_trend || "—"}
+                    </span>
+                  </td>
+                  <td className="border-b border-bg-border/60 px-2 py-1 text-center">
+                    <Sparkline data={row.recent_closes_30d} />
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
