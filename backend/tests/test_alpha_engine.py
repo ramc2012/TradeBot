@@ -98,7 +98,8 @@ class TestCompositeScore:
         )
         c = result["components"]
         assert "asset" in c and "sector" in c and "stock" in c
-        assert "market_profile_proxy" in c and "order_flow_proxy" in c
+        assert "market_profile" in c and "order_flow" in c
+        assert c["mp_source"] == "proxy" and c["of_source"] == "proxy"
         assert "trend_score" in c and "atr_expansion" in c
 
     def test_weights_sum_validation(self):
@@ -219,24 +220,73 @@ class TestTechnicals:
 # ---------------------------------------------------------------------------
 class TestBiasDerivation:
     def test_leading_sector_leading_stock_bullish_trend(self):
-        row = {"stock_quadrant": "leading", "sector_quadrant": "leading"}
+        row = {"stock_quadrant": "leading", "sector_quadrant": "leading", "stock_rs_pct": 5.0}
         assert _bias_from_signals(row, trend_score=0.7) == "bullish"
 
     def test_improving_sector_improving_stock_bullish(self):
-        row = {"stock_quadrant": "improving", "sector_quadrant": "improving"}
+        row = {"stock_quadrant": "improving", "sector_quadrant": "improving", "stock_rs_pct": 3.0}
         assert _bias_from_signals(row, trend_score=0.6) == "bullish"
 
     def test_lagging_sector_weakening_stock_bearish(self):
-        row = {"stock_quadrant": "weakening", "sector_quadrant": "lagging"}
+        row = {"stock_quadrant": "weakening", "sector_quadrant": "lagging", "stock_rs_pct": -4.0}
         assert _bias_from_signals(row, trend_score=0.3) == "bearish"
 
-    def test_leading_sector_lagging_stock_neutral(self):
-        row = {"stock_quadrant": "lagging", "sector_quadrant": "leading"}
-        assert _bias_from_signals(row, trend_score=0.6) == "neutral"
-
-    def test_leading_quadrants_but_flat_trend_neutral(self):
-        row = {"stock_quadrant": "leading", "sector_quadrant": "leading"}
+    def test_mixed_quadrants_neutral(self):
+        # Stock leading, sector lagging, trend flat → only 1 bullish vote
+        row = {"stock_quadrant": "leading", "sector_quadrant": "lagging", "stock_rs_pct": 0.0}
         assert _bias_from_signals(row, trend_score=0.5) == "neutral"
+
+    def test_two_of_three_vote_bullish_via_rs(self):
+        # Stock leading + positive RS sign = 2 votes; sector lagging.
+        row = {"stock_quadrant": "leading", "sector_quadrant": "lagging", "stock_rs_pct": 8.0}
+        assert _bias_from_signals(row, trend_score=0.5) == "bullish"
+
+    def test_two_of_three_vote_bullish_via_sector_and_trend(self):
+        # Sector leading + trend up = 2 votes; stock quadrant lagging.
+        row = {"stock_quadrant": "lagging", "sector_quadrant": "leading", "stock_rs_pct": 0.0}
+        assert _bias_from_signals(row, trend_score=0.7) == "bullish"
+
+    def test_balanced_votes_neutral(self):
+        # 2 bull (stock leading, RS+) tied with 2 bear (sector lagging, trend down)
+        row = {"stock_quadrant": "leading", "sector_quadrant": "lagging", "stock_rs_pct": 5.0}
+        # trend_score 0.4 → bearish-side trend AND negative wouldn't trigger... actually:
+        #   bull: stock_quadrant (yes) + RS positive (yes) = 2
+        #   bear: sector_quadrant (yes) + trend<=0.45 (yes) = 2
+        # tie → neutral
+        assert _bias_from_signals(row, trend_score=0.4) == "neutral"
+
+
+class TestCompositeScoreWithLiveMPOF:
+    def test_live_mp_score_overrides_proxy(self):
+        # Live mp_score=100 should drive higher than ATR-proxy fallback
+        live_result = composite_score(
+            asset_score=100.0, sector_rs_pct=10.0, stock_rs_pct=10.0,
+            trend_score=0.5, atr_expansion=1.0, volume_score=0.5,
+            oi_score=0.0, iv_score=0.0,
+            weights=LayerWeights(),
+            mp_score=100.0, of_score=100.0,
+        )
+        proxy_result = composite_score(
+            asset_score=100.0, sector_rs_pct=10.0, stock_rs_pct=10.0,
+            trend_score=0.5, atr_expansion=1.0, volume_score=0.5,
+            oi_score=0.0, iv_score=0.0,
+            weights=LayerWeights(),
+        )
+        assert live_result["score"] > proxy_result["score"]
+        assert live_result["components"]["mp_source"] == "live"
+        assert live_result["components"]["of_source"] == "live"
+        assert proxy_result["components"]["mp_source"] == "proxy"
+
+    def test_low_mp_score_drags_composite_down(self):
+        # MP score of 20 should pull composite well below the 80 gate
+        result = composite_score(
+            asset_score=100.0, sector_rs_pct=20.0, stock_rs_pct=20.0,
+            trend_score=0.5, atr_expansion=1.0, volume_score=0.5,
+            oi_score=0.0, iv_score=0.0,
+            weights=LayerWeights(),
+            mp_score=20.0, of_score=20.0,
+        )
+        assert result["score"] < 80.0
 
 
 # ---------------------------------------------------------------------------

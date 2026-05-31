@@ -115,25 +115,28 @@ async def discover_fno_universe() -> list[str]:
 # L1 — Asset rotation (STUBBED)
 # ---------------------------------------------------------------------------
 async def rank_asset_classes() -> dict[str, Any]:
-    """Stub asset-rotation layer.
+    """Asset-rotation layer. Auto-detects whether live ETF data is present.
 
-    Returns the "equities-win" verdict so L2+ can proceed. When the
-    GOLDBEES/SILVERBEES/BBETF/LIQUIDBEES ETF spot data is ingested, this
-    will get a real implementation that ranks asset classes by 3/6/12-month
-    momentum + above-30W-MA. Until then, the score is locked at 100.
+    When `underlying_spot_candles` has ≥200 daily bars for each of
+    GOLDBEES/SILVERBEES/BBETF/LIQUIDBEES + NIFTY, this returns a real
+    momentum-weighted ranking (per asset_rotation.rank_asset_classes_live).
+    Otherwise it falls back to "equities-win" so the rest of the alpha
+    pipeline continues to run.
     """
-    return {
-        "winner": "EQUITIES",
-        "asset_rank": [
-            {"asset": "EQUITIES", "score": 100.0, "note": "stub: ETF ingestion pending"},
-            {"asset": "GOLD", "score": None, "note": "stub: GOLDBEES ingestion pending"},
-            {"asset": "SILVER", "score": None, "note": "stub: SILVERBEES ingestion pending"},
-            {"asset": "BONDS", "score": None, "note": "stub: BBETF ingestion pending"},
-            {"asset": "CASH", "score": None, "note": "stub: LIQUIDBEES ingestion pending"},
-        ],
-        "score_for_engine": 100.0,
-        "stub": True,
-    }
+    try:
+        from .asset_rotation import rank_asset_classes_live
+        return await rank_asset_classes_live()
+    except Exception as exc:
+        logger.warning(f"[L1] live asset-rotation failed; using stub: {exc}")
+        return {
+            "winner": "EQUITIES",
+            "asset_rank": [
+                {"asset": "EQUITIES", "score": 100.0, "note": "stub: live ranker errored"},
+            ],
+            "score_for_engine": 100.0,
+            "stub": True,
+            "stub_reason": str(exc),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -270,15 +273,14 @@ async def score_option_candidates(
     *,
     config: AlphaEngineConfig,
 ) -> list[dict[str, Any]]:
-    """Annotate each L3 candidate with daily trend + option liquidity stats.
+    """Annotate each L3 candidate with daily trend + option liquidity stats
+    + live Market-Profile / Order-Flow scores.
 
-    Pulls latest 60 daily bars per candidate (from underlying_spot_candles)
-    + ATM-strike CE/PE OI + volume from option_premium_candles. Adds:
-      * trend_score      0..1   EMA8 vs EMA21 slope
-      * atr_expansion    0..1   ATR(20) / ATR(60)
-      * volume_score     0..1   recent vs trailing volume z-score
-      * oi_score         0..1   ATM OI bucket normalized
-      * iv_score         0..1   IV percentile proxy from premium chop
+    Per candidate:
+      * Pull last 60 days of 30-min bars from underlying_spot_candles → derive
+        trend / ATR-expansion / volume / live MP day-type / live OF (CVD/VWAP).
+      * Pull ATM CE+PE OI/volume from option_premium_candles for the liquidity
+        gate + IV proxy.
 
     Stocks failing the OI floor are dropped entirely.
     """
@@ -298,7 +300,7 @@ async def score_option_candidates(
             spot_bars = await session.execute(
                 text(
                     """
-                    SELECT time, close, volume
+                    SELECT time, open, high, low, close, volume
                     FROM underlying_spot_candles
                     WHERE underlying = :underlying
                       AND interval = '30minute'
@@ -309,12 +311,25 @@ async def score_option_candidates(
                 ),
                 {"underlying": symbol},
             )
-            spot_rows = [(r[0], float(r[1]), float(r[2] or 0)) for r in spot_bars.fetchall() if r[1] is not None]
-            if len(spot_rows) < 40:
+            ohlcv_rows = []
+            for r in spot_bars.fetchall():
+                if r[4] is None:
+                    continue
+                ohlcv_rows.append(
+                    {
+                        "time": r[0].isoformat() if r[0] is not None else None,
+                        "open": float(r[1] or r[4]),
+                        "high": float(r[2] or r[4]),
+                        "low": float(r[3] or r[4]),
+                        "close": float(r[4]),
+                        "volume": float(r[5] or 0),
+                    }
+                )
+            if len(ohlcv_rows) < 40:
                 continue
-            spot_rows.reverse()
-            closes = [c for _, c, _ in spot_rows]
-            volumes = [v for _, _, v in spot_rows]
+            ohlcv_rows.reverse()
+            closes = [b["close"] for b in ohlcv_rows]
+            volumes = [b["volume"] for b in ohlcv_rows]
 
             trend_score = _trend_score(closes)
             atr_expansion = _atr_expansion(closes)
@@ -329,6 +344,11 @@ async def score_option_candidates(
             if (atm_metric.get("atm_volume") or 0.0) < config.min_atm_volume:
                 continue
 
+            # Live MP + OF (replaces the ATR/volume proxies for L7).
+            bias_guess = _bias_from_signals({**row, "stock_rs_pct": row.get("stock_rs_pct")}, trend_score)
+            mp_score, mp_meta = _market_profile_score(ohlcv_rows, bias_guess)
+            of_score, of_meta = _orderflow_score(ohlcv_rows, bias_guess)
+
             enriched.append(
                 {
                     **row,
@@ -341,10 +361,197 @@ async def score_option_candidates(
                     "atm_oi": atm_metric.get("atm_oi"),
                     "atm_volume": atm_metric.get("atm_volume"),
                     "atm_strike": atm_metric.get("atm_strike"),
-                    "directional_bias": _bias_from_signals(row, trend_score),
+                    "directional_bias": bias_guess,
+                    # Live MP/OF scores (0..100) — fed into composite_score.
+                    "mp_score": round(mp_score, 2),
+                    "of_score": round(of_score, 2),
+                    "mp_meta": mp_meta,
+                    "of_meta": of_meta,
                 }
             )
     return enriched
+
+
+def _market_profile_score(candles: list[dict[str, Any]], bias: str) -> tuple[float, dict[str, Any]]:
+    """Build a single-session profile from intraday candles + score for bias.
+
+    Maps day-type assessment to a 0..100 score scaled by confidence:
+      trend      → bullish/bearish aligned with bias: 90
+                   neutral: 55, opposite: 20
+      breakout   → aligned: 100, opposite: 15
+      balance    → 55 (mean-rev candidate; neutral for directional bias)
+      failed_auction → 30 (avoid expansion bets)
+      exhaustion → 25 (avoid)
+    Falls back to 50 (neutral) if the profile can't be built.
+    """
+    try:
+        from analytics.market_profile_ext import assess_day_type, ib_extension
+    except Exception:
+        return 50.0, {"error": "import_failed"}
+
+    if len(candles) < 14:
+        return 50.0, {"error": "insufficient_bars"}
+
+    # Use the latest ~14 bars (one trading session at 30-min cadence) as
+    # "today". Compute simple profile primitives — POC = price at biggest
+    # volume bin, value area from cumulative TPO. This is intentionally
+    # lightweight; the production MP engine lives elsewhere.
+    today_candles = candles[-14:]
+    profile = _simple_session_profile(today_candles)
+    if not profile:
+        return 50.0, {"error": "profile_build_failed"}
+    current_price = float(today_candles[-1]["close"])
+    ib_info = ib_extension(profile, current_price)
+    try:
+        assessment = assess_day_type(profile, current_price, ib_extension_info=ib_info)
+    except Exception as exc:
+        return 50.0, {"error": f"assess_failed:{exc}"}
+
+    classification = (assessment.classification or "").lower()
+    confidence = float(assessment.confidence or 0.5)
+
+    base = 50.0
+    if classification == "trend":
+        base = 90.0 if bias in ("bullish", "bearish") else 55.0
+    elif classification == "breakout":
+        base = 100.0 if bias in ("bullish", "bearish") else 60.0
+    elif classification == "balance":
+        base = 55.0
+    elif classification == "failed_auction":
+        base = 30.0
+    elif classification == "exhaustion":
+        base = 25.0
+
+    score = base * confidence + 50.0 * (1.0 - confidence)
+    return max(0.0, min(100.0, score)), {
+        "classification": classification,
+        "confidence": round(confidence, 3),
+        "ib_extended_above": getattr(ib_info, "extended_above", None) if ib_info else None,
+        "ib_extended_below": getattr(ib_info, "extended_below", None) if ib_info else None,
+    }
+
+
+def _orderflow_score(candles: list[dict[str, Any]], bias: str) -> tuple[float, dict[str, Any]]:
+    """Score order-flow alignment with bias.
+
+      CVD direction agrees with bias        +40
+      Anchored VWAP supports bias side      +20
+      No divergence                         +20
+      Divergence vs bias                    -30
+    Base score is 50 (neutral). Final clamped to [0, 100].
+    """
+    try:
+        from analytics.orderflow import orderflow_snapshot, cvd_agrees_with
+    except Exception:
+        return 50.0, {"error": "import_failed"}
+    if not candles:
+        return 50.0, {"error": "no_candles"}
+    try:
+        snap = orderflow_snapshot(candles)
+    except Exception as exc:
+        return 50.0, {"error": f"snapshot_failed:{exc}"}
+
+    score = 50.0
+    cvd_latest = snap.get("cvd_latest")
+    vwap_latest = snap.get("vwap_latest")
+    div = snap.get("divergence")
+    last_close = float(candles[-1]["close"])
+
+    if cvd_latest is not None:
+        cvd_sign_bullish = float(cvd_latest) > 0
+        if bias == "bullish" and cvd_sign_bullish:
+            score += 20
+        elif bias == "bearish" and not cvd_sign_bullish:
+            score += 20
+        elif bias in ("bullish", "bearish"):
+            score -= 10
+
+    if vwap_latest is not None:
+        if bias == "bullish" and last_close >= float(vwap_latest):
+            score += 15
+        elif bias == "bearish" and last_close <= float(vwap_latest):
+            score += 15
+
+    if div is not None:
+        kind = str(div.get("kind") or "")
+        # bearish-divergence on a bullish bias is a warning, etc.
+        if (bias == "bullish" and "bearish" in kind) or (bias == "bearish" and "bullish" in kind):
+            score -= 25
+    else:
+        score += 5  # no divergence = small bonus
+
+    return max(0.0, min(100.0, score)), {
+        "cvd_latest": cvd_latest,
+        "vwap_latest": vwap_latest,
+        "divergence": div,
+    }
+
+
+def _simple_session_profile(candles: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Lightweight session profile (POC + value area + IB) from OHLCV bars.
+
+    Bins typical price into 30 buckets weighted by volume, finds the POC
+    (highest-volume bucket), expands outward to capture 70% of volume for
+    the value area, and uses the first 2 bars as the initial-balance.
+    """
+    if not candles:
+        return None
+    highs = [float(b.get("high") or b.get("close") or 0) for b in candles]
+    lows = [float(b.get("low") or b.get("close") or 0) for b in candles]
+    closes = [float(b.get("close") or 0) for b in candles]
+    volumes = [float(b.get("volume") or 0) for b in candles]
+    session_high = max(highs) if highs else 0.0
+    session_low = min(lows) if lows else 0.0
+    if session_high <= session_low:
+        return None
+    bins = 30
+    step = (session_high - session_low) / bins
+    if step <= 0:
+        return None
+    counts: dict[int, float] = {}
+    for h, l, c, v in zip(highs, lows, closes, volumes):
+        tp = (h + l + c) / 3.0
+        idx = min(int((tp - session_low) / step), bins - 1)
+        counts[idx] = counts.get(idx, 0) + max(v, 1.0)
+    if not counts:
+        return None
+    total = sum(counts.values())
+    poc_idx = max(counts.items(), key=lambda kv: kv[1])[0]
+    poc_price = session_low + (poc_idx + 0.5) * step
+    # Expand outward for 70% value area.
+    included = {poc_idx}
+    cumulative = counts[poc_idx]
+    target = total * 0.7
+    lo_idx = hi_idx = poc_idx
+    while cumulative < target and (lo_idx > 0 or hi_idx < bins - 1):
+        next_lo = counts.get(lo_idx - 1, 0) if lo_idx > 0 else -1
+        next_hi = counts.get(hi_idx + 1, 0) if hi_idx < bins - 1 else -1
+        if next_hi > next_lo and hi_idx < bins - 1:
+            hi_idx += 1
+            included.add(hi_idx)
+            cumulative += counts.get(hi_idx, 0)
+        elif lo_idx > 0:
+            lo_idx -= 1
+            included.add(lo_idx)
+            cumulative += counts.get(lo_idx, 0)
+        else:
+            break
+    vah = session_low + (hi_idx + 1) * step
+    val = session_low + lo_idx * step
+    # IB = first two bars
+    ib_candles = candles[:2]
+    ib_high = max(float(b.get("high") or b.get("close") or 0) for b in ib_candles) if ib_candles else poc_price
+    ib_low = min(float(b.get("low") or b.get("close") or 0) for b in ib_candles) if ib_candles else poc_price
+    return {
+        "poc": poc_price,
+        "vah": vah,
+        "val": val,
+        "ib_high": ib_high,
+        "ib_low": ib_low,
+        "session_high": session_high,
+        "session_low": session_low,
+        "close": closes[-1] if closes else poc_price,
+    }
 
 
 async def _atm_option_liquidity(session, symbol: str) -> dict[str, Any]:
@@ -440,23 +647,24 @@ def composite_score(
     oi_score: float,
     iv_score: float,
     weights: LayerWeights,
+    mp_score: float | None = None,
+    of_score: float | None = None,
 ) -> dict[str, Any]:
     """Combine the 5 weighted components into a single 0..100 score.
 
-    Components are normalized to [0, 100] each before weighting. The
-    market_profile + order_flow components are placeholders here — they
-    are populated by call sites that have a MP/OF analyzer wired
-    (S2/Commodity/AI already pass these in). For an MVP that only has
-    trend/RS/OI, we use atr_expansion + volume_score as proxies for MP+OF
-    until those are properly threaded through.
+    Components are normalized to [0, 100] each before weighting. When
+    mp_score / of_score are passed (the production path from
+    score_option_candidates), they replace the ATR/volume proxies; when
+    omitted (legacy callers, tests), the proxies are used so the function
+    is still self-contained.
     """
     asset_component = max(0.0, min(100.0, float(asset_score)))
     sector_component = _normalize_rs_pct(sector_rs_pct)
     stock_component = _normalize_rs_pct(stock_rs_pct)
-    # MP/OF proxies until live wiring lands:
-    mp_proxy = max(0.0, min(100.0, 50.0 + (atr_expansion - 1.0) * 100.0))
-    of_proxy = max(0.0, min(100.0, 50.0 + (volume_score - 0.5) * 100.0))
-    # OI/IV not in the headline 5×20 — folded into the L4 prefilter only.
+    # Live MP/OF if supplied, otherwise proxies derived from ATR/volume so
+    # tests + ad-hoc callers don't break.
+    mp_value = float(mp_score) if mp_score is not None else max(0.0, min(100.0, 50.0 + (atr_expansion - 1.0) * 100.0))
+    of_value = float(of_score) if of_score is not None else max(0.0, min(100.0, 50.0 + (volume_score - 0.5) * 100.0))
 
     total_weight = weights.total()
     if total_weight <= 0:
@@ -466,8 +674,8 @@ def composite_score(
         weights.asset * asset_component
         + weights.sector * sector_component
         + weights.stock * stock_component
-        + weights.market_profile * mp_proxy
-        + weights.order_flow * of_proxy
+        + weights.market_profile * mp_value
+        + weights.order_flow * of_value
     ) / total_weight
 
     return {
@@ -476,8 +684,10 @@ def composite_score(
             "asset": round(asset_component, 2),
             "sector": round(sector_component, 2),
             "stock": round(stock_component, 2),
-            "market_profile_proxy": round(mp_proxy, 2),
-            "order_flow_proxy": round(of_proxy, 2),
+            "market_profile": round(mp_value, 2),
+            "order_flow": round(of_value, 2),
+            "mp_source": "live" if mp_score is not None else "proxy",
+            "of_source": "live" if of_score is not None else "proxy",
             "trend_score": round(trend_score, 4),
             "atr_expansion": round(atr_expansion, 4),
             "volume_score": round(volume_score, 4),
@@ -537,6 +747,8 @@ async def run_alpha_pipeline(config: AlphaEngineConfig | None = None) -> dict[st
             oi_score=float(row.get("oi_score") or 0.0),
             iv_score=float(row.get("iv_score") or 0.0),
             weights=config.weights,
+            mp_score=row.get("mp_score"),
+            of_score=row.get("of_score"),
         )
         scored.append(
             {
@@ -682,26 +894,48 @@ def _normalize_rs_pct(rs_pct: float) -> float:
 
 
 def _bias_from_signals(row: dict[str, Any], trend_score: float) -> str:
-    """Decide directional_bias from quadrant + trend.
+    """Decide directional_bias from quadrant + trend + RS sign.
 
-    Leading + improving with trend_score >= 0.55 → bullish.
-    Lagging + weakening with trend_score <= 0.45 → bearish.
-    Otherwise neutral (will be filtered out by the paper book).
+    Softer than the strict v1 rule (which needed BOTH stock and sector in
+    leading/improving AND trend >= 0.55). The new rule:
+
+      Bullish if ANY two of three agree:
+        - stock_quadrant ∈ {leading, improving}
+        - sector_quadrant ∈ {leading, improving}
+        - trend_score >= 0.55 OR stock_rs_pct > 0
+
+      Bearish if ANY two of three agree (mirror):
+        - stock_quadrant ∈ {lagging, weakening}
+        - sector_quadrant ∈ {lagging, weakening}
+        - trend_score <= 0.45 OR stock_rs_pct < 0
+
+    Otherwise neutral. The v1 rule produced ~1 bullish per scan in
+    practice — too strict to populate the book. Two-of-three lets a
+    stock with strong sector tailwind + positive RS trade even when
+    its individual quadrant is "improving" rather than "leading".
     """
     stock_quadrant = str(row.get("stock_quadrant") or "")
     sector_quadrant = str(row.get("sector_quadrant") or "")
+    rs_pct = float(row.get("stock_rs_pct") or 0.0)
     bullish_quadrants = {"leading", "improving"}
     bearish_quadrants = {"lagging", "weakening"}
-    if (
-        stock_quadrant in bullish_quadrants
-        and sector_quadrant in bullish_quadrants
-        and trend_score >= 0.55
-    ):
+
+    bull_votes = sum(
+        [
+            stock_quadrant in bullish_quadrants,
+            sector_quadrant in bullish_quadrants,
+            trend_score >= 0.55 or rs_pct > 0.0,
+        ]
+    )
+    bear_votes = sum(
+        [
+            stock_quadrant in bearish_quadrants,
+            sector_quadrant in bearish_quadrants,
+            trend_score <= 0.45 or rs_pct < 0.0,
+        ]
+    )
+    if bull_votes >= 2 and bull_votes > bear_votes:
         return "bullish"
-    if (
-        stock_quadrant in bearish_quadrants
-        and sector_quadrant in bearish_quadrants
-        and trend_score <= 0.45
-    ):
+    if bear_votes >= 2 and bear_votes > bull_votes:
         return "bearish"
     return "neutral"
