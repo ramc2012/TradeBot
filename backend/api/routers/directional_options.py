@@ -3,13 +3,19 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from directional_options.service import directional_options_service
 
 
 router = APIRouter(prefix="/api/directional-options", tags=["directional-options"])
 _service = directional_options_service
+
+
+class DirectionalResetRequest(BaseModel):
+    confirm: str = Field(..., description="Must equal 'RESET' to proceed (destructive).")
+    actor: str | None = None
 
 
 @router.get("/summary")
@@ -59,6 +65,25 @@ async def paper_positions(
     limit: int = Query(50, ge=1, le=200),
 ) -> dict[str, object]:
     return await _service.paper_positions(symbol=symbol, status=status, limit=limit)
+
+
+@router.get("/paper-summary")
+async def paper_summary() -> dict[str, object]:
+    """Capital + P&L snapshot for the portfolio panel."""
+    return await _service.paper_summary()
+
+
+@router.post("/reset-paper")
+async def reset_paper_account(body: DirectionalResetRequest) -> dict[str, object]:
+    if (body.confirm or "").strip().upper() != "RESET":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Paper reset is destructive. POST `{\"confirm\": \"RESET\"}` "
+                "to confirm."
+            ),
+        )
+    return await _service.reset_paper_account(actor=body.actor)
 
 
 @router.get("/backtest")

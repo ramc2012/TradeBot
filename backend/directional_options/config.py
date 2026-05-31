@@ -9,6 +9,11 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 RUNTIME_ROOT = PACKAGE_ROOT.parent / "runtime" / "directional_options"
 DATA_ROOT = PACKAGE_ROOT.parent / "runtime" / "index_analytics_data"
 
+# Funded equity anchor for paper-trading capital accounting. Mirrors the
+# AI/FMP pattern (initial_capital + realized - reserved_margin = available).
+# 30L matches the desk's actual paper sizing (see risk.starting_equity).
+DIRECTIONAL_INITIAL_CAPITAL: float = 3_000_000.0
+
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "label": "Directional Long Options",

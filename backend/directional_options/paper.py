@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from analysis.instruments import normalize_index_contract_expiry
 from core.paper_trade_recorder import paper_trade_recorder
+from directional_options.config import DIRECTIONAL_INITIAL_CAPITAL
 
 
 _TIMEFRAME_MINUTES = {
@@ -428,13 +429,109 @@ class DirectionalOptionsPaperStore:
     def _summary(self, open_positions: list[dict[str, Any]], closed_positions: list[dict[str, Any]]) -> dict[str, Any]:
         realized = round(sum(float(row.get("realized_pnl") or 0.0) for row in closed_positions), 2)
         unrealized = round(sum(float(row.get("unrealized_pnl") or 0.0) for row in open_positions), 2)
+
+        # Capital accounting matches the AI/FMP/S1/S2 canonical shape so the
+        # frontend portfolio panel can render uniformly across all lanes.
+        # Premium × quantity is the cash locked against each open long-option.
+        initial_capital = DIRECTIONAL_INITIAL_CAPITAL
+        reserved_margin = round(
+            sum(
+                float(p.get("entry_premium") or 0.0) * float(p.get("quantity_units") or 0)
+                for p in open_positions
+            ),
+            2,
+        )
+        total_equity = round(initial_capital + realized + unrealized, 2)
+        available_capital = round(initial_capital + realized - reserved_margin, 2)
+        total_return_pct = round(
+            ((total_equity - initial_capital) / initial_capital) * 100.0, 4
+        ) if initial_capital else 0.0
+
+        closed_sorted = sorted(
+            closed_positions,
+            key=lambda r: str(r.get("closed_at") or r.get("updated_at") or ""),
+        )
+        running_equity = initial_capital
+        peak = initial_capital
+        max_dd = 0.0
+        trade_returns_pct: list[float] = []
+        wins = 0
+        losses = 0
+        for row in closed_sorted:
+            pnl = float(row.get("realized_pnl") or 0.0)
+            pre_equity = running_equity if running_equity > 0 else initial_capital
+            running_equity = max(0.0, running_equity + pnl)
+            if running_equity > peak:
+                peak = running_equity
+            if peak > 0:
+                dd = (peak - running_equity) / peak
+                max_dd = max(max_dd, dd)
+            if pre_equity > 0:
+                trade_returns_pct.append((pnl / pre_equity) * 100.0)
+            if pnl > 0:
+                wins += 1
+            elif pnl < 0:
+                losses += 1
+
+        sharpe = 0.0
+        if len(trade_returns_pct) >= 2:
+            mean = sum(trade_returns_pct) / len(trade_returns_pct)
+            var = sum((r - mean) ** 2 for r in trade_returns_pct) / max(len(trade_returns_pct) - 1, 1)
+            stdev = var ** 0.5
+            if stdev > 0:
+                sharpe = round(mean / stdev, 4)
+
+        win_rate = (wins / (wins + losses)) if (wins + losses) else 0.0
+
         return {
             "open_positions": len(open_positions),
             "closed_positions": len(closed_positions),
             "realized_pnl": realized,
             "unrealized_pnl": unrealized,
             "total_pnl": round(realized + unrealized, 2),
+            "initial_capital": initial_capital,
+            "available_capital": available_capital,
+            "reserved_margin": reserved_margin,
+            "total_equity": total_equity,
+            "total_return_pct": total_return_pct,
+            "max_drawdown": round(max_dd, 4),
+            "sharpe_ratio": sharpe,
+            "total_trades": wins + losses,
+            "win_rate": round(win_rate, 4),
         }
+
+    async def reset_account(self, *, actor: str | None = None) -> dict[str, Any]:
+        """Archive current state and wipe positions+journal back to the
+        funded baseline. Mirrors `archive_and_reset_paper_account` on S1/S2.
+        Idempotent — a second call on an already-empty book is a no-op."""
+        async with self._lock:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            archive_dir = self.root / "archive" / stamp
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            if self.positions_path.exists():
+                self.positions_path.replace(archive_dir / "paper_positions.json")
+            if self.journal_path.exists():
+                self.journal_path.replace(archive_dir / "paper_journal.jsonl")
+            self._save_positions(
+                {
+                    "open_positions": [],
+                    "closed_positions": [],
+                    "last_synced_at": _utc_now(),
+                }
+            )
+        return {
+            "reset": True,
+            "actor": actor,
+            "archived_to": str(archive_dir.relative_to(self.root.parent)) if archive_dir.exists() else None,
+            "initial_capital": DIRECTIONAL_INITIAL_CAPITAL,
+        }
+
+    def capital_status(self) -> dict[str, Any]:
+        state = self._load_positions()
+        return self._summary(
+            list(state.get("open_positions", [])),
+            list(state.get("closed_positions", [])),
+        )
 
     def _append_journal(self, payload: dict[str, Any]) -> None:
         self.root.mkdir(parents=True, exist_ok=True)

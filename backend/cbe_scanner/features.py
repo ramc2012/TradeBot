@@ -856,6 +856,12 @@ def scan_universe(
                 fii_dii_flow=data_provider.get_fii_dii_flow(symbol),
                 cfg=cfg,
             )
+            latest_close = None
+            try:
+                if ohlc is not None and "close" in ohlc.columns and not ohlc.empty:
+                    latest_close = float(ohlc["close"].iloc[-1])
+            except Exception:
+                latest_close = None
             results.append({
                 "instrument": symbol,
                 "composite_score": score.composite_score,
@@ -870,6 +876,11 @@ def scan_universe(
                 "f7_its_score": score.f7_its["score"],
                 "active_features": score.active_features,
                 "effective_weight_total": score.effective_weight_total,
+                # Latest spot close — required by the paper book to open
+                # positions at a realistic entry price and to mark them to
+                # market on subsequent scans. Without this, the book has no
+                # price discovery path.
+                "latest_close": latest_close,
                 "details": score.to_dict(),
             })
         except Exception as e:

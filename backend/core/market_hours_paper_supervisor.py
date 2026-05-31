@@ -303,6 +303,39 @@ class MarketHoursPaperSupervisor:
                 "results": results,
             }
 
+        async def _cbe_runner() -> dict[str, Any]:
+            """Run one CBE scan + sync the cash-equity paper book.
+
+            The CBE scanner is end-of-day in design (its features look at
+            daily OHLC, IV/PCR snapshots, sector momentum). Running it
+            periodically through the day re-evaluates the watchlist against
+            fresh prices, so bias flips are caught quickly and stale
+            watchlist entries get dropped after FLAT_CONFIRMATION_SCANS."""
+            from cbe_scanner.service import run_scan as _run_cbe_scan
+
+            try:
+                payload = await asyncio.wait_for(_run_cbe_scan(), timeout=180.0)
+            except asyncio.TimeoutError:
+                return {
+                    "status": "timeout",
+                    "result_count": 0,
+                    "failure_count": 1,
+                    "failures": {"cbe_scan": "timed out after 180s"},
+                    "results": [],
+                }
+            watchlist = list(payload.get("watchlist") or [])
+            paper_summary = dict(payload.get("paper_summary") or {})
+            return {
+                "status": "ok",
+                "result_count": int(payload.get("scored_count") or 0),
+                "actionable_count": len(watchlist),
+                "watchlist_count": int(payload.get("watchlist_count") or 0),
+                "failure_count": 0,
+                "paper_summary": paper_summary,
+                "scan_date": payload.get("scan_date"),
+                "run_id": payload.get("run_id"),
+            }
+
         async def _gann_runner() -> dict[str, Any]:
             try:
                 result = await asyncio.wait_for(
@@ -365,6 +398,13 @@ class MarketHoursPaperSupervisor:
                 interval_seconds=settings.DIRECTIONAL_OPTIONS_AUTO_INTERVAL_SECONDS,
                 callback=_directional_runner,
                 enabled=settings.DIRECTIONAL_OPTIONS_AUTO_ENABLED,
+            ),
+            RunnerConfig(
+                key="cbe_scanner",
+                label="CBE Scanner Paper Cycle",
+                interval_seconds=getattr(settings, "CBE_SCANNER_AUTO_INTERVAL_SECONDS", 900),
+                callback=_cbe_runner,
+                enabled=getattr(settings, "CBE_SCANNER_AUTO_ENABLED", True),
             ),
             RunnerConfig(
                 key="gann_tp_delta",
@@ -554,6 +594,7 @@ class MarketHoursPaperSupervisor:
             "auction_intelligence": "auction_intelligence",
             "fractal_market_profile": "fmp",
             "directional_options": "directional_options",
+            "cbe_scanner": "cbe_scanner",
             "market_intelligence": "market_intelligence",
             "gann_tp_delta": "gann_tp_delta",
         }

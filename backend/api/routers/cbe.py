@@ -4,10 +4,11 @@ from __future__ import annotations
 from datetime import date
 from typing import Literal
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from cbe_scanner.features import CBEConfig
+from cbe_scanner.paper import cbe_paper_book
 from cbe_scanner.project_provider import load_project_universe
 from cbe_scanner.repository import load_latest_scan_payload
 from cbe_scanner.service import build_config, load_project_instrument_analytics, run_scan
@@ -23,6 +24,11 @@ class CBEScanRequest(BaseModel):
     lookback_days: int = Field(default=300, ge=60, le=1000)
     watchlist_min_score: float | None = Field(default=None, ge=0.0, le=10.0)
     watchlist_max_size: int | None = Field(default=None, ge=1, le=100)
+
+
+class CBEResetRequest(BaseModel):
+    confirm: str = Field(..., description="Must equal 'RESET' to proceed (destructive).")
+    actor: str | None = None
 
 
 @router.get("/config")
@@ -80,3 +86,38 @@ async def get_cbe_instrument_analytics(
         scan_date=scan_date,
         lookback_days=lookback_days,
     )
+
+
+@router.get("/paper-summary")
+async def cbe_paper_summary() -> dict:
+    """Capital + P&L snapshot for the CBE cash-equity paper book."""
+    return await cbe_paper_book.capital_status()
+
+
+@router.get("/paper-positions")
+async def cbe_paper_positions(
+    status: Literal["all", "open", "closed"] = Query("all"),
+    limit: int = Query(100, ge=1, le=500),
+) -> dict:
+    return await cbe_paper_book.list_positions(status=status, limit=limit)
+
+
+@router.get("/paper-journal")
+async def cbe_paper_journal(
+    instrument: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+) -> dict:
+    return await cbe_paper_book.list_journal(instrument=instrument, limit=limit)
+
+
+@router.post("/reset-paper")
+async def cbe_reset_paper(body: CBEResetRequest) -> dict:
+    if (body.confirm or "").strip().upper() != "RESET":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Paper reset is destructive. POST `{\"confirm\": \"RESET\"}` "
+                "to confirm."
+            ),
+        )
+    return await cbe_paper_book.reset_account(actor=body.actor)

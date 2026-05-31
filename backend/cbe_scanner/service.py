@@ -9,6 +9,7 @@ import pandas as pd
 
 from .data_provider import DataProvider, SyntheticDataProvider
 from .features import CBEConfig, compute_cbe_score, generate_watchlist, scan_universe
+from .paper import cbe_paper_book
 from .project_provider import load_project_timescale_provider, load_project_universe
 from .repository import persist_scan_payload
 
@@ -176,6 +177,7 @@ async def run_scan(
     seed: int = 42,
     lookback_days: int = 300,
     cfg: CBEConfig | None = None,
+    sync_paper_book: bool = True,
 ) -> dict[str, Any]:
     if source == "synthetic":
         payload = run_synthetic_scan(universe=universe, scan_date=scan_date, seed=seed, cfg=cfg)
@@ -188,6 +190,17 @@ async def run_scan(
         )
     run_id = await persist_scan_payload(payload)
     payload["run_id"] = run_id
+    if sync_paper_book:
+        # Drive the cash-equity paper book from this scan. Failure is logged
+        # but never blocks scan persistence — the scan is the canonical
+        # record; the book is a derived artifact.
+        try:
+            paper_summary = await cbe_paper_book.sync_from_scan(payload)
+            payload["paper_summary"] = paper_summary
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(f"[CBE] paper-book sync failed: {exc}")
+            payload["paper_summary"] = {"error": str(exc)}
     return payload
 
 

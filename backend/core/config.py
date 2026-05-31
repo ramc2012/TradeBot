@@ -113,6 +113,12 @@ class Settings(BaseSettings):
     # within one cycle of its close, which the broker quote refresh rate
     # comfortably supports.
     DIRECTIONAL_OPTIONS_AUTO_INTERVAL_SECONDS: int = 60
+    # CBE scanner is an end-of-day-style screener (daily OHLC + IV/PCR
+    # snapshots + sector momentum). Running it every 15 minutes is enough
+    # to catch bias flips and re-evaluate watchlist entries against fresh
+    # prices without burning DB cycles unnecessarily.
+    CBE_SCANNER_AUTO_ENABLED: bool = True
+    CBE_SCANNER_AUTO_INTERVAL_SECONDS: int = 900
     COMMODITY_FYERS_RATE_LIMIT_BACKOFF_SECONDS: int = 90
     COMMODITY_KILL_LOCK: bool = False
     SECTOR_INTERACTION_DURABLE_STATE_ENABLED: bool = False

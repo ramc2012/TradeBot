@@ -311,6 +311,17 @@ class DirectionalOptionsService:
     ) -> dict[str, object]:
         return await self.paper.list_positions(symbol=symbol, status=status, limit=limit)
 
+    async def paper_summary(self) -> dict[str, object]:
+        """Capital + P&L snapshot — matches AI/FMP/S1/S2 shape so the
+        frontend portfolio panel renders uniformly across all lanes."""
+        return await asyncio.to_thread(self.paper.capital_status)
+
+    async def reset_paper_account(self, *, actor: str | None = None) -> dict[str, object]:
+        """Archive the JSON book and restore the funded baseline."""
+        result = await self.paper.reset_account(actor=actor)
+        self._summary_cache = {"payload": None, "expires_at": 0.0}
+        return result
+
     def _snapshot(
         self,
         *,
