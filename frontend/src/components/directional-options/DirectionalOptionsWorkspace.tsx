@@ -6,6 +6,8 @@ import {
   Activity,
   AlertTriangle,
   ArrowUpRight,
+  Banknote,
+  Brain,
   CandlestickChart,
   Gauge,
   Layers3,
@@ -13,6 +15,10 @@ import {
   Target,
   TrendingUp,
 } from "lucide-react";
+
+import PolicyDecisionPanel, { type PolicyBlock } from "./PolicyDecisionPanel";
+import PaperTradingTab from "./PaperTradingTab";
+import PolicyLearningTab from "./PolicyLearningTab";
 import {
   Bar,
   BarChart,
@@ -201,6 +207,7 @@ type WorkspaceResponse = {
     contract_candidates: ContractCandidate[];
     risk?: RiskSnapshot | null;
     selection_reason: string;
+    policy?: PolicyBlock | null;
     data_status?: {
       execution_ready?: boolean;
       degraded_reason?: string | null;
@@ -338,6 +345,16 @@ function StatusBadge({ label }: { label: string }) {
   );
 }
 
+type TabKey = "overview" | "paper" | "policy" | "backtest" | "coverage";
+
+const TABS: { key: TabKey; label: string; icon: typeof Target }[] = [
+  { key: "overview", label: "Live overview", icon: Gauge },
+  { key: "paper", label: "Paper trading", icon: Banknote },
+  { key: "policy", label: "Policy & learning", icon: Brain },
+  { key: "backtest", label: "Backtest", icon: TrendingUp },
+  { key: "coverage", label: "Data coverage", icon: Layers3 },
+];
+
 export default function DirectionalOptionsWorkspace() {
   const [isPending, startTransition] = useTransition();
   const [underlying, setUnderlying] = useState("NIFTY");
@@ -345,6 +362,7 @@ export default function DirectionalOptionsWorkspace() {
   const [lookbackSessions, setLookbackSessions] = useState("16");
   const [loadDiagnostics, setLoadDiagnostics] = useState(false);
   const [showDashboardEmbed, setShowDashboardEmbed] = useState(false);
+  const [activeTab, setActiveTab] = useState<TabKey>("overview");
   const deferredUnderlying = useDeferredValue(underlying);
   const deferredTimeframe = useDeferredValue(timeframe);
   const deferredLookbackSessions = useDeferredValue(lookbackSessions);
@@ -441,7 +459,7 @@ export default function DirectionalOptionsWorkspace() {
                 value={underlying}
                 onChange={(event) => startTransition(() => setUnderlying(event.target.value))}
               >
-                {(module?.underlyings || ["NIFTY", "BANKNIFTY", "SENSEX", "CRUDEOIL"]).map((item) => (
+                {(module?.underlyings || ["NIFTY", "BANKNIFTY", "SENSEX"]).map((item) => (
                   <option key={item} value={item} className="bg-bg-card text-text-primary">
                     {item}
                   </option>
@@ -489,19 +507,49 @@ export default function DirectionalOptionsWorkspace() {
         </div>
       </section>
 
+      {/* Tab navigation — splits the workspace into Overview / Paper /
+          Policy / Backtest / Coverage. The metric tile-strip moves into
+          the Overview tab so users land on the live trading view by
+          default, with backtest + dataset diagnostics tucked away. */}
+      <nav className="flex flex-wrap items-center gap-1.5 border-b border-bg-border/40 pb-1">
+        {TABS.map(({ key, label, icon: Icon }) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setActiveTab(key)}
+            className={clsx(
+              "inline-flex items-center gap-1.5 rounded-t-lg border-b-2 px-3 py-2 text-[12.5px] font-semibold transition-colors",
+              activeTab === key
+                ? "border-accent-blue text-text-primary"
+                : "border-transparent text-text-muted hover:text-text-secondary",
+            )}
+          >
+            <Icon size={14} />
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      {activeTab === "overview" ? (
+      <>
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-        <MetricTile label="Engine Score" value={formatNumber(summary?.engine_score, 1)} detail="Composite walk-forward quality score." color={tone(summary?.engine_score)} />
-        <MetricTile label="Expectancy" value={formatSignedMoney(summary?.expectancy)} detail="Average rupee PnL per simulated trade." color={tone(summary?.expectancy)} />
-        <MetricTile label="Max DD" value={formatPct(summary?.max_drawdown_pct)} detail="Largest peak-to-trough drawdown." color="text-accent-red" />
-        <MetricTile label="Win Rate" value={formatPct(summary?.win_rate_pct)} detail={`PF ${summary?.profit_factor?.toFixed(2) || "--"}`} color={tone((summary?.win_rate_pct || 0) - 50)} />
-        <MetricTile label="Profitable Months" value={formatPct(summary?.percent_profitable_months)} detail={`${summary?.trade_count || 0} trades across ${deferredLookbackSessions} sessions.`} color={tone((summary?.percent_profitable_months || 0) - 50)} />
+        <MetricTile label="Paper Book" value={`${data?.paper_positions?.summary?.open_count ?? 0}`} detail={`Realized ${formatSignedMoney(data?.paper_positions?.summary?.realized_pnl, 0)} · open ${formatSignedMoney(data?.paper_positions?.summary?.unrealized_pnl, 0)}`} color={tone((data?.paper_positions?.summary?.realized_pnl || 0) + (data?.paper_positions?.summary?.unrealized_pnl || 0))} />
         <MetricTile
-          label="Paper Book"
-          value={`${data?.paper_positions?.summary?.open_count ?? 0}`}
-          detail={`Realized ${formatSignedMoney(data?.paper_positions?.summary?.realized_pnl, 0)} · open ${formatSignedMoney(data?.paper_positions?.summary?.unrealized_pnl, 0)}`}
-          color={tone((data?.paper_positions?.summary?.realized_pnl || 0) + (data?.paper_positions?.summary?.unrealized_pnl || 0))}
+          label="Policy verdict"
+          value={snapshot?.policy?.act ? "ACT" : snapshot?.policy ? "SKIP" : "—"}
+          detail={snapshot?.policy ? `${snapshot.policy.size_multiplier?.toFixed(2) ?? "1.00"}× · sampled ${snapshot.policy.sampled_value?.toFixed(2) ?? "—"}` : "Policy not active"}
+          color={snapshot?.policy?.act ? "text-emerald-300" : "text-amber-300"}
         />
+        <MetricTile label="Regime" value={snapshot?.regime?.label || "—"} detail={`Conf ${formatNumber(snapshot?.regime?.confidence, 2)}`} />
+        <MetricTile label="Signal" value={snapshot?.signal?.direction || "flat"} detail={`Conf ${formatNumber(snapshot?.signal?.confidence, 2)} · horizon ${snapshot?.signal?.expected_horizon_bars ?? "—"}b`} color={snapshot?.signal?.direction === "CE" ? "text-emerald-300" : snapshot?.signal?.direction === "PE" ? "text-rose-300" : undefined} />
+        <MetricTile label="Trades learned" value={`${snapshot?.policy?.n_seen ?? 0}`} detail={`σ posterior ${formatNumber(snapshot?.policy?.posterior_var != null ? Math.sqrt(snapshot.policy.posterior_var) : null, 2)}`} />
       </section>
+
+      {/* RL policy decision panel — the new headline view */}
+      <PolicyDecisionPanel
+        policy={snapshot?.policy ?? null}
+        candidates={snapshot?.contract_candidates}
+      />
 
       <section className="grid gap-5 xl:grid-cols-[1.1fr,0.9fr]">
         <div className="rounded-[26px] border border-bg-border bg-bg-secondary/24 p-5">
@@ -744,6 +792,17 @@ export default function DirectionalOptionsWorkspace() {
         </div>
       </section>
 
+      </>
+      ) : null}
+
+      {activeTab === "paper" ? (
+        <PaperTradingTab symbol={deferredUnderlying} />
+      ) : null}
+
+      {activeTab === "policy" ? <PolicyLearningTab /> : null}
+
+      {activeTab === "backtest" ? (
+      <>
       <section className="grid gap-5 xl:grid-cols-[1fr,0.92fr]">
         <div className="rounded-[26px] border border-bg-border bg-bg-secondary/24 p-5">
           <div className="flex items-center gap-2 text-sm font-semibold text-text-primary">
@@ -850,6 +909,10 @@ export default function DirectionalOptionsWorkspace() {
         </div>
       </section>
 
+      </>
+      ) : null}
+
+      {activeTab === "coverage" ? (
       <section className="rounded-[26px] border border-bg-border bg-bg-secondary/24 p-5">
         <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-text-primary">
           <Layers3 size={16} />
@@ -884,6 +947,7 @@ export default function DirectionalOptionsWorkspace() {
           ))}
         </div>
       </section>
+      ) : null}
     </div>
   );
 }

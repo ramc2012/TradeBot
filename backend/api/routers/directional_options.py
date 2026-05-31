@@ -94,3 +94,38 @@ async def backtest(
 ) -> dict[str, object]:
     payload = await asyncio.to_thread(_service.workspace, underlying, timeframe, lookback_sessions)
     return payload["backtest"]
+
+
+@router.get("/policy")
+async def policy_state() -> dict[str, object]:
+    """Global RL policy state — n_seen, per-size-bucket Mean R, pending positions.
+
+    Surfaced so the UI's "Policy & Learning" tab can render the
+    posterior's training progress and size-bucket convergence
+    without having to call live-snapshot per underlying.
+    """
+    if _service.policy is None:
+        return {
+            "enabled": False,
+            "reason": "RL policy disabled in config.",
+        }
+    snap = _service.policy.snapshot()
+    risk_cfg = _service.config.get("risk", {}) or {}
+    paper_cfg = _service.config.get("paper_trading", {}) or {}
+    # Mirror the strategy knobs the UI needs to render — these are the
+    # things the user (and the agent) need to see at a glance.
+    snap["strategy_params"] = {
+        "universe": list(_service.config.get("universe") or []),
+        "risk_pct": risk_cfg.get("risk_pct"),
+        "premium_cap_pct": risk_cfg.get("premium_cap_pct"),
+        "planned_stop_pct": risk_cfg.get("planned_stop_pct"),
+        "profit_target_pct": risk_cfg.get("profit_target_pct"),
+        "trail_giveback_pct": risk_cfg.get("trail_giveback_pct"),
+        "daily_loss_cap_r": risk_cfg.get("daily_loss_cap_r"),
+        "weekly_loss_cap_r": risk_cfg.get("weekly_loss_cap_r"),
+        "starting_equity": risk_cfg.get("starting_equity"),
+        "min_hold_bars": paper_cfg.get("min_hold_bars"),
+        "one_position_per_symbol": paper_cfg.get("one_position_per_symbol"),
+    }
+    snap["enabled"] = True
+    return snap

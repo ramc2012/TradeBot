@@ -29,15 +29,9 @@ import {
 } from "@/components/strategy/desk-helpers";
 
 const REFRESH_MS = 6_000;
-const DEFAULT_SYMBOLS = [
-  "NIFTY",
-  "BANKNIFTY",
-  "SENSEX",
-  "CRUDEOIL",
-  "GOLD",
-  "SILVERM",
-  "NATURALGAS",
-];
+// Indices-only after the RL/indices-only refactor — commodity
+// underlyings are out of scope for this engine.
+const DEFAULT_SYMBOLS = ["NIFTY", "BANKNIFTY", "SENSEX"];
 
 type DOSnap = {
   as_of?: string;

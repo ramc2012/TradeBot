@@ -444,6 +444,10 @@ export const getDirectionalOptionsPaperJournal = (symbol?: string, limit = 50) =
   api.get("/api/directional-options/paper-journal", { params: { symbol, limit } });
 export const getDirectionalOptionsPaperPositions = (symbol?: string, status = "all", limit = 50) =>
   api.get("/api/directional-options/paper-positions", { params: { symbol, status, limit } });
+export const getDirectionalOptionsPolicy = () =>
+  api.get("/api/directional-options/policy");
+export const getDirectionalOptionsPaperSummary = () =>
+  api.get("/api/directional-options/paper-summary");
 
 // ── Gann TP Delta Harmonic ────────────────────────────────────────────────
 export const getGannTPDeltaSummary = () => api.get("/api/gann-tp-delta/summary");
