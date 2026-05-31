@@ -69,8 +69,15 @@ class Settings(BaseSettings):
     MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY: bool = False
     STRATEGY_LEARNING_ENABLED: bool = True
     STRATEGY_LEARNING_LOOKBACK_DAYS: int = 120
-    STRATEGY_LEARNING_MIN_TRADES: int = 3
-    STRATEGY_LEARNING_BLOCK_ENTRIES_ENABLED: bool = False
+    # Bring online faster — 2 closed trades is enough to start ranking
+    # (default was 3 which on S1's 5-trades-a-day pace took weeks to
+    # accumulate per (underlying, option_type, signal_reason) tuple).
+    STRATEGY_LEARNING_MIN_TRADES: int = 2
+    # Once a tuple has hit MIN_TRADES *and* shows <25% win rate with
+    # negative expectancy, the learning gate refuses fresh entries for
+    # it. Without this flag, learning was purely a size/confidence
+    # advisor and never actually filtered bad-history setups out.
+    STRATEGY_LEARNING_BLOCK_ENTRIES_ENABLED: bool = True
     # Per-purpose adapter routing. The goal is to distribute load between the
     # two live brokers so neither hits 429 first and a single rate-limit storm
     # doesn't cascade across desks. Rationale per purpose:

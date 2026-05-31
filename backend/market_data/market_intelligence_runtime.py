@@ -147,6 +147,7 @@ class MarketIntelligenceRuntime:
         self._last_full_watchlist_refresh_at: datetime | None = None
         self._last_chain_refresh_at: datetime | None = None
         self._last_premium_refresh_at: datetime | None = None
+        self._last_learning_refresh_at: datetime | None = None
         # Per-(underlying, option_type) set of instrument_keys that have
         # been ATM at any point during the current session. Lets the
         # periodic refresh continue to top up prior-ATM strikes even
@@ -665,6 +666,61 @@ class MarketIntelligenceRuntime:
             ),
         }
 
+    async def refresh_learning_scores(self) -> dict[str, Any]:
+        """Recompute the strategy-learning scores from `agent_signals` and
+        `agent_positions` so S1/S2 entry decisions see updated win-rate /
+        expectancy / size_multiplier per (underlying, option_type, signal_reason).
+
+        The infrastructure (StrategyLearningService) was fully built but
+        never invoked periodically — it only refreshed on a manual
+        `/api/strategy/learning-refresh` POST. Result: the in-memory
+        score cache stayed empty, S1/S2 ran without learning signal, and
+        chronically-losing setups kept firing. Hooking refresh into the
+        MI cycle turns the system from "passive recorder" into "active
+        learner".
+
+        Cooldown: 5 minutes. Learning scores aggregate trades over many
+        days, so per-minute refresh adds nothing — but 5-min gives
+        intraday closed trades a chance to influence the next entry.
+        """
+        now = datetime.now(IST)
+        cooldown_seconds = 300  # 5 min
+        if self._last_learning_refresh_at is not None:
+            elapsed = (now - self._last_learning_refresh_at).total_seconds()
+            if elapsed < cooldown_seconds:
+                return {
+                    "status": "cooldown",
+                    "last_refresh_at": self._last_learning_refresh_at.isoformat(),
+                    "cooldown_seconds": cooldown_seconds,
+                }
+
+        try:
+            from paper_engine.strategy_learning import strategy_learning_service
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "import_error", "error": str(exc)}
+
+        try:
+            result = await strategy_learning_service.refresh_scores()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[MarketIntelligence] Learning refresh failed: {exc}")
+            return {"status": "error", "error": str(exc)}
+
+        self._last_learning_refresh_at = datetime.now(IST)
+        # Compact summary — the full score dict can be hundreds of entries.
+        score_count = 0
+        try:
+            score_count = int(result.get("score_count") or len(result.get("scores") or {}))
+        except Exception:
+            pass
+        return {
+            "status": "ok",
+            "last_refresh_at": self._last_learning_refresh_at.isoformat(),
+            "score_count": score_count,
+            "elapsed_seconds": round(
+                (self._last_learning_refresh_at - now).total_seconds(), 2
+            ),
+        }
+
     async def refresh_nse_runtime(self) -> dict[str, Any]:
         spot_gap_fill = await self.gap_fill_spot_history(
             symbols=list(NSE_INDEX_SCOPE),
@@ -681,6 +737,15 @@ class MarketIntelligenceRuntime:
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[MarketIntelligence] Option premium refresh failed: {exc}")
             premium_refresh = {"status": "error", "error": str(exc)}
+        # Strategy-learning refresh — recomputes per-(underlying, option_type,
+        # signal_reason) win-rate / expectancy / size-multiplier so S1/S2's
+        # entry decision sees fresh learning signal. Has its own 5-min
+        # cooldown; failure here is non-fatal.
+        try:
+            learning_refresh = await self.refresh_learning_scores()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[MarketIntelligence] Learning refresh failed: {exc}")
+            learning_refresh = {"status": "error", "error": str(exc)}
         try:
             sector_interaction = await india_live_sector_service.market_intelligence_payload()
         except Exception as exc:
@@ -704,6 +769,7 @@ class MarketIntelligenceRuntime:
             "watchlists": watchlists,
             "option_chains": option_chains,
             "premium_refresh": premium_refresh,
+            "learning_refresh": learning_refresh,
             "sector_interaction": sector_interaction,
             "macro_research": macro_research,
         }
