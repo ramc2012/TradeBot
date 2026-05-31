@@ -90,7 +90,30 @@ async def persist_scan_payload(payload: dict[str, Any]) -> str | None:
                             "f4_cp_score": float(row.get("f4_cp_score") or 0.0),
                             "f5_mp_score": float(row.get("f5_mp_score") or 0.0),
                             "is_watchlist": str(row.get("instrument") or "") in watchlist_symbols,
-                            "details": json.dumps(row.get("details") or {}),
+                            # Stash v3 indicator fields into the JSONB blob so
+                            # load_latest_scan_payload can restore them at
+                            # full fidelity without needing a new migration.
+                            "details": json.dumps(
+                                {
+                                    **(row.get("details") or {}),
+                                    "v3": {
+                                        "macd_line": row.get("macd_line"),
+                                        "macd_signal": row.get("macd_signal"),
+                                        "macd_hist": row.get("macd_hist"),
+                                        "macd_bullish": row.get("macd_bullish"),
+                                        "macd_score": row.get("macd_score"),
+                                        "macd_meta": row.get("macd_meta"),
+                                        "rsi_14": row.get("rsi_14"),
+                                        "rsi_score": row.get("rsi_score"),
+                                        "rsi_meta": row.get("rsi_meta"),
+                                        "weekly_close_vs_ema20": row.get("weekly_close_vs_ema20"),
+                                        "weekly_trend": row.get("weekly_trend"),
+                                        "latest_close": row.get("latest_close"),
+                                        "recent_closes_30d": row.get("recent_closes_30d"),
+                                        "composite_components": row.get("composite_components"),
+                                    },
+                                }
+                            ),
                             "sector_code": row.get("sector_code"),
                             "sector_quadrant": row.get("sector_quadrant"),
                             "sector_rs_pct": _opt_float(row.get("sector_rs_pct")),
@@ -126,7 +149,8 @@ async def load_latest_scan_payload(source: str | None = None) -> dict[str, Any] 
                 return None
             run_query = """
                 SELECT id, source, scan_date, universe_size, scored_count, watchlist_count,
-                       config, source_status, created_at
+                       config, source_status, created_at, asset_winner, composite_gate,
+                       engine_version
                 FROM cbe_scan_runs
             """
             params: dict[str, Any] = {}
@@ -144,7 +168,10 @@ async def load_latest_scan_payload(source: str | None = None) -> dict[str, Any] 
                     """
                     SELECT rank, instrument, composite_score, directional_bias, bias_conviction,
                            f1_vc_score, f2_omp_score, f3_csmd_score, f4_cp_score,
-                           f5_mp_score, is_watchlist, details
+                           f5_mp_score, is_watchlist, details,
+                           sector_code, sector_quadrant, sector_rs_pct,
+                           stock_quadrant, stock_rs_pct, stock_rank_in_sector,
+                           composite_alpha_score, gate_passed
                     FROM cbe_scan_results
                     WHERE run_id = :run_id
                     ORDER BY rank ASC
@@ -163,8 +190,12 @@ async def load_latest_scan_payload(source: str | None = None) -> dict[str, Any] 
                 "watchlist_count": run_row["watchlist_count"],
                 "config": run_row["config"] or {},
                 "source_status": run_row["source_status"] or {},
+                "asset_winner": dict(run_row).get("asset_winner"),
                 "results": rows,
-                "watchlist": [row for row in rows if row.get("is_watchlist")],
+                "watchlist": [
+                    row for row in rows
+                    if row.get("gate_passed") and row.get("directional_bias") in ("bullish", "bearish")
+                ],
             }
     except Exception as exc:
         logger.warning(f"[CBE] Latest scan load skipped: {exc}")
@@ -202,8 +233,29 @@ def _coerce_scan_date(value: Any) -> date | None:
 
 
 def _result_row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
+    """Restore the row shape that the frontend expects.
+
+    The v3 indicator fields (macd_*, rsi_*, weekly_*, recent_closes_30d,
+    composite_components) are stashed inside the details JSONB blob on
+    insert. Hoist them back to row top-level so /api/cbe/latest emits
+    the same shape as a fresh /api/cbe/scan response.
+    """
     row.pop("rank", None)
-    row["details"] = row.get("details") or {}
+    details = row.get("details") or {}
+    if not isinstance(details, dict):
+        details = {}
+    v3 = details.get("v3") or {}
+    if isinstance(v3, dict):
+        for key in (
+            "macd_line", "macd_signal", "macd_hist", "macd_bullish",
+            "macd_score", "macd_meta",
+            "rsi_14", "rsi_score", "rsi_meta",
+            "weekly_close_vs_ema20", "weekly_trend",
+            "latest_close", "recent_closes_30d", "composite_components",
+        ):
+            if v3.get(key) is not None:
+                row[key] = v3[key]
+    row["details"] = details
     return row
 
 
