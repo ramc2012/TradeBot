@@ -98,8 +98,16 @@ def _featurize(signal: dict[str, Any], candidate: dict[str, Any], regime: dict[s
     p_up = float(signal.get("p_up") or 0.5)
 
     delta_abs = abs(float(candidate.get("delta") or 0.0))
-    p_trading_edge = float(candidate.get("p_trading_edge") or 0.0)
-    p_terminal_edge = float(candidate.get("p_terminal_edge") or 0.0)
+    # IMPORTANT: p_trading_edge and p_terminal_edge come out of the
+    # selector as absolute ₹ amounts (option_price units). Left raw they
+    # dominate the feature vector — e.g. p_trading_edge=2175 dwarfs every
+    # other O(1) feature, blowing the predictive variance into the
+    # millions and making the cold-start Thompson sampler hyper-volatile.
+    # Normalize by option_price so the feature is "edge as fraction of
+    # premium" which lives naturally in roughly [-2, +5].
+    option_price = max(float(candidate.get("option_price") or 0.0), 1.0)
+    p_trading_edge = float(candidate.get("p_trading_edge") or 0.0) / option_price
+    p_terminal_edge = float(candidate.get("p_terminal_edge") or 0.0) / option_price
     p_minus_q_tail = float(candidate.get("p_minus_q_tail") or 0.0)
     probability_of_profit = float(candidate.get("probability_of_profit") or 0.0)
     skew_tax = float(candidate.get("skew_tax") or 0.0)
