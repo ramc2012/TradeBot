@@ -171,15 +171,27 @@ async def load_project_instrument_analytics(
 
 async def run_scan(
     *,
-    source: Literal["synthetic", "project_timescale"] = "project_timescale",
+    source: Literal["synthetic", "project_timescale", "alpha_engine"] = "alpha_engine",
     universe: Iterable[str] | None = None,
     scan_date: date | datetime | pd.Timestamp | None = None,
     seed: int = 42,
     lookback_days: int = 300,
     cfg: CBEConfig | None = None,
     sync_paper_book: bool = True,
+    alpha_config: "AlphaEngineConfig | None" = None,
 ) -> dict[str, Any]:
-    if source == "synthetic":
+    """Run the scanner. Default source is the alpha engine.
+
+    The legacy "project_timescale" (composite vol-compression scoring) and
+    "synthetic" sources stay reachable for backwards-compatible research
+    queries but are no longer used by the paper book or supervisor.
+    """
+    if source == "alpha_engine":
+        from .alpha_engine import AlphaEngineConfig, run_alpha_pipeline
+
+        cfg_obj = alpha_config or AlphaEngineConfig()
+        payload = await run_alpha_pipeline(cfg_obj)
+    elif source == "synthetic":
         payload = run_synthetic_scan(universe=universe, scan_date=scan_date, seed=seed, cfg=cfg)
     else:
         payload = await run_project_scan(

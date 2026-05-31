@@ -23,11 +23,13 @@ async def persist_scan_payload(payload: dict[str, Any]) -> str | None:
                 text(
                     """
                     INSERT INTO cbe_scan_runs
-                        (source, scan_date, universe_size, scored_count, watchlist_count, config, source_status)
+                        (source, scan_date, universe_size, scored_count, watchlist_count, config, source_status,
+                         asset_winner, composite_gate, engine_version)
                     VALUES
                         (
                             :source, :scan_date, :universe_size, :scored_count,
-                            :watchlist_count, CAST(:config AS JSONB), CAST(:source_status AS JSONB)
+                            :watchlist_count, CAST(:config AS JSONB), CAST(:source_status AS JSONB),
+                            :asset_winner, :composite_gate, :engine_version
                         )
                     RETURNING id
                     """
@@ -35,11 +37,14 @@ async def persist_scan_payload(payload: dict[str, Any]) -> str | None:
                 {
                     "source": str(payload.get("source") or "unknown"),
                     "scan_date": _coerce_scan_date(payload.get("scan_date")),
-                    "universe_size": int(payload.get("universe_size") or 0),
+                    "universe_size": int(payload.get("universe_size") or payload.get("fno_universe_size") or 0),
                     "scored_count": int(payload.get("scored_count") or 0),
                     "watchlist_count": int(payload.get("watchlist_count") or 0),
                     "config": json.dumps(payload.get("config") or {}),
                     "source_status": json.dumps(payload.get("source_status") or {}),
+                    "asset_winner": payload.get("asset_winner"),
+                    "composite_gate": float((payload.get("config") or {}).get("composite_gate") or 0.0) or None,
+                    "engine_version": payload.get("source"),
                 },
             )
             run_id = run_result.scalar_one()
@@ -51,13 +56,23 @@ async def persist_scan_payload(payload: dict[str, Any]) -> str | None:
                             (
                                 run_id, rank, instrument, composite_score, directional_bias,
                                 bias_conviction, f1_vc_score, f2_omp_score, f3_csmd_score,
-                                f4_cp_score, f5_mp_score, is_watchlist, details
+                                f4_cp_score, f5_mp_score, is_watchlist, details,
+                                sector_code, sector_quadrant, sector_rs_pct,
+                                stock_quadrant, stock_rs_pct, stock_rank_in_sector,
+                                trend_score, atr_expansion, volume_score, oi_score, iv_score,
+                                atm_strike, atm_oi, atm_volume,
+                                composite_alpha_score, gate_passed
                             )
                         VALUES
                             (
                                 :run_id, :rank, :instrument, :composite_score, :directional_bias,
                                 :bias_conviction, :f1_vc_score, :f2_omp_score, :f3_csmd_score,
-                                :f4_cp_score, :f5_mp_score, :is_watchlist, CAST(:details AS JSONB)
+                                :f4_cp_score, :f5_mp_score, :is_watchlist, CAST(:details AS JSONB),
+                                :sector_code, :sector_quadrant, :sector_rs_pct,
+                                :stock_quadrant, :stock_rs_pct, :stock_rank_in_sector,
+                                :trend_score, :atr_expansion, :volume_score, :oi_score, :iv_score,
+                                :atm_strike, :atm_oi, :atm_volume,
+                                :composite_alpha_score, :gate_passed
                             )
                         """
                     ),
@@ -76,6 +91,22 @@ async def persist_scan_payload(payload: dict[str, Any]) -> str | None:
                             "f5_mp_score": float(row.get("f5_mp_score") or 0.0),
                             "is_watchlist": str(row.get("instrument") or "") in watchlist_symbols,
                             "details": json.dumps(row.get("details") or {}),
+                            "sector_code": row.get("sector_code"),
+                            "sector_quadrant": row.get("sector_quadrant"),
+                            "sector_rs_pct": _opt_float(row.get("sector_rs_pct")),
+                            "stock_quadrant": row.get("stock_quadrant"),
+                            "stock_rs_pct": _opt_float(row.get("stock_rs_pct")),
+                            "stock_rank_in_sector": _opt_int(row.get("stock_rank_in_sector")),
+                            "trend_score": _opt_float(row.get("trend_score")),
+                            "atr_expansion": _opt_float(row.get("atr_expansion")),
+                            "volume_score": _opt_float(row.get("volume_score")),
+                            "oi_score": _opt_float(row.get("oi_score")),
+                            "iv_score": _opt_float(row.get("iv_score")),
+                            "atm_strike": _opt_float(row.get("atm_strike")),
+                            "atm_oi": _opt_float(row.get("atm_oi")),
+                            "atm_volume": _opt_float(row.get("atm_volume")),
+                            "composite_alpha_score": _opt_float(row.get("composite_alpha_score")),
+                            "gate_passed": bool(row.get("gate_passed")) if row.get("gate_passed") is not None else None,
                         }
                         for index, row in enumerate(results)
                         if row.get("instrument")
@@ -137,6 +168,24 @@ async def load_latest_scan_payload(source: str | None = None) -> dict[str, Any] 
             }
     except Exception as exc:
         logger.warning(f"[CBE] Latest scan load skipped: {exc}")
+        return None
+
+
+def _opt_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
         return None
 
 
