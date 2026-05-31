@@ -1,18 +1,36 @@
 "use client";
 
+/**
+ * Commodity desk · MP+OF · single-viewport dashboard.
+ *
+ * Layout fits a 1366×768 laptop without scroll:
+ *   ┌ header strip (status + decision tiles + actions)
+ *   ├ table header (column labels)
+ *   ├ 8 instrument rows (one per configured MCX future)
+ *   │   each row: symbol, live price, MP profile bar (SVG), CVD/VWAP,
+ *   │             trigger badge + confidence, stop hint, position chip
+ *   └ split footer (action queue · audit feed)
+ *
+ * Click any row → modal with full per-instrument context.
+ *
+ * Streaming model
+ * --------------
+ * The page is socket-primary. `useLiveSnapshotQuery` subscribes to the
+ * overview WebSocket (which now carries positions / orders / trade history
+ * inline) and uses HTTP polling as a 60-second heartbeat fallback only.
+ * Per-symbol tick sockets layer sub-second LTP updates on top so the
+ * price columns update faster than the bar-close cadence the agent runs at.
+ */
+
 import { Fragment, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { ChevronDown, ChevronRight, CirclePlay, RefreshCcw } from "lucide-react";
+import { CirclePlay, RefreshCcw, X } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 
 import {
   api as apiClient,
   getCommodityOverview,
-  getCommodityOrders,
-  getCommodityPositions,
-  getCommodityReports,
-  getCommodityStrategyContracts,
   getCommodityWatchlistSnapshot,
   runCommodityStrategyOnce,
   startCommodityStrategyAgent,
@@ -23,128 +41,86 @@ import {
   createTickSocket,
 } from "@/lib/websocket";
 
-const REFRESH_MS = 4_000;
+// ─── Polling cadence ───────────────────────────────────────────────────────
+// The sockets push immediately on bar close / position change. Polls are a
+// cold-start primer + a heartbeat so we recover from a transient socket drop.
+const PRIMER_POLL_MS = 5_000;       // first ~minute, until socket connects
+const HEARTBEAT_POLL_MS = 60_000;   // steady-state, only kicks in if socket dies
 
-type TabKey = "watchlist" | "positions" | "history";
-type Bucket = "active" | "ready" | "favourable" | "drifting" | "neutral" | null;
-
-const TABS: { key: TabKey; label: string }[] = [
-  { key: "watchlist", label: "Watchlist" },
-  { key: "positions", label: "Open Positions" },
-  { key: "history", label: "Trade History" },
-];
-type Trajectory = "improving" | "stalled" | "deteriorating" | null;
+// ─── Types ─────────────────────────────────────────────────────────────────
 
 type WatchRow = {
   symbol?: string | null;
   configured_symbol?: string | null;
   active_lookup_symbol?: string | null;
-  selected_lookup_symbol?: string | null;
-  rollover_detail?: string | null;
   underlying?: string | null;
   display_name?: string | null;
   price?: number | null;
   previous_close?: number | null;
   change?: number | null;
   change_pct?: number | null;
-  macd?: number | null;
-  macd_signal?: number | null;
-  macd_histogram?: number | null;
-  rsi?: number | null;
-  indicator_timeframe?: string | null;
   atr?: number | null;
   regime?: string | null;
   mp_day_type?: string | null;
   mp_status?: string | null;
-  bar_time?: string | null;
-  reason?: string | null;
-  signal_validation?: string | null;
-  signal_validation_detail?: string | null;
-  bucket?: Bucket;
-  trajectory?: Trajectory;
-  proximity_pct?: number | null;
-  bucket_rationale?: string | null;
-  expiry?: string | null;
-  ce_symbol?: string | null;
-  pe_symbol?: string | null;
-  signal_side?: string | null;
-  trade_bar_time?: string | null;
-  trade_symbol?: string | null;
-  live_tick_source?: string | null;
-  live_tick_time?: string | null;
-  live_tick_stale_seconds?: number | null;
-  ce?: Record<string, unknown> | null;
-  pe?: Record<string, unknown> | null;
-  // Order-flow + MP-extension fields published by the commodity agent's
-  // _analyze_futures_symbol (see backend/paper_engine/commodity_strategy_agent.py).
-  cvd_latest?: number | null;
-  cvd_session?: number | null;
-  cvd_window_delta?: number | null;
-  cvd_agrees?: boolean | null;
-  vwap?: number | null;
-  vwap_upper?: number | null;
-  vwap_lower?: number | null;
-  cvd_divergence?: { kind?: string; strength?: number } | null;
-  hvn_count?: number | null;
-  lvn_count?: number | null;
-  ib_extended_above?: boolean | null;
-  ib_extended_below?: boolean | null;
-  ib_extension_pct?: number | null;
-  mp_direction?: string | null;
-  // Core Market Profile levels — critical for mean-reversion entries.
+  mp_periods?: number | null;
+  mp_session_date?: string | null;
   mp_poc?: number | null;
   mp_vah?: number | null;
   mp_val?: number | null;
   mp_ib_high?: number | null;
   mp_ib_low?: number | null;
-  mp_periods?: number | null;
-  mp_session_date?: string | null;
-  // MP+OF evaluator additions.
+  mp_direction?: string | null;
+  bar_time?: string | null;
+  signal?: string | null;
+  candidate_signal?: string | null;
+  reason?: string | null;
   entry_style?: string | null;
   confidence?: number | null;
   stop_hint?: number | null;
   target_hint?: number | null;
+  signal_validation?: string | null;
+  signal_validation_detail?: string | null;
   trigger_evidence?: Record<string, unknown> | null;
+  cvd_latest?: number | null;
+  cvd_session?: number | null;
+  cvd_window_delta?: number | null;
+  cvd_agrees?: boolean | null;
+  cvd_block_active?: boolean | null;
+  cvd_divergence?: { kind?: string; strength?: number } | null;
+  vwap?: number | null;
+  vwap_upper?: number | null;
+  vwap_lower?: number | null;
+  hvn_count?: number | null;
+  lvn_count?: number | null;
+  ib_extended_above?: boolean | null;
+  ib_extended_below?: boolean | null;
+  ib_extension_pct?: number | null;
+  lot_size?: number | null;
+  lots_per_trade?: number | null;
+  default_qty?: number | null;
+  contract_unit_label?: string | null;
+  quote_unit_label?: string | null;
   prior_session_date?: string | null;
+  indicator_timeframe?: string | null;
+  live_tick_source?: string | null;
+  live_tick_time?: string | null;
+  live_tick_stale_seconds?: number | null;
 };
 
 type CommoditySnapshotContract = {
   symbol?: string | null;
   underlying?: string | null;
+  display_name?: string | null;
   lookup_symbol?: string | null;
-  active_lookup_symbol?: string | null;
-  selected_lookup_symbol?: string | null;
-  default_lookup_symbol?: string | null;
-  active_expiry?: string | null;
-  selected_expiry?: string | null;
-  suggested_expiry?: string | null;
-  expiries?: string[];
-  expiry_mappings?: { expiry?: string; lookup_symbol?: string }[];
   lot_size?: number | null;
-  has_options?: boolean | null;
   quote_unit_label?: string | null;
   contract_unit_label?: string | null;
   strategy_title?: string | null;
-  selection_policy?: string | null;
-  selection_locked?: boolean | null;
-  detail?: string | null;
 };
 
 type CommodityWatchlistSnapshot = {
-  contract_catalog?: {
-    contracts?: CommoditySnapshotContract[];
-    source?: string | null;
-    detail?: string | null;
-    timestamp?: string | null;
-    summary?: Record<string, unknown>;
-  };
-  atm_watchlist?: {
-    rows?: WatchRow[];
-    source?: string | null;
-    detail?: string | null;
-    timestamp?: string | null;
-    summary?: Record<string, unknown>;
-  };
+  contract_catalog?: { contracts?: CommoditySnapshotContract[] };
 };
 
 type CommodityPosition = {
@@ -152,9 +128,11 @@ type CommodityPosition = {
   symbol?: string;
   live_symbol?: string;
   display_name?: string;
+  underlying?: string;
   action?: string;
   qty?: number;
   lots?: number;
+  lot_size?: number;
   entry_price?: number;
   current_price?: number;
   stop_price?: number;
@@ -163,20 +141,8 @@ type CommodityPosition = {
   return_pct?: number | null;
   entered_at?: string;
   regime?: string | null;
-  strategy_title?: string | null;
-  option_type?: string | null;
-  strike?: number | null;
-  expiry?: string | null;
-};
-
-type LatestTickSnapshot = {
-  symbol?: string | null;
-  ltp?: number | null;
-  close?: number | null;
-  stale?: boolean | null;
-  stale_seconds?: number | null;
-  timestamp?: string | null;
-  source?: string | null;
+  strategy_key?: string | null;
+  entry_style?: string | null;
 };
 
 type AuditEvent = {
@@ -211,33 +177,14 @@ type TradeRow = {
   reason?: string;
 };
 
-type ReportRow = {
-  timestamp?: string;
-  total_equity?: number;
-  realized_pnl?: number;
-  unrealized_pnl?: number;
-  day_pnl?: number;
-  open_positions?: number;
-  total_trades?: number;
-  win_rate?: number;
-  max_drawdown?: number;
-};
-
-type DataQualitySymbol = {
-  symbol: string;
-  stale: boolean;
-  flagged: boolean;
-  freshest_age_seconds: number;
-  freshest_source: string;
-};
-
-type DataQualitySnap = {
-  overall?: string;
-  market_state?: string;
-  symbol_count?: number;
-  stale_count?: number;
-  flagged_count?: number;
-  symbol_health?: DataQualitySymbol[];
+type LatestTickSnapshot = {
+  symbol?: string | null;
+  ltp?: number | null;
+  close?: number | null;
+  stale?: boolean | null;
+  stale_seconds?: number | null;
+  timestamp?: string | null;
+  source?: string | null;
 };
 
 type StatusPayload = {
@@ -251,36 +198,24 @@ type StatusPayload = {
   last_run_at?: string | null;
   last_error?: string | null;
   last_message?: string | null;
-  config?: Record<string, any>;
-  strategy_agents?: Record<string, any>[];
-  strategies?: Record<string, any>[];
-  summary?: Record<string, any>;
+  config?: Record<string, unknown>;
+  strategy_agents?: Record<string, unknown>[];
+  strategies?: Record<string, unknown>[];
+  summary?: Record<string, unknown>;
   futures_watchlist?: WatchRow[];
   watchlist?: WatchRow[];
-  option_watchlist?: WatchRow[];
   positions?: CommodityPosition[];
   trade_history?: TradeRow[];
   orders?: Order[];
-  reports?: ReportRow[];
+  reports?: Record<string, unknown>[];
   commentary?: { time?: string; tone?: string; message?: string }[];
-  signal_audit?: Record<string, any>[];
-  data_health?: Record<string, any>;
+  signal_audit?: Record<string, unknown>[];
 };
 
-const BUCKET_COLOR: Record<string, string> = {
-  active: "bg-emerald-500/15 text-emerald-300",
-  ready: "bg-emerald-500/20 text-emerald-200",
-  favourable: "bg-amber-500/15 text-amber-200",
-  drifting: "bg-rose-500/15 text-rose-200",
-  neutral: "bg-slate-500/15 text-slate-300",
-};
-
-const QUIET_ROW = "border-t border-transparent hover:bg-bg-secondary/20";
-const QUIET_SURFACE = "rounded-md bg-bg-secondary/15";
-const QUIET_TILE = "rounded-md bg-bg-secondary/20";
+// ─── Format helpers ───────────────────────────────────────────────────────
 
 function formatINR(n: number | null | undefined, decimals = 0): string {
-  if (n === null || n === undefined || Number.isNaN(n)) return "--";
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
   return `₹${Number(n).toLocaleString("en-IN", {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
@@ -288,7 +223,7 @@ function formatINR(n: number | null | undefined, decimals = 0): string {
 }
 
 function formatNumber(n: number | null | undefined, decimals = 2): string {
-  if (n === null || n === undefined || Number.isNaN(n)) return "--";
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
   return Number(n).toLocaleString("en-IN", {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
@@ -296,383 +231,18 @@ function formatNumber(n: number | null | undefined, decimals = 2): string {
 }
 
 function formatPct(n: number | null | undefined, decimals = 2): string {
-  if (n === null || n === undefined || Number.isNaN(n)) return "--";
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
   const sign = n > 0 ? "+" : "";
   return `${sign}${Number(n).toFixed(decimals)}%`;
 }
 
 function formatSigned(n: number | null | undefined, decimals = 0): string {
-  if (n === null || n === undefined || Number.isNaN(n)) return "--";
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
   const sign = n > 0 ? "+" : "";
   return `${sign}${Number(n).toLocaleString("en-IN", {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
   })}`;
-}
-
-function timeframeLabel(value: unknown, fallback: string): string {
-  const raw = String(value || fallback);
-  if (raw === "15minute") return "15m";
-  if (raw === "30minute") return "30m";
-  return raw.replace("minute", "m");
-}
-
-function finiteNumber(value: unknown, fallback = 0): number {
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? numeric : fallback;
-}
-
-function formatIST(iso: string | null | undefined): string {
-  if (!iso) return "--";
-  try {
-    return new Date(iso).toLocaleString("en-IN", {
-      day: "2-digit",
-      month: "short",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    });
-  } catch {
-    return iso;
-  }
-}
-
-function formatTimeStamp(iso: string | null | undefined): string {
-  if (!iso) return "--";
-  try {
-    return new Date(iso).toLocaleTimeString("en-IN", {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    });
-  } catch {
-    return iso;
-  }
-}
-
-function tickAgeLabel(iso: string | null | undefined, staleSeconds?: number | null): string {
-  const explicitAge = Number(staleSeconds);
-  if (Number.isFinite(explicitAge) && explicitAge >= 0) {
-    return explicitAge < 60 ? `${Math.round(explicitAge)}s` : `${Math.round(explicitAge / 60)}m`;
-  }
-  if (!iso) return "--";
-  const time = new Date(iso).getTime();
-  if (!Number.isFinite(time)) return "--";
-  const seconds = Math.max(0, Math.round((Date.now() - time) / 1000));
-  return seconds < 60 ? `${seconds}s` : `${Math.round(seconds / 60)}m`;
-}
-
-function trajectoryGlyph(t: Trajectory): string {
-  if (t === "improving") return "▲";
-  if (t === "deteriorating") return "▼";
-  if (t === "stalled") return "▬";
-  return "·";
-}
-
-function trajectoryColor(t: Trajectory): string {
-  if (t === "improving") return "text-emerald-400";
-  if (t === "deteriorating") return "text-rose-400";
-  return "text-slate-400";
-}
-
-function severityColor(sev: string | undefined): string {
-  switch ((sev || "").toLowerCase()) {
-    case "error":
-      return "text-rose-400";
-    case "warning":
-      return "text-amber-300";
-    case "success":
-      return "text-emerald-300";
-    case "trade":
-      return "text-sky-300";
-    default:
-      return "text-slate-400";
-  }
-}
-
-function snapshotContractToWatchRow(contract: CommoditySnapshotContract): WatchRow {
-  const symbol =
-    contract.selected_lookup_symbol ||
-    contract.active_lookup_symbol ||
-    contract.lookup_symbol ||
-    contract.default_lookup_symbol ||
-    contract.symbol ||
-    null;
-  const expiry =
-    contract.selected_expiry ||
-    contract.active_expiry ||
-    contract.suggested_expiry ||
-    null;
-  const detail = contract.detail || "Runtime scan rows are empty; showing the saved MCX contract catalog.";
-  const unitParts = [contract.contract_unit_label, contract.quote_unit_label].filter(Boolean);
-  return {
-    symbol,
-    configured_symbol: contract.symbol || null,
-    active_lookup_symbol: contract.active_lookup_symbol || null,
-    selected_lookup_symbol: contract.selected_lookup_symbol || null,
-    underlying: contract.underlying || contract.symbol || null,
-    display_name: [contract.underlying || contract.symbol, expiry].filter(Boolean).join(" · "),
-    regime: contract.selection_policy || "catalog",
-    mp_day_type: unitParts.join(" · ") || null,
-    mp_status: contract.has_options ? "options mapped" : "futures only",
-    signal_validation: contract.has_options ? "catalog_ready" : "catalog_only",
-    signal_validation_detail: detail,
-    bucket: "neutral",
-    trajectory: "stalled",
-    bucket_rationale: detail,
-  };
-}
-
-function commodityTickKeys(row: WatchRow): string[] {
-  const keys = [
-    row.symbol,
-    row.active_lookup_symbol,
-    row.selected_lookup_symbol,
-    row.configured_symbol,
-  ]
-    .map((value) => String(value || "").trim().toUpperCase())
-    .filter(Boolean);
-  return Array.from(new Set(keys));
-}
-
-function normalizeTickSymbol(symbol: string | null | undefined): string {
-  return String(symbol || "").trim().toUpperCase();
-}
-
-function normalizeTickPayload(symbol: string, raw: unknown): LatestTickSnapshot | null {
-  const data = raw as Record<string, unknown>;
-  const ltp = Number(data.ltp ?? data.last_price ?? data.price ?? data.close);
-  if (!Number.isFinite(ltp) || ltp <= 0) return null;
-  return {
-    symbol: String(data.symbol || symbol),
-    ltp,
-    close: Number.isFinite(Number(data.close)) ? Number(data.close) : null,
-    stale: Boolean(data.stale),
-    stale_seconds: Number.isFinite(Number(data.stale_seconds)) ? Number(data.stale_seconds) : null,
-    timestamp: String(data.timestamp || data.time || new Date().toISOString()),
-    source: String(data.source || "tick_stream"),
-  };
-}
-
-function useCommodityTickStreams(symbols: string[]): {
-  ticks: Record<string, LatestTickSnapshot>;
-  symbolCount: number;
-} {
-  const [ticks, setTicks] = useState<Record<string, LatestTickSnapshot>>({});
-  const symbolKey = useMemo(
-    () => symbols.map(normalizeTickSymbol).filter(Boolean).sort().join("|"),
-    [symbols],
-  );
-
-  useEffect(() => {
-    const nextSymbols = symbolKey.split("|").filter(Boolean);
-    if (nextSymbols.length === 0) {
-      setTicks({});
-      return;
-    }
-
-    let active = true;
-    setTicks((current) =>
-      Object.fromEntries(
-        Object.entries(current).filter(([symbol]) => nextSymbols.includes(symbol)),
-      ),
-    );
-    const sockets = nextSymbols.map((symbol) =>
-      createTickSocket(
-        symbol,
-        (raw) => {
-          if (!active) return;
-          const tick = normalizeTickPayload(symbol, raw);
-          if (!tick) return;
-          const keys = [symbol, normalizeTickSymbol(tick.symbol)].filter(Boolean);
-          setTicks((current) => {
-            const next = { ...current };
-            for (const key of keys) next[key] = tick;
-            return next;
-          });
-        },
-      ),
-    );
-
-    return () => {
-      active = false;
-      sockets.forEach((socket) => socket.close());
-    };
-  }, [symbolKey]);
-
-  return {
-    ticks,
-    symbolCount: symbolKey ? symbolKey.split("|").filter(Boolean).length : 0,
-  };
-}
-
-function overlayLiveTicks(rows: WatchRow[], ticks: Record<string, LatestTickSnapshot> | undefined): WatchRow[] {
-  if (!ticks || rows.length === 0) return rows;
-  return rows.map((row) => {
-    const tick = commodityTickKeys(row)
-      .map((key) => ticks[key])
-      .find((candidate) => candidate && Number(candidate.ltp || 0) > 0 && !candidate.stale);
-    if (!tick || Number(tick.ltp || 0) <= 0) return row;
-    const price = Number(tick.ltp);
-    const previousClose = Number(row.previous_close || 0);
-    return {
-      ...row,
-      price,
-      change: previousClose > 0 ? price - previousClose : row.change,
-      change_pct: previousClose > 0 ? ((price - previousClose) / previousClose) * 100 : row.change_pct,
-      live_tick_source: tick.source,
-      live_tick_time: tick.timestamp,
-      live_tick_stale_seconds: tick.stale_seconds,
-    } as WatchRow;
-  });
-}
-
-function enrichFuturesRowsWithActiveContracts(
-  rows: WatchRow[],
-  contracts: CommoditySnapshotContract[],
-): WatchRow[] {
-  if (!rows.length || !contracts.length) return rows;
-
-  const contractsByConfiguredSymbol = new Map(
-    contracts
-      .filter((contract) => contract.symbol)
-      .map((contract) => [String(contract.symbol), contract]),
-  );
-  const contractsByUnderlying = new Map(
-    contracts
-      .filter((contract) => contract.underlying)
-      .map((contract) => [String(contract.underlying), contract]),
-  );
-
-  return rows.map((row) => {
-    const configuredSymbol = String(row.configured_symbol || row.symbol || "");
-    const contract =
-      contractsByConfiguredSymbol.get(configuredSymbol) ||
-      contractsByUnderlying.get(String(row.underlying || ""));
-    const activeSymbol =
-      contract?.selected_lookup_symbol ||
-      contract?.active_lookup_symbol ||
-      row.active_lookup_symbol ||
-      row.selected_lookup_symbol ||
-      row.symbol ||
-      null;
-    if (!contract || !activeSymbol || activeSymbol === row.symbol) return row;
-
-    return {
-      ...row,
-      symbol: activeSymbol,
-      configured_symbol: contract.symbol || row.configured_symbol || row.symbol || null,
-      active_lookup_symbol: contract.active_lookup_symbol || row.active_lookup_symbol || null,
-      selected_lookup_symbol: contract.selected_lookup_symbol || row.selected_lookup_symbol || null,
-      rollover_detail:
-        row.rollover_detail ||
-        `Showing active futures ${activeSymbol} for configured ${contract.symbol || row.symbol}.`,
-    };
-  });
-}
-
-function Section({
-  title,
-  detail,
-  children,
-  className = "",
-}: {
-  title: string;
-  detail?: string;
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <section className={`${QUIET_SURFACE} p-3 ${className}`}>
-      <div className="mb-2 flex items-baseline justify-between gap-3">
-        <h2 className="text-[11px] font-semibold uppercase tracking-[0.18em] text-text-muted">{title}</h2>
-        {detail ? <span className="text-[10.5px] text-text-muted">{detail}</span> : null}
-      </div>
-      {children}
-    </section>
-  );
-}
-
-function StatTile({
-  label,
-  value,
-  detail,
-  tone = "text-text-primary",
-}: {
-  label: string;
-  value: string;
-  detail?: string;
-  tone?: string;
-}) {
-  return (
-    <div className={`${QUIET_TILE} px-3 py-2`}>
-      <div className="text-[10.5px] uppercase tracking-[0.16em] text-text-muted">{label}</div>
-      <div className={`mt-1 font-mono text-base font-semibold ${tone}`}>{value}</div>
-      {detail ? <div className="mt-1 truncate text-[11px] text-text-muted">{detail}</div> : null}
-    </div>
-  );
-}
-
-/**
- * Pill-style secondary stat. Used in the chip strip below the main Decision
- * Bar so caps / cooldown / DQ status stay visible without stealing the
- * vertical real estate of full StatTiles.
- */
-function Chip({ label, value, tone = "" }: { label: string; value: string; tone?: string }) {
-  return (
-    <span className="inline-flex items-baseline gap-1 rounded-md bg-bg-secondary/20 px-2 py-1">
-      <span className="uppercase tracking-[0.14em] text-[10px] text-text-muted">{label}</span>
-      <span className={`font-mono text-[11px] ${tone || "text-text-secondary"}`}>{value}</span>
-    </span>
-  );
-}
-
-function BucketPill({ bucket }: { bucket?: Bucket }) {
-  return (
-    <span className={`rounded px-1.5 py-0.5 text-[10px] ${BUCKET_COLOR[bucket || "neutral"] || BUCKET_COLOR.neutral}`}>
-      {bucket || "--"}
-    </span>
-  );
-}
-
-function OptionLegSummary({ leg }: { leg?: Record<string, unknown> }) {
-  if (!leg) {
-    return <span className="text-text-muted">--</span>;
-  }
-  const liquid = Boolean(leg.is_liquid);
-  const oi = Number(leg.oi ?? 0);
-  const oiChange = leg.oi_change === null || leg.oi_change === undefined ? null : Number(leg.oi_change);
-  const volume = Number(leg.volume ?? 0);
-  return (
-    <div className="space-y-0.5">
-      <div className="flex items-baseline justify-end gap-2">
-        <span className="font-mono text-text-primary">{String((leg.strike ?? "--") as string | number)}</span>
-        <span className={liquid ? "text-emerald-300" : "text-amber-300"}>{liquid ? "liquid" : "thin"}</span>
-      </div>
-      <div className="font-mono text-[12px] text-text-primary">{formatNumber(Number(leg.live_ltp ?? leg.ltp ?? 0), 2)}</div>
-      <div className="text-[10.5px] text-text-muted">
-        OI {formatNumber(oi, 0)}
-        {oiChange !== null ? (
-          <span className={oiChange >= 0 ? "text-emerald-400" : "text-rose-400"}> {oiChange >= 0 ? "+" : ""}{formatNumber(oiChange, 0)}</span>
-        ) : null}
-        <span> · Vol {formatNumber(volume, 0)}</span>
-      </div>
-    </div>
-  );
-}
-
-// Tighter helpers used by the Bloomberg-style table.
-const POS = "text-emerald-400";
-const NEG = "text-rose-400";
-const NEU = "text-text-muted";
-
-function colorForDelta(n: number | null | undefined): string {
-  if (n === null || n === undefined || Number.isNaN(n)) return NEU;
-  if (n > 0) return POS;
-  if (n < 0) return NEG;
-  return NEU;
 }
 
 function compactNumber(n: number | null | undefined): string {
@@ -681,1145 +251,743 @@ function compactNumber(n: number | null | undefined): string {
   if (abs >= 1_00_00_000) return `${(n / 1_00_00_000).toFixed(2)}Cr`;
   if (abs >= 1_00_000) return `${(n / 1_00_000).toFixed(2)}L`;
   if (abs >= 1_000) return `${(n / 1_000).toFixed(2)}k`;
-  return n.toLocaleString("en-IN", { maximumFractionDigits: 0 });
+  return Math.round(n).toLocaleString("en-IN");
 }
 
-function bucketCode(b?: Bucket): string {
-  if (b === "active") return "ACT";
-  if (b === "ready") return "RDY";
-  if (b === "favourable") return "FAV";
-  if (b === "drifting") return "DRF";
-  if (b === "neutral") return "NEU";
-  return "—";
+function formatIST(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString("en-IN", {
+      day: "2-digit",
+      month: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+  } catch {
+    return iso;
+  }
 }
 
-function bucketCellClass(b?: Bucket): string {
-  if (b === "active" || b === "ready") return "text-emerald-300";
-  if (b === "favourable") return "text-amber-300";
-  if (b === "drifting") return "text-rose-300";
+function formatTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleTimeString("en-IN", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function finiteNumber(value: unknown, fallback = 0): number {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+// ─── Style helpers ─────────────────────────────────────────────────────────
+
+const TRIGGER_COLOR: Record<string, string> = {
+  open_drive: "bg-emerald-500/20 text-emerald-200 ring-emerald-500/30",
+  ib_break: "bg-sky-500/20 text-sky-200 ring-sky-500/30",
+  failed_auction: "bg-amber-500/20 text-amber-200 ring-amber-500/30",
+  va_migration: "bg-fuchsia-500/20 text-fuchsia-200 ring-fuchsia-500/30",
+  lvn_fade: "bg-slate-500/20 text-slate-300 ring-slate-500/30",
+};
+
+const TRIGGER_PRIORITY: Record<string, number> = {
+  open_drive: 5,
+  ib_break: 4,
+  failed_auction: 3,
+  va_migration: 2,
+  lvn_fade: 1,
+};
+
+function triggerLabel(entryStyle: string | null | undefined): string {
+  if (!entryStyle) return "—";
+  return entryStyle
+    .split("_")
+    .map((w) => (w.length > 1 ? w[0].toUpperCase() + w.slice(1) : w.toUpperCase()))
+    .join(" ");
+}
+
+function colorForDelta(n: number | null | undefined): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return "text-slate-400";
+  if (n > 0) return "text-emerald-400";
+  if (n < 0) return "text-rose-400";
   return "text-slate-400";
 }
 
-function regimeShort(r?: string | null): string {
-  if (!r) return "—";
-  const t = String(r).toLowerCase();
-  if (t.startsWith("bull")) return "BULL";
-  if (t.startsWith("bear")) return "BEAR";
-  if (t.startsWith("neutral")) return "NTRL";
-  if (t === "dead_zone") return "DEAD";
-  if (t === "vol_spike") return "VLSP";
-  if (t === "warmup") return "WARM";
-  return t.slice(0, 4).toUpperCase();
-}
-
-function mpShort(s?: string | null): string {
-  if (!s) return "—";
-  const t = String(s).toLowerCase();
-  // Common MP day types: trend_up, trend_down, balance, balance_above_poc,
-  // balance_below_poc, failed_auction_high, failed_auction_low
-  if (t === "trend_up") return "↑TRND";
-  if (t === "trend_down") return "↓TRND";
-  if (t === "balance") return "BAL";
-  if (t === "balance_above_poc") return "BAL↑";
-  if (t === "balance_below_poc") return "BAL↓";
-  if (t === "failed_auction_high") return "FA-H";
-  if (t === "failed_auction_low") return "FA-L";
-  return t.slice(0, 5).toUpperCase();
-}
-
-function sigShort(v?: string | null): string {
-  if (!v) return "—";
-  const t = String(v).toLowerCase();
-  if (t === "ready") return "READY";
-  if (t === "waiting_cross") return "WAIT";
-  if (t === "mp_conflict") return "MP-X";
-  if (t === "mp_pending") return "MP-P";
-  if (t === "mp_warming_up") return "MP-W";
-  if (t === "warming_up") return "WARM";
-  if (t === "position_open") return "OPEN";
-  if (t === "data_stale") return "STALE";
-  if (t === "blocked_kill_switch") return "KILL";
-  if (t === "iv_reject") return "IV✗";
-  if (t === "iv_unavailable") return "IV?";
-  if (t === "tte_filter") return "TTE✗";
-  if (t === "event_window") return "EVT";
-  return t.slice(0, 5).toUpperCase();
-}
-
-function daysToExpiry(expiry?: string | null): number | null {
-  if (!expiry) return null;
-  try {
-    const d = new Date(`${expiry}T00:00:00+05:30`);
-    const today = new Date();
-    return Math.max(0, Math.floor((d.getTime() - today.getTime()) / 86_400_000));
-  } catch {
-    return null;
-  }
-}
-
+// ─── MP Profile bar (SVG) ─────────────────────────────────────────────────
 /**
- * Watchlist with summary rows + click-to-expand detail panel. Inspired by
- * TradingView's screener and Zerodha Kite's positions view:
- *   - Primary row shows the 8 columns a trader scans for fast triage
- *     (symbol, bucket, last, Δ%, MACD-hist, regime, MP, signal)
- *   - Click the row (or the chevron) to expand a detail panel below with
- *     CE/PE strikes, ATM Greeks, DTE, proximity, bar time, and rationale
- *   - No horizontal scroll on a standard 1440px laptop screen
+ * Mini visual sized for an in-row at-a-glance look at session structure.
+ * Shows the VAL→VAH band (light), the IB band (slightly darker), the POC
+ * (single bright tick), and a marker at the live price.
+ *
+ * Width is flexible (parent decides via className); height is fixed at 22px
+ * so the row stays compact. If MP isn't ready yet, renders a "warming up"
+ * placeholder so the row layout doesn't jump.
  */
-function InstrumentWatchlist({
-  futuresRows,
-  optionRows,
+function MPProfileBar({
+  row,
+  className = "",
 }: {
-  futuresRows: WatchRow[];
-  optionRows: WatchRow[];
+  row: WatchRow;
+  className?: string;
 }) {
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const price = Number(row.price ?? 0);
+  const poc = Number(row.mp_poc ?? 0);
+  const vah = Number(row.mp_vah ?? 0);
+  const val = Number(row.mp_val ?? 0);
+  const ibh = Number(row.mp_ib_high ?? 0);
+  const ibl = Number(row.mp_ib_low ?? 0);
 
-  if (futuresRows.length === 0 && optionRows.length === 0) {
+  if (!poc || !vah || !val || vah <= val) {
     return (
-      <div className="px-2 py-8 text-center text-xs text-text-muted">
-        No commodity instruments available.
+      <div
+        className={`flex h-[22px] items-center justify-center rounded bg-bg-secondary/30 px-2 text-[9.5px] uppercase tracking-wider text-text-muted ${className}`}
+      >
+        mp warming
       </div>
     );
   }
-  const optionsBySymbol = new Map<string, WatchRow>();
-  const addOptionKey = (key: unknown, row: WatchRow) => {
-    const normalized = String(key || "").trim();
-    if (normalized && !optionsBySymbol.has(normalized)) {
-      optionsBySymbol.set(normalized, row);
-    }
-  };
-  for (const row of optionRows) {
-    addOptionKey(row.symbol, row);
-    addOptionKey(row.configured_symbol, row);
-    addOptionKey(row.active_lookup_symbol, row);
-    addOptionKey(row.selected_lookup_symbol, row);
-    addOptionKey(row.underlying, row);
-  }
 
-  const toggle = (key: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) {
-        next.delete(key);
-      } else {
-        next.add(key);
-      }
-      return next;
-    });
-  };
+  // Domain: stretch a little beyond VAL/VAH so the marker doesn't clip.
+  const padBase = (vah - val) * 0.25;
+  const minDomain = Math.min(val, ibl || val, price || val) - padBase;
+  const maxDomain = Math.max(vah, ibh || vah, price || vah) + padBase;
+  const span = maxDomain - minDomain || 1;
+  const toPct = (v: number) => `${((v - minDomain) / span) * 100}%`;
 
-  const TH =
-    "px-2 py-1.5 text-left text-[10px] font-semibold uppercase tracking-[0.14em] text-text-muted bg-bg-secondary/40 sticky top-0 z-10";
-  const THR = `${TH} text-right`;
-  const TD = "px-2 py-1.5 align-middle whitespace-nowrap font-mono text-[12px]";
-  const TDR = `${TD} text-right`;
+  const valX = toPct(val);
+  const vahX = toPct(vah);
+  const pocX = toPct(poc);
+  const ibLowX = ibl ? toPct(Math.max(ibl, val)) : null;
+  const ibHighX = ibh ? toPct(Math.min(ibh, vah)) : null;
+  const priceX = price ? toPct(price) : null;
+
+  const direction = String(row.mp_direction || "").toLowerCase();
+  const markerColor =
+    direction === "buy" ? "fill-emerald-400" : direction === "sell" ? "fill-rose-400" : "fill-sky-300";
 
   return (
-    <div className="space-y-3">
-      <div className="overflow-hidden rounded-md border border-bg-active/30">
-        <table className="w-full border-collapse">
-          <thead>
-            <tr>
-              <th className={`${TH} w-6 px-1`} aria-label="expand" />
-              <th className={TH}>Symbol</th>
-              <th className={`${TH} w-14`}>Bkt</th>
-              <th className={`${THR} w-24`}>Last</th>
-              <th className={`${THR} w-20`}>Δ%</th>
-              <th className={`${THR} w-20`}>MACD 15m</th>
-              <th className={`${THR} w-20`}>Hist</th>
-              <th className={`${THR} w-16`}>RSI 15m</th>
-              <th className={`${TH} w-16`}>Regime</th>
-              <th className={`${TH} w-16`}>MP</th>
-              <th className={`${TH} w-16`}>Sig</th>
-              <th className={`${THR} w-16`}>DTE</th>
-              <th className={`${THR} w-20`}>Bar</th>
-            </tr>
-          </thead>
-          <tbody>
-            {futuresRows.map((row) => {
-            const key = String(row.symbol || row.underlying || "");
-            const isOpen = expanded.has(key);
-            const optionRow =
-              optionsBySymbol.get(String(row.symbol || "")) ||
-              optionsBySymbol.get(String(row.configured_symbol || "")) ||
-              optionsBySymbol.get(String(row.active_lookup_symbol || "")) ||
-              optionsBySymbol.get(String(row.selected_lookup_symbol || "")) ||
-              optionsBySymbol.get(String(row.underlying || ""));
-            const ce = (optionRow as Record<string, unknown> | undefined)?.ce as
-              | Record<string, unknown>
-              | undefined;
-            const pe = (optionRow as Record<string, unknown> | undefined)?.pe as
-              | Record<string, unknown>
-              | undefined;
-            const optionExpiry = (optionRow as Record<string, unknown> | undefined)?.expiry as
-              | string
-              | undefined;
-            const dte = daysToExpiry(optionExpiry);
-            const chg =
-              row.price != null && row.previous_close != null
-                ? Number(row.price) - Number(row.previous_close)
-                : null;
-            const sigVal = row.signal_validation || row.reason;
-            return (
-              <Fragment key={key}>
-                <tr
-                  className="cursor-pointer border-t border-bg-active/20 hover:bg-bg-secondary/25"
-                  onClick={() => toggle(key)}
-                  title={
-                    row.bucket_rationale ||
-                    row.signal_validation_detail ||
-                    row.signal_validation ||
-                    ""
-                  }
-                >
-                  <td className="px-1 py-1.5 align-middle text-text-muted">
-                    {isOpen ? (
-                      <ChevronDown className="h-3.5 w-3.5" />
-                    ) : (
-                      <ChevronRight className="h-3.5 w-3.5" />
-                    )}
-                  </td>
-                  <td className="px-2 py-1.5 align-middle whitespace-nowrap">
-                    <span className="font-semibold text-text-primary">
-                      {row.display_name || row.underlying || row.symbol}
-                    </span>
-                    <span className="ml-2 font-mono text-[10px] text-text-muted">
-                      {(row.symbol || "").replace(/^MCX:/, "").replace(/FUT$/, "")}
-                    </span>
-                  </td>
-                  <td
-                    className={`px-2 py-1.5 align-middle text-[11px] font-semibold ${bucketCellClass(
-                      row.bucket ?? null,
-                    )}`}
-                  >
-                    {bucketCode(row.bucket ?? null)}
-                  </td>
-                  <td className={`${TDR} text-text-primary`}>
-                    {formatNumber(row.price, 2)}
-                    {chg != null ? (
-                      <div className={`text-[10px] font-normal ${colorForDelta(chg)}`}>
-                        {(chg >= 0 ? "+" : "") + formatNumber(chg, 2)}
-                      </div>
-                    ) : null}
-                    {row.live_tick_time ? (
-                      <div
-                        className={`text-[9.5px] font-normal ${
-                          row.live_tick_stale_seconds != null && row.live_tick_stale_seconds > 10
-                            ? "text-amber-300"
-                            : "text-sky-300"
-                        }`}
-                        title={`${row.live_tick_source || "tick"} · ${formatIST(row.live_tick_time)}`}
-                      >
-                        LTP {formatTimeStamp(row.live_tick_time)} · {tickAgeLabel(row.live_tick_time, row.live_tick_stale_seconds)}
-                      </div>
-                    ) : null}
-                  </td>
-                  <td className={`${TDR} ${colorForDelta(row.change_pct)}`}>
-                    {formatPct(row.change_pct, 2)}
-                  </td>
-                  <td className={`${TDR} ${colorForDelta(row.macd)}`}>
-                    {formatNumber(row.macd, 2)}
-                  </td>
-                  <td className={`${TDR} ${colorForDelta(row.macd_histogram)}`}>
-                    {formatNumber(row.macd_histogram, 2)}
-                  </td>
-                  <td className={`${TDR} text-text-secondary`}>
-                    {formatNumber(row.rsi, 1)}
-                  </td>
-                  <td className="px-2 py-1.5 align-middle text-[10.5px] uppercase text-text-secondary">
-                    {regimeShort(row.regime)}
-                  </td>
-                  <td className="px-2 py-1.5 align-middle text-[10.5px] text-text-secondary" title="Market Profile day type · price position vs Value Area · POC level">
-                    {(() => {
-                      const px = row.price != null ? Number(row.price) : null;
-                      const poc = row.mp_poc != null ? Number(row.mp_poc) : null;
-                      const vah = row.mp_vah != null ? Number(row.mp_vah) : null;
-                      const val = row.mp_val != null ? Number(row.mp_val) : null;
-                      // Zone vs Value Area — a key mean-reversion signal.
-                      let zone: "above" | "inside" | "below" | null = null;
-                      if (px != null && vah != null && val != null) {
-                        zone = px > vah ? "above" : px < val ? "below" : "inside";
-                      }
-                      const zoneLabel =
-                        zone === "above" ? "↑VAH" : zone === "below" ? "↓VAL" : zone === "inside" ? "in VA" : null;
-                      const zoneClr =
-                        zone === "above"
-                          ? "text-emerald-300"
-                          : zone === "below"
-                            ? "text-rose-300"
-                            : "text-text-muted";
-                      return (
-                        <div>
-                          <div className="uppercase">{mpShort(row.mp_day_type || row.mp_status)}</div>
-                          {poc != null ? (
-                            <div className="mt-0.5 font-mono text-[10px] text-text-muted">
-                              POC {formatNumber(poc, poc >= 1000 ? 0 : 2)}
-                            </div>
-                          ) : null}
-                          {zoneLabel ? (
-                            <div className={`mt-0.5 font-mono text-[10px] ${zoneClr}`}>{zoneLabel}</div>
-                          ) : null}
-                        </div>
-                      );
-                    })()}
-                  </td>
-                  <td className="px-2 py-1.5 align-middle text-[10.5px] uppercase text-text-secondary">
-                    {sigShort(sigVal)}
-                  </td>
-                  <td className={`${TDR} text-text-muted`}>
-                    {dte == null ? "—" : dte}
-                  </td>
-                  <td className={`${TDR} text-[10px] text-text-muted`}>
-                    {formatIST(row.bar_time)}
-                  </td>
-                </tr>
-                {isOpen ? (
-                  <tr className="border-t border-bg-active/15 bg-bg-secondary/15">
-                    <td className="px-1" />
-                    <td colSpan={12} className="px-2 py-2">
-                      <InstrumentDetail row={row} ce={ce} pe={pe} dte={dte} />
-                    </td>
-                  </tr>
-                ) : null}
-              </Fragment>
-            );
-            })}
-          </tbody>
-        </table>
-      </div>
-      {/* Options pair table removed — commodity options sleeve deprecated. */}
+    <div
+      className={`relative h-[22px] rounded bg-bg-secondary/40 ${className}`}
+      title={`POC ${formatNumber(poc, 2)} · VAH ${formatNumber(vah, 2)} · VAL ${formatNumber(val, 2)} · IB [${formatNumber(ibl, 2)}–${formatNumber(ibh, 2)}]`}
+    >
+      <svg
+        className="absolute inset-0 h-full w-full"
+        preserveAspectRatio="none"
+        viewBox="0 0 100 22"
+        role="img"
+        aria-label="market profile"
+      >
+        {/* Value area band (VAL → VAH) */}
+        <rect
+          x={parseFloat(valX)}
+          y={4}
+          width={parseFloat(vahX) - parseFloat(valX)}
+          height={14}
+          className="fill-slate-500/30"
+        />
+        {/* IB band (subtle inside the value area) */}
+        {ibLowX && ibHighX ? (
+          <rect
+            x={parseFloat(ibLowX)}
+            y={7}
+            width={Math.max(parseFloat(ibHighX) - parseFloat(ibLowX), 0)}
+            height={8}
+            className="fill-slate-400/30"
+          />
+        ) : null}
+        {/* POC bright tick */}
+        <rect x={parseFloat(pocX) - 0.5} y={2} width={1} height={18} className="fill-amber-300/85" />
+        {/* Center mid-line for orientation */}
+        <line x1={0} x2={100} y1={11} y2={11} className="stroke-text-muted/30" strokeWidth={0.4} />
+        {/* Live price marker */}
+        {priceX ? (
+          <g>
+            <line
+              x1={parseFloat(priceX)}
+              x2={parseFloat(priceX)}
+              y1={0}
+              y2={22}
+              className="stroke-text-primary/70"
+              strokeWidth={0.6}
+            />
+            <polygon
+              points={`${parseFloat(priceX) - 1.2},0 ${parseFloat(priceX) + 1.2},0 ${parseFloat(priceX)},2.2`}
+              className={markerColor}
+            />
+          </g>
+        ) : null}
+      </svg>
     </div>
   );
 }
 
-function InstrumentDetail({
+// ─── Trigger badge ─────────────────────────────────────────────────────────
+
+function TriggerBadge({ row }: { row: WatchRow }) {
+  const style = String(row.entry_style || "").toLowerCase();
+  const colorClass = TRIGGER_COLOR[style] || "bg-bg-secondary/40 text-text-muted ring-bg-secondary/50";
+  const conf = Number(row.confidence ?? 0);
+  const sig = String(row.signal || row.candidate_signal || "").toUpperCase();
+  if (!style) {
+    return <span className="text-[10.5px] text-text-muted">no trigger</span>;
+  }
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded px-1.5 py-[1.5px] text-[10px] font-medium uppercase tracking-wide ring-1 ${colorClass}`}
+    >
+      <span>{triggerLabel(style)}</span>
+      {sig ? <span className="rounded bg-black/30 px-1 text-[9px]">{sig}</span> : null}
+      {conf > 0 ? <span className="font-mono">{conf.toFixed(2)}</span> : null}
+    </span>
+  );
+}
+
+// ─── CVD chip ──────────────────────────────────────────────────────────────
+
+function CVDChip({ row }: { row: WatchRow }) {
+  const session = Number(row.cvd_session ?? row.cvd_latest ?? NaN);
+  const agrees = row.cvd_agrees;
+  if (!Number.isFinite(session)) {
+    return <span className="text-text-muted">—</span>;
+  }
+  const arrow = session > 0 ? "↑" : session < 0 ? "↓" : "·";
+  const tone =
+    agrees === true ? "text-emerald-300" : agrees === false ? "text-rose-300" : colorForDelta(session);
+  return (
+    <span className={`font-mono ${tone}`} title={`Session CVD ${session.toLocaleString("en-IN")}`}>
+      {arrow} {compactNumber(Math.abs(session))}
+    </span>
+  );
+}
+
+// ─── Position chip ─────────────────────────────────────────────────────────
+
+function PositionChip({ position }: { position?: CommodityPosition }) {
+  if (!position) return <span className="text-text-muted">—</span>;
+  const pnl = Number(position.unrealized_pnl ?? 0);
+  const ret = Number(position.return_pct ?? 0);
+  const side = (position.action || "").toUpperCase();
+  const sideColor = side === "BUY" ? "text-emerald-300" : "text-rose-300";
+  const pnlColor = pnl >= 0 ? "text-emerald-400" : "text-rose-400";
+  return (
+    <span className="inline-flex items-center gap-1.5 font-mono">
+      <span className={`text-[10.5px] uppercase ${sideColor}`}>{side}</span>
+      <span className="text-text-secondary">{position.lots}lt</span>
+      <span className={`text-[11px] ${pnlColor}`}>
+        {formatSigned(pnl)} ({formatPct(ret, 1)})
+      </span>
+    </span>
+  );
+}
+
+// ─── Tick stream hook ──────────────────────────────────────────────────────
+/**
+ * Subscribe one socket per configured MCX symbol. The page passes the live
+ * tick values down into each row so the price column updates faster than
+ * the agent's 30s scan cadence.
+ */
+function useCommodityTickStreams(symbols: string[]): Record<string, LatestTickSnapshot> {
+  const [ticks, setTicks] = useState<Record<string, LatestTickSnapshot>>({});
+  const key = symbols.join("|");
+  useEffect(() => {
+    const list = key.split("|").filter(Boolean);
+    if (list.length === 0) {
+      setTicks({});
+      return;
+    }
+    let active = true;
+    const sockets = list.map((symbol) =>
+      createTickSocket(symbol, (raw) => {
+        if (!active) return;
+        const data = raw as Record<string, unknown>;
+        const ltp = Number(data.ltp ?? data.last_price ?? data.price ?? data.close);
+        if (!Number.isFinite(ltp) || ltp <= 0) return;
+        const snapshot: LatestTickSnapshot = {
+          symbol,
+          ltp,
+          stale: Boolean(data.stale),
+          stale_seconds: Number.isFinite(Number(data.stale_seconds))
+            ? Number(data.stale_seconds)
+            : null,
+          timestamp: String(data.timestamp || new Date().toISOString()),
+          source: String(data.source || "tick_stream"),
+        };
+        setTicks((cur) => ({ ...cur, [symbol]: snapshot }));
+      }),
+    );
+    return () => {
+      active = false;
+      sockets.forEach((s) => s.close());
+    };
+  }, [key]);
+  return ticks;
+}
+
+function overlayTicks(rows: WatchRow[], ticks: Record<string, LatestTickSnapshot>): WatchRow[] {
+  if (!Object.keys(ticks).length) return rows;
+  return rows.map((row) => {
+    const sym = String(row.symbol || row.configured_symbol || row.active_lookup_symbol || "").toUpperCase();
+    const tick = ticks[sym];
+    if (!tick || !Number.isFinite(Number(tick.ltp))) return row;
+    const price = Number(tick.ltp);
+    const prev = Number(row.previous_close || 0);
+    return {
+      ...row,
+      price,
+      change: prev > 0 ? price - prev : row.change,
+      change_pct: prev > 0 ? ((price - prev) / prev) * 100 : row.change_pct,
+      live_tick_source: tick.source,
+      live_tick_time: tick.timestamp,
+      live_tick_stale_seconds: tick.stale_seconds,
+    };
+  });
+}
+
+// ─── Instrument row ────────────────────────────────────────────────────────
+
+function InstrumentRow({
   row,
-  ce,
-  pe,
-  dte,
+  position,
+  onClick,
 }: {
   row: WatchRow;
-  ce?: Record<string, unknown>;
-  pe?: Record<string, unknown>;
-  dte: number | null;
+  position?: CommodityPosition;
+  onClick: () => void;
 }) {
-  const ceLtp = Number(ce?.live_ltp ?? ce?.ltp);
-  const peLtp = Number(pe?.live_ltp ?? pe?.ltp);
-  const ceMacd = Number(ce?.macd);
-  const peMacd = Number(pe?.macd);
-  const ceRsi = Number(ce?.rsi);
-  const peRsi = Number(pe?.rsi);
-  const futuresTimeframe = timeframeLabel(row.indicator_timeframe, "15minute");
-  const ceTimeframe = timeframeLabel(ce?.indicator_timeframe, "30minute");
-  const peTimeframe = timeframeLabel(pe?.indicator_timeframe, "30minute");
-  const ceOi = Number(ce?.oi);
-  const peOi = Number(pe?.oi);
-  const ceOiDelta = ce?.oi_change != null ? Number(ce.oi_change) : null;
-  const peOiDelta = pe?.oi_change != null ? Number(pe.oi_change) : null;
-  const ceVol = Number(ce?.volume ?? 0);
-  const peVol = Number(pe?.volume ?? 0);
-
-  // Order-flow + MP-extension snapshot derived from the new backend
-  // fields. None of these affect existing logic — they only render in
-  // the expanded drawer.
-  const vwap = row.vwap;
-  const price = row.price;
-  const vwapDelta = price != null && vwap != null ? Number(price) - Number(vwap) : null;
-  const vwapPct = vwapDelta != null && vwap ? (vwapDelta / Number(vwap)) * 100 : null;
-  const cvdSession = row.cvd_session;
-  const cvdWindow = row.cvd_window_delta;
-  const cvdAgrees = row.cvd_agrees;
-  const cvdDiv = row.cvd_divergence;
-  const ibPct = row.ib_extension_pct;
-  const ibDir = row.ib_extended_above ? "up" : row.ib_extended_below ? "down" : "inside";
-  const hvn = row.hvn_count;
-  const lvn = row.lvn_count;
-  const mpDir = row.mp_direction;
-
-  // ── Value-Area mean-reversion context ────────────────────────────
-  // Mean-reversion entries are strongest when price has rejected outside
-  // value (above VAH or below VAL) and is rotating back toward the POC.
-  const px = price != null ? Number(price) : null;
-  const poc = row.mp_poc != null ? Number(row.mp_poc) : null;
-  const vah = row.mp_vah != null ? Number(row.mp_vah) : null;
-  const val = row.mp_val != null ? Number(row.mp_val) : null;
-  const ibH = row.mp_ib_high != null ? Number(row.mp_ib_high) : null;
-  const ibL = row.mp_ib_low != null ? Number(row.mp_ib_low) : null;
-  // Zone vs VA
-  let vaZone: "above" | "inside" | "below" | null = null;
-  if (px != null && vah != null && val != null) {
-    vaZone = px > vah ? "above" : px < val ? "below" : "inside";
-  }
-  // Distance from key levels (signed, as % of price for readability)
-  const distPocPct = px != null && poc ? ((px - poc) / poc) * 100 : null;
-  const distVahPct = px != null && vah ? ((px - vah) / vah) * 100 : null;
-  const distValPct = px != null && val ? ((px - val) / val) * 100 : null;
-  // Mean-reversion hint: above VAH or below VAL + CVD divergence is the
-  // classic exhaustion setup. Inside VA = no mean-revert edge.
-  const meanRevHint =
-    vaZone === "above" && cvdDiv?.kind === "bearish"
-      ? { dir: "short", target: poc, why: "above VAH + bearish CVD divergence → revert toward POC" }
-      : vaZone === "below" && cvdDiv?.kind === "bullish"
-        ? { dir: "long", target: poc, why: "below VAL + bullish CVD divergence → revert toward POC" }
-        : vaZone === "above"
-          ? { dir: "watch", target: vah, why: "extended above VAH — watch for rejection back to VAH/POC" }
-          : vaZone === "below"
-            ? { dir: "watch", target: val, why: "extended below VAL — watch for reclaim of VAL/POC" }
-            : null;
-
+  const change = Number(row.change ?? 0);
+  const changePct = Number(row.change_pct ?? 0);
+  const price = Number(row.price ?? 0);
+  const live = row.live_tick_source ? "•" : "";
   return (
-    <div className="grid grid-cols-12 gap-3">
-      {/* Futures stats column */}
-      <div className="col-span-12 lg:col-span-3">
-        <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-muted">
-          Futures · {futuresTimeframe}
+    <tr
+      onClick={onClick}
+      className="cursor-pointer border-t border-bg-secondary/20 hover:bg-bg-secondary/15"
+    >
+      <td className="py-1.5 pl-2 pr-2">
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-[12px] font-semibold text-text-primary">
+            {row.display_name || row.underlying || row.symbol}
+          </span>
+          {live ? <span className="text-emerald-400">{live}</span> : null}
         </div>
-        <dl className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
-          <dt className="text-text-muted">ATR</dt>
-          <dd className="text-right font-mono">{formatNumber(row.atr, 2)}</dd>
-          <dt className="text-text-muted">MACD signal</dt>
-          <dd className="text-right font-mono">{formatNumber(row.macd_signal, 2)}</dd>
-          <dt className="text-text-muted">RSI</dt>
-          <dd className="text-right font-mono">{formatNumber(row.rsi, 1)}</dd>
-          <dt className="text-text-muted">Proximity</dt>
-          <dd className="text-right font-mono">
-            {row.proximity_pct == null ? "—" : `${Math.round(row.proximity_pct)}%`}
-          </dd>
-          <dt className="text-text-muted">Prev close</dt>
-          <dd className="text-right font-mono">{formatNumber(row.previous_close, 2)}</dd>
-          <dt className="text-text-muted">LTP stamp</dt>
-          <dd className="text-right font-mono text-[10px]">
-            {row.live_tick_time
-              ? `${formatTimeStamp(row.live_tick_time)} · ${tickAgeLabel(row.live_tick_time, row.live_tick_stale_seconds)}`
-              : "—"}
-          </dd>
-          {row.configured_symbol && row.configured_symbol !== row.symbol ? (
-            <>
-              <dt className="text-text-muted">Configured</dt>
-              <dd className="text-right font-mono text-[10px]">{row.configured_symbol}</dd>
-            </>
-          ) : null}
-          <dt className="text-text-muted">DTE</dt>
-          <dd className="text-right font-mono">{dte == null ? "—" : dte}</dd>
-          <dt className="text-text-muted">Bar time</dt>
-          <dd className="text-right font-mono text-[10px]">{formatIST(row.bar_time)}</dd>
-        </dl>
-      </div>
-      {/* Order flow + MP extension column */}
-      <div className="col-span-12 lg:col-span-3">
-        <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-amber-300/80" title="Bar-level CVD, anchored VWAP, Initial Balance extension, and volume-by-price clusters. The CVD-agreement gate uses these.">
-          Flow · MP ext
-        </div>
-
-        {/* Value-area block — critical for mean-reversion entries */}
-        {(poc != null || vah != null || val != null) ? (
-          <div className="mt-1.5 rounded-md border border-bg-active/30 bg-bg-secondary/20 px-2 py-1.5">
-            <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.14em] text-text-muted">
-              <span>Value Area</span>
-              {vaZone ? (
-                <span
-                  className={
-                    vaZone === "above"
-                      ? "text-emerald-300"
-                      : vaZone === "below"
-                        ? "text-rose-300"
-                        : "text-sky-300"
-                  }
-                  title={
-                    vaZone === "above"
-                      ? "Price above VAH — overbought relative to today's value"
-                      : vaZone === "below"
-                        ? "Price below VAL — oversold relative to today's value"
-                        : "Price inside Value Area — balanced"
-                  }
-                >
-                  {vaZone === "above" ? "↑ above VA" : vaZone === "below" ? "↓ below VA" : "inside VA"}
-                </span>
-              ) : null}
-            </div>
-            <dl className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
-              <dt className="text-text-muted">POC</dt>
-              <dd className="text-right font-mono">
-                {poc != null ? formatNumber(poc, poc >= 1000 ? 2 : 2) : "—"}
-                {distPocPct != null ? (
-                  <span className={`ml-1 text-[10px] ${distPocPct > 0 ? "text-emerald-300" : distPocPct < 0 ? "text-rose-300" : "text-text-muted"}`}>
-                    ({distPocPct >= 0 ? "+" : ""}{distPocPct.toFixed(2)}%)
-                  </span>
-                ) : null}
-              </dd>
-              <dt className="text-text-muted">VAH</dt>
-              <dd className="text-right font-mono">
-                {vah != null ? formatNumber(vah, vah >= 1000 ? 2 : 2) : "—"}
-                {distVahPct != null ? (
-                  <span className="ml-1 text-[10px] text-text-muted">
-                    ({distVahPct >= 0 ? "+" : ""}{distVahPct.toFixed(2)}%)
-                  </span>
-                ) : null}
-              </dd>
-              <dt className="text-text-muted">VAL</dt>
-              <dd className="text-right font-mono">
-                {val != null ? formatNumber(val, val >= 1000 ? 2 : 2) : "—"}
-                {distValPct != null ? (
-                  <span className="ml-1 text-[10px] text-text-muted">
-                    ({distValPct >= 0 ? "+" : ""}{distValPct.toFixed(2)}%)
-                  </span>
-                ) : null}
-              </dd>
-              {ibH != null ? (
-                <>
-                  <dt className="text-text-muted">IB high</dt>
-                  <dd className="text-right font-mono">{formatNumber(ibH, ibH >= 1000 ? 2 : 2)}</dd>
-                </>
-              ) : null}
-              {ibL != null ? (
-                <>
-                  <dt className="text-text-muted">IB low</dt>
-                  <dd className="text-right font-mono">{formatNumber(ibL, ibL >= 1000 ? 2 : 2)}</dd>
-                </>
-              ) : null}
-            </dl>
-            {meanRevHint ? (
-              <div className="mt-1.5 rounded border-l-2 border-amber-300/60 bg-bg-primary/30 px-1.5 py-1 text-[10px] leading-snug">
-                <span
-                  className={
-                    meanRevHint.dir === "long"
-                      ? "font-semibold text-emerald-300"
-                      : meanRevHint.dir === "short"
-                        ? "font-semibold text-rose-300"
-                        : "font-semibold text-amber-300"
-                  }
-                >
-                  {meanRevHint.dir.toUpperCase()}-revert{meanRevHint.target != null ? ` → ${formatNumber(meanRevHint.target, meanRevHint.target >= 1000 ? 2 : 2)}` : ""}
-                </span>
-                <div className="mt-0.5 text-text-muted">{meanRevHint.why}</div>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-
-        <dl className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
-          <dt className="text-text-muted" title="VWAP (volume-weighted average price) anchored at session open">VWAP</dt>
-          <dd className={`text-right font-mono ${vwapDelta != null && vwapDelta > 0 ? "text-emerald-300" : vwapDelta != null && vwapDelta < 0 ? "text-rose-300" : ""}`}>
-            {vwap != null ? formatNumber(Number(vwap), 2) : "—"}
-            {vwapPct != null ? (
-              <span className="ml-1 text-[10px] text-text-muted">
-                ({vwapPct >= 0 ? "+" : ""}{vwapPct.toFixed(2)}%)
-              </span>
-            ) : null}
-          </dd>
-          <dt className="text-text-muted" title="Cumulative volume delta over the entire session (Lee-Ready bar approximation)">Sess CVD</dt>
-          <dd className={`text-right font-mono ${cvdSession != null && cvdSession > 0 ? "text-emerald-300" : cvdSession != null && cvdSession < 0 ? "text-rose-300" : ""}`}>
-            {cvdSession != null ? formatSigned(cvdSession, 0) : "—"}
-          </dd>
-          <dt className="text-text-muted" title="CVD change over the last 6 bars">Δ6 CVD</dt>
-          <dd className={`text-right font-mono ${cvdWindow != null && cvdWindow > 0 ? "text-emerald-300" : cvdWindow != null && cvdWindow < 0 ? "text-rose-300" : ""}`}>
-            {cvdWindow != null ? formatSigned(cvdWindow, 0) : "—"}
-          </dd>
-          <dt className="text-text-muted" title="Is CVD aligned with the current MACD-cross direction? The gate blocks entries when this is false.">Gate</dt>
-          <dd className="text-right font-mono text-[10.5px]">
-            {cvdAgrees == null ? (
-              <span className="text-text-muted">—</span>
-            ) : cvdAgrees ? (
-              <span className="text-emerald-300">✓ aligned</span>
-            ) : (
-              <span className="text-rose-300">✗ disagree</span>
-            )}
-          </dd>
-          <dt className="text-text-muted" title="IB = Initial Balance (first 1-hour range). >50% extension = directional day.">IB ext</dt>
-          <dd className="text-right font-mono">
-            <span className={ibDir === "up" ? "text-emerald-300" : ibDir === "down" ? "text-rose-300" : "text-text-muted"}>
-              {ibDir}
-            </span>
-            {ibPct != null ? (
-              <span className="ml-1 text-[10px] text-text-muted">{(ibPct * 100).toFixed(0)}%</span>
-            ) : null}
-          </dd>
-          <dt className="text-text-muted" title="High-volume nodes (S/R) and low-volume nodes (fast-move zones)">VbP</dt>
-          <dd className="text-right font-mono text-[10.5px] text-text-muted">
-            HVN {hvn ?? "—"} · LVN {lvn ?? "—"}
-          </dd>
-          {mpDir ? (
-            <>
-              <dt className="text-text-muted">MP dir</dt>
-              <dd className="text-right font-mono text-[10.5px]">{mpDir}</dd>
-            </>
-          ) : null}
-          {cvdDiv && cvdDiv.kind ? (
-            <>
-              <dt className="text-text-muted" title="Divergence between price and CVD over the recent lookback window">Divergence</dt>
-              <dd className={`text-right font-mono text-[10.5px] ${cvdDiv.kind === "bullish" ? "text-emerald-300" : "text-rose-300"}`}>
-                {cvdDiv.kind}
-                {cvdDiv.strength != null ? (
-                  <span className="ml-1 text-[10px] text-text-muted">({cvdDiv.strength.toFixed(2)})</span>
-                ) : null}
-              </dd>
-            </>
-          ) : null}
-        </dl>
-      </div>
-      {/* CE leg */}
-      <div className="col-span-12 sm:col-span-6 lg:col-span-3">
-        <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-300/80">
-          CE leg · {ceTimeframe}
-        </div>
-        {ce ? (
-          <dl className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
-            <dt className="text-text-muted">Strike</dt>
-            <dd className="text-right font-mono">{ce.strike != null ? String(ce.strike) : "—"}</dd>
-            <dt className="text-text-muted">LTP</dt>
-            <dd className="text-right font-mono text-text-primary">
-              {Number.isFinite(ceLtp) ? formatNumber(ceLtp, 2) : "—"}
-            </dd>
-            <dt className="text-text-muted">MACD</dt>
-            <dd className={`text-right font-mono ${colorForDelta(ceMacd)}`}>
-              {Number.isFinite(ceMacd) ? formatNumber(ceMacd, 2) : "—"}
-            </dd>
-            <dt className="text-text-muted">RSI</dt>
-            <dd className="text-right font-mono">
-              {Number.isFinite(ceRsi) ? formatNumber(ceRsi, 1) : "—"}
-            </dd>
-            <dt className="text-text-muted">OI</dt>
-            <dd className="text-right font-mono">
-              {Number.isFinite(ceOi) ? compactNumber(ceOi) : "—"}
-              {ceOiDelta != null ? (
-                <span className={`ml-1 text-[10px] ${colorForDelta(ceOiDelta)}`}>
-                  {(ceOiDelta >= 0 ? "+" : "") + compactNumber(ceOiDelta)}
-                </span>
-              ) : null}
-            </dd>
-            <dt className="text-text-muted">Volume</dt>
-            <dd className="text-right font-mono">{compactNumber(ceVol)}</dd>
-          </dl>
-        ) : (
-          <div className="mt-1.5 text-[11px] italic text-text-muted">No CE leg.</div>
-        )}
-      </div>
-      {/* PE leg */}
-      <div className="col-span-12 sm:col-span-6 lg:col-span-3">
-        <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-rose-300/80">
-          PE leg · {peTimeframe}
-        </div>
-        {pe ? (
-          <dl className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
-            <dt className="text-text-muted">Strike</dt>
-            <dd className="text-right font-mono">{pe.strike != null ? String(pe.strike) : "—"}</dd>
-            <dt className="text-text-muted">LTP</dt>
-            <dd className="text-right font-mono text-text-primary">
-              {Number.isFinite(peLtp) ? formatNumber(peLtp, 2) : "—"}
-            </dd>
-            <dt className="text-text-muted">MACD</dt>
-            <dd className={`text-right font-mono ${colorForDelta(peMacd)}`}>
-              {Number.isFinite(peMacd) ? formatNumber(peMacd, 2) : "—"}
-            </dd>
-            <dt className="text-text-muted">RSI</dt>
-            <dd className="text-right font-mono">
-              {Number.isFinite(peRsi) ? formatNumber(peRsi, 1) : "—"}
-            </dd>
-            <dt className="text-text-muted">OI</dt>
-            <dd className="text-right font-mono">
-              {Number.isFinite(peOi) ? compactNumber(peOi) : "—"}
-              {peOiDelta != null ? (
-                <span className={`ml-1 text-[10px] ${colorForDelta(peOiDelta)}`}>
-                  {(peOiDelta >= 0 ? "+" : "") + compactNumber(peOiDelta)}
-                </span>
-              ) : null}
-            </dd>
-            <dt className="text-text-muted">Volume</dt>
-            <dd className="text-right font-mono">{compactNumber(peVol)}</dd>
-          </dl>
-        ) : (
-          <div className="mt-1.5 text-[11px] italic text-text-muted">No PE leg.</div>
-        )}
-      </div>
-      {/* Rationale row — full width under the four columns */}
-      {row.bucket_rationale || row.signal_validation_detail ? (
-        <div className="col-span-12 border-t border-bg-active/15 pt-2">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-muted">
-            Why
-          </div>
-          <div className="mt-1.5 text-[10.5px] leading-snug text-text-muted">
-            {row.bucket_rationale || row.signal_validation_detail}
-          </div>
-        </div>
-      ) : null}
-    </div>
+        <div className="font-mono text-[9.5px] text-text-muted">{row.underlying || row.symbol}</div>
+      </td>
+      <td className="px-2 text-right font-mono text-[12px] text-text-primary">
+        {formatNumber(price, 2)}
+      </td>
+      <td className={`px-2 text-right font-mono text-[11px] ${colorForDelta(change)}`}>
+        <div>{formatSigned(change, 2)}</div>
+        <div className="text-[10px] opacity-80">{formatPct(changePct, 2)}</div>
+      </td>
+      <td className="px-2 align-middle">
+        <MPProfileBar row={row} className="w-full min-w-[120px]" />
+      </td>
+      <td className="px-2 text-right text-[11px]">
+        <CVDChip row={row} />
+      </td>
+      <td className="px-2 text-right font-mono text-[10.5px] text-text-secondary">
+        {row.vwap != null ? formatNumber(Number(row.vwap), 2) : "—"}
+      </td>
+      <td className="px-2">
+        <TriggerBadge row={row} />
+      </td>
+      <td className="px-2 text-right font-mono text-[10.5px] text-text-secondary">
+        {row.stop_hint != null ? formatNumber(Number(row.stop_hint), 2) : "—"}
+      </td>
+      <td className="pl-2 pr-3 text-right text-[11px]">
+        <PositionChip position={position} />
+      </td>
+    </tr>
   );
 }
 
-function PositionsTable({ positions }: { positions: CommodityPosition[] }) {
-  if (positions.length === 0) {
-    return <div className="px-2 py-6 text-center text-xs text-text-muted">No open commodity positions.</div>;
+// ─── Action queue ──────────────────────────────────────────────────────────
+/** Sort by trigger priority × confidence so the most actionable surfaces top. */
+function ActionQueue({
+  rows,
+  onSelect,
+}: {
+  rows: WatchRow[];
+  onSelect: (symbol: string) => void;
+}) {
+  const ranked = useMemo(() => {
+    const armed = rows.filter((r) => r.entry_style && r.signal);
+    return armed
+      .map((r) => {
+        const style = String(r.entry_style || "").toLowerCase();
+        return {
+          row: r,
+          score: (TRIGGER_PRIORITY[style] || 0) * 10 + Number(r.confidence ?? 0),
+        };
+      })
+      .sort((a, b) => b.score - a.score);
+  }, [rows]);
+
+  if (ranked.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center text-[11px] text-text-muted">
+        No armed triggers this cycle.
+      </div>
+    );
   }
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[1000px] text-xs">
-        <thead className="text-[10.5px] uppercase tracking-wide text-text-muted">
-          <tr>
-            <th className="text-left">Instrument</th>
-            <th className="text-left">Side</th>
-            <th className="text-right" title="Lots × lot size">Lots</th>
-            <th className="text-right" title="Total contracts (lots × lot size)">Qty</th>
-            <th className="text-right">Entry</th>
-            <th className="text-right">Last</th>
-            <th className="text-right">Stop</th>
-            <th className="text-right">Target</th>
-            <th className="text-right">Unrl P&L</th>
-            <th className="text-right">Ret%</th>
-            <th className="text-left">Context</th>
-          </tr>
-        </thead>
-        <tbody>
-          {positions.map((p) => {
-            // Show lots × lot_size so the trader can audit position size at a
-            // glance — critical after the SENSEX lot-size bug surfaced. When
-            // backend doesn't supply lots explicitly, derive from qty (we
-            // know SENSEX=20, NIFTY=65, BANKNIFTY=30, MIDCPNIFTY=120, etc.).
-            const qty = Number(p.qty ?? 0);
-            const lots = Number(p.lots ?? 0);
-            const lotSize = lots > 0 ? Math.round(qty / lots) : null;
-            const lotLabel = lots > 0 && lotSize
-              ? `${lots} × ${lotSize}`
-              : lots > 0
-                ? `${lots}`
-                : "—";
-            return (
-              <tr key={p.position_key || p.live_symbol} className={QUIET_ROW}>
-                <td className="py-1.5 font-medium">
-                  {p.display_name || p.symbol}
-                  <div className="text-[10px] text-text-muted">{p.live_symbol}</div>
-                </td>
-                <td>{p.action}</td>
-                <td className="text-right font-mono text-[11px] text-text-muted" title="lots × contract size">
-                  {lotLabel}
-                </td>
-                <td className="text-right font-mono">{qty || "—"}</td>
-                <td className="text-right font-mono">{formatNumber(p.entry_price, 2)}</td>
-                <td className="text-right font-mono">{formatNumber(p.current_price, 2)}</td>
-                <td className="text-right font-mono text-rose-300">{formatNumber(p.stop_price, 2)}</td>
-                <td className="text-right font-mono text-emerald-300">{formatNumber(p.target_price, 2)}</td>
-                <td className={`text-right font-mono ${(p.unrealized_pnl ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                  {formatINR(p.unrealized_pnl)}
-                </td>
-                <td className={`text-right font-mono ${(p.return_pct ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                  {formatPct(p.return_pct, 1)}
-                </td>
-                <td className="text-[10.5px] text-text-muted">
-                  {[p.strategy_title, p.regime, p.expiry].filter(Boolean).join(" · ") || "--"}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function OrdersTable({ orders }: { orders: Order[] }) {
-  if (orders.length === 0) {
-    return <div className="px-2 py-6 text-center text-xs text-text-muted">No commodity orders yet.</div>;
-  }
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[820px] text-xs">
-        <thead className="text-[10.5px] uppercase tracking-wide text-text-muted">
-          <tr>
-            <th className="text-left">Time</th>
-            <th className="text-left">Flow</th>
-            <th className="text-left">Symbol</th>
-            <th className="text-left">Side</th>
-            <th className="text-right">Qty</th>
-            <th className="text-right">Fill</th>
-            <th className="text-left">Reason</th>
-          </tr>
-        </thead>
-        <tbody>
-          {orders.map((o, idx) => (
-            <tr key={`${o.time}-${idx}`} className={QUIET_ROW}>
-              <td className="py-1 font-mono text-[10.5px] text-text-muted">{formatIST(o.time)}</td>
-              <td className={o.flow === "entry" ? "text-emerald-300" : o.flow === "exit" ? "text-rose-300" : "text-text-muted"}>
-                {o.flow || "--"}
-              </td>
-              <td className="font-mono text-[10.5px]">{o.symbol}</td>
-              <td>{o.action}</td>
-              <td className="text-right font-mono">{o.qty}</td>
-              <td className="text-right font-mono">{formatNumber(o.fill_price, 2)}</td>
-              <td className="truncate text-[10.5px] text-text-muted">{o.reason || ""}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function TradesTable({ trades }: { trades: TradeRow[] }) {
-  if (trades.length === 0) {
-    return <div className="px-2 py-6 text-center text-xs text-text-muted">No closed commodity trades yet.</div>;
-  }
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[860px] text-xs">
-        <thead className="text-[10.5px] uppercase tracking-wide text-text-muted">
-          <tr>
-            <th className="text-left">Exit</th>
-            <th className="text-left">Symbol</th>
-            <th className="text-left">Side</th>
-            <th className="text-right">Qty</th>
-            <th className="text-right">Entry</th>
-            <th className="text-right">Exit Price</th>
-            <th className="text-right">P&L</th>
-            <th className="text-left">Reason</th>
-          </tr>
-        </thead>
-        <tbody>
-          {trades.map((t, idx) => (
-            <tr key={`${t.symbol}-${t.exit_time}-${idx}`} className={QUIET_ROW}>
-              <td className="py-1 font-mono text-[10.5px] text-text-muted">{formatIST(t.exit_time)}</td>
-              <td className="font-mono text-[10.5px]">{t.symbol}</td>
-              <td>{t.action}</td>
-              <td className="text-right font-mono">{t.qty}</td>
-              <td className="text-right font-mono">{formatNumber(t.entry_price, 2)}</td>
-              <td className="text-right font-mono">{formatNumber(t.exit_price, 2)}</td>
-              <td className={`text-right font-mono ${(t.pnl ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                {formatINR(t.pnl)}
-              </td>
-              <td className="truncate text-text-muted">{t.reason || "--"}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function ActionQueue({ rows }: { rows: WatchRow[] }) {
-  const order: Bucket[] = ["ready", "active", "favourable", "drifting", "neutral"];
-  const grouped = order.map((bucket) => ({
-    bucket,
-    rows: rows.filter((r) => r.bucket === bucket),
-  }));
-  const titles: Record<NonNullable<Bucket>, string> = {
-    ready: "Ready · execute",
-    active: "Active · in position",
-    favourable: "Favourable · tracking",
-    drifting: "Drifting · risk",
-    neutral: "Neutral · idle",
-  };
-  return (
-    <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
-      {grouped.map(({ bucket, rows: bucketRows }) => {
-        if (!bucket) return null;
-        const label = titles[bucket];
-        const tone =
-          bucket === "ready" || bucket === "active"
-            ? "border-emerald-500/40 bg-emerald-500/5"
-            : bucket === "favourable"
-              ? "border-amber-500/40 bg-amber-500/5"
-              : bucket === "drifting"
-                ? "border-rose-500/40 bg-rose-500/5"
-                : "border-slate-500/30 bg-slate-500/5";
+    <ul className="space-y-0.5 text-[11px]">
+      {ranked.slice(0, 6).map(({ row }) => {
+        const sym = String(row.symbol || "");
         return (
-          <div key={bucket} className={`rounded-md border ${tone} px-2 py-1.5`}>
-            <div className="flex items-baseline justify-between text-[10.5px] uppercase tracking-[0.18em] text-text-muted">
-              <span>{label}</span>
-              <span>{bucketRows.length}</span>
+          <li
+            key={sym}
+            onClick={() => onSelect(sym)}
+            className="flex cursor-pointer items-baseline justify-between gap-2 rounded px-1.5 py-1 hover:bg-bg-secondary/20"
+          >
+            <div className="flex items-baseline gap-2 truncate">
+              <span className="text-[11.5px] font-semibold text-text-primary">
+                {row.display_name || row.underlying}
+              </span>
+              <TriggerBadge row={row} />
             </div>
-            {bucketRows.length === 0 ? (
-              <div className="mt-1 text-[11px] italic text-text-muted">—</div>
-            ) : (
-              <ul className="mt-1.5 space-y-1 text-xs">
-                {bucketRows.map((r) => (
-                  <li
-                    key={`${bucket}-${r.symbol || r.underlying}`}
-                    className="flex items-baseline justify-between gap-2 leading-tight"
-                  >
-                    <span className="min-w-0 truncate">
-                      <span className="font-medium text-text-primary">
-                        {r.display_name || r.underlying || r.symbol}
-                      </span>
-                      <span className="ml-1 text-[10px] text-text-muted">
-                        {r.signal_validation || r.reason || "--"}
-                      </span>
-                    </span>
-                    <span className="shrink-0 font-mono text-[10.5px] text-text-muted">
-                      <span className={trajectoryColor(r.trajectory ?? null)}>
-                        {trajectoryGlyph(r.trajectory ?? null)}
-                      </span>{" "}
-                      {r.proximity_pct != null ? `${Math.round(r.proximity_pct)}%` : ""}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+            <span className="shrink-0 font-mono text-[10.5px] text-text-muted">
+              stop {row.stop_hint != null ? formatNumber(Number(row.stop_hint), 2) : "—"}
+            </span>
+          </li>
         );
       })}
-    </div>
+    </ul>
   );
 }
 
-function MiniPositionCard({ p }: { p: CommodityPosition }) {
-  const pnl = Number(p.unrealized_pnl ?? 0);
-  const ret = Number(p.return_pct ?? 0);
-  const ageSec = p.entered_at
-    ? Math.max(0, (Date.now() - new Date(p.entered_at).getTime()) / 1000)
-    : null;
-  const ageLabel = (() => {
-    if (ageSec === null) return "—";
-    const m = Math.floor(ageSec / 60);
-    if (m < 60) return `${m}m`;
-    const h = Math.floor(m / 60);
-    const rm = m % 60;
-    return rm ? `${h}h ${rm}m` : `${h}h`;
-  })();
-  return (
-    <div className={`${QUIET_TILE} rounded-md px-3 py-2`}>
-      <div className="flex items-baseline justify-between gap-2">
-        <div className="min-w-0">
-          <div className="truncate font-medium text-text-primary">
-            {p.display_name || p.symbol}
-          </div>
-          <div className="truncate text-[10px] text-text-muted">{p.live_symbol}</div>
-        </div>
-        <div className="shrink-0 text-right">
-          <div
-            className={`font-mono text-sm font-semibold ${pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}
-          >
-            {formatINR(pnl)}
-          </div>
-          <div className={`font-mono text-[10.5px] ${ret >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-            {formatPct(ret, 2)}
-          </div>
-        </div>
-      </div>
-      <div className="mt-1.5 grid grid-cols-3 gap-1 text-[10.5px] text-text-muted">
-        <div>
-          <div className="uppercase tracking-wider">side</div>
-          <div className="font-mono text-text-primary">
-            {p.action} {p.qty}
-          </div>
-        </div>
-        <div>
-          <div className="uppercase tracking-wider">entry → now</div>
-          <div className="font-mono text-text-primary">
-            {formatNumber(p.entry_price, 2)} → {formatNumber(p.current_price, 2)}
-          </div>
-        </div>
-        <div className="text-right">
-          <div className="uppercase tracking-wider">age</div>
-          <div className="font-mono text-text-primary">{ageLabel}</div>
-        </div>
-      </div>
-      <div className="mt-1 flex items-baseline justify-between text-[10.5px]">
-        <span className="text-rose-300 font-mono">stop {formatNumber(p.stop_price, 2)}</span>
-        <span className="text-emerald-300 font-mono">tgt {formatNumber(p.target_price, 2)}</span>
-      </div>
-      {p.regime || p.expiry || p.strategy_title ? (
-        <div className="mt-1 truncate text-[10px] text-text-muted">
-          {[p.strategy_title, p.regime, p.expiry].filter(Boolean).join(" · ")}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * Structured signal-audit table. Replaces the previous raw JSON dump on
- * the Research tab so traders can scan signal-by-signal disposition at a
- * glance. Renders the most relevant audit fields and exposes the full
- * payload behind a click-to-expand row for the rare case it's needed.
- */
-function SignalAuditTable({ rows }: { rows: Record<string, any>[] }) {
-  const [open, setOpen] = useState<Set<number>>(new Set());
-  if (!rows || rows.length === 0) {
-    return <div className="px-2 py-6 text-center text-xs text-text-muted">No signal audit rows yet.</div>;
-  }
-  const toggle = (idx: number) => {
-    setOpen((prev) => {
-      const next = new Set(prev);
-      if (next.has(idx)) {
-        next.delete(idx);
-      } else {
-        next.add(idx);
-      }
-      return next;
-    });
-  };
-  return (
-    <div className="max-h-[420px] overflow-auto rounded-md border border-bg-active/30">
-      <table className="w-full border-collapse text-[11.5px]">
-        <thead className="sticky top-0 z-10 bg-bg-secondary/40">
-          <tr className="text-[10px] uppercase tracking-wider text-text-muted">
-            <th className="w-6 px-1 py-1.5" aria-label="expand" />
-            <th className="px-2 py-1.5 text-left">Time</th>
-            <th className="px-2 py-1.5 text-left">Symbol</th>
-            <th className="px-2 py-1.5 text-left">Strategy</th>
-            <th className="px-2 py-1.5 text-left">Decision</th>
-            <th className="px-2 py-1.5 text-left">Reason</th>
-            <th className="px-2 py-1.5 text-right">Score</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, idx) => {
-            const isOpen = open.has(idx);
-            const decision = String(
-              row.decision || row.status || row.action || "—",
-            ).toLowerCase();
-            const decisionTone =
-              decision === "ready" || decision === "enter" || decision === "long" || decision === "trade"
-                ? "text-emerald-300"
-                : decision === "block" || decision === "blocked" || decision === "skip"
-                  ? "text-rose-300"
-                  : decision === "watch" || decision === "watching"
-                    ? "text-amber-300"
-                    : "text-text-muted";
-            const score = row.priority_score ?? row.score ?? row.confidence ?? null;
-            return (
-              <Fragment key={`${row.time || row.timestamp || idx}-${idx}`}>
-                <tr
-                  className="cursor-pointer border-t border-bg-active/15 hover:bg-bg-secondary/20"
-                  onClick={() => toggle(idx)}
-                >
-                  <td className="px-1 py-1 align-middle text-text-muted">
-                    {isOpen ? (
-                      <ChevronDown className="h-3.5 w-3.5" />
-                    ) : (
-                      <ChevronRight className="h-3.5 w-3.5" />
-                    )}
-                  </td>
-                  <td className="px-2 py-1 font-mono text-[10.5px] text-text-muted">
-                    {formatIST(row.time || row.timestamp || row.as_of)}
-                  </td>
-                  <td className="px-2 py-1 font-mono text-[11px]">
-                    {String(row.symbol || row.underlying || "—")}
-                  </td>
-                  <td className="px-2 py-1 text-text-secondary">
-                    {String(row.strategy || row.strategy_key || row.lane || "—")}
-                  </td>
-                  <td className={`px-2 py-1 font-semibold uppercase ${decisionTone}`}>
-                    {decision}
-                  </td>
-                  <td className="max-w-[28ch] truncate px-2 py-1 text-text-secondary" title={String(row.reason || row.notes || "")}>
-                    {String(row.reason || row.notes || "—")}
-                  </td>
-                  <td className="px-2 py-1 text-right font-mono">
-                    {score == null || score === "" ? "—" : Number(score).toFixed(2)}
-                  </td>
-                </tr>
-                {isOpen ? (
-                  <tr className="border-t border-bg-active/10 bg-bg-secondary/15">
-                    <td />
-                    <td colSpan={6} className="px-3 py-2">
-                      <pre className="overflow-auto rounded-md bg-bg-primary/60 p-2 text-[10.5px] text-text-secondary">
-                        {JSON.stringify(row, null, 2)}
-                      </pre>
-                    </td>
-                  </tr>
-                ) : null}
-              </Fragment>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
+// ─── Audit feed ────────────────────────────────────────────────────────────
 
 function AuditFeed({ events }: { events: AuditEvent[] }) {
-  if (events.length === 0) {
-    return <div className="px-2 py-6 text-center text-xs text-text-muted">No audit events yet.</div>;
+  if (!events.length) {
+    return (
+      <div className="flex h-full items-center justify-center text-[11px] text-text-muted">
+        No audit events yet this session.
+      </div>
+    );
   }
   return (
-    <ul className="space-y-0.5 text-[11.5px]">
-      {events.map((e, idx) => (
-        <li key={`${e.created_at}-${idx}`} className="flex items-baseline gap-2 border-b border-transparent py-1 hover:bg-bg-secondary/15">
-          <span className="w-[86px] shrink-0 font-mono text-[10.5px] text-text-muted">{formatIST(e.created_at)}</span>
-          <span className={`w-[92px] shrink-0 text-[10.5px] uppercase ${severityColor(e.severity)}`}>{e.event_type || "--"}</span>
-          <span className="w-[150px] shrink-0 truncate font-mono text-[10.5px] text-text-muted">{e.symbol || e.underlying || "--"}</span>
-          <span className="min-w-0 flex-1 truncate text-text-secondary">{e.message || JSON.stringify(e.payload || {})}</span>
+    <ul className="space-y-0.5 text-[11px]">
+      {events.slice(0, 6).map((event, idx) => (
+        <li
+          key={`${event.created_at}-${idx}`}
+          className="flex gap-2 rounded px-1.5 py-1 hover:bg-bg-secondary/15"
+        >
+          <span className="w-[58px] shrink-0 font-mono text-[10px] text-text-muted">
+            {formatTime(event.created_at)}
+          </span>
+          <span className="w-[68px] shrink-0 text-[10px] uppercase tracking-wider text-text-secondary">
+            {event.underlying || event.symbol || ""}
+          </span>
+          <span className="truncate text-[10.5px] text-text-primary">
+            {(event.event_type || "").replace("mp_signal.", "")}{" "}
+            <span className="text-text-muted">{(event.message || "").slice(0, 80)}</span>
+          </span>
         </li>
       ))}
     </ul>
   );
 }
 
+// ─── Instrument detail modal ──────────────────────────────────────────────
+
+function InstrumentDetailModal({
+  row,
+  position,
+  recentTrades,
+  recentOrders,
+  recentAudit,
+  onClose,
+}: {
+  row: WatchRow;
+  position?: CommodityPosition;
+  recentTrades: TradeRow[];
+  recentOrders: Order[];
+  recentAudit: AuditEvent[];
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const evidence = (row.trigger_evidence || {}) as Record<string, unknown>;
+  const evidenceEntries = Object.entries(evidence);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="relative max-h-[88vh] w-full max-w-5xl overflow-y-auto rounded-lg bg-bg-primary p-5 ring-1 ring-bg-secondary/40"
+      >
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute right-3 top-3 rounded p-1 text-text-muted hover:bg-bg-secondary/30 hover:text-text-primary"
+        >
+          <X className="h-4 w-4" />
+        </button>
+
+        {/* Title */}
+        <div className="mb-3 flex items-baseline justify-between">
+          <div>
+            <div className="text-base font-semibold text-text-primary">
+              {row.display_name} <span className="font-mono text-[12px] text-text-muted">{row.symbol}</span>
+            </div>
+            <div className="text-[11px] text-text-muted">
+              {row.contract_unit_label} · {row.quote_unit_label} · bar {formatIST(row.bar_time)}
+            </div>
+          </div>
+          <div className="text-right">
+            <div className={`font-mono text-2xl font-semibold ${colorForDelta(Number(row.change ?? 0))}`}>
+              {formatNumber(Number(row.price ?? 0), 2)}
+            </div>
+            <div className={`font-mono text-[11px] ${colorForDelta(Number(row.change ?? 0))}`}>
+              {formatSigned(Number(row.change ?? 0), 2)} ({formatPct(Number(row.change_pct ?? 0), 2)})
+            </div>
+          </div>
+        </div>
+
+        {/* Profile bar (full-width) */}
+        <div className="mb-3">
+          <MPProfileBar row={row} className="h-[28px]" />
+          <div className="mt-1 flex justify-between text-[10px] text-text-muted">
+            <span>VAL {formatNumber(Number(row.mp_val ?? 0), 2)}</span>
+            <span>POC {formatNumber(Number(row.mp_poc ?? 0), 2)}</span>
+            <span>VAH {formatNumber(Number(row.mp_vah ?? 0), 2)}</span>
+          </div>
+        </div>
+
+        {/* 3-column context grid */}
+        <div className="mb-4 grid grid-cols-12 gap-3 text-[11.5px]">
+          <Section title="Market Profile" cols={4}>
+            <Row k="Day type" v={String(row.mp_day_type ?? "—")} />
+            <Row k="Status" v={String(row.mp_status ?? "—")} />
+            <Row k="Periods" v={String(row.mp_periods ?? "—")} />
+            <Row k="POC" v={formatNumber(Number(row.mp_poc ?? 0), 2)} />
+            <Row k="VAH" v={formatNumber(Number(row.mp_vah ?? 0), 2)} />
+            <Row k="VAL" v={formatNumber(Number(row.mp_val ?? 0), 2)} />
+            <Row k="IB high" v={formatNumber(Number(row.mp_ib_high ?? 0), 2)} />
+            <Row k="IB low" v={formatNumber(Number(row.mp_ib_low ?? 0), 2)} />
+            <Row k="IB extended" v={row.ib_extended_above ? "above" : row.ib_extended_below ? "below" : "no"} />
+            <Row k="IB ext %" v={row.ib_extension_pct != null ? `${(Number(row.ib_extension_pct) * 100).toFixed(1)}%` : "—"} />
+            <Row k="Prior session" v={row.prior_session_date || "—"} />
+          </Section>
+
+          <Section title="Order Flow" cols={4}>
+            <Row k="CVD session" v={compactNumber(Number(row.cvd_session ?? row.cvd_latest))} />
+            <Row k="CVD agree?" v={row.cvd_agrees == null ? "—" : row.cvd_agrees ? "yes" : "no"} />
+            <Row k="CVD window Δ" v={compactNumber(Number(row.cvd_window_delta ?? 0))} />
+            <Row k="Divergence" v={row.cvd_divergence?.kind ? `${row.cvd_divergence.kind} ${(row.cvd_divergence.strength ?? 0).toString().slice(0, 4)}` : "—"} />
+            <Row k="VWAP" v={formatNumber(Number(row.vwap ?? 0), 2)} />
+            <Row k="VWAP +σ" v={formatNumber(Number(row.vwap_upper ?? 0), 2)} />
+            <Row k="VWAP −σ" v={formatNumber(Number(row.vwap_lower ?? 0), 2)} />
+            <Row k="HVN / LVN" v={`${row.hvn_count ?? 0} / ${row.lvn_count ?? 0}`} />
+          </Section>
+
+          <Section title="Trigger" cols={4}>
+            <Row k="Signal" v={String(row.signal || "—")} />
+            <Row k="Candidate" v={String(row.candidate_signal || "—")} />
+            <Row k="Style" v={triggerLabel(row.entry_style)} />
+            <Row k="Confidence" v={row.confidence != null ? Number(row.confidence).toFixed(2) : "—"} />
+            <Row k="Stop hint" v={row.stop_hint != null ? formatNumber(Number(row.stop_hint), 2) : "—"} />
+            <Row k="Target hint" v={row.target_hint != null ? formatNumber(Number(row.target_hint), 2) : "—"} />
+            <Row k="Validation" v={row.signal_validation || "—"} />
+            <Row k="ATR (1m)" v={row.atr != null ? formatNumber(Number(row.atr), 4) : "—"} />
+          </Section>
+        </div>
+
+        {/* Reason + evidence */}
+        {row.signal_validation_detail ? (
+          <div className="mb-4 rounded bg-bg-secondary/15 px-3 py-2 text-[11.5px] text-text-secondary">
+            {row.signal_validation_detail}
+          </div>
+        ) : null}
+        {evidenceEntries.length > 0 ? (
+          <div className="mb-4 grid grid-cols-2 gap-3 rounded bg-bg-secondary/10 p-2 text-[10.5px]">
+            <div className="col-span-2 text-[10px] uppercase tracking-wider text-text-muted">Trigger evidence</div>
+            {evidenceEntries.map(([k, v]) => (
+              <Row key={k} k={k} v={typeof v === "number" ? formatNumber(v, 4) : String(v)} />
+            ))}
+          </div>
+        ) : null}
+
+        {/* Position (if any) */}
+        {position ? (
+          <div className="mb-4 grid grid-cols-12 gap-3 rounded bg-bg-secondary/15 p-3 text-[11.5px]">
+            <div className="col-span-12 text-[10px] uppercase tracking-wider text-text-muted">
+              Open position
+            </div>
+            <Row k="Side" v={String(position.action || "—")} cols={3} />
+            <Row k="Lots" v={String(position.lots || "—")} cols={3} />
+            <Row k="Qty" v={String(position.qty || "—")} cols={3} />
+            <Row k="Entered" v={formatIST(position.entered_at)} cols={3} />
+            <Row k="Entry" v={formatNumber(Number(position.entry_price ?? 0), 2)} cols={3} />
+            <Row k="Current" v={formatNumber(Number(position.current_price ?? 0), 2)} cols={3} />
+            <Row k="Stop" v={formatNumber(Number(position.stop_price ?? 0), 2)} cols={3} />
+            <Row k="Target" v={formatNumber(Number(position.target_price ?? 0), 2)} cols={3} />
+            <Row k="Unrealized" v={formatINR(Number(position.unrealized_pnl ?? 0), 0)} cols={6} />
+            <Row k="Return" v={formatPct(Number(position.return_pct ?? 0), 2)} cols={6} />
+          </div>
+        ) : null}
+
+        {/* Recent activity */}
+        <div className="grid grid-cols-12 gap-3">
+          <div className="col-span-6">
+            <div className="mb-1 text-[10px] uppercase tracking-wider text-text-muted">
+              Recent trades · {recentTrades.length}
+            </div>
+            <ul className="space-y-0.5 text-[10.5px]">
+              {recentTrades.length === 0 ? (
+                <li className="text-text-muted">no closed trades</li>
+              ) : (
+                recentTrades.slice(0, 5).map((t, idx) => (
+                  <li key={`t-${idx}`} className="flex justify-between gap-2 font-mono">
+                    <span>{formatIST(t.exit_time)}</span>
+                    <span>{t.action}</span>
+                    <span>{formatNumber(t.entry_price, 2)} → {formatNumber(t.exit_price, 2)}</span>
+                    <span className={`${Number(t.pnl ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                      {formatSigned(Number(t.pnl ?? 0))}
+                    </span>
+                  </li>
+                ))
+              )}
+            </ul>
+          </div>
+          <div className="col-span-6">
+            <div className="mb-1 text-[10px] uppercase tracking-wider text-text-muted">
+              Recent audit · {recentAudit.length}
+            </div>
+            <ul className="space-y-0.5 text-[10.5px]">
+              {recentAudit.length === 0 ? (
+                <li className="text-text-muted">no events</li>
+              ) : (
+                recentAudit.slice(0, 6).map((e, idx) => (
+                  <li key={`a-${idx}`} className="flex gap-2">
+                    <span className="w-[58px] shrink-0 font-mono text-text-muted">{formatTime(e.created_at)}</span>
+                    <span className="truncate">{(e.event_type || "").replace("mp_signal.", "")} {e.message ? `· ${e.message.slice(0, 100)}` : ""}</span>
+                  </li>
+                ))
+              )}
+            </ul>
+          </div>
+        </div>
+
+        {/* Orders for this symbol */}
+        {recentOrders.length > 0 ? (
+          <div className="mt-3">
+            <div className="mb-1 text-[10px] uppercase tracking-wider text-text-muted">
+              Recent orders · {recentOrders.length}
+            </div>
+            <ul className="space-y-0.5 text-[10.5px]">
+              {recentOrders.slice(0, 4).map((o, idx) => (
+                <li key={`o-${idx}`} className="flex justify-between gap-2 font-mono">
+                  <span>{formatIST(o.time)}</span>
+                  <span>{o.flow}</span>
+                  <span>{o.action}</span>
+                  <span>{o.qty}</span>
+                  <span>{formatNumber(o.fill_price, 2)}</span>
+                  <span className="text-text-muted">{o.reason}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+// Small inline helpers for the modal grid.
+function Section({
+  title,
+  cols = 12,
+  children,
+}: {
+  title: string;
+  cols?: number;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className={`col-span-12 lg:col-span-${cols} rounded bg-bg-secondary/15 p-2`}>
+      <div className="mb-1 text-[10px] uppercase tracking-wider text-text-muted">{title}</div>
+      <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">{children}</div>
+    </div>
+  );
+}
+function Row({ k, v, cols }: { k: string; v: string; cols?: number }) {
+  return (
+    <div className={cols ? `col-span-${cols} flex justify-between gap-1` : "flex justify-between gap-1"}>
+      <span className="text-text-muted">{k}</span>
+      <span className="font-mono text-text-primary">{v}</span>
+    </div>
+  );
+}
+
+// ─── Page ──────────────────────────────────────────────────────────────────
+
 export default function CommodityLivePage() {
-  const [activeTab, setActiveTab] = useState<TabKey>("watchlist");
   const queryClient = useQueryClient();
 
+  // Socket-primary streams. Falls back to the heartbeat poll if the socket
+  // ever disconnects.
   const overviewQuery = useLiveSnapshotQuery<Record<string, unknown>>({
     queryKey: ["commodity-live", "overview"],
     queryFn: async () => (await getCommodityOverview()).data,
     streamFactory: (onData, onStatusChange) =>
-      createCommodityOverviewSocket((payload) => onData(payload as Record<string, unknown>), onStatusChange),
+      createCommodityOverviewSocket(
+        (payload) => onData(payload as Record<string, unknown>),
+        onStatusChange,
+      ),
     storageKey: "commodity-live:overview",
     streamWhenHidden: true,
-    refetchInterval: REFRESH_MS,
-    refetchIntervalInBackground: true,
-  });
-
-  const positionsQuery = useQuery({
-    queryKey: ["commodity-live", "positions"],
-    queryFn: async () => (await getCommodityPositions()).data,
-    refetchInterval: REFRESH_MS,
-    refetchIntervalInBackground: true,
-  });
-
-  const ordersQuery = useQuery({
-    queryKey: ["commodity-live", "orders"],
-    queryFn: async () => (await getCommodityOrders(60)).data,
-    refetchInterval: REFRESH_MS * 2,
-    refetchIntervalInBackground: true,
-  });
-
-  const reportsQuery = useQuery({
-    queryKey: ["commodity-live", "reports"],
-    queryFn: async () => (await getCommodityReports(40)).data,
-    refetchInterval: REFRESH_MS * 3,
+    refetchInterval: HEARTBEAT_POLL_MS,
     refetchIntervalInBackground: true,
   });
 
   const watchlistSnapshotQuery = useLiveSnapshotQuery<CommodityWatchlistSnapshot>({
     queryKey: ["commodity-live", "watchlist-snapshot"],
-    queryFn: async () => (await getCommodityWatchlistSnapshot()).data as CommodityWatchlistSnapshot,
+    queryFn: async () =>
+      (await getCommodityWatchlistSnapshot()).data as CommodityWatchlistSnapshot,
     streamFactory: (onData, onStatusChange) =>
-      createCommodityWatchlistSocket((payload) => onData(payload as CommodityWatchlistSnapshot), onStatusChange),
+      createCommodityWatchlistSocket(
+        (payload) => onData(payload as CommodityWatchlistSnapshot),
+        onStatusChange,
+      ),
     storageKey: "commodity-live:watchlist-snapshot",
     streamWhenHidden: true,
-    refetchInterval: REFRESH_MS * 3,
-    refetchIntervalInBackground: true,
-  });
-
-  const contractsQuery = useQuery({
-    queryKey: ["commodity-live", "contracts"],
-    queryFn: async () => (await getCommodityStrategyContracts()).data,
-    refetchInterval: REFRESH_MS * 6,
+    refetchInterval: HEARTBEAT_POLL_MS,
     refetchIntervalInBackground: true,
   });
 
   const auditQuery = useQuery({
     queryKey: ["commodity-live", "audit"],
-    queryFn: async () => (await apiClient.get("/api/audit/events?market=commodity&limit=40")).data,
-    refetchInterval: REFRESH_MS * 2,
+    queryFn: async () =>
+      (await apiClient.get("/api/audit/events?market=commodity&limit=60")).data,
+    refetchInterval: PRIMER_POLL_MS,
     refetchIntervalInBackground: true,
   });
 
-  const dataQualityQuery = useQuery({
-    queryKey: ["commodity-live", "data-quality"],
-    queryFn: async () => (await apiClient.get("/api/data-quality/snapshot")).data,
-    refetchInterval: REFRESH_MS * 2,
-    refetchIntervalInBackground: true,
-  });
-
+  // Mutations
   const runOnceMutation = useMutation({
     mutationFn: async () => (await runCommodityStrategyOnce(true)).data,
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["commodity-live"] });
     },
   });
-
   const startMutation = useMutation({
     mutationFn: async () => (await startCommodityStrategyAgent()).data,
     onSuccess: async () => {
@@ -1827,403 +995,313 @@ export default function CommodityLivePage() {
     },
   });
 
+  // ── Derive view models ──────────────────────────────────────────────
   const status = (overviewQuery.data?.status ?? {}) as StatusPayload;
-  const summary = status.summary ?? {};
-  const config = status.config ?? {};
+  const summary = (status.summary ?? {}) as Record<string, unknown>;
+
+  // Socket-streamed positions / orders / trade history are inside the
+  // overview payload. No more separate polls for those.
+  const positions = (status.positions ?? []) as CommodityPosition[];
+  const orders = (status.orders ?? []) as Order[];
+  const trades = (status.trade_history ?? []) as TradeRow[];
+
   const contracts = useMemo(
-    () => (contractsQuery.data?.contracts ?? watchlistSnapshotQuery.data?.contract_catalog?.contracts ?? []) as CommoditySnapshotContract[],
-    [contractsQuery.data?.contracts, watchlistSnapshotQuery.data?.contract_catalog?.contracts],
+    () =>
+      (watchlistSnapshotQuery.data?.contract_catalog?.contracts ?? []) as CommoditySnapshotContract[],
+    [watchlistSnapshotQuery.data?.contract_catalog?.contracts],
   );
 
-  const runtimeFuturesWatchlist = useMemo(
-    () => enrichFuturesRowsWithActiveContracts((status.futures_watchlist ?? status.watchlist ?? []) as WatchRow[], contracts),
-    [contracts, status.futures_watchlist, status.watchlist],
+  // Build the row list: prefer the agent's live watchlist; fall back to the
+  // contract catalog so the table never empties when the agent is between
+  // scans.
+  const runtimeRows = (status.futures_watchlist ?? status.watchlist ?? []) as WatchRow[];
+  const fallbackRows: WatchRow[] = useMemo(
+    () =>
+      contracts.map((c) => ({
+        symbol: c.symbol,
+        underlying: c.underlying,
+        display_name: c.display_name || c.underlying || c.symbol,
+        lot_size: c.lot_size ?? undefined,
+        quote_unit_label: c.quote_unit_label || undefined,
+        contract_unit_label: c.contract_unit_label || undefined,
+      })),
+    [contracts],
   );
-  const liveTickSymbols = useMemo(
+  const baseRows = runtimeRows.length > 0 ? runtimeRows : fallbackRows;
+
+  // Subscribe to per-symbol tick streams so prices update faster than the
+  // agent scan cadence.
+  const tickSymbols = useMemo(
     () =>
       Array.from(
         new Set(
-          runtimeFuturesWatchlist
-            .flatMap(commodityTickKeys)
-            .filter((symbol) => symbol.startsWith("MCX:")),
+          baseRows
+            .map((r) => String(r.symbol || r.active_lookup_symbol || "").toUpperCase())
+            .filter((s) => s.startsWith("MCX:")),
         ),
       ),
-    [runtimeFuturesWatchlist],
+    [baseRows],
   );
-  const liveTickStream = useCommodityTickStreams(liveTickSymbols);
-  const snapshotFuturesWatchlist = useMemo(
-    () => (watchlistSnapshotQuery.data?.contract_catalog?.contracts ?? []).map(snapshotContractToWatchRow),
-    [watchlistSnapshotQuery.data?.contract_catalog?.contracts],
-  );
-  const watchlist = useMemo(
-    () => overlayLiveTicks(
-      runtimeFuturesWatchlist.length > 0 ? runtimeFuturesWatchlist : snapshotFuturesWatchlist,
-      liveTickStream.ticks,
-    ),
-    [liveTickStream.ticks, runtimeFuturesWatchlist, snapshotFuturesWatchlist],
-  );
-  // Option watchlist removed — commodity options sleeve deprecated.
-  const optionWatchlist: WatchRow[] = useMemo(() => [], []);
+  const ticks = useCommodityTickStreams(tickSymbols);
+  const rows = useMemo(() => overlayTicks(baseRows, ticks), [baseRows, ticks]);
 
-  const streamedPositions = (overviewQuery.data?.positions as CommodityPosition[] | undefined) ?? status.positions;
-  const streamedOrders = (overviewQuery.data?.orders as Order[] | undefined) ?? status.orders;
-  const streamedReports = (overviewQuery.data?.reports as ReportRow[] | undefined) ?? status.reports;
-  const positions = useMemo(
-    () => streamedPositions ?? (positionsQuery.data as CommodityPosition[] | undefined) ?? [],
-    [positionsQuery.data, streamedPositions],
+  // Audit events.
+  const auditEvents = useMemo(
+    () => (auditQuery.data?.events ?? []) as AuditEvent[],
+    [auditQuery.data?.events],
   );
-  const orders = useMemo(
-    () => streamedOrders ?? (ordersQuery.data as Order[] | undefined) ?? [],
-    [ordersQuery.data, streamedOrders],
+
+  // Index positions by symbol for O(1) lookup in the row renderer.
+  const positionBySymbol = useMemo(() => {
+    const map: Record<string, CommodityPosition> = {};
+    for (const p of positions) {
+      if (p.symbol) map[p.symbol] = p;
+      if (p.live_symbol && !map[p.live_symbol]) map[p.live_symbol] = p;
+    }
+    return map;
+  }, [positions]);
+
+  // ── Selection (modal) ──────────────────────────────────────────────
+  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
+  const selectedRow = useMemo(
+    () => rows.find((r) => r.symbol === selectedSymbol) || null,
+    [rows, selectedSymbol],
   );
-  const reports = useMemo(
-    () => streamedReports ?? (reportsQuery.data as ReportRow[] | undefined) ?? [],
-    [reportsQuery.data, streamedReports],
+  const symbolFilteredTrades = useMemo(
+    () => trades.filter((t) => t.symbol === selectedSymbol),
+    [trades, selectedSymbol],
   );
-  const trades = useMemo(() => (status.trade_history ?? []) as TradeRow[], [status.trade_history]);
-  const auditEvents = useMemo(() => (auditQuery.data?.events ?? []) as AuditEvent[], [auditQuery.data]);
-  const globalDataQuality = useMemo(() => (dataQualityQuery.data ?? {}) as DataQualitySnap, [dataQualityQuery.data]);
-  const dataQuality = useMemo(
-    () => ((status.data_health?.commodity_data_quality ?? globalDataQuality) as DataQualitySnap),
-    [globalDataQuality, status.data_health?.commodity_data_quality],
+  const symbolFilteredOrders = useMemo(
+    () => orders.filter((o) => o.symbol === selectedSymbol),
+    [orders, selectedSymbol],
   );
-  const mcxQuality = useMemo(
-    () => (dataQuality.symbol_health ?? []).filter((s) => (s.symbol || "").startsWith("MCX:")),
-    [dataQuality.symbol_health],
+  const symbolFilteredAudit = useMemo(
+    () =>
+      auditEvents.filter(
+        (e) => e.symbol === selectedSymbol || e.underlying === selectedRow?.underlying,
+      ),
+    [auditEvents, selectedRow?.underlying, selectedSymbol],
   );
-  const totalEquity = Number(summary.total_equity ?? 0);
-  const initialCapital = Number(summary.initial_capital ?? 1_000_000);
-  const realizedPnl = Number(summary.realized_pnl ?? 0);
-  const positionOpenPnl = positions.reduce((total, position) => total + finiteNumber(position.unrealized_pnl), 0);
-  const dayRealizedPnl = finiteNumber(summary.day_pnl);
-  const unrealizedPnl = finiteNumber(summary.unrealized_pnl, positionOpenPnl);
-  const dayPnl = dayRealizedPnl + unrealizedPnl;
-  const totalTrades = Number(summary.total_trades ?? 0);
-  const winRate = Number(summary.win_rate ?? 0);
-  const maxDrawdown = Number(summary.max_drawdown ?? 0);
-  const equityPct = initialCapital > 0 ? ((totalEquity - initialCapital) / initialCapital) * 100 : 0;
-  const running = Boolean(status.running);
+
+  // ── Header / status tiles ──────────────────────────────────────────
+  const totalEquity = finiteNumber(summary.total_equity);
+  const initialCapital = finiteNumber(summary.initial_capital, 1_000_000);
+  const dayRealized = finiteNumber(summary.day_pnl);
+  const unrealized = positions.reduce(
+    (acc, p) => acc + finiteNumber(p.unrealized_pnl),
+    0,
+  );
+  const dayPnl = dayRealized + unrealized;
+  const equityPct =
+    initialCapital > 0 ? ((totalEquity - initialCapital) / initialCapital) * 100 : 0;
+  const armedCount = rows.filter((r) => r.entry_style && r.signal).length;
+
   const killActive = Boolean(status.kill_switch_active);
+  const running = Boolean(status.running);
   const loopActive = Boolean(status.loop_active);
-  const usingSnapshotFutures = runtimeFuturesWatchlist.length === 0 && snapshotFuturesWatchlist.length > 0;
-  const scanIntervalSeconds = Number(status.scan_interval_seconds ?? 30);
-  const hasLiveTicks = Object.keys(liveTickStream.ticks).length > 0;
-  const feedState =
-    hasLiveTicks
-      ? `tick stream ${Object.keys(liveTickStream.ticks).length}/${liveTickStream.symbolCount || liveTickSymbols.length || 0}`
-      : overviewQuery.hasSnapshot || watchlistSnapshotQuery.hasSnapshot
-          ? `scan ${scanIntervalSeconds}s`
-          : "loading";
-  const feedStateTone =
-    hasLiveTicks || overviewQuery.isStreamConnected || watchlistSnapshotQuery.isStreamConnected
-      ? "bg-emerald-500/10 text-emerald-300"
-      : overviewQuery.hasSnapshot || watchlistSnapshotQuery.hasSnapshot
-        ? "bg-amber-500/10 text-amber-200"
-        : "bg-bg-secondary/50 text-text-muted";
+  const startRequired = Boolean(status.start_required);
 
-  const statusBadgeText = killActive
+  const statusTone = killActive
+    ? "bg-rose-500/15 text-rose-300"
+    : running
+      ? "bg-emerald-500/15 text-emerald-300"
+      : loopActive
+        ? "bg-sky-500/15 text-sky-300"
+        : startRequired
+          ? "bg-amber-500/15 text-amber-200"
+          : "bg-bg-secondary/40 text-text-muted";
+  const statusLabel = killActive
     ? "kill switch"
     : running
       ? "scanning"
       : loopActive
         ? "armed"
-        : status.start_required
+        : startRequired
           ? "start required"
           : "idle";
-  const statusBadgeTone = killActive
-    ? "bg-rose-500/10 text-rose-300"
-    : running
-      ? "bg-emerald-500/10 text-emerald-300"
-      : loopActive
-        ? "bg-sky-500/10 text-sky-300"
-        : "bg-amber-500/10 text-amber-200";
+
+  const isStreaming =
+    overviewQuery.isStreamConnected || watchlistSnapshotQuery.isStreamConnected;
+  const streamTone = isStreaming
+    ? "bg-emerald-500/15 text-emerald-300"
+    : overviewQuery.hasSnapshot
+      ? "bg-amber-500/15 text-amber-200"
+      : "bg-bg-secondary/40 text-text-muted";
+  const streamLabel = isStreaming
+    ? `LIVE · ${Object.keys(ticks).length}/${tickSymbols.length} ticks`
+    : overviewQuery.hasSnapshot
+      ? "snapshot · awaiting socket"
+      : "loading";
 
   return (
-    <div className="min-h-screen bg-bg-primary px-4 py-3 text-text-primary">
-      {/* ── Compact header: title + status + actions all on one row. The
-          last-scan / last-message chip rides along at the right to save
-          the second header row for the tab nav. */}
-      <header className="mb-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <h1 className="text-base font-semibold tracking-tight">Commodity Desk</h1>
-          <span className={`rounded-md px-2 py-0.5 text-[10.5px] font-medium ${statusBadgeTone}`}>
-            {statusBadgeText}
-          </span>
-          <span
-            className={`rounded-md px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.14em] ${feedStateTone}`}
-          >
-            {feedState}
-          </span>
-          <span className="hidden text-[11px] text-text-muted sm:inline">
-            {formatIST(status.last_run_at)} · {status.last_message || "—"}
-          </span>
-          <div className="ml-auto flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() => startMutation.mutate()}
-              disabled={startMutation.isPending || killActive || loopActive}
-              className="inline-flex items-center gap-1 rounded-md bg-bg-secondary/25 px-2 py-1 text-[11.5px] text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
-              title="Start commodity agent"
-            >
-              <CirclePlay className="h-3.5 w-3.5" />
-              {loopActive ? "Running" : "Start"}
-            </button>
-            <button
-              type="button"
-              onClick={() => runOnceMutation.mutate()}
-              disabled={runOnceMutation.isPending}
-              className="inline-flex items-center gap-1 rounded-md bg-bg-secondary/25 px-2 py-1 text-[11.5px] text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
-              title="Run one scan"
-            >
-              <RefreshCcw className="h-3.5 w-3.5" />
-              Scan
-            </button>
-            <Link
-              href="/settings"
-              className="rounded-md bg-bg-secondary/25 px-2 py-1 text-[11.5px] text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary"
-            >
-              Settings
-            </Link>
-          </div>
+    <div className="flex h-screen flex-col overflow-hidden bg-bg-primary text-text-primary">
+      {/* ── Header ─────────────────────────────────────────────────── */}
+      <header className="flex flex-wrap items-center gap-2 border-b border-bg-secondary/30 px-3 py-2">
+        <h1 className="text-base font-semibold tracking-tight">Commodity · MP+OF</h1>
+        <span className={`rounded-md px-2 py-0.5 text-[10.5px] font-medium uppercase tracking-wide ${statusTone}`}>
+          {statusLabel}
+        </span>
+        <span className={`rounded-md px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.14em] ${streamTone}`}>
+          {streamLabel}
+        </span>
+        <span className="hidden text-[10.5px] text-text-muted sm:inline">
+          {formatIST(status.last_run_at)} · {(status.last_message || "").slice(0, 120)}
+        </span>
+
+        {/* Decision tiles inline */}
+        <div className="ml-auto flex flex-wrap items-baseline gap-3 text-[11px]">
+          <Tile
+            label="Equity"
+            value={formatINR(totalEquity)}
+            tone={equityPct >= 0 ? "text-emerald-400" : "text-rose-400"}
+            detail={formatPct(equityPct, 2)}
+          />
+          <Tile
+            label="Day P&L"
+            value={formatINR(dayPnl)}
+            tone={dayPnl >= 0 ? "text-emerald-400" : "text-rose-400"}
+            detail={`r ${formatINR(dayRealized)} · u ${formatINR(unrealized)}`}
+          />
+          <Tile
+            label="Open / Armed"
+            value={`${positions.length} / ${armedCount}`}
+            detail={`${rows.length} tracked`}
+          />
         </div>
-        {/* Tab nav sits directly under the header — kept as the single
-            source of truth for which subview is visible. */}
-        <nav className="mt-2 flex gap-1 overflow-x-auto rounded-md bg-bg-secondary/15 p-1">
-          {TABS.map((tab) => (
-            <button
-              key={tab.key}
-              type="button"
-              onClick={() => setActiveTab(tab.key)}
-              className={`whitespace-nowrap rounded px-3 py-1.5 text-xs font-medium transition-colors ${
-                activeTab === tab.key
-                  ? "bg-bg-secondary/55 text-text-primary"
-                  : "text-text-muted hover:bg-bg-secondary/30 hover:text-text-primary"
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </nav>
+
+        <div className="ml-1 flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => startMutation.mutate()}
+            disabled={startMutation.isPending || killActive || loopActive}
+            className="inline-flex items-center gap-1 rounded-md bg-bg-secondary/25 px-2 py-1 text-[11px] text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+            title="Start commodity agent"
+          >
+            <CirclePlay className="h-3.5 w-3.5" />
+            {loopActive ? "Running" : "Start"}
+          </button>
+          <button
+            type="button"
+            onClick={() => runOnceMutation.mutate()}
+            disabled={runOnceMutation.isPending}
+            className="inline-flex items-center gap-1 rounded-md bg-bg-secondary/25 px-2 py-1 text-[11px] text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+            title="Run one scan"
+          >
+            <RefreshCcw className="h-3.5 w-3.5" />
+            Scan
+          </button>
+          <Link
+            href="/settings"
+            className="rounded-md bg-bg-secondary/25 px-2 py-1 text-[11px] text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary"
+          >
+            Settings
+          </Link>
+        </div>
       </header>
 
-      {/* ── Decision Bar — 4 headline tiles + a chip strip for the rest.
-          Robinhood pattern: hero P&L gets generous typography, secondary
-          stats live in muted text below. Saves ~40px of vertical space
-          and stops the bar from drowning the tab content. */}
-      <section className="mb-3 grid grid-cols-2 gap-2 md:grid-cols-4">
-        <StatTile
-          label="Equity"
-          value={formatINR(totalEquity)}
-          detail={`init ${formatINR(initialCapital)} · ${formatPct(equityPct, 2)}`}
-          tone={equityPct >= 0 ? "text-emerald-400" : "text-rose-400"}
-        />
-        <StatTile
-          label="Day P&L"
-          value={formatINR(dayPnl)}
-          detail={`realized ${formatINR(dayRealizedPnl)} · open ${formatINR(unrealizedPnl)}`}
-          tone={dayPnl >= 0 ? "text-emerald-400" : "text-rose-400"}
-        />
-        <StatTile
-          label="Realized"
-          value={formatINR(realizedPnl)}
-          detail={`${totalTrades} trades · win ${(winRate * 100).toFixed(0)}%`}
-          tone={realizedPnl >= 0 ? "text-emerald-400" : "text-rose-400"}
-        />
-        <StatTile
-          label="Open / Ready"
-          value={`${positions.length} / ${(summary.ready_futures_signals ?? 0) + (summary.ready_option_signals ?? 0)}`}
-          detail={`fut ${summary.ready_futures_signals ?? 0} · opt ${summary.ready_option_signals ?? 0} · ${summary.open_orders ?? 0} working`}
-          tone={(summary.ready_futures_signals ?? 0) + (summary.ready_option_signals ?? 0) > 0 ? "text-emerald-300" : undefined}
-        />
-      </section>
-      {/* Secondary stats — muted chip strip. Daily-loss / drawdown caps /
-          data-quality / cooldown live here so the tiles above stay focused
-          on the live P&L story. */}
-      <div className="mb-3 flex flex-wrap gap-2 text-[11px] text-text-muted">
-        <Chip label="Drawdown" value={formatPct(maxDrawdown * 100, 1)} tone={maxDrawdown > 0.1 ? "text-amber-300" : ""} />
-        <Chip label="Cap" value={formatPct(Number(config.commodity_max_drawdown_pct ?? 0), 1)} />
-        <Chip label="Daily loss" value={formatINR(config.commodity_daily_loss_limit)} />
-        <Chip label="Per-underlying loss" value={formatINR(config.commodity_underlying_daily_loss_limit)} />
-        <Chip label="Cooldown" value={`${config.commodity_stop_cooldown_minutes ?? "—"}m`} />
-        <Chip
-          label="Data quality"
-          value={dataQuality.overall || "—"}
-          tone={
-            dataQuality.overall === "healthy"
-              ? "text-emerald-300"
-              : dataQuality.overall === "critical"
-                ? "text-rose-300"
-                : "text-amber-300"
-          }
-        />
-        <Chip label="MCX symbols" value={String(mcxQuality.length)} />
-      </div>
+      {/* ── Instrument table ───────────────────────────────────────── */}
+      <main className="flex flex-1 min-h-0 flex-col px-3 py-2">
+        <div className="overflow-hidden rounded-md border border-bg-secondary/30">
+          <table className="w-full table-fixed">
+            <thead>
+              <tr className="bg-bg-secondary/20 text-[10px] uppercase tracking-[0.14em] text-text-muted">
+                <th className="w-[12%] py-1.5 pl-2 pr-2 text-left">Instrument</th>
+                <th className="w-[9%] px-2 text-right">LTP</th>
+                <th className="w-[9%] px-2 text-right">Δ</th>
+                <th className="w-[24%] px-2 text-left">MP Profile · live</th>
+                <th className="w-[8%] px-2 text-right">CVD</th>
+                <th className="w-[8%] px-2 text-right">VWAP</th>
+                <th className="w-[14%] px-2 text-left">Trigger</th>
+                <th className="w-[8%] px-2 text-right">Stop</th>
+                <th className="w-[8%] pl-2 pr-3 text-right">Position</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="py-6 text-center text-[11px] text-text-muted">
+                    No instruments yet — waiting for the first scan.
+                  </td>
+                </tr>
+              ) : (
+                rows.map((row) => (
+                  <InstrumentRow
+                    key={String(row.symbol || row.underlying)}
+                    row={row}
+                    position={positionBySymbol[String(row.symbol || "")]}
+                    onClick={() => setSelectedSymbol(String(row.symbol || ""))}
+                  />
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
 
-      {/* WATCHLIST tab — Bloomberg-style dense table + action queue side panel. */}
-      {activeTab === "watchlist" ? (
-        <>
-          <div className="mb-3 space-y-3">
-            <Section
-              title="Live Instruments"
-              detail={
-                usingSnapshotFutures
-                  ? "catalog fallback · scanner offline"
-                  : `${watchlist.length} futures · MP+OF on 1-min · tick stream · scan ${scanIntervalSeconds}s`
-              }
-            >
-              <InstrumentWatchlist futuresRows={watchlist} optionRows={optionWatchlist} />
-            </Section>
-            <Section
-              title="Action Queue"
-              detail={`${watchlist.length} symbols · bucketed by signal proximity`}
-            >
-              <ActionQueue rows={watchlist} />
-            </Section>
-          </div>
-        </>
-      ) : null}
-
-      {/* POSITIONS tab — wide table is faster to scan than a grid of cards;
-          risk-controls and strategy-agent sleeves sit beside it in a 4-8
-          split so the trader sees everything without scrolling. */}
-      {activeTab === "positions" ? (
-        <div className="mb-3 grid grid-cols-12 gap-3">
-          <Section
-            title="Open Positions"
-            detail={
-              positions.length === 0
-                ? "no exposure"
-                : `${positions.length} live · stop/target tracked`
-            }
-            className="col-span-12"
-          >
-            {positions.length === 0 ? (
-              <div className="px-2 py-8 text-center text-xs text-text-muted">
-                Desk is flat. Scan output will populate the action queue when signals fire.
+        {/* ── Footer: action queue · audit feed ──────────────────── */}
+        <div className="mt-2 grid flex-1 min-h-0 grid-cols-12 gap-2">
+          <div className="col-span-12 lg:col-span-5 rounded-md border border-bg-secondary/30 p-2">
+            <div className="mb-1 flex items-baseline justify-between">
+              <div className="text-[10px] uppercase tracking-[0.14em] text-text-muted">
+                Action Queue
               </div>
-            ) : (
-              <PositionsTable positions={positions} />
-            )}
-          </Section>
-          <Section
-            title="Risk Controls"
-            detail="commodity limits"
-            className="col-span-12 xl:col-span-4"
-          >
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <StatTile label="Daily Loss" value={formatINR(config.commodity_daily_loss_limit)} />
-              <StatTile
-                label="Underlying Loss"
-                value={formatINR(config.commodity_underlying_daily_loss_limit)}
-              />
-              <StatTile
-                label="Max Drawdown"
-                value={formatPct(Number(config.commodity_max_drawdown_pct ?? 0), 1)}
-              />
-              <StatTile label="Cooldown" value={`${config.commodity_stop_cooldown_minutes ?? "--"}m`} />
-              <StatTile label="Lots / Trade" value={String(config.lots_per_trade ?? "--")} />
-              <StatTile
-                label="Option Budget"
-                value={formatPct(Number(config.option_capital_fraction ?? 0) * 100, 1)}
-              />
+              <div className="text-[10px] text-text-muted">
+                {armedCount} armed · priority × confidence
+              </div>
             </div>
-          </Section>
-          <Section
-            title="Strategy Agents"
-            detail="commodity sleeves"
-            className="col-span-12 xl:col-span-8"
-          >
-            <div className="grid gap-2 sm:grid-cols-2">
-              {(status.strategy_agents ?? []).map((agent) => (
-                <div key={String(agent.key)} className={`${QUIET_TILE} px-3 py-2 text-xs`}>
-                  <div className="flex items-baseline justify-between gap-2">
-                    <div className="font-semibold text-text-primary">
-                      {String(agent.title || agent.key)}
-                    </div>
-                    <div className="text-text-muted">{String(agent.execution_mode || "--")}</div>
-                  </div>
-                  <div className="mt-1 grid grid-cols-2 gap-2 text-[11px] text-text-muted">
-                    <span>{String(agent.instrument_scope || "--")}</span>
-                    <span>{String(agent.timeframe || "--")}</span>
-                    <span>tracked {String(agent.tracked_symbols ?? "--")}</span>
-                    <span>ready {String(agent.ready_signals ?? 0)}</span>
-                  </div>
-                </div>
-              ))}
+            <ActionQueue
+              rows={rows}
+              onSelect={(sym) => setSelectedSymbol(sym)}
+            />
+          </div>
+          <div className="col-span-12 lg:col-span-7 rounded-md border border-bg-secondary/30 p-2">
+            <div className="mb-1 flex items-baseline justify-between">
+              <div className="text-[10px] uppercase tracking-[0.14em] text-text-muted">
+                Audit feed · mp_signal.*
+              </div>
+              <div className="text-[10px] text-text-muted">{auditEvents.length} events</div>
             </div>
-          </Section>
+            <AuditFeed events={auditEvents} />
+          </div>
         </div>
-      ) : null}
+      </main>
 
-      {/* HISTORY tab — Portfolio Summary as a tight side panel, Closed
-          Trades takes the dominant real estate (it's what traders open
-          this tab to read), Order Flow and Audit Feed share the row
-          below at equal weight. */}
-      {activeTab === "history" ? (
-        <div className="mb-3 grid grid-cols-12 gap-3">
-          <Section
-            title="Portfolio Summary"
-            detail="paper commodity book"
-            className="col-span-12 xl:col-span-3"
-          >
-            <div className="grid grid-cols-2 gap-2">
-              <StatTile label="Initial" value={formatINR(initialCapital)} />
-              <StatTile label="Available" value={formatINR(summary.available_capital)} />
-              <StatTile
-                label="Equity"
-                value={formatINR(totalEquity)}
-                tone={equityPct >= 0 ? "text-emerald-400" : "text-rose-400"}
-              />
-              <StatTile
-                label="Realized"
-                value={formatINR(realizedPnl)}
-                tone={realizedPnl >= 0 ? "text-emerald-400" : "text-rose-400"}
-              />
-              <StatTile
-                label="Unrealized"
-                value={formatINR(unrealizedPnl)}
-                tone={unrealizedPnl >= 0 ? "text-emerald-400" : "text-rose-400"}
-              />
-              <StatTile
-                label="Profit Factor"
-                value={summary.profit_factor ? Number(summary.profit_factor).toFixed(2) : "--"}
-              />
-            </div>
-          </Section>
-          <Section
-            title="Closed Trades"
-            detail={`${trades.length} rows · last ${formatIST(trades[0]?.exit_time)}`}
-            className="col-span-12 xl:col-span-9"
-          >
-            <div className="max-h-[480px] overflow-y-auto">
-              <TradesTable trades={trades.slice(0, 50)} />
-            </div>
-          </Section>
-          <Section
-            title="Order Flow"
-            detail={`${orders.length} rows`}
-            className="col-span-12 xl:col-span-6"
-          >
-            <div className="max-h-[320px] overflow-y-auto">
-              <OrdersTable orders={orders.slice(0, 50)} />
-            </div>
-          </Section>
-          <Section
-            title="Audit Feed"
-            detail="state transitions"
-            className="col-span-12 xl:col-span-6"
-          >
-            <div className="max-h-[320px] overflow-y-auto">
-              <AuditFeed events={auditEvents.slice(0, 40)} />
-            </div>
-          </Section>
-        </div>
+      {/* ── Detail modal ───────────────────────────────────────────── */}
+      {selectedRow ? (
+        <InstrumentDetailModal
+          row={selectedRow}
+          position={positionBySymbol[String(selectedRow.symbol || "")]}
+          recentTrades={symbolFilteredTrades}
+          recentOrders={symbolFilteredOrders}
+          recentAudit={symbolFilteredAudit}
+          onClose={() => setSelectedSymbol(null)}
+        />
       ) : null}
+    </div>
+  );
+}
 
-      {/* Expiry & Research tabs were removed when the options sleeve was
-          deprecated. The MP+OF futures-only desk has nothing useful to put
-          there — strategy notes are shown inline on the Positions tab and
-          signal audit is available via the backend's /api/audit endpoint. */}
+// ─── Header tile ───────────────────────────────────────────────────────────
+
+function Tile({
+  label,
+  value,
+  detail,
+  tone,
+}: {
+  label: string;
+  value: string;
+  detail?: string;
+  tone?: string;
+}) {
+  return (
+    <div className="flex items-baseline gap-2">
+      <span className="text-[10px] uppercase tracking-[0.14em] text-text-muted">{label}</span>
+      <span className={`font-mono text-[13px] font-semibold ${tone || "text-text-primary"}`}>
+        {value}
+      </span>
+      {detail ? (
+        <span className="font-mono text-[10px] text-text-muted">{detail}</span>
+      ) : null}
     </div>
   );
 }
