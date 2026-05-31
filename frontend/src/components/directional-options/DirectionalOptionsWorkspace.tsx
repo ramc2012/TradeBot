@@ -19,6 +19,8 @@ import {
 import PolicyDecisionPanel, { type PolicyBlock } from "./PolicyDecisionPanel";
 import PaperTradingTab from "./PaperTradingTab";
 import PolicyLearningTab from "./PolicyLearningTab";
+import MultiSymbolWatch from "./MultiSymbolWatch";
+import EngineCalculations from "./EngineCalculations";
 import {
   Bar,
   BarChart,
@@ -532,6 +534,17 @@ export default function DirectionalOptionsWorkspace() {
 
       {activeTab === "overview" ? (
       <>
+      {/* Always-on watchlist — covers every symbol in the universe, even
+          when the policy is in SKIP mode. The user can click a row to
+          re-center the workspace on that symbol. */}
+      <MultiSymbolWatch
+        symbols={module?.underlyings || ["NIFTY", "BANKNIFTY", "SENSEX"]}
+        timeframe={deferredTimeframe}
+        lookbackSessions={Number(deferredLookbackSessions)}
+        selectedSymbol={deferredUnderlying}
+        onSelect={(s) => startTransition(() => setUnderlying(s))}
+      />
+
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         <MetricTile label="Paper Book" value={`${data?.paper_positions?.summary?.open_count ?? 0}`} detail={`Realized ${formatSignedMoney(data?.paper_positions?.summary?.realized_pnl, 0)} · open ${formatSignedMoney(data?.paper_positions?.summary?.unrealized_pnl, 0)}`} color={tone((data?.paper_positions?.summary?.realized_pnl || 0) + (data?.paper_positions?.summary?.unrealized_pnl || 0))} />
         <MetricTile
@@ -550,6 +563,12 @@ export default function DirectionalOptionsWorkspace() {
         policy={snapshot?.policy ?? null}
         candidates={snapshot?.contract_candidates}
       />
+
+      {/* Always-on calculation breakdown — feature snapshot, regime
+          reasons, signal sub-fields, all candidates with scores. Renders
+          even on a no-signal bar so the user sees what the engine is
+          actually computing instead of empty placeholders. */}
+      <EngineCalculations snapshot={snapshot ?? null} />
 
       <section className="grid gap-5 xl:grid-cols-[1.1fr,0.9fr]">
         <div className="rounded-[26px] border border-bg-border bg-bg-secondary/24 p-5">
