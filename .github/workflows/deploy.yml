@@ -117,16 +117,11 @@ jobs:
           fi
           echo "==> Using repo at \$REPO"
           cd "\$REPO"
-          # SSM runs as root, but /opt/TradeBot (and /home/ubuntu/nomad-curie)
-          # are owned by the ubuntu user. Git 2.35+ refuses cross-user git ops
-          # without an explicit safe.directory whitelist:
-          #   fatal: detected dubious ownership in repository at '/opt/TradeBot'
-          # Adding it to root's gitconfig lets the root-side `git log` calls
-          # work; the `sudo -u ubuntu git ...` calls below don't need it
-          # because they already run as the owning user.
-          git config --global --add safe.directory "\$REPO"
+          # All git operations run as the ubuntu user (the repo owner) so we
+          # never trip git's safe.directory check or need \$HOME under the
+          # root SSM session.
           echo "==> Current HEAD before pull:"
-          git log -1 --oneline
+          sudo -u ubuntu git log -1 --oneline
           echo "==> Fetching origin..."
           sudo -u ubuntu git fetch origin --quiet
           echo "==> New commits to pull:"
@@ -134,7 +129,7 @@ jobs:
           echo "==> Pulling main..."
           sudo -u ubuntu git pull origin main --ff-only
           echo "==> HEAD after pull:"
-          git log -1 --oneline
+          sudo -u ubuntu git log -1 --oneline
           echo "==> Building + restarting backend and frontend..."
           docker compose up -d --build ${FORCE_FLAG} backend frontend
           echo "==> Waiting 30s for services to settle..."
