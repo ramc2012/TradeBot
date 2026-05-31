@@ -137,6 +137,26 @@ type WatchRow = {
   contract_unit_label?: string | null;
   quote_unit_label?: string | null;
   prior_session_date?: string | null;
+  // Full TPO of the prior session — surfaced by the agent so the detail
+  // modal's "Last day" tile renders the completed auction immediately,
+  // without waiting for tomorrow's roll into the persisted history.
+  prior_session_profile?: {
+    session_date?: string | null;
+    poc?: number | null;
+    vah?: number | null;
+    val?: number | null;
+    ib_high?: number | null;
+    ib_low?: number | null;
+    high?: number | null;
+    low?: number | null;
+    tick_size?: number | null;
+    tpo_letters?: Record<string, string> | null;
+    tpo_counts?: Record<string, number> | null;
+    single_prints?: number[] | null;
+    poor_high?: boolean | null;
+    poor_low?: boolean | null;
+    period_count?: number | null;
+  } | null;
   indicator_timeframe?: string | null;
   live_tick_source?: string | null;
   live_tick_time?: string | null;
@@ -2210,20 +2230,39 @@ function InstrumentDetailModal({
     };
   };
 
-  const yesterday = histPeriod("previous_day", "Yesterday")
-    || (yPoc || yVah || yVal
-      ? {
-          label: "Yesterday",
-          date: row.prior_session_date || undefined,
-          poc: yPoc,
-          vah: yVah,
-          val: yVal,
-          high: null,
-          low: null,
-          tpo_letters: null,
-          tick_size: null,
-        }
-      : null);
+  // Last-day TPO. Source priority:
+  //   1. row.prior_session_profile — the live agent payload; carries full
+  //      letters and is always fresh, so we prefer it when present.
+  //   2. persisted history endpoint (`previous_day` aggregate).
+  //   3. trigger_evidence (prior_poc / prior_pvah / prior_pval) as a thin
+  //      fallback when the agent only surfaced reference levels.
+  const yesterdayLive = row.prior_session_profile;
+  const yesterday: HistPeriod | null = yesterdayLive
+    ? {
+        label: "Yesterday",
+        date: yesterdayLive.session_date || undefined,
+        poc: yesterdayLive.poc ?? null,
+        vah: yesterdayLive.vah ?? null,
+        val: yesterdayLive.val ?? null,
+        high: yesterdayLive.high ?? null,
+        low: yesterdayLive.low ?? null,
+        tpo_letters: yesterdayLive.tpo_letters ?? null,
+        tick_size: yesterdayLive.tick_size ?? null,
+      }
+    : histPeriod("previous_day", "Yesterday")
+      || (yPoc || yVah || yVal
+        ? {
+            label: "Yesterday",
+            date: row.prior_session_date || undefined,
+            poc: yPoc,
+            vah: yVah,
+            val: yVal,
+            high: null,
+            low: null,
+            tpo_letters: null,
+            tick_size: null,
+          }
+        : null);
   const thisWeek = histPeriod("this_week", "This week");
   const lastWeek = histPeriod("last_week", "Last week");
   const thisMonth = histPeriod("this_month", "This month");
@@ -2293,7 +2332,36 @@ function InstrumentDetailModal({
           {/* Today */}
           <div className="col-span-7">
             <div className="mb-1 flex items-baseline justify-between text-[10px] uppercase tracking-[0.14em] text-text-muted">
-              <span>Today · {row.mp_day_type || "—"}</span>
+              <span className="flex items-center gap-1.5">
+                <span>Today · {row.mp_day_type || "—"}</span>
+                {/* "Developing" is the standard MP term for an unfinished
+                    session — IB and the value area can still shift until
+                    the close. We mark it explicitly so the desk doesn't
+                    mistake the live numbers for a settled auction. */}
+                {(() => {
+                  const periods = Number(row.mp_periods ?? 0);
+                  const isDeveloping = periods < 13; // ~6.5h MCX session at 30m
+                  if (!isDeveloping) {
+                    return (
+                      <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-semibold tracking-wider text-emerald-300">
+                        FINAL
+                      </span>
+                    );
+                  }
+                  const ibComplete = periods >= 2;
+                  return (
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[9px] font-semibold tracking-wider ${
+                        ibComplete
+                          ? "bg-amber-500/20 text-amber-300"
+                          : "bg-sky-500/20 text-sky-300"
+                      }`}
+                    >
+                      {ibComplete ? "DEVELOPING" : "DEVELOPING IB"}
+                    </span>
+                  );
+                })()}
+              </span>
               <span>
                 {row.mp_periods ?? "—"} periods · tick {formatNumber(Number(row.mp_tick_size ?? 0), 2)}
               </span>

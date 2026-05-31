@@ -1743,23 +1743,71 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             atr_1m=atr_1m,
         )
 
-        # Persist a daily snapshot once Initial Balance has fully printed (so
-        # we don't churn the disk with intra-IB rewrites). This is a cheap
-        # idempotent overwrite: the latest scan of the day wins, so by EOD
-        # the file holds the final auction.
-        if today_profile is not None and int(getattr(today_profile, "period_count", 0) or 0) >= FUTURES_MP_MIN_PERIODS:
-            try:
-                from paper_engine.commodity_profile_store import (
-                    build_daily_profile_from_snapshot,
-                    save_profile,
-                )
+        # Persist daily snapshots so the historical timeline grows on its own.
+        # We snapshot:
+        #   - today_profile once Initial Balance has fully printed (so we don't
+        #     churn the disk with intra-IB rewrites). The latest scan of the
+        #     day wins via idempotent overwrite — by EOD the file holds the
+        #     final auction.
+        #   - prior_profile every time we load it. This bootstraps the
+        #     "Yesterday" tile on first deploy instead of forcing the desk to
+        #     wait one session for history to fill in.
+        try:
+            from paper_engine.commodity_profile_store import (
+                build_daily_profile_from_snapshot,
+                save_profile,
+            )
 
+            if today_profile is not None and int(getattr(today_profile, "period_count", 0) or 0) >= FUTURES_MP_MIN_PERIODS:
                 snapshot = build_daily_profile_from_snapshot(spec.root, today_profile)
                 if snapshot is not None:
                     save_profile(snapshot)
-            except Exception as persist_exc:
+
+            if prior_profile is not None:
+                prior_snapshot = build_daily_profile_from_snapshot(spec.root, prior_profile)
+                if prior_snapshot is not None:
+                    save_profile(prior_snapshot)
+        except Exception as persist_exc:
+            logger.debug(
+                f"[CommodityStrategy] daily profile persist skipped for {spec.root}: {persist_exc}"
+            )
+
+        # Attach the full prior-session profile to the row payload so the
+        # detail modal can render "Last day" TPO immediately — without waiting
+        # for the historical-timeline endpoint to roll. The frontend reads
+        # this in preference to the persisted aggregate when present.
+        if prior_profile is not None:
+            try:
+                tpo_letters_raw = dict(getattr(prior_profile, "tpo_letters", {}) or {})
+                tpo_counts_raw = dict(getattr(prior_profile, "tpo_counts", {}) or {})
+                prior_session_date = getattr(prior_profile, "session_date", None)
+                result["prior_session_profile"] = {
+                    "session_date": (
+                        prior_session_date.isoformat()
+                        if hasattr(prior_session_date, "isoformat")
+                        else (str(prior_session_date) if prior_session_date else None)
+                    ),
+                    "poc": _round_or_none(getattr(prior_profile, "poc", None), 2),
+                    "vah": _round_or_none(getattr(prior_profile, "vah", None), 2),
+                    "val": _round_or_none(getattr(prior_profile, "val", None), 2),
+                    "ib_high": _round_or_none(getattr(prior_profile, "initial_balance_high", None), 2),
+                    "ib_low": _round_or_none(getattr(prior_profile, "initial_balance_low", None), 2),
+                    "high": _round_or_none(getattr(prior_profile, "high_price", None), 2),
+                    "low": _round_or_none(getattr(prior_profile, "low_price", None), 2),
+                    "tick_size": _round_or_none(getattr(prior_profile, "tick_size", None), 4),
+                    "tpo_letters": {str(k): str(v) for k, v in tpo_letters_raw.items()},
+                    "tpo_counts": {str(k): int(v) for k, v in tpo_counts_raw.items()},
+                    "single_prints": [
+                        float(x)
+                        for x in list(getattr(prior_profile, "single_prints", []) or [])
+                    ],
+                    "poor_high": bool(getattr(prior_profile, "poor_high", False)),
+                    "poor_low": bool(getattr(prior_profile, "poor_low", False)),
+                    "period_count": int(getattr(prior_profile, "period_count", 0) or 0),
+                }
+            except Exception as prior_exc:
                 logger.debug(
-                    f"[CommodityStrategy] daily profile persist skipped for {spec.root}: {persist_exc}"
+                    f"[CommodityStrategy] prior profile payload skipped for {spec.root}: {prior_exc}"
                 )
 
         # Attach instrument-shape fields the harness/decorator need.
