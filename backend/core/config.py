@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     # is vestigial but kept for emergency rollback.
     NSE_S1_BYPASS_MARKET_PROFILE_GATE: bool = True
     NSE_S2_BYPASS_MARKET_PROFILE_GATE: bool = False
+    # When true, S2 evaluates the MP+OF engine (the same one driving the
+    # commodity desk) on 1-min index spot before falling back to the legacy
+    # 15-min option-premium MACD path. The MP+OF path emits BUY/SELL plus
+    # the standard mp_* fields, which the lane maps to ATM CE/PE on the
+    # weekly+monthly expiry tracks declared in strategy2_mp_of.S2_EXPIRY_ROUTING.
+    NSE_S2_USE_MP_OF_ENGINE: bool = True
     PAPER_TRADING_ONLY: bool = False
     PAPER_RUNTIME_PREWARM_ENABLED: bool = True
     MARKET_HOURS_PAPER_SUPERVISOR_ENABLED: bool = True

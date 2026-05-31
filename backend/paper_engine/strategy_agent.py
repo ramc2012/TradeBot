@@ -3138,6 +3138,35 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         ce_aligned = ce_macd_value is not None and ce_macd_value > 0
         pe_aligned = pe_macd_value is not None and pe_macd_value < 0
 
+        # ── MP+OF directional override ──────────────────────────────────
+        # Ported from the commodity desk: a 4-trigger Market-Profile +
+        # Order-Flow engine running on 1-min index spot. When it emits a
+        # BUY/SELL, we override the MACD-derived fresh_ce/fresh_pe so the
+        # rest of the lane treats the MP+OF side as the entry trigger.
+        # Falls through to MACD when the engine is silent (insufficient
+        # 1m history, no prior session, etc.), so this is a soft promotion
+        # not a wholesale rewire.
+        mp_of_signal: dict[str, Any] = {}
+        if settings.NSE_S2_USE_MP_OF_ENGINE:
+            try:
+                from paper_engine.strategy2_mp_of import evaluate_strategy2_mp_of
+
+                mp_of_signal = await evaluate_strategy2_mp_of(
+                    underlying=underlying,
+                    started_at=started_at,
+                )
+                _mp_side = mp_of_signal.get("side")
+                if _mp_side == "CE":
+                    fresh_ce, fresh_pe = True, False
+                elif _mp_side == "PE":
+                    fresh_ce, fresh_pe = False, True
+            except Exception as mp_exc:
+                logger.debug(
+                    f"[Strategy2] MP+OF evaluation failed for {underlying}: {mp_exc}; "
+                    "falling back to MACD path."
+                )
+                mp_of_signal = {"signal": None, "reason": f"mp_of_error:{mp_exc}"}
+
         # ── Order-flow on option premium candles ────────────────────────
         # S2 trades option premium directly (long CE or long PE). CVD on
         # the chosen side's candles tells us whether premium accumulation
@@ -3263,6 +3292,21 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             cvd_agrees = (
                 cvd_agrees_with("BUY", active_cvd_window) if direction in {"CE", "PE"} else None
             )
+
+            # If MP+OF supplied the direction, replace the MACD-shaped audit
+            # strings so logs, signal records, and the UI surface the real
+            # trigger. Falls through transparently when MP+OF was silent
+            # (the bypass branch's MACD reason stays in place).
+            mp_of_active = bool(mp_of_signal.get("signal")) and direction in {"CE", "PE"}
+            if mp_of_active:
+                entry_reason = f"mp_of:{mp_of_signal.get('entry_style') or 'auto'}"
+                gate_reason = mp_of_signal.get("reason") or gate_reason
+                instruction = (
+                    f"{underlying}: MP+OF {mp_of_signal.get('entry_style', 'signal')} "
+                    f"→ {direction} (confidence "
+                    f"{int(round(float(mp_of_signal.get('confidence') or 0.0) * 100))}%). "
+                    f"{mp_of_signal.get('signal_validation_detail', '')}"
+                ).strip()
             signal = {
                 "strategy": "Strategy 2",
                 "source": "live_scan",
@@ -3298,14 +3342,34 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 ),
                 "cvd_agrees": cvd_agrees,
                 "cvd_divergence": active_of.get("divergence"),
+                # MP+OF surface fields — populated only when the engine fired.
+                # The dashboard reads these to render the entry style + the
+                # auction context the trigger fired on.
+                "mp_of_engine_signal": mp_of_signal.get("signal") if mp_of_signal else None,
+                "mp_of_entry_style": mp_of_signal.get("entry_style") if mp_of_signal else None,
+                "mp_of_confidence": _round_or_none(mp_of_signal.get("confidence"), 3) if mp_of_signal else None,
+                "mp_of_stop_hint": _round_or_none(mp_of_signal.get("stop_hint"), 2) if mp_of_signal else None,
+                "mp_of_validation": mp_of_signal.get("signal_validation_detail") if mp_of_signal else None,
+                "mp_of_day_type": mp_of_signal.get("mp_day_type") if mp_of_signal else None,
+                "mp_of_periods": mp_of_signal.get("mp_periods") if mp_of_signal else None,
                 **bucket_info,
             }
+            # Pipeline detail: when MP+OF actively shaped the decision we
+            # surface its trigger style instead of the legacy "MP bypassed"
+            # marker. Falls back to the test-mode string only when MP+OF
+            # didn't fire (so the watcher sees the right state).
+            if mp_of_active:
+                pipeline_detail = (
+                    f"mp+of {mp_of_signal.get('entry_style', 'signal')} → {direction} · {status}"
+                )
+            else:
+                pipeline_detail = f"mp+of standby · {status}"
             pipeline = {
                 "name": f"Strategy 2 {underlying}",
                 "status": "ok" if freshness == "live" else ("warning" if freshness == "stale" else "missing"),
                 "rows": max(len(ce_candles), len(pe_candles)),
                 "last_date": str(option_last_bar_time or "—"),
-                "detail": f"option-only test mode · MP bypassed · {status}",
+                "detail": pipeline_detail,
                 "freshness": freshness,
             }
             return {
