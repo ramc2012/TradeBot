@@ -1792,93 +1792,178 @@ function TPOChart({
     );
   }
 
+  // ── Layout: fit the entire profile to the available box ───────────────
+  //
+  // The profile is always rendered to its full vertical extent — no scroll.
+  // Two consequences make this match the way Sierra Chart / IRT auto-scale:
+  //
+  //   • A long-range session (e.g. NICKEL on a directional day) produces
+  //     many tick rows → rows compress to short bars instead of clipping.
+  //   • A tight, balanced session produces few rows → the same chart box
+  //     gives each level a tall, readable row.
+  //
+  // The per-row pixel height is `chartHeight / numRows`, so the box height
+  // itself scales the boxes by the instrument's actual move — which is the
+  // ATR-driven sizing the desk asked for.
+
+  const PRICE_AXIS_WIDTH = 50;
+  const RIGHT_PAD = 26; // room for reference badges (Y / W / M)
+  const chartHeight = height;
+  const rowHeight = chartHeight / entries.length;
+  const tick =
+    Number(tickSize ?? 0) ||
+    (entries.length > 1 ? entries[0].price - entries[1].price : 0.5);
+
+  // Cell width sized to the densest row so every letter fits on one line;
+  // bounded so a very thin row doesn't shrink letters below readability.
   const maxLetters = entries.reduce((m, e) => Math.max(m, e.letters.length), 0);
-  const rowHeight = Math.max(10, Math.min(20, height / Math.max(entries.length, 1)));
-  const tick = Number(tickSize ?? 0) || (entries.length > 1 ? entries[0].price - entries[1].price : 0.5);
+  const fontPx = Math.max(5, Math.min(11, rowHeight - 1));
+  const cellWidth = Math.max(4, Math.min(11, fontPx + 1));
+  const lettersFit = rowHeight >= 7 && fontPx >= 6;
 
   const valNum = Number(val ?? 0);
   const vahNum = Number(vah ?? 0);
   const pocNum = Number(poc ?? 0);
   const priceNum = Number(price ?? 0);
+  const ibhNum = ibh != null ? Number(ibh) : null;
+  const iblNum = ibl != null ? Number(ibl) : null;
+
+  // Sparse price labels — every Nth row so labels stay legible regardless
+  // of how thin individual rows have become.
+  const targetLabelGap = 14;
+  const labelEvery = Math.max(1, Math.round(targetLabelGap / Math.max(rowHeight, 1)));
 
   return (
     <div
       className="relative overflow-hidden rounded-md bg-bg-primary ring-1 ring-bg-secondary/40"
-      style={{ height }}
+      style={{ height: chartHeight }}
     >
-      <div className="absolute inset-0 overflow-y-auto">
-        <table className="w-full border-separate border-spacing-0 font-mono">
-          <tbody>
-            {entries.map((row) => {
-              const inVA = valNum && vahNum && row.price >= valNum && row.price <= vahNum;
-              const inIB = ibl != null && ibh != null && row.price >= Number(ibl) && row.price <= Number(ibh);
-              const isPOC = pocNum && Math.abs(row.price - pocNum) < tick * 0.5;
-              const atVAH = vahNum && Math.abs(row.price - vahNum) < tick * 0.5;
-              const atVAL = valNum && Math.abs(row.price - valNum) < tick * 0.5;
-              const atPrice = priceNum && Math.abs(row.price - priceNum) < tick * 0.5;
-              const ref = references.find(
-                (r) => Math.abs(r.price - row.price) < tick * 0.5,
-              );
-              const bg = isPOC
-                ? pocBaseColor
-                : inIB
-                  ? "rgba(252, 211, 77, 0.07)"
-                  : inVA
-                    ? "rgba(148, 163, 184, 0.07)"
-                    : "transparent";
-              return (
-                <tr
-                  key={row.price}
-                  style={{ background: bg, height: rowHeight }}
-                  className={[
-                    atVAH ? "border-t border-dashed border-text-muted/40" : "",
-                    atVAL ? "border-b border-dashed border-text-muted/40" : "",
-                  ].join(" ")}
-                  title={`${formatNumber(row.price, 2)} · ${row.letters.length} TPO (${row.letters.split("").join(" ")})`}
-                >
-                  <td
-                    className="whitespace-nowrap border-r border-bg-secondary/30 px-1.5 text-right text-[9.5px] text-text-muted"
-                    style={{ width: 60 }}
-                  >
-                    {atPrice ? "▶ " : ""}
-                    {formatNumber(row.price, 2)}
-                  </td>
-                  <td className="relative px-1">
-                    <div className="flex flex-wrap leading-none">
-                      {row.letters.split("").map((ch, i) => (
-                        <span
-                          key={i}
-                          className={`mr-[1.5px] text-[10px] tracking-tighter ${
-                            isPOC
-                              ? "text-amber-300 font-semibold"
-                              : inIB
-                                ? "text-amber-200"
-                                : inVA
-                                  ? "text-text-secondary"
-                                  : "text-text-muted"
-                          }`}
-                        >
-                          {ch}
-                        </span>
-                      ))}
-                    </div>
-                    {/* Reference marker on the right edge */}
-                    {ref ? (
-                      <span
-                        className="absolute right-1 top-1/2 -translate-y-1/2 rounded px-1 text-[9px] font-semibold"
-                        style={{ background: ref.color + "33", color: ref.color }}
-                      >
-                        {ref.label}
-                      </span>
-                    ) : null}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-      {/* Floating axis labels */}
+      {/* Axis separator */}
+      <div
+        className="absolute top-0 bottom-0 bg-bg-secondary/20"
+        style={{ left: PRICE_AXIS_WIDTH, width: 1 }}
+      />
+      {entries.map((row, i) => {
+        const top = i * rowHeight;
+        const inVA =
+          valNum && vahNum && row.price >= valNum && row.price <= vahNum;
+        const inIB =
+          iblNum != null &&
+          ibhNum != null &&
+          row.price >= iblNum &&
+          row.price <= ibhNum;
+        const isPOC = pocNum && Math.abs(row.price - pocNum) < tick * 0.5;
+        const atVAH = vahNum && Math.abs(row.price - vahNum) < tick * 0.5;
+        const atVAL = valNum && Math.abs(row.price - valNum) < tick * 0.5;
+        const atPrice =
+          priceNum && Math.abs(row.price - priceNum) < tick * 0.5;
+        const ref = references.find(
+          (r) => Math.abs(r.price - row.price) < tick * 0.5,
+        );
+        const bandFill = isPOC
+          ? pocBaseColor
+          : inIB
+            ? "rgba(252, 211, 77, 0.09)"
+            : inVA
+              ? "rgba(148, 163, 184, 0.07)"
+              : "transparent";
+        const letterColor = isPOC
+          ? "#fcd34d"
+          : inIB
+            ? "#fde68a"
+            : inVA
+              ? "#cbd5e1"
+              : "#94a3b8";
+        const showLabel =
+          i === 0 || i === entries.length - 1 || i % labelEvery === 0;
+        const labelFontPx = Math.max(7, Math.min(9, rowHeight - 1));
+
+        return (
+          <div
+            key={row.price}
+            className="absolute left-0 right-0 flex items-center"
+            style={{
+              top,
+              height: rowHeight,
+              background: bandFill,
+              borderTop: atVAH ? "1px dashed rgba(148,163,184,0.45)" : undefined,
+              borderBottom: atVAL ? "1px dashed rgba(148,163,184,0.45)" : undefined,
+            }}
+            title={`${formatNumber(row.price, 2)} · ${row.letters.length} TPO (${row.letters.split("").join(" ")})`}
+          >
+            {/* Price axis label, drawn sparsely */}
+            {showLabel ? (
+              <div
+                className="absolute font-mono whitespace-nowrap text-right"
+                style={{
+                  right: `calc(100% - ${PRICE_AXIS_WIDTH - 4}px)`,
+                  fontSize: labelFontPx,
+                  color: isPOC ? "#fcd34d" : "#64748b",
+                  lineHeight: 1,
+                }}
+              >
+                {atPrice ? "▶ " : ""}
+                {formatNumber(row.price, 2)}
+              </div>
+            ) : null}
+            {/* Letters (when row is tall enough) OR proportional bar */}
+            <div
+              className="absolute flex items-center"
+              style={{
+                left: PRICE_AXIS_WIDTH + 4,
+                right: RIGHT_PAD,
+                top: 0,
+                bottom: 0,
+              }}
+            >
+              {lettersFit ? (
+                <div className="flex font-mono leading-none">
+                  {row.letters.split("").map((ch, j) => (
+                    <span
+                      key={j}
+                      style={{
+                        width: cellWidth,
+                        fontSize: fontPx,
+                        color: letterColor,
+                        fontWeight: isPOC ? 600 : 400,
+                      }}
+                    >
+                      {ch}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                // Too thin to render legible letters → tinted proportional
+                // bar. Width = TPO count / max count, so the auction shape
+                // is still legible at a glance.
+                <div
+                  style={{
+                    width: `${(row.letters.length / Math.max(maxLetters, 1)) * 100}%`,
+                    height: Math.max(1.5, rowHeight * 0.7),
+                    background: letterColor,
+                    opacity: isPOC ? 0.95 : inIB ? 0.7 : inVA ? 0.55 : 0.4,
+                    borderRadius: 1,
+                  }}
+                />
+              )}
+            </div>
+            {/* Reference badge */}
+            {ref ? (
+              <div
+                className="absolute right-1 top-1/2 -translate-y-1/2 rounded px-1 text-[9px] font-semibold font-mono"
+                style={{
+                  background: ref.color + "33",
+                  color: ref.color,
+                  lineHeight: 1.2,
+                }}
+              >
+                {ref.label}
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+      {/* Corner axis legend */}
       <div className="pointer-events-none absolute right-1 top-1 flex flex-col items-end gap-0.5 text-[9px] font-mono">
         {high ? <span className="text-text-muted">H {formatNumber(Number(high), 2)}</span> : null}
         {vah ? <span className="text-text-secondary">VAH {formatNumber(Number(vah), 2)}</span> : null}
