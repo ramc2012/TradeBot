@@ -98,15 +98,33 @@ class AssetMomentum:
 async def fetch_asset_history(symbol: str, *, lookback_days: int = 400) -> list[float]:
     """Return chronological daily-close list for the symbol.
 
-    Pulls from `underlying_spot_candles` at the 30-min interval and
-    resamples to last-bar-of-day for the daily series. Returns empty
-    list when no bars exist (caller falls back to stub).
+    Prefers `interval='day'` rows (ETF backfill writes here). Falls back
+    to 30-min resampling for symbols like NIFTY where intraday is the
+    only source available.
     """
     from db.database import AsyncSessionLocal
     from sqlalchemy import text
 
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
+        # Pass 1 — proper daily bars (ETFs after ingest_etf_history script).
+        daily_result = await session.execute(
+            text(
+                """
+                SELECT close FROM underlying_spot_candles
+                WHERE underlying = :underlying
+                  AND interval = 'day'
+                  AND time >= NOW() - (:lookback_days || ' days')::interval
+                ORDER BY time ASC
+                """
+            ),
+            {"underlying": symbol, "lookback_days": str(int(lookback_days))},
+        )
+        rows = [float(r[0]) for r in daily_result.fetchall() if r[0] is not None]
+        if rows:
+            return rows
+
+        # Pass 2 — fall back to 30-min resampled to daily (NIFTY/BANKNIFTY etc.).
+        intraday_result = await session.execute(
             text(
                 """
                 WITH daily AS (
@@ -121,10 +139,9 @@ async def fetch_asset_history(symbol: str, *, lookback_days: int = 400) -> list[
                 SELECT d, close FROM daily ORDER BY d ASC
                 """
             ),
-            {"underlying": symbol, "lookback_days": lookback_days},
+            {"underlying": symbol, "lookback_days": str(int(lookback_days))},
         )
-        rows = [float(r[1]) for r in result.fetchall() if r[1] is not None]
-        return rows
+        return [float(r[1]) for r in intraday_result.fetchall() if r[1] is not None]
 
 
 def _pct_change(series: list[float], periods: int) -> float | None:
