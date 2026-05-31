@@ -29,9 +29,14 @@ class DirectionalSignalEngine:
         self.config = config
 
     def predict(self, row, regime: RegimeSnapshot, timeframe: str) -> Optional[DirectionalSignal]:
-        if not regime.trade_allowed:
-            return None
-
+        # NOTE: the `regime.trade_allowed` gate was removed in the RL
+        # refactor. Per the design directive, regimes are FEATURES (the
+        # policy sees the label as a one-hot), not barriers. The bandit
+        # will quickly learn that chop / risk_off trades bleed theta and
+        # stop choosing them — but it needs to SEE them first. Without
+        # this, the policy never gets called on any session whose
+        # regime is currently chop / risk_off, and the UI shows "no
+        # signal" indefinitely.
         ema_spread = float(row.get("ema_spread_pct", 0.0))
         breakout_up = max(float(row.get("breakout_up", 0.0)), 0.0)
         breakout_down = max(float(row.get("breakout_down", 0.0)), 0.0)
@@ -48,16 +53,14 @@ class DirectionalSignalEngine:
 
         direction = "CE" if bull_score >= bear_score else "PE"
         direction_score = bull_score if direction == "CE" else bear_score
-        # Tiny direction-score floor — empty / zero-momentum bars are
-        # filtered so the policy doesn't waste capacity learning that flat
-        # tape doesn't pay. Regime-aware: looser for the lower-conviction
-        # regimes (exploration / micro_trend) since the policy is meant to
-        # learn from those small bets.
-        min_direction_score = float(
-            self.config.get("min_direction_score_other", 0.02)
-            if regime.label in {"exploration", "micro_trend"}
-            else self.config.get("min_direction_score_trend", 0.04)
-        )
+        # Floor lowered to ~0 so the policy sees ALL non-dead bars,
+        # including chop / risk_off. The bandit's one-hot regime feature
+        # captures the regime context; the value posterior will turn
+        # negative for chop and the policy will Thompson-skip those
+        # trades on its own. We only filter literal zero-momentum bars
+        # (where every momentum/breakout/DI input is exactly 0.0) to
+        # avoid feeding the model degenerate features.
+        min_direction_score = float(self.config.get("min_direction_score_floor", 0.001))
         if direction_score <= min_direction_score:
             return None
 

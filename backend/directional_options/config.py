@@ -43,12 +43,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "warmup_bars": 32,
     },
     "signal_engine": {
-        # No hard confidence cutoff — the RL policy gates trades by the
-        # value posterior. We keep a tiny direction-score floor so empty /
-        # zero-momentum bars don't even propose a signal (the policy would
-        # waste capacity learning that flat tape doesn't pay).
-        "min_direction_score_trend": 0.04,
-        "min_direction_score_other": 0.02,
+        # No hard confidence cutoff and no regime gate — the RL policy
+        # decides act/skip from the value posterior. We keep only a
+        # tiny direction-score floor to skip literal dead-tape bars
+        # (every momentum / breakout / DI input exactly 0). Every other
+        # bar — including chop — produces a signal that flows to the
+        # policy. The policy will learn from realised R-multiples that
+        # chop trades bleed theta and skip them.
+        "min_direction_score_floor": 0.001,
         "breakout_confidence_bonus": 0.06,
         "expected_move_atr_multiplier": 1.25,
         "expected_move_trend_multiplier": 0.85,
