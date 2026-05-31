@@ -111,6 +111,11 @@ class CBEPaperBook:
         scan_date = str(scan_payload.get("scan_date") or "")
         recorded_at = _utc_now()
         watchlist = list(scan_payload.get("watchlist") or [])
+        # Apply L1 equity exposure budget — scales notional cap. With 100% it
+        # behaves unchanged; with 40% the per-position cap halves+halves
+        # so the book sizes down when equities are not the asset-class leader.
+        exposure_pct = float(scan_payload.get("equity_exposure_pct") or 100.0)
+        sized_cap = self.position_notional_cap * (exposure_pct / 100.0)
         watchlist_by_symbol = {
             _norm_symbol(row.get("instrument")): row
             for row in watchlist
@@ -212,7 +217,7 @@ class CBEPaperBook:
                     continue
 
                 # Size: integer quantity such that notional <= min(cap, available).
-                notional_budget = min(self.position_notional_cap, max(0.0, available_capital))
+                notional_budget = min(sized_cap, max(0.0, available_capital))
                 if notional_budget < latest_close:
                     # Can't afford even one share at current price.
                     continue

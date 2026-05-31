@@ -1,4 +1,4 @@
-"""Unit tests for the CBE alpha engine — pure-compute helpers + scorer."""
+"""Unit tests for the CBE alpha engine v3 — MACD + RSI + RRG indicator set."""
 from __future__ import annotations
 
 import math
@@ -9,290 +9,281 @@ from cbe_scanner.alpha_engine import (
     AlphaEngineConfig,
     LayerWeights,
     composite_score,
-    _atr_expansion,
+    compute_daily_indicators,
+    compute_weekly_context,
+    score_macd,
+    score_rsi,
     _bias_from_signals,
-    _bucket_score,
+    _derive_equity_exposure,
     _ema,
+    _rsi,
     _normalize_rs_pct,
-    _trend_score,
-    _volume_score,
 )
 
 
-# ---------------------------------------------------------------------------
-# Composite scorer
-# ---------------------------------------------------------------------------
+# ───────────────────────── Composite scorer ─────────────────────────
 class TestCompositeScore:
-    def test_all_components_neutral_yields_50(self):
+    def test_all_neutral_yields_50(self):
         result = composite_score(
-            asset_score=50.0,
-            sector_rs_pct=0.0,
-            stock_rs_pct=0.0,
-            trend_score=0.5,
-            atr_expansion=1.0,
-            volume_score=0.5,
-            oi_score=0.0,
-            iv_score=0.0,
-            weights=LayerWeights(),
+            asset_score=50.0, sector_rs_pct=0.0, stock_rs_pct=0.0,
+            macd_score=50.0, rsi_score=50.0, weights=LayerWeights(),
         )
-        # Every component clamps to 50 in the neutral case.
         assert result["score"] == 50.0
 
-    def test_all_components_max_yields_100(self):
-        # Saturate every component.
+    def test_all_max_yields_100(self):
         result = composite_score(
-            asset_score=100.0,
-            sector_rs_pct=50.0,   # → normalized 100
-            stock_rs_pct=50.0,    # → normalized 100
-            trend_score=1.0,
-            atr_expansion=2.0,    # → MP proxy 150 → clamped 100
-            volume_score=1.0,     # → OF proxy 100
-            oi_score=1.0,
-            iv_score=1.0,
-            weights=LayerWeights(),
+            asset_score=100.0, sector_rs_pct=50.0, stock_rs_pct=50.0,
+            macd_score=100.0, rsi_score=100.0, weights=LayerWeights(),
         )
         assert result["score"] == 100.0
 
-    def test_asset_weighted_zero_drags_score(self):
-        result = composite_score(
-            asset_score=0.0,
-            sector_rs_pct=50.0,
-            stock_rs_pct=50.0,
-            trend_score=1.0,
-            atr_expansion=2.0,
-            volume_score=1.0,
-            oi_score=1.0,
-            iv_score=1.0,
-            weights=LayerWeights(),
-        )
-        # 4 components at 100, 1 at 0 with equal weights → 80
-        assert result["score"] == 80.0
-
-    def test_gate_at_80_admits_balanced_strong_signal(self):
-        # All 5 components at 80 → composite 80 → exactly on the gate.
-        result = composite_score(
-            asset_score=80.0,
-            sector_rs_pct=12.0,
-            stock_rs_pct=12.0,
-            trend_score=0.8,
-            atr_expansion=1.3,
-            volume_score=0.8,
-            oi_score=0.6,
-            iv_score=0.5,
-            weights=LayerWeights(),
-        )
-        # All non-trivial; should hover near the threshold without exceeding 100.
-        assert 70.0 <= result["score"] <= 90.0
-
-    def test_components_dict_includes_breakdown(self):
-        result = composite_score(
-            asset_score=100.0,
-            sector_rs_pct=10.0,
-            stock_rs_pct=10.0,
-            trend_score=0.6,
-            atr_expansion=1.1,
-            volume_score=0.55,
-            oi_score=0.3,
-            iv_score=0.2,
-            weights=LayerWeights(),
-        )
-        c = result["components"]
-        assert "asset" in c and "sector" in c and "stock" in c
-        assert "market_profile" in c and "order_flow" in c
-        assert c["mp_source"] == "proxy" and c["of_source"] == "proxy"
-        assert "trend_score" in c and "atr_expansion" in c
-
-    def test_weights_sum_validation(self):
-        # User can re-weight; total drives normalization.
-        custom = LayerWeights(asset=30, sector=30, stock=20, market_profile=10, order_flow=10)
-        result = composite_score(
-            asset_score=100.0,
-            sector_rs_pct=20.0,
-            stock_rs_pct=20.0,
-            trend_score=0.5,
-            atr_expansion=1.0,
-            volume_score=0.5,
-            oi_score=0.0,
-            iv_score=0.0,
-            weights=custom,
-        )
-        # Asset+Sector are big (100+100); Stock big (100); MP/OF neutral (50)
-        # weighted: (30*100 + 30*100 + 20*100 + 10*50 + 10*50) / 100 = 90
-        assert result["score"] == 90.0
-
-    def test_zero_weights_safe(self):
-        custom = LayerWeights(asset=0, sector=0, stock=0, market_profile=0, order_flow=0)
+    def test_one_component_zero_drags_score(self):
+        # MACD = 0, everything else max → 80 (4 × 100 + 0) / 5
         result = composite_score(
             asset_score=100.0, sector_rs_pct=50.0, stock_rs_pct=50.0,
-            trend_score=1.0, atr_expansion=2.0, volume_score=1.0,
-            oi_score=1.0, iv_score=1.0,
-            weights=custom,
+            macd_score=0.0, rsi_score=100.0, weights=LayerWeights(),
         )
-        assert result["score"] == 0.0
+        assert result["score"] == 80.0
 
-
-# ---------------------------------------------------------------------------
-# Normalizers
-# ---------------------------------------------------------------------------
-class TestNormalizers:
-    def test_normalize_rs_pct_zero_is_50(self):
-        assert _normalize_rs_pct(0.0) == 50.0
-
-    def test_normalize_rs_pct_positive(self):
-        assert _normalize_rs_pct(10.0) == 75.0  # 50 + 10*2.5
-
-    def test_normalize_rs_pct_negative_clamps(self):
-        assert _normalize_rs_pct(-50.0) == 0.0  # clamped
-
-    def test_normalize_rs_pct_positive_clamps(self):
-        assert _normalize_rs_pct(100.0) == 100.0
-
-
-class TestBucketScore:
-    def test_below_all_thresholds_is_zero(self):
-        assert _bucket_score(100, [500, 2000, 10000, 50000]) == 0.0
-
-    def test_above_top_threshold_is_one(self):
-        assert _bucket_score(100_000, [500, 2000, 10000, 50000]) == 1.0
-
-    def test_progressive_bucketing(self):
-        # 5000 → above 500 and 2000, below 10000/50000 → 2/4 = 0.5
-        assert _bucket_score(5000, [500, 2000, 10000, 50000]) == 0.5
-
-
-# ---------------------------------------------------------------------------
-# Technical helpers
-# ---------------------------------------------------------------------------
-class TestTechnicals:
-    def test_ema_returns_same_length(self):
-        series = [100.0 + i for i in range(50)]
-        ema = _ema(series, 8)
-        assert len(ema) == 50
-
-    def test_ema_smooths_upward_trend(self):
-        series = [100.0 + i for i in range(50)]
-        ema = _ema(series, 8)
-        # EMA lags the linear trend
-        assert ema[-1] < series[-1]
-        assert ema[-1] > series[-10]
-
-    def test_trend_score_uptrend(self):
-        closes = [100.0 + i * 0.5 for i in range(60)]
-        score = _trend_score(closes)
-        assert score > 0.55
-
-    def test_trend_score_downtrend(self):
-        closes = [200.0 - i * 0.5 for i in range(60)]
-        score = _trend_score(closes)
-        assert score < 0.45
-
-    def test_trend_score_flat_is_neutral(self):
-        closes = [100.0] * 60
-        score = _trend_score(closes)
-        assert 0.45 <= score <= 0.55
-
-    def test_atr_expansion_expanding_range(self):
-        # First 40 bars stable, last 20 widening — ATR expansion > 1
-        closes = [100.0 + math.sin(i / 5) * 0.5 for i in range(40)]
-        closes += [100.0 + math.sin(i / 5) * 3.0 for i in range(20)]
-        ratio = _atr_expansion(closes)
-        assert ratio > 1.0
-
-    def test_atr_expansion_contracting_range(self):
-        closes = [100.0 + math.sin(i / 5) * 3.0 for i in range(40)]
-        closes += [100.0 + math.sin(i / 5) * 0.5 for i in range(20)]
-        ratio = _atr_expansion(closes)
-        assert ratio < 1.0
-
-    def test_volume_score_rising(self):
-        volumes = [1000.0] * 40 + [3000.0] * 20
-        score = _volume_score(volumes)
-        assert score > 0.7
-
-    def test_volume_score_falling(self):
-        volumes = [3000.0] * 40 + [1000.0] * 20
-        score = _volume_score(volumes)
-        assert score < 0.3
-
-
-# ---------------------------------------------------------------------------
-# Bias derivation
-# ---------------------------------------------------------------------------
-class TestBiasDerivation:
-    """STRICT spec: bullish requires trend up AND sector_rs > 0; mirror bearish."""
-
-    def test_trend_up_and_sector_leading_yields_bullish(self):
-        row = {"sector_rs_pct": 5.0}
-        assert _bias_from_signals(row, trend_score=0.7) == "bullish"
-
-    def test_trend_down_and_sector_lagging_yields_bearish(self):
-        row = {"sector_rs_pct": -4.0}
-        assert _bias_from_signals(row, trend_score=0.3) == "bearish"
-
-    def test_trend_up_but_sector_lagging_is_neutral(self):
-        # The doc explicitly rejects fighting-the-tape setups.
-        row = {"sector_rs_pct": -3.0}
-        assert _bias_from_signals(row, trend_score=0.7) == "neutral"
-
-    def test_trend_down_but_sector_leading_is_neutral(self):
-        row = {"sector_rs_pct": 5.0}
-        assert _bias_from_signals(row, trend_score=0.3) == "neutral"
-
-    def test_flat_trend_is_neutral_regardless_of_sector(self):
-        row = {"sector_rs_pct": 5.0}
-        assert _bias_from_signals(row, trend_score=0.5) == "neutral"
-
-    def test_borderline_trend_is_neutral(self):
-        # trend_score must be >= 0.55 for bullish; 0.54 doesn't count.
-        row = {"sector_rs_pct": 5.0}
-        assert _bias_from_signals(row, trend_score=0.54) == "neutral"
-
-
-class TestCompositeScoreWithLiveMPOF:
-    def test_live_mp_score_overrides_proxy(self):
-        # Live mp_score=100 should drive higher than ATR-proxy fallback
-        live_result = composite_score(
-            asset_score=100.0, sector_rs_pct=10.0, stock_rs_pct=10.0,
-            trend_score=0.5, atr_expansion=1.0, volume_score=0.5,
-            oi_score=0.0, iv_score=0.0,
-            weights=LayerWeights(),
-            mp_score=100.0, of_score=100.0,
+    def test_components_include_macd_and_rsi(self):
+        result = composite_score(
+            asset_score=80.0, sector_rs_pct=10.0, stock_rs_pct=10.0,
+            macd_score=90.0, rsi_score=80.0, weights=LayerWeights(),
         )
-        proxy_result = composite_score(
-            asset_score=100.0, sector_rs_pct=10.0, stock_rs_pct=10.0,
-            trend_score=0.5, atr_expansion=1.0, volume_score=0.5,
-            oi_score=0.0, iv_score=0.0,
-            weights=LayerWeights(),
-        )
-        assert live_result["score"] > proxy_result["score"]
-        assert live_result["components"]["mp_source"] == "live"
-        assert live_result["components"]["of_source"] == "live"
-        assert proxy_result["components"]["mp_source"] == "proxy"
+        comps = result["components"]
+        for key in ("asset", "sector", "stock", "macd", "rsi"):
+            assert key in comps
 
-    def test_low_mp_score_drags_composite_down(self):
-        # MP score of 20 should pull composite well below the 80 gate
+    def test_weights_sum_drives_normalization(self):
+        # 30/30/20/10/10 — heavy weights on asset/sector
+        custom = LayerWeights(asset=30, sector=30, stock=20, macd=10, rsi=10)
         result = composite_score(
             asset_score=100.0, sector_rs_pct=20.0, stock_rs_pct=20.0,
-            trend_score=0.5, atr_expansion=1.0, volume_score=0.5,
-            oi_score=0.0, iv_score=0.0,
-            weights=LayerWeights(),
-            mp_score=20.0, of_score=20.0,
+            macd_score=50.0, rsi_score=50.0, weights=custom,
         )
-        assert result["score"] < 80.0
+        # 30*100 + 30*100 + 20*100 + 10*50 + 10*50 = 7000; /100 = 70 — actually
+        # sector at +20 RS → 100 component, stock at +20 RS → 100 component
+        # Score = (30·100 + 30·100 + 20·100 + 10·50 + 10·50)/100 = 90
+        assert result["score"] == 90.0
 
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-def test_default_config_weights_sum_to_100():
-    w = LayerWeights()
-    assert w.total() == 100.0
+# ───────────────────────── MACD scoring ─────────────────────────
+class TestMacdScoring:
+    def test_above_zero_bullish_fresh_cross_max(self):
+        indicators = {
+            "macd_line": 1.5, "macd_signal": 1.0, "macd_histogram": 0.5,
+            "macd_bullish": True, "macd_above_zero": True, "macd_cross_today": True,
+        }
+        score, meta = score_macd(indicators)
+        assert score == 95.0
+        assert meta["label"] == "above_zero_bullish_fresh"
+
+    def test_above_zero_bullish_no_fresh_cross(self):
+        indicators = {
+            "macd_line": 1.5, "macd_signal": 1.0,
+            "macd_bullish": True, "macd_above_zero": True, "macd_cross_today": False,
+        }
+        score, _ = score_macd(indicators)
+        assert score == 75.0
+
+    def test_below_zero_bearish_fresh_cross_lowest(self):
+        indicators = {
+            "macd_line": -1.5, "macd_signal": -1.0,
+            "macd_bullish": False, "macd_above_zero": False, "macd_cross_today": True,
+        }
+        score, _ = score_macd(indicators)
+        assert score == 5.0
+
+    def test_below_zero_bullish_recovery(self):
+        indicators = {
+            "macd_line": -0.5, "macd_signal": -1.0,
+            "macd_bullish": True, "macd_above_zero": False, "macd_cross_today": True,
+        }
+        score, meta = score_macd(indicators)
+        assert score == 60.0
+        assert meta["label"] == "below_zero_bullish_recovery"
+
+    def test_no_macd_falls_back_neutral(self):
+        score, _ = score_macd({"macd_line": None})
+        assert score == 50.0
 
 
+# ───────────────────────── RSI scoring ─────────────────────────
+class TestRsiScoring:
+    def test_healthy_uptrend_45_to_65_max_score(self):
+        score, meta = score_rsi({"rsi_14": 55.0})
+        assert score == 90.0
+        assert meta["label"] == "healthy_uptrend"
+
+    def test_extreme_overbought_lowest(self):
+        score, _ = score_rsi({"rsi_14": 88.0})
+        assert score == 10.0
+
+    def test_overbought_zone(self):
+        score, _ = score_rsi({"rsi_14": 78.0})
+        assert score == 30.0
+
+    def test_deep_oversold(self):
+        score, _ = score_rsi({"rsi_14": 22.0})
+        assert score == 25.0
+
+    def test_oversold_bounce_candidate(self):
+        score, meta = score_rsi({"rsi_14": 32.0})
+        assert score == 50.0
+        assert meta["label"] == "oversold_bounce"
+
+
+# ───────────────────────── MACD/RSI compute on synthetic series ─────────────────────────
+class TestComputeIndicators:
+    def test_rising_series_macd_above_zero(self):
+        closes = [100 + 0.5 * i for i in range(60)]
+        ind = compute_daily_indicators(closes)
+        assert ind["macd_line"] > 0
+        assert ind["macd_bullish"] is True
+        assert ind["macd_above_zero"] is True
+
+    def test_falling_series_macd_below_zero(self):
+        closes = [200 - 0.5 * i for i in range(60)]
+        ind = compute_daily_indicators(closes)
+        assert ind["macd_line"] < 0
+        assert ind["macd_above_zero"] is False
+
+    def test_short_series_returns_none_indicators(self):
+        ind = compute_daily_indicators([100, 101, 102])
+        assert ind["macd_line"] is None
+        assert ind["rsi_14"] is None
+
+    def test_rsi_flat_series_around_50(self):
+        # Pure flat series has no gains and no losses → RSI undefined.
+        # Wilder convention returns 100 when avg_loss == 0; our impl matches.
+        closes = [100.0] * 50
+        rsi = _rsi(closes, 14)
+        assert rsi == 100.0
+
+
+class TestWeeklyContext:
+    def test_uptrend_classified_up(self):
+        # 200 daily bars rising → weekly trend up
+        closes = [100 + 0.5 * i for i in range(200)]
+        ctx = compute_weekly_context(closes)
+        assert ctx["trend"] == "up"
+
+    def test_downtrend_classified_down(self):
+        closes = [300 - 0.5 * i for i in range(200)]
+        ctx = compute_weekly_context(closes)
+        assert ctx["trend"] == "down"
+
+    def test_short_series_unknown(self):
+        ctx = compute_weekly_context([100, 101, 102])
+        assert ctx["trend"] == "unknown"
+
+
+# ───────────────────────── Bias triple-confirmation ─────────────────────────
+class TestBiasMacdRsiRrg:
+    def _macd(self, bullish: bool, above_zero: bool):
+        return {
+            "macd_line": 1.0 if above_zero else -1.0,
+            "macd_bullish": bullish,
+            "macd_above_zero": above_zero,
+        }
+
+    def test_all_three_aligned_bullish(self):
+        row = {
+            "macd": {**self._macd(True, True), "rsi_14": 55.0},
+            "weekly": {"trend": "up"},
+            "stock_quadrant": "leading", "sector_quadrant": "leading",
+        }
+        assert _bias_from_signals(row) == "bullish"
+
+    def test_all_three_aligned_bearish(self):
+        row = {
+            "macd": {**self._macd(False, False), "rsi_14": 40.0},
+            "weekly": {"trend": "down"},
+            "stock_quadrant": "lagging", "sector_quadrant": "lagging",
+        }
+        assert _bias_from_signals(row) == "bearish"
+
+    def test_macd_bullish_but_overbought_rsi_neutral(self):
+        # RSI 80 → not in healthy 45-70 zone → no entry.
+        row = {
+            "macd": {**self._macd(True, True), "rsi_14": 80.0},
+            "weekly": {"trend": "up"},
+            "stock_quadrant": "leading", "sector_quadrant": "leading",
+        }
+        assert _bias_from_signals(row) == "neutral"
+
+    def test_macd_bullish_but_rrg_lagging_neutral(self):
+        row = {
+            "macd": {**self._macd(True, True), "rsi_14": 55.0},
+            "weekly": {"trend": "up"},
+            "stock_quadrant": "lagging", "sector_quadrant": "leading",
+        }
+        assert _bias_from_signals(row) == "neutral"
+
+    def test_weekly_trend_down_blocks_bullish(self):
+        row = {
+            "macd": {**self._macd(True, True), "rsi_14": 55.0},
+            "weekly": {"trend": "down"},
+            "stock_quadrant": "leading", "sector_quadrant": "leading",
+        }
+        assert _bias_from_signals(row) == "neutral"
+
+    def test_missing_macd_neutral(self):
+        row = {"macd": {}, "weekly": {}, "stock_quadrant": "leading"}
+        assert _bias_from_signals(row) == "neutral"
+
+
+# ───────────────────────── Equity exposure derivation ─────────────────────────
+class TestEquityExposure:
+    def test_equities_winner_100_pct(self):
+        layer = {"asset_rank": [{"asset": "EQUITIES"}, {"asset": "GOLD"}]}
+        assert _derive_equity_exposure(layer) == 100.0
+
+    def test_equities_second_70_pct(self):
+        layer = {"asset_rank": [{"asset": "GOLD"}, {"asset": "EQUITIES"}, {"asset": "BONDS"}]}
+        assert _derive_equity_exposure(layer) == 70.0
+
+    def test_equities_third_40_pct(self):
+        layer = {"asset_rank": [{"asset": "GOLD"}, {"asset": "BONDS"}, {"asset": "EQUITIES"}]}
+        assert _derive_equity_exposure(layer) == 40.0
+
+    def test_equities_bottom_20_pct(self):
+        layer = {"asset_rank": [
+            {"asset": "GOLD"}, {"asset": "BONDS"}, {"asset": "CASH"}, {"asset": "EQUITIES"},
+        ]}
+        assert _derive_equity_exposure(layer) == 20.0
+
+    def test_stub_falls_back_to_100(self):
+        assert _derive_equity_exposure({"stub": True}) == 100.0
+
+
+# ───────────────────────── Normalizers + EMA ─────────────────────────
+def test_normalize_rs_pct_zero_is_50():
+    assert _normalize_rs_pct(0.0) == 50.0
+
+
+def test_normalize_rs_pct_positive_extreme_clamps():
+    assert _normalize_rs_pct(50.0) == 100.0
+
+
+def test_ema_smooths():
+    series = [100.0 + i for i in range(20)]
+    ema = _ema(series, 5)
+    assert len(ema) == 20
+    assert ema[-1] < series[-1]
+    assert ema[-1] > series[0]
+
+
+# ───────────────────────── Config defaults ─────────────────────────
 def test_alpha_engine_config_defaults():
     cfg = AlphaEngineConfig()
     assert cfg.timeframe == "weekly"
     assert cfg.sectors_to_keep == 4
-    # Strict spec: pool-then-top-N, default 10 per "Select Top 10 Stocks"
     assert cfg.finalists_count == 10
     assert cfg.composite_gate == 80.0
+
+
+def test_layer_weights_sum_to_100():
+    w = LayerWeights()
+    assert w.total() == 100.0
+    assert w.macd == 20.0 and w.rsi == 20.0
