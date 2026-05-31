@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from cbe_scanner.paper import CBEPaperBook, CBE_INITIAL_CAPITAL, FLAT_CONFIRMATION_SCANS
+from cbe_scanner.paper import CBEPaperBook, CBE_INITIAL_CAPITAL, MIN_HOLD_TRADING_DAYS
 
 
 def _scan_payload(rows: list[dict[str, Any]], *, scan_date: str = "2026-05-29") -> dict[str, Any]:
@@ -114,35 +114,49 @@ def test_short_position_gains_on_price_drop(book: CBEPaperBook):
     assert pos["unrealized_pnl"] == 2500.0
 
 
-def test_bias_flip_closes_and_reopens(book: CBEPaperBook):
+def test_bias_flip_held_during_min_hold_window(book: CBEPaperBook):
+    """Per the weekly-rebalance rule, a bias flip on day 0 does NOT close
+    the position — must wait MIN_HOLD_TRADING_DAYS first."""
     _run(book.sync_from_scan(_scan_payload([_row("RELIANCE", "bullish", 6.5, 2500.0)])))
     _run(book.sync_from_scan(_scan_payload([_row("RELIANCE", "bearish", 6.5, 2510.0)])))
     positions = _run(book.list_positions(status="all"))
+    # Both signals arrived inside the min-hold window — original LONG stays open.
     assert len(positions["open_positions"]) == 1
-    assert positions["open_positions"][0]["direction"] == "short"
+    assert positions["open_positions"][0]["direction"] == "long"
+    assert positions["open_positions"][0].get("pending_close_reason") == "bias_flip"
+    assert not positions["closed_positions"]
+
+
+def test_bias_flip_closes_after_min_hold_elapsed(book: CBEPaperBook):
+    """Force-backdate opened_at and verify the next bias flip closes."""
+    _run(book.sync_from_scan(_scan_payload([_row("RELIANCE", "bullish", 6.5, 2500.0)])))
+    # Mutate the persisted state so the position looks old enough to exit.
+    from datetime import datetime, timedelta, timezone
+    import json
+    state = json.loads(book.positions_path.read_text())
+    state["open_positions"][0]["opened_at"] = (
+        datetime.now(timezone.utc) - timedelta(days=MIN_HOLD_TRADING_DAYS * 7 // 5 + 1)
+    ).isoformat()
+    book.positions_path.write_text(json.dumps(state))
+    _run(book.sync_from_scan(_scan_payload([_row("RELIANCE", "bearish", 6.5, 2510.0)])))
+    positions = _run(book.list_positions(status="all"))
     assert len(positions["closed_positions"]) == 1
     closed = positions["closed_positions"][0]
-    assert closed["direction"] == "long"
     assert closed["close_reason"] == "bias_flip"
-    # Long booked at 2500, closed at 2510 → +400
     assert closed["realized_pnl"] == 400.0
+    # And the new short re-opened
+    assert len(positions["open_positions"]) == 1
+    assert positions["open_positions"][0]["direction"] == "short"
 
 
-def test_dropped_from_watchlist_closes_after_n_misses(book: CBEPaperBook):
+def test_drop_from_watchlist_held_during_min_hold(book: CBEPaperBook):
     _run(book.sync_from_scan(_scan_payload([_row("RELIANCE", "bullish", 6.5, 2500.0)])))
-    # Empty watchlist for FLAT_CONFIRMATION_SCANS-1 misses in a row.
-    for _ in range(FLAT_CONFIRMATION_SCANS - 1):
+    # Several empty scans inside the window — position stays open.
+    for _ in range(5):
         _run(book.sync_from_scan(_scan_payload([])))
-    # Still open after (N-1) misses.
     positions = _run(book.list_positions(status="all"))
-    open_reliance = [p for p in positions["open_positions"] if p["instrument"] == "RELIANCE"]
-    assert len(open_reliance) == 1
-    # Nth miss — closes.
-    _run(book.sync_from_scan(_scan_payload([])))
-    positions = _run(book.list_positions(status="all"))
-    closed = [p for p in positions["closed_positions"] if p["instrument"] == "RELIANCE"]
-    assert len(closed) == 1
-    assert closed[0]["close_reason"] == "dropped_from_watchlist"
+    assert len(positions["open_positions"]) == 1
+    assert not positions["closed_positions"]
 
 
 def test_reset_archives_and_zeroes_book(book: CBEPaperBook):
@@ -191,10 +205,21 @@ def test_invalid_latest_close_is_skipped(book: CBEPaperBook):
 
 
 def test_summary_after_close_includes_realized_pnl(book: CBEPaperBook):
+    """After backdating the open so min-hold elapses, a bias flip closes
+    and realized_pnl shows up in the summary."""
+    from datetime import datetime, timedelta, timezone
+    import json
+
     _run(book.sync_from_scan(_scan_payload([_row("RELIANCE", "bullish", 6.5, 2500.0)])))
+    state = json.loads(book.positions_path.read_text())
+    state["open_positions"][0]["opened_at"] = (
+        datetime.now(timezone.utc) - timedelta(days=MIN_HOLD_TRADING_DAYS * 7 // 5 + 1)
+    ).isoformat()
+    book.positions_path.write_text(json.dumps(state))
+
     _run(book.sync_from_scan(_scan_payload([_row("RELIANCE", "bearish", 6.5, 2600.0)])))
     summary = _run(book.capital_status())
-    # Long opened at 2500, closed at 2600 → +4000 realized; reopened short.
+    # Long opened at 2500, closed at 2600 (40 shares) → +4000 realized.
     assert summary["realized_pnl"] == 4000.0
-    assert summary["total_trades"] == 1  # 1 closed trade
+    assert summary["total_trades"] == 1
     assert summary["win_rate"] == 1.0

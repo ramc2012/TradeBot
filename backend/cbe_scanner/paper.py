@@ -22,9 +22,9 @@ Mechanics:
       * If still on the watchlist with the same bias: refresh latest_close +
         unrealized_pnl.
       * If on the watchlist with a flipped bias: close (close_reason="bias_flip")
-        and re-open in the new direction.
-      * If absent from the latest scan's watchlist for more than
-        FLAT_CONFIRMATION_SCANS scans: close (close_reason="dropped_from_watchlist").
+        ONLY after MIN_HOLD_TRADING_DAYS — weekly-rebalance rule.
+      * If absent from the watchlist: close (close_reason="dropped_from_watchlist")
+        ONLY after MIN_HOLD_TRADING_DAYS.
   - Mark-to-market uses the `latest_close` field injected by
     `cbe_scanner.features.scan_universe`.
 
@@ -46,14 +46,15 @@ CBE_INITIAL_CAPITAL: float = 1_000_000.0
 
 # Notional cap per individual cash-equity position. With ₹1L per stock the
 # book can carry ~10 simultaneous concurrent bets at 100% capital deployed,
-# matching the watchlist_max_size default. Sizing rounds DOWN to integer
-# shares so the actual reserved margin is <= the cap.
+# matching the spec's "Top 10 Stocks" output. Sizing rounds DOWN to integer
+# shares so reserved margin <= the cap.
 DEFAULT_POSITION_NOTIONAL_CAP: float = 100_000.0
 
-# A position must miss this many consecutive scans before being closed. One
-# missed scan is plausible noise (transient feature unavailability); three in
-# a row is genuine signal decay.
-FLAT_CONFIRMATION_SCANS: int = 3
+# Minimum hold period in TRADING DAYS. Spec calls for weekly rebalance;
+# this enforces that positions opened today cannot exit before 5 trading
+# days have elapsed unless a hard stop fires. Replaces the old "drop after
+# 3 missed scans" rule which conflicted with weekly cadence.
+MIN_HOLD_TRADING_DAYS: int = 5
 
 
 def _utc_now() -> str:
@@ -62,6 +63,25 @@ def _utc_now() -> str:
 
 def _norm_symbol(value: str | None) -> str:
     return str(value or "").strip().upper()
+
+
+def _min_hold_satisfied(position: dict[str, Any]) -> bool:
+    """True if MIN_HOLD_TRADING_DAYS have elapsed since opened_at.
+
+    Approximation: 5 trading days ≈ 7 calendar days. Good enough for the
+    weekly-rebalance rule; refinement via core/trading_calendar can come
+    later if precision matters.
+    """
+    opened_at = position.get("opened_at")
+    if not opened_at:
+        return True
+    try:
+        opened_dt = datetime.fromisoformat(str(opened_at).replace("Z", "+00:00"))
+    except Exception:
+        return True
+    elapsed_days = (datetime.now(timezone.utc) - opened_dt).total_seconds() / 86400.0
+    # 5 trading days ≈ 7 calendar days (covers a weekend).
+    return elapsed_days >= (MIN_HOLD_TRADING_DAYS * 7.0 / 5.0)
 
 
 class CBEPaperBook:
@@ -104,15 +124,20 @@ class CBEPaperBook:
 
             available_capital = self._available_capital(state)
 
-            # Pass 1 — refresh / flip / drop existing positions.
+            # Pass 1 — refresh / flip / drop existing positions, with the
+            # weekly-rebalance min-hold rule enforced. A position cannot
+            # close on its first signal flip until MIN_HOLD_TRADING_DAYS
+            # have elapsed since open. Mark-to-market still updates every
+            # scan; only the close decision is gated.
             surviving: list[dict[str, Any]] = []
             for pos in open_positions:
                 sym = _norm_symbol(pos.get("instrument"))
                 row = watchlist_by_symbol.get(sym)
+                hold_ok = _min_hold_satisfied(pos)
+
+                # Case A: symbol absent from watchlist.
                 if row is None:
-                    miss = int(pos.get("consecutive_watchlist_misses") or 0) + 1
-                    pos["consecutive_watchlist_misses"] = miss
-                    if miss >= FLAT_CONFIRMATION_SCANS:
+                    if hold_ok:
                         self._close_position(
                             pos,
                             mark_price=float(pos.get("latest_close") or pos.get("entry_price") or 0.0),
@@ -120,8 +145,10 @@ class CBEPaperBook:
                             close_reason="dropped_from_watchlist",
                         )
                         closed_positions.append(pos)
-                        # Free margin freed by closing this row.
                         continue
+                    # Min-hold not satisfied — keep the position; just bump
+                    # last_seen so we can audit how long it's been silent.
+                    pos["last_silent_scan_at"] = recorded_at
                     surviving.append(pos)
                     continue
 
@@ -130,18 +157,30 @@ class CBEPaperBook:
                 pos_direction = str(pos.get("direction") or "").lower()
                 latest_close = self._coerce_price(row.get("latest_close"))
 
+                # Case B: bias flipped or went neutral. Only close if min-hold met.
                 if expected_direction is None or expected_direction != pos_direction:
-                    self._close_position(
-                        pos,
-                        mark_price=latest_close if latest_close is not None else float(pos.get("latest_close") or 0.0),
-                        close_time=recorded_at,
-                        close_reason="bias_flip" if expected_direction else "neutral_bias",
-                    )
-                    closed_positions.append(pos)
+                    if hold_ok:
+                        self._close_position(
+                            pos,
+                            mark_price=latest_close if latest_close is not None else float(pos.get("latest_close") or 0.0),
+                            close_time=recorded_at,
+                            close_reason="bias_flip" if expected_direction else "neutral_bias",
+                        )
+                        closed_positions.append(pos)
+                        continue
+                    # Still in min-hold window — refresh mark and hold.
+                    pos["pending_close_reason"] = "bias_flip" if expected_direction else "neutral_bias"
+                    if latest_close is not None:
+                        pos["latest_close"] = latest_close
+                        entry = float(pos.get("entry_price") or 0.0)
+                        qty = int(pos.get("quantity") or 0)
+                        sign = 1 if pos_direction == "long" else -1
+                        pos["unrealized_pnl"] = round((latest_close - entry) * qty * sign, 2)
+                    surviving.append(pos)
                     continue
 
-                # Same-direction reaffirmation — mark to market.
-                pos["consecutive_watchlist_misses"] = 0
+                # Case C: same-direction reaffirmation — mark to market.
+                pos.pop("pending_close_reason", None)
                 pos["last_seen_at"] = recorded_at
                 pos["last_scan_date"] = scan_date
                 if latest_close is not None:
@@ -207,7 +246,7 @@ class CBEPaperBook:
                         "updated_at": recorded_at,
                         "last_seen_at": recorded_at,
                         "last_scan_date": scan_date,
-                        "consecutive_watchlist_misses": 0,
+                        "pending_close_reason": None,
                         "instrument": symbol,
                         "direction": direction,
                         "bias": bias,

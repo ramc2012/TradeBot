@@ -1,38 +1,54 @@
-"""Top-down capital rotation alpha engine.
+"""Top-down capital rotation alpha engine — STRICT SPEC.
 
-The CBE Scanner has been re-architected as a 7-layer institutional-style
-capital rotation engine. This MVP delivers layers L0–L4 + L7 (composite
-scorer). L1 asset rotation is stubbed at "equities-win" until GOLDBEES/
-SILVERBEES/BBETF spot ingestion lands; L5 option selection and L6 MP
-overlay remain in their existing modules (directional_options.selector and
-analytics.market_profile_ext) and are *called* by the engine here rather
-than re-implemented.
+Rules follow the user-supplied alpha-generation framework exactly. The
+engine is a pyramid funnel, NOT a universe-wide screener.
 
-Layers
-------
-L0  F&O universe whitelist                derived from option_premium_candles
-L1  Asset rotation (Gold/Silver/Bond/Eq)  STUB: returns equities-win
-L2  Sector ranking vs Nifty50             SectorRotationTracker (existing)
-L3  Stock ranking within winning sectors  SectorRotationTracker components
-L4  Option candidate filter               trend + RS + OI + IV (this module)
-L7  Composite RS Matrix scoring + 80-gate (this module)
+Pipeline
+--------
+L1  Asset rotation               Compare Gold/Silver/Bonds/Cash/Equities
+                                 vs Nifty50 on momentum + above-30W-MA +
+                                 RS trend. If equities do NOT win,
+                                 the engine returns an EMPTY watchlist
+                                 for the week — no trades.
+L2  Sector rotation (weekly)     Only runs if L1 winner == EQUITIES.
+                                 Rank all 13 sectors by RS pct vs Nifty50,
+                                 take top 4.
+L3  Stock selection (weekly)     Pool ALL members of the top 4 sectors,
+                                 rank pool by stock RS, take top 10.
+L4  Option candidate filter      Score the 10 finalists on:
+                                   Trend + RS + Volume + IV + OI
+                                 (5 components, equally weighted) + drop
+                                 names that fail liquidity floors.
+L5  Directional option selection Bias is set by L4 alignment:
+                                   trend up + sector leading  → bullish (CE)
+                                   trend down + sector lagging → bearish (PE)
+                                   mixed                       → skip
+L6  Market profile overlay       Skip exhaustion regimes; trend/balance/
+                                 breakout pass through.
+L7  Composite RS Matrix          0.20·Asset + 0.20·Sector + 0.20·Stock +
+                                 0.20·MP + 0.20·OF. Gate at 80.
 
-The scorer combines Asset RS (20%) + Sector RS (20%) + Stock RS (20%) +
-Market Profile (20%) + Order Flow (20%). With L1 stubbed, Asset RS is a
-constant (100 if equities win) — the gate still works because the other
-four components must collectively pass 80 × 0.80 / 0.80 = 80 by themselves.
-When L1 lights up later, the formula remains unchanged.
+Cadence
+-------
+Scan: 15-min during NSE hours (re-evaluation).
+Position rebalance: WEEKLY. Minimum hold = 5 trading days.
+
+What was removed in this rewrite
+--------------------------------
+* universe_mode="full" — the spec is a narrowing pyramid, not a sweep.
+* "Two-of-three vote" bias — replaced with strict trend+sector alignment.
+* top-5-per-sector — replaced with pool-then-top-10.
+* 3-miss close-on-watchlist-drop — replaced with min-hold = 5 trading days.
 
 Output contract
 ---------------
-The engine returns a payload shaped like the legacy CBE scan output so
-the paper book + DB persistence keep working unchanged:
+Payload shape stays backward-compatible with the paper book + DB
+persistence so the frontend continues to render:
     {
       "scan_date": "...",
-      "asset_winner": "EQUITIES",
-      "sector_ranks": [...],
+      "asset_winner": "EQUITIES" | "GOLD" | ...,
       "results": [ <one row per candidate> ],
-      "watchlist": [ <subset that passed the gate> ],
+      "watchlist": [ <subset that passed the gate AND has a bias> ],
     }
 """
 from __future__ import annotations
@@ -71,23 +87,22 @@ class LayerWeights:
 
 @dataclass
 class AlphaEngineConfig:
+    """Strict-spec configuration. Knobs map 1:1 to the user's doc."""
     weights: LayerWeights = field(default_factory=LayerWeights)
     timeframe: str = "weekly"
+    # L2: number of winning sectors to keep. Spec says "top 3-4 sectors";
+    # default 4 gives slightly broader stock selection.
     sectors_to_keep: int = 4
-    stocks_per_sector: int = 5
+    # L3: total number of stocks to surface as finalists, POOLED across
+    # all winning sectors (NOT per-sector). Spec: "Select Top 10 Stocks".
+    finalists_count: int = 10
+    # L7 gate. Spec: "Only trades scoring above a threshold (e.g. 80/100)
+    # become eligible."
     composite_gate: float = COMPOSITE_GATE
-    # Universe mode controls L3 breadth:
-    #   "full"          → score EVERY qualified F&O instrument (~221 names)
-    #                     using sector RS as context, not a filter. Sector
-    #                     winners still surface in the L2 panel for UI.
-    #   "winners_only"  → legacy behaviour: top stocks_per_sector inside the
-    #                     top sectors_to_keep winning sectors (~20 names).
-    universe_mode: str = "full"
-    # Soft floors on option side. A stock with extremely thin options is
-    # excluded *before* scoring (saves compute, also avoids false
-    # 90+ scores for names you can't actually trade).
+    # Liquidity floors. A stock with extremely thin options is excluded
+    # before scoring — there's no point ranking names you can't trade.
     min_atm_oi: float = 500.0
-    min_atm_volume: float = 0.0  # opens for stocks with low volume but high OI
+    min_atm_volume: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -209,20 +224,24 @@ async def rank_stocks_in_winners(
     winning_sectors: list[dict[str, Any]],
     *,
     timeframe: str,
-    stocks_per_sector: int,
+    finalists_count: int,
     fno_universe: set[str],
     tracker: SectorRotationTracker | None = None,
 ) -> dict[str, Any]:
-    """For each winning sector, fetch components + rank by RS.
+    """L3 per spec: pool members of all winning sectors, then take top N.
 
-    Output keys each stock's RS-vs-sector + RS-vs-Nifty50 + RRG quadrant
-    so downstream layers can use both. Only stocks present in the F&O
-    whitelist are kept — there's no point ranking non-tradeable names.
+    The doc says "Select Top 10 Stocks" — pooled across the winning
+    sectors, NOT 10 per sector. A leading-sector stock with mediocre RS
+    will still rank below a lagging-sector stock with extreme RS, which
+    is exactly what we want: the engine surfaces the strongest 10 names
+    regardless of which winning sector they came from.
+
+    Filters:
+      * F&O whitelist only (untradeable names are dropped).
+      * Pool excludes stocks not in any winning sector.
     """
     tracker = tracker or SectorRotationTracker()
-    quadrant_priority = {"leading": 0, "improving": 1, "weakening": 2, "lagging": 3}
-    stock_rows: list[dict[str, Any]] = []
-    per_sector: dict[str, list[dict[str, Any]]] = {}
+    pool: list[dict[str, Any]] = []
 
     for sector_row in winning_sectors:
         code = str(sector_row.get("code") or "")
@@ -235,12 +254,11 @@ async def rank_stocks_in_winners(
             continue
         rrg_points = list((components.get("rrg") or {}).get("points") or [])
 
-        sector_stocks: list[dict[str, Any]] = []
         for point in rrg_points:
             symbol = str(point.get("code") or point.get("symbol") or "").upper()
             if not symbol or symbol not in fno_universe:
                 continue
-            sector_stocks.append(
+            pool.append(
                 {
                     "instrument": symbol,
                     "sector_code": code,
@@ -252,111 +270,23 @@ async def rank_stocks_in_winners(
                 }
             )
 
-        sector_stocks.sort(
-            key=lambda row: (
-                quadrant_priority.get(row["stock_quadrant"], 99),
-                -row["stock_rs_pct"],
-                row["instrument"],
-            )
-        )
-        top = sector_stocks[: max(1, int(stocks_per_sector))]
-        per_sector[code] = top
-        for index, row in enumerate(top):
-            row["stock_rank_in_sector"] = index + 1
-            stock_rows.append(row)
-
-    return {
-        "per_sector": per_sector,
-        "candidates": stock_rows,
-        "candidate_count": len(stock_rows),
-    }
-
-
-async def rank_stocks_full_universe(
-    sector_payload: dict[str, Any],
-    *,
-    fno_universe: set[str],
-    timeframe: str,
-) -> dict[str, Any]:
-    """Score the *entire* F&O universe, not just winning-sector members.
-
-    Pulls per-stock RS data from `stocks_by_sector` (populated for ALL 13
-    sectors by SectorRotationTracker, not just winners). Symbols not
-    mapped to any sector get sector_code=None — they're still scored,
-    just without a sector RS context. This makes the alpha engine
-    behave like a universe-wide screener: top performers naturally bubble
-    up from the composite scoring rather than being pre-filtered.
-    """
-    quadrant_priority = {"leading": 0, "improving": 1, "weakening": 2, "lagging": 3}
-    stocks_by_sector = sector_payload.get("stocks_by_sector") or {}
-    sector_meta_by_code: dict[str, dict[str, Any]] = {}
-    for row in sector_payload.get("watchlist") or []:
-        code = str(row.get("code") or "")
-        if code:
-            sector_meta_by_code[code] = row
-
-    candidates: list[dict[str, Any]] = []
-    seen_symbols: set[str] = set()
-
-    # Pass 1 — every stock that's in a sector slice gets enriched with RS.
-    for sector_code, sector_bundle in stocks_by_sector.items():
-        if not isinstance(sector_bundle, dict):
-            continue
-        sector_info = sector_bundle.get("sector") or sector_meta_by_code.get(sector_code) or {}
-        rrg_points = list((sector_bundle.get("rrg") or {}).get("points") or [])
-        for point in rrg_points:
-            symbol = str(point.get("code") or point.get("symbol") or "").upper()
-            if not symbol or symbol not in fno_universe or symbol in seen_symbols:
-                continue
-            seen_symbols.add(symbol)
-            candidates.append(
-                {
-                    "instrument": symbol,
-                    "sector_code": sector_code,
-                    "sector_name": sector_info.get("name"),
-                    "sector_rs_pct": float(sector_info.get("relative_strength_pct") or 0.0),
-                    "sector_quadrant": sector_info.get("quadrant"),
-                    "stock_rs_pct": float(point.get("relative_strength_pct") or 0.0),
-                    "stock_quadrant": str(point.get("quadrant") or "lagging"),
-                }
-            )
-
-    # Pass 2 — F&O symbols missing from any sector slice still need to be
-    # in the universe (they're tradeable but unclassified). Score with
-    # sector_code=None so L4 can still compute trend / MP / OF on them.
-    for symbol in sorted(fno_universe):
-        if symbol in seen_symbols:
-            continue
-        candidates.append(
-            {
-                "instrument": symbol,
-                "sector_code": None,
-                "sector_name": None,
-                "sector_rs_pct": 0.0,
-                "sector_quadrant": None,
-                "stock_rs_pct": 0.0,
-                "stock_quadrant": "unclassified",
-            }
-        )
-
-    # Stable ordering: leading/improving first, then by stock RS pct so the
-    # supervisor can short-circuit if it runs out of compute budget.
-    candidates.sort(
-        key=lambda row: (
-            quadrant_priority.get(str(row.get("stock_quadrant") or "lagging"), 99),
-            -float(row.get("stock_rs_pct") or 0.0),
-            str(row.get("instrument") or ""),
-        )
+    # Pool then take top 10 — strict per-spec.
+    pool.sort(
+        key=lambda row: (-float(row["stock_rs_pct"]), row["instrument"]),
     )
+    finalists = pool[: max(1, int(finalists_count))]
+    for index, row in enumerate(finalists):
+        row["stock_rank_overall"] = index + 1
+
     return {
-        "candidates": candidates,
-        "candidate_count": len(candidates),
-        "mode": "full",
+        "candidates": finalists,
+        "candidate_count": len(finalists),
+        "pool_size_before_topN": len(pool),
     }
 
 
 # ---------------------------------------------------------------------------
-# L4 — Option candidate filter (trend, RS, OI, IV, volume)
+# L4 — Option candidate filter (Trend + RS + Volume + IV + OI — strict spec)
 # ---------------------------------------------------------------------------
 async def score_option_candidates(
     candidates: list[dict[str, Any]],
@@ -808,31 +738,45 @@ async def run_alpha_pipeline(config: AlphaEngineConfig | None = None) -> dict[st
     started = datetime.now(timezone.utc)
 
     fno_universe = set(await discover_fno_universe())
+
+    # L1 — Asset rotation. If equities do NOT win this week, the engine
+    # short-circuits per spec: no equity-options trades are taken at all.
     asset_layer = await rank_asset_classes()
+    if str(asset_layer.get("winner") or "").upper() != "EQUITIES":
+        finished = datetime.now(timezone.utc)
+        return {
+            "scan_date": started.date().isoformat(),
+            "started_at": started.isoformat(),
+            "finished_at": finished.isoformat(),
+            "elapsed_seconds": round((finished - started).total_seconds(), 2),
+            "fno_universe_size": len(fno_universe),
+            "asset_winner": asset_layer.get("winner"),
+            "asset_layer": asset_layer,
+            "sector_layer": None,
+            "stock_layer_summary": {"candidate_count": 0, "reason": "equities_not_winner"},
+            "config": _config_payload(config),
+            "scored_count": 0,
+            "watchlist_count": 0,
+            "results": [],
+            "watchlist": [],
+            "source": "alpha_engine_v2_strict",
+            "skipped_reason": f"L1 winner is {asset_layer.get('winner')} — equities not in favour this week",
+        }
+
+    # L2 — Sector rotation. Rank all sectors by RS vs Nifty50, take top 4.
     sector_layer = await rank_sectors(
         config.timeframe,
         keep_top=config.sectors_to_keep,
     )
-    # L3 — universe_mode picks between full-universe coverage and the
-    # legacy winners-only narrowing. Full mode is the new default since
-    # the user's brief explicitly asked for "watchlist for the entire
-    # qualified F&O universe".
-    if config.universe_mode == "full":
-        from analytics.sector import SectorRotationTracker
-        tracker = SectorRotationTracker()
-        full_sector_payload = await tracker.get_sector_rotation(config.timeframe)
-        stock_layer = await rank_stocks_full_universe(
-            full_sector_payload,
-            fno_universe=fno_universe,
-            timeframe=config.timeframe,
-        )
-    else:
-        stock_layer = await rank_stocks_in_winners(
-            sector_layer.get("winners") or [],
-            timeframe=config.timeframe,
-            stocks_per_sector=config.stocks_per_sector,
-            fno_universe=fno_universe,
-        )
+
+    # L3 — Pool members of winning sectors, then take top N stocks by RS.
+    stock_layer = await rank_stocks_in_winners(
+        sector_layer.get("winners") or [],
+        timeframe=config.timeframe,
+        finalists_count=config.finalists_count,
+        fno_universe=fno_universe,
+    )
+
     enriched = await score_option_candidates(
         list(stock_layer.get("candidates") or []),
         config=config,
@@ -891,7 +835,12 @@ async def run_alpha_pipeline(config: AlphaEngineConfig | None = None) -> dict[st
         )
 
     scored.sort(key=lambda r: float(r.get("composite_alpha_score") or 0.0), reverse=True)
-    watchlist = [r for r in scored if r.get("gate_passed")]
+    # Watchlist = passed the 80-gate AND has a non-neutral bias (per strict
+    # bias rule: trend & sector aligned). Neutral rows can't trade options.
+    watchlist = [
+        r for r in scored
+        if r.get("gate_passed") and r.get("directional_bias") in ("bullish", "bearish")
+    ]
 
     finished = datetime.now(timezone.utc)
     return {
@@ -905,21 +854,24 @@ async def run_alpha_pipeline(config: AlphaEngineConfig | None = None) -> dict[st
         "sector_layer": sector_layer,
         "stock_layer_summary": {
             "candidate_count": stock_layer.get("candidate_count"),
-            "mode": stock_layer.get("mode") or ("winners_only" if config.universe_mode != "full" else "full"),
-            "sectors_scanned": list((stock_layer.get("per_sector") or {}).keys()),
+            "pool_size_before_topN": stock_layer.get("pool_size_before_topN"),
         },
-        "config": {
-            "timeframe": config.timeframe,
-            "universe_mode": config.universe_mode,
-            "sectors_to_keep": config.sectors_to_keep,
-            "stocks_per_sector": config.stocks_per_sector,
-            "composite_gate": config.composite_gate,
-        },
+        "config": _config_payload(config),
         "scored_count": len(scored),
         "watchlist_count": len(watchlist),
         "results": scored,
         "watchlist": watchlist,
-        "source": "alpha_engine_v1",
+        "source": "alpha_engine_v2_strict",
+    }
+
+
+def _config_payload(config: AlphaEngineConfig) -> dict[str, Any]:
+    return {
+        "timeframe": config.timeframe,
+        "sectors_to_keep": config.sectors_to_keep,
+        "finalists_count": config.finalists_count,
+        "composite_gate": config.composite_gate,
+        "min_atm_oi": config.min_atm_oi,
     }
 
 
@@ -1000,48 +952,23 @@ def _normalize_rs_pct(rs_pct: float) -> float:
 
 
 def _bias_from_signals(row: dict[str, Any], trend_score: float) -> str:
-    """Decide directional_bias from quadrant + trend + RS sign.
+    """Strict directional bias per the user's alpha-generation doc.
 
-    Softer than the strict v1 rule (which needed BOTH stock and sector in
-    leading/improving AND trend >= 0.55). The new rule:
+    The doc's logic for L5 (option selection) implies:
+      * BULLISH (buy CE): trend up AND sector_rs_pct > 0
+                          (the stock is moving up inside a leading sector)
+      * BEARISH (buy PE): trend down AND sector_rs_pct < 0
+                          (the stock is moving down inside a lagging sector)
+      * NEUTRAL: any mismatch — skip the trade.
 
-      Bullish if ANY two of three agree:
-        - stock_quadrant ∈ {leading, improving}
-        - sector_quadrant ∈ {leading, improving}
-        - trend_score >= 0.55 OR stock_rs_pct > 0
-
-      Bearish if ANY two of three agree (mirror):
-        - stock_quadrant ∈ {lagging, weakening}
-        - sector_quadrant ∈ {lagging, weakening}
-        - trend_score <= 0.45 OR stock_rs_pct < 0
-
-    Otherwise neutral. The v1 rule produced ~1 bullish per scan in
-    practice — too strict to populate the book. Two-of-three lets a
-    stock with strong sector tailwind + positive RS trade even when
-    its individual quadrant is "improving" rather than "leading".
+    Trend thresholds (0.55 / 0.45) come from the L4 trend_score scale where
+    0.5 = flat. A mismatched signal (e.g. trend up but sector lagging)
+    means the stock is fighting its own sector tape — those names
+    historically reverse, so the engine refuses the trade.
     """
-    stock_quadrant = str(row.get("stock_quadrant") or "")
-    sector_quadrant = str(row.get("sector_quadrant") or "")
-    rs_pct = float(row.get("stock_rs_pct") or 0.0)
-    bullish_quadrants = {"leading", "improving"}
-    bearish_quadrants = {"lagging", "weakening"}
-
-    bull_votes = sum(
-        [
-            stock_quadrant in bullish_quadrants,
-            sector_quadrant in bullish_quadrants,
-            trend_score >= 0.55 or rs_pct > 0.0,
-        ]
-    )
-    bear_votes = sum(
-        [
-            stock_quadrant in bearish_quadrants,
-            sector_quadrant in bearish_quadrants,
-            trend_score <= 0.45 or rs_pct < 0.0,
-        ]
-    )
-    if bull_votes >= 2 and bull_votes > bear_votes:
+    sector_rs = float(row.get("sector_rs_pct") or 0.0)
+    if trend_score >= 0.55 and sector_rs > 0.0:
         return "bullish"
-    if bear_votes >= 2 and bear_votes > bull_votes:
+    if trend_score <= 0.45 and sector_rs < 0.0:
         return "bearish"
     return "neutral"

@@ -219,41 +219,33 @@ class TestTechnicals:
 # Bias derivation
 # ---------------------------------------------------------------------------
 class TestBiasDerivation:
-    def test_leading_sector_leading_stock_bullish_trend(self):
-        row = {"stock_quadrant": "leading", "sector_quadrant": "leading", "stock_rs_pct": 5.0}
+    """STRICT spec: bullish requires trend up AND sector_rs > 0; mirror bearish."""
+
+    def test_trend_up_and_sector_leading_yields_bullish(self):
+        row = {"sector_rs_pct": 5.0}
         assert _bias_from_signals(row, trend_score=0.7) == "bullish"
 
-    def test_improving_sector_improving_stock_bullish(self):
-        row = {"stock_quadrant": "improving", "sector_quadrant": "improving", "stock_rs_pct": 3.0}
-        assert _bias_from_signals(row, trend_score=0.6) == "bullish"
-
-    def test_lagging_sector_weakening_stock_bearish(self):
-        row = {"stock_quadrant": "weakening", "sector_quadrant": "lagging", "stock_rs_pct": -4.0}
+    def test_trend_down_and_sector_lagging_yields_bearish(self):
+        row = {"sector_rs_pct": -4.0}
         assert _bias_from_signals(row, trend_score=0.3) == "bearish"
 
-    def test_mixed_quadrants_neutral(self):
-        # Stock leading, sector lagging, trend flat → only 1 bullish vote
-        row = {"stock_quadrant": "leading", "sector_quadrant": "lagging", "stock_rs_pct": 0.0}
+    def test_trend_up_but_sector_lagging_is_neutral(self):
+        # The doc explicitly rejects fighting-the-tape setups.
+        row = {"sector_rs_pct": -3.0}
+        assert _bias_from_signals(row, trend_score=0.7) == "neutral"
+
+    def test_trend_down_but_sector_leading_is_neutral(self):
+        row = {"sector_rs_pct": 5.0}
+        assert _bias_from_signals(row, trend_score=0.3) == "neutral"
+
+    def test_flat_trend_is_neutral_regardless_of_sector(self):
+        row = {"sector_rs_pct": 5.0}
         assert _bias_from_signals(row, trend_score=0.5) == "neutral"
 
-    def test_two_of_three_vote_bullish_via_rs(self):
-        # Stock leading + positive RS sign = 2 votes; sector lagging.
-        row = {"stock_quadrant": "leading", "sector_quadrant": "lagging", "stock_rs_pct": 8.0}
-        assert _bias_from_signals(row, trend_score=0.5) == "bullish"
-
-    def test_two_of_three_vote_bullish_via_sector_and_trend(self):
-        # Sector leading + trend up = 2 votes; stock quadrant lagging.
-        row = {"stock_quadrant": "lagging", "sector_quadrant": "leading", "stock_rs_pct": 0.0}
-        assert _bias_from_signals(row, trend_score=0.7) == "bullish"
-
-    def test_balanced_votes_neutral(self):
-        # 2 bull (stock leading, RS+) tied with 2 bear (sector lagging, trend down)
-        row = {"stock_quadrant": "leading", "sector_quadrant": "lagging", "stock_rs_pct": 5.0}
-        # trend_score 0.4 → bearish-side trend AND negative wouldn't trigger... actually:
-        #   bull: stock_quadrant (yes) + RS positive (yes) = 2
-        #   bear: sector_quadrant (yes) + trend<=0.45 (yes) = 2
-        # tie → neutral
-        assert _bias_from_signals(row, trend_score=0.4) == "neutral"
+    def test_borderline_trend_is_neutral(self):
+        # trend_score must be >= 0.55 for bullish; 0.54 doesn't count.
+        row = {"sector_rs_pct": 5.0}
+        assert _bias_from_signals(row, trend_score=0.54) == "neutral"
 
 
 class TestCompositeScoreWithLiveMPOF:
@@ -301,87 +293,6 @@ def test_alpha_engine_config_defaults():
     cfg = AlphaEngineConfig()
     assert cfg.timeframe == "weekly"
     assert cfg.sectors_to_keep == 4
-    assert cfg.stocks_per_sector == 5
+    # Strict spec: pool-then-top-N, default 10 per "Select Top 10 Stocks"
+    assert cfg.finalists_count == 10
     assert cfg.composite_gate == 80.0
-    # Default is the new full-universe mode per user spec ("create a
-    # watchlist for the entire qualified F&O universe").
-    assert cfg.universe_mode == "full"
-
-
-class TestFullUniverseRanker:
-    """Tests for rank_stocks_full_universe — pure data shaping; no DB."""
-
-    def test_covers_every_fno_symbol(self):
-        import asyncio
-        from cbe_scanner.alpha_engine import rank_stocks_full_universe
-
-        sector_payload = {
-            "watchlist": [
-                {"code": "BANKING", "name": "Banking", "relative_strength_pct": 5.0, "quadrant": "leading"},
-                {"code": "IT", "name": "IT", "relative_strength_pct": -2.0, "quadrant": "lagging"},
-            ],
-            "stocks_by_sector": {
-                "BANKING": {
-                    "sector": {"name": "Banking", "relative_strength_pct": 5.0, "quadrant": "leading"},
-                    "rrg": {
-                        "points": [
-                            {"code": "HDFCBANK", "relative_strength_pct": 7.0, "quadrant": "leading"},
-                            {"code": "ICICIBANK", "relative_strength_pct": 4.0, "quadrant": "improving"},
-                        ],
-                    },
-                },
-                "IT": {
-                    "sector": {"name": "IT", "relative_strength_pct": -2.0, "quadrant": "lagging"},
-                    "rrg": {
-                        "points": [
-                            {"code": "TCS", "relative_strength_pct": -3.0, "quadrant": "lagging"},
-                        ],
-                    },
-                },
-            },
-        }
-        # F&O universe includes 4 names; 1 of them is not in any sector slice.
-        fno = {"HDFCBANK", "ICICIBANK", "TCS", "RELIANCE"}
-        result = asyncio.get_event_loop().run_until_complete(
-            rank_stocks_full_universe(sector_payload, fno_universe=fno, timeframe="weekly")
-        )
-        symbols = {c["instrument"] for c in result["candidates"]}
-        assert symbols == fno  # every F&O symbol present
-        assert result["mode"] == "full"
-
-        sector_for = {c["instrument"]: c["sector_code"] for c in result["candidates"]}
-        assert sector_for["HDFCBANK"] == "BANKING"
-        assert sector_for["TCS"] == "IT"
-        assert sector_for["RELIANCE"] is None  # unclassified — kept in universe
-
-    def test_orders_leading_quadrants_first(self):
-        import asyncio
-        from cbe_scanner.alpha_engine import rank_stocks_full_universe
-
-        sector_payload = {
-            "watchlist": [],
-            "stocks_by_sector": {
-                "BANKING": {
-                    "sector": {"relative_strength_pct": 0.0, "quadrant": "leading"},
-                    "rrg": {
-                        "points": [
-                            {"code": "STK_LAGGING", "relative_strength_pct": -5.0, "quadrant": "lagging"},
-                            {"code": "STK_LEADING", "relative_strength_pct": 8.0, "quadrant": "leading"},
-                            {"code": "STK_IMPROVING", "relative_strength_pct": 3.0, "quadrant": "improving"},
-                        ],
-                    },
-                },
-            },
-        }
-        result = asyncio.get_event_loop().run_until_complete(
-            rank_stocks_full_universe(
-                sector_payload,
-                fno_universe={"STK_LEADING", "STK_IMPROVING", "STK_LAGGING"},
-                timeframe="weekly",
-            )
-        )
-        order = [c["instrument"] for c in result["candidates"]]
-        # leading < improving < lagging
-        assert order[0] == "STK_LEADING"
-        assert order[1] == "STK_IMPROVING"
-        assert order[2] == "STK_LAGGING"
