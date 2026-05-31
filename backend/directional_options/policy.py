@@ -239,17 +239,28 @@ class SizeBucket:
         self.n += 1
 
     def sample(self, rng: np.random.Generator) -> float:
+        # Posterior on the mean: t-style stdev = sqrt(var / n) shrinks
+        # like 1/sqrt(n), which is what we want — but we also add a
+        # forced-exploration term `prior_var / (n + prior_strength)` that
+        # decays slowly and keeps under-sampled buckets in the running.
+        # Without this, a single lucky early draw can collapse the
+        # Thompson sampler onto one multiplier (observed empirically in
+        # the first walk-forward run: 2.0× ran away with 209/223 trades).
+        prior_var = 0.25  # σ ≈ 0.5 on R — covers the realistic range
+        prior_strength = 4.0  # equivalent observations of the prior
         if self.n == 0:
-            # Weakly informative prior — small positive bias for 1.0×
-            # so the policy starts at base sizing before evidence.
+            # Slight 1.0× prior so we start at base sizing. ~0 elsewhere.
             prior_mean = 0.05 if abs(self.multiplier - 1.0) < 1e-6 else 0.0
-            return float(rng.normal(prior_mean, 0.5))
+            return float(rng.normal(prior_mean, math.sqrt(prior_var)))
         mean = self.sum_r / self.n
         if self.n < 2:
-            return float(rng.normal(mean, 0.5))
-        var = max((self.sum_r_sq / self.n) - mean * mean, 1e-4)
-        # Posterior on the mean: stdev = sqrt(var / n)
-        return float(rng.normal(mean, math.sqrt(var / self.n)))
+            sample_var = prior_var
+        else:
+            sample_var = max((self.sum_r_sq / self.n) - mean * mean, 1e-4)
+        # Effective variance: posterior on the mean + persistent forced-
+        # exploration term that shrinks like 1/(n + prior_strength).
+        eff_var = (sample_var / self.n) + (prior_var / (self.n + prior_strength))
+        return float(rng.normal(mean, math.sqrt(eff_var)))
 
 
 @dataclass
