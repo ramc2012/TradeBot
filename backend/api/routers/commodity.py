@@ -193,3 +193,22 @@ async def commodity_reports(limit: Optional[int] = None):
     if limit is not None and limit >= 0:
         return reports[:limit]
     return reports
+
+
+@router.get("/profile-history/{root}")
+async def commodity_profile_history(root: str):
+    """Return the prior-period profile references for an underlying.
+
+    Today's profile streams in the regular overview payload; this endpoint
+    is the *historical* counterpart and serves yesterday + this/last week +
+    this/last month aggregates so the detail modal's timeline can render
+    Y / W / M references next to the live TPO chart.
+
+    Built from snapshots persisted by the strategy agent each session
+    (``backend/runtime/commodity_profiles/<ROOT>/<YYYY-MM-DD>.json``).
+    Missing periods return ``null`` for that field so the UI can render a
+    'coming soon' placeholder.
+    """
+    from paper_engine.commodity_profile_store import historical_timeline
+
+    return historical_timeline(str(root or "").strip().upper())

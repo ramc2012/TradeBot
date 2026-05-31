@@ -666,6 +666,20 @@ def evaluate_commodity_mp_signal(
         "mp_ib_low": _round(_attr(today_profile, "initial_balance_low"), 2),
         "mp_periods": int(_profile_attr(today_profile, "period_count", 0) or 0),
         "mp_session_date": str(_profile_attr(today_profile, "session_date", "") or ""),
+        # Full TPO map for the day so the UI can render the classic letter
+        # histogram instead of the abbreviated POC/VAH/VAL summary. The map
+        # is small (typically ~30-60 price levels × short letter strings) and
+        # is already computed by MarketProfileEngine; we just surface it.
+        "mp_tpo_letters": _profile_attr(today_profile, "tpo_letters", None) or {},
+        "mp_tpo_counts": _profile_attr(today_profile, "tpo_counts", None) or {},
+        "mp_tick_size": _safe_float(_profile_attr(today_profile, "tick_size", None)),
+        "mp_high": _round(_attr(today_profile, "high_price"), 2),
+        "mp_low": _round(_attr(today_profile, "low_price"), 2),
+        "mp_single_prints": list(_profile_attr(today_profile, "single_prints", []) or []),
+        "mp_poor_high": bool(_profile_attr(today_profile, "poor_high", False)),
+        "mp_poor_low": bool(_profile_attr(today_profile, "poor_low", False)),
+        "mp_buying_tail": list(_profile_attr(today_profile, "buying_tail", []) or []),
+        "mp_selling_tail": list(_profile_attr(today_profile, "selling_tail", []) or []),
         "cvd_latest": None,
         "cvd_session": None,
         "cvd_block_active": False,

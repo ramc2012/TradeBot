@@ -230,6 +230,8 @@ export const getCommodityReports = (limit?: number) =>
   api.get("/api/commodity/reports", { params: { limit } });
 export const getCommodityWatchlistSnapshot = (expiry?: string) =>
   api.get("/api/commodity/watchlist-snapshot", { params: { expiry } });
+export const getCommodityProfileHistory = (root: string) =>
+  api.get(`/api/commodity/profile-history/${encodeURIComponent(root)}`);
 // Legacy options-watchlist stubs — deprecated. The endpoints were removed
 // from the backend; these resolve immediately with an empty payload so any
 // page that still imports them keeps compiling.

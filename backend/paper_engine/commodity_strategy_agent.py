@@ -1743,6 +1743,25 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             atr_1m=atr_1m,
         )
 
+        # Persist a daily snapshot once Initial Balance has fully printed (so
+        # we don't churn the disk with intra-IB rewrites). This is a cheap
+        # idempotent overwrite: the latest scan of the day wins, so by EOD
+        # the file holds the final auction.
+        if today_profile is not None and int(getattr(today_profile, "period_count", 0) or 0) >= FUTURES_MP_MIN_PERIODS:
+            try:
+                from paper_engine.commodity_profile_store import (
+                    build_daily_profile_from_snapshot,
+                    save_profile,
+                )
+
+                snapshot = build_daily_profile_from_snapshot(spec.root, today_profile)
+                if snapshot is not None:
+                    save_profile(snapshot)
+            except Exception as persist_exc:
+                logger.debug(
+                    f"[CommodityStrategy] daily profile persist skipped for {spec.root}: {persist_exc}"
+                )
+
         # Attach instrument-shape fields the harness/decorator need.
         result.update(
             {

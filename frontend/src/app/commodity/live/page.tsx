@@ -31,6 +31,7 @@ import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import {
   api as apiClient,
   getCommodityOverview,
+  getCommodityProfileHistory,
   getCommodityWatchlistSnapshot,
   runCommodityStrategyOnce,
   startCommodityStrategyAgent,
@@ -87,6 +88,18 @@ type WatchRow = {
   mp_status?: string | null;
   mp_periods?: number | null;
   mp_session_date?: string | null;
+  // Full TPO surface — added in v5 so the detail modal can render the
+  // classic letter histogram instead of just POC/VAH/VAL summary.
+  mp_tpo_letters?: Record<string, string> | null;
+  mp_tpo_counts?: Record<string, number> | null;
+  mp_tick_size?: number | null;
+  mp_high?: number | null;
+  mp_low?: number | null;
+  mp_single_prints?: number[] | null;
+  mp_poor_high?: boolean | null;
+  mp_poor_low?: boolean | null;
+  mp_buying_tail?: number[] | null;
+  mp_selling_tail?: number[] | null;
   mp_poc?: number | null;
   mp_vah?: number | null;
   mp_val?: number | null;
@@ -1688,6 +1701,175 @@ function AuditFeed({ events }: { events: AuditEvent[] }) {
 
 // ─── Instrument detail modal ──────────────────────────────────────────────
 
+// ─── TPO Chart ──────────────────────────────────────────────────────────────
+//
+// Classic Steidlmayer vertical Market Profile: every 30-min period in the
+// session is a letter (A, B, C, …), and each letter is drawn at every price
+// it traded at. Reading the histogram horizontally tells you "where price
+// spent the most time" (POC = the longest row). Vertically, gaps in the
+// letters between two prices are *single prints* — the auction moved
+// through them quickly.
+//
+// We also overlay POC / VAH / VAL guide lines, IB band as a faint amber
+// background column on the left, and dotted reference lines at the POC
+// from prior periods (Y / W / M) so the trader sees in one glance whether
+// today's auction overlaps history.
+
+type ReferenceLine = {
+  label: string; // "Y" | "W" | "M"
+  price: number;
+  color: string;
+};
+
+function TPOChart({
+  letters,
+  poc,
+  vah,
+  val,
+  ibh,
+  ibl,
+  high,
+  low,
+  tickSize,
+  price,
+  references = [],
+  pocBaseColor = "rgba(252, 211, 77, 0.18)",
+  height = 420,
+}: {
+  letters: Record<string, string>;
+  poc?: number | null;
+  vah?: number | null;
+  val?: number | null;
+  ibh?: number | null;
+  ibl?: number | null;
+  high?: number | null;
+  low?: number | null;
+  tickSize?: number | null;
+  price?: number | null;
+  references?: ReferenceLine[];
+  pocBaseColor?: string;
+  height?: number;
+}) {
+  const entries = useMemo(() => {
+    const out: { price: number; letters: string }[] = [];
+    for (const [k, v] of Object.entries(letters || {})) {
+      const p = Number(k);
+      if (!Number.isFinite(p)) continue;
+      out.push({ price: p, letters: String(v || "") });
+    }
+    out.sort((a, b) => b.price - a.price); // high → low (top → bottom)
+    return out;
+  }, [letters]);
+
+  if (entries.length === 0) {
+    return (
+      <div
+        className="flex items-center justify-center rounded-md bg-bg-secondary/25 text-[11px] uppercase tracking-wide text-text-muted ring-1 ring-bg-secondary/40"
+        style={{ height }}
+      >
+        TPO data not yet available — waiting for first IB
+      </div>
+    );
+  }
+
+  const maxLetters = entries.reduce((m, e) => Math.max(m, e.letters.length), 0);
+  const rowHeight = Math.max(10, Math.min(20, height / Math.max(entries.length, 1)));
+  const tick = Number(tickSize ?? 0) || (entries.length > 1 ? entries[0].price - entries[1].price : 0.5);
+
+  const valNum = Number(val ?? 0);
+  const vahNum = Number(vah ?? 0);
+  const pocNum = Number(poc ?? 0);
+  const priceNum = Number(price ?? 0);
+
+  return (
+    <div
+      className="relative overflow-hidden rounded-md bg-bg-primary ring-1 ring-bg-secondary/40"
+      style={{ height }}
+    >
+      <div className="absolute inset-0 overflow-y-auto">
+        <table className="w-full border-separate border-spacing-0 font-mono">
+          <tbody>
+            {entries.map((row) => {
+              const inVA = valNum && vahNum && row.price >= valNum && row.price <= vahNum;
+              const inIB = ibl != null && ibh != null && row.price >= Number(ibl) && row.price <= Number(ibh);
+              const isPOC = pocNum && Math.abs(row.price - pocNum) < tick * 0.5;
+              const atVAH = vahNum && Math.abs(row.price - vahNum) < tick * 0.5;
+              const atVAL = valNum && Math.abs(row.price - valNum) < tick * 0.5;
+              const atPrice = priceNum && Math.abs(row.price - priceNum) < tick * 0.5;
+              const ref = references.find(
+                (r) => Math.abs(r.price - row.price) < tick * 0.5,
+              );
+              const bg = isPOC
+                ? pocBaseColor
+                : inIB
+                  ? "rgba(252, 211, 77, 0.07)"
+                  : inVA
+                    ? "rgba(148, 163, 184, 0.07)"
+                    : "transparent";
+              return (
+                <tr
+                  key={row.price}
+                  style={{ background: bg, height: rowHeight }}
+                  className={[
+                    atVAH ? "border-t border-dashed border-text-muted/40" : "",
+                    atVAL ? "border-b border-dashed border-text-muted/40" : "",
+                  ].join(" ")}
+                  title={`${formatNumber(row.price, 2)} · ${row.letters.length} TPO (${row.letters.split("").join(" ")})`}
+                >
+                  <td
+                    className="whitespace-nowrap border-r border-bg-secondary/30 px-1.5 text-right text-[9.5px] text-text-muted"
+                    style={{ width: 60 }}
+                  >
+                    {atPrice ? "▶ " : ""}
+                    {formatNumber(row.price, 2)}
+                  </td>
+                  <td className="relative px-1">
+                    <div className="flex flex-wrap leading-none">
+                      {row.letters.split("").map((ch, i) => (
+                        <span
+                          key={i}
+                          className={`mr-[1.5px] text-[10px] tracking-tighter ${
+                            isPOC
+                              ? "text-amber-300 font-semibold"
+                              : inIB
+                                ? "text-amber-200"
+                                : inVA
+                                  ? "text-text-secondary"
+                                  : "text-text-muted"
+                          }`}
+                        >
+                          {ch}
+                        </span>
+                      ))}
+                    </div>
+                    {/* Reference marker on the right edge */}
+                    {ref ? (
+                      <span
+                        className="absolute right-1 top-1/2 -translate-y-1/2 rounded px-1 text-[9px] font-semibold"
+                        style={{ background: ref.color + "33", color: ref.color }}
+                      >
+                        {ref.label}
+                      </span>
+                    ) : null}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {/* Floating axis labels */}
+      <div className="pointer-events-none absolute right-1 top-1 flex flex-col items-end gap-0.5 text-[9px] font-mono">
+        {high ? <span className="text-text-muted">H {formatNumber(Number(high), 2)}</span> : null}
+        {vah ? <span className="text-text-secondary">VAH {formatNumber(Number(vah), 2)}</span> : null}
+        {poc ? <span className="font-semibold text-amber-300">POC {formatNumber(Number(poc), 2)}</span> : null}
+        {val ? <span className="text-text-secondary">VAL {formatNumber(Number(val), 2)}</span> : null}
+        {low ? <span className="text-text-muted">L {formatNumber(Number(low), 2)}</span> : null}
+      </div>
+    </div>
+  );
+}
+
 /** Per-period profile data shape — POC / VAH / VAL plus optional IB band.
  *  Used for the timeline rows below the headline 'Today' visual. */
 type PeriodProfile = {
@@ -1953,16 +2135,10 @@ function PeriodProfileRow({ profile }: { profile: PeriodProfile }) {
 function InstrumentDetailModal({
   row,
   position,
-  recentTrades,
-  recentOrders,
-  recentAudit,
   onClose,
 }: {
   row: WatchRow;
   position?: CommodityPosition;
-  recentTrades: TradeRow[];
-  recentOrders: Order[];
-  recentAudit: AuditEvent[];
   onClose: () => void;
 }) {
   useEffect(() => {
@@ -1991,14 +2167,86 @@ function InstrumentDetailModal({
   // Week / month profiles are not yet wired in the backend — show placeholders
   // so the timeline structure is in place. Will populate when the agent
   // exposes them.
-  const referenceProfiles: PeriodProfile[] = [
-    yesterdayProfile,
-    { label: "This week", status: "pending" },
-    { label: "Last week", status: "pending" },
-    { label: "This month", status: "pending" },
-    { label: "Last month", status: "pending" },
-  ];
-  const refsForHero = referenceProfiles.filter((r) => r.status === "available");
+  // Fetch persisted prior profiles (yesterday + week + month aggregates) the
+  // moment the modal opens. The endpoint serves daily snapshots saved by the
+  // agent under backend/runtime/commodity_profiles, so the timeline grows
+  // organically every session.
+  const histRoot = String(row.underlying || row.symbol || "");
+  const historyQuery = useQuery({
+    queryKey: ["commodity", "profile-history", histRoot],
+    queryFn: () => getCommodityProfileHistory(histRoot).then((r) => r.data),
+    enabled: !!histRoot,
+    staleTime: 60_000,
+  });
+  const history = (historyQuery.data || {}) as Record<string, unknown>;
+
+  type HistPeriod = {
+    label: string;
+    date?: string;
+    poc?: number | null;
+    vah?: number | null;
+    val?: number | null;
+    high?: number | null;
+    low?: number | null;
+    tpo_letters?: Record<string, string> | null;
+    tick_size?: number | null;
+  };
+  const histPeriod = (key: string, label: string): HistPeriod | null => {
+    const raw = history[key];
+    if (!raw || typeof raw !== "object") return null;
+    const obj = raw as Record<string, unknown>;
+    return {
+      label,
+      date: typeof obj.session_date === "string" ? obj.session_date : undefined,
+      poc: typeof obj.poc === "number" ? obj.poc : null,
+      vah: typeof obj.vah === "number" ? obj.vah : null,
+      val: typeof obj.val === "number" ? obj.val : null,
+      high: typeof obj.high === "number" ? obj.high : null,
+      low: typeof obj.low === "number" ? obj.low : null,
+      tpo_letters: (obj.tpo_letters && typeof obj.tpo_letters === "object")
+        ? (obj.tpo_letters as Record<string, string>)
+        : null,
+      tick_size: typeof obj.tick_size === "number" ? obj.tick_size : null,
+    };
+  };
+
+  const yesterday = histPeriod("previous_day", "Yesterday")
+    || (yPoc || yVah || yVal
+      ? {
+          label: "Yesterday",
+          date: row.prior_session_date || undefined,
+          poc: yPoc,
+          vah: yVah,
+          val: yVal,
+          high: null,
+          low: null,
+          tpo_letters: null,
+          tick_size: null,
+        }
+      : null);
+  const thisWeek = histPeriod("this_week", "This week");
+  const lastWeek = histPeriod("last_week", "Last week");
+  const thisMonth = histPeriod("this_month", "This month");
+  const lastMonth = histPeriod("last_month", "Last month");
+  const historicalPeriods: HistPeriod[] = [yesterday, thisWeek, lastWeek, thisMonth, lastMonth].filter(
+    (p): p is HistPeriod => p !== null && (p.poc != null || p.vah != null || p.val != null),
+  );
+
+  // Reference lines drawn on today's chart — colour-coded by period.
+  const refColors: Record<string, string> = {
+    Yesterday: "#fbbf24",
+    "This week": "#a78bfa",
+    "Last week": "#818cf8",
+    "This month": "#34d399",
+    "Last month": "#10b981",
+  };
+  const todayReferences: ReferenceLine[] = historicalPeriods
+    .filter((p) => p.poc != null)
+    .map((p) => ({
+      label: p.label === "Yesterday" ? "Y" : p.label.startsWith("This week") ? "W" : p.label.startsWith("Last week") ? "lW" : p.label.startsWith("This month") ? "M" : "lM",
+      price: Number(p.poc),
+      color: refColors[p.label] || "#94a3b8",
+    }));
 
   return (
     <div
@@ -2040,26 +2288,142 @@ function InstrumentDetailModal({
           </div>
         </div>
 
-        {/* Today's profile — hero visual with OF chips + prior-period reference lines */}
-        <div className="mb-2">
-          <div className="mb-1 flex items-baseline justify-between text-[10px] uppercase tracking-[0.14em] text-text-muted">
-            <span>Today · {row.mp_day_type || "—"}</span>
-            <span>{row.mp_periods ?? "—"} periods · {row.indicator_timeframe || "1m"}</span>
-          </div>
-          <TodayProfileHero row={row} references={refsForHero} />
-          {/* Trigger validation / evidence note, when present */}
-          {row.signal_validation_detail ? (
-            <div className="mt-2 rounded bg-bg-secondary/15 px-3 py-1.5 text-[11px] text-text-secondary">
-              {row.signal_validation_detail}
+        {/* Today's TPO + reference legend + historical TPO grid */}
+        <div className="mb-4 grid grid-cols-12 gap-3">
+          {/* Today */}
+          <div className="col-span-7">
+            <div className="mb-1 flex items-baseline justify-between text-[10px] uppercase tracking-[0.14em] text-text-muted">
+              <span>Today · {row.mp_day_type || "—"}</span>
+              <span>
+                {row.mp_periods ?? "—"} periods · tick {formatNumber(Number(row.mp_tick_size ?? 0), 2)}
+              </span>
             </div>
-          ) : null}
+            <TPOChart
+              letters={(row.mp_tpo_letters as Record<string, string>) || {}}
+              poc={row.mp_poc as number | undefined}
+              vah={row.mp_vah as number | undefined}
+              val={row.mp_val as number | undefined}
+              ibh={row.mp_ib_high as number | undefined}
+              ibl={row.mp_ib_low as number | undefined}
+              high={row.mp_high as number | undefined}
+              low={row.mp_low as number | undefined}
+              tickSize={row.mp_tick_size as number | undefined}
+              price={Number(row.price ?? 0)}
+              references={todayReferences}
+              height={460}
+            />
+            {row.signal_validation_detail ? (
+              <div className="mt-2 rounded bg-bg-secondary/15 px-3 py-1.5 text-[11px] text-text-secondary">
+                {row.signal_validation_detail}
+              </div>
+            ) : null}
+          </div>
+
+          {/* Sidebar: reference legend + OF micro */}
+          <div className="col-span-5 flex flex-col gap-2">
+            <div className="rounded bg-bg-secondary/15 p-2 ring-1 ring-bg-secondary/30">
+              <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-text-muted">
+                References on today's chart
+              </div>
+              {todayReferences.length === 0 ? (
+                <div className="text-[11px] text-text-muted">
+                  Building history — references appear as snapshots persist.
+                </div>
+              ) : (
+                <ul className="space-y-0.5 text-[11px] font-mono">
+                  {todayReferences.map((r) => (
+                    <li key={r.label + r.price} className="flex items-center gap-2">
+                      <span
+                        className="inline-flex h-4 w-6 items-center justify-center rounded text-[9px] font-semibold"
+                        style={{ background: r.color + "33", color: r.color }}
+                      >
+                        {r.label}
+                      </span>
+                      <span className="text-text-secondary">POC</span>
+                      <span className="ml-auto">{formatNumber(r.price, 2)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="rounded bg-bg-secondary/15 p-2 ring-1 ring-bg-secondary/30">
+              <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-text-muted">
+                Order-flow now
+              </div>
+              <div className="grid grid-cols-2 gap-y-1 text-[11px] font-mono">
+                <KV label="VWAP" v={formatNumber(Number(row.vwap ?? 0), 2)} />
+                <KV
+                  label="CVD"
+                  v={formatSigned(Number(row.cvd_session ?? row.cvd_latest ?? 0))}
+                  tone={Number(row.cvd_session ?? row.cvd_latest ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}
+                />
+                <KV label="ATR(1m)" v={formatNumber(Number(row.atr ?? 0), 2)} />
+                <KV label="Regime" v={String(row.regime || "—")} />
+                <KV label="Confidence" v={`${Math.round(Number(row.confidence ?? 0) * 100)}%`} />
+                <KV label="Trigger" v={triggerLabel(row.entry_style)} />
+              </div>
+            </div>
+          </div>
         </div>
 
-        {/* Period timeline — yesterday + week + month, all stacked */}
-        <div className="mb-4 space-y-1.5">
-          {referenceProfiles.map((p) => (
-            <PeriodProfileRow key={p.label} profile={p} />
-          ))}
+        {/* Historical TPO grid — yesterday + week + month profiles */}
+        <div className="mb-4">
+          <div className="mb-1 flex items-baseline justify-between text-[10px] uppercase tracking-[0.14em] text-text-muted">
+            <span>Historical profiles</span>
+            <span>
+              {historyQuery.isLoading
+                ? "loading…"
+                : historicalPeriods.length === 0
+                  ? "building — first snapshot persists at session close"
+                  : `${historicalPeriods.length} period${historicalPeriods.length === 1 ? "" : "s"} on file`}
+            </span>
+          </div>
+          {historicalPeriods.length > 0 ? (
+            <div className="grid grid-cols-5 gap-2">
+              {historicalPeriods.map((p) => (
+                <div
+                  key={p.label}
+                  className="rounded bg-bg-secondary/15 p-1.5 ring-1 ring-bg-secondary/30"
+                >
+                  <div className="mb-1 flex items-baseline justify-between text-[9.5px] uppercase tracking-[0.14em] text-text-muted">
+                    <span style={{ color: refColors[p.label] }}>{p.label}</span>
+                    {p.date ? <span className="font-mono">{p.date}</span> : null}
+                  </div>
+                  {p.tpo_letters && Object.keys(p.tpo_letters).length > 0 ? (
+                    <TPOChart
+                      letters={p.tpo_letters}
+                      poc={p.poc}
+                      vah={p.vah}
+                      val={p.val}
+                      high={p.high}
+                      low={p.low}
+                      tickSize={p.tick_size}
+                      pocBaseColor={(refColors[p.label] || "#fbbf24") + "33"}
+                      height={210}
+                    />
+                  ) : (
+                    <div className="space-y-1 px-1 py-2 text-[10px] font-mono">
+                      <div className="flex justify-between">
+                        <span className="text-text-muted">VAH</span>
+                        <span>{p.vah != null ? formatNumber(Number(p.vah), 2) : "—"}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-text-muted">POC</span>
+                        <span className="text-amber-300">{p.poc != null ? formatNumber(Number(p.poc), 2) : "—"}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-text-muted">VAL</span>
+                        <span>{p.val != null ? formatNumber(Number(p.val), 2) : "—"}</span>
+                      </div>
+                      <div className="mt-1 text-[9px] uppercase tracking-wide text-text-muted">
+                        TPO letters not stored
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : null}
         </div>
 
         {/* Position card (visual gauge, not a table) */}
@@ -2102,81 +2466,6 @@ function InstrumentDetailModal({
           </div>
         ) : null}
 
-        {/* Recent activity — slim event lists */}
-        <div className="grid grid-cols-12 gap-3">
-          <div className="col-span-6">
-            <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-text-muted">
-              Recent trades · {recentTrades.length}
-            </div>
-            <ul className="space-y-0.5 text-[10.5px]">
-              {recentTrades.length === 0 ? (
-                <li className="text-text-muted">no closed trades</li>
-              ) : (
-                recentTrades.slice(0, 5).map((t, idx) => (
-                  <li key={`t-${idx}`} className="flex justify-between gap-2 font-mono">
-                    <span className="text-text-muted">{formatIST(t.exit_time)}</span>
-                    <span>{t.action}</span>
-                    <span>
-                      {formatNumber(t.entry_price, 2)} → {formatNumber(t.exit_price, 2)}
-                    </span>
-                    <span
-                      className={`${Number(t.pnl ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}
-                    >
-                      {formatSigned(Number(t.pnl ?? 0))}
-                    </span>
-                  </li>
-                ))
-              )}
-            </ul>
-          </div>
-          <div className="col-span-6">
-            <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-text-muted">
-              Recent audit · {recentAudit.length}
-            </div>
-            <ul className="space-y-0.5 text-[10.5px]">
-              {recentAudit.length === 0 ? (
-                <li className="text-text-muted">no events</li>
-              ) : (
-                recentAudit.slice(0, 6).map((e, idx) => (
-                  <li key={`a-${idx}`} className="flex gap-2">
-                    <span className="w-[58px] shrink-0 font-mono text-text-muted">
-                      {formatTime(e.created_at)}
-                    </span>
-                    <span className="truncate">
-                      {(e.event_type || "").replace("mp_signal.", "")}{" "}
-                      {e.message ? `· ${e.message.slice(0, 100)}` : ""}
-                    </span>
-                  </li>
-                ))
-              )}
-            </ul>
-          </div>
-        </div>
-
-        {/* Orders strip */}
-        {recentOrders.length > 0 ? (
-          <div className="mt-3">
-            <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-text-muted">
-              Recent orders · {recentOrders.length}
-            </div>
-            <ul className="space-y-0.5 text-[10.5px]">
-              {recentOrders.slice(0, 4).map((o, idx) => (
-                <li key={`o-${idx}`} className="flex justify-between gap-2 font-mono">
-                  <span className="text-text-muted">{formatIST(o.time)}</span>
-                  <span>{o.flow}</span>
-                  <span
-                    className={o.action === "BUY" ? "text-emerald-300" : "text-rose-300"}
-                  >
-                    {o.action}
-                  </span>
-                  <span>{o.qty}</span>
-                  <span>{formatNumber(o.fill_price, 2)}</span>
-                  <span className="text-text-muted">{o.reason}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
       </div>
     </div>
   );
@@ -2449,21 +2738,6 @@ export default function CommodityLivePage() {
   const selectedRow = useMemo(
     () => rows.find((r) => r.symbol === selectedSymbol) || null,
     [rows, selectedSymbol],
-  );
-  const symbolFilteredTrades = useMemo(
-    () => trades.filter((t) => t.symbol === selectedSymbol),
-    [trades, selectedSymbol],
-  );
-  const symbolFilteredOrders = useMemo(
-    () => orders.filter((o) => o.symbol === selectedSymbol),
-    [orders, selectedSymbol],
-  );
-  const symbolFilteredAudit = useMemo(
-    () =>
-      auditEvents.filter(
-        (e) => e.symbol === selectedSymbol || e.underlying === selectedRow?.underlying,
-      ),
-    [auditEvents, selectedRow?.underlying, selectedSymbol],
   );
 
   // ── Header / status tiles ──────────────────────────────────────────
@@ -2859,9 +3133,6 @@ export default function CommodityLivePage() {
         <InstrumentDetailModal
           row={selectedRow}
           position={positionBySymbol[String(selectedRow.symbol || "")]}
-          recentTrades={symbolFilteredTrades}
-          recentOrders={symbolFilteredOrders}
-          recentAudit={symbolFilteredAudit}
           onClose={() => setSelectedSymbol(null)}
         />
       ) : null}
