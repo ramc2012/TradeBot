@@ -2,7 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { ChevronDown, ChevronRight, CirclePlay, RefreshCcw, Save } from "lucide-react";
+import { ChevronDown, ChevronRight, CirclePlay, RefreshCcw } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 
@@ -16,7 +16,6 @@ import {
   getCommodityWatchlistSnapshot,
   runCommodityStrategyOnce,
   startCommodityStrategyAgent,
-  updateCommodityStrategyContracts,
 } from "@/lib/api";
 import {
   createCommodityOverviewSocket,
@@ -26,15 +25,13 @@ import {
 
 const REFRESH_MS = 4_000;
 
-type TabKey = "watchlist" | "positions" | "history" | "research" | "expiry";
+type TabKey = "watchlist" | "positions" | "history";
 type Bucket = "active" | "ready" | "favourable" | "drifting" | "neutral" | null;
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: "watchlist", label: "Watchlist" },
   { key: "positions", label: "Open Positions" },
   { key: "history", label: "Trade History" },
-  { key: "research", label: "Research" },
-  { key: "expiry", label: "Expiry Setup" },
 ];
 type Trajectory = "improving" | "stalled" | "deteriorating" | null;
 
@@ -100,6 +97,15 @@ type WatchRow = {
   mp_val?: number | null;
   mp_ib_high?: number | null;
   mp_ib_low?: number | null;
+  mp_periods?: number | null;
+  mp_session_date?: string | null;
+  // MP+OF evaluator additions.
+  entry_style?: string | null;
+  confidence?: number | null;
+  stop_hint?: number | null;
+  target_hint?: number | null;
+  trigger_evidence?: Record<string, unknown> | null;
+  prior_session_date?: string | null;
 };
 
 type CommoditySnapshotContract = {
@@ -982,87 +988,7 @@ function InstrumentWatchlist({
           </tbody>
         </table>
       </div>
-      <OptionPairWatchlist rows={optionRows} />
-    </div>
-  );
-}
-
-function OptionPairWatchlist({ rows }: { rows: WatchRow[] }) {
-  if (!rows.length) {
-    return (
-      <div className="rounded-md border border-bg-active/20 px-3 py-4 text-center text-xs text-text-muted">
-        No CE/PE option pairs are available from the current commodity setup.
-      </div>
-    );
-  }
-
-  const TH =
-    "px-2 py-1.5 text-left text-[10px] font-semibold uppercase tracking-[0.14em] text-text-muted bg-bg-secondary/40 sticky top-0 z-10";
-  const THR = `${TH} text-right`;
-  const TD = "px-2 py-1.5 align-middle whitespace-nowrap font-mono text-[12px]";
-  const TDR = `${TD} text-right`;
-
-  return (
-    <div className="overflow-hidden rounded-md border border-bg-active/25">
-      <div className="border-b border-bg-active/20 px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-text-muted">
-        CE / PE Option Pairs · 30m MACD + RSI
-      </div>
-      <table className="w-full border-collapse">
-        <thead>
-          <tr>
-            <th className={TH}>Underlying</th>
-            <th className={TH}>Signal</th>
-            <th className={`${THR} w-20`}>CE Strike</th>
-            <th className={`${THR} w-20`}>CE LTP</th>
-            <th className={`${THR} w-20`}>CE MACD</th>
-            <th className={`${THR} w-16`}>CE RSI</th>
-            <th className={`${THR} w-20`}>PE Strike</th>
-            <th className={`${THR} w-20`}>PE LTP</th>
-            <th className={`${THR} w-20`}>PE MACD</th>
-            <th className={`${THR} w-16`}>PE RSI</th>
-            <th className={`${THR} w-20`}>Bar</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => {
-            const ce = (row.ce || {}) as Record<string, unknown>;
-            const pe = (row.pe || {}) as Record<string, unknown>;
-            const ceTimeframe = timeframeLabel(ce.indicator_timeframe, "30minute");
-            const peTimeframe = timeframeLabel(pe.indicator_timeframe, "30minute");
-            const key = String(row.symbol || row.underlying || row.ce_symbol || row.pe_symbol);
-            return (
-              <tr key={key} className="border-t border-bg-active/20 hover:bg-bg-secondary/20">
-                <td className="px-2 py-1.5 align-middle">
-                  <span className="font-semibold text-text-primary">{row.underlying || row.display_name || row.symbol}</span>
-                  <span className="ml-2 font-mono text-[10px] text-text-muted">{row.expiry || "--"}</span>
-                </td>
-                <td className="px-2 py-1.5 align-middle text-[10.5px] uppercase text-text-secondary">
-                  {row.signal_side || sigShort(row.signal_validation || row.signal_validation_detail)}
-                </td>
-                <td className={`${TDR} text-text-secondary`}>{ce.strike != null ? String(ce.strike) : "--"}</td>
-                <td className={`${TDR} text-text-primary`}>{formatNumber(Number(ce.live_ltp ?? ce.ltp), 2)}</td>
-                <td className={`${TDR} ${colorForDelta(Number(ce.macd))}`} title={`CE MACD ${ceTimeframe}`}>
-                  {formatNumber(Number(ce.macd), 2)}
-                </td>
-                <td className={`${TDR} text-text-secondary`} title={`CE RSI ${ceTimeframe}`}>
-                  {formatNumber(Number(ce.rsi), 1)}
-                </td>
-                <td className={`${TDR} text-text-secondary`}>{pe.strike != null ? String(pe.strike) : "--"}</td>
-                <td className={`${TDR} text-text-primary`}>{formatNumber(Number(pe.live_ltp ?? pe.ltp), 2)}</td>
-                <td className={`${TDR} ${colorForDelta(Number(pe.macd))}`} title={`PE MACD ${peTimeframe}`}>
-                  {formatNumber(Number(pe.macd), 2)}
-                </td>
-                <td className={`${TDR} text-text-secondary`} title={`PE RSI ${peTimeframe}`}>
-                  {formatNumber(Number(pe.rsi), 1)}
-                </td>
-                <td className={`${TDR} text-[10px] text-text-muted`}>
-                  {formatIST(row.trade_bar_time || String(ce.bar_time || pe.bar_time || ""))}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+      {/* Options pair table removed — commodity options sleeve deprecated. */}
     </div>
   );
 }
@@ -1821,7 +1747,6 @@ function AuditFeed({ events }: { events: AuditEvent[] }) {
 
 export default function CommodityLivePage() {
   const [activeTab, setActiveTab] = useState<TabKey>("watchlist");
-  const [expiryDraft, setExpiryDraft] = useState<Record<string, string>>({});
   const queryClient = useQueryClient();
 
   const overviewQuery = useLiveSnapshotQuery<Record<string, unknown>>({
@@ -1888,17 +1813,6 @@ export default function CommodityLivePage() {
     refetchIntervalInBackground: true,
   });
 
-  const saveExpiriesMutation = useMutation({
-    mutationFn: async (selected: Record<string, string>) => (await updateCommodityStrategyContracts(selected)).data,
-    onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["commodity-live", "contracts"] }),
-        queryClient.invalidateQueries({ queryKey: ["commodity-live", "overview"] }),
-        queryClient.invalidateQueries({ queryKey: ["commodity-live", "watchlist-snapshot"] }),
-      ]);
-    },
-  });
-
   const runOnceMutation = useMutation({
     mutationFn: async () => (await runCommodityStrategyOnce(true)).data,
     onSuccess: async () => {
@@ -1948,18 +1862,8 @@ export default function CommodityLivePage() {
     ),
     [liveTickStream.ticks, runtimeFuturesWatchlist, snapshotFuturesWatchlist],
   );
-  const runtimeOptionWatchlist = useMemo(
-    () => (status.option_watchlist ?? []) as WatchRow[],
-    [status.option_watchlist],
-  );
-  const snapshotOptionWatchlist = useMemo(
-    () => (watchlistSnapshotQuery.data?.atm_watchlist?.rows ?? []) as WatchRow[],
-    [watchlistSnapshotQuery.data?.atm_watchlist?.rows],
-  );
-  const optionWatchlist = useMemo(
-    () => (runtimeOptionWatchlist.length > 0 ? runtimeOptionWatchlist : snapshotOptionWatchlist),
-    [runtimeOptionWatchlist, snapshotOptionWatchlist],
-  );
+  // Option watchlist removed — commodity options sleeve deprecated.
+  const optionWatchlist: WatchRow[] = useMemo(() => [], []);
 
   const streamedPositions = (overviewQuery.data?.positions as CommodityPosition[] | undefined) ?? status.positions;
   const streamedOrders = (overviewQuery.data?.orders as Order[] | undefined) ?? status.orders;
@@ -2016,18 +1920,6 @@ export default function CommodityLivePage() {
       : overviewQuery.hasSnapshot || watchlistSnapshotQuery.hasSnapshot
         ? "bg-amber-500/10 text-amber-200"
         : "bg-bg-secondary/50 text-text-muted";
-
-  const saveExpiries = () => {
-    const selected: Record<string, string> = {};
-    contracts.forEach((contract) => {
-      const symbol = String(contract.symbol || "");
-      const fallback = contract.selected_expiry || contract.active_expiry || contract.suggested_expiry || "";
-      if (symbol && (expiryDraft[symbol] || fallback)) {
-        selected[symbol] = expiryDraft[symbol] || fallback;
-      }
-    });
-    saveExpiriesMutation.mutate(selected);
-  };
 
   const statusBadgeText = killActive
     ? "kill switch"
@@ -2176,7 +2068,7 @@ export default function CommodityLivePage() {
               detail={
                 usingSnapshotFutures
                   ? "catalog fallback · scanner offline"
-                  : `${watchlist.length} futures · ${optionWatchlist.length} option pairs · tick stream · scan ${scanIntervalSeconds}s`
+                  : `${watchlist.length} futures · MP+OF on 1-min · tick stream · scan ${scanIntervalSeconds}s`
               }
             >
               <InstrumentWatchlist futuresRows={watchlist} optionRows={optionWatchlist} />
@@ -2328,185 +2220,10 @@ export default function CommodityLivePage() {
         </div>
       ) : null}
 
-      {/* EXPIRY tab — focuses purely on the contract catalog and per-symbol
-          expiry selection. Risk Controls / Strategy Agents previously lived
-          here too (duplicated from the Positions tab); removed to give the
-          selection table the full canvas it needs. */}
-      {activeTab === "expiry" ? (
-        <div className="mb-3 grid grid-cols-12 gap-3">
-          <Section
-            title="Expiry Selection"
-            detail={`${contracts.length} contracts · ${contractsQuery.data?.source || watchlistSnapshotQuery.data?.contract_catalog?.source || "--"}`}
-            className="col-span-12"
-          >
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[840px] text-xs">
-                <thead className="text-[10.5px] uppercase tracking-wide text-text-muted">
-                  <tr>
-                    <th className="text-left">Symbol</th>
-                    <th className="text-left">Lookup</th>
-                    <th className="text-left">Expiry</th>
-                    <th className="text-left">Suggested</th>
-                    <th className="text-left">Mapped</th>
-                    <th className="text-right">Lot</th>
-                    <th className="text-left">Policy</th>
-                    <th className="text-left">Unit</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {contracts.length === 0 ? (
-                    <tr>
-                      <td colSpan={8} className="py-4 text-center text-text-muted">
-                        No contracts loaded.
-                      </td>
-                    </tr>
-                  ) : (
-                    contracts.map((contract) => {
-                      const symbol = String(contract.symbol || "");
-                      const fallback =
-                        contract.selected_expiry ||
-                        contract.active_expiry ||
-                        contract.suggested_expiry ||
-                        "";
-                      const value = expiryDraft[symbol] ?? fallback;
-                      const mapped =
-                        contract.selected_lookup_symbol ||
-                        contract.active_lookup_symbol ||
-                        contract.lookup_symbol ||
-                        "—";
-                      return (
-                        <tr key={symbol} className={QUIET_ROW}>
-                          <td className="py-2 font-medium">
-                            {contract.underlying || symbol}
-                            <div className="text-[10px] text-text-muted">{symbol}</div>
-                          </td>
-                          <td className="font-mono text-[10.5px] text-text-muted">
-                            {contract.active_lookup_symbol || contract.lookup_symbol || "--"}
-                          </td>
-                          <td>
-                            <select
-                              value={value}
-                              onChange={(event) =>
-                                setExpiryDraft((draft) => ({ ...draft, [symbol]: event.target.value }))
-                              }
-                              className="w-full min-w-[150px] rounded-md bg-bg-primary/70 px-2 py-1 text-xs text-text-primary outline-none ring-1 ring-transparent focus:ring-accent-blue/40"
-                            >
-                              {(contract.expiries ?? []).map((expiry) => (
-                                <option key={expiry} value={expiry}>
-                                  {expiry}
-                                </option>
-                              ))}
-                              {value && !(contract.expiries ?? []).includes(value) ? (
-                                <option value={value}>{value}</option>
-                              ) : null}
-                            </select>
-                          </td>
-                          <td className="font-mono text-[10.5px] text-text-muted">
-                            {contract.suggested_expiry || "--"}
-                          </td>
-                          <td className="font-mono text-[10.5px] text-text-muted">{mapped}</td>
-                          <td className="text-right font-mono">{contract.lot_size ?? "--"}</td>
-                          <td>
-                            <span
-                              className={
-                                contract.selection_locked ? "text-amber-300" : "text-emerald-300"
-                              }
-                            >
-                              {contract.selection_policy || "--"}
-                            </span>
-                          </td>
-                          <td className="text-text-muted">
-                            {[contract.contract_unit_label, contract.quote_unit_label]
-                              .filter(Boolean)
-                              .join(" · ") || "--"}
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
-            <div className="mt-2 flex flex-wrap items-baseline justify-between gap-2">
-              <span className="text-[10.5px] text-text-muted">
-                {contractsQuery.data?.detail ||
-                  watchlistSnapshotQuery.data?.contract_catalog?.detail ||
-                  "Contract catalog loaded."}
-              </span>
-              <button
-                type="button"
-                onClick={saveExpiries}
-                disabled={saveExpiriesMutation.isPending}
-                className="inline-flex items-center gap-1 rounded-md bg-bg-secondary/25 px-2 py-1 text-xs text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <Save className="h-3.5 w-3.5" />
-                Save expiry selection
-              </button>
-            </div>
-          </Section>
-        </div>
-      ) : null}
-
-      {/* RESEARCH tab — Strategy notes + commentary + signal audit JSON. */}
-      {activeTab === "research" ? (
-        <div className="grid grid-cols-12 gap-3">
-          <Section
-            title="Commodity Research Context"
-            detail="strategy assumptions"
-            className="col-span-12 xl:col-span-5"
-          >
-            <div className="space-y-3 text-xs text-text-secondary">
-              {(status.strategies ?? []).map((strategy) => (
-                <div key={String(strategy.key)} className={`${QUIET_TILE} px-3 py-2`}>
-                  <div className="font-semibold text-text-primary">
-                    {String(strategy.title || strategy.key)}
-                  </div>
-                  <div className="mt-1 text-[11px] text-text-muted">
-                    {[strategy.instrument, strategy.timeframe, strategy.broker]
-                      .filter(Boolean)
-                      .map(String)
-                      .join(" · ")}
-                  </div>
-                  <p className="mt-2 leading-relaxed">{String(strategy.notes || "")}</p>
-                </div>
-              ))}
-            </div>
-          </Section>
-          <Section
-            title="Commentary"
-            detail={`${status.commentary?.length ?? 0} messages`}
-            className="col-span-12 xl:col-span-7"
-          >
-            {(status.commentary ?? []).length === 0 ? (
-              <div className="px-2 py-6 text-center text-xs text-text-muted">No commentary yet.</div>
-            ) : (
-              <ul className="max-h-[320px] space-y-0.5 overflow-y-auto text-xs">
-                {(status.commentary ?? []).map((entry, idx) => (
-                  <li
-                    key={`${entry.time}-${idx}`}
-                    className="flex gap-3 border-b border-transparent py-1 hover:bg-bg-secondary/15"
-                  >
-                    <span className="w-[92px] shrink-0 font-mono text-[10.5px] text-text-muted">
-                      {formatIST(entry.time)}
-                    </span>
-                    <span className={`w-[70px] shrink-0 text-[10.5px] uppercase ${severityColor(entry.tone)}`}>
-                      {entry.tone || "--"}
-                    </span>
-                    <span className="text-text-secondary">{entry.message}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Section>
-          <Section
-            title="Signal Audit"
-            detail={`${status.signal_audit?.length ?? 0} rows · most recent first`}
-            className="col-span-12"
-          >
-            <SignalAuditTable rows={status.signal_audit ?? []} />
-          </Section>
-        </div>
-      ) : null}
+      {/* Expiry & Research tabs were removed when the options sleeve was
+          deprecated. The MP+OF futures-only desk has nothing useful to put
+          there — strategy notes are shown inline on the Positions tab and
+          signal audit is available via the backend's /api/audit endpoint. */}
     </div>
   );
 }

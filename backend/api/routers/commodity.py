@@ -1,7 +1,16 @@
-"""Commodity strategy routes for Fyers-first MCX paper trading."""
+"""Commodity strategy routes — MP+OF futures-only sleeve.
+
+The options sleeve and ATM-watchlist service have been deprecated; the
+endpoints that backed them (`/atm-watchlist`, `/atm-watchlist/expiries`,
+`PUT /strategy-agent/contracts`) are gone.
+
+`/strategy-agent/contracts` and `/watchlist-snapshot` are retained as thin
+catalog endpoints driven entirely from `COMMODITY_CONTRACT_SPECS`, so the
+frontend's contract table keeps working without any expiry-discovery
+backend behind it.
+"""
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -9,7 +18,6 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from market_data.commodity_contract_specs import get_commodity_contract_spec
-from market_data.commodity_atm_watchlist import commodity_atm_watchlist_service
 from paper_engine.commodity_strategy_agent import commodity_strategy_agent
 
 router = APIRouter(prefix="/api/commodity", tags=["commodity"])
@@ -27,171 +35,52 @@ def _normalized_symbols(symbols: list[str]) -> list[str]:
     return normalized
 
 
-def _degraded_contract_catalog(
-    detail: str,
-    *,
-    symbols: Optional[list[str]] = None,
-    selected_option_expiries: Optional[dict[str, str]] = None,
-    selected_option_lookup_symbols: Optional[dict[str, str]] = None,
-) -> dict[str, object]:
-    selected_expiries = {
-        str(symbol).strip().upper(): str(expiry).strip()
-        for symbol, expiry in dict(selected_option_expiries or {}).items()
-        if str(symbol).strip() and str(expiry).strip()
-    }
-    selected_lookup_symbols = {
-        str(symbol).strip().upper(): str(lookup_symbol).strip().upper()
-        for symbol, lookup_symbol in dict(selected_option_lookup_symbols or {}).items()
-        if str(symbol).strip() and str(lookup_symbol).strip()
-    }
+def _build_contract_catalog(symbols: list[str]) -> dict[str, object]:
+    """Build the slim, options-free contract catalog the UI consumes.
+
+    No broker calls — everything is sourced from the static specs.
+    """
     contracts: list[dict[str, object]] = []
-    for symbol in _normalized_symbols(symbols or []):
+    for symbol in _normalized_symbols(symbols):
         spec = get_commodity_contract_spec(symbol)
-        selected_expiry = selected_expiries.get(symbol)
-        selected_lookup_symbol = selected_lookup_symbols.get(symbol) or symbol
-        expiry_mappings = (
-            [{"expiry": selected_expiry, "lookup_symbol": selected_lookup_symbol}]
-            if selected_expiry
-            else []
-        )
         contracts.append(
             {
                 "symbol": symbol,
                 "underlying": spec.root,
+                "display_name": spec.display_name,
                 "lookup_symbol": symbol,
-                "expiries": [selected_expiry] if selected_expiry else [],
-                "selected_expiry": selected_expiry,
-                "suggested_expiry": selected_expiry,
-                "active_expiry": selected_expiry,
-                "has_options": bool(selected_expiry),
-                "active_lookup_symbol": selected_lookup_symbol,
+                "active_lookup_symbol": symbol,
                 "default_lookup_symbol": symbol,
-                "expiry_mappings": expiry_mappings,
-                "selected_lookup_symbol": selected_lookup_symbol if selected_expiry else None,
-                "selection_policy": "saved_static_fallback" if selected_expiry else "static_metadata_only",
-                "selection_locked": bool(selected_expiry),
                 "lot_size": spec.futures_lot_size,
+                "tick_size": spec.mp_tick_size,
                 "contract_unit_label": spec.contract_unit_label,
                 "quote_unit_label": spec.quote_unit_label,
-                "strategy_title": spec.options_label,
-                "detail": "Live MCX expiry discovery is unavailable; showing saved/static contract metadata.",
+                "strategy_title": spec.futures_label,
+                "has_options": False,
+                "selection_policy": "futures_only",
+                "selection_locked": True,
+                "detail": "MP+OF futures-only sleeve; options were deprecated.",
             }
         )
-    fallback_detail = detail
-    if contracts:
-        fallback_detail = (
-            f"{detail} Showing saved MCX futures with static contract metadata; "
-            "live expiry discovery will retry on the next refresh."
-        )
     return {
-        "source": "degraded_static",
-        "build_status": "degraded",
-        "detail": fallback_detail,
+        "source": "static_specs",
+        "build_status": "ready",
+        "detail": "MP+OF futures-only catalog (static specs; no broker discovery).",
         "contracts": contracts,
         "rows": contracts,
         "summary": {
             "total_symbols": len(contracts),
-            "contracts_ready": sum(1 for item in contracts if item.get("has_options")),
-            "active_selections": sum(1 for item in contracts if item.get("active_expiry")),
+            "contracts_ready": len(contracts),
+            "active_selections": len(contracts),
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
-def _degraded_atm_watchlist(detail: str) -> dict[str, object]:
-    return {
-        "source": "degraded",
-        "build_status": "degraded",
-        "detail": detail,
-        "rows": [],
-        "summary": {
-            "total_rows": 0,
-            "ce_ready": 0,
-            "pe_ready": 0,
-        },
-    }
-
-
-async def _bounded_contract_catalog(
-    symbols: list[str],
-    selected_option_expiries: dict[str, str],
-    selected_option_lookup_symbols: dict[str, str],
-    *,
-    timeout: float = 30.0,
-) -> dict[str, object]:
-    """Fetch the commodity contract catalog with a generous timeout.
-
-    The service runs Fyers expiry discovery for each symbol with 0.6s inter-
-    call spacing + 3-attempt exponential backoff on 429. Worst-case ~6-8s
-    for 4 commodities under rate-limit pressure, plus a static-catalog
-    fallback. A 4s ceiling here used to time out the endpoint while the
-    underlying service was still recovering, leaving the dashboard showing
-    "degraded · 0 rows" even though the strategy scan that uses the same
-    service was getting valid data on the slower internal path.
-    """
-    try:
-        payload = await asyncio.wait_for(
-            commodity_atm_watchlist_service.get_contract_catalog(
-                symbols,
-                selected_option_expiries,
-                selected_option_lookup_symbols,
-            ),
-            timeout=timeout,
-        )
-        if symbols and not list(payload.get("contracts") or []):
-            return _degraded_contract_catalog(
-                str(payload.get("detail") or "Commodity contract catalog is unavailable."),
-                symbols=symbols,
-                selected_option_expiries=selected_option_expiries,
-                selected_option_lookup_symbols=selected_option_lookup_symbols,
-            )
-        return payload
-    except Exception as exc:
-        return _degraded_contract_catalog(
-            f"Commodity contract catalog refresh timed out or failed: {exc}",
-            symbols=symbols,
-            selected_option_expiries=selected_option_expiries,
-            selected_option_lookup_symbols=selected_option_lookup_symbols,
-        )
-
-
-async def _bounded_atm_watchlist(
-    symbols: list[str],
-    selected_option_expiries: dict[str, str],
-    selected_option_lookup_symbols: dict[str, str],
-    expiry: Optional[str],
-    *,
-    timeout: float = 30.0,
-) -> dict[str, object]:
-    """Fetch the commodity ATM watchlist with a generous timeout.
-
-    Same reasoning as _bounded_contract_catalog: the chain build runs 4
-    Fyers `get_option_chain` calls with 0.6s spacing + 3-attempt backoff
-    on 429. Realistic worst case ~10s; the previous 4s ceiling was
-    truncating the call mid-flight and returning a degraded payload even
-    while the strategy scan path (no timeout) was succeeding.
-    """
-    try:
-        return await asyncio.wait_for(
-            commodity_atm_watchlist_service.get_watchlist(
-                symbols,
-                selected_option_expiries,
-                selected_option_lookup_symbols,
-                expiry,
-            ),
-            timeout=timeout,
-        )
-    except Exception as exc:
-        return _degraded_atm_watchlist(f"Commodity ATM watchlist refresh timed out or failed: {exc}")
-
-
 class CommodityConfigRequest(BaseModel):
     symbols: list[str]
+    # Legacy field accepted but ignored — options sleeve is deprecated.
     selected_option_expiries: dict[str, str] | None = None
-
-
-class CommodityExpirySelectionRequest(BaseModel):
-    selected_option_expiries: dict[str, str]
 
 
 class KillSwitchRequest(BaseModel):
@@ -247,33 +136,14 @@ async def run_commodity_strategy_once(force: bool = True):
 async def update_commodity_strategy_config(body: CommodityConfigRequest):
     return commodity_strategy_agent.update_symbols(
         body.symbols,
-        selected_option_expiries=body.selected_option_expiries,
+        selected_option_expiries=body.selected_option_expiries,  # ignored
     )
 
 
 @router.get("/strategy-agent/contracts")
 async def commodity_strategy_contracts():
-    await commodity_strategy_agent.ensure_selected_option_setup_locks()
     symbols = commodity_strategy_agent.get_symbols()
-    selected_option_expiries = commodity_strategy_agent.get_selected_option_expiries()
-    selected_option_lookup_symbols = commodity_strategy_agent.get_selected_option_lookup_symbols()
-    cached = commodity_atm_watchlist_service.get_cached_contract_catalog(
-        symbols,
-        selected_option_expiries,
-        selected_option_lookup_symbols,
-    )
-    if cached:
-        return cached
-    return await _bounded_contract_catalog(
-        symbols,
-        selected_option_expiries,
-        selected_option_lookup_symbols,
-    )
-
-
-@router.put("/strategy-agent/contracts")
-async def update_commodity_strategy_contracts(body: CommodityExpirySelectionRequest):
-    return await commodity_strategy_agent.update_selected_option_expiries(body.selected_option_expiries)
+    return _build_contract_catalog(symbols)
 
 
 @router.get("/kill-switch")
@@ -286,56 +156,21 @@ async def update_commodity_kill_switch(body: KillSwitchRequest):
     return await commodity_strategy_agent.set_kill_switch(body.active)
 
 
-@router.get("/atm-watchlist/expiries")
-async def commodity_atm_watchlist_expiries():
-    return await commodity_atm_watchlist_service.get_expiries(
-        commodity_strategy_agent.get_symbols(),
-    )
-
-
-@router.get("/atm-watchlist")
-async def commodity_atm_watchlist(expiry: Optional[str] = Query(None)):
-    await commodity_strategy_agent.ensure_selected_option_setup_locks()
-    return await _bounded_atm_watchlist(
-        commodity_strategy_agent.get_symbols(),
-        commodity_strategy_agent.get_selected_option_expiries(),
-        commodity_strategy_agent.get_selected_option_lookup_symbols(),
-        expiry,
-    )
-
-
 @router.get("/watchlist-snapshot")
 async def commodity_watchlist_snapshot(
-    expiry: Optional[str] = Query(None),
-    live_refresh: bool = Query(False),
+    expiry: Optional[str] = Query(None),  # legacy arg, ignored
+    live_refresh: bool = Query(False),  # legacy arg, ignored
 ):
-    await commodity_strategy_agent.ensure_selected_option_setup_locks()
     symbols = commodity_strategy_agent.get_symbols()
-    selected_option_expiries = commodity_strategy_agent.get_selected_option_expiries()
-    selected_option_lookup_symbols = commodity_strategy_agent.get_selected_option_lookup_symbols()
-    contract_catalog = None if live_refresh else commodity_atm_watchlist_service.get_cached_contract_catalog(
-        symbols,
-        selected_option_expiries,
-        selected_option_lookup_symbols,
-    )
-    atm_watchlist = None if live_refresh else commodity_atm_watchlist_service.get_cached_watchlist(
-        symbols,
-        selected_option_expiries,
-        selected_option_lookup_symbols,
-        expiry,
-    )
     return {
-        "contract_catalog": contract_catalog or await _bounded_contract_catalog(
-            symbols,
-            selected_option_expiries,
-            selected_option_lookup_symbols,
-        ),
-        "atm_watchlist": atm_watchlist or await _bounded_atm_watchlist(
-            symbols,
-            selected_option_expiries,
-            selected_option_lookup_symbols,
-            expiry,
-        ),
+        "contract_catalog": _build_contract_catalog(symbols),
+        # Field retained for frontend backwards-compat; always empty.
+        "atm_watchlist": {
+            "rows": [],
+            "source": "deprecated",
+            "detail": "Commodity options sleeve removed; this field is intentionally empty.",
+            "summary": {"total_rows": 0, "ce_ready": 0, "pe_ready": 0},
+        },
     }
 
 

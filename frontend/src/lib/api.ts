@@ -215,8 +215,11 @@ export const updateCommodityStrategyConfig = (symbols: string[]) =>
   api.put("/api/commodity/strategy-agent/config", { symbols });
 export const getCommodityStrategyContracts = () =>
   api.get("/api/commodity/strategy-agent/contracts");
-export const updateCommodityStrategyContracts = (selectedOptionExpiries: Record<string, string>) =>
-  api.put("/api/commodity/strategy-agent/contracts", { selected_option_expiries: selectedOptionExpiries });
+// Options sleeve deprecated — kept as no-op for backwards compat with any
+// caller that still imports it. Resolves immediately without hitting the API.
+export const updateCommodityStrategyContracts = async (
+  _selectedOptionExpiries: Record<string, string>,
+) => ({ data: { status: "noop", detail: "Commodity options sleeve deprecated." } });
 export const getCommodityKillSwitchStatus = () => api.get("/api/commodity/kill-switch");
 export const updateCommodityKillSwitch = (active: boolean) =>
   api.put("/api/commodity/kill-switch", { active });
@@ -225,12 +228,21 @@ export const getCommodityOrders = (limit?: number) =>
 export const getCommodityPositions = () => api.get("/api/commodity/positions");
 export const getCommodityReports = (limit?: number) =>
   api.get("/api/commodity/reports", { params: { limit } });
-export const getCommodityATMWatchlistExpiries = () =>
-  api.get("/api/commodity/atm-watchlist/expiries");
-export const getCommodityATMWatchlist = (expiry?: string) =>
-  api.get("/api/commodity/atm-watchlist", { params: { expiry } });
 export const getCommodityWatchlistSnapshot = (expiry?: string) =>
   api.get("/api/commodity/watchlist-snapshot", { params: { expiry } });
+// Legacy options-watchlist stubs — deprecated. The endpoints were removed
+// from the backend; these resolve immediately with an empty payload so any
+// page that still imports them keeps compiling.
+export const getCommodityATMWatchlist = async (_expiry?: string) => ({
+  data: {
+    rows: [] as unknown[],
+    source: "deprecated" as string,
+    detail: "Commodity options sleeve removed." as string,
+  } as Record<string, unknown>,
+});
+export const getCommodityATMWatchlistExpiries = async () => ({
+  data: { expiries: [] as string[] } as Record<string, unknown>,
+});
 
 // ── Market ────────────────────────────────────────────────────────────────
 export const getOptionChain = (symbol: string, expiry?: string) =>
