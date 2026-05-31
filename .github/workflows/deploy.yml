@@ -82,18 +82,20 @@ jobs:
         run: |
           set -euo pipefail
           INSTANCE_ID="${{ secrets.EC2_INSTANCE_ID }}"
-          REPO_PATH="${REPO_PATH}"
           FORCE_FLAG=""
           if [ "$FORCE_RECREATE" = "true" ]; then
             FORCE_FLAG="--force-recreate"
           fi
           COMMIT_SHA="${{ github.sha }}"
-          COMMIT_MSG=$(echo "${{ github.event.head_commit.message }}" | head -1)
+          COMMIT_MSG=$(echo "${{ github.event.head_commit.message }}" | head -1 || echo "manual deploy")
 
-          # Build the deploy script. We try the configured REPO_PATH first;
-          # if it doesn't exist, fall back to /opt/TradeBot (the alternate
-          # layout the SSM-tarball workflow used historically).
-          SCRIPT=$(cat <<EOF
+          # Write the deploy script to a real file with real newlines.
+          # We try the configured REPO_PATH first; if it doesn't exist, fall
+          # back to /opt/TradeBot (the alternate layout the SSM-tarball
+          # workflow used historically). $REPO and $GITHUB_OUTPUT are escaped
+          # because they need to be evaluated on the EC2 box, not by the
+          # GitHub runner's heredoc expansion.
+          cat > /tmp/deploy_script.sh <<EOF
           set -euo pipefail
           if [ -d "${REPO_PATH}/.git" ]; then
             REPO="${REPO_PATH}"
@@ -125,17 +127,31 @@ jobs:
           curl -sS -m 5 http://localhost:8000/health || (echo "backend /health failed" && exit 1)
           echo ""
           echo "==> Commodity overview lane shape:"
-          curl -sS -m 5 http://localhost:8000/api/commodity/overview \
-            | python3 -c 'import json,sys; s=json.load(sys.stdin)["status"]; print("Lanes:", [x["title"] for x in s.get("strategies", [])]); print("Symbols:", s["config"]["symbols"])'
+          curl -sS -m 5 http://localhost:8000/api/commodity/overview | python3 -c 'import json,sys; s=json.load(sys.stdin)["status"]; print("Lanes:", [x["title"] for x in s.get("strategies", [])]); print("Symbols:", s["config"]["symbols"])'
           EOF
-          )
 
-          # Send the command via SSM
+          # Wrap the script as a proper JSON parameters file. Real newlines
+          # in the script become \n inside JSON; AWS SSM decodes them back to
+          # real newlines when it reads file://... — which is the whole reason
+          # for not using --parameters "commands=[...]" shorthand (that
+          # shorthand keeps \n as literal backslash-n and the EC2 shell chokes
+          # on it: "syntax error near unexpected token \`\\necho'").
+          python3 <<'PYEOF' > /tmp/ssm_params.json
+          import json
+          with open('/tmp/deploy_script.sh') as fh:
+              script = fh.read()
+          print(json.dumps({"commands": [script]}))
+          PYEOF
+
+          # Sanity-check the script locally — catches accidental heredoc
+          # corruption before we burn 2 minutes on a remote rebuild.
+          bash -n /tmp/deploy_script.sh
+
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
             --comment "Deploy ${COMMIT_SHA:0:7}: ${COMMIT_MSG}" \
-            --parameters "commands=[$(printf '%s' "$SCRIPT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')]" \
+            --parameters "file:///tmp/ssm_params.json" \
             --cloud-watch-output-config "CloudWatchOutputEnabled=false" \
             --query "Command.CommandId" --output text)
           echo "command_id=$COMMAND_ID" >> "$GITHUB_OUTPUT"
