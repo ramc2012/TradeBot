@@ -4977,6 +4977,11 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             runtime.portfolio._daily_pnl = defaultdict(float)
             runtime.portfolio._peak_equity = runtime.portfolio.initial_capital
             runtime.portfolio._positions = {}
+            # After clearing positions + history, available_capital MUST be
+            # the full initial capital. Without this, any prior realized PnL
+            # that had been refunded to cash before the reset would survive
+            # as phantom equity.
+            runtime.portfolio.available_capital = runtime.portfolio.initial_capital
             runtime.order_book = PaperOrderBook(on_fill=runtime.portfolio.on_fill)
             runtime.positions = {}
             runtime.signal_lane = []

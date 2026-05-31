@@ -146,6 +146,15 @@ class MarketIntelligenceRuntime:
     def __init__(self) -> None:
         self._last_full_watchlist_refresh_at: datetime | None = None
         self._last_chain_refresh_at: datetime | None = None
+        self._last_premium_refresh_at: datetime | None = None
+        # Per-(underlying, option_type) set of instrument_keys that have
+        # been ATM at any point during the current session. Lets the
+        # periodic refresh continue to top up prior-ATM strikes even
+        # after spot has moved enough to roll the live ATM — without
+        # this, every strike that drops off the watchlist gets stuck
+        # on whatever bars it had at the moment of the roll.
+        self._session_atm_seen: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+        self._session_atm_seen_date: date | None = None
 
     async def load_local_spot_rows(
         self,
@@ -466,6 +475,196 @@ class MarketIntelligenceRuntime:
             "requests": results,
         }
 
+    async def refresh_atm_premium_candles(self) -> dict[str, Any]:
+        """Top up `option_premium_candles` for every ATM contract in the live
+        watchlist, at 3-minute granularity.
+
+        Why 3-minute, not 30-minute: 3-min bars give AI / profile / order-flow
+        modules 10× the granularity for free (Upstox 1-min source aggregated
+        to 3-min inside option_history_service). S1's MACD strategy still
+        reads 30-min via its own on-demand load_candles call — those land
+        in the same table tagged with `interval='30minute'` so the two
+        timeframes coexist without interference.
+
+        Coverage problem this fixes: the live tick aggregator only writes
+        premiums for ~10 actively-subscribed instruments (indices +
+        commodities + currently-held stock options). For the other ~190
+        stocks in the F&O universe, the premium table used to sit on the
+        09:15 open bar all day. This periodic refresh tops up the full
+        10-strike window (3 ITM + 1 ATM + 6 OTM per side) so when the
+        intraday ATM rolls, neighbour-strike history is already there.
+
+        Idempotent — bars already in DB don't re-write. Cooldown matches
+        the supervisor interval so the rest of the session sees fresh
+        3-min closes within a couple of minutes of each new bar landing
+        on Upstox.
+        """
+        now = datetime.now(IST)
+        # Bar cadence is 30 min, but we want to catch the new bar within
+        # 60-90s of its close. A 60s cooldown matches the supervisor's
+        # cycle interval — every run advances at most one new bar per
+        # contract, which is what we want.
+        cooldown_seconds = max(int(settings.MARKET_INTELLIGENCE_REFRESH_INTERVAL_SECONDS), 30)
+        if self._last_premium_refresh_at is not None:
+            elapsed = (now - self._last_premium_refresh_at).total_seconds()
+            if elapsed < cooldown_seconds:
+                return {
+                    "status": "cooldown",
+                    "last_refresh_at": self._last_premium_refresh_at.isoformat(),
+                    "cooldown_seconds": cooldown_seconds,
+                }
+
+        # Only refresh during NSE market hours — otherwise we're spending
+        # API budget for no benefit (no new bars are landing on Upstox).
+        market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        market_close = now.replace(hour=15, minute=35, second=0, microsecond=0)
+        if now < market_open or now > market_close:
+            self._last_premium_refresh_at = now
+            return {
+                "status": "market_closed",
+                "last_refresh_at": now.isoformat(),
+            }
+
+        # Pull current ATM watchlist directly — the source of truth for
+        # which strikes/expiries we should be feeding the strategy.
+        try:
+            from market_data.atm_watchlist import atm_watchlist_service
+            from market_data.option_history import option_history_service
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "import_error", "error": str(exc)}
+
+        try:
+            watchlist = await atm_watchlist_service.get_watchlist(live_refresh=False)
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "watchlist_error", "error": str(exc)}
+
+        rows = list(watchlist.get("rows") or [])
+
+        # Roll the session-seen registry at session boundary.
+        today = now.date()
+        if self._session_atm_seen_date != today:
+            self._session_atm_seen = {}
+            self._session_atm_seen_date = today
+
+        # First pass — record every strike the agent might need.
+        # Two sources feed the session_atm_seen registry:
+        #
+        #   1. The watchlist's current ATM picks (`row.ce` / `row.pe`) —
+        #      these are what trading actually uses *right now*.
+        #   2. The pre-computed `extended_strikes` window (3 ITM + 1 ATM
+        #      + 6 OTM per side) — pre-warms neighbours so when the
+        #      intraday ATM rolls, history is already there. Watchlist
+        #      and trade execution remain anchored on the ATM pick;
+        #      this is *data coverage only*.
+        for row in rows:
+            expiry_iso = str(row.get("expiry") or "").strip()
+            underlying = str(row.get("underlying") or "").strip().upper()
+            if not expiry_iso or not underlying:
+                continue
+            try:
+                expiry = date.fromisoformat(expiry_iso)
+            except ValueError:
+                continue
+
+            # Source 1 — the watchlist's current ATM picks
+            for side_key in ("ce", "pe"):
+                side = row.get(side_key) or {}
+                strike = side.get("strike")
+                instrument_key = str(side.get("instrument_key") or "").strip()
+                if strike is None or not instrument_key:
+                    continue
+                bucket = self._session_atm_seen.setdefault(
+                    (underlying, side_key.upper()), {}
+                )
+                bucket[instrument_key] = {
+                    "underlying": underlying,
+                    "option_type": side_key.upper(),
+                    "strike": float(strike),
+                    "expiry": expiry,
+                    "instrument_key": instrument_key,
+                }
+
+            # Source 2 — the extended 10-strike window per side.
+            extended = row.get("extended_strikes") or {}
+            for side_label in ("CE", "PE"):
+                for ext in extended.get(side_label) or []:
+                    instrument_key = str(ext.get("instrument_key") or "").strip()
+                    strike = ext.get("strike")
+                    if strike is None or not instrument_key:
+                        continue
+                    bucket = self._session_atm_seen.setdefault(
+                        (underlying, side_label), {}
+                    )
+                    bucket[instrument_key] = {
+                        "underlying": underlying,
+                        "option_type": side_label,
+                        "strike": float(strike),
+                        "expiry": expiry,
+                        "instrument_key": instrument_key,
+                    }
+
+        # Refresh every recorded ATM strike — current AND historical for
+        # today. A 30-min top-up call is cheap when the contract already
+        # has bars (broker only returns the missing tail).
+        ok = 0
+        skipped = 0
+        errors = 0
+        # Spread broker calls across the cycle so we don't hammer Upstox
+        # for a multi-thousand-contract burst — 100ms pause gives the
+        # native rate limiter headroom even when the extended 10-strike
+        # window expands the set to ~4k contracts.
+        per_call_pause = 0.1
+        refresh_targets: list[dict[str, Any]] = [
+            contract
+            for bucket in self._session_atm_seen.values()
+            for contract in bucket.values()
+        ]
+        for contract in refresh_targets:
+            try:
+                # 3-minute granularity. The service aggregates from
+                # Upstox 1-min source and persists at `interval='3minute'`.
+                # limit=160 covers ~8 hours of session (160 × 3 min) so
+                # the first cycle after market open backfills the whole
+                # session in one call; subsequent cycles incrementally
+                # add only the new bars.
+                await option_history_service.load_candles(
+                    underlying=contract["underlying"],
+                    expiry=contract["expiry"],
+                    strike=contract["strike"],
+                    option_type=contract["option_type"],
+                    instrument_key=contract["instrument_key"],
+                    interval="3minute",
+                    limit=160,
+                    allow_broker_refresh=True,
+                )
+                ok += 1
+            except Exception as exc:  # noqa: BLE001
+                errors += 1
+                logger.debug(
+                    f"[MarketIntelligence] premium refresh failed for "
+                    f"{contract['underlying']} {contract['option_type']} "
+                    f"{contract['strike']}: {exc}"
+                )
+            await asyncio.sleep(per_call_pause)
+
+        self._last_premium_refresh_at = datetime.now(IST)
+        session_strike_count = sum(
+            len(bucket) for bucket in self._session_atm_seen.values()
+        )
+        return {
+            "status": "ok",
+            "interval": "3minute",
+            "last_refresh_at": self._last_premium_refresh_at.isoformat(),
+            "rows_in_watchlist": len(rows),
+            "session_atm_strikes_tracked": session_strike_count,
+            "refreshed": ok,
+            "skipped": skipped,
+            "errors": errors,
+            "elapsed_seconds": round(
+                (self._last_premium_refresh_at - now).total_seconds(), 2
+            ),
+        }
+
     async def refresh_nse_runtime(self) -> dict[str, Any]:
         spot_gap_fill = await self.gap_fill_spot_history(
             symbols=list(NSE_INDEX_SCOPE),
@@ -473,6 +672,15 @@ class MarketIntelligenceRuntime:
         )
         watchlists = await self.refresh_nse_watchlists()
         option_chains = await self.refresh_index_option_chains()
+        # Top up 30m option premium candles across the full ATM watchlist
+        # so S1's MACD scan sees fresh bars throughout the session.
+        # Failure here MUST NOT abort the cycle — strategy fall-back paths
+        # use whatever DB has.
+        try:
+            premium_refresh = await self.refresh_atm_premium_candles()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[MarketIntelligence] Option premium refresh failed: {exc}")
+            premium_refresh = {"status": "error", "error": str(exc)}
         try:
             sector_interaction = await india_live_sector_service.market_intelligence_payload()
         except Exception as exc:
@@ -495,6 +703,7 @@ class MarketIntelligenceRuntime:
             "spot_gap_fill": spot_gap_fill,
             "watchlists": watchlists,
             "option_chains": option_chains,
+            "premium_refresh": premium_refresh,
             "sector_interaction": sector_interaction,
             "macro_research": macro_research,
         }

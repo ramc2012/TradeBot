@@ -320,6 +320,16 @@ class PaperPortfolio:
                 return None
             return round(value, digits)
 
+        # Self-correct any drift between `available_capital` (mutated
+        # incrementally by on_fill / close_position) and the canonical
+        # derivation `initial + realized − reserved`. Drift can accumulate
+        # when partial closes round differently, when reset wipes some but
+        # not all accounting state, or when `_estimate_margin` evaluates
+        # at a different `avg_price` than the original fill basis. Reading
+        # is the right place: zero side effects on the trade path, and the
+        # dashboard always sees coherent numbers.
+        self.reconcile_available_capital()
+
         return {
             "session_id": str(self.session_id),
             "initial_capital": safe_round(self.initial_capital, 2),

@@ -4310,6 +4310,9 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._runtime.portfolio._daily_pnl = defaultdict(float)
         self._runtime.portfolio._peak_equity = self._runtime.portfolio.initial_capital
         self._runtime.portfolio._positions = {}
+        # Without this, any prior realized-PnL that had been refunded to
+        # cash before the reset survives as phantom equity.
+        self._runtime.portfolio.available_capital = self._runtime.portfolio.initial_capital
         self._commentary = []
         self._runtime.processed_signals = {}
         self._kill_switch_active = False

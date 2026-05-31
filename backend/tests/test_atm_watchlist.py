@@ -1058,3 +1058,120 @@ def test_load_underlyings_bootstraps_when_catalog_has_only_indices(monkeypatch) 
 
 async def _async_payload(payload):
     return payload
+
+
+# ── _extended_strike_window unit tests ──────────────────────────────────
+
+
+def _make_chain_entry(strike: float, option_type: str, *, ltp: float = 0.0,
+                      volume: int = 0, oi: int = 0) -> OptionChainEntry:
+    return OptionChainEntry(
+        strike=strike,
+        option_type=option_type,
+        ltp=ltp,
+        oi=oi,
+        volume=volume,
+        bid=0.0,
+        ask=0.0,
+        instrument_key=f"NSE_FO|{int(strike)}{option_type}",
+    )
+
+
+def test_extended_strike_window_ce_3itm_1atm_6otm():
+    """Standard CE window: 3 lower strikes (ITM), the ATM, then 6 higher (OTM)."""
+    strikes = [23700.0, 23800.0, 23900.0, 24000.0, 24100.0, 24200.0,
+               24300.0, 24400.0, 24500.0, 24600.0, 24700.0]
+    entries = [_make_chain_entry(s, ot) for s in strikes for ot in ("CE", "PE")]
+    window = atm_watchlist_module._extended_strike_window(
+        sorted_strikes=strikes,
+        atm_strike=24000.0,
+        option_type="CE",
+        chain_entries=entries,
+    )
+    assert len(window) == 10
+    assert [w["strike"] for w in window] == [
+        23700, 23800, 23900, 24000, 24100, 24200, 24300, 24400, 24500, 24600,
+    ]
+    atm_rows = [w for w in window if w["is_atm"]]
+    assert len(atm_rows) == 1 and atm_rows[0]["strike"] == 24000.0
+    assert 24700.0 not in [w["strike"] for w in window]
+
+
+def test_extended_strike_window_pe_3itm_1atm_6otm():
+    """PE side inverts the ITM/OTM relationship — higher strikes are ITM."""
+    strikes = [23400.0, 23500.0, 23600.0, 23700.0, 23800.0, 23900.0,
+               24000.0, 24100.0, 24200.0, 24300.0, 24400.0]
+    entries = [_make_chain_entry(s, ot) for s in strikes for ot in ("CE", "PE")]
+    window = atm_watchlist_module._extended_strike_window(
+        sorted_strikes=strikes,
+        atm_strike=24000.0,
+        option_type="PE",
+        chain_entries=entries,
+    )
+    assert len(window) == 10
+    returned = [w["strike"] for w in window]
+    assert 24400.0 not in returned  # only 3 ITM (above)
+    assert 24100.0 in returned and 24200.0 in returned and 24300.0 in returned
+    assert 24000.0 in returned
+    for s in (23400.0, 23500.0, 23600.0, 23700.0, 23800.0, 23900.0):
+        assert s in returned
+
+
+def test_extended_strike_window_drops_strikes_without_chain_entry():
+    """Strikes with no chain entry on the requested side are skipped."""
+    strikes = [100.0, 110.0, 120.0]
+    entries = [_make_chain_entry(s, "CE") for s in strikes]
+    window = atm_watchlist_module._extended_strike_window(
+        sorted_strikes=strikes,
+        atm_strike=110.0,
+        option_type="PE",
+        chain_entries=entries,
+    )
+    assert window == []
+
+
+def test_extended_strike_window_atm_at_low_edge_returns_partial():
+    """ATM at the lowest strike means no ITM possible on CE side. Still
+    returns ATM + however many OTM strikes are available."""
+    strikes = [100.0, 105.0, 110.0, 115.0, 120.0, 125.0, 130.0, 135.0, 140.0]
+    entries = [_make_chain_entry(s, "CE") for s in strikes]
+    window = atm_watchlist_module._extended_strike_window(
+        sorted_strikes=strikes,
+        atm_strike=100.0,
+        option_type="CE",
+        chain_entries=entries,
+    )
+    assert [w["strike"] for w in window] == [
+        100.0, 105.0, 110.0, 115.0, 120.0, 125.0, 130.0,
+    ]
+
+
+def test_extended_strike_window_empty_inputs_safe():
+    """Empty / invalid inputs return []; never raises."""
+    assert atm_watchlist_module._extended_strike_window(
+        sorted_strikes=[], atm_strike=100, option_type="CE", chain_entries=[]
+    ) == []
+    assert atm_watchlist_module._extended_strike_window(
+        sorted_strikes=[100, 110], atm_strike=0, option_type="CE", chain_entries=[]
+    ) == []
+    assert atm_watchlist_module._extended_strike_window(
+        sorted_strikes=[100, 110], atm_strike=100, option_type="XX", chain_entries=[]
+    ) == []
+
+
+def test_extended_strike_window_picks_atm_when_not_in_list():
+    """If the ATM isn't exactly a listed strike, snap to nearest."""
+    strikes = [23500.0, 23600.0, 23700.0, 23800.0, 23900.0, 24000.0,
+               24100.0, 24200.0, 24300.0]
+    entries = [_make_chain_entry(s, "CE") for s in strikes]
+    # 23970 is closer to 24000 than to 23900 (30 vs 70)
+    window = atm_watchlist_module._extended_strike_window(
+        sorted_strikes=strikes,
+        atm_strike=23970.0,
+        option_type="CE",
+        chain_entries=entries,
+    )
+    assert len(window) > 0
+    atm_rows = [w for w in window if w["is_atm"]]
+    assert len(atm_rows) == 1
+    assert atm_rows[0]["strike"] == 24000.0

@@ -201,6 +201,104 @@ def _select_liquid_atm_strike(
     return picks["CE"]
 
 
+def _extended_strike_window(
+    *,
+    sorted_strikes: list[float],
+    atm_strike: float,
+    option_type: str,
+    chain_entries,
+    n_itm: int = 3,
+    n_otm: int = 6,
+) -> list[dict[str, Any]]:
+    """Return up to 10 strikes around ATM (3 ITM + 1 ATM + 6 OTM) with
+    their instrument_keys.
+
+    The watchlist + trading pipeline still uses the ATM (or nearest-
+    liquid) pick. This window is purely a *data-coverage* aid: the
+    periodic premium-refresh job pre-warms history for these strikes
+    so when the intraday ATM rolls onto a neighbour, the strategy's
+    MACD computation already has bars instead of seeing 1 bar at open
+    and going blind.
+
+    "ITM" / "OTM" is defined per side:
+      * CE: lower strike = ITM, higher strike = OTM
+      * PE: higher strike = ITM, lower strike = OTM
+
+    Strikes that don't have an option_type-matching chain entry are
+    dropped (so the caller never queries a non-existent contract).
+    """
+    if not sorted_strikes or atm_strike <= 0:
+        return []
+    side = (option_type or "").upper()
+    if side not in {"CE", "PE"}:
+        return []
+    try:
+        atm_idx = sorted_strikes.index(atm_strike)
+    except ValueError:
+        # ATM strike isn't in the chain; fall back to nearest.
+        atm_idx = min(
+            range(len(sorted_strikes)),
+            key=lambda i: abs(sorted_strikes[i] - atm_strike),
+        )
+
+    if side == "CE":
+        itm_slice = sorted_strikes[max(0, atm_idx - n_itm):atm_idx]
+        otm_slice = sorted_strikes[atm_idx + 1:atm_idx + 1 + n_otm]
+    else:  # PE — higher strike = ITM
+        itm_slice = sorted_strikes[atm_idx + 1:atm_idx + 1 + n_itm]
+        otm_slice = sorted_strikes[max(0, atm_idx - n_otm):atm_idx]
+    window = [*itm_slice, sorted_strikes[atm_idx], *otm_slice]
+
+    # Build instrument_key lookup from the chain. The key is unique per
+    # (strike, option_type) so we restrict to the side we're filling.
+    key_map: dict[float, str] = {}
+    ltp_map: dict[float, float] = {}
+    volume_map: dict[float, float] = {}
+    oi_map: dict[float, float] = {}
+    for entry in chain_entries or []:
+        if str(getattr(entry, "option_type", "")).upper() != side:
+            continue
+        try:
+            strike = float(entry.strike)
+        except (TypeError, ValueError):
+            continue
+        instrument_key = str(getattr(entry, "instrument_key", "") or "").strip()
+        if instrument_key:
+            key_map[strike] = instrument_key
+        try:
+            ltp_map[strike] = float(getattr(entry, "ltp", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            volume_map[strike] = float(getattr(entry, "volume", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            oi_map[strike] = float(getattr(entry, "oi", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+
+    out: list[dict[str, Any]] = []
+    for strike in window:
+        instrument_key = key_map.get(strike)
+        if not instrument_key:
+            # No chain entry on this side for that strike — skip rather
+            # than emit a bad fetch target.
+            continue
+        out.append(
+            {
+                "strike": strike,
+                "instrument_key": instrument_key,
+                "option_type": side,
+                "ltp": ltp_map.get(strike),
+                "volume": volume_map.get(strike),
+                "oi": oi_map.get(strike),
+                "is_atm": strike == sorted_strikes[atm_idx],
+            }
+        )
+    return out
+
+
 def _trading_days_until(target: date, *, today: Optional[date] = None) -> int:
     """Count Mon–Fri weekdays from today (exclusive) to target (exclusive)."""
     today = today or date.today()
@@ -1337,6 +1435,25 @@ class ATMWatchlistService:
         if lot_size:
             await self._persist_lot_size(meta.symbol, lot_size)
 
+        # Extended-strike window (3 ITM + 1 ATM + 6 OTM per side).
+        # Watchlist + trading still anchor on ce_payload / pe_payload above;
+        # this field is purely a data-coverage list so the periodic
+        # premium-refresh job can pre-warm neighbour strikes. When the
+        # intraday ATM rolls onto a neighbour, the strategy's MACD has
+        # bars instead of seeing one bar at open and going blind.
+        extended_ce = _extended_strike_window(
+            sorted_strikes=strikes,
+            atm_strike=atm_ce_strike,
+            option_type="CE",
+            chain_entries=chain.entries,
+        )
+        extended_pe = _extended_strike_window(
+            sorted_strikes=strikes,
+            atm_strike=atm_pe_strike,
+            option_type="PE",
+            chain_entries=chain.entries,
+        )
+
         return {
             "underlying": meta.symbol,
             "kind": meta.kind,
@@ -1355,6 +1472,10 @@ class ATMWatchlistService:
             "lot_size": lot_size,   # NSE-mandated lot size for this underlying
             "ce": ce_payload,
             "pe": pe_payload,
+            "extended_strikes": {
+                "CE": extended_ce,
+                "PE": extended_pe,
+            },
         }
 
     async def _build_option_payload(
