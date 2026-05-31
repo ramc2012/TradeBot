@@ -48,8 +48,19 @@ const PRIMER_POLL_MS = 5_000;       // first ~minute, until socket connects
 const HEARTBEAT_POLL_MS = 60_000;   // steady-state, only kicks in if socket dies
 
 // ─── Bottom tabs ──────────────────────────────────────────────────────────
-type BottomTabKey = "queue" | "orders" | "trades" | "expiry" | "stats" | "audit";
+type BottomTabKey =
+  | "positions"
+  | "queue"
+  | "orders"
+  | "trades"
+  | "expiry"
+  | "stats"
+  | "audit";
+// Order matters — leftmost is the default when nothing is selected.
+// Positions sits first so the open book is the headline view when the
+// desk has exposure; Queue is the default when flat.
 const BOTTOM_TABS: { key: BottomTabKey; label: string }[] = [
+  { key: "positions", label: "Positions" },
   { key: "queue", label: "Queue" },
   { key: "orders", label: "Orders" },
   { key: "trades", label: "Trades" },
@@ -425,7 +436,7 @@ function MPProfileBar({
 
   return (
     <div
-      className={`relative rounded bg-bg-secondary/40 ring-1 ${borderRing} ${className}`}
+      className={`relative overflow-hidden rounded-md bg-gradient-to-b from-bg-secondary/30 to-bg-secondary/50 ring-1 ${borderRing} ${className}`}
       style={{ height }}
       title={tooltip}
     >
@@ -436,25 +447,39 @@ function MPProfileBar({
         role="img"
         aria-label="market profile"
       >
-        {/* Value-area band (VAL → VAH) */}
+        <defs>
+          <linearGradient id="vaGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="rgb(148 163 184 / 0.35)" />
+            <stop offset="100%" stopColor="rgb(148 163 184 / 0.2)" />
+          </linearGradient>
+        </defs>
+
+        {/* Value-area band (VAL → VAH) — primary auction zone */}
         <rect
           x={valX}
           y={height * 0.18}
           width={Math.max(vahX - valX, 0.5)}
           height={height * 0.64}
-          className="fill-slate-500/30"
+          fill="url(#vaGrad)"
+          rx={1.2}
         />
-        {/* IB band (subtle, central inside the value area) */}
+        {/* VAL/VAH edges as subtle vertical guides */}
+        <line x1={valX} x2={valX} y1={height * 0.12} y2={height * 0.88} className="stroke-text-muted/50" strokeWidth={0.35} strokeDasharray="0.5 0.7" />
+        <line x1={vahX} x2={vahX} y1={height * 0.12} y2={height * 0.88} className="stroke-text-muted/50" strokeWidth={0.35} strokeDasharray="0.5 0.7" />
+
+        {/* IB band — inner amber pill */}
         {ibLowX !== null && ibHighX !== null ? (
           <rect
             x={ibLowX}
-            y={height * 0.34}
+            y={height * 0.36}
             width={Math.max(ibHighX - ibLowX, 0.4)}
-            height={height * 0.32}
-            className="fill-amber-200/25"
+            height={height * 0.28}
+            className="fill-amber-300/20"
+            rx={1}
           />
         ) : null}
-        {/* VWAP band (±σ subtle) */}
+
+        {/* VWAP ±σ band as a soft full-height tint */}
         {vwapLX !== null && vwapUX !== null ? (
           <rect
             x={Math.min(vwapLX, vwapUX)}
@@ -464,30 +489,34 @@ function MPProfileBar({
             className="fill-sky-400/8"
           />
         ) : null}
-        {/* POC bright vertical tick */}
-        <rect x={pocX - 0.55} y={height * 0.05} width={1.1} height={height * 0.9} className="fill-amber-300/85" />
-        {/* VWAP solid line */}
+
+        {/* POC tick — the single highest-volume price */}
+        <rect x={pocX - 0.6} y={height * 0.06} width={1.2} height={height * 0.88} className="fill-amber-300/95" rx={0.5} />
+
+        {/* VWAP dashed sky-blue line */}
         {vwapX !== null ? (
           <line
             x1={vwapX}
             x2={vwapX}
-            y1={0}
-            y2={height}
-            className="stroke-sky-400/85"
-            strokeWidth={0.8}
-            strokeDasharray="2 1.4"
+            y1={height * 0.08}
+            y2={height * 0.92}
+            className="stroke-sky-400"
+            strokeWidth={0.9}
+            strokeDasharray="1.8 1.2"
           />
         ) : null}
-        {/* Centre mid-line for orientation */}
+
+        {/* Horizontal mid-line — quiet baseline */}
         <line
           x1={0}
           x2={100}
           y1={height / 2}
           y2={height / 2}
-          className="stroke-text-muted/30"
-          strokeWidth={0.4}
+          className="stroke-text-muted/20"
+          strokeWidth={0.3}
         />
-        {/* Live price marker */}
+
+        {/* Live price marker — top and bottom arrows + faint vertical line */}
         {priceX !== null ? (
           <g>
             <line
@@ -495,25 +524,27 @@ function MPProfileBar({
               x2={priceX}
               y1={0}
               y2={height}
-              className="stroke-text-primary/85"
-              strokeWidth={0.7}
+              className="stroke-text-primary/70"
+              strokeWidth={0.55}
             />
             <polygon
-              points={`${priceX - 1.3},0 ${priceX + 1.3},0 ${priceX},${height * 0.18}`}
+              points={`${priceX - 1.6},0 ${priceX + 1.6},0 ${priceX},${height * 0.2}`}
               className={markerColor}
             />
             <polygon
-              points={`${priceX - 1.3},${height} ${priceX + 1.3},${height} ${priceX},${height - height * 0.18}`}
+              points={`${priceX - 1.6},${height} ${priceX + 1.6},${height} ${priceX},${height - height * 0.2}`}
               className={markerColor}
             />
           </g>
         ) : null}
       </svg>
+
+      {/* Tiny in-bar labels for the major levels — only when there's room */}
       {showLegend ? (
-        <div className="absolute -bottom-3 left-0 right-0 flex justify-between text-[8.5px] text-text-muted">
-          <span>VAL {formatNumber(val, 2)}</span>
-          <span>POC {formatNumber(poc, 2)}</span>
-          <span>VAH {formatNumber(vah, 2)}</span>
+        <div className="pointer-events-none absolute inset-0 flex items-end justify-between px-1 pb-[1.5px] text-[8.5px] font-mono text-text-muted/90">
+          <span>{formatNumber(val, 0)}</span>
+          <span className="text-amber-300/90">{formatNumber(poc, 0)}</span>
+          <span>{formatNumber(vah, 0)}</span>
         </div>
       ) : null}
     </div>
@@ -677,58 +708,61 @@ function InstrumentRow({
   const price = Number(row.price ?? 0);
   const vwap = Number(row.vwap ?? 0);
   const live = Boolean(row.live_tick_source);
-  // Combine name + ticker into a single-line label. The display name carries
-  // the human-friendly text; the ticker is appended in a muted monospace pill
-  // so traders can copy/scan it without the row going two lines tall.
-  const name = row.display_name || row.underlying || row.symbol;
-  const ticker = String(row.underlying || row.symbol || "")
+  // Single-symbol-only naming (no display-name duplication). MCX:GOLD26JUNFUT
+  // → GOLD; for "ALUMINI" / "ZINCMINI" keep mini suffix because users read it
+  // as the contract size.
+  const symbol = String(row.underlying || row.symbol || "")
     .replace(/^MCX:/, "")
-    .replace(/\d{2}[A-Z]{3}FUT$/, "");
+    .replace(/\d{2}[A-Z]{3}FUT$/, "")
+    .toUpperCase();
   // VWAP differential: helps trader instantly read "price vs auction mean".
   const vwapDelta = vwap > 0 && price > 0 ? price - vwap : null;
 
   return (
     <tr
       onClick={onClick}
-      className={`cursor-pointer transition-colors ${zebra ? "bg-bg-secondary/[0.06]" : ""} hover:bg-bg-secondary/20`}
+      className={`cursor-pointer transition-colors ${
+        zebra ? "bg-bg-secondary/[0.07]" : "bg-transparent"
+      } hover:bg-bg-secondary/25`}
     >
-      <td className="py-1 pl-2 pr-2">
-        <div className="flex items-baseline gap-1.5 leading-none">
+      <td className="py-2 pl-3 pr-2 align-middle">
+        <div className="flex items-center gap-2">
           {live ? (
-            <span className="relative h-1.5 w-1.5 flex-none rounded-full bg-emerald-400" title="streaming live ticks" />
+            <span className="relative h-2 w-2 flex-none rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(74,222,128,0.6)]" title="streaming" />
           ) : (
-            <span className="h-1.5 w-1.5 flex-none rounded-full bg-text-muted/40" title="no tick stream" />
+            <span className="h-2 w-2 flex-none rounded-full bg-text-muted/40" title="not streaming" />
           )}
-          <span className="text-[12px] font-semibold text-text-primary">{name}</span>
-          <span className="font-mono text-[9.5px] text-text-muted">{ticker}</span>
+          <span className="font-mono text-[13px] font-semibold tracking-wide text-text-primary">
+            {symbol}
+          </span>
         </div>
       </td>
-      <td className="px-2 text-right font-mono text-[12px] text-text-primary leading-none">
+      <td className="px-2 text-right align-middle font-mono text-[13px] font-medium text-text-primary">
         {formatNumber(price, 2)}
       </td>
-      <td className={`px-2 text-right font-mono text-[10.5px] leading-none ${colorForDelta(change)}`}>
-        <span>{formatSigned(change, 2)}</span>
-        <span className="ml-1 opacity-80">{formatPct(changePct, 2)}</span>
+      <td className={`px-2 text-right align-middle font-mono text-[11px] ${colorForDelta(change)}`}>
+        <div>{formatSigned(change, 2)}</div>
+        <div className="text-[10px] opacity-80">{formatPct(changePct, 2)}</div>
       </td>
-      <td className="px-2 text-right font-mono text-[10.5px] text-text-secondary leading-none">
+      <td className="px-2 text-right align-middle font-mono text-[11px] text-text-secondary">
         <div>{vwap > 0 ? formatNumber(vwap, 2) : "—"}</div>
         {vwapDelta !== null ? (
-          <div className={`text-[9.5px] ${colorForDelta(vwapDelta)}`}>{formatSigned(vwapDelta, 2)}</div>
+          <div className={`text-[10px] ${colorForDelta(vwapDelta)}`}>{formatSigned(vwapDelta, 2)}</div>
         ) : null}
       </td>
-      <td className="px-2 align-middle">
-        <MPProfileBar row={row} className="w-full min-w-[140px]" height={20} />
+      <td className="px-3 align-middle">
+        <MPProfileBar row={row} className="w-full min-w-[180px]" height={30} showLegend />
       </td>
-      <td className="px-2 text-right text-[11px] leading-none">
+      <td className="px-2 text-right align-middle text-[12px]">
         <CVDChip row={row} />
       </td>
-      <td className="px-2 leading-none">
+      <td className="px-2 align-middle">
         <TriggerBadge row={row} />
       </td>
-      <td className="px-2 text-right font-mono text-[10.5px] text-text-secondary leading-none">
+      <td className="px-2 text-right align-middle font-mono text-[11px] text-text-secondary">
         {row.stop_hint != null ? formatNumber(Number(row.stop_hint), 2) : "—"}
       </td>
-      <td className="pl-2 pr-3 text-right text-[11px] leading-none">
+      <td className="pl-2 pr-3 text-right align-middle text-[11px]">
         <PositionChip position={position} />
       </td>
     </tr>
@@ -799,6 +833,152 @@ function ActionQueue({
             );
           })}
         </ul>
+      )}
+    </div>
+  );
+}
+
+// ─── Positions tab ─────────────────────────────────────────────────────────
+// Detailed view of every open position: side, lots, entry, current, stop,
+// target, distance to stop, distance to target, unrealised P&L, return %,
+// entry style, and time held. Replaces the "click each row to see position
+// in the modal" workflow that was hidden in the previous layout.
+
+function hoursBetween(now: Date, isoStart: string | undefined): string {
+  if (!isoStart) return "—";
+  const start = new Date(isoStart).getTime();
+  if (!Number.isFinite(start)) return "—";
+  const mins = Math.max(0, Math.floor((now.getTime() - start) / 60000));
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  const r = mins % 60;
+  if (hrs < 24) return r ? `${hrs}h ${r}m` : `${hrs}h`;
+  const days = Math.floor(hrs / 24);
+  const rh = hrs % 24;
+  return rh ? `${days}d ${rh}h` : `${days}d`;
+}
+
+function PositionsTab({
+  positions,
+  onSelect,
+}: {
+  positions: CommodityPosition[];
+  onSelect: (sym: string) => void;
+}) {
+  const [sideFilter, setSideFilter] = useState<"all" | "BUY" | "SELL">("all");
+  const [pnlFilter, setPnlFilter] = useState<"all" | "winning" | "losing">("all");
+  const filtered = positions.filter((p) => {
+    if (sideFilter !== "all" && p.action !== sideFilter) return false;
+    if (pnlFilter === "winning" && Number(p.unrealized_pnl ?? 0) <= 0) return false;
+    if (pnlFilter === "losing" && Number(p.unrealized_pnl ?? 0) >= 0) return false;
+    return true;
+  });
+  const now = new Date();
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <FilterBar>
+        <FilterSelect
+          value={sideFilter}
+          onChange={(v) => setSideFilter(v as "all" | "BUY" | "SELL")}
+          options={["all", "BUY", "SELL"]}
+        />
+        <FilterSelect
+          value={pnlFilter}
+          onChange={(v) => setPnlFilter(v as "all" | "winning" | "losing")}
+          options={["all", "winning", "losing"]}
+        />
+        <FilterCount n={filtered.length} total={positions.length} />
+      </FilterBar>
+      {filtered.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center text-[11.5px] text-text-muted">
+          {positions.length === 0
+            ? "Desk is flat — no open positions."
+            : "No positions match the filter."}
+        </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto">
+          <table className="w-full text-[11px]">
+            <thead className="sticky top-0 bg-bg-primary text-[9.5px] uppercase tracking-[0.14em] text-text-muted">
+              <tr>
+                <th className="py-1.5 pl-2 pr-2 text-left">Symbol</th>
+                <th className="px-2 text-left">Side · Lots</th>
+                <th className="px-2 text-right">Entry</th>
+                <th className="px-2 text-right">Current</th>
+                <th className="px-2 text-right">Stop · Δ</th>
+                <th className="px-2 text-right">Target · Δ</th>
+                <th className="px-2 text-right">Unrealized</th>
+                <th className="px-2 text-right">Return</th>
+                <th className="px-2 text-left">Trigger</th>
+                <th className="px-2 text-right">Held</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((p, idx) => {
+                const cur = Number(p.current_price ?? 0);
+                const entry = Number(p.entry_price ?? 0);
+                const stop = Number(p.stop_price ?? 0);
+                const target = Number(p.target_price ?? 0);
+                const side = (p.action || "").toUpperCase();
+                const pnl = Number(p.unrealized_pnl ?? 0);
+                const ret = Number(p.return_pct ?? 0);
+                const stopDist =
+                  cur > 0 && stop > 0 ? (side === "BUY" ? cur - stop : stop - cur) : null;
+                const tgtDist =
+                  cur > 0 && target > 0 ? (side === "BUY" ? target - cur : cur - target) : null;
+                const sym = String(p.symbol || p.live_symbol || "")
+                  .replace(/^MCX:/, "")
+                  .replace(/\d{2}[A-Z]{3}FUT$/, "");
+                return (
+                  <tr
+                    key={p.position_key || `${p.symbol}-${idx}`}
+                    onClick={() => p.symbol && onSelect(p.symbol)}
+                    className={`cursor-pointer border-t border-bg-secondary/15 ${idx % 2 ? "bg-bg-secondary/[0.06]" : ""} hover:bg-bg-secondary/20`}
+                  >
+                    <td className="py-1.5 pl-2 pr-2 align-middle">
+                      <span className="font-mono text-[12px] font-semibold text-text-primary">{sym}</span>
+                    </td>
+                    <td className="px-2 align-middle">
+                      <span className={`text-[10.5px] uppercase ${side === "BUY" ? "text-emerald-300" : "text-rose-300"}`}>
+                        {side}
+                      </span>
+                      <span className="ml-1 font-mono text-[10.5px] text-text-secondary">{p.lots}lt</span>
+                    </td>
+                    <td className="px-2 text-right align-middle font-mono">{formatNumber(entry, 2)}</td>
+                    <td className="px-2 text-right align-middle font-mono">{formatNumber(cur, 2)}</td>
+                    <td className="px-2 text-right align-middle">
+                      <div className="font-mono">{formatNumber(stop, 2)}</div>
+                      {stopDist !== null ? (
+                        <div className={`text-[10px] ${stopDist >= 0 ? "text-text-muted" : "text-rose-400"}`}>
+                          {formatSigned(stopDist, 2)}
+                        </div>
+                      ) : null}
+                    </td>
+                    <td className="px-2 text-right align-middle">
+                      <div className="font-mono">{target > 0 ? formatNumber(target, 2) : "—"}</div>
+                      {tgtDist !== null ? (
+                        <div className={`text-[10px] ${tgtDist >= 0 ? "text-text-muted" : "text-emerald-300"}`}>
+                          {formatSigned(tgtDist, 2)}
+                        </div>
+                      ) : null}
+                    </td>
+                    <td className={`px-2 text-right align-middle font-mono ${pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                      {formatSigned(pnl)}
+                    </td>
+                    <td className={`px-2 text-right align-middle font-mono ${ret >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
+                      {formatPct(ret, 1)}
+                    </td>
+                    <td className="px-2 align-middle text-[10.5px] text-text-muted">
+                      {triggerLabel(p.entry_style)}
+                    </td>
+                    <td className="px-2 text-right align-middle font-mono text-text-muted">
+                      {hoursBetween(now, p.entered_at)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
@@ -1717,6 +1897,25 @@ export default function CommodityLivePage() {
   );
 
   // Index positions by symbol for O(1) lookup in the row renderer.
+  // Derive expiry options from the configured symbols. Today the agent
+  // tracks one active contract per underlying, so the picker lists each
+  // distinct contract month found in the symbol list. Selecting a different
+  // one is reserved for the future per-month preview — backend wiring still
+  // pending. For now the selector is informational.
+  const expiryOptions = useMemo(() => {
+    const months = new Set<string>();
+    for (const r of rows) {
+      const m = String(r.symbol || "").toUpperCase().match(/^MCX:[A-Z0-9]+?(\d{2})([A-Z]{3})FUT$/);
+      if (m) months.add(`${m[1]}${m[2]}`);
+    }
+    const opts: { value: string; label: string }[] = [{ value: "active", label: "active month" }];
+    for (const m of Array.from(months).sort()) {
+      const label = `20${m.slice(0, 2)} ${m.slice(2)}`;
+      opts.push({ value: m, label });
+    }
+    return opts;
+  }, [rows]);
+
   const positionBySymbol = useMemo(() => {
     const map: Record<string, CommodityPosition> = {};
     for (const p of positions) {
@@ -1728,8 +1927,27 @@ export default function CommodityLivePage() {
 
   // ── Selection + UI state ───────────────────────────────────────────
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
-  const [bottomTab, setBottomTab] = useState<BottomTabKey>("queue");
+  const [bottomTab, setBottomTab] = useState<BottomTabKey>("positions");
+  // Auto-flip to a sensible default only on first load: positions when the
+  // desk has exposure, queue when flat. User clicks override and stick.
+  const [hasInteractedWithTabs, setHasInteractedWithTabs] = useState(false);
   const [strategyModalOpen, setStrategyModalOpen] = useState(false);
+  const [selectedExpiry, setSelectedExpiry] = useState<string>("active");
+  // Wrap setBottomTab so any user click locks the user's choice (we stop
+  // auto-flipping after that).
+  const setBottomTabSticky = (k: BottomTabKey) => {
+    setHasInteractedWithTabs(true);
+    setBottomTab(k);
+  };
+  // First-load auto-flip: positions when there's open exposure, queue when flat.
+  const positionCountForEffect = useMemo(
+    () => ((status.positions as CommodityPosition[] | undefined) ?? []).length,
+    [status.positions],
+  );
+  useEffect(() => {
+    if (hasInteractedWithTabs) return;
+    setBottomTab(positionCountForEffect > 0 ? "positions" : "queue");
+  }, [hasInteractedWithTabs, positionCountForEffect]);
   const selectedRow = useMemo(
     () => rows.find((r) => r.symbol === selectedSymbol) || null,
     [rows, selectedSymbol],
@@ -1925,93 +2143,150 @@ export default function CommodityLivePage() {
         </div>
       </header>
 
-      {/* ── Instrument table ───────────────────────────────────────── */}
-      <main className="flex flex-1 min-h-0 flex-col px-3 py-2">
-        <div className="overflow-hidden rounded-md border border-bg-secondary/30">
-          <table className="w-full table-fixed">
-            <thead>
-              <tr className="bg-bg-secondary/20 text-[9.5px] uppercase tracking-[0.14em] text-text-muted">
-                <th className="w-[13%] py-1 pl-2 pr-2 text-left">Instrument</th>
-                <th className="w-[8%] px-2 text-right">LTP</th>
-                <th className="w-[9%] px-2 text-right">Δ · Δ%</th>
-                <th className="w-[8%] px-2 text-right">VWAP · Δ</th>
-                <th className="w-[22%] px-2 text-left">MP · VA · IB · VWAP</th>
-                <th className="w-[8%] px-2 text-right">CVD</th>
-                <th className="w-[14%] px-2 text-left">Trigger</th>
-                <th className="w-[8%] px-2 text-right">Stop</th>
-                <th className="w-[10%] pl-2 pr-3 text-right">Position</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.length === 0 ? (
+      {/* ── 50/50 split: top half watchlist · bottom half tabs ─────────── */}
+      <main className="grid flex-1 min-h-0 grid-rows-2 gap-2 px-3 py-2">
+        {/* TOP HALF — watchlist with CE/PE-style spacing */}
+        <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-bg-secondary/30">
+          {/* Watchlist title bar with expiry chip */}
+          <div className="flex items-center gap-3 border-b border-bg-secondary/30 bg-bg-secondary/15 px-3 py-1.5">
+            <h2 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-text-secondary">
+              MCX Futures · live
+            </h2>
+            <span className="text-[10.5px] text-text-muted">
+              {rows.length} symbols
+              {armedCount > 0 ? ` · ${armedCount} armed` : ""}
+              {positions.length > 0 ? ` · ${positions.length} open` : ""}
+            </span>
+            {/* Expiry selector — surfaces what month the live contracts roll
+                into. Currently informational; the backend always tracks the
+                active month per symbol. Bound state lets us switch to a
+                further-out month for analysis later. */}
+            <div className="ml-auto flex items-center gap-2">
+              <span className="text-[9.5px] uppercase tracking-[0.14em] text-text-muted">Expiry</span>
+              <select
+                value={selectedExpiry}
+                onChange={(e) => setSelectedExpiry(e.target.value)}
+                className="h-6 rounded bg-bg-secondary/40 px-1.5 text-[10.5px] text-text-primary focus:outline-none focus:ring-1 focus:ring-bg-active/60"
+              >
+                {expiryOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          {/* Watchlist table */}
+          <div className="flex-1 overflow-y-auto">
+            <table className="w-full table-fixed">
+              <thead className="sticky top-0 z-10 bg-bg-secondary/25 text-[9.5px] uppercase tracking-[0.14em] text-text-muted">
                 <tr>
-                  <td colSpan={9} className="py-6 text-center text-[11px] text-text-muted">
-                    No instruments yet — waiting for the first scan.
-                  </td>
+                  <th className="w-[11%] py-2 pl-3 pr-2 text-left">Symbol</th>
+                  <th className="w-[8%] px-2 text-right">LTP</th>
+                  <th className="w-[8%] px-2 text-right">Change</th>
+                  <th className="w-[8%] px-2 text-right">VWAP</th>
+                  <th className="w-[25%] px-3 text-left">Market Profile · live</th>
+                  <th className="w-[8%] px-2 text-right">CVD</th>
+                  <th className="w-[14%] px-2 text-left">Trigger</th>
+                  <th className="w-[8%] px-2 text-right">Stop</th>
+                  <th className="w-[10%] pl-2 pr-3 text-right">Position</th>
                 </tr>
-              ) : (
-                rows.map((row, idx) => (
-                  <InstrumentRow
-                    key={String(row.symbol || row.underlying)}
-                    row={row}
-                    position={positionBySymbol[String(row.symbol || "")]}
-                    zebra={idx % 2 === 1}
-                    onClick={() => setSelectedSymbol(String(row.symbol || ""))}
-                  />
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {rows.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className="py-10 text-center text-[11.5px] text-text-muted">
+                      No instruments yet — waiting for the first scan.
+                    </td>
+                  </tr>
+                ) : (
+                  rows.map((row, idx) => (
+                    <InstrumentRow
+                      key={String(row.symbol || row.underlying)}
+                      row={row}
+                      position={positionBySymbol[String(row.symbol || "")]}
+                      zebra={idx % 2 === 1}
+                      onClick={() => setSelectedSymbol(String(row.symbol || ""))}
+                    />
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
 
-        {/* ── Tabbed footer: queue · orders · trades · expiry · stats · audit ── */}
-        <div className="mt-2 flex flex-1 min-h-0 flex-col rounded-md border border-bg-secondary/30">
-          <nav className="flex items-baseline gap-1 border-b border-bg-secondary/30 px-1.5 py-1">
+        {/* BOTTOM HALF — browser-style tabs */}
+        <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-bg-secondary/30">
+          <nav className="flex items-end gap-0.5 border-b border-bg-secondary/30 bg-bg-secondary/10 px-1.5 pt-1.5">
             {BOTTOM_TABS.map((t) => {
               const isActive = bottomTab === t.key;
               const count =
-                t.key === "queue"
-                  ? armedCount
-                  : t.key === "orders"
-                    ? orders.length
-                    : t.key === "trades"
-                      ? trades.length
-                      : t.key === "audit"
-                        ? auditEvents.length
-                        : null;
+                t.key === "positions"
+                  ? positions.length
+                  : t.key === "queue"
+                    ? armedCount
+                    : t.key === "orders"
+                      ? orders.length
+                      : t.key === "trades"
+                        ? trades.length
+                        : t.key === "audit"
+                          ? auditEvents.length
+                          : t.key === "expiry"
+                            ? rows.length
+                            : null;
               return (
                 <button
                   key={t.key}
                   type="button"
-                  onClick={() => setBottomTab(t.key)}
-                  className={`rounded px-2 py-0.5 text-[10.5px] uppercase tracking-[0.14em] transition-colors ${
+                  onClick={() => setBottomTabSticky(t.key)}
+                  className={`group relative -mb-px rounded-t-md border border-bg-secondary/30 px-3 py-1 text-[11px] uppercase tracking-[0.14em] transition-colors ${
                     isActive
-                      ? "bg-bg-secondary/50 text-text-primary"
-                      : "text-text-muted hover:bg-bg-secondary/20 hover:text-text-primary"
+                      ? "border-b-transparent bg-bg-primary text-text-primary"
+                      : "border-transparent bg-transparent text-text-muted hover:bg-bg-secondary/20 hover:text-text-primary"
                   }`}
                 >
+                  {/* coloured top strip on the active tab */}
+                  <span
+                    className={`absolute left-3 right-3 top-0 h-[2px] rounded-b ${
+                      isActive ? "bg-sky-400" : "bg-transparent"
+                    }`}
+                  />
                   {t.label}
                   {count !== null ? (
-                    <span className="ml-1 text-[9.5px] text-text-muted">{count}</span>
+                    <span
+                      className={`ml-1.5 rounded px-1 py-[1px] text-[9.5px] ${
+                        isActive ? "bg-sky-500/15 text-sky-300" : "bg-bg-secondary/30 text-text-muted"
+                      }`}
+                    >
+                      {count}
+                    </span>
                   ) : null}
                 </button>
               );
             })}
-            <span className="ml-auto text-[10px] text-text-muted">
-              {bottomTab === "queue"
-                ? "priority × confidence"
-                : bottomTab === "orders"
-                  ? "newest first · click row → instrument modal"
-                  : bottomTab === "trades"
-                    ? "closed trades · newest first"
-                    : bottomTab === "expiry"
-                      ? "MCX futures · roll window 10d"
-                      : bottomTab === "stats"
-                        ? "portfolio statistics"
-                        : "mp_signal.* events"}
+            <span className="ml-auto pb-1 text-[10px] text-text-muted">
+              {bottomTab === "positions"
+                ? "open book · click row → instrument modal"
+                : bottomTab === "queue"
+                  ? "priority × confidence"
+                  : bottomTab === "orders"
+                    ? "newest first · click row → instrument"
+                    : bottomTab === "trades"
+                      ? "closed trades · newest first"
+                      : bottomTab === "expiry"
+                        ? "MCX futures · roll window 10d"
+                        : bottomTab === "stats"
+                          ? "portfolio statistics"
+                          : "mp_signal.* events"}
             </span>
           </nav>
-          <div className="flex-1 min-h-0 overflow-hidden px-2 py-1">
+          <div className="flex-1 min-h-0 overflow-hidden bg-bg-primary px-3 py-2">
+            {bottomTab === "positions" ? (
+              <PositionsTab
+                positions={positions}
+                onSelect={(sym) => setSelectedSymbol(sym)}
+              />
+            ) : null}
             {bottomTab === "queue" ? (
               <ActionQueue rows={rows} onSelect={(sym) => setSelectedSymbol(sym)} />
             ) : null}
@@ -2027,7 +2302,7 @@ export default function CommodityLivePage() {
             ) : null}
             {bottomTab === "audit" ? <AuditFeed events={auditEvents} /> : null}
           </div>
-        </div>
+        </section>
       </main>
 
       {/* ── Strategy modal ─────────────────────────────────────────── */}
