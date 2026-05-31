@@ -31,7 +31,9 @@ class CBEScanRequest(BaseModel):
     timeframe: str | None = Field(default=None, description="Alpha: 'weekly', 'daily', etc.")
     sectors_to_keep: int | None = Field(default=None, ge=1, le=13)
     stocks_per_sector: int | None = Field(default=None, ge=1, le=20)
-    composite_gate: float | None = Field(default=None, ge=0.0, le=100.0)
+    composite_gate: float | None = Field(default=None, ge=0.0, le=100.0, deprecated=True)
+    top_n_watchlist: int | None = Field(default=None, ge=1, le=50)
+    low_conviction_floor: float | None = Field(default=None, ge=0.0, le=100.0)
 
 
 class CBEResetRequest(BaseModel):
@@ -78,8 +80,12 @@ async def scan_cbe(body: CBEScanRequest) -> dict:
             alpha_cfg.sectors_to_keep = body.sectors_to_keep
         if body.stocks_per_sector:
             alpha_cfg.stocks_per_sector = body.stocks_per_sector
-        if body.composite_gate is not None:
-            alpha_cfg.composite_gate = body.composite_gate
+        # composite_gate is now legacy — accept it for back-compat but it
+        # has no effect. The watchlist is purely top-N by ranking.
+        if body.top_n_watchlist is not None:
+            alpha_cfg.top_n_watchlist = body.top_n_watchlist
+        if body.low_conviction_floor is not None:
+            alpha_cfg.low_conviction_floor = body.low_conviction_floor
     return await run_scan(
         source=body.source,
         universe=body.universe,

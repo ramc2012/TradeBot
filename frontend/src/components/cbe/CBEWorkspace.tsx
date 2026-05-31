@@ -108,6 +108,7 @@ type AlphaPayload = {
   scan_date?: string;
   asset_winner?: string;
   asset_layer?: AssetLayer;
+  equity_exposure_pct?: number;
   sector_layer?: {
     timeframe?: string;
     winners?: SectorWinner[];
@@ -286,68 +287,149 @@ function EmptyState({ text }: { text: string }) {
 }
 
 // ── L1 + L2 layer panels ──────────────────────────────────────────────────
-function AssetLayerPanel({ layer }: { layer?: AssetLayer }) {
-  if (!layer) {
-    return (
-      <section className="rounded-lg border border-bg-border bg-bg-secondary/16 p-3">
-        <EmptyState text="Run an alpha scan to populate the asset layer." />
-      </section>
-    );
+
+// Asset class taxonomy. Always rendered (5 fixed rows) so the user sees
+// the full mix even when L1 data is still warming up.
+const ASSET_CLASSES: Array<{
+  asset: string;
+  label: string;
+  symbol: string;
+  desc: string;
+}> = [
+  { asset: "EQUITIES", label: "Equities", symbol: "NIFTY 50", desc: "F&O stock book benchmark" },
+  { asset: "GOLD",     label: "Gold",     symbol: "GOLDBEES", desc: "Nippon India Gold ETF" },
+  { asset: "SILVER",   label: "Silver",   symbol: "SILVERBEES", desc: "Nippon India Silver ETF" },
+  { asset: "BONDS",    label: "Bonds",    symbol: "BBETF",    desc: "Bharat Bond ETF" },
+  { asset: "CASH",     label: "Cash",     symbol: "LIQUIDBEES", desc: "Nippon India Liquid ETF" },
+];
+
+function AssetLayerPanel({
+  layer,
+  equityExposurePct,
+}: {
+  layer?: AssetLayer;
+  equityExposurePct?: number;
+}) {
+  const isStub = Boolean(layer?.stub);
+  // Index incoming asset_rank rows by asset name (uppercase) so we can
+  // align them with the fixed taxonomy below.
+  const byAsset: Record<string, Record<string, unknown>> = {};
+  for (const row of (layer?.asset_rank as Array<Record<string, unknown>> | undefined) || []) {
+    const key = String(row.asset || "").toUpperCase();
+    if (key) byAsset[key] = row;
   }
+  const winner = (layer?.winner || "").toUpperCase();
+
   return (
     <section className="rounded-lg border border-bg-border bg-bg-secondary/16 p-3">
       <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-text-primary">
         <Coins size={15} className="text-accent-amber" />
         L1 · Asset rotation
-        {layer.stub ? (
+        {isStub ? (
           <span className="rounded border border-accent-amber/30 bg-accent-amber/10 px-2 py-0.5 text-[10px] uppercase text-accent-amber">
-            stub
+            ETF data pending
           </span>
         ) : (
           <span className="rounded border border-accent-green/30 bg-accent-green/10 px-2 py-0.5 text-[10px] uppercase text-accent-green">
             live
           </span>
         )}
-      </div>
-      <div className="space-y-1 text-xs text-text-secondary">
-        <div>
-          Winner:{" "}
-          <span className="font-mono font-semibold text-text-primary">{layer.winner || "—"}</span>
-          {layer.score_for_engine !== undefined ? (
-            <span className="ml-3 text-text-muted">
-              equities score: <span className="font-mono text-text-primary">{fmtNum(layer.score_for_engine, 1)}</span>
+        {equityExposurePct !== undefined ? (
+          <span className="ml-auto text-[11px] text-text-secondary">
+            Equity exposure:{" "}
+            <span className="font-mono font-semibold text-text-primary">
+              {fmtNum(equityExposurePct, 0)}%
             </span>
-          ) : null}
+          </span>
+        ) : null}
+      </div>
+      {isStub ? (
+        <div className="mb-2 rounded border border-accent-amber/25 bg-accent-amber/5 px-2.5 py-1.5 text-[11px] text-text-secondary">
+          GOLDBEES / SILVERBEES / BBETF / LIQUIDBEES daily ETF history not yet
+          ingested. Engine treats equities as winner at 100% exposure until L1
+          goes live; rotation indicators will populate automatically once data
+          lands.
         </div>
-        {layer.stub_reason ? (
-          <div className="text-[11px] text-text-muted">↳ {layer.stub_reason}</div>
-        ) : null}
-        {layer.asset_rank?.length ? (
-          <div className="mt-2 overflow-x-auto">
-            <table className="min-w-full text-[11px]">
-              <thead className="text-text-muted">
-                <tr>
-                  <th className="px-2 py-1 text-left">Asset</th>
-                  <th className="px-2 py-1 text-right">3m</th>
-                  <th className="px-2 py-1 text-right">6m</th>
-                  <th className="px-2 py-1 text-right">12m</th>
-                  <th className="px-2 py-1 text-right">Score</th>
+      ) : null}
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-[11px]">
+          <thead className="text-text-muted">
+            <tr>
+              <th className="px-2 py-1 text-left">Asset</th>
+              <th className="px-2 py-1 text-left">Proxy</th>
+              <th className="px-2 py-1 text-right">3m %</th>
+              <th className="px-2 py-1 text-right">6m %</th>
+              <th className="px-2 py-1 text-right">12m %</th>
+              <th className="px-2 py-1 text-center" title="Above 30-week MA">&gt;30W MA</th>
+              <th className="px-2 py-1 text-right" title="RS vs Nifty50 trend">RS trend</th>
+              <th className="px-2 py-1 text-right">Score</th>
+              <th className="px-2 py-1 text-left">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ASSET_CLASSES.map((cls) => {
+              const live = byAsset[cls.asset] || {};
+              const m3 = live.momentum_3m as number | null | undefined;
+              const m6 = live.momentum_6m as number | null | undefined;
+              const m12 = live.momentum_12m as number | null | undefined;
+              const above = live.above_30w_ma as boolean | null | undefined;
+              const rs = live.rs_trend as number | null | undefined;
+              const score = live.score as number | null | undefined;
+              const isWinner = cls.asset === winner;
+              return (
+                <tr
+                  key={cls.asset}
+                  className={clsx(
+                    "border-t border-bg-border/40",
+                    isWinner ? "bg-accent-green/8" : null,
+                  )}
+                >
+                  <td className="px-2 py-1.5">
+                    <div className="font-semibold text-text-primary">
+                      {cls.label}
+                      {isWinner ? (
+                        <span className="ml-1.5 text-[9px] uppercase text-accent-green">winner</span>
+                      ) : null}
+                    </div>
+                    <div className="text-[10px] text-text-muted">{cls.desc}</div>
+                  </td>
+                  <td className="px-2 py-1.5 font-mono text-[10px] text-text-secondary">{cls.symbol}</td>
+                  <td className={clsx("px-2 py-1.5 text-right font-mono", tonePnL(m3 ?? 0))}>
+                    {m3 === null || m3 === undefined ? "—" : (m3 > 0 ? "+" : "") + fmtNum(m3, 1)}
+                  </td>
+                  <td className={clsx("px-2 py-1.5 text-right font-mono", tonePnL(m6 ?? 0))}>
+                    {m6 === null || m6 === undefined ? "—" : (m6 > 0 ? "+" : "") + fmtNum(m6, 1)}
+                  </td>
+                  <td className={clsx("px-2 py-1.5 text-right font-mono", tonePnL(m12 ?? 0))}>
+                    {m12 === null || m12 === undefined ? "—" : (m12 > 0 ? "+" : "") + fmtNum(m12, 1)}
+                  </td>
+                  <td className="px-2 py-1.5 text-center">
+                    {above === true ? (
+                      <CheckCircle2 size={12} className="mx-auto text-accent-green" />
+                    ) : above === false ? (
+                      <span className="text-accent-red">✗</span>
+                    ) : (
+                      <span className="text-text-muted">—</span>
+                    )}
+                  </td>
+                  <td className={clsx("px-2 py-1.5 text-right font-mono", tonePnL(rs ?? 0))}>
+                    {rs === null || rs === undefined ? "—" : (rs > 0 ? "+" : "") + fmtNum(rs, 1)}
+                  </td>
+                  <td className="px-2 py-1.5 text-right font-mono font-semibold text-text-primary">
+                    {score === null || score === undefined ? "—" : fmtNum(score, 1)}
+                  </td>
+                  <td className="px-2 py-1.5">
+                    {isStub ? (
+                      <span className="text-[10px] text-accent-amber">pending</span>
+                    ) : (
+                      <span className="text-[10px] text-accent-green">live</span>
+                    )}
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {layer.asset_rank.map((row, idx) => (
-                  <tr key={String(row.asset ?? idx)} className="border-t border-bg-border/40">
-                    <td className="px-2 py-1 font-semibold text-text-primary">{String(row.asset ?? "—")}</td>
-                    <td className="px-2 py-1 text-right font-mono text-text-secondary">{fmtNum(row.momentum_3m, 1)}</td>
-                    <td className="px-2 py-1 text-right font-mono text-text-secondary">{fmtNum(row.momentum_6m, 1)}</td>
-                    <td className="px-2 py-1 text-right font-mono text-text-secondary">{fmtNum(row.momentum_12m, 1)}</td>
-                    <td className="px-2 py-1 text-right font-mono text-text-primary">{fmtNum(row.score, 1)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : null}
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </section>
   );
@@ -472,7 +554,7 @@ function RankedScanTable({ rows }: { rows: AlphaRow[] }) {
               <th className="border-b border-bg-border px-3 py-2 text-center font-semibold" title="Stock RRG quadrant">RRG</th>
               <th className="border-b border-bg-border px-3 py-2 text-left font-semibold">Bias</th>
               <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Alpha</th>
-              <th className="border-b border-bg-border px-3 py-2 text-center font-semibold">Gate</th>
+              <th className="border-b border-bg-border px-3 py-2 text-center font-semibold" title="Top 10 by composite alpha — these get traded">Top 10</th>
               <th className="border-b border-bg-border px-3 py-2 text-right font-semibold" title="Sector RS vs Nifty50">Sec RS%</th>
               <th className="border-b border-bg-border px-3 py-2 text-right font-semibold" title="Stock RS">Stk RS%</th>
               <th className="border-b border-bg-border px-3 py-2 text-right font-semibold" title="Daily MACD signal score">MACD</th>
@@ -906,7 +988,10 @@ export default function CBEWorkspace() {
 
       {/* L1 + L2 layer panels side-by-side */}
       <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-        <AssetLayerPanel layer={payload?.asset_layer} />
+        <AssetLayerPanel
+          layer={payload?.asset_layer}
+          equityExposurePct={payload?.equity_exposure_pct as number | undefined}
+        />
         <SectorLayerPanel
           winners={payload?.sector_layer?.winners}
           ranked={payload?.sector_layer?.ranked_sectors}
@@ -980,14 +1065,15 @@ export default function CBEWorkspace() {
         <section className="rounded-lg border border-accent-green/35 bg-accent-green/8 p-3">
           <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-accent-green">
             <CheckCircle2 size={15} />
-            Gate-cleared watchlist ({watchlist.length})
+            Top {watchlist.length} — traded this cycle
           </div>
           <div className="flex flex-wrap gap-2">
-            {watchlist.map((row) => (
+            {watchlist.map((row, idx) => (
               <span
                 key={row.instrument}
                 className="inline-flex items-center gap-2 rounded-md border border-accent-green/35 bg-accent-green/10 px-2.5 py-1 text-xs text-accent-green"
               >
+                <span className="font-mono text-[10px] text-text-muted">#{idx + 1}</span>
                 <span className="font-semibold text-text-primary">{row.instrument}</span>
                 <span className="font-mono">{fmtNum(row.composite_alpha_score, 1)}</span>
                 <span className="text-[10px] uppercase">{row.directional_bias}</span>

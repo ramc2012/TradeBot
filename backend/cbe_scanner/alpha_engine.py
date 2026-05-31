@@ -66,10 +66,16 @@ logger = logging.getLogger(__name__)
 IST_NOW = lambda: datetime.now(timezone.utc).isoformat()
 
 
-# Gate threshold for composite alpha score. Any candidate scoring below
-# this never enters the watchlist. The 80-floor is the user's spec and
-# corresponds roughly to "4 of 5 layers strongly aligned".
-COMPOSITE_GATE: float = 80.0
+# How many top-ranked candidates make the watchlist each cycle. Replaced
+# the old absolute composite_gate floor — strength is RELATIVE. In a
+# strong market many names clear an 80-point bar; in a weak market none
+# do. Either way the trader wants the top N by strength, not a binary
+# pass/fail vs a fixed threshold.
+TOP_N_WATCHLIST: int = 10
+# Kept as backstop only — a candidate whose composite is BELOW this gets
+# logged as a low-conviction pick. Does NOT exclude it from the
+# watchlist; the only filter is the top-N rank.
+LOW_CONVICTION_FLOOR: float = 50.0
 
 
 @dataclass
@@ -101,7 +107,13 @@ class AlphaEngineConfig:
     finalists_count: int = 10
     # L7 gate. Spec: "Only trades scoring above a threshold (e.g. 80/100)
     # become eligible."
-    composite_gate: float = COMPOSITE_GATE
+    # Top N candidates by composite_alpha_score become the watchlist.
+    # No absolute gate — strength is judged relative to peers each cycle.
+    top_n_watchlist: int = TOP_N_WATCHLIST
+    # Soft hint only — flagged as low-conviction in details, not a hard
+    # filter. Kept so the frontend can call out top-N rows that are
+    # tradeable but weak (e.g. all-bear market scenario).
+    low_conviction_floor: float = LOW_CONVICTION_FLOOR
     # Liquidity floors. A stock with extremely thin options is excluded
     # before scoring — there's no point ranking names you can't trade.
     min_atm_oi: float = 500.0
@@ -693,7 +705,11 @@ async def run_alpha_pipeline(config: AlphaEngineConfig | None = None) -> dict[st
                 **row,
                 "composite_alpha_score": score["score"],
                 "composite_components": score["components"],
-                "gate_passed": score["score"] >= config.composite_gate,
+                # gate_passed kept for DB-column compatibility but its
+                # semantics are now "in top N by composite_alpha_score".
+                # Set below after the ranking sort completes.
+                "gate_passed": False,
+                "low_conviction": score["score"] < config.low_conviction_floor,
                 "composite_score": round(score["score"] / 10.0, 2),
                 "bias_conviction": min(
                     1.0,
@@ -719,10 +735,25 @@ async def run_alpha_pipeline(config: AlphaEngineConfig | None = None) -> dict[st
         )
 
     scored.sort(key=lambda r: float(r.get("composite_alpha_score") or 0.0), reverse=True)
-    watchlist = [
+    # Watchlist = top N by composite_alpha_score whose bias is actionable.
+    # Strength is RELATIVE per cycle — no absolute floor. We take up to N
+    # tradeable rows from the head of the sorted list; if fewer than N
+    # have non-neutral bias, the watchlist is shorter (that's honest —
+    # don't trade neutral biases just to fill a quota).
+    actionable = [
         r for r in scored
-        if r.get("gate_passed") and r.get("directional_bias") in ("bullish", "bearish")
+        if r.get("directional_bias") in ("bullish", "bearish")
     ]
+    watchlist = actionable[: int(config.top_n_watchlist)]
+    # Mark in_top_n on the rows (and keep gate_passed alias for old
+    # frontend code that hasn't migrated yet).
+    top_n_ids = {id(r) for r in watchlist}
+    for row in scored:
+        is_top = id(row) in top_n_ids
+        row["in_top_n"] = is_top
+        row["gate_passed"] = is_top  # alias for back-compat
+        row["rank_overall"] = scored.index(row) + 1
+        row["rank_actionable"] = (actionable.index(row) + 1) if row in actionable else None
     finished = datetime.now(timezone.utc)
     return {
         "scan_date": started.date().isoformat(),
@@ -751,7 +782,8 @@ def _config_payload(config: AlphaEngineConfig) -> dict[str, Any]:
         "timeframe": config.timeframe,
         "sectors_to_keep": config.sectors_to_keep,
         "finalists_count": config.finalists_count,
-        "composite_gate": config.composite_gate,
+        "top_n_watchlist": config.top_n_watchlist,
+        "low_conviction_floor": config.low_conviction_floor,
         "min_atm_oi": config.min_atm_oi,
     }
 

@@ -280,7 +280,9 @@ def test_alpha_engine_config_defaults():
     assert cfg.timeframe == "weekly"
     assert cfg.sectors_to_keep == 4
     assert cfg.finalists_count == 10
-    assert cfg.composite_gate == 80.0
+    # Gate replaced with top-N ranking (relative strength, not absolute).
+    assert cfg.top_n_watchlist == 10
+    assert cfg.low_conviction_floor == 50.0
 
 
 def test_layer_weights_sum_to_100():
