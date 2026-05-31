@@ -18,12 +18,20 @@ router = APIRouter(prefix="/api/cbe", tags=["cbe"])
 
 
 class CBEScanRequest(BaseModel):
-    source: Literal["project_timescale"] = "project_timescale"
-    universe: list[str] | None = Field(default=None, description="Optional symbols to scan.")
+    # The alpha engine is now the default scan source. Legacy project_timescale
+    # remains for research / regression queries — it bypasses the L1..L7 pipeline
+    # and runs the original vol-compression composite score.
+    source: Literal["alpha_engine", "project_timescale"] = "alpha_engine"
+    universe: list[str] | None = Field(default=None, description="Legacy: symbols to scan in project_timescale mode.")
     scan_date: date | None = None
     lookback_days: int = Field(default=300, ge=60, le=1000)
     watchlist_min_score: float | None = Field(default=None, ge=0.0, le=10.0)
     watchlist_max_size: int | None = Field(default=None, ge=1, le=100)
+    # Alpha-engine-specific knobs. Ignored when source=project_timescale.
+    timeframe: str | None = Field(default=None, description="Alpha: 'weekly', 'daily', etc.")
+    sectors_to_keep: int | None = Field(default=None, ge=1, le=13)
+    stocks_per_sector: int | None = Field(default=None, ge=1, le=20)
+    composite_gate: float | None = Field(default=None, ge=0.0, le=100.0)
 
 
 class CBEResetRequest(BaseModel):
@@ -60,12 +68,25 @@ async def scan_cbe(body: CBEScanRequest) -> dict:
         watchlist_min_score=body.watchlist_min_score,
         watchlist_max_size=body.watchlist_max_size,
     )
+    alpha_cfg = None
+    if body.source == "alpha_engine":
+        from cbe_scanner.alpha_engine import AlphaEngineConfig
+        alpha_cfg = AlphaEngineConfig()
+        if body.timeframe:
+            alpha_cfg.timeframe = body.timeframe
+        if body.sectors_to_keep:
+            alpha_cfg.sectors_to_keep = body.sectors_to_keep
+        if body.stocks_per_sector:
+            alpha_cfg.stocks_per_sector = body.stocks_per_sector
+        if body.composite_gate is not None:
+            alpha_cfg.composite_gate = body.composite_gate
     return await run_scan(
         source=body.source,
         universe=body.universe,
         scan_date=body.scan_date,
         lookback_days=body.lookback_days,
         cfg=cfg,
+        alpha_config=alpha_cfg,
     )
 
 
