@@ -341,12 +341,30 @@ function colorForDelta(n: number | null | undefined): string {
  * so the row stays compact. If MP isn't ready yet, renders a "warming up"
  * placeholder so the row layout doesn't jump.
  */
+/**
+ * Regime-colored border for the MP visual so each row's auction state
+ * registers from the row outline alone.
+ */
+function regimeBorderClass(dayType: string | null | undefined): string {
+  const t = String(dayType || "").toLowerCase();
+  if (t === "trend_up") return "ring-emerald-500/60";
+  if (t === "trend_down") return "ring-rose-500/60";
+  if (t === "balance_above_poc") return "ring-emerald-400/30";
+  if (t === "balance_below_poc") return "ring-rose-400/30";
+  if (t === "balance") return "ring-slate-500/40";
+  return "ring-bg-secondary/40";
+}
+
 function MPProfileBar({
   row,
   className = "",
+  height = 22,
+  showLegend = false,
 }: {
   row: WatchRow;
   className?: string;
+  height?: number;
+  showLegend?: boolean;
 }) {
   const price = Number(row.price ?? 0);
   const poc = Number(row.mp_poc ?? 0);
@@ -354,87 +372,150 @@ function MPProfileBar({
   const val = Number(row.mp_val ?? 0);
   const ibh = Number(row.mp_ib_high ?? 0);
   const ibl = Number(row.mp_ib_low ?? 0);
+  const vwap = Number(row.vwap ?? 0);
+  const vwapU = Number(row.vwap_upper ?? 0);
+  const vwapL = Number(row.vwap_lower ?? 0);
+  const borderRing = regimeBorderClass(row.mp_day_type);
 
   if (!poc || !vah || !val || vah <= val) {
     return (
       <div
-        className={`flex h-[22px] items-center justify-center rounded bg-bg-secondary/30 px-2 text-[9.5px] uppercase tracking-wider text-text-muted ${className}`}
+        className={`flex items-center justify-center rounded bg-bg-secondary/30 px-2 text-[9.5px] uppercase tracking-wider text-text-muted ring-1 ring-bg-secondary/40 ${className}`}
+        style={{ height }}
       >
         mp warming
       </div>
     );
   }
 
-  // Domain: stretch a little beyond VAL/VAH so the marker doesn't clip.
-  const padBase = (vah - val) * 0.25;
-  const minDomain = Math.min(val, ibl || val, price || val) - padBase;
-  const maxDomain = Math.max(vah, ibh || vah, price || vah) + padBase;
+  // Stretch the domain past VAL/VAH so VWAP bands and the live marker
+  // don't clip on extension days.
+  const candidates = [val, vah, ibl, ibh, price, vwap, vwapU, vwapL].filter((n) => n > 0);
+  const lowEdge = Math.min(...candidates);
+  const highEdge = Math.max(...candidates);
+  const padBase = (highEdge - lowEdge) * 0.06 || (vah - val) * 0.1;
+  const minDomain = lowEdge - padBase;
+  const maxDomain = highEdge + padBase;
   const span = maxDomain - minDomain || 1;
-  const toPct = (v: number) => `${((v - minDomain) / span) * 100}%`;
+  const toX = (v: number) => ((v - minDomain) / span) * 100;
 
-  const valX = toPct(val);
-  const vahX = toPct(vah);
-  const pocX = toPct(poc);
-  const ibLowX = ibl ? toPct(Math.max(ibl, val)) : null;
-  const ibHighX = ibh ? toPct(Math.min(ibh, vah)) : null;
-  const priceX = price ? toPct(price) : null;
+  const valX = toX(val);
+  const vahX = toX(vah);
+  const pocX = toX(poc);
+  const ibLowX = ibl ? toX(Math.max(ibl, lowEdge)) : null;
+  const ibHighX = ibh ? toX(Math.min(ibh, highEdge)) : null;
+  const priceX = price ? toX(price) : null;
+  const vwapX = vwap ? toX(vwap) : null;
+  const vwapUX = vwapU ? toX(vwapU) : null;
+  const vwapLX = vwapL ? toX(vwapL) : null;
 
   const direction = String(row.mp_direction || "").toLowerCase();
   const markerColor =
     direction === "buy" ? "fill-emerald-400" : direction === "sell" ? "fill-rose-400" : "fill-sky-300";
 
+  const tooltip = [
+    `POC ${formatNumber(poc, 2)}`,
+    `VA [${formatNumber(val, 2)}–${formatNumber(vah, 2)}]`,
+    ibl && ibh ? `IB [${formatNumber(ibl, 2)}–${formatNumber(ibh, 2)}]` : null,
+    vwap ? `VWAP ${formatNumber(vwap, 2)}` : null,
+    price ? `LTP ${formatNumber(price, 2)}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
     <div
-      className={`relative h-[22px] rounded bg-bg-secondary/40 ${className}`}
-      title={`POC ${formatNumber(poc, 2)} · VAH ${formatNumber(vah, 2)} · VAL ${formatNumber(val, 2)} · IB [${formatNumber(ibl, 2)}–${formatNumber(ibh, 2)}]`}
+      className={`relative rounded bg-bg-secondary/40 ring-1 ${borderRing} ${className}`}
+      style={{ height }}
+      title={tooltip}
     >
       <svg
         className="absolute inset-0 h-full w-full"
         preserveAspectRatio="none"
-        viewBox="0 0 100 22"
+        viewBox={`0 0 100 ${height}`}
         role="img"
         aria-label="market profile"
       >
-        {/* Value area band (VAL → VAH) */}
+        {/* Value-area band (VAL → VAH) */}
         <rect
-          x={parseFloat(valX)}
-          y={4}
-          width={parseFloat(vahX) - parseFloat(valX)}
-          height={14}
+          x={valX}
+          y={height * 0.18}
+          width={Math.max(vahX - valX, 0.5)}
+          height={height * 0.64}
           className="fill-slate-500/30"
         />
-        {/* IB band (subtle inside the value area) */}
-        {ibLowX && ibHighX ? (
+        {/* IB band (subtle, central inside the value area) */}
+        {ibLowX !== null && ibHighX !== null ? (
           <rect
-            x={parseFloat(ibLowX)}
-            y={7}
-            width={Math.max(parseFloat(ibHighX) - parseFloat(ibLowX), 0)}
-            height={8}
-            className="fill-slate-400/30"
+            x={ibLowX}
+            y={height * 0.34}
+            width={Math.max(ibHighX - ibLowX, 0.4)}
+            height={height * 0.32}
+            className="fill-amber-200/25"
           />
         ) : null}
-        {/* POC bright tick */}
-        <rect x={parseFloat(pocX) - 0.5} y={2} width={1} height={18} className="fill-amber-300/85" />
-        {/* Center mid-line for orientation */}
-        <line x1={0} x2={100} y1={11} y2={11} className="stroke-text-muted/30" strokeWidth={0.4} />
+        {/* VWAP band (±σ subtle) */}
+        {vwapLX !== null && vwapUX !== null ? (
+          <rect
+            x={Math.min(vwapLX, vwapUX)}
+            y={0}
+            width={Math.abs(vwapUX - vwapLX) || 0.3}
+            height={height}
+            className="fill-sky-400/8"
+          />
+        ) : null}
+        {/* POC bright vertical tick */}
+        <rect x={pocX - 0.55} y={height * 0.05} width={1.1} height={height * 0.9} className="fill-amber-300/85" />
+        {/* VWAP solid line */}
+        {vwapX !== null ? (
+          <line
+            x1={vwapX}
+            x2={vwapX}
+            y1={0}
+            y2={height}
+            className="stroke-sky-400/85"
+            strokeWidth={0.8}
+            strokeDasharray="2 1.4"
+          />
+        ) : null}
+        {/* Centre mid-line for orientation */}
+        <line
+          x1={0}
+          x2={100}
+          y1={height / 2}
+          y2={height / 2}
+          className="stroke-text-muted/30"
+          strokeWidth={0.4}
+        />
         {/* Live price marker */}
-        {priceX ? (
+        {priceX !== null ? (
           <g>
             <line
-              x1={parseFloat(priceX)}
-              x2={parseFloat(priceX)}
+              x1={priceX}
+              x2={priceX}
               y1={0}
-              y2={22}
-              className="stroke-text-primary/70"
-              strokeWidth={0.6}
+              y2={height}
+              className="stroke-text-primary/85"
+              strokeWidth={0.7}
             />
             <polygon
-              points={`${parseFloat(priceX) - 1.2},0 ${parseFloat(priceX) + 1.2},0 ${parseFloat(priceX)},2.2`}
+              points={`${priceX - 1.3},0 ${priceX + 1.3},0 ${priceX},${height * 0.18}`}
+              className={markerColor}
+            />
+            <polygon
+              points={`${priceX - 1.3},${height} ${priceX + 1.3},${height} ${priceX},${height - height * 0.18}`}
               className={markerColor}
             />
           </g>
         ) : null}
       </svg>
+      {showLegend ? (
+        <div className="absolute -bottom-3 left-0 right-0 flex justify-between text-[8.5px] text-text-muted">
+          <span>VAL {formatNumber(val, 2)}</span>
+          <span>POC {formatNumber(poc, 2)}</span>
+          <span>VAH {formatNumber(vah, 2)}</span>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -487,13 +568,30 @@ function PositionChip({ position }: { position?: CommodityPosition }) {
   const side = (position.action || "").toUpperCase();
   const sideColor = side === "BUY" ? "text-emerald-300" : "text-rose-300";
   const pnlColor = pnl >= 0 ? "text-emerald-400" : "text-rose-400";
+  const cur = Number(position.current_price ?? 0);
+  const stop = Number(position.stop_price ?? 0);
+  // Distance to stop in absolute price points (signed: positive = comfortable,
+  // negative = stop already breached on the wrong side).
+  const stopDist =
+    cur > 0 && stop > 0
+      ? side === "BUY"
+        ? cur - stop
+        : stop - cur
+      : null;
   return (
-    <span className="inline-flex items-center gap-1.5 font-mono">
-      <span className={`text-[10.5px] uppercase ${sideColor}`}>{side}</span>
-      <span className="text-text-secondary">{position.lots}lt</span>
-      <span className={`text-[11px] ${pnlColor}`}>
-        {formatSigned(pnl)} ({formatPct(ret, 1)})
-      </span>
+    <span className="inline-flex items-baseline gap-1 font-mono leading-none">
+      <span className={`text-[10px] uppercase ${sideColor}`}>{side}</span>
+      <span className="text-[9.5px] text-text-secondary">{position.lots}lt</span>
+      <span className={`text-[11px] ${pnlColor}`}>{formatSigned(pnl)}</span>
+      <span className="text-[9.5px] text-text-muted">({formatPct(ret, 1)})</span>
+      {stopDist !== null ? (
+        <span
+          className={`text-[9.5px] ${stopDist >= 0 ? "text-text-muted" : "text-rose-400"}`}
+          title={`Stop ${formatNumber(stop, 2)} · distance ${formatSigned(stopDist, 2)}`}
+        >
+          ⊥{formatSigned(stopDist, 2)}
+        </span>
+      ) : null}
     </span>
   );
 }
@@ -566,53 +664,71 @@ function overlayTicks(rows: WatchRow[], ticks: Record<string, LatestTickSnapshot
 function InstrumentRow({
   row,
   position,
+  zebra,
   onClick,
 }: {
   row: WatchRow;
   position?: CommodityPosition;
+  zebra: boolean;
   onClick: () => void;
 }) {
   const change = Number(row.change ?? 0);
   const changePct = Number(row.change_pct ?? 0);
   const price = Number(row.price ?? 0);
-  const live = row.live_tick_source ? "•" : "";
+  const vwap = Number(row.vwap ?? 0);
+  const live = Boolean(row.live_tick_source);
+  // Combine name + ticker into a single-line label. The display name carries
+  // the human-friendly text; the ticker is appended in a muted monospace pill
+  // so traders can copy/scan it without the row going two lines tall.
+  const name = row.display_name || row.underlying || row.symbol;
+  const ticker = String(row.underlying || row.symbol || "")
+    .replace(/^MCX:/, "")
+    .replace(/\d{2}[A-Z]{3}FUT$/, "");
+  // VWAP differential: helps trader instantly read "price vs auction mean".
+  const vwapDelta = vwap > 0 && price > 0 ? price - vwap : null;
+
   return (
     <tr
       onClick={onClick}
-      className="cursor-pointer border-t border-bg-secondary/20 hover:bg-bg-secondary/15"
+      className={`cursor-pointer transition-colors ${zebra ? "bg-bg-secondary/[0.06]" : ""} hover:bg-bg-secondary/20`}
     >
-      <td className="py-1.5 pl-2 pr-2">
-        <div className="flex items-baseline gap-1.5">
-          <span className="text-[12px] font-semibold text-text-primary">
-            {row.display_name || row.underlying || row.symbol}
-          </span>
-          {live ? <span className="text-emerald-400">{live}</span> : null}
+      <td className="py-1 pl-2 pr-2">
+        <div className="flex items-baseline gap-1.5 leading-none">
+          {live ? (
+            <span className="relative h-1.5 w-1.5 flex-none rounded-full bg-emerald-400" title="streaming live ticks" />
+          ) : (
+            <span className="h-1.5 w-1.5 flex-none rounded-full bg-text-muted/40" title="no tick stream" />
+          )}
+          <span className="text-[12px] font-semibold text-text-primary">{name}</span>
+          <span className="font-mono text-[9.5px] text-text-muted">{ticker}</span>
         </div>
-        <div className="font-mono text-[9.5px] text-text-muted">{row.underlying || row.symbol}</div>
       </td>
-      <td className="px-2 text-right font-mono text-[12px] text-text-primary">
+      <td className="px-2 text-right font-mono text-[12px] text-text-primary leading-none">
         {formatNumber(price, 2)}
       </td>
-      <td className={`px-2 text-right font-mono text-[11px] ${colorForDelta(change)}`}>
-        <div>{formatSigned(change, 2)}</div>
-        <div className="text-[10px] opacity-80">{formatPct(changePct, 2)}</div>
+      <td className={`px-2 text-right font-mono text-[10.5px] leading-none ${colorForDelta(change)}`}>
+        <span>{formatSigned(change, 2)}</span>
+        <span className="ml-1 opacity-80">{formatPct(changePct, 2)}</span>
+      </td>
+      <td className="px-2 text-right font-mono text-[10.5px] text-text-secondary leading-none">
+        <div>{vwap > 0 ? formatNumber(vwap, 2) : "—"}</div>
+        {vwapDelta !== null ? (
+          <div className={`text-[9.5px] ${colorForDelta(vwapDelta)}`}>{formatSigned(vwapDelta, 2)}</div>
+        ) : null}
       </td>
       <td className="px-2 align-middle">
-        <MPProfileBar row={row} className="w-full min-w-[120px]" />
+        <MPProfileBar row={row} className="w-full min-w-[140px]" height={20} />
       </td>
-      <td className="px-2 text-right text-[11px]">
+      <td className="px-2 text-right text-[11px] leading-none">
         <CVDChip row={row} />
       </td>
-      <td className="px-2 text-right font-mono text-[10.5px] text-text-secondary">
-        {row.vwap != null ? formatNumber(Number(row.vwap), 2) : "—"}
-      </td>
-      <td className="px-2">
+      <td className="px-2 leading-none">
         <TriggerBadge row={row} />
       </td>
-      <td className="px-2 text-right font-mono text-[10.5px] text-text-secondary">
+      <td className="px-2 text-right font-mono text-[10.5px] text-text-secondary leading-none">
         {row.stop_hint != null ? formatNumber(Number(row.stop_hint), 2) : "—"}
       </td>
-      <td className="pl-2 pr-3 text-right text-[11px]">
+      <td className="pl-2 pr-3 text-right text-[11px] leading-none">
         <PositionChip position={position} />
       </td>
     </tr>
@@ -628,6 +744,7 @@ function ActionQueue({
   rows: WatchRow[];
   onSelect: (symbol: string) => void;
 }) {
+  const [triggerFilter, setTriggerFilter] = useState<string>("all");
   const ranked = useMemo(() => {
     const armed = rows.filter((r) => r.entry_style && r.signal);
     return armed
@@ -640,133 +757,238 @@ function ActionQueue({
       })
       .sort((a, b) => b.score - a.score);
   }, [rows]);
-
-  if (ranked.length === 0) {
-    return (
-      <div className="flex h-full items-center justify-center text-[11px] text-text-muted">
-        No armed triggers this cycle.
-      </div>
-    );
-  }
+  const filtered = ranked.filter(
+    (item) => triggerFilter === "all" || item.row.entry_style === triggerFilter,
+  );
   return (
-    <ul className="space-y-0.5 text-[11px]">
-      {ranked.slice(0, 6).map(({ row }) => {
-        const sym = String(row.symbol || "");
-        return (
-          <li
-            key={sym}
-            onClick={() => onSelect(sym)}
-            className="flex cursor-pointer items-baseline justify-between gap-2 rounded px-1.5 py-1 hover:bg-bg-secondary/20"
-          >
-            <div className="flex items-baseline gap-2 truncate">
-              <span className="text-[11.5px] font-semibold text-text-primary">
-                {row.display_name || row.underlying}
-              </span>
-              <TriggerBadge row={row} />
-            </div>
-            <span className="shrink-0 font-mono text-[10.5px] text-text-muted">
-              stop {row.stop_hint != null ? formatNumber(Number(row.stop_hint), 2) : "—"}
-            </span>
-          </li>
-        );
-      })}
-    </ul>
+    <div className="flex h-full min-h-0 flex-col">
+      <FilterBar>
+        <FilterSelect
+          value={triggerFilter}
+          onChange={setTriggerFilter}
+          options={["all", "open_drive", "ib_break", "failed_auction", "va_migration", "lvn_fade"]}
+        />
+        <FilterCount n={filtered.length} total={ranked.length} />
+      </FilterBar>
+      {filtered.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center text-[11px] text-text-muted">
+          {ranked.length === 0
+            ? "No armed triggers this cycle."
+            : "No triggers match the filter."}
+        </div>
+      ) : (
+        <ul className="flex-1 space-y-0.5 overflow-y-auto text-[11px]">
+          {filtered.slice(0, 20).map(({ row }) => {
+            const sym = String(row.symbol || "");
+            return (
+              <li
+                key={sym}
+                onClick={() => onSelect(sym)}
+                className="flex cursor-pointer items-baseline justify-between gap-2 rounded px-1.5 py-1 hover:bg-bg-secondary/20"
+              >
+                <div className="flex items-baseline gap-2 truncate">
+                  <span className="text-[11.5px] font-semibold text-text-primary">
+                    {row.display_name || row.underlying}
+                  </span>
+                  <TriggerBadge row={row} />
+                </div>
+                <span className="shrink-0 font-mono text-[10.5px] text-text-muted">
+                  stop {row.stop_hint != null ? formatNumber(Number(row.stop_hint), 2) : "—"}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
   );
 }
 
 // ─── Orders tab ────────────────────────────────────────────────────────────
 
 function OrdersTab({ orders, onSelect }: { orders: Order[]; onSelect: (sym: string) => void }) {
-  if (orders.length === 0) {
-    return (
-      <div className="flex h-full items-center justify-center text-[11px] text-text-muted">
-        No orders this session.
-      </div>
-    );
-  }
+  const [symFilter, setSymFilter] = useState("");
+  const [sideFilter, setSideFilter] = useState<"all" | "BUY" | "SELL">("all");
+  const [flowFilter, setFlowFilter] = useState<"all" | "entry" | "exit">("all");
+  const filtered = orders.filter((o) => {
+    if (symFilter && !String(o.symbol || "").toLowerCase().includes(symFilter.toLowerCase())) return false;
+    if (sideFilter !== "all" && o.action !== sideFilter) return false;
+    if (flowFilter !== "all" && o.flow !== flowFilter) return false;
+    return true;
+  });
   return (
-    <div className="overflow-y-auto" style={{ maxHeight: 160 }}>
-      <table className="w-full text-[10.5px]">
-        <thead className="sticky top-0 bg-bg-primary text-[9.5px] uppercase tracking-wider text-text-muted">
-          <tr>
-            <th className="px-2 py-1 text-left">Time</th>
-            <th className="px-2 text-left">Symbol</th>
-            <th className="px-2 text-left">Flow</th>
-            <th className="px-2 text-left">Action</th>
-            <th className="px-2 text-right">Qty</th>
-            <th className="px-2 text-right">Fill</th>
-            <th className="px-2 text-left">Reason</th>
-          </tr>
-        </thead>
-        <tbody>
-          {orders.slice(0, 60).map((o, idx) => (
-            <tr
-              key={`${o.time}-${idx}`}
-              className="cursor-pointer border-t border-bg-secondary/15 hover:bg-bg-secondary/20"
-              onClick={() => o.symbol && onSelect(o.symbol)}
-            >
-              <td className="px-2 py-0.5 font-mono text-text-muted">{formatTime(o.time)}</td>
-              <td className="px-2 font-mono">{o.symbol}</td>
-              <td className="px-2">{o.flow}</td>
-              <td className={`px-2 ${o.action === "BUY" ? "text-emerald-300" : "text-rose-300"}`}>{o.action}</td>
-              <td className="px-2 text-right font-mono">{o.qty}</td>
-              <td className="px-2 text-right font-mono">{formatNumber(o.fill_price, 2)}</td>
-              <td className="px-2 text-text-muted">{o.reason}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="flex h-full min-h-0 flex-col">
+      <FilterBar>
+        <FilterText placeholder="symbol contains…" value={symFilter} onChange={setSymFilter} />
+        <FilterSelect value={sideFilter} onChange={(v) => setSideFilter(v as "all" | "BUY" | "SELL")} options={["all", "BUY", "SELL"]} />
+        <FilterSelect value={flowFilter} onChange={(v) => setFlowFilter(v as "all" | "entry" | "exit")} options={["all", "entry", "exit"]} />
+        <FilterCount n={filtered.length} total={orders.length} />
+      </FilterBar>
+      {filtered.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center text-[11px] text-text-muted">
+          {orders.length === 0 ? "No orders this session." : "No orders match the filter."}
+        </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto">
+          <table className="w-full text-[10.5px]">
+            <thead className="sticky top-0 bg-bg-primary text-[9.5px] uppercase tracking-wider text-text-muted">
+              <tr>
+                <th className="px-2 py-1 text-left">Time</th>
+                <th className="px-2 text-left">Symbol</th>
+                <th className="px-2 text-left">Flow</th>
+                <th className="px-2 text-left">Action</th>
+                <th className="px-2 text-right">Qty</th>
+                <th className="px-2 text-right">Fill</th>
+                <th className="px-2 text-left">Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.slice(0, 80).map((o, idx) => (
+                <tr
+                  key={`${o.time}-${idx}`}
+                  className="cursor-pointer border-t border-bg-secondary/15 hover:bg-bg-secondary/20"
+                  onClick={() => o.symbol && onSelect(o.symbol)}
+                >
+                  <td className="px-2 py-0.5 font-mono text-text-muted">{formatTime(o.time)}</td>
+                  <td className="px-2 font-mono">{o.symbol}</td>
+                  <td className="px-2">{o.flow}</td>
+                  <td className={`px-2 ${o.action === "BUY" ? "text-emerald-300" : "text-rose-300"}`}>{o.action}</td>
+                  <td className="px-2 text-right font-mono">{o.qty}</td>
+                  <td className="px-2 text-right font-mono">{formatNumber(o.fill_price, 2)}</td>
+                  <td className="px-2 text-text-muted">{o.reason}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
+  );
+}
+
+// ─── Filter bar primitives ────────────────────────────────────────────────
+
+function FilterBar({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="mb-1 flex flex-wrap items-center gap-1.5 border-b border-bg-secondary/20 pb-1">
+      {children}
+    </div>
+  );
+}
+function FilterText({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder: string;
+}) {
+  return (
+    <input
+      type="text"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      className="h-5 w-32 rounded bg-bg-secondary/30 px-1.5 text-[10.5px] text-text-primary placeholder:text-text-muted/60 focus:outline-none focus:ring-1 focus:ring-bg-active/60"
+    />
+  );
+}
+function FilterSelect({
+  value,
+  onChange,
+  options,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: string[];
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="h-5 rounded bg-bg-secondary/30 px-1 text-[10.5px] text-text-primary focus:outline-none focus:ring-1 focus:ring-bg-active/60"
+    >
+      {options.map((o) => (
+        <option key={o} value={o}>
+          {o}
+        </option>
+      ))}
+    </select>
+  );
+}
+function FilterCount({ n, total }: { n: number; total: number }) {
+  return (
+    <span className="ml-auto text-[10px] text-text-muted">
+      {n === total ? `${n}` : `${n} of ${total}`}
+    </span>
   );
 }
 
 // ─── Trades tab ────────────────────────────────────────────────────────────
 
 function TradesTab({ trades, onSelect }: { trades: TradeRow[]; onSelect: (sym: string) => void }) {
-  if (trades.length === 0) {
-    return (
-      <div className="flex h-full items-center justify-center text-[11px] text-text-muted">
-        No closed trades yet.
-      </div>
-    );
-  }
+  const [symFilter, setSymFilter] = useState("");
+  const [sideFilter, setSideFilter] = useState<"all" | "BUY" | "SELL">("all");
+  const [outcomeFilter, setOutcomeFilter] = useState<"all" | "wins" | "losses">("all");
   const sorted = [...trades].sort(
     (a, b) => new Date(b.exit_time || "").getTime() - new Date(a.exit_time || "").getTime(),
   );
+  const filtered = sorted.filter((t) => {
+    if (symFilter && !String(t.symbol || "").toLowerCase().includes(symFilter.toLowerCase())) return false;
+    if (sideFilter !== "all" && t.action !== sideFilter) return false;
+    if (outcomeFilter === "wins" && Number(t.pnl ?? 0) <= 0) return false;
+    if (outcomeFilter === "losses" && Number(t.pnl ?? 0) >= 0) return false;
+    return true;
+  });
   return (
-    <div className="overflow-y-auto" style={{ maxHeight: 160 }}>
-      <table className="w-full text-[10.5px]">
-        <thead className="sticky top-0 bg-bg-primary text-[9.5px] uppercase tracking-wider text-text-muted">
-          <tr>
-            <th className="px-2 py-1 text-left">Exited</th>
-            <th className="px-2 text-left">Symbol</th>
-            <th className="px-2 text-left">Side</th>
-            <th className="px-2 text-right">Entry</th>
-            <th className="px-2 text-right">Exit</th>
-            <th className="px-2 text-right">P&L</th>
-            <th className="px-2 text-left">Reason</th>
-          </tr>
-        </thead>
-        <tbody>
-          {sorted.slice(0, 80).map((t, idx) => (
-            <tr
-              key={`${t.exit_time}-${idx}`}
-              className="cursor-pointer border-t border-bg-secondary/15 hover:bg-bg-secondary/20"
-              onClick={() => t.symbol && onSelect(t.symbol)}
-            >
-              <td className="px-2 py-0.5 font-mono text-text-muted">{formatIST(t.exit_time)}</td>
-              <td className="px-2 font-mono">{t.symbol}</td>
-              <td className={`px-2 ${t.action === "BUY" ? "text-emerald-300" : "text-rose-300"}`}>{t.action}</td>
-              <td className="px-2 text-right font-mono">{formatNumber(t.entry_price, 2)}</td>
-              <td className="px-2 text-right font-mono">{formatNumber(t.exit_price, 2)}</td>
-              <td className={`px-2 text-right font-mono ${Number(t.pnl ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                {formatSigned(Number(t.pnl ?? 0))}
-              </td>
-              <td className="px-2 text-text-muted">{t.reason}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="flex h-full min-h-0 flex-col">
+      <FilterBar>
+        <FilterText placeholder="symbol contains…" value={symFilter} onChange={setSymFilter} />
+        <FilterSelect value={sideFilter} onChange={(v) => setSideFilter(v as "all" | "BUY" | "SELL")} options={["all", "BUY", "SELL"]} />
+        <FilterSelect value={outcomeFilter} onChange={(v) => setOutcomeFilter(v as "all" | "wins" | "losses")} options={["all", "wins", "losses"]} />
+        <FilterCount n={filtered.length} total={trades.length} />
+      </FilterBar>
+      {filtered.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center text-[11px] text-text-muted">
+          {trades.length === 0 ? "No closed trades yet." : "No trades match the filter."}
+        </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto">
+          <table className="w-full text-[10.5px]">
+            <thead className="sticky top-0 bg-bg-primary text-[9.5px] uppercase tracking-wider text-text-muted">
+              <tr>
+                <th className="px-2 py-1 text-left">Exited</th>
+                <th className="px-2 text-left">Symbol</th>
+                <th className="px-2 text-left">Side</th>
+                <th className="px-2 text-right">Entry</th>
+                <th className="px-2 text-right">Exit</th>
+                <th className="px-2 text-right">P&L</th>
+                <th className="px-2 text-left">Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.slice(0, 100).map((t, idx) => (
+                <tr
+                  key={`${t.exit_time}-${idx}`}
+                  className="cursor-pointer border-t border-bg-secondary/15 hover:bg-bg-secondary/20"
+                  onClick={() => t.symbol && onSelect(t.symbol)}
+                >
+                  <td className="px-2 py-0.5 font-mono text-text-muted">{formatIST(t.exit_time)}</td>
+                  <td className="px-2 font-mono">{t.symbol}</td>
+                  <td className={`px-2 ${t.action === "BUY" ? "text-emerald-300" : "text-rose-300"}`}>{t.action}</td>
+                  <td className="px-2 text-right font-mono">{formatNumber(t.entry_price, 2)}</td>
+                  <td className="px-2 text-right font-mono">{formatNumber(t.exit_price, 2)}</td>
+                  <td className={`px-2 text-right font-mono ${Number(t.pnl ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                    {formatSigned(Number(t.pnl ?? 0))}
+                  </td>
+                  <td className="px-2 text-text-muted">{t.reason}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -800,6 +1022,7 @@ function daysTo(date: Date | null): number | null {
 }
 
 function ExpiryTab({ rows }: { rows: WatchRow[] }) {
+  const [statusFilter, setStatusFilter] = useState<"all" | "active" | "roll" | "expired">("all");
   if (rows.length === 0) {
     return (
       <div className="flex h-full items-center justify-center text-[11px] text-text-muted">
@@ -807,47 +1030,68 @@ function ExpiryTab({ rows }: { rows: WatchRow[] }) {
       </div>
     );
   }
+  const filtered = rows.filter((row) => {
+    if (statusFilter === "all") return true;
+    const dte = daysTo(parseMCXExpiry(row.symbol));
+    if (statusFilter === "expired") return dte !== null && dte < 0;
+    if (statusFilter === "roll") return dte !== null && dte >= 0 && dte <= 10;
+    if (statusFilter === "active") return dte !== null && dte > 10;
+    return true;
+  });
   return (
-    <div className="overflow-y-auto" style={{ maxHeight: 160 }}>
-      <table className="w-full text-[10.5px]">
-        <thead className="sticky top-0 bg-bg-primary text-[9.5px] uppercase tracking-wider text-text-muted">
-          <tr>
-            <th className="px-2 py-1 text-left">Underlying</th>
-            <th className="px-2 text-left">Active contract</th>
-            <th className="px-2 text-left">Expiry</th>
-            <th className="px-2 text-right">DTE</th>
-            <th className="px-2 text-left">Roll status</th>
-            <th className="px-2 text-right">Lot · Tick</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => {
-            const exp = parseMCXExpiry(row.symbol);
-            const dte = daysTo(exp);
-            const rolling = dte !== null && dte <= 10;
-            const expired = dte !== null && dte < 0;
-            const status = expired
-              ? { label: "expired · roll now", tone: "text-rose-400" }
-              : rolling
-                ? { label: `roll window · ${dte}d`, tone: "text-amber-300" }
-                : { label: dte === null ? "—" : "active", tone: "text-emerald-300" };
-            return (
-              <tr key={String(row.symbol || row.underlying)} className="border-t border-bg-secondary/15">
-                <td className="px-2 py-0.5 font-medium">{row.display_name || row.underlying}</td>
-                <td className="px-2 font-mono">{row.symbol}</td>
-                <td className="px-2 font-mono">
-                  {exp ? exp.toISOString().slice(0, 10) : "—"}
-                </td>
-                <td className="px-2 text-right font-mono">{dte ?? "—"}</td>
-                <td className={`px-2 ${status.tone}`}>{status.label}</td>
-                <td className="px-2 text-right font-mono text-text-muted">
-                  {row.lot_size ?? "—"}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+    <div className="flex h-full min-h-0 flex-col">
+      <FilterBar>
+        <FilterSelect
+          value={statusFilter}
+          onChange={(v) => setStatusFilter(v as "all" | "active" | "roll" | "expired")}
+          options={["all", "active", "roll", "expired"]}
+        />
+        <FilterCount n={filtered.length} total={rows.length} />
+      </FilterBar>
+      <div className="flex-1 overflow-y-auto">
+        <table className="w-full text-[10.5px]">
+          <thead className="sticky top-0 bg-bg-primary text-[9.5px] uppercase tracking-wider text-text-muted">
+            <tr>
+              <th className="px-2 py-1 text-left">Underlying</th>
+              <th className="px-2 text-left">Active contract</th>
+              <th className="px-2 text-left">Expiry</th>
+              <th className="px-2 text-right">DTE</th>
+              <th className="px-2 text-left">Roll status</th>
+              <th className="px-2 text-right">Lot · Tick</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((row, idx) => {
+              const exp = parseMCXExpiry(row.symbol);
+              const dte = daysTo(exp);
+              const rolling = dte !== null && dte <= 10;
+              const expired = dte !== null && dte < 0;
+              const status = expired
+                ? { label: "expired · roll now", tone: "text-rose-400" }
+                : rolling
+                  ? { label: `roll window · ${dte}d`, tone: "text-amber-300" }
+                  : { label: dte === null ? "—" : "active", tone: "text-emerald-300" };
+              return (
+                <tr
+                  key={String(row.symbol || row.underlying)}
+                  className={`border-t border-bg-secondary/15 ${idx % 2 ? "bg-bg-secondary/[0.06]" : ""}`}
+                >
+                  <td className="px-2 py-0.5 font-medium">{row.display_name || row.underlying}</td>
+                  <td className="px-2 font-mono">{row.symbol}</td>
+                  <td className="px-2 font-mono">
+                    {exp ? exp.toISOString().slice(0, 10) : "—"}
+                  </td>
+                  <td className="px-2 text-right font-mono">{dte ?? "—"}</td>
+                  <td className={`px-2 ${status.tone}`}>{status.label}</td>
+                  <td className="px-2 text-right font-mono text-text-muted">
+                    {row.lot_size ?? "—"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -894,21 +1138,28 @@ function StatsTab({
       .sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
   }, [trades]);
 
+  // Equity / Day P&L are already in the page header — Stats deliberately
+  // surfaces the *aggregate* performance numbers that the header has no room
+  // for (win rate, profit factor, drawdown, distribution).
   return (
     <div className="overflow-y-auto" style={{ maxHeight: 160 }}>
       <div className="grid grid-cols-12 gap-2 text-[11px]">
-        <StatTile k="Equity" v={formatINR(totalEquity)} cols={2} tone={totalEquity >= initialCapital ? "text-emerald-300" : "text-rose-300"} />
-        <StatTile k="Realized" v={formatINR(realized)} cols={2} tone={realized >= 0 ? "text-emerald-300" : "text-rose-300"} />
-        <StatTile k="Unrealized" v={formatINR(openPnl)} cols={2} tone={openPnl >= 0 ? "text-emerald-300" : "text-rose-300"} />
-        <StatTile k="Trades" v={String(trades.length)} cols={1} />
-        <StatTile k="Win rate" v={`${(winRate * 100).toFixed(0)}%`} cols={1} />
-        <StatTile k="Profit factor" v={Number.isFinite(profitFactor) ? profitFactor.toFixed(2) : "∞"} cols={2} />
-        <StatTile k="Max DD" v={`${(maxDD * 100).toFixed(1)}%`} cols={2} tone={maxDD > 0.1 ? "text-amber-300" : ""} />
-        <StatTile k="Avg win" v={formatINR(avgWin)} cols={2} />
-        <StatTile k="Avg loss" v={formatINR(-avgLoss)} cols={2} />
+        <StatTile k="Trades" v={String(trades.length)} cols={2} />
+        <StatTile k="Win rate" v={`${(winRate * 100).toFixed(0)}%`} cols={2} />
+        <StatTile
+          k="Profit factor"
+          v={Number.isFinite(profitFactor) ? profitFactor.toFixed(2) : "∞"}
+          cols={2}
+        />
+        <StatTile k="Max drawdown" v={`${(maxDD * 100).toFixed(1)}%`} cols={2} tone={maxDD > 0.1 ? "text-amber-300" : ""} />
         <StatTile k="W / L" v={`${wins.length} / ${losses.length}`} cols={2} />
-        <StatTile k="Open positions" v={String(positions.length)} cols={2} />
-        <StatTile k="Initial" v={formatINR(initialCapital)} cols={2} />
+        <StatTile k="Open" v={String(positions.length)} cols={2} />
+        <StatTile k="Avg win" v={formatINR(avgWin)} cols={3} tone="text-emerald-300" />
+        <StatTile k="Avg loss" v={formatINR(-avgLoss)} cols={3} tone="text-rose-300" />
+        <StatTile k="Gross win" v={formatINR(grossProfit)} cols={3} tone="text-emerald-300" />
+        <StatTile k="Gross loss" v={formatINR(-grossLoss)} cols={3} tone="text-rose-300" />
+        <StatTile k="Realized" v={formatINR(realized)} cols={6} tone={realized >= 0 ? "text-emerald-300" : "text-rose-300"} />
+        <StatTile k="Unrealized" v={formatINR(openPnl)} cols={6} tone={openPnl >= 0 ? "text-emerald-300" : "text-rose-300"} />
       </div>
       {byUnderlying.length > 0 ? (
         <div className="mt-2 rounded bg-bg-secondary/15 px-2 py-1.5">
@@ -1054,33 +1305,57 @@ function StrategyModal({
 // ─── Audit feed ────────────────────────────────────────────────────────────
 
 function AuditFeed({ events }: { events: AuditEvent[] }) {
-  if (!events.length) {
-    return (
-      <div className="flex h-full items-center justify-center text-[11px] text-text-muted">
-        No audit events yet this session.
-      </div>
-    );
-  }
+  const [textFilter, setTextFilter] = useState("");
+  const [typeFilter, setTypeFilter] = useState<"all" | "fired" | "skipped" | "entry" | "exit">(
+    "all",
+  );
+  const filtered = events.filter((e) => {
+    const t = String(e.event_type || "");
+    const m = `${e.symbol || e.underlying || ""} ${e.message || ""}`.toLowerCase();
+    if (textFilter && !m.includes(textFilter.toLowerCase())) return false;
+    if (typeFilter === "fired" && !t.includes("fired")) return false;
+    if (typeFilter === "skipped" && !t.includes("skipped")) return false;
+    if (typeFilter === "entry" && t !== "position_entry") return false;
+    if (typeFilter === "exit" && t !== "position_exit") return false;
+    return true;
+  });
   return (
-    <ul className="space-y-0.5 text-[11px]">
-      {events.slice(0, 6).map((event, idx) => (
-        <li
-          key={`${event.created_at}-${idx}`}
-          className="flex gap-2 rounded px-1.5 py-1 hover:bg-bg-secondary/15"
-        >
-          <span className="w-[58px] shrink-0 font-mono text-[10px] text-text-muted">
-            {formatTime(event.created_at)}
-          </span>
-          <span className="w-[68px] shrink-0 text-[10px] uppercase tracking-wider text-text-secondary">
-            {event.underlying || event.symbol || ""}
-          </span>
-          <span className="truncate text-[10.5px] text-text-primary">
-            {(event.event_type || "").replace("mp_signal.", "")}{" "}
-            <span className="text-text-muted">{(event.message || "").slice(0, 80)}</span>
-          </span>
-        </li>
-      ))}
-    </ul>
+    <div className="flex h-full min-h-0 flex-col">
+      <FilterBar>
+        <FilterText placeholder="symbol or message…" value={textFilter} onChange={setTextFilter} />
+        <FilterSelect
+          value={typeFilter}
+          onChange={(v) => setTypeFilter(v as "all" | "fired" | "skipped" | "entry" | "exit")}
+          options={["all", "fired", "skipped", "entry", "exit"]}
+        />
+        <FilterCount n={filtered.length} total={events.length} />
+      </FilterBar>
+      {filtered.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center text-[11px] text-text-muted">
+          {events.length === 0 ? "No audit events yet." : "No events match the filter."}
+        </div>
+      ) : (
+        <ul className="flex-1 overflow-y-auto space-y-0.5 text-[11px]">
+          {filtered.slice(0, 60).map((event, idx) => (
+            <li
+              key={`${event.created_at}-${idx}`}
+              className="flex gap-2 rounded px-1.5 py-1 hover:bg-bg-secondary/15"
+            >
+              <span className="w-[58px] shrink-0 font-mono text-[10px] text-text-muted">
+                {formatTime(event.created_at)}
+              </span>
+              <span className="w-[68px] shrink-0 text-[10px] uppercase tracking-wider text-text-secondary">
+                {event.underlying || event.symbol || ""}
+              </span>
+              <span className="truncate text-[10.5px] text-text-primary">
+                {(event.event_type || "").replace("mp_signal.", "")}{" "}
+                <span className="text-text-muted">{(event.message || "").slice(0, 100)}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -1514,88 +1789,138 @@ export default function CommodityLivePage() {
 
   const isStreaming =
     overviewQuery.isStreamConnected || watchlistSnapshotQuery.isStreamConnected;
-  const streamTone = isStreaming
-    ? "bg-emerald-500/15 text-emerald-300"
+  const liveDotClass = isStreaming
+    ? "bg-emerald-400 shadow-[0_0_6px_rgba(74,222,128,0.7)]"
     : overviewQuery.hasSnapshot
-      ? "bg-amber-500/15 text-amber-200"
-      : "bg-bg-secondary/40 text-text-muted";
-  const streamLabel = isStreaming
-    ? `LIVE · ${Object.keys(ticks).length}/${tickSymbols.length} ticks`
+      ? "bg-amber-400"
+      : "bg-text-muted/40";
+  const liveLabel = isStreaming
+    ? `LIVE · ${Object.keys(ticks).length}/${tickSymbols.length}`
     : overviewQuery.hasSnapshot
-      ? "snapshot · awaiting socket"
-      : "loading";
+      ? "SNAPSHOT"
+      : "OFFLINE";
+
+  // Market session pill (MCX open / closed). Re-uses trading_calendar from
+  // the overview payload — no extra request.
+  const cal = (status as unknown as { trading_calendar?: Record<string, unknown> })
+    .trading_calendar || {};
+  const marketOpen = Boolean(cal.is_open);
+  const marketLabel = marketOpen
+    ? "MCX OPEN"
+    : `MCX ${String(cal.status || "closed").toUpperCase()}`;
+  const marketTone = marketOpen
+    ? "text-emerald-300"
+    : String(cal.status || "").toLowerCase() === "break"
+      ? "text-amber-300"
+      : "text-text-muted";
+
+  // Broker badges from data_health.{fyers,upstox}_token_health
+  const dataHealth = (status as unknown as { data_health?: Record<string, Record<string, unknown>> })
+    .data_health || {};
+  const fyersValid = Boolean(dataHealth.fyers_token_health?.valid);
+  const upstoxValid = Boolean(dataHealth.upstox_token_health?.valid);
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-bg-primary text-text-primary">
-      {/* ── Header ─────────────────────────────────────────────────── */}
-      <header className="flex flex-wrap items-center gap-2 border-b border-bg-secondary/30 px-3 py-2">
-        <h1 className="text-base font-semibold tracking-tight">Commodity · MP+OF</h1>
-        <span className={`rounded-md px-2 py-0.5 text-[10.5px] font-medium uppercase tracking-wide ${statusTone}`}>
-          {statusLabel}
-        </span>
-        <span className={`rounded-md px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.14em] ${streamTone}`}>
-          {streamLabel}
-        </span>
-        <span className="hidden text-[10.5px] text-text-muted sm:inline">
-          {formatIST(status.last_run_at)} · {(status.last_message || "").slice(0, 120)}
-        </span>
+      {/* ── Header (single dense line) ──────────────────────────────
+          Left: liveness dot · market status · title
+          Middle: account values (equity, day P&L, open/armed)
+          Right: PAPER badge · broker dots · action buttons
+          The previous header had duplicate descriptions and tiles that
+          consumed two rows on most screens — this version stays single
+          line on a 1366-wide viewport. */}
+      <header className="flex items-center gap-3 border-b border-bg-secondary/30 px-3 py-1.5 text-[11px]">
+        {/* Left cluster: status dot + market + title */}
+        <div className="flex items-center gap-2">
+          <span className={`h-2.5 w-2.5 flex-none rounded-full ${liveDotClass}`} title={liveLabel} />
+          <span className={`hidden text-[9.5px] font-semibold uppercase tracking-[0.14em] sm:inline ${marketTone}`}>
+            {marketLabel}
+          </span>
+          <h1 className="text-[14px] font-semibold tracking-tight">Commodities</h1>
+          <span
+            className={`rounded px-1.5 py-[1.5px] text-[9.5px] font-medium uppercase tracking-[0.14em] ${
+              killActive
+                ? "bg-rose-500/15 text-rose-300"
+                : running
+                  ? "bg-emerald-500/15 text-emerald-300"
+                  : loopActive
+                    ? "bg-sky-500/15 text-sky-300"
+                    : startRequired
+                      ? "bg-amber-500/15 text-amber-200"
+                      : "bg-bg-secondary/40 text-text-muted"
+            }`}
+            title={status.last_message || ""}
+          >
+            {statusLabel}
+          </span>
+        </div>
 
-        {/* Decision tiles inline */}
-        <div className="ml-auto flex flex-wrap items-baseline gap-3 text-[11px]">
-          <Tile
-            label="Equity"
-            value={formatINR(totalEquity)}
-            tone={equityPct >= 0 ? "text-emerald-400" : "text-rose-400"}
-            detail={formatPct(equityPct, 2)}
+        {/* Middle: portfolio values */}
+        <div className="ml-auto flex items-baseline gap-4 font-mono">
+          <HeaderStat
+            k="EQUITY"
+            v={formatINR(totalEquity)}
+            sub={formatPct(equityPct, 2)}
+            tone={equityPct >= 0 ? "text-emerald-300" : "text-rose-300"}
           />
-          <Tile
-            label="Day P&L"
-            value={formatINR(dayPnl)}
-            tone={dayPnl >= 0 ? "text-emerald-400" : "text-rose-400"}
-            detail={`r ${formatINR(dayRealized)} · u ${formatINR(unrealized)}`}
+          <HeaderStat
+            k="DAY P&L"
+            v={formatINR(dayPnl)}
+            sub={`r ${formatINR(dayRealized)} · u ${formatINR(unrealized)}`}
+            tone={dayPnl >= 0 ? "text-emerald-300" : "text-rose-300"}
           />
-          <Tile
-            label="Open / Armed"
-            value={`${positions.length} / ${armedCount}`}
-            detail={`${rows.length} tracked`}
+          <HeaderStat
+            k="OPEN / ARMED"
+            v={`${positions.length} / ${armedCount}`}
+            sub={`${rows.length} tracked`}
           />
         </div>
 
-        <div className="ml-1 flex items-center gap-1">
+        {/* Right: PAPER · broker status · actions */}
+        <div className="flex items-center gap-1.5">
+          <span
+            className="rounded bg-amber-500/15 px-1.5 py-[1.5px] text-[9.5px] font-medium uppercase tracking-[0.14em] text-amber-200"
+            title="paper trading book"
+          >
+            PAPER
+          </span>
+          <BrokerDot label="FY" ok={fyersValid} title="Fyers broker session" />
+          <BrokerDot label="UP" ok={upstoxValid} title="Upstox broker session" />
+          <div className="mx-1 h-4 w-px bg-bg-secondary/40" aria-hidden />
           <button
             type="button"
             onClick={() => startMutation.mutate()}
             disabled={startMutation.isPending || killActive || loopActive}
-            className="inline-flex items-center gap-1 rounded-md bg-bg-secondary/25 px-2 py-1 text-[11px] text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex items-center gap-1 rounded bg-bg-secondary/25 px-2 py-1 text-[10.5px] text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
             title="Start commodity agent"
           >
-            <CirclePlay className="h-3.5 w-3.5" />
+            <CirclePlay className="h-3 w-3" />
             {loopActive ? "Running" : "Start"}
           </button>
           <button
             type="button"
             onClick={() => runOnceMutation.mutate()}
             disabled={runOnceMutation.isPending}
-            className="inline-flex items-center gap-1 rounded-md bg-bg-secondary/25 px-2 py-1 text-[11px] text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex items-center gap-1 rounded bg-bg-secondary/25 px-2 py-1 text-[10.5px] text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
             title="Run one scan"
           >
-            <RefreshCcw className="h-3.5 w-3.5" />
+            <RefreshCcw className="h-3 w-3" />
             Scan
           </button>
           <button
             type="button"
             onClick={() => setStrategyModalOpen(true)}
-            className="inline-flex items-center gap-1 rounded-md bg-bg-secondary/25 px-2 py-1 text-[11px] text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary"
+            className="inline-flex items-center gap-1 rounded bg-bg-secondary/25 px-2 py-1 text-[10.5px] text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary"
             title="MP+OF rules · risk caps · universe"
           >
-            <Settings className="h-3.5 w-3.5" />
+            <Settings className="h-3 w-3" />
             Strategy
           </button>
           <Link
             href="/settings"
-            className="rounded-md bg-bg-secondary/25 px-2 py-1 text-[11px] text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary"
+            className="rounded bg-bg-secondary/25 px-2 py-1 text-[10.5px] text-text-secondary hover:bg-bg-secondary/40 hover:text-text-primary"
           >
-            Settings
+            ⚙
           </Link>
         </div>
       </header>
@@ -1605,16 +1930,16 @@ export default function CommodityLivePage() {
         <div className="overflow-hidden rounded-md border border-bg-secondary/30">
           <table className="w-full table-fixed">
             <thead>
-              <tr className="bg-bg-secondary/20 text-[10px] uppercase tracking-[0.14em] text-text-muted">
-                <th className="w-[12%] py-1.5 pl-2 pr-2 text-left">Instrument</th>
-                <th className="w-[9%] px-2 text-right">LTP</th>
-                <th className="w-[9%] px-2 text-right">Δ</th>
-                <th className="w-[24%] px-2 text-left">MP Profile · live</th>
+              <tr className="bg-bg-secondary/20 text-[9.5px] uppercase tracking-[0.14em] text-text-muted">
+                <th className="w-[13%] py-1 pl-2 pr-2 text-left">Instrument</th>
+                <th className="w-[8%] px-2 text-right">LTP</th>
+                <th className="w-[9%] px-2 text-right">Δ · Δ%</th>
+                <th className="w-[8%] px-2 text-right">VWAP · Δ</th>
+                <th className="w-[22%] px-2 text-left">MP · VA · IB · VWAP</th>
                 <th className="w-[8%] px-2 text-right">CVD</th>
-                <th className="w-[8%] px-2 text-right">VWAP</th>
                 <th className="w-[14%] px-2 text-left">Trigger</th>
                 <th className="w-[8%] px-2 text-right">Stop</th>
-                <th className="w-[8%] pl-2 pr-3 text-right">Position</th>
+                <th className="w-[10%] pl-2 pr-3 text-right">Position</th>
               </tr>
             </thead>
             <tbody>
@@ -1625,11 +1950,12 @@ export default function CommodityLivePage() {
                   </td>
                 </tr>
               ) : (
-                rows.map((row) => (
+                rows.map((row, idx) => (
                   <InstrumentRow
                     key={String(row.symbol || row.underlying)}
                     row={row}
                     position={positionBySymbol[String(row.symbol || "")]}
+                    zebra={idx % 2 === 1}
                     onClick={() => setSelectedSymbol(String(row.symbol || ""))}
                   />
                 ))
@@ -1730,26 +2056,44 @@ export default function CommodityLivePage() {
 
 // ─── Header tile ───────────────────────────────────────────────────────────
 
-function Tile({
-  label,
-  value,
-  detail,
+function HeaderStat({
+  k,
+  v,
+  sub,
   tone,
 }: {
-  label: string;
-  value: string;
-  detail?: string;
+  k: string;
+  v: string;
+  sub?: string;
   tone?: string;
 }) {
   return (
-    <div className="flex items-baseline gap-2">
-      <span className="text-[10px] uppercase tracking-[0.14em] text-text-muted">{label}</span>
-      <span className={`font-mono text-[13px] font-semibold ${tone || "text-text-primary"}`}>
-        {value}
-      </span>
-      {detail ? (
-        <span className="font-mono text-[10px] text-text-muted">{detail}</span>
-      ) : null}
+    <div className="flex items-baseline gap-1.5 leading-none">
+      <span className="text-[9px] uppercase tracking-[0.14em] text-text-muted">{k}</span>
+      <span className={`font-mono text-[12.5px] font-semibold ${tone || "text-text-primary"}`}>{v}</span>
+      {sub ? <span className="font-mono text-[9px] text-text-muted">{sub}</span> : null}
     </div>
+  );
+}
+
+function BrokerDot({
+  label,
+  ok,
+  title,
+}: {
+  label: string;
+  ok: boolean;
+  title?: string;
+}) {
+  return (
+    <span
+      title={`${title || label} · ${ok ? "connected" : "disconnected"}`}
+      className={`inline-flex items-center gap-1 rounded px-1.5 py-[1.5px] text-[9.5px] font-medium uppercase tracking-[0.14em] ${
+        ok ? "bg-emerald-500/15 text-emerald-300" : "bg-rose-500/15 text-rose-300"
+      }`}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${ok ? "bg-emerald-400" : "bg-rose-400"}`} />
+      {label}
+    </span>
   );
 }
