@@ -35,7 +35,7 @@ from typing import Any, Optional
 from loguru import logger
 from sqlalchemy import text
 
-from core.db import AsyncSessionLocal
+from db.database import AsyncSessionLocal
 
 
 # ─── Universe / routing ───────────────────────────────────────────────────
