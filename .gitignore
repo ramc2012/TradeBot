@@ -25,7 +25,15 @@ frontend/.next/
 # Logs and runtime state
 *.log
 backend/logs/
-backend/runtime/*.json
+# Live runtime state — mutated by the running backend (paper books,
+# journals, portfolio events, RAG bundles). Recursive globs cover all
+# per-strategy subdirs (directional_options/paper, gann_tp_delta/paper,
+# rag/, portfolio/, ...).
+backend/runtime/**/*.json
+backend/runtime/**/*.jsonl
+# Top-level strategy state snapshots written by the supervisor.
+backend/commodity_strategy.json
+backend/nse_strategy_state.json
 
 # Local databases and temp files
 *.sqlite
