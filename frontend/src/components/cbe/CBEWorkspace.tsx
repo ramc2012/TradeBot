@@ -1,136 +1,263 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import {
   AlertTriangle,
+  ArrowDownRight,
+  ArrowUpRight,
   BarChart3,
+  Briefcase,
   CheckCircle2,
-  Database,
-  LineChart as LineChartIcon,
+  Coins,
+  History,
+  Layers,
+  ListChecks,
   Play,
   Radar,
   RefreshCw,
-  Search,
-  SlidersHorizontal,
+  RotateCcw,
+  ShieldCheck,
+  Target,
+  TrendingUp,
+  Wallet,
   type LucideIcon,
 } from "lucide-react";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ComposedChart,
-  Line,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 
 import {
   describeApiError,
-  getCBEInstrumentAnalytics,
   getCBELatestScan,
-  getCBEUniverse,
+  getCBEPaperJournal,
+  getCBEPaperPositions,
+  getCBEPaperSummary,
+  resetCBEPaper,
   runCBEScan,
 } from "@/lib/api";
 
-type CBESource = "project_timescale";
-type DetailTab = "overview" | "price" | "options" | "evidence";
+// ── Types ─────────────────────────────────────────────────────────────────
+type Bias = "bullish" | "bearish" | "neutral" | string;
 
-type CBEScanRow = {
+type CompositeComponents = {
+  asset?: number;
+  sector?: number;
+  stock?: number;
+  market_profile?: number;
+  order_flow?: number;
+  mp_source?: "live" | "proxy";
+  of_source?: "live" | "proxy";
+  trend_score?: number;
+  atr_expansion?: number;
+  volume_score?: number;
+  oi_score?: number;
+  iv_score?: number;
+};
+
+type AlphaRow = {
   instrument: string;
-  composite_score: number;
-  directional_bias: "bullish" | "bearish" | "neutral" | string;
+  composite_score: number;          // legacy 0-10 alias
+  composite_alpha_score: number;    // 0-100
+  gate_passed: boolean;
+  directional_bias: Bias;
   bias_conviction: number;
-  f1_vc_score: number;
-  f2_omp_score: number;
-  f3_csmd_score: number;
-  f4_cp_score: number;
-  f5_mp_score: number;
-  details?: {
-    f1_vc?: Record<string, unknown>;
-    f2_omp?: Record<string, unknown>;
-    f3_csmd?: Record<string, unknown>;
-    f4_cp?: Record<string, unknown>;
-    f5_mp?: Record<string, unknown>;
+  sector_code?: string;
+  sector_quadrant?: string;
+  sector_rs_pct?: number;
+  stock_quadrant?: string;
+  stock_rs_pct?: number;
+  stock_rank_in_sector?: number;
+  trend_score?: number;
+  atr_expansion?: number;
+  volume_score?: number;
+  oi_score?: number;
+  iv_score?: number;
+  mp_score?: number;
+  of_score?: number;
+  atm_strike?: number;
+  atm_oi?: number;
+  atm_volume?: number;
+  latest_close?: number;
+  composite_components?: CompositeComponents;
+  mp_meta?: { classification?: string; confidence?: number };
+  of_meta?: { cvd_latest?: number; vwap_latest?: number };
+};
+
+type SectorWinner = {
+  code: string;
+  name: string;
+  rs_pct: number;
+  quadrant: string;
+};
+
+type AssetLayer = {
+  winner?: string;
+  stub?: boolean;
+  stub_reason?: string;
+  score_for_engine?: number;
+  asset_rank?: Array<Record<string, unknown>>;
+};
+
+type AlphaPayload = {
+  source?: string;
+  scan_date?: string;
+  asset_winner?: string;
+  asset_layer?: AssetLayer;
+  sector_layer?: {
+    timeframe?: string;
+    winners?: SectorWinner[];
+    ranked_sectors?: SectorWinner[];
   };
+  fno_universe_size?: number;
+  scored_count?: number;
+  watchlist_count?: number;
+  elapsed_seconds?: number;
+  results?: AlphaRow[];
+  watchlist?: AlphaRow[];
+  paper_summary?: PaperSummary;
 };
 
-type CBEScanPayload = {
-  source: CBESource;
-  source_status?: Record<string, unknown>;
-  scan_date: string | null;
-  universe_size: number;
-  scored_count: number;
-  watchlist_count: number;
-  results: CBEScanRow[];
-  watchlist: CBEScanRow[];
+type PaperSummary = {
+  open_positions: number;
+  closed_positions: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  total_pnl: number;
+  initial_capital: number;
+  available_capital: number;
+  reserved_margin: number;
+  total_equity: number;
+  total_return_pct: number;
+  max_drawdown: number;
+  sharpe_ratio: number;
+  total_trades: number;
+  win_rate: number;
 };
 
-type CBEInstrumentAnalytics = {
-  symbol: string;
-  available: boolean;
-  scan_date: string;
-  source_status?: Record<string, unknown>;
-  score?: CBEScanRow | null;
-  ohlc: Array<Record<string, unknown>>;
-  option_chain: Array<Record<string, unknown>>;
-  iv_history: Array<Record<string, unknown>>;
-  pcr_history: Array<Record<string, unknown>>;
-  sector_returns: Array<Record<string, unknown>>;
+type PaperPosition = {
+  position_id: string;
+  instrument: string;
+  status: "open" | "closed";
+  direction: "long" | "short";
+  bias?: string;
+  opened_at: string;
+  closed_at?: string | null;
+  entry_price: number;
+  latest_close?: number;
+  exit_price?: number | null;
+  quantity: number;
+  notional: number;
+  unrealized_pnl: number;
+  realized_pnl: number;
+  composite_score?: number;
+  latest_composite_score?: number;
+  close_reason?: string | null;
 };
 
-const FEATURE_COLUMNS = [
-  { key: "f1_vc_score", label: "VC", name: "Vol compression" },
-  { key: "f2_omp_score", label: "OMP", name: "Options" },
-  { key: "f3_csmd_score", label: "CSMD", name: "Cross-section" },
-  { key: "f4_cp_score", label: "CP", name: "Catalyst" },
-  { key: "f5_mp_score", label: "MP", name: "Microstructure" },
-] as const;
+type PaperPositionsResponse = {
+  status: string;
+  summary: PaperSummary;
+  open_positions: PaperPosition[];
+  closed_positions: PaperPosition[];
+  last_synced_at?: string | null;
+};
 
-const TABS: Array<{ key: DetailTab; label: string; icon: LucideIcon }> = [
-  { key: "overview", label: "Overview", icon: Radar },
-  { key: "price", label: "Price", icon: LineChartIcon },
-  { key: "options", label: "Options", icon: BarChart3 },
-  { key: "evidence", label: "Evidence", icon: SlidersHorizontal },
-];
+type JournalRecord = {
+  recorded_at: string;
+  scan_date?: string;
+  instrument: string;
+  event: "open" | "close";
+  direction?: string;
+  bias?: string;
+  composite_score?: number;
+  entry_price?: number;
+  exit_price?: number;
+  quantity?: number;
+  notional?: number;
+  realized_pnl?: number;
+  close_reason?: string;
+};
 
-function formatNumber(value: unknown, digits = 2) {
+type DeskTab = "ranked" | "open" | "history" | "journal";
+
+// ── Formatting helpers ────────────────────────────────────────────────────
+function fmtNum(value: unknown, digits = 2): string {
   const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return "--";
+  if (!Number.isFinite(numeric)) return "—";
   return numeric.toFixed(digits);
 }
-
-function formatCompact(value: unknown) {
+function fmtPct(value: unknown, digits = 2): string {
   const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return "--";
+  if (!Number.isFinite(numeric)) return "—";
+  return `${numeric.toFixed(digits)}%`;
+}
+function fmtRupee(value: unknown): string {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "—";
+  return `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(numeric)}`;
+}
+function fmtCompact(value: unknown): string {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "—";
   return new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0, notation: "compact" }).format(numeric);
 }
+function fmtDate(value: unknown): string {
+  if (!value) return "—";
+  try {
+    const d = new Date(String(value));
+    if (Number.isNaN(d.getTime())) return String(value).slice(0, 16);
+    return d.toISOString().replace("T", " ").slice(0, 16);
+  } catch {
+    return String(value).slice(0, 16);
+  }
+}
 
-function toneForBias(bias: string) {
+function toneForBias(bias: Bias): string {
   if (bias === "bullish") return "border-accent-green/35 bg-accent-green/10 text-accent-green";
   if (bias === "bearish") return "border-accent-red/35 bg-accent-red/10 text-accent-red";
   return "border-bg-border bg-bg-secondary/35 text-text-secondary";
 }
 
-function scoreTone(score: number) {
-  if (score >= 7) return "text-accent-green";
-  if (score >= 5.5) return "text-accent-amber";
+function toneForQuadrant(q?: string): string {
+  switch ((q || "").toLowerCase()) {
+    case "leading":
+      return "text-accent-green";
+    case "improving":
+      return "text-accent-blue";
+    case "weakening":
+      return "text-accent-amber";
+    case "lagging":
+      return "text-accent-red";
+    default:
+      return "text-text-muted";
+  }
+}
+
+function toneForGate(passed: boolean, score: number): string {
+  if (passed) return "text-accent-green";
+  if (score >= 70) return "text-accent-amber";
   return "text-text-secondary";
 }
 
+function tonePnL(value: number | undefined): string {
+  const n = Number(value || 0);
+  if (n > 0) return "text-accent-green";
+  if (n < 0) return "text-accent-red";
+  return "text-text-secondary";
+}
+
+// ── Reusable bits ─────────────────────────────────────────────────────────
 function Metric({
   label,
   value,
   detail,
   icon: Icon,
+  tone,
 }: {
   label: string;
   value: string;
-  detail: string;
+  detail?: string;
   icon: LucideIcon;
+  tone?: string;
 }) {
   return (
     <div className="rounded-lg border border-bg-border bg-bg-secondary/24 px-4 py-3">
@@ -138,133 +265,199 @@ function Metric({
         <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">{label}</div>
         <Icon size={16} className="text-accent-blue" />
       </div>
-      <div className="mt-2 font-mono text-lg font-semibold text-text-primary">{value}</div>
-      <div className="mt-1 text-[11px] text-text-muted">{detail}</div>
-    </div>
-  );
-}
-
-function FeatureBar({ value }: { value: number }) {
-  const pct = Math.max(0, Math.min(100, value * 10));
-  return (
-    <div className="h-1.5 w-full rounded-full bg-bg-primary/70">
-      <div
-        className={clsx(
-          "h-full rounded-full",
-          value >= 7 ? "bg-accent-green" : value >= 5 ? "bg-accent-amber" : "bg-accent-blue",
-        )}
-        style={{ width: `${pct}%` }}
-      />
+      <div className={clsx("mt-2 font-mono text-lg font-semibold", tone || "text-text-primary")}>{value}</div>
+      {detail ? <div className="mt-1 text-[11px] text-text-muted">{detail}</div> : null}
     </div>
   );
 }
 
 function EmptyState({ text }: { text: string }) {
   return (
-    <div className="flex h-[190px] items-center justify-center rounded-lg border border-bg-border bg-bg-primary/24 text-sm text-text-muted">
+    <div className="flex h-[180px] items-center justify-center rounded-lg border border-bg-border bg-bg-primary/24 text-sm text-text-muted">
       {text}
     </div>
   );
 }
 
-function chartTooltipStyle() {
-  return {
-    backgroundColor: "#101522",
-    border: "1px solid rgba(95, 109, 135, 0.45)",
-    borderRadius: 8,
-    color: "#dbe4f0",
-  };
-}
-
-function scoreToScanRow(score?: Record<string, any> | null): CBEScanRow | undefined {
-  if (!score) return undefined;
-  return {
-    instrument: String(score.instrument || ""),
-    composite_score: Number(score.composite_score || 0),
-    directional_bias: String(score.directional_bias || "neutral"),
-    bias_conviction: Number(score.bias_conviction || 0),
-    f1_vc_score: Number(score.f1_vc?.score || 0),
-    f2_omp_score: Number(score.f2_omp?.score || 0),
-    f3_csmd_score: Number(score.f3_csmd?.score || 0),
-    f4_cp_score: Number(score.f4_cp?.score || 0),
-    f5_mp_score: Number(score.f5_mp?.score || 0),
-    details: {
-      f1_vc: score.f1_vc,
-      f2_omp: score.f2_omp,
-      f3_csmd: score.f3_csmd,
-      f4_cp: score.f4_cp,
-      f5_mp: score.f5_mp,
-    },
-  };
-}
-
-function ScanTable({
-  rows,
-  selected,
-  onSelect,
-}: {
-  rows: CBEScanRow[];
-  selected?: string;
-  onSelect: (symbol: string) => void;
-}) {
-  if (!rows.length) {
-    return <EmptyState text="No scan rows available." />;
+// ── L1 + L2 layer panels ──────────────────────────────────────────────────
+function AssetLayerPanel({ layer }: { layer?: AssetLayer }) {
+  if (!layer) {
+    return (
+      <section className="rounded-lg border border-bg-border bg-bg-secondary/16 p-3">
+        <EmptyState text="Run an alpha scan to populate the asset layer." />
+      </section>
+    );
   }
+  return (
+    <section className="rounded-lg border border-bg-border bg-bg-secondary/16 p-3">
+      <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-text-primary">
+        <Coins size={15} className="text-accent-amber" />
+        L1 · Asset rotation
+        {layer.stub ? (
+          <span className="rounded border border-accent-amber/30 bg-accent-amber/10 px-2 py-0.5 text-[10px] uppercase text-accent-amber">
+            stub
+          </span>
+        ) : (
+          <span className="rounded border border-accent-green/30 bg-accent-green/10 px-2 py-0.5 text-[10px] uppercase text-accent-green">
+            live
+          </span>
+        )}
+      </div>
+      <div className="space-y-1 text-xs text-text-secondary">
+        <div>
+          Winner:{" "}
+          <span className="font-mono font-semibold text-text-primary">{layer.winner || "—"}</span>
+          {layer.score_for_engine !== undefined ? (
+            <span className="ml-3 text-text-muted">
+              equities score: <span className="font-mono text-text-primary">{fmtNum(layer.score_for_engine, 1)}</span>
+            </span>
+          ) : null}
+        </div>
+        {layer.stub_reason ? (
+          <div className="text-[11px] text-text-muted">↳ {layer.stub_reason}</div>
+        ) : null}
+        {layer.asset_rank?.length ? (
+          <div className="mt-2 overflow-x-auto">
+            <table className="min-w-full text-[11px]">
+              <thead className="text-text-muted">
+                <tr>
+                  <th className="px-2 py-1 text-left">Asset</th>
+                  <th className="px-2 py-1 text-right">3m</th>
+                  <th className="px-2 py-1 text-right">6m</th>
+                  <th className="px-2 py-1 text-right">12m</th>
+                  <th className="px-2 py-1 text-right">Score</th>
+                </tr>
+              </thead>
+              <tbody>
+                {layer.asset_rank.map((row, idx) => (
+                  <tr key={String(row.asset ?? idx)} className="border-t border-bg-border/40">
+                    <td className="px-2 py-1 font-semibold text-text-primary">{String(row.asset ?? "—")}</td>
+                    <td className="px-2 py-1 text-right font-mono text-text-secondary">{fmtNum(row.momentum_3m, 1)}</td>
+                    <td className="px-2 py-1 text-right font-mono text-text-secondary">{fmtNum(row.momentum_6m, 1)}</td>
+                    <td className="px-2 py-1 text-right font-mono text-text-secondary">{fmtNum(row.momentum_12m, 1)}</td>
+                    <td className="px-2 py-1 text-right font-mono text-text-primary">{fmtNum(row.score, 1)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
 
+function SectorLayerPanel({ winners, ranked }: { winners?: SectorWinner[]; ranked?: SectorWinner[] }) {
+  const top = (winners && winners.length ? winners : ranked) || [];
+  return (
+    <section className="rounded-lg border border-bg-border bg-bg-secondary/16 p-3">
+      <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-text-primary">
+        <Layers size={15} className="text-accent-blue" />
+        L2 · Sector winners vs Nifty50
+      </div>
+      {top.length ? (
+        <div className="space-y-1.5">
+          {top.map((sector) => (
+            <div
+              key={sector.code}
+              className="flex items-center justify-between rounded-md border border-bg-border bg-bg-primary/24 px-3 py-2"
+            >
+              <div>
+                <div className="text-sm font-semibold text-text-primary">{sector.name}</div>
+                <div className={clsx("text-[11px] uppercase tracking-wide", toneForQuadrant(sector.quadrant))}>
+                  {sector.quadrant}
+                </div>
+              </div>
+              <div className="font-mono text-sm text-text-primary">
+                {sector.rs_pct > 0 ? "+" : ""}
+                {fmtNum(sector.rs_pct, 2)}%
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <EmptyState text="No sector winners yet." />
+      )}
+    </section>
+  );
+}
+
+// ── Ranked alpha candidates ───────────────────────────────────────────────
+function RankedScanTable({ rows }: { rows: AlphaRow[] }) {
+  if (!rows.length) {
+    return <EmptyState text="Run an alpha scan to populate the ranked candidates." />;
+  }
   return (
     <div className="overflow-hidden rounded-lg border border-bg-border">
       <div className="max-h-[560px] overflow-auto">
         <table className="min-w-full border-separate border-spacing-0 text-sm">
           <thead className="sticky top-0 z-10 bg-bg-card text-[11px] uppercase tracking-[0.12em] text-text-muted">
             <tr>
-              <th className="border-b border-bg-border px-3 py-2 text-left font-semibold">Rank</th>
+              <th className="border-b border-bg-border px-3 py-2 text-left font-semibold">#</th>
               <th className="border-b border-bg-border px-3 py-2 text-left font-semibold">Symbol</th>
-              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Score</th>
+              <th className="border-b border-bg-border px-3 py-2 text-left font-semibold">Sector</th>
               <th className="border-b border-bg-border px-3 py-2 text-left font-semibold">Bias</th>
-              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Conv</th>
-              {FEATURE_COLUMNS.map((column) => (
-                <th key={column.key} className="border-b border-bg-border px-3 py-2 text-right font-semibold">
-                  {column.label}
-                </th>
-              ))}
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Alpha</th>
+              <th className="border-b border-bg-border px-3 py-2 text-center font-semibold">Gate</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Sec RS%</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Stk RS%</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Trend</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">MP</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">OF</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">ATM OI</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((row, index) => {
-              const active = selected === row.instrument;
-              return (
-                <tr
-                  key={row.instrument}
-                  onClick={() => onSelect(row.instrument)}
+            {rows.map((row, index) => (
+              <tr key={row.instrument} className="border-b border-bg-border/70 bg-bg-secondary/10 hover:bg-bg-hover/60">
+                <td className="border-b border-bg-border/60 px-3 py-2 font-mono text-xs text-text-muted">{index + 1}</td>
+                <td className="border-b border-bg-border/60 px-3 py-2 font-semibold text-text-primary">{row.instrument}</td>
+                <td className="border-b border-bg-border/60 px-3 py-2 text-xs text-text-secondary">{row.sector_code || "—"}</td>
+                <td className="border-b border-bg-border/60 px-3 py-2">
+                  <span
+                    className={clsx(
+                      "rounded-md border px-2 py-1 text-[10px] uppercase",
+                      toneForBias(row.directional_bias),
+                    )}
+                  >
+                    {row.directional_bias}
+                  </span>
+                </td>
+                <td
                   className={clsx(
-                    "cursor-pointer border-b border-bg-border/70 transition-colors",
-                    active ? "bg-accent-blue/12" : "bg-bg-secondary/10 hover:bg-bg-hover/60",
+                    "border-b border-bg-border/60 px-3 py-2 text-right font-mono font-semibold",
+                    toneForGate(row.gate_passed, row.composite_alpha_score),
                   )}
                 >
-                  <td className="border-b border-bg-border/60 px-3 py-2 font-mono text-xs text-text-muted">{index + 1}</td>
-                  <td className="border-b border-bg-border/60 px-3 py-2 font-semibold text-text-primary">{row.instrument}</td>
-                  <td className={clsx("border-b border-bg-border/60 px-3 py-2 text-right font-mono", scoreTone(row.composite_score))}>
-                    {formatNumber(row.composite_score)}
-                  </td>
-                  <td className="border-b border-bg-border/60 px-3 py-2">
-                    <span className={clsx("rounded-md border px-2 py-1 text-[11px] uppercase", toneForBias(row.directional_bias))}>
-                      {row.directional_bias}
-                    </span>
-                  </td>
-                  <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-text-secondary">
-                    {formatNumber(row.bias_conviction)}
-                  </td>
-                  {FEATURE_COLUMNS.map((column) => (
-                    <td key={column.key} className="border-b border-bg-border/60 px-3 py-2 text-right">
-                      <div className="flex min-w-[54px] flex-col items-end gap-1">
-                        <span className="font-mono text-xs text-text-secondary">{formatNumber(row[column.key], 1)}</span>
-                        <FeatureBar value={Number(row[column.key] || 0)} />
-                      </div>
-                    </td>
-                  ))}
-                </tr>
-              );
-            })}
+                  {fmtNum(row.composite_alpha_score, 1)}
+                </td>
+                <td className="border-b border-bg-border/60 px-3 py-2 text-center">
+                  {row.gate_passed ? (
+                    <CheckCircle2 size={14} className="mx-auto text-accent-green" />
+                  ) : (
+                    <span className="text-[10px] text-text-muted">·</span>
+                  )}
+                </td>
+                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs text-text-secondary">
+                  {fmtNum(row.sector_rs_pct, 2)}
+                </td>
+                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs text-text-secondary">
+                  {fmtNum(row.stock_rs_pct, 2)}
+                </td>
+                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs text-text-secondary">
+                  {fmtNum(row.trend_score, 2)}
+                </td>
+                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs text-text-secondary">
+                  <span title={row.mp_meta?.classification || ""}>{fmtNum(row.mp_score, 1)}</span>
+                </td>
+                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs text-text-secondary">
+                  {fmtNum(row.of_score, 1)}
+                </td>
+                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs text-text-secondary">
+                  {fmtCompact(row.atm_oi)}
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
@@ -272,327 +465,284 @@ function ScanTable({
   );
 }
 
-function FeatureScoreChart({ row }: { row?: CBEScanRow }) {
-  if (!row) return <EmptyState text="Run a scan or select an instrument." />;
-  const data = FEATURE_COLUMNS.map((column) => ({
-    name: column.label,
-    score: Number(row[column.key] || 0),
-  }));
+// ── Open Portfolio ────────────────────────────────────────────────────────
+function OpenPortfolioTable({ positions }: { positions: PaperPosition[] }) {
+  if (!positions.length) {
+    return <EmptyState text="No open positions. Paper book is flat." />;
+  }
   return (
-    <div className="h-[210px]">
-      <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data} margin={{ top: 12, right: 8, left: -28, bottom: 0 }}>
-          <CartesianGrid stroke="rgba(95,109,135,0.22)" vertical={false} />
-          <XAxis dataKey="name" tick={{ fill: "#7f8ba3", fontSize: 11 }} axisLine={false} tickLine={false} />
-          <YAxis domain={[0, 10]} tick={{ fill: "#7f8ba3", fontSize: 11 }} axisLine={false} tickLine={false} />
-          <Tooltip contentStyle={chartTooltipStyle()} formatter={(value) => formatNumber(value, 2)} />
-          <Bar dataKey="score" fill="#60a5fa" radius={[4, 4, 0, 0]} />
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function PriceChart({ analytics }: { analytics?: CBEInstrumentAnalytics }) {
-  const data = analytics?.ohlc || [];
-  if (!data.length) return <EmptyState text="No price history for the selected instrument." />;
-  return (
-    <div className="h-[260px]">
-      <ResponsiveContainer width="100%" height="100%">
-        <ComposedChart data={data} margin={{ top: 12, right: 16, left: -20, bottom: 0 }}>
-          <CartesianGrid stroke="rgba(95,109,135,0.22)" vertical={false} />
-          <XAxis dataKey="date" tick={{ fill: "#7f8ba3", fontSize: 10 }} tickLine={false} axisLine={false} minTickGap={24} />
-          <YAxis yAxisId="price" tick={{ fill: "#7f8ba3", fontSize: 11 }} tickLine={false} axisLine={false} width={58} />
-          <YAxis yAxisId="volume" orientation="right" tick={{ fill: "#7f8ba3", fontSize: 11 }} tickLine={false} axisLine={false} width={44} tickFormatter={formatCompact} />
-          <Tooltip contentStyle={chartTooltipStyle()} formatter={(value, name) => [formatNumber(value, name === "volume" ? 0 : 2), name]} />
-          <Bar yAxisId="volume" dataKey="volume" fill="rgba(96,165,250,0.22)" radius={[3, 3, 0, 0]} />
-          <Line yAxisId="price" type="monotone" dataKey="close" stroke="#34d399" strokeWidth={2} dot={false} />
-        </ComposedChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function OptionOiChart({ analytics }: { analytics?: CBEInstrumentAnalytics }) {
-  const data = (analytics?.option_chain || []).slice(0, 70);
-  if (!data.length) return <EmptyState text="No option chain snapshot for the selected instrument." />;
-  return (
-    <div className="h-[260px]">
-      <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data} margin={{ top: 12, right: 16, left: -20, bottom: 0 }}>
-          <CartesianGrid stroke="rgba(95,109,135,0.22)" vertical={false} />
-          <XAxis dataKey="strike" tick={{ fill: "#7f8ba3", fontSize: 10 }} tickLine={false} axisLine={false} minTickGap={18} />
-          <YAxis tick={{ fill: "#7f8ba3", fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={formatCompact} />
-          <Tooltip contentStyle={chartTooltipStyle()} formatter={(value) => formatCompact(value)} />
-          <Bar dataKey="call_oi" name="Call OI" fill="#60a5fa" radius={[3, 3, 0, 0]} />
-          <Bar dataKey="put_oi" name="Put OI" fill="#34d399" radius={[3, 3, 0, 0]} />
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function IvPcrChart({ analytics }: { analytics?: CBEInstrumentAnalytics }) {
-  const data = useMemo(() => {
-    const byDate = new Map<string, Record<string, unknown>>();
-    for (const row of analytics?.iv_history || []) {
-      const key = String(row.date);
-      byDate.set(key, { ...(byDate.get(key) || { date: key }), iv: row.iv });
-    }
-    for (const row of analytics?.pcr_history || []) {
-      const key = String(row.date);
-      byDate.set(key, { ...(byDate.get(key) || { date: key }), pcr: row.pcr });
-    }
-    return Array.from(byDate.values());
-  }, [analytics?.iv_history, analytics?.pcr_history]);
-  if (!data.length) return <EmptyState text="No IV/PCR history for the selected instrument." />;
-  return (
-    <div className="h-[220px]">
-      <ResponsiveContainer width="100%" height="100%">
-        <ComposedChart data={data} margin={{ top: 12, right: 16, left: -20, bottom: 0 }}>
-          <CartesianGrid stroke="rgba(95,109,135,0.22)" vertical={false} />
-          <XAxis dataKey="date" tick={{ fill: "#7f8ba3", fontSize: 10 }} tickLine={false} axisLine={false} minTickGap={24} />
-          <YAxis yAxisId="left" tick={{ fill: "#7f8ba3", fontSize: 11 }} tickLine={false} axisLine={false} />
-          <YAxis yAxisId="right" orientation="right" tick={{ fill: "#7f8ba3", fontSize: 11 }} tickLine={false} axisLine={false} />
-          <Tooltip contentStyle={chartTooltipStyle()} formatter={(value) => formatNumber(value, 2)} />
-          <Line yAxisId="left" type="monotone" dataKey="iv" name="IV" stroke="#f59e0b" strokeWidth={2} dot={false} />
-          <Line yAxisId="right" type="monotone" dataKey="pcr" name="PCR" stroke="#a78bfa" strokeWidth={2} dot={false} />
-        </ComposedChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function DetailTabs({
-  row,
-  analytics,
-  isLoading,
-  activeTab,
-  onTab,
-}: {
-  row?: CBEScanRow;
-  analytics?: CBEInstrumentAnalytics;
-  isLoading: boolean;
-  activeTab: DetailTab;
-  onTab: (tab: DetailTab) => void;
-}) {
-  const symbol = analytics?.symbol || row?.instrument;
-  const scoreRow = row || scoreToScanRow(analytics?.score as Record<string, any> | null | undefined);
-  return (
-    <section className="rounded-lg border border-bg-border bg-bg-secondary/16 p-3">
-      <div className="mb-3 flex items-start justify-between gap-3">
-        <div>
-          <div className="text-[11px] uppercase tracking-[0.14em] text-text-muted">Instrument</div>
-          <div className="mt-1 text-lg font-semibold text-text-primary">{symbol || "--"}</div>
-        </div>
-        {scoreRow ? (
-          <div className={clsx("rounded-md border px-2 py-1 text-xs uppercase", toneForBias(scoreRow.directional_bias))}>
-            {scoreRow.directional_bias}
-          </div>
-        ) : null}
+    <div className="overflow-hidden rounded-lg border border-bg-border">
+      <div className="max-h-[480px] overflow-auto">
+        <table className="min-w-full border-separate border-spacing-0 text-sm">
+          <thead className="sticky top-0 z-10 bg-bg-card text-[11px] uppercase tracking-[0.12em] text-text-muted">
+            <tr>
+              <th className="border-b border-bg-border px-3 py-2 text-left font-semibold">Opened</th>
+              <th className="border-b border-bg-border px-3 py-2 text-left font-semibold">Symbol</th>
+              <th className="border-b border-bg-border px-3 py-2 text-left font-semibold">Side</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Qty</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Entry</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Mark</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Notional</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Unrealized P&L</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Alpha</th>
+            </tr>
+          </thead>
+          <tbody>
+            {positions.map((p) => (
+              <tr key={p.position_id} className="border-b border-bg-border/70 bg-bg-secondary/10">
+                <td className="border-b border-bg-border/60 px-3 py-2 font-mono text-[11px] text-text-muted">
+                  {fmtDate(p.opened_at)}
+                </td>
+                <td className="border-b border-bg-border/60 px-3 py-2 font-semibold text-text-primary">{p.instrument}</td>
+                <td className="border-b border-bg-border/60 px-3 py-2">
+                  <span
+                    className={clsx(
+                      "inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] uppercase",
+                      p.direction === "long"
+                        ? "border-accent-green/35 bg-accent-green/10 text-accent-green"
+                        : "border-accent-red/35 bg-accent-red/10 text-accent-red",
+                    )}
+                  >
+                    {p.direction === "long" ? <ArrowUpRight size={11} /> : <ArrowDownRight size={11} />}
+                    {p.direction}
+                  </span>
+                </td>
+                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs">{p.quantity}</td>
+                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs">
+                  {fmtNum(p.entry_price, 2)}
+                </td>
+                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs">
+                  {fmtNum(p.latest_close, 2)}
+                </td>
+                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs">
+                  {fmtRupee(p.notional)}
+                </td>
+                <td
+                  className={clsx(
+                    "border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs font-semibold",
+                    tonePnL(p.unrealized_pnl),
+                  )}
+                >
+                  {p.unrealized_pnl >= 0 ? "+" : ""}
+                  {fmtRupee(p.unrealized_pnl)}
+                </td>
+                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs text-text-secondary">
+                  {fmtNum(p.latest_composite_score ?? p.composite_score, 1)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
-      <div className="mb-3 grid grid-cols-4 gap-1 rounded-lg border border-bg-border bg-bg-primary/20 p-1">
-        {TABS.map((tab) => {
-          const Icon = tab.icon;
-          return (
-            <button
-              key={tab.key}
-              type="button"
-              onClick={() => onTab(tab.key)}
-              className={clsx(
-                "inline-flex min-h-9 items-center justify-center gap-1 rounded-md px-2 text-xs font-semibold transition-colors",
-                activeTab === tab.key ? "bg-accent-blue/18 text-accent-blue" : "text-text-muted hover:bg-bg-hover/60",
-              )}
-            >
-              <Icon size={13} />
-              <span>{tab.label}</span>
-            </button>
-          );
-        })}
-      </div>
-      {isLoading ? (
-        <EmptyState text="Loading instrument analytics..." />
-      ) : activeTab === "overview" ? (
-        <div className="space-y-3">
-          <FeatureScoreChart row={scoreRow} />
-          <div className="grid grid-cols-3 gap-2 text-xs">
-            <div className="rounded-lg border border-bg-border bg-bg-primary/24 px-3 py-2">
-              <div className="text-text-muted">Score</div>
-              <div className={clsx("mt-1 font-mono text-base font-semibold", scoreTone(Number(scoreRow?.composite_score || 0)))}>
-                {formatNumber(scoreRow?.composite_score)}
-              </div>
-            </div>
-            <div className="rounded-lg border border-bg-border bg-bg-primary/24 px-3 py-2">
-              <div className="text-text-muted">OHLC</div>
-              <div className="mt-1 font-mono text-base font-semibold text-text-primary">{analytics?.ohlc?.length ?? "--"}</div>
-            </div>
-            <div className="rounded-lg border border-bg-border bg-bg-primary/24 px-3 py-2">
-              <div className="text-text-muted">Strikes</div>
-              <div className="mt-1 font-mono text-base font-semibold text-text-primary">{analytics?.option_chain?.length ?? "--"}</div>
-            </div>
-          </div>
-        </div>
-      ) : activeTab === "price" ? (
-        <div className="space-y-3">
-          <PriceChart analytics={analytics} />
-          <IvPcrChart analytics={analytics} />
-        </div>
-      ) : activeTab === "options" ? (
-        <OptionOiChart analytics={analytics} />
-      ) : (
-        <div className="space-y-2">
-          {FEATURE_COLUMNS.map((column) => {
-            const detailKey = column.key.replace("_score", "").replace("f1_vc", "f1_vc").replace("f2_omp", "f2_omp") as keyof NonNullable<CBEScanRow["details"]>;
-            const evidence = scoreRow?.details?.[detailKey];
-            return (
-              <div key={column.key} className="rounded-lg border border-bg-border bg-bg-primary/24 px-3 py-2">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs font-semibold text-text-secondary">{column.name}</span>
-                  <span className="font-mono text-sm text-text-primary">{formatNumber(scoreRow?.[column.key], 2)}</span>
-                </div>
-                <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap text-[11px] leading-relaxed text-text-muted">
-                  {evidence ? JSON.stringify(evidence, null, 2) : "No detailed evidence available."}
-                </pre>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </section>
+    </div>
   );
 }
 
+// ── Historical Trades ─────────────────────────────────────────────────────
+function HistoricalTradesTable({ positions }: { positions: PaperPosition[] }) {
+  if (!positions.length) {
+    return <EmptyState text="No closed trades yet. History will appear here after the first close." />;
+  }
+  return (
+    <div className="overflow-hidden rounded-lg border border-bg-border">
+      <div className="max-h-[480px] overflow-auto">
+        <table className="min-w-full border-separate border-spacing-0 text-sm">
+          <thead className="sticky top-0 z-10 bg-bg-card text-[11px] uppercase tracking-[0.12em] text-text-muted">
+            <tr>
+              <th className="border-b border-bg-border px-3 py-2 text-left font-semibold">Closed</th>
+              <th className="border-b border-bg-border px-3 py-2 text-left font-semibold">Symbol</th>
+              <th className="border-b border-bg-border px-3 py-2 text-left font-semibold">Side</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Qty</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Entry</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Exit</th>
+              <th className="border-b border-bg-border px-3 py-2 text-right font-semibold">Realized P&L</th>
+              <th className="border-b border-bg-border px-3 py-2 text-left font-semibold">Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            {positions.map((p) => (
+              <tr key={p.position_id} className="border-b border-bg-border/70 bg-bg-secondary/10">
+                <td className="border-b border-bg-border/60 px-3 py-2 font-mono text-[11px] text-text-muted">
+                  {fmtDate(p.closed_at)}
+                </td>
+                <td className="border-b border-bg-border/60 px-3 py-2 font-semibold text-text-primary">{p.instrument}</td>
+                <td className="border-b border-bg-border/60 px-3 py-2">
+                  <span
+                    className={clsx(
+                      "rounded-md border px-2 py-1 text-[10px] uppercase",
+                      p.direction === "long"
+                        ? "border-accent-green/35 bg-accent-green/10 text-accent-green"
+                        : "border-accent-red/35 bg-accent-red/10 text-accent-red",
+                    )}
+                  >
+                    {p.direction}
+                  </span>
+                </td>
+                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs">{p.quantity}</td>
+                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs">
+                  {fmtNum(p.entry_price, 2)}
+                </td>
+                <td className="border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs">
+                  {fmtNum(p.exit_price, 2)}
+                </td>
+                <td
+                  className={clsx(
+                    "border-b border-bg-border/60 px-3 py-2 text-right font-mono text-xs font-semibold",
+                    tonePnL(p.realized_pnl),
+                  )}
+                >
+                  {p.realized_pnl >= 0 ? "+" : ""}
+                  {fmtRupee(p.realized_pnl)}
+                </td>
+                <td className="border-b border-bg-border/60 px-3 py-2 text-xs text-text-secondary">
+                  {p.close_reason || "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Journal ───────────────────────────────────────────────────────────────
+function JournalList({ records }: { records: JournalRecord[] }) {
+  if (!records.length) {
+    return <EmptyState text="Journal is empty. Open/close events will land here as they happen." />;
+  }
+  return (
+    <div className="max-h-[480px] space-y-2 overflow-auto pr-1">
+      {records.map((r, idx) => (
+        <div
+          key={`${r.recorded_at}-${idx}`}
+          className="rounded-lg border border-bg-border bg-bg-primary/24 px-3 py-2 text-xs"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <span
+                className={clsx(
+                  "rounded-md border px-2 py-0.5 text-[10px] uppercase",
+                  r.event === "open"
+                    ? "border-accent-blue/40 bg-accent-blue/10 text-accent-blue"
+                    : "border-accent-amber/40 bg-accent-amber/10 text-accent-amber",
+                )}
+              >
+                {r.event}
+              </span>
+              <span className="font-semibold text-text-primary">{r.instrument}</span>
+              {r.direction ? (
+                <span className="text-text-muted">{r.direction}</span>
+              ) : null}
+            </div>
+            <span className="font-mono text-[10px] text-text-muted">{fmtDate(r.recorded_at)}</span>
+          </div>
+          <div className="mt-1 grid grid-cols-2 gap-2 text-text-secondary md:grid-cols-4">
+            {r.entry_price !== undefined ? <div>Entry: <span className="font-mono">{fmtNum(r.entry_price, 2)}</span></div> : null}
+            {r.exit_price !== undefined ? <div>Exit: <span className="font-mono">{fmtNum(r.exit_price, 2)}</span></div> : null}
+            {r.quantity !== undefined ? <div>Qty: <span className="font-mono">{r.quantity}</span></div> : null}
+            {r.realized_pnl !== undefined ? (
+              <div className={tonePnL(r.realized_pnl)}>
+                Realized: <span className="font-mono font-semibold">{fmtRupee(r.realized_pnl)}</span>
+              </div>
+            ) : null}
+            {r.close_reason ? <div className="col-span-2 text-text-muted">↳ {r.close_reason}</div> : null}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Main workspace ────────────────────────────────────────────────────────
 export default function CBEWorkspace() {
-  const source: CBESource = "project_timescale";
-  const [watchlistMinScore, setWatchlistMinScore] = useState(7);
-  const [watchlistMaxSize, setWatchlistMaxSize] = useState(15);
-  const [selectedSymbol, setSelectedSymbol] = useState<string | undefined>();
-  const [instrumentSearch, setInstrumentSearch] = useState("");
-  const [activeTab, setActiveTab] = useState<DetailTab>("overview");
+  const [activeTab, setActiveTab] = useState<DeskTab>("ranked");
+  const [resetting, setResetting] = useState(false);
 
-  const universeQuery = useQuery({
-    queryKey: ["cbeUniverse"],
-    queryFn: () => getCBEUniverse().then((response) => response.data as { count: number; symbols: string[] }),
-    staleTime: 5 * 60_000,
-  });
+  // The latest persisted scan (alpha-engine output)
   const latestQuery = useQuery({
-    queryKey: ["cbeLatest", source],
-    queryFn: () => getCBELatestScan(source).then((response) => response.data as CBEScanPayload),
+    queryKey: ["cbeAlphaLatest"],
+    queryFn: () => getCBELatestScan().then((r) => r.data as AlphaPayload),
     staleTime: 30_000,
   });
 
+  // On-demand scan
   const scanMutation = useMutation({
     mutationFn: () =>
-      runCBEScan({
-        source,
-        watchlist_min_score: watchlistMinScore,
-        watchlist_max_size: watchlistMaxSize,
-      }).then((response) => response.data as CBEScanPayload),
-    onSuccess: (payload) => {
-      setSelectedSymbol(payload.watchlist[0]?.instrument || payload.results[0]?.instrument);
-    },
+      runCBEScan({ source: "alpha_engine" }).then((r) => r.data as AlphaPayload),
   });
 
-  const payload = scanMutation.data?.source === source ? scanMutation.data : latestQuery.data;
-  const rankedRows = payload?.results || [];
-  const watchlistRows = payload?.watchlist || [];
-  const allSymbols = useMemo(() => {
-    const set = new Set<string>();
-    for (const symbol of universeQuery.data?.symbols || []) set.add(symbol);
-    for (const row of rankedRows) set.add(row.instrument);
-    return Array.from(set).sort();
-  }, [rankedRows, universeQuery.data?.symbols]);
-  const filteredSymbols = useMemo(() => {
-    const query = instrumentSearch.trim().toUpperCase();
-    if (!query) return allSymbols;
-    return allSymbols.filter((symbol) => symbol.includes(query));
-  }, [allSymbols, instrumentSearch]);
-  const hasScanPayload = Boolean(payload?.scan_date && rankedRows.length);
-  const selectedRow = useMemo(
-    () => rankedRows.find((row) => row.instrument === selectedSymbol) || watchlistRows[0] || rankedRows[0],
-    [rankedRows, selectedSymbol, watchlistRows],
-  );
-  const activeSymbol = selectedSymbol || selectedRow?.instrument || allSymbols[0];
-  const analyticsQuery = useQuery({
-    queryKey: ["cbeInstrumentAnalytics", activeSymbol],
-    queryFn: () => getCBEInstrumentAnalytics(activeSymbol || "").then((response) => response.data as CBEInstrumentAnalytics),
-    enabled: Boolean(activeSymbol),
-    staleTime: 60_000,
+  // Paper book — refresh every 30 s so the portfolio panel stays live
+  const summaryQuery = useQuery({
+    queryKey: ["cbePaperSummary"],
+    queryFn: () => getCBEPaperSummary().then((r) => r.data as PaperSummary),
+    refetchInterval: 30_000,
   });
-  const error = scanMutation.error ? describeApiError(scanMutation.error, "CBE scan failed") : "";
 
-  useEffect(() => {
-    if (!selectedSymbol && activeSymbol) {
-      setSelectedSymbol(activeSymbol);
+  const positionsQuery = useQuery({
+    queryKey: ["cbePaperPositions"],
+    queryFn: () => getCBEPaperPositions("all", 200).then((r) => r.data as PaperPositionsResponse),
+    refetchInterval: 30_000,
+  });
+
+  const journalQuery = useQuery({
+    queryKey: ["cbePaperJournal"],
+    queryFn: () => getCBEPaperJournal(undefined, 200).then((r) => r.data as { records: JournalRecord[] }),
+    refetchInterval: 30_000,
+  });
+
+  const payload = scanMutation.data ?? latestQuery.data;
+  const summary = summaryQuery.data;
+  const positions = positionsQuery.data;
+  const journal = journalQuery.data?.records || [];
+
+  const ranked = payload?.results || [];
+  const watchlist = payload?.watchlist || [];
+  const error = scanMutation.error ? describeApiError(scanMutation.error, "Alpha scan failed") : "";
+
+  const handleReset = async () => {
+    if (!window.confirm("Reset CBE paper account to baseline? This archives all positions + journal.")) return;
+    try {
+      setResetting(true);
+      await resetCBEPaper("frontend");
+      await Promise.all([
+        summaryQuery.refetch(),
+        positionsQuery.refetch(),
+        journalQuery.refetch(),
+      ]);
+    } finally {
+      setResetting(false);
     }
-  }, [activeSymbol, selectedSymbol]);
+  };
+
+  const tabCounts = useMemo(() => {
+    return {
+      ranked: ranked.length,
+      open: positions?.open_positions?.length ?? 0,
+      history: positions?.closed_positions?.length ?? 0,
+      journal: journal.length,
+    };
+  }, [ranked.length, positions, journal.length]);
 
   return (
-    <div className="mx-auto flex w-full max-w-[1540px] flex-col gap-3">
+    <div className="mx-auto flex w-full max-w-[1640px] flex-col gap-3">
       <header className="rounded-lg border border-bg-border bg-bg-secondary/28 px-4 py-3">
         <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
           <div>
             <div className="flex items-center gap-2">
               <Radar size={18} className="text-accent-blue" />
-              <h1 className="text-lg font-semibold text-text-primary">CBE Scanner</h1>
+              <h1 className="text-lg font-semibold text-text-primary">CBE Alpha Engine</h1>
+              <span className="rounded border border-accent-blue/30 bg-accent-blue/10 px-2 py-0.5 text-[10px] uppercase text-accent-blue">
+                v1.1
+              </span>
             </div>
             <div className="mt-1 text-xs text-text-muted">
-              {hasScanPayload ? `${payload?.scan_date} · ${payload?.source}` : "Compression-Before-Expansion watchlist"}
+              Top-down capital rotation · L1 asset → L2 sector → L3 stock → L4 option filter → L7 composite gate
+              {payload?.scan_date ? ` · last scan ${payload.scan_date}` : ""}
+              {payload?.elapsed_seconds ? ` · ${payload.elapsed_seconds.toFixed(2)}s` : ""}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <label className="flex min-w-[220px] items-center gap-2 rounded-lg border border-bg-border bg-bg-primary/30 px-2 py-1.5 text-xs text-text-secondary">
-              <Search size={14} />
-              <input
-                value={instrumentSearch}
-                onChange={(event) => setInstrumentSearch(event.target.value)}
-                placeholder="Find F&O symbol"
-                className="min-w-0 flex-1 bg-transparent text-text-primary outline-none placeholder:text-text-muted"
-              />
-            </label>
-            <select
-              value={activeSymbol || ""}
-              onChange={(event) => {
-                setSelectedSymbol(event.target.value);
-                setActiveTab("overview");
-              }}
-              className="min-h-9 min-w-[160px] rounded-lg border border-bg-border bg-bg-primary/70 px-3 text-sm font-semibold text-text-primary outline-none focus:border-accent-blue"
-            >
-              {filteredSymbols.map((symbol) => (
-                <option key={symbol} value={symbol}>
-                  {symbol}
-                </option>
-              ))}
-            </select>
-            <div className="inline-flex items-center gap-2 rounded-lg border border-accent-green/30 bg-accent-green/10 px-3 py-2 text-xs font-semibold text-accent-green">
-              <Database size={14} />
-              Project Data
-            </div>
-            <label className="flex items-center gap-2 rounded-lg border border-bg-border bg-bg-primary/30 px-2 py-1.5 text-xs text-text-secondary">
-              <SlidersHorizontal size={14} />
-              Min
-              <input
-                type="number"
-                min={0}
-                max={10}
-                step={0.1}
-                value={watchlistMinScore}
-                onChange={(event) => setWatchlistMinScore(Number(event.target.value))}
-                className="w-16 rounded-md border border-bg-border bg-bg-secondary px-2 py-1 font-mono text-text-primary outline-none focus:border-accent-blue"
-              />
-            </label>
-            <label className="flex items-center gap-2 rounded-lg border border-bg-border bg-bg-primary/30 px-2 py-1.5 text-xs text-text-secondary">
-              Max
-              <input
-                type="number"
-                min={1}
-                max={100}
-                step={1}
-                value={watchlistMaxSize}
-                onChange={(event) => setWatchlistMaxSize(Number(event.target.value))}
-                className="w-16 rounded-md border border-bg-border bg-bg-secondary px-2 py-1 font-mono text-text-primary outline-none focus:border-accent-blue"
-              />
-            </label>
             <button
               type="button"
               onClick={() => scanMutation.mutate()}
@@ -600,17 +750,69 @@ export default function CBEWorkspace() {
               className="inline-flex items-center gap-2 rounded-lg border border-accent-blue/40 bg-accent-blue/16 px-3 py-2 text-sm font-semibold text-accent-blue transition-colors hover:bg-accent-blue/24 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {scanMutation.isPending ? <RefreshCw size={15} className="animate-spin" /> : <Play size={15} />}
-              Run
+              Run Alpha Scan
+            </button>
+            <button
+              type="button"
+              onClick={handleReset}
+              disabled={resetting}
+              className="inline-flex items-center gap-2 rounded-lg border border-accent-red/35 bg-accent-red/10 px-3 py-2 text-sm font-semibold text-accent-red transition-colors hover:bg-accent-red/20 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {resetting ? <RefreshCw size={15} className="animate-spin" /> : <RotateCcw size={15} />}
+              Reset Paper Book
             </button>
           </div>
         </div>
       </header>
 
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <Metric label="Universe" value={String(payload?.universe_size ?? universeQuery.data?.count ?? "--")} detail="F&O underlyings loaded" icon={Database} />
-        <Metric label="Scored" value={String(payload?.scored_count ?? "--")} detail="Rows with enough OHLC history" icon={CheckCircle2} />
-        <Metric label="Watchlist" value={String(payload?.watchlist_count ?? "--")} detail={`Score >= ${formatNumber(watchlistMinScore, 1)}`} icon={Radar} />
-        <Metric label="Data" value={String(payload?.source_status?.ohlc_symbols ?? analyticsQuery.data?.source_status?.ohlc_symbols ?? "--")} detail="OHLC symbols loaded" icon={SlidersHorizontal} />
+      {/* Portfolio summary */}
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+        <Metric
+          label="Initial Capital"
+          value={fmtRupee(summary?.initial_capital ?? 0)}
+          icon={Wallet}
+        />
+        <Metric
+          label="Available"
+          value={fmtRupee(summary?.available_capital ?? 0)}
+          detail={`Reserved: ${fmtRupee(summary?.reserved_margin ?? 0)}`}
+          icon={ShieldCheck}
+        />
+        <Metric
+          label="Total Equity"
+          value={fmtRupee(summary?.total_equity ?? 0)}
+          detail={fmtPct(summary?.total_return_pct ?? 0)}
+          icon={TrendingUp}
+          tone={tonePnL((summary?.total_return_pct ?? 0))}
+        />
+        <Metric
+          label="Realized P&L"
+          value={fmtRupee(summary?.realized_pnl ?? 0)}
+          detail={`Unrealized: ${fmtRupee(summary?.unrealized_pnl ?? 0)}`}
+          icon={CheckCircle2}
+          tone={tonePnL(summary?.realized_pnl)}
+        />
+        <Metric
+          label="Win Rate"
+          value={fmtPct((summary?.win_rate ?? 0) * 100, 1)}
+          detail={`${summary?.total_trades ?? 0} closed trades`}
+          icon={Target}
+        />
+        <Metric
+          label="Max Drawdown"
+          value={fmtPct((summary?.max_drawdown ?? 0) * 100, 2)}
+          detail={`Sharpe: ${fmtNum(summary?.sharpe_ratio ?? 0, 2)}`}
+          icon={BarChart3}
+        />
+      </div>
+
+      {/* L1 + L2 layer panels side-by-side */}
+      <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <AssetLayerPanel layer={payload?.asset_layer} />
+        <SectorLayerPanel
+          winners={payload?.sector_layer?.winners}
+          ranked={payload?.sector_layer?.ranked_sectors}
+        />
       </div>
 
       {error ? (
@@ -620,66 +822,82 @@ export default function CBEWorkspace() {
         </div>
       ) : null}
 
-      <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_430px]">
-        <section className="rounded-lg border border-bg-border bg-bg-secondary/16 p-3">
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <div>
-              <div className="text-sm font-semibold text-text-primary">Ranked Scan</div>
-              <div className="text-xs text-text-muted">
-                {rankedRows.length ? `${rankedRows.length} ranked rows · ${watchlistRows.length} cleared watchlist` : "No rankings yet"}
-              </div>
-            </div>
-            {scanMutation.isPending ? (
-              <span className="inline-flex items-center gap-2 rounded-md border border-accent-amber/30 bg-accent-amber/10 px-2 py-1 text-xs text-accent-amber">
-                <RefreshCw size={13} className="animate-spin" />
-                Running
-              </span>
-            ) : null}
+      {/* Tabbed desk */}
+      <section className="rounded-lg border border-bg-border bg-bg-secondary/16 p-3">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          {[
+            { key: "ranked" as const, label: "Ranked candidates", icon: Radar, count: tabCounts.ranked },
+            { key: "open" as const, label: "Open Portfolio", icon: Briefcase, count: tabCounts.open },
+            { key: "history" as const, label: "Historical Trades", icon: History, count: tabCounts.history },
+            { key: "journal" as const, label: "Journal", icon: ListChecks, count: tabCounts.journal },
+          ].map((tab) => {
+            const Icon = tab.icon;
+            const active = activeTab === tab.key;
+            return (
+              <button
+                key={tab.key}
+                type="button"
+                onClick={() => setActiveTab(tab.key)}
+                className={clsx(
+                  "inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors",
+                  active
+                    ? "border-accent-blue/40 bg-accent-blue/14 text-accent-blue"
+                    : "border-bg-border bg-bg-primary/24 text-text-secondary hover:bg-bg-hover/60",
+                )}
+              >
+                <Icon size={13} />
+                {tab.label}
+                <span
+                  className={clsx(
+                    "rounded-full px-1.5 py-0.5 text-[10px] font-mono",
+                    active ? "bg-accent-blue/25 text-accent-blue" : "bg-bg-secondary/50 text-text-muted",
+                  )}
+                >
+                  {tab.count}
+                </span>
+              </button>
+            );
+          })}
+          <div className="ml-auto text-[11px] text-text-muted">
+            {payload?.fno_universe_size ? `F&O universe: ${payload.fno_universe_size}` : null}
+            {payload?.scored_count !== undefined ? ` · scored: ${payload.scored_count}` : null}
+            {payload?.watchlist_count !== undefined
+              ? ` · gate passed: ${payload.watchlist_count}`
+              : null}
           </div>
-          <ScanTable rows={rankedRows} selected={activeSymbol} onSelect={setSelectedSymbol} />
-        </section>
-        <div className="space-y-3">
-          <section className="rounded-lg border border-bg-border bg-bg-secondary/16 p-3">
-            <div className="mb-3 text-sm font-semibold text-text-primary">Watchlist</div>
-            <div className="max-h-[230px] space-y-2 overflow-auto pr-1">
-              {watchlistRows.length ? (
-                watchlistRows.map((row) => (
-                  <button
-                    key={row.instrument}
-                    type="button"
-                    onClick={() => setSelectedSymbol(row.instrument)}
-                    className={clsx(
-                      "flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition-colors",
-                      activeSymbol === row.instrument
-                        ? "border-accent-blue/40 bg-accent-blue/12"
-                        : "border-bg-border bg-bg-primary/24 hover:border-accent-blue/35 hover:bg-accent-blue/8",
-                    )}
-                  >
-                    <div>
-                      <div className="font-semibold text-text-primary">{row.instrument}</div>
-                      <div className="mt-1 text-[11px] text-text-muted">{row.directional_bias}</div>
-                    </div>
-                    <div className={clsx("font-mono text-sm font-semibold", scoreTone(row.composite_score))}>
-                      {formatNumber(row.composite_score)}
-                    </div>
-                  </button>
-                ))
-              ) : (
-                <div className="rounded-lg border border-bg-border bg-bg-primary/24 px-3 py-5 text-sm text-text-muted">
-                  No watchlist rows.
-                </div>
-              )}
-            </div>
-          </section>
-          <DetailTabs
-            row={selectedRow?.instrument === activeSymbol ? selectedRow : undefined}
-            analytics={analyticsQuery.data}
-            isLoading={analyticsQuery.isFetching}
-            activeTab={activeTab}
-            onTab={setActiveTab}
-          />
         </div>
-      </div>
+
+        {activeTab === "ranked" ? (
+          <RankedScanTable rows={ranked} />
+        ) : activeTab === "open" ? (
+          <OpenPortfolioTable positions={positions?.open_positions ?? []} />
+        ) : activeTab === "history" ? (
+          <HistoricalTradesTable positions={positions?.closed_positions ?? []} />
+        ) : (
+          <JournalList records={journal} />
+        )}
+      </section>
+
+      {watchlist.length ? (
+        <section className="rounded-lg border border-accent-green/35 bg-accent-green/8 p-3">
+          <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-accent-green">
+            <CheckCircle2 size={15} />
+            Gate-cleared watchlist ({watchlist.length})
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {watchlist.map((row) => (
+              <span
+                key={row.instrument}
+                className="inline-flex items-center gap-2 rounded-md border border-accent-green/35 bg-accent-green/10 px-2.5 py-1 text-xs text-accent-green"
+              >
+                <span className="font-semibold text-text-primary">{row.instrument}</span>
+                <span className="font-mono">{fmtNum(row.composite_alpha_score, 1)}</span>
+                <span className="text-[10px] uppercase">{row.directional_bias}</span>
+              </span>
+            ))}
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }

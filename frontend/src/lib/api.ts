@@ -396,6 +396,15 @@ export const getCBEInstrumentAnalytics = (symbol: string, lookbackDays = 300) =>
     timeout: 90_000,
   });
 
+// CBE paper-trading book (alpha engine v1+)
+export const getCBEPaperSummary = () => api.get("/api/cbe/paper-summary");
+export const getCBEPaperPositions = (status: "all" | "open" | "closed" = "all", limit = 100) =>
+  api.get("/api/cbe/paper-positions", { params: { status, limit } });
+export const getCBEPaperJournal = (instrument?: string, limit = 100) =>
+  api.get("/api/cbe/paper-journal", { params: { instrument, limit } });
+export const resetCBEPaper = (actor?: string) =>
+  api.post("/api/cbe/reset-paper", { confirm: "RESET", actor });
+
 // ── Directional Long Options ───────────────────────────────────────────────
 export const getDirectionalOptionsSummary = () =>
   api.get("/api/directional-options/summary");
