@@ -60,9 +60,10 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Verify instance reachability
+        env:
+          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
         run: |
           set -euo pipefail
-          INSTANCE_ID="${{ secrets.EC2_INSTANCE_ID }}"
           if [ -z "$INSTANCE_ID" ]; then
             echo "::error::EC2_INSTANCE_ID secret is not set."
             exit 1
@@ -79,15 +80,24 @@ jobs:
 
       - name: Send deploy command via SSM
         id: send
+        # All untrusted/user-controlled values come in through env: so they
+        # never get pasted into bash via ${{ }} interpolation. Round-2
+        # failure: my own commit message contained backticks and the YAML
+        # interpolation evaluated them as command substitution on the
+        # runner. Lesson: never expand github.event.* directly inside a
+        # `run:` script.
+        env:
+          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          INSTANCE_ID="${{ secrets.EC2_INSTANCE_ID }}"
           FORCE_FLAG=""
           if [ "$FORCE_RECREATE" = "true" ]; then
             FORCE_FLAG="--force-recreate"
           fi
-          COMMIT_SHA="${{ github.sha }}"
-          COMMIT_MSG=$(echo "${{ github.event.head_commit.message }}" | head -1 || echo "manual deploy")
+          # SSM comment is constrained to 100 chars and surface-only; the SHA
+          # is enough to trace a deploy back to its source commit.
+          COMMENT="Deploy ${COMMIT_SHA:0:12}"
 
           # Write the deploy script to a real file with real newlines.
           # We try the configured REPO_PATH first; if it doesn't exist, fall
@@ -150,7 +160,7 @@ jobs:
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
-            --comment "Deploy ${COMMIT_SHA:0:7}: ${COMMIT_MSG}" \
+            --comment "$COMMENT" \
             --parameters "file:///tmp/ssm_params.json" \
             --cloud-watch-output-config "CloudWatchOutputEnabled=false" \
             --query "Command.CommandId" --output text)
@@ -159,10 +169,11 @@ jobs:
 
       - name: Wait for deploy to finish
         id: wait
+        env:
+          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+          COMMAND_ID: ${{ steps.send.outputs.command_id }}
         run: |
           set -euo pipefail
-          INSTANCE_ID="${{ secrets.EC2_INSTANCE_ID }}"
-          COMMAND_ID="${{ steps.send.outputs.command_id }}"
           # AWS CLI built-in waiter polls every 5s up to 600s.
           aws ssm wait command-executed \
             --command-id "$COMMAND_ID" \
@@ -178,10 +189,12 @@ jobs:
 
       - name: Report deploy output
         if: always()
+        env:
+          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+          COMMAND_ID: ${{ steps.send.outputs.command_id }}
+          STATUS: ${{ steps.wait.outputs.status }}
         run: |
           set +e
-          INSTANCE_ID="${{ secrets.EC2_INSTANCE_ID }}"
-          COMMAND_ID="${{ steps.send.outputs.command_id }}"
           if [ -z "$COMMAND_ID" ]; then
             echo "::error::No command ID was captured; dispatch step failed."
             exit 1
@@ -195,7 +208,6 @@ jobs:
           echo "::group::SSM command StdErr"
           echo "$RESULT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("StandardErrorContent",""))'
           echo "::endgroup::"
-          STATUS="${{ steps.wait.outputs.status }}"
           if [ "$STATUS" != "Success" ]; then
             echo "::error::Deploy did not succeed (final status: $STATUS)."
             exit 1
