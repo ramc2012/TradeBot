@@ -791,14 +791,26 @@ def _config_payload(config: AlphaEngineConfig) -> dict[str, Any]:
 def _derive_equity_exposure(asset_layer: dict[str, Any]) -> float:
     """Convert L1 asset-mix into an equity exposure budget (0-100).
 
-      EQUITIES winner       → 100%
-      EQUITIES top-2        →  70%
-      EQUITIES top-3        →  40%
-      EQUITIES bottom       →  20%
-      Stub/unknown          → 100%
+    Forward-leaning logic (asset_rotation v1):
+      - Prefer the explicit verdict-driven hint when present
+        (ACCELERATE/MAINTAIN/REDUCE/PROBE/AVOID → 100/70/30/30/20).
+      - Falls back to the legacy rank-based ladder for older payloads.
+
+    Why verdicts beat rank: in a market where equities is the historical
+    winner but its acceleration just flipped negative, RANK still says
+    100% but VERDICT says REDUCE → 30%. The whole point is to ACT on
+    inflection, not on yesterday's leadership.
     """
     if asset_layer.get("stub"):
         return 100.0
+    # New path — verdict-driven (asset_rotation v1+)
+    hint = asset_layer.get("equity_exposure_pct_hint")
+    if hint is not None:
+        try:
+            return float(hint)
+        except (TypeError, ValueError):
+            pass
+    # Legacy path — rank-based ladder (pre-v1 payloads)
     rank = asset_layer.get("asset_rank") or []
     if not rank:
         return 100.0
