@@ -78,3 +78,71 @@ def test_tick_size_table_covers_full_universe() -> None:
     for underlying in s2.S2_EXPIRY_ROUTING:
         assert underlying in s2.S2_TICK_SIZE, f"missing tick size for {underlying}"
         assert s2.S2_TICK_SIZE[underlying] > 0
+
+
+# ─── resolve_s2_expiry_targets ────────────────────────────────────────────
+
+
+def _scope(monthlies: dict[str, str], expiries: list[str]) -> dict:
+    """Mimic the shape of atm_watchlist_service.get_expiries()."""
+    return {"index_monthlies": monthlies, "expiries": expiries}
+
+
+def test_resolve_nifty_picks_weekly_and_monthly() -> None:
+    scope = _scope(
+        {"NIFTY": "2026-06-30"},
+        ["2026-06-04", "2026-06-11", "2026-06-25", "2026-06-30", "2026-07-30"],
+    )
+    targets = s2.resolve_s2_expiry_targets("NIFTY", scope)
+    # Monthly first (preserved ordering), then weekly.
+    assert ("monthly", "2026-06-30") in targets
+    # Weekly = earliest non-monthly expiry after today. Test runs at
+    # date >= 2026-05-31 so 2026-06-04 is the nearest forward weekly.
+    weekly = [(t, e) for t, e in targets if t == "weekly"]
+    assert len(weekly) == 1
+    assert weekly[0][1] < "2026-06-30"
+
+
+def test_resolve_banknifty_monthly_only_even_when_weekly_exists() -> None:
+    # BANKNIFTY policy says monthly-only, regardless of what the broker
+    # chain lists. We deliberately drop weekly contracts here.
+    scope = _scope(
+        {"BANKNIFTY": "2026-06-30"},
+        ["2026-06-25", "2026-06-30"],
+    )
+    targets = s2.resolve_s2_expiry_targets("BANKNIFTY", scope)
+    tracks = [t for t, _ in targets]
+    assert "monthly" in tracks
+    assert "weekly" not in tracks
+
+
+def test_resolve_sensex_with_only_one_listed_expiry() -> None:
+    # SENSEX currently shows just the monthly contract in the live chain
+    # (the BSE weekly may be a separate symbol). Resolver should still
+    # surface monthly without throwing.
+    scope = _scope(
+        {"SENSEX": "2026-06-25"},
+        ["2026-06-25"],
+    )
+    targets = s2.resolve_s2_expiry_targets("SENSEX", scope)
+    assert targets == [("monthly", "2026-06-25")]
+
+
+def test_resolve_empty_scope_drops_all() -> None:
+    assert s2.resolve_s2_expiry_targets("NIFTY", {}) == []
+    assert s2.resolve_s2_expiry_targets("BANKNIFTY", {"index_monthlies": {}}) == []
+
+
+def test_resolve_skips_today_and_past_for_weekly() -> None:
+    # Weekly resolver must not pick a same-day expiry — the contract is
+    # essentially dead after the morning open.
+    from datetime import date as _date
+
+    today_iso = _date.today().isoformat()
+    scope = _scope(
+        {"NIFTY": "2026-06-30"},
+        [today_iso, "2026-06-25", "2026-06-30"],
+    )
+    targets = s2.resolve_s2_expiry_targets("NIFTY", scope)
+    weekly_expiries = [e for t, e in targets if t == "weekly"]
+    assert today_iso not in weekly_expiries

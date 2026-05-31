@@ -147,6 +147,70 @@ def expiry_tracks_for(underlying: str) -> tuple[str, ...]:
     return S2_EXPIRY_ROUTING.get(str(underlying).upper(), ("monthly",))
 
 
+def resolve_s2_expiry_targets(
+    underlying: str,
+    expiry_scope: dict[str, Any],
+) -> list[tuple[str, str]]:
+    """Pick the expiry contracts S2 should trade for an underlying.
+
+    Returns a list of ``(track, expiry_iso)`` tuples. ``track`` is
+    ``"weekly"`` or ``"monthly"``. The order is monthly-first so the
+    deeper contract takes precedence when capacity is tight (the lane's
+    position cap counts all open positions equally).
+
+    Resolution rules — keyed off the live ``expiry_scope`` payload that
+    :func:`atm_watchlist_service.get_expiries` returns:
+
+    * ``monthly`` — read from ``expiry_scope["index_monthlies"][underlying]``.
+      This is the authoritative NSE/BSE monthly anchor (already
+      day-of-week normalised by the watchlist service).
+    * ``weekly`` — pick the **earliest** broker-listed expiry that is
+      both later than today and earlier than the monthly anchor. We
+      intentionally use the *nearest* weekly rather than the LAST one
+      before the monthly because S2's MP+OF triggers want high gamma /
+      short TTE; the nearest weekly is therefore preferred. When no such
+      contract exists (e.g. SENSEX often has only one listed expiry per
+      month, or weeklies were discontinued), the weekly slot is skipped.
+
+    Only the underlyings in :data:`S2_EXPIRY_ROUTING` with ``"weekly"``
+    in their track tuple are eligible for a weekly contract. The
+    others get a single-element ``[("monthly", iso)]`` result even when
+    multiple expiries exist in the broker chain — that's the policy
+    layer the user requested.
+    """
+    underlying = str(underlying or "").upper()
+    tracks = expiry_tracks_for(underlying)
+    out: list[tuple[str, str]] = []
+
+    index_monthlies = dict(expiry_scope.get("index_monthlies") or {})
+    monthly_iso = str(index_monthlies.get(underlying) or "").strip()
+    if "monthly" in tracks and monthly_iso:
+        out.append(("monthly", monthly_iso))
+
+    if "weekly" in tracks and monthly_iso:
+        # Walk the broker's expiry ladder for anything earlier than monthly.
+        # ``expiries`` is a sorted-ascending list of ISO date strings; we
+        # pick the first one strictly between today and monthly_iso.
+        from datetime import date as _date
+
+        today_iso = _date.today().isoformat()
+        all_expiries = list(expiry_scope.get("expiries") or [])
+        weekly_candidate: Optional[str] = None
+        for entry in all_expiries:
+            iso = str(entry or "").strip()
+            if not iso or iso == monthly_iso:
+                continue
+            if iso <= today_iso:
+                continue
+            if iso < monthly_iso:
+                weekly_candidate = iso
+                break
+        if weekly_candidate:
+            out.append(("weekly", weekly_candidate))
+
+    return out
+
+
 def shape_result_for_s2(
     result: dict[str, Any],
     *,

@@ -1507,14 +1507,29 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         *,
         live_refresh: bool,
     ) -> dict[str, dict[str, Any]]:
-        index_monthlies = dict(expiry_scope.get("index_monthlies") or {})
-        requests = [
-            (underlying, str(index_monthlies.get(underlying) or "").strip())
-            for underlying in STRATEGY2_UNDERLYINGS
-        ]
-        requests = [(underlying, expiry) for underlying, expiry in requests if expiry]
+        """Resolve the S2 watchlist on the per-underlying expiry-track matrix.
+
+        NIFTY and SENSEX trade BOTH weekly and monthly ATM contracts;
+        BANKNIFTY/FINNIFTY/MIDCPNIFTY trade monthly only. The routing
+        comes from :data:`strategy2_mp_of.S2_EXPIRY_ROUTING`.
+
+        Returned dict is keyed by ``f"{underlying}:{track}"`` so the
+        caller can tell the rows apart even though they share an
+        underlying. Each row is tagged with ``row["expiry_track"]``
+        (``"weekly"`` or ``"monthly"``) so the downstream entry loop
+        can size and book each leg independently.
+        """
+        from paper_engine.strategy2_mp_of import resolve_s2_expiry_targets
+
+        # Build the (underlying, track, expiry) request matrix.
+        requests: list[tuple[str, str, str]] = []
+        for underlying in STRATEGY2_UNDERLYINGS:
+            for track, expiry in resolve_s2_expiry_targets(underlying, expiry_scope):
+                if expiry:
+                    requests.append((underlying, track, expiry))
         if not requests:
             return {}
+
         results = await asyncio.gather(
             *(
                 atm_watchlist_service.get_watchlist(
@@ -1522,19 +1537,27 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     symbols=[underlying],
                     live_refresh=live_refresh,
                 )
-                for underlying, expiry in requests
+                for underlying, _track, expiry in requests
             ),
             return_exceptions=True,
         )
-        rows_by_underlying: dict[str, dict[str, Any]] = {}
-        for result in results:
+
+        rows_by_key: dict[str, dict[str, Any]] = {}
+        for (underlying, track, _expiry), result in zip(requests, results):
             if not isinstance(result, dict):
                 continue
             for row in result.get("rows") or []:
-                underlying = str(row.get("underlying") or "").strip()
-                if underlying in STRATEGY2_UNDERLYINGS:
-                    rows_by_underlying[underlying] = row
-        return rows_by_underlying
+                row_underlying = str(row.get("underlying") or "").strip()
+                if row_underlying != underlying:
+                    continue
+                # Don't mutate the watchlist service's cached dict.
+                tagged = dict(row)
+                tagged["expiry_track"] = track
+                rows_by_key[f"{underlying}:{track}"] = tagged
+                # First matching row per request is the ATM line we want;
+                # if the watchlist returned multiple, we take just one.
+                break
+        return rows_by_key
 
     @staticmethod
     def _broker_failure_message(snapshot: dict[str, Any]) -> str:
@@ -2384,6 +2407,18 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     live_refresh=not local_only_mode,
                 )
                 if strategy2_native_rows:
+                    # The S2 loader returns composite-keyed rows
+                    # ("NIFTY:weekly", "NIFTY:monthly", …). When we have
+                    # composite entries for an underlying, drop the
+                    # legacy single-key entry so the S2 lane doesn't see
+                    # the same underlying both as a one-expiry and as a
+                    # multi-expiry row matrix.
+                    s2_underlyings_with_tracks: set[str] = set()
+                    for key in strategy2_native_rows.keys():
+                        if ":" in key:
+                            s2_underlyings_with_tracks.add(key.split(":", 1)[0])
+                    for underlying in s2_underlyings_with_tracks:
+                        rows_by_underlying.pop(underlying, None)
                     rows_by_underlying.update(strategy2_native_rows)
                     rows = list(rows_by_underlying.values())
                 expiries = sorted({r.get("expiry", "") for r in rows if r.get("expiry")})
@@ -2656,26 +2691,43 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             runtime.last_message = "No index ATM rows available for Strategy 2."
             return
 
+        # Contexts are keyed by (underlying, expiry_track) so the weekly
+        # and monthly NIFTY/SENSEX rows can carry their own option-side
+        # candles, MACD lines, and CVD windows. For status-line display
+        # we still want a single representative context per underlying;
+        # _ctx_for picks the first one for an underlying (monthly comes
+        # first thanks to resolve_s2_expiry_targets's ordering).
         contexts: dict[str, dict[str, Any]] = {}
+
+        def _row_key(r: dict[str, Any]) -> str:
+            return f"{r.get('underlying') or ''}:{r.get('expiry_track') or 'monthly'}"
+
+        def _ctx_for(und: str) -> dict[str, Any]:
+            for k, v in contexts.items():
+                if k.startswith(f"{und}:"):
+                    return v
+            return {}
+
         for row in index_rows:
-            contexts[row["underlying"]] = await self._build_strategy2_signal_context(row, started_at)
+            contexts[_row_key(row)] = await self._build_strategy2_signal_context(row, started_at)
         for underlying in STRATEGY2_UNDERLYINGS:
-            if underlying in contexts:
+            if any(k.startswith(f"{underlying}:") for k in contexts):
                 continue
-            contexts[underlying] = self._build_strategy2_preparation_failure_context(
+            contexts[f"{underlying}:monthly"] = self._build_strategy2_preparation_failure_context(
                 {"underlying": underlying},
                 started_at,
                 RuntimeError("ATM watchlist row missing for configured Strategy 2 underlying"),
             )
 
         runtime.signal_lane = [
-            contexts[underlying]["signal"]
+            _ctx_for(underlying)["signal"]
             for underlying in STRATEGY2_UNDERLYINGS
-            if underlying in contexts
+            if _ctx_for(underlying).get("signal")
         ]
         for row in index_rows:
-            signal = dict(contexts[row["underlying"]].get("signal") or {})
+            signal = dict(contexts.get(_row_key(row), {}).get("signal") or {})
             signal.setdefault("expiry", row.get("expiry"))
+            signal.setdefault("expiry_track", row.get("expiry_track"))
             signal.setdefault("atm_strike", row.get("atm_strike"))
             direction = signal.get("direction")
             if direction == "CE" and row.get("ce"):
@@ -2691,9 +2743,9 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "watchlist_rows": len(index_rows),
             "updated_at": started_at.isoformat(),
             "pipeline": [
-                contexts[underlying]["pipeline"]
+                _ctx_for(underlying)["pipeline"]
                 for underlying in STRATEGY2_UNDERLYINGS
-                if underlying in contexts and contexts[underlying].get("pipeline")
+                if _ctx_for(underlying).get("pipeline")
             ],
         }
 
@@ -2850,10 +2902,23 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         for row in rows:
             if opened >= capacity:
                 break
-            context = contexts.get(row["underlying"]) or {}
+            # Context key: prefer (underlying, expiry_track) so weekly /
+            # monthly rows for the same underlying carry their own
+            # option-side candles + MACD lines. Falls back to the legacy
+            # underlying-only lookup so old callers / pre-refactor states
+            # still resolve cleanly.
+            _ctx_key = f"{row.get('underlying') or ''}:{row.get('expiry_track') or 'monthly'}"
+            context = contexts.get(_ctx_key) or contexts.get(row["underlying"]) or {}
             if not context.get("can_enter"):
                 continue
-            if self._has_underlying_position(runtime, row["underlying"]):
+            # Uniqueness gate: in the weekly+monthly routing world for
+            # NIFTY/SENSEX we want BOTH legs open, so we check on
+            # (underlying, expiry) rather than underlying alone. For the
+            # monthly-only underlyings the result is identical because
+            # there's only one row per underlying.
+            if self._has_underlying_expiry_position(
+                runtime, row["underlying"], str(row.get("expiry") or "")
+            ):
                 continue
             if started_at.time() > STRATEGY2_ENTRY_CUTOFF:
                 continue
@@ -3002,7 +3067,17 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 pos.macd_line = macd_line
                 pos.latest_rsi = _round_or_none(latest_macd_rsi(closes).get("rsi"), 2)
 
-            context = contexts.get(pos.underlying) or {}
+            # Contexts are now composite-keyed (underlying:track) — pick
+            # the row matching the position's expiry when possible, fall
+            # back to any track for the underlying (MP+OF signal is
+            # per-underlying so direction is identical across tracks).
+            context = (
+                contexts.get(pos.underlying)
+                or next(
+                    (v for k, v in contexts.items() if k.startswith(f"{pos.underlying}:")),
+                    {},
+                )
+            )
             aligned_direction = context.get("direction")
             entered_at = _parse_iso_timestamp(pos.entered_at)
             return_pct = pos.return_pct
@@ -3916,6 +3991,24 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
 
     def _has_underlying_position(self, runtime: StrategyRuntime, underlying: str) -> bool:
         return any(p.underlying == underlying for p in runtime.positions.values())
+
+    def _has_underlying_expiry_position(
+        self,
+        runtime: StrategyRuntime,
+        underlying: str,
+        expiry: str,
+    ) -> bool:
+        """Stronger uniqueness check used by S2 for the weekly/monthly matrix.
+
+        Lets the lane open BOTH the weekly and monthly ATM legs on a single
+        signal — `_has_underlying_position` would skip the second leg because
+        it sees the first leg as "already in" for the underlying.
+        """
+        expiry_norm = str(expiry or "").strip()
+        return any(
+            p.underlying == underlying and str(p.expiry or "").strip() == expiry_norm
+            for p in runtime.positions.values()
+        )
 
     @staticmethod
     def _paper_session_uuid(runtime: StrategyRuntime) -> str:
