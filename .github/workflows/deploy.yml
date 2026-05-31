@@ -107,6 +107,12 @@ jobs:
           # GitHub runner's heredoc expansion.
           cat > /tmp/deploy_script.sh <<EOF
           set -euo pipefail
+          # SSM runs commands as root and sometimes with no HOME exported,
+          # which breaks 'git config --global'. Set HOME defensively so
+          # global-config writes land in /root/.gitconfig.
+          export HOME="\${HOME:-/root}"
+          echo "==> Running as: \$(whoami)  HOME=\$HOME"
+
           if [ -d "${REPO_PATH}/.git" ]; then
             REPO="${REPO_PATH}"
           elif [ -d "/opt/TradeBot/.git" ]; then
@@ -116,20 +122,29 @@ jobs:
             exit 1
           fi
           echo "==> Using repo at \$REPO"
+
+          # Log who owns the repo so future failures expose the right user
+          # immediately. Linux 'stat -c' and BSD 'stat -f' differ, so try both.
+          REPO_OWNER=\$(stat -c '%U' "\$REPO" 2>/dev/null || stat -f '%Su' "\$REPO" 2>/dev/null || echo unknown)
+          echo "==> Repo owned by: \$REPO_OWNER"
+
           cd "\$REPO"
-          # All git operations run as the ubuntu user (the repo owner) so we
-          # never trip git's safe.directory check or need \$HOME under the
-          # root SSM session.
+
+          # All git ops run as root. Whitelist the repo dir so git 2.35+
+          # doesn't refuse with 'dubious ownership' when REPO_OWNER != root.
+          # Previous round used sudo -u ubuntu but the box has no ubuntu user.
+          git config --global --add safe.directory "\$REPO"
+
           echo "==> Current HEAD before pull:"
-          sudo -u ubuntu git log -1 --oneline
+          git log -1 --oneline
           echo "==> Fetching origin..."
-          sudo -u ubuntu git fetch origin --quiet
+          git fetch origin --quiet
           echo "==> New commits to pull:"
-          sudo -u ubuntu git log HEAD..origin/main --oneline || true
+          git log HEAD..origin/main --oneline || true
           echo "==> Pulling main..."
-          sudo -u ubuntu git pull origin main --ff-only
+          git pull origin main --ff-only
           echo "==> HEAD after pull:"
-          sudo -u ubuntu git log -1 --oneline
+          git log -1 --oneline
           echo "==> Building + restarting backend and frontend..."
           docker compose up -d --build ${FORCE_FLAG} backend frontend
           echo "==> Waiting 30s for services to settle..."
