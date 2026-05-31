@@ -141,9 +141,45 @@ jobs:
           git fetch origin --quiet
           echo "==> New commits to pull:"
           git log HEAD..origin/main --oneline || true
-          echo "==> Pulling main..."
-          git pull origin main --ff-only
-          echo "==> HEAD after pull:"
+
+          # The previous SSM-tarball deploys unpacked code into /opt/TradeBot
+          # outside git's awareness, so the working tree has files that
+          # block --ff-only ("untracked working tree files would be
+          # overwritten by merge"). We force-sync to origin/main, but
+          # preserve the runtime/ audit trail + persisted agent state
+          # because those contain paper-book history that's only here, not
+          # in the database. Code is unaffected because all of it is on
+          # origin/main already.
+          BACKUP="/tmp/tradebot_runtime_backup_\$(date +%s)"
+          mkdir -p "\$BACKUP"
+          echo "==> Backing up live runtime state to \$BACKUP"
+          # The trailing slash on the source matters with rsync; tar fallback
+          # handles the case where rsync isn't installed.
+          for relpath in backend/runtime backend/commodity_strategy.json backend/nse_strategy_state.json; do
+            if [ -e "\$relpath" ]; then
+              dst="\$BACKUP/\$relpath"
+              mkdir -p "\$(dirname "\$dst")"
+              cp -a "\$relpath" "\$dst"
+              echo "    saved \$relpath"
+            fi
+          done
+
+          echo "==> Force-syncing tracked files to origin/main..."
+          git reset --hard origin/main
+          echo "==> Cleaning untracked files (gitignored files preserved)..."
+          git clean -fd
+
+          echo "==> Restoring runtime state over committed snapshot..."
+          for relpath in backend/runtime backend/commodity_strategy.json backend/nse_strategy_state.json; do
+            src="\$BACKUP/\$relpath"
+            if [ -e "\$src" ]; then
+              rm -rf "\$relpath"
+              cp -a "\$src" "\$relpath"
+              echo "    restored \$relpath"
+            fi
+          done
+
+          echo "==> HEAD after sync:"
           git log -1 --oneline
           echo "==> Building + restarting backend and frontend..."
           docker compose up -d --build ${FORCE_FLAG} backend frontend
