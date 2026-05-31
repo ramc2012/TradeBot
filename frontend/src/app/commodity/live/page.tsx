@@ -631,7 +631,7 @@ function PositionChip({ position }: { position?: CommodityPosition }) {
   return (
     <span className="inline-flex items-baseline gap-1 font-mono leading-none">
       <span className={`text-[10px] uppercase ${sideColor}`}>{side}</span>
-      <span className="text-[9.5px] text-text-secondary">{position.lots}lt</span>
+      <span className="text-[9.5px] text-text-secondary">{position.lots}</span>
       <span className={`text-[11px] ${pnlColor}`}>{formatSigned(pnl)}</span>
       <span className="text-[9.5px] text-text-muted">({formatPct(ret, 1)})</span>
       {stopDist !== null ? (
@@ -1024,7 +1024,7 @@ function PositionsTab({
                       <span className={`text-[10.5px] uppercase ${side === "BUY" ? "text-emerald-300" : "text-rose-300"}`}>
                         {side}
                       </span>
-                      <span className="ml-1 font-mono text-[10.5px] text-text-secondary">{p.lots}lt</span>
+                      <span className="ml-1 font-mono text-[10.5px] text-text-secondary">{p.lots}</span>
                     </td>
                     <td className="px-2 text-right align-middle font-mono">{formatNumber(entry, 2)}</td>
                     <td className="px-2 text-right align-middle font-mono">{formatNumber(cur, 2)}</td>
@@ -1688,6 +1688,268 @@ function AuditFeed({ events }: { events: AuditEvent[] }) {
 
 // ─── Instrument detail modal ──────────────────────────────────────────────
 
+/** Per-period profile data shape — POC / VAH / VAL plus optional IB band.
+ *  Used for the timeline rows below the headline 'Today' visual. */
+type PeriodProfile = {
+  label: string;        // "Yesterday", "This week", etc.
+  status: "live" | "available" | "pending";
+  date?: string;
+  poc?: number;
+  vah?: number;
+  val?: number;
+  ibh?: number;
+  ibl?: number;
+};
+
+/**
+ * Big visual profile for the detail modal — same grammar as the inline row
+ * MPProfileBar but with:
+ *   • prior-period reference markers (POC ticks for Y / W / M),
+ *   • OF chips on the side (VWAP, CVD, divergence, IB extension),
+ *   • a wider domain so labels never clip.
+ */
+function TodayProfileHero({
+  row,
+  references,
+}: {
+  row: WatchRow;
+  references: PeriodProfile[];
+}) {
+  const price = Number(row.price ?? 0);
+  const poc = Number(row.mp_poc ?? 0);
+  const vah = Number(row.mp_vah ?? 0);
+  const val = Number(row.mp_val ?? 0);
+  const ibh = Number(row.mp_ib_high ?? 0);
+  const ibl = Number(row.mp_ib_low ?? 0);
+  const vwap = Number(row.vwap ?? 0);
+  const vwapU = Number(row.vwap_upper ?? 0);
+  const vwapL = Number(row.vwap_lower ?? 0);
+  if (!poc || !vah || !val || vah <= val) {
+    return (
+      <div className="flex h-[120px] items-center justify-center rounded-md bg-bg-secondary/25 text-[11px] uppercase tracking-wide text-text-muted ring-1 ring-bg-secondary/40">
+        market profile warming up
+      </div>
+    );
+  }
+  // Domain includes all reference levels so they remain visible.
+  const refValues = references.flatMap((r) => [r.poc, r.vah, r.val, r.ibh, r.ibl]).filter(
+    (n): n is number => typeof n === "number" && n > 0,
+  );
+  const all = [val, vah, ibl, ibh, price, vwap, vwapU, vwapL, ...refValues].filter((n) => n > 0);
+  const minDomain = Math.min(...all) - (Math.max(...all) - Math.min(...all)) * 0.04;
+  const maxDomain = Math.max(...all) + (Math.max(...all) - Math.min(...all)) * 0.04;
+  const span = maxDomain - minDomain || 1;
+  const x = (v: number) => ((v - minDomain) / span) * 100;
+  const H = 120;
+  const direction = String(row.mp_direction || "").toLowerCase();
+  const markerColor =
+    direction === "buy" ? "fill-emerald-400" : direction === "sell" ? "fill-rose-400" : "fill-sky-300";
+  const REF_COLORS: Record<string, string> = {
+    Y: "rgb(244 114 182 / 0.85)", // yesterday — pink
+    W: "rgb(125 211 252 / 0.85)", // week     — light sky
+    M: "rgb(192 132 252 / 0.85)", // month    — violet
+  };
+
+  return (
+    <div
+      className={`relative overflow-hidden rounded-md bg-gradient-to-b from-bg-secondary/30 to-bg-secondary/50 ring-1 ${regimeBorderClass(row.mp_day_type)}`}
+      style={{ height: H }}
+    >
+      <svg
+        className="absolute inset-0 h-full w-full"
+        preserveAspectRatio="none"
+        viewBox={`0 0 100 ${H}`}
+        role="img"
+        aria-label="today market profile"
+      >
+        <defs>
+          <linearGradient id="heroVa" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="rgb(148 163 184 / 0.45)" />
+            <stop offset="100%" stopColor="rgb(148 163 184 / 0.18)" />
+          </linearGradient>
+        </defs>
+        {/* Value area */}
+        <rect x={x(val)} y={H * 0.18} width={Math.max(x(vah) - x(val), 0.5)} height={H * 0.64} fill="url(#heroVa)" rx={2} />
+        {/* VAH/VAL guides */}
+        <line x1={x(val)} x2={x(val)} y1={H * 0.1} y2={H * 0.9} className="stroke-text-muted/60" strokeWidth={0.4} strokeDasharray="1 1" />
+        <line x1={x(vah)} x2={x(vah)} y1={H * 0.1} y2={H * 0.9} className="stroke-text-muted/60" strokeWidth={0.4} strokeDasharray="1 1" />
+        {/* IB pill */}
+        {ibl && ibh ? (
+          <rect x={x(ibl)} y={H * 0.4} width={Math.max(x(ibh) - x(ibl), 0.4)} height={H * 0.2} className="fill-amber-300/22" rx={2} />
+        ) : null}
+        {/* VWAP band */}
+        {vwapL && vwapU ? (
+          <rect x={Math.min(x(vwapL), x(vwapU))} y={0} width={Math.abs(x(vwapU) - x(vwapL))} height={H} className="fill-sky-400/8" />
+        ) : null}
+        {/* VWAP line */}
+        {vwap ? (
+          <line x1={x(vwap)} x2={x(vwap)} y1={H * 0.08} y2={H * 0.92} className="stroke-sky-400" strokeWidth={1} strokeDasharray="3 2" />
+        ) : null}
+        {/* POC */}
+        <rect x={x(poc) - 0.8} y={H * 0.05} width={1.6} height={H * 0.9} className="fill-amber-300/95" rx={0.7} />
+        {/* Reference markers from prior periods */}
+        {references.map((ref) => {
+          if (!ref.poc) return null;
+          const key = ref.label[0];
+          const color = REF_COLORS[key] || "rgb(148 163 184 / 0.9)";
+          return (
+            <g key={ref.label}>
+              {/* POC dotted line */}
+              <line
+                x1={x(ref.poc)}
+                x2={x(ref.poc)}
+                y1={H * 0.1}
+                y2={H * 0.9}
+                stroke={color}
+                strokeWidth={0.7}
+                strokeDasharray="0.5 1.5"
+              />
+              {/* Marker label */}
+              <text
+                x={x(ref.poc)}
+                y={H * 0.07}
+                fontSize="3.5"
+                textAnchor="middle"
+                fill={color}
+                style={{ fontFamily: "ui-monospace,monospace" }}
+              >
+                {key}
+              </text>
+              {/* VAH/VAL ticks (thinner) */}
+              {ref.vah ? (
+                <line x1={x(ref.vah)} x2={x(ref.vah)} y1={H * 0.4} y2={H * 0.6} stroke={color} strokeWidth={0.4} strokeDasharray="0.4 0.8" />
+              ) : null}
+              {ref.val ? (
+                <line x1={x(ref.val)} x2={x(ref.val)} y1={H * 0.4} y2={H * 0.6} stroke={color} strokeWidth={0.4} strokeDasharray="0.4 0.8" />
+              ) : null}
+            </g>
+          );
+        })}
+        {/* Live price marker */}
+        {price > 0 ? (
+          <g>
+            <line x1={x(price)} x2={x(price)} y1={0} y2={H} className="stroke-text-primary/85" strokeWidth={0.7} />
+            <polygon points={`${x(price) - 1.8},0 ${x(price) + 1.8},0 ${x(price)},${H * 0.16}`} className={markerColor} />
+            <polygon points={`${x(price) - 1.8},${H} ${x(price) + 1.8},${H} ${x(price)},${H - H * 0.16}`} className={markerColor} />
+          </g>
+        ) : null}
+      </svg>
+
+      {/* In-bar level labels */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between px-2 pb-1 text-[10px] font-mono">
+        <span className="text-text-muted">VAL {formatNumber(val, 2)}</span>
+        <span className="text-amber-300">POC {formatNumber(poc, 2)}</span>
+        <span className="text-text-muted">VAH {formatNumber(vah, 2)}</span>
+      </div>
+
+      {/* Order-flow chip strip — overlays today's profile so the live OF
+          context (VWAP, CVD, divergence, IB extension) sits next to the auction. */}
+      <div className="absolute right-2 top-2 flex flex-wrap items-center justify-end gap-1 text-[9.5px] font-mono">
+        {vwap ? (
+          <span className="rounded bg-sky-500/20 px-1.5 py-[1px] text-sky-200">VWAP {formatNumber(vwap, 2)}</span>
+        ) : null}
+        <span
+          className={`rounded px-1.5 py-[1px] ${
+            Number(row.cvd_session ?? 0) > 0
+              ? "bg-emerald-500/20 text-emerald-200"
+              : Number(row.cvd_session ?? 0) < 0
+                ? "bg-rose-500/20 text-rose-200"
+                : "bg-bg-secondary/40 text-text-muted"
+          }`}
+        >
+          CVD {Number(row.cvd_session ?? 0) > 0 ? "↑" : Number(row.cvd_session ?? 0) < 0 ? "↓" : "·"}{" "}
+          {compactNumber(Number(row.cvd_session ?? row.cvd_latest))}
+        </span>
+        {row.cvd_divergence?.kind ? (
+          <span className="rounded bg-fuchsia-500/20 px-1.5 py-[1px] text-fuchsia-200">
+            DIV {row.cvd_divergence.kind}
+          </span>
+        ) : null}
+        {row.ib_extended_above || row.ib_extended_below ? (
+          <span className="rounded bg-amber-500/20 px-1.5 py-[1px] text-amber-200">
+            IB {row.ib_extended_above ? "↑" : "↓"} {row.ib_extension_pct != null ? `${(Number(row.ib_extension_pct) * 100).toFixed(0)}%` : ""}
+          </span>
+        ) : null}
+      </div>
+
+      {/* Reference legend (key for the dotted markers) */}
+      {references.some((r) => r.poc) ? (
+        <div className="absolute left-2 top-2 flex items-center gap-2 text-[9.5px] font-mono">
+          {references.map((r) =>
+            r.poc ? (
+              <span key={r.label} style={{ color: REF_COLORS[r.label[0]] || "rgb(148 163 184)" }}>
+                {r.label[0]}={formatNumber(r.poc, 2)}
+              </span>
+            ) : null,
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Compact horizontal profile row for a prior period (Y / W / M). Either
+ * shows a small visual when the data is available, or a labelled
+ * 'pending' placeholder so the timeline structure is visible.
+ */
+function PeriodProfileRow({ profile }: { profile: PeriodProfile }) {
+  if (profile.status === "pending") {
+    return (
+      <div className="flex h-[36px] items-center justify-between rounded bg-bg-secondary/15 px-3 ring-1 ring-bg-secondary/30">
+        <span className="text-[10.5px] uppercase tracking-[0.14em] text-text-muted">
+          {profile.label}
+        </span>
+        <span className="text-[10px] text-text-muted">
+          Backend not yet wired — coming soon
+        </span>
+      </div>
+    );
+  }
+  const poc = Number(profile.poc ?? 0);
+  const vah = Number(profile.vah ?? 0);
+  const val = Number(profile.val ?? 0);
+  if (!poc || !vah || !val || vah <= val) {
+    return (
+      <div className="flex h-[36px] items-center justify-between rounded bg-bg-secondary/15 px-3 ring-1 ring-bg-secondary/30">
+        <span className="text-[10.5px] uppercase tracking-[0.14em] text-text-muted">
+          {profile.label}
+        </span>
+        <span className="text-[10px] text-text-muted">data unavailable</span>
+      </div>
+    );
+  }
+  const lowEdge = Math.min(val, profile.ibl || val);
+  const highEdge = Math.max(vah, profile.ibh || vah);
+  const pad = (highEdge - lowEdge) * 0.06;
+  const min = lowEdge - pad;
+  const max = highEdge + pad;
+  const span = max - min || 1;
+  const x = (v: number) => ((v - min) / span) * 100;
+  return (
+    <div className="flex items-center gap-3">
+      <div className="w-[78px] shrink-0 text-[10.5px] uppercase tracking-[0.14em] text-text-secondary">
+        {profile.label}
+        {profile.date ? <div className="text-[9.5px] text-text-muted normal-case">{profile.date}</div> : null}
+      </div>
+      <div className="relative h-[36px] flex-1 overflow-hidden rounded bg-bg-secondary/25 ring-1 ring-bg-secondary/30">
+        <svg viewBox="0 0 100 36" preserveAspectRatio="none" className="absolute inset-0 h-full w-full">
+          <rect x={x(val)} y={6} width={Math.max(x(vah) - x(val), 0.5)} height={24} className="fill-slate-500/30" rx={1.5} />
+          {profile.ibl && profile.ibh ? (
+            <rect x={x(profile.ibl)} y={12} width={Math.max(x(profile.ibh) - x(profile.ibl), 0.4)} height={12} className="fill-amber-300/20" rx={1} />
+          ) : null}
+          <rect x={x(poc) - 0.6} y={3} width={1.2} height={30} className="fill-amber-300/85" rx={0.4} />
+        </svg>
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-between px-2 pb-[1px] text-[9px] font-mono text-text-muted/85">
+          <span>{formatNumber(val, 2)}</span>
+          <span className="text-amber-300">{formatNumber(poc, 2)}</span>
+          <span>{formatNumber(vah, 2)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function InstrumentDetailModal({
   row,
   position,
@@ -1711,17 +1973,41 @@ function InstrumentDetailModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // Pull yesterday's profile out of trigger_evidence when the engine
+  // surfaced it (open_drive / va_migration emit prior_pvah / prior_pval).
   const evidence = (row.trigger_evidence || {}) as Record<string, unknown>;
-  const evidenceEntries = Object.entries(evidence);
+  const evPoc = typeof evidence.today_poc === "number" ? evidence.today_poc : null;
+  const yPoc = typeof evidence.prior_poc === "number" ? evidence.prior_poc : null;
+  const yVah = typeof evidence.prior_pvah === "number" ? evidence.prior_pvah : null;
+  const yVal = typeof evidence.prior_pval === "number" ? evidence.prior_pval : null;
+  const yesterdayProfile: PeriodProfile = {
+    label: "Yesterday",
+    date: row.prior_session_date || undefined,
+    status: yPoc || yVah || yVal ? "available" : "pending",
+    poc: yPoc ?? undefined,
+    vah: yVah ?? undefined,
+    val: yVal ?? undefined,
+  };
+  // Week / month profiles are not yet wired in the backend — show placeholders
+  // so the timeline structure is in place. Will populate when the agent
+  // exposes them.
+  const referenceProfiles: PeriodProfile[] = [
+    yesterdayProfile,
+    { label: "This week", status: "pending" },
+    { label: "Last week", status: "pending" },
+    { label: "This month", status: "pending" },
+    { label: "Last month", status: "pending" },
+  ];
+  const refsForHero = referenceProfiles.filter((r) => r.status === "available");
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="relative max-h-[88vh] w-full max-w-5xl overflow-y-auto rounded-lg bg-bg-primary p-5 ring-1 ring-bg-secondary/40"
+        className="relative max-h-[92vh] w-full max-w-5xl overflow-y-auto rounded-lg bg-bg-primary p-5 ring-1 ring-bg-secondary/40"
       >
         <button
           type="button"
@@ -1732,17 +2018,20 @@ function InstrumentDetailModal({
         </button>
 
         {/* Title */}
-        <div className="mb-3 flex items-baseline justify-between">
+        <div className="mb-4 flex items-baseline justify-between">
           <div>
             <div className="text-base font-semibold text-text-primary">
-              {row.display_name} <span className="font-mono text-[12px] text-text-muted">{row.symbol}</span>
+              {row.display_name}{" "}
+              <span className="font-mono text-[12px] text-text-muted">{row.symbol}</span>
             </div>
             <div className="text-[11px] text-text-muted">
               {row.contract_unit_label} · {row.quote_unit_label} · bar {formatIST(row.bar_time)}
             </div>
           </div>
           <div className="text-right">
-            <div className={`font-mono text-2xl font-semibold ${colorForDelta(Number(row.change ?? 0))}`}>
+            <div
+              className={`font-mono text-2xl font-semibold ${colorForDelta(Number(row.change ?? 0))}`}
+            >
               {formatNumber(Number(row.price ?? 0), 2)}
             </div>
             <div className={`font-mono text-[11px] ${colorForDelta(Number(row.change ?? 0))}`}>
@@ -1751,93 +2040,72 @@ function InstrumentDetailModal({
           </div>
         </div>
 
-        {/* Profile bar (full-width) */}
-        <div className="mb-3">
-          <MPProfileBar row={row} className="h-[28px]" />
-          <div className="mt-1 flex justify-between text-[10px] text-text-muted">
-            <span>VAL {formatNumber(Number(row.mp_val ?? 0), 2)}</span>
-            <span>POC {formatNumber(Number(row.mp_poc ?? 0), 2)}</span>
-            <span>VAH {formatNumber(Number(row.mp_vah ?? 0), 2)}</span>
+        {/* Today's profile — hero visual with OF chips + prior-period reference lines */}
+        <div className="mb-2">
+          <div className="mb-1 flex items-baseline justify-between text-[10px] uppercase tracking-[0.14em] text-text-muted">
+            <span>Today · {row.mp_day_type || "—"}</span>
+            <span>{row.mp_periods ?? "—"} periods · {row.indicator_timeframe || "1m"}</span>
           </div>
-        </div>
-
-        {/* 3-column context grid */}
-        <div className="mb-4 grid grid-cols-12 gap-3 text-[11.5px]">
-          <Section title="Market Profile" cols={4}>
-            <Row k="Day type" v={String(row.mp_day_type ?? "—")} />
-            <Row k="Status" v={String(row.mp_status ?? "—")} />
-            <Row k="Periods" v={String(row.mp_periods ?? "—")} />
-            <Row k="POC" v={formatNumber(Number(row.mp_poc ?? 0), 2)} />
-            <Row k="VAH" v={formatNumber(Number(row.mp_vah ?? 0), 2)} />
-            <Row k="VAL" v={formatNumber(Number(row.mp_val ?? 0), 2)} />
-            <Row k="IB high" v={formatNumber(Number(row.mp_ib_high ?? 0), 2)} />
-            <Row k="IB low" v={formatNumber(Number(row.mp_ib_low ?? 0), 2)} />
-            <Row k="IB extended" v={row.ib_extended_above ? "above" : row.ib_extended_below ? "below" : "no"} />
-            <Row k="IB ext %" v={row.ib_extension_pct != null ? `${(Number(row.ib_extension_pct) * 100).toFixed(1)}%` : "—"} />
-            <Row k="Prior session" v={row.prior_session_date || "—"} />
-          </Section>
-
-          <Section title="Order Flow" cols={4}>
-            <Row k="CVD session" v={compactNumber(Number(row.cvd_session ?? row.cvd_latest))} />
-            <Row k="CVD agree?" v={row.cvd_agrees == null ? "—" : row.cvd_agrees ? "yes" : "no"} />
-            <Row k="CVD window Δ" v={compactNumber(Number(row.cvd_window_delta ?? 0))} />
-            <Row k="Divergence" v={row.cvd_divergence?.kind ? `${row.cvd_divergence.kind} ${(row.cvd_divergence.strength ?? 0).toString().slice(0, 4)}` : "—"} />
-            <Row k="VWAP" v={formatNumber(Number(row.vwap ?? 0), 2)} />
-            <Row k="VWAP +σ" v={formatNumber(Number(row.vwap_upper ?? 0), 2)} />
-            <Row k="VWAP −σ" v={formatNumber(Number(row.vwap_lower ?? 0), 2)} />
-            <Row k="HVN / LVN" v={`${row.hvn_count ?? 0} / ${row.lvn_count ?? 0}`} />
-          </Section>
-
-          <Section title="Trigger" cols={4}>
-            <Row k="Signal" v={String(row.signal || "—")} />
-            <Row k="Candidate" v={String(row.candidate_signal || "—")} />
-            <Row k="Style" v={triggerLabel(row.entry_style)} />
-            <Row k="Confidence" v={row.confidence != null ? Number(row.confidence).toFixed(2) : "—"} />
-            <Row k="Stop hint" v={row.stop_hint != null ? formatNumber(Number(row.stop_hint), 2) : "—"} />
-            <Row k="Target hint" v={row.target_hint != null ? formatNumber(Number(row.target_hint), 2) : "—"} />
-            <Row k="Validation" v={row.signal_validation || "—"} />
-            <Row k="ATR (1m)" v={row.atr != null ? formatNumber(Number(row.atr), 4) : "—"} />
-          </Section>
-        </div>
-
-        {/* Reason + evidence */}
-        {row.signal_validation_detail ? (
-          <div className="mb-4 rounded bg-bg-secondary/15 px-3 py-2 text-[11.5px] text-text-secondary">
-            {row.signal_validation_detail}
-          </div>
-        ) : null}
-        {evidenceEntries.length > 0 ? (
-          <div className="mb-4 grid grid-cols-2 gap-3 rounded bg-bg-secondary/10 p-2 text-[10.5px]">
-            <div className="col-span-2 text-[10px] uppercase tracking-wider text-text-muted">Trigger evidence</div>
-            {evidenceEntries.map(([k, v]) => (
-              <Row key={k} k={k} v={typeof v === "number" ? formatNumber(v, 4) : String(v)} />
-            ))}
-          </div>
-        ) : null}
-
-        {/* Position (if any) */}
-        {position ? (
-          <div className="mb-4 grid grid-cols-12 gap-3 rounded bg-bg-secondary/15 p-3 text-[11.5px]">
-            <div className="col-span-12 text-[10px] uppercase tracking-wider text-text-muted">
-              Open position
+          <TodayProfileHero row={row} references={refsForHero} />
+          {/* Trigger validation / evidence note, when present */}
+          {row.signal_validation_detail ? (
+            <div className="mt-2 rounded bg-bg-secondary/15 px-3 py-1.5 text-[11px] text-text-secondary">
+              {row.signal_validation_detail}
             </div>
-            <Row k="Side" v={String(position.action || "—")} cols={3} />
-            <Row k="Lots" v={String(position.lots || "—")} cols={3} />
-            <Row k="Qty" v={String(position.qty || "—")} cols={3} />
-            <Row k="Entered" v={formatIST(position.entered_at)} cols={3} />
-            <Row k="Entry" v={formatNumber(Number(position.entry_price ?? 0), 2)} cols={3} />
-            <Row k="Current" v={formatNumber(Number(position.current_price ?? 0), 2)} cols={3} />
-            <Row k="Stop" v={formatNumber(Number(position.stop_price ?? 0), 2)} cols={3} />
-            <Row k="Target" v={formatNumber(Number(position.target_price ?? 0), 2)} cols={3} />
-            <Row k="Unrealized" v={formatINR(Number(position.unrealized_pnl ?? 0), 0)} cols={6} />
-            <Row k="Return" v={formatPct(Number(position.return_pct ?? 0), 2)} cols={6} />
+          ) : null}
+        </div>
+
+        {/* Period timeline — yesterday + week + month, all stacked */}
+        <div className="mb-4 space-y-1.5">
+          {referenceProfiles.map((p) => (
+            <PeriodProfileRow key={p.label} profile={p} />
+          ))}
+        </div>
+
+        {/* Position card (visual gauge, not a table) */}
+        {position ? (
+          <div className="mb-4 rounded bg-bg-secondary/15 p-3 ring-1 ring-bg-secondary/30">
+            <div className="mb-2 flex items-baseline justify-between text-[10.5px] uppercase tracking-[0.14em] text-text-muted">
+              <span>Open position · {position.action}</span>
+              <span>
+                entered {formatIST(position.entered_at)} · {position.lots} {position.lots && Number(position.lots) > 1 ? "lots" : "lot"}
+              </span>
+            </div>
+            <RiskGauge
+              side={String(position.action || "")}
+              entry={Number(position.entry_price ?? 0)}
+              current={Number(position.current_price ?? 0)}
+              stop={Number(position.stop_price ?? 0)}
+              target={Number(position.target_price ?? 0)}
+            />
+            <div className="mt-2 grid grid-cols-4 gap-3 text-[11px] font-mono">
+              <KV label="Entry" v={formatNumber(Number(position.entry_price ?? 0), 2)} />
+              <KV label="Current" v={formatNumber(Number(position.current_price ?? 0), 2)} />
+              <KV label="Stop" v={formatNumber(Number(position.stop_price ?? 0), 2)} />
+              <KV
+                label="Target"
+                v={position.target_price ? formatNumber(Number(position.target_price), 2) : "—"}
+              />
+              <KV
+                label="P&L"
+                v={formatSigned(Number(position.unrealized_pnl ?? 0))}
+                tone={Number(position.unrealized_pnl ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}
+              />
+              <KV
+                label="Return"
+                v={formatPct(Number(position.return_pct ?? 0), 2)}
+                tone={Number(position.return_pct ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}
+              />
+              <KV label="Style" v={triggerLabel(position.entry_style)} />
+              <KV label="Regime" v={String(position.regime || "—")} />
+            </div>
           </div>
         ) : null}
 
-        {/* Recent activity */}
+        {/* Recent activity — slim event lists */}
         <div className="grid grid-cols-12 gap-3">
           <div className="col-span-6">
-            <div className="mb-1 text-[10px] uppercase tracking-wider text-text-muted">
+            <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-text-muted">
               Recent trades · {recentTrades.length}
             </div>
             <ul className="space-y-0.5 text-[10.5px]">
@@ -1846,10 +2114,14 @@ function InstrumentDetailModal({
               ) : (
                 recentTrades.slice(0, 5).map((t, idx) => (
                   <li key={`t-${idx}`} className="flex justify-between gap-2 font-mono">
-                    <span>{formatIST(t.exit_time)}</span>
+                    <span className="text-text-muted">{formatIST(t.exit_time)}</span>
                     <span>{t.action}</span>
-                    <span>{formatNumber(t.entry_price, 2)} → {formatNumber(t.exit_price, 2)}</span>
-                    <span className={`${Number(t.pnl ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                    <span>
+                      {formatNumber(t.entry_price, 2)} → {formatNumber(t.exit_price, 2)}
+                    </span>
+                    <span
+                      className={`${Number(t.pnl ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}
+                    >
                       {formatSigned(Number(t.pnl ?? 0))}
                     </span>
                   </li>
@@ -1858,7 +2130,7 @@ function InstrumentDetailModal({
             </ul>
           </div>
           <div className="col-span-6">
-            <div className="mb-1 text-[10px] uppercase tracking-wider text-text-muted">
+            <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-text-muted">
               Recent audit · {recentAudit.length}
             </div>
             <ul className="space-y-0.5 text-[10.5px]">
@@ -1867,8 +2139,13 @@ function InstrumentDetailModal({
               ) : (
                 recentAudit.slice(0, 6).map((e, idx) => (
                   <li key={`a-${idx}`} className="flex gap-2">
-                    <span className="w-[58px] shrink-0 font-mono text-text-muted">{formatTime(e.created_at)}</span>
-                    <span className="truncate">{(e.event_type || "").replace("mp_signal.", "")} {e.message ? `· ${e.message.slice(0, 100)}` : ""}</span>
+                    <span className="w-[58px] shrink-0 font-mono text-text-muted">
+                      {formatTime(e.created_at)}
+                    </span>
+                    <span className="truncate">
+                      {(e.event_type || "").replace("mp_signal.", "")}{" "}
+                      {e.message ? `· ${e.message.slice(0, 100)}` : ""}
+                    </span>
                   </li>
                 ))
               )}
@@ -1876,18 +2153,22 @@ function InstrumentDetailModal({
           </div>
         </div>
 
-        {/* Orders for this symbol */}
+        {/* Orders strip */}
         {recentOrders.length > 0 ? (
           <div className="mt-3">
-            <div className="mb-1 text-[10px] uppercase tracking-wider text-text-muted">
+            <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-text-muted">
               Recent orders · {recentOrders.length}
             </div>
             <ul className="space-y-0.5 text-[10.5px]">
               {recentOrders.slice(0, 4).map((o, idx) => (
                 <li key={`o-${idx}`} className="flex justify-between gap-2 font-mono">
-                  <span>{formatIST(o.time)}</span>
+                  <span className="text-text-muted">{formatIST(o.time)}</span>
                   <span>{o.flow}</span>
-                  <span>{o.action}</span>
+                  <span
+                    className={o.action === "BUY" ? "text-emerald-300" : "text-rose-300"}
+                  >
+                    {o.action}
+                  </span>
                   <span>{o.qty}</span>
                   <span>{formatNumber(o.fill_price, 2)}</span>
                   <span className="text-text-muted">{o.reason}</span>
@@ -1897,6 +2178,16 @@ function InstrumentDetailModal({
           </div>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+/** Tight inline key-value cell used inside the visual cards. */
+function KV({ label, v, tone }: { label: string; v: string; tone?: string }) {
+  return (
+    <div>
+      <div className="text-[9.5px] uppercase tracking-[0.14em] text-text-muted">{label}</div>
+      <div className={`font-mono text-[12px] ${tone || "text-text-primary"}`}>{v}</div>
     </div>
   );
 }
@@ -2424,7 +2715,7 @@ export default function CommodityLivePage() {
 
         {/* BOTTOM HALF — browser-style tabs */}
         <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-bg-secondary/30">
-          <nav className="flex items-end gap-0.5 border-b border-bg-secondary/30 bg-bg-secondary/10 px-1.5 pt-1.5">
+          <nav className="flex items-end gap-1 border-b-2 border-sky-500/70 bg-bg-secondary/30 px-1.5 pt-1.5">
             {BOTTOM_TABS.map((t, idx) => {
               const isActive = bottomTab === t.key;
               const count =
@@ -2447,22 +2738,22 @@ export default function CommodityLivePage() {
                   type="button"
                   onClick={() => setBottomTabSticky(t.key)}
                   title={`Switch to ${t.label} — press ${idx + 1}`}
-                  className={`group relative -mb-px rounded-t-md border border-bg-secondary/30 px-3 py-1 text-[11px] uppercase tracking-[0.14em] transition-colors ${
+                  // Chrome-style tab look: each tab is a SOLID filled chip
+                  // with a clearly different background tint depending on
+                  // active state. Active = sky-blue solid tint that visually
+                  // joins the content area below; inactive = darker grey
+                  // solid that recedes. This replaces the "active is
+                  // transparent + sky strip" pattern which was too subtle.
+                  className={`group relative -mb-[2px] rounded-t-md px-3 py-1.5 text-[11px] uppercase tracking-[0.14em] transition-colors ${
                     isActive
-                      ? "border-b-transparent bg-bg-primary text-text-primary"
-                      : "border-transparent bg-transparent text-text-muted hover:bg-bg-secondary/20 hover:text-text-primary"
+                      ? "bg-sky-500/85 text-white shadow-[inset_0_-2px_0_0_rgba(56,189,248,0.95)]"
+                      : "bg-bg-secondary/55 text-text-muted hover:bg-bg-secondary/75 hover:text-text-primary"
                   }`}
                 >
-                  {/* coloured top strip on the active tab */}
-                  <span
-                    className={`absolute left-3 right-3 top-0 h-[2px] rounded-b ${
-                      isActive ? "bg-sky-400" : "bg-transparent"
-                    }`}
-                  />
-                  {/* keyboard shortcut hint */}
+                  {/* keyboard shortcut hint chip */}
                   <span
                     className={`mr-1.5 inline-flex h-3.5 w-3.5 items-center justify-center rounded text-[9px] font-mono ${
-                      isActive ? "bg-sky-500/20 text-sky-200" : "bg-bg-secondary/40 text-text-muted"
+                      isActive ? "bg-white/25 text-white" : "bg-bg-primary/60 text-text-muted"
                     }`}
                   >
                     {idx + 1}
@@ -2470,8 +2761,8 @@ export default function CommodityLivePage() {
                   {t.label}
                   {count !== null ? (
                     <span
-                      className={`ml-1.5 rounded px-1 py-[1px] text-[9.5px] ${
-                        isActive ? "bg-sky-500/15 text-sky-300" : "bg-bg-secondary/30 text-text-muted"
+                      className={`ml-1.5 rounded px-1 py-[1px] text-[9.5px] font-mono ${
+                        isActive ? "bg-white/25 text-white" : "bg-bg-primary/60 text-text-muted"
                       }`}
                     >
                       {count}
