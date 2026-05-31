@@ -1,0 +1,58 @@
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-primary: #080b18;
+  --bg-secondary: #0d1117;
+  --bg-card: #0f1724;
+  --border: #1e2d45;
+  --accent-green: #00d4a3;
+  --accent-red: #ff4757;
+  --accent-amber: #ffa502;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  background-color: var(--bg-primary);
+  color: #e2e8f0;
+  font-family: "Inter", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--bg-secondary); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: #2d3f5f; }
+
+.font-mono { font-family: "JetBrains Mono", monospace; }
+
+.pnl-positive { color: var(--accent-green); }
+.pnl-negative { color: var(--accent-red); }
+
+.card {
+  @apply bg-bg-card border border-bg-border rounded-lg;
+}
+
+.live-glow {
+  box-shadow: 0 0 20px rgba(255, 165, 2, 0.15);
+}
+
+.terminal-input {
+  @apply bg-bg-secondary border border-bg-border text-text-primary font-mono
+    rounded px-3 py-2 focus:outline-none focus:border-accent-blue
+    placeholder:text-text-muted;
+}
+
+/* v2-specific: subtle badge to make it obvious which app is running */
+.v2-badge {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(59, 130, 246, 0.2));
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  color: #c4b5fd;
+}
