@@ -1,4 +1,10 @@
-"""Default configuration for the directional long-options engine."""
+"""Default configuration for the directional long-options engine.
+
+Scoped to NSE index options only — NIFTY, BANKNIFTY, SENSEX. Hard
+thresholds (min_confidence, min_expected_edge_pct, regime/delta blocks)
+have been retired; the RL policy at `directional_options.policy` learns
+them online from realized paper-trade outcomes.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,21 +15,20 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 RUNTIME_ROOT = PACKAGE_ROOT.parent / "runtime" / "directional_options"
 DATA_ROOT = PACKAGE_ROOT.parent / "runtime" / "index_analytics_data"
 
-# Funded equity anchor for paper-trading capital accounting. Mirrors the
-# AI/FMP pattern (initial_capital + realized - reserved_margin = available).
-# 30L matches the desk's actual paper sizing (see risk.starting_equity).
+# Funded equity anchor for paper-trading capital accounting.
 DIRECTIONAL_INITIAL_CAPITAL: float = 3_000_000.0
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "label": "Directional Long Options",
     "description": (
-        "Long-premium research and execution sandbox focused on buying calls and puts "
-        "only when expected convexity clears theta, spread, slippage, and IV drag."
+        "Long-premium research and execution sandbox for NSE index options "
+        "(NIFTY / BANKNIFTY / SENSEX). Trade/skip, strike choice, and sizing "
+        "are learned online by a contextual bandit instead of hand-tuned hurdles."
     ),
     "data_root": DATA_ROOT,
     "runtime_root": RUNTIME_ROOT,
-    "universe": ["NIFTY", "BANKNIFTY", "SENSEX", "CRUDEOIL", "GOLD", "SILVERM", "NATURALGAS"],
+    "universe": ["NIFTY", "BANKNIFTY", "SENSEX"],
     "timeframes": ["5minute", "15minute"],
     "default_underlying": "NIFTY",
     "default_timeframe": "5minute",
@@ -38,17 +43,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "warmup_bars": 32,
     },
     "signal_engine": {
-        # Lowered from 0.58 → 0.50 so the new "exploration" regime (whose
-        # confidence range is ~0.45-0.65) can produce paper signals. The
-        # risk allocator already scales size by confidence — a 0.50-conf
-        # signal sizes at the 0.5× floor (₹7.5k risk on ₹30L), small
-        # enough for learning bets to land regularly without exceeding the
-        # daily loss cap.
-        "min_confidence": 0.50,
-        # Intraday strategy — 5/15 min bars. Holding 18 bars on a 15-min
-        # timeframe (= 4.5 hours) crosses into swing territory, which this
-        # engine is not built for. Horizons clamp to ≤45 minutes on 5-min
-        # bars and ≤2.25 hours on 15-min bars.
+        # No hard confidence cutoff — the RL policy gates trades by the
+        # value posterior. We keep a tiny direction-score floor so empty /
+        # zero-momentum bars don't even propose a signal (the policy would
+        # waste capacity learning that flat tape doesn't pay).
+        "min_direction_score_trend": 0.04,
+        "min_direction_score_other": 0.02,
         "breakout_confidence_bonus": 0.06,
         "expected_move_atr_multiplier": 1.25,
         "expected_move_trend_multiplier": 0.85,
@@ -57,39 +57,40 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "long_horizon_bars": 9,
     },
     "selector": {
-        "max_candidates": 18,
+        # Surface up to this many candidates to the policy for ranking.
+        "max_candidates": 12,
         "preferred_weekly_days": 8,
         "max_days_to_expiry": 45,
-        # Lowered min_volume + min_oi so MCX commodity options pass the
-        # liquidity floor — GOLD/SILVERM/NATURALGAS weekly contracts often
-        # trade at lower volume/OI than NSE index weeklies but are still
-        # tradable. CRUDEOIL was getting "All local watchlist contracts
-        # failed liquidity or edge hurdles" with the old 150/2.5k floors.
-        "min_volume": 50.0,
-        "min_oi": 500.0,
+        # Index weekly minimums — these are real liquidity floors, not
+        # edge gates. Below this the bid/ask is wide enough that the
+        # post-cost realised return diverges from the model. Kept as a
+        # data-quality guard, not a strategy gate.
+        "min_volume": 150.0,
+        "min_oi": 2500.0,
         "max_spread_pct": 0.20,
         "fallback_spread_pct": 0.30,
-        "sigma_floor": 0.12,
-        # MCX commodities routinely trade 60–90% IV; clamping at 0.62
-        # caused future_option_value to be undervalued in the trading-edge
-        # calc, making net edge come out negative on real setups. 0.95
-        # leaves headroom without enabling pathological vol blow-ups.
-        "sigma_ceiling": 0.95,
+        # Index IV envelope (Nifty ATM IV historically 8–35%, BANKNIFTY
+        # 10–45%, SENSEX 9–32%). 0.62 ceiling fits indices cleanly now
+        # that commodities are out of scope.
+        "sigma_floor": 0.10,
+        "sigma_ceiling": 0.62,
         "sigma_multiplier": 1.08,
-        "risk_free_rate": 0.06,
+        "risk_free_rate": 0.065,
+        # The distributional optimizer no longer GATES candidates — every
+        # contract that passes the liquidity floor is surfaced to the
+        # policy. These thresholds are kept as INFORMATIVE scores that
+        # feed the policy's feature vector (p_minus_q_tail, timing_fit,
+        # skew_tax, model_uncertainty, etc.).
         "distributional_optimizer": {
-            # Permissive hurdles — taking the trade and learning beats
-            # waiting for theoretically-perfect edge. Confidence×size
-            # scaler keeps low-conviction bets small.
-            "min_net_edge_pct": 0.005,
-            "min_probability_of_profit": 0.32,
-            "min_liquidity_score": 0.20,
-            "min_timing_fit": 0.18,
-            # The error buffer used to be ~3.5% of premium + uncertainty
-            # blow-up (×0.18). For commodities with model_uncertainty ~0.3
-            # that's 8.9% — bigger than typical trading edge. Halved so
-            # the buffer no longer dominates the trading_edge calc.
+            "min_net_edge_pct": 0.0,
+            "min_probability_of_profit": 0.0,
+            "min_liquidity_score": 0.0,
+            "min_timing_fit": 0.0,
             "model_error_base_pct": 0.015,
+            # Delta windows are HINTS used to compute the delta-bucket
+            # feature, not hard rejections. The policy may discover that
+            # for a given regime the optimal delta sits outside these
+            # canonical bands.
             "ordinary_delta_min": 0.45,
             "ordinary_delta_max": 0.65,
             "fast_move_delta_min": 0.35,
@@ -118,37 +119,25 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
     },
     "risk": {
-        # Matches the paper desk's actual equity (~₹30L). Was 10L which made
-        # even a single BANKNIFTY lot un-affordable on near-ATM strikes once
-        # premium_cap_pct was applied. If the live paper equity drifts we
-        # can wire `paper_portfolio.get_equity()` here later.
+        # Matches the paper desk's actual equity (~₹30L).
         "starting_equity": 3_000_000.0,
-        # Base sizing — scaler 0.5×–1.5× of these per signal confidence
-        # (see DirectionalOptionsRiskEngine._confidence_multiplier).
-        # 0.5% risk → at 0.85 conf the lot risk budget is 0.75% of equity.
-        # 2.5% premium → at 0.85 conf the premium cap is 3.75% of equity
-        # (~₹1.12 lakh on a ₹30L book), which clears one BANKNIFTY weekly
-        # ATM lot even when the option premium runs ₹120–₹250.
+        # Base sizing — the RL policy multiplies these by a learned size
+        # multiplier in {0.5×, 1.0×, 1.5×, 2.0×} per trade.
         "risk_pct": 0.005,
-        "premium_cap_pct": 0.025,
-        # Mirror min_confidence so the allocator knows the curve floor.
-        "min_confidence": 0.58,
+        # NO premium cap — user directive: "without any limit on size".
+        # The risk_pct × size_multiplier path is the only sizing gate.
+        # Capital safety still comes from one-position-per-symbol and the
+        # daily/weekly loss caps below.
+        "premium_cap_pct": None,
         "planned_stop_pct": 0.35,
         "profit_target_pct": 0.45,
         "trail_giveback_pct": 0.18,
         "expiry_guard_days": 0.8,
-        "daily_loss_cap_r": 2.0,
-        "weekly_loss_cap_r": 5.0,
-        # 4% expected-edge floor (was 8%). Commodity options price with
-        # higher model uncertainty than NSE indices — an 8% expected
-        # PnL/premium hurdle filtered out every commodity candidate even
-        # when the underlying setup was sound. Risk allocator still gates
-        # the bet size by confidence.
-        "min_expected_edge_pct": 0.04,
-        # Intraday strategy — at most one open directional bet per
-        # underlying, but several underlyings can coexist if convictions
-        # align.
-        "max_open_positions": 4,
+        # Capital safety caps — these are NOT edge gates. They prevent
+        # blowups on bad days but never block individual trades from
+        # firing based on signal quality.
+        "daily_loss_cap_r": 4.0,
+        "weekly_loss_cap_r": 10.0,
     },
     "execution": {
         "entry_slippage_pct": 0.0075,
@@ -158,17 +147,29 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "backtest": {
         "lookback_sessions": 16,
         "mark_to_market_every_bar": True,
-        "max_trades_per_day": 2,
+        "max_trades_per_day": 4,
     },
     "paper_trading": {
         "journal_root": RUNTIME_ROOT / "paper",
         "live_lookback_days": 10,
         "stale_watchlist_seconds": 600,
-        # Anti-churn: minimum bars a position must be held before honouring a
-        # signal-flip or flat-signal close. Set per timeframe minutes — e.g. on
-        # 5-minute bars, 3 bars = 15 minutes of hold before regime reversal
-        # can flatten the trade. Stop / target exits still fire immediately.
+        # Anti-churn: minimum bars a position must be held before
+        # honouring a signal-flip or flat-signal close. Stop / target
+        # exits still fire immediately.
         "min_hold_bars": 3,
+        # One open position per underlying. New signals on a symbol that
+        # already has an open position are journaled but do NOT open a
+        # second position. (Refresh / signal-flip on the SAME symbol is
+        # handled by the existing _same_contract path.)
+        "one_position_per_symbol": True,
+    },
+    "rl_policy": {
+        # Persistent posterior lives next to the paper book.
+        "state_path": RUNTIME_ROOT / "policy_state.json",
+        # If True, the policy decides trade/skip + size from learned
+        # posterior. If False, the engine falls back to a permissive
+        # always-act path (used by tests that want deterministic flow).
+        "enabled": True,
     },
 }
 

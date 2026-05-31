@@ -11,6 +11,7 @@ from uuid import uuid4
 from analysis.instruments import normalize_index_contract_expiry
 from core.paper_trade_recorder import paper_trade_recorder
 from directional_options.config import DIRECTIONAL_INITIAL_CAPITAL
+from directional_options.policy import DirectionalPolicy
 
 
 _TIMEFRAME_MINUTES = {
@@ -97,7 +98,14 @@ class DirectionalOptionsPaperStore:
     # ~90 % churn observed on 2026-05-20 (71 opens / 64 closes in a session).
     FLAT_CONFIRMATION_SECONDS: float = 300.0
 
-    def __init__(self, root: Path | str, *, min_hold_bars: int = 3):
+    def __init__(
+        self,
+        root: Path | str,
+        *,
+        min_hold_bars: int = 3,
+        one_position_per_symbol: bool = True,
+        policy: DirectionalPolicy | None = None,
+    ):
         self.root = Path(root)
         if not self.root.is_absolute():
             self.root = Path(__file__).resolve().parent.parent / self.root
@@ -105,6 +113,8 @@ class DirectionalOptionsPaperStore:
         self.positions_path = self.root / "paper_positions.json"
         self._lock = asyncio.Lock()
         self.min_hold_bars = int(min_hold_bars)
+        self.one_position_per_symbol = bool(one_position_per_symbol)
+        self.policy = policy
 
     async def list_journal(self, symbol: str | None = None, limit: int = 50) -> dict[str, Any]:
         records = self._load_journal()
@@ -298,6 +308,26 @@ class DirectionalOptionsPaperStore:
                 open_positions.remove(row)
                 closed_positions.append(row)
 
+            # Hard one-position-per-symbol guard. If the existing position
+            # on this symbol was REFRESHED above (same contract+direction)
+            # we never get here. Otherwise: if there is still ANY open
+            # position on this underlying after the signal-flip pass (e.g.
+            # min_hold not yet satisfied), suppress the new open.
+            symbol_already_open = any(
+                _normalize_symbol(row.get("underlying")) == underlying
+                and str(row.get("status") or "open") == "open"
+                for row in open_positions
+            )
+            if self.one_position_per_symbol and symbol_already_open and not refreshed:
+                self._save_positions(
+                    {
+                        "last_synced_at": recorded_at,
+                        "open_positions": open_positions,
+                        "closed_positions": closed_positions[-250:],
+                    }
+                )
+                return self._summary(open_positions, closed_positions)
+
             if not refreshed:
                 new_position_id = uuid4().hex
                 try:
@@ -318,6 +348,22 @@ class DirectionalOptionsPaperStore:
                     )
                 except Exception:
                     pass
+                # Register the open with the RL policy so the realised
+                # R-multiple flows back into the value posterior on close.
+                policy_payload = dict(snapshot.get("policy") or {})
+                size_multiplier = float(policy_payload.get("size_multiplier") or 1.0)
+                if self.policy is not None:
+                    try:
+                        self.policy.register_open(
+                            position_id=new_position_id,
+                            signal=signal,
+                            candidate=contract,
+                            regime=dict(snapshot.get("regime") or {}),
+                            size_multiplier=size_multiplier,
+                            risk_budget=float(risk.get("risk_budget") or 0.0),
+                        )
+                    except Exception:
+                        pass
                 open_positions.append(
                     {
                         "position_id": new_position_id,
@@ -357,6 +403,9 @@ class DirectionalOptionsPaperStore:
                         "rag_context": rag_context,
                         "price_source": contract.get("price_source") or "local_watchlist",
                         "mark_time": recorded_at,
+                        "policy_size_multiplier": size_multiplier,
+                        "policy_sampled_value": policy_payload.get("sampled_value"),
+                        "policy_n_seen_at_open": policy_payload.get("n_seen"),
                     }
                 )
 
@@ -404,6 +453,18 @@ class DirectionalOptionsPaperStore:
         position["unrealized_pnl"] = 0.0
         realized = round((latest_premium - entry_premium) * quantity, 2)
         position["realized_pnl"] = realized
+        # Feed the realized PnL back to the RL policy so the value
+        # posterior tightens and the multiplier buckets converge.
+        if self.policy is not None:
+            try:
+                r_multiple = self.policy.record_close(
+                    position_id=str(position.get("position_id") or ""),
+                    realized_pnl=float(realized),
+                )
+                if r_multiple is not None:
+                    position["policy_r_multiple"] = round(float(r_multiple), 4)
+            except Exception:
+                pass
         try:
             asyncio.create_task(
                 paper_trade_recorder.record_event(

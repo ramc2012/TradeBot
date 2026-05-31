@@ -1,9 +1,12 @@
 """Directional signal generation on the underlying spot series.
 
-Confidence is hard-capped at MAX_SIGNAL_CONFIDENCE. Trading does not allow
-100% certainty — the cap matters because allocation downstream scales
-linearly with confidence above the min_confidence threshold, and an
-unbounded ceiling would let a single overheated bar size aggressively.
+Confidence is hard-capped at MAX_SIGNAL_CONFIDENCE so a single overheated
+bar can't dominate the policy's value posterior. There is no longer a
+hard min_confidence cutoff — the RL policy in `directional_options.policy`
+learns its own trade/skip threshold from realised R-multiples. Only an
+empty / zero-direction-score signal is filtered here, because feeding
+those into the policy would just teach it that flat tape doesn't pay
+(wasting model capacity).
 """
 from __future__ import annotations
 
@@ -45,12 +48,15 @@ class DirectionalSignalEngine:
 
         direction = "CE" if bull_score >= bear_score else "PE"
         direction_score = bull_score if direction == "CE" else bear_score
-        # Direction-score floor: stricter for trend/breakout (we want a clear
-        # tape), looser for exploration/micro_trend (the whole point is to
-        # take a small bet and learn). Empty-score signals are still
-        # filtered.
-        min_direction_score = (
-            0.04 if regime.label in {"exploration", "micro_trend"} else 0.15
+        # Tiny direction-score floor — empty / zero-momentum bars are
+        # filtered so the policy doesn't waste capacity learning that flat
+        # tape doesn't pay. Regime-aware: looser for the lower-conviction
+        # regimes (exploration / micro_trend) since the policy is meant to
+        # learn from those small bets.
+        min_direction_score = float(
+            self.config.get("min_direction_score_other", 0.02)
+            if regime.label in {"exploration", "micro_trend"}
+            else self.config.get("min_direction_score_trend", 0.04)
         )
         if direction_score <= min_direction_score:
             return None
@@ -62,8 +68,9 @@ class DirectionalSignalEngine:
             + regime.confidence * 0.28
             + (self.config["breakout_confidence_bonus"] if regime.label == "breakout" else 0.0),
         )
-        if confidence < float(self.config["min_confidence"]):
-            return None
+        # NOTE: no hard min_confidence cutoff anymore. Low-confidence
+        # signals pass through to the policy, which decides act/skip from
+        # the learned R-multiple posterior.
 
         if regime.label == "breakout":
             horizon_bars = int(self.config["short_horizon_bars"])

@@ -145,7 +145,10 @@ class RiskDecision:
     premium_at_risk: float
     max_loss: float
     risk_budget: float
-    premium_cap: float
+    # premium_cap is None when the engine is configured with no premium
+    # cap (RL-managed sizing). Kept as float for backwards-compatible
+    # consumers when the cap IS set.
+    premium_cap: Optional[float]
     reasons: list[str] = field(default_factory=list)
 
 

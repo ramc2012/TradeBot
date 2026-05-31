@@ -18,11 +18,11 @@ from directional_options.config import clone_default_config
 from directional_options.data import DirectionalOptionsDataStore
 from directional_options.features import FeatureEngine
 from directional_options.paper import DirectionalOptionsPaperStore
+from directional_options.policy import DirectionalPolicy, get_policy
 from directional_options.regime import RegimeClassifier
 from directional_options.risk import DirectionalOptionsRiskEngine
 from directional_options.selector import OptionSelectionEngine
 from directional_options.signals import DirectionalSignalEngine
-from market_data.commodity_contract_specs import get_commodity_contract_spec
 from market_data.market_intelligence_runtime import market_intelligence_runtime
 
 
@@ -37,9 +37,17 @@ class DirectionalOptionsService:
         self.signals = DirectionalSignalEngine(self.config["signal_engine"])
         self.selector = OptionSelectionEngine(self.store, self.config["selector"])
         self.risk = DirectionalOptionsRiskEngine(self.config["risk"])
+        rl_cfg = self.config.get("rl_policy") or {}
+        self.policy: DirectionalPolicy | None = (
+            get_policy(rl_cfg.get("state_path")) if rl_cfg.get("enabled", True) else None
+        )
         self.paper = DirectionalOptionsPaperStore(
             self.config["paper_trading"]["journal_root"],
             min_hold_bars=int(self.config["paper_trading"].get("min_hold_bars", 3)),
+            one_position_per_symbol=bool(
+                self.config["paper_trading"].get("one_position_per_symbol", True)
+            ),
+            policy=self.policy,
         )
         self.backtester = DirectionalOptionsBacktester(
             store=self.store,
@@ -64,13 +72,10 @@ class DirectionalOptionsService:
         from core.market_hours_paper_supervisor import market_hours_paper_supervisor
         from directional_options.dashboard import get_dashboard_mount_state
 
+        # Universe is restricted to NSE index underlyings — NIFTY / BANKNIFTY
+        # / SENSEX. Commodity paths were removed in the RL refactor.
         data_underlyings = set(self.store.available_underlyings())
-        runtime_root_exists = Path(self.config["data_root"]).exists()
-        available = [
-            item
-            for item in self.config["universe"]
-            if item in data_underlyings or (self._is_supported_commodity(item) and runtime_root_exists)
-        ]
+        available = [item for item in self.config["universe"] if item in data_underlyings]
         if not available and (settings.PAPER_TRADING_ONLY or settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY):
             available = list(self.config["universe"])
         automation = market_hours_paper_supervisor.get_runner_status("directional_options")
@@ -93,8 +98,10 @@ class DirectionalOptionsService:
 
     @staticmethod
     def _is_supported_commodity(underlying: str) -> bool:
-        spec = get_commodity_contract_spec(underlying)
-        return bool(spec.root and spec.root != "UNKNOWN")
+        # Retained as a no-op for backwards compatibility with any
+        # external caller; commodity branches are out of scope after
+        # the RL/indices-only refactor.
+        return False
 
     @lru_cache(maxsize=24)
     def workspace(
@@ -151,15 +158,8 @@ class DirectionalOptionsService:
             summary = self.summary()
             lookback_days = max(int(self.config["paper_trading"]["live_lookback_days"]), lookback_sessions)
             try:
-                # 8s was tight for the *first* commodity history fetch — it
-                # pulls 10 days of 1-min bars from MCX through Fyers/Upstox.
-                # NSE indices come back fast (cached locally); commodities
-                # routinely needed 10–15s for the cold call and timed out,
-                # leaving feature_frame empty and the symbol stuck on
-                # "No local spot candles…". Once the commodity agent
-                # persists into underlying_spot_candles the subsequent calls
-                # are local-DB hits, but we still want the first cold call
-                # to succeed.
+                # NSE indices are local-DB hits — the 30s timeout is
+                # generous to tolerate a cold-cache fetch on first launch.
                 spot, history_source, history_symbol = await asyncio.wait_for(
                     self.store.load_live_spot_frame(
                         underlying,
@@ -347,6 +347,7 @@ class DirectionalOptionsService:
         candidates_payload: list[dict[str, object]] = []
         risk_payload: dict[str, object] | None = None
         rag_context: dict[str, Any] | None = None
+        policy_payload: dict[str, Any] | None = None
         if signal is not None:
             selection = self.selector.select(
                 underlying=underlying,
@@ -358,20 +359,34 @@ class DirectionalOptionsService:
                 timeframe=timeframe,
             )
             selection_reason = selection["reason"]
-            candidate = selection["best"]
             candidates_payload = [asdict(item) for item in selection["candidates"]]
-            if candidate is not None:
-                candidate_payload = asdict(candidate)
+            chosen, policy_payload = self._policy_pick(
+                signal=signal,
+                regime=regime,
+                candidates=selection["candidates"] or ([selection["best"]] if selection["best"] is not None else []),
+                default=selection["best"],
+            )
+            size_mult = float((policy_payload or {}).get("size_multiplier", 1.0))
+            policy_act = bool((policy_payload or {}).get("act", True))
+            if chosen is not None:
+                candidate_payload = asdict(chosen)
                 risk_payload = asdict(
                     self.risk.approve(
-                        candidate=candidate,
+                        candidate=chosen,
                         signal=signal,
                         equity=float(self.config["risk"]["starting_equity"]),
+                        size_multiplier=size_mult,
                     )
                 )
+                if not policy_act:
+                    risk_payload["approved"] = False
+                    reasons = list(risk_payload.get("reasons") or [])
+                    reasons.append((policy_payload or {}).get("reason") or "Policy declined to trade this state.")
+                    risk_payload["reasons"] = reasons
+                    selection_reason = (policy_payload or {}).get("reason") or selection_reason
                 rag_context = self._build_rag_context(
                     underlying=underlying,
-                    symbol=candidate.trading_symbol,
+                    symbol=chosen.trading_symbol,
                     signal=signal,
                     regime=regime,
                     candidate=candidate_payload,
@@ -407,6 +422,7 @@ class DirectionalOptionsService:
             "contract_candidates": candidates_payload,
             "risk": risk_payload,
             "rag_context": rag_context,
+            "policy": policy_payload,
             "selection_reason": selection_reason,
             **bucket_info,
         }
@@ -492,6 +508,7 @@ class DirectionalOptionsService:
         candidates_payload: list[dict[str, object]] = []
         risk_payload: dict[str, object] | None = None
         rag_context: dict[str, Any] | None = None
+        policy_payload: dict[str, Any] | None = None
 
         snapshot_rows: list[dict[str, Any]] = []
         option_snapshot_lookup_failed = False
@@ -543,20 +560,34 @@ class DirectionalOptionsService:
             )
             if not option_snapshot_lookup_failed:
                 selection_reason = selection["reason"]
-            candidate = selection["best"]
             candidates_payload = [asdict(item) for item in selection["candidates"]]
-            if candidate is not None:
-                candidate_payload = asdict(candidate)
+            chosen, policy_payload = self._policy_pick(
+                signal=signal,
+                regime=regime,
+                candidates=selection["candidates"] or ([selection["best"]] if selection["best"] is not None else []),
+                default=selection["best"],
+            )
+            size_mult = float((policy_payload or {}).get("size_multiplier", 1.0))
+            policy_act = bool((policy_payload or {}).get("act", True))
+            if chosen is not None:
+                candidate_payload = asdict(chosen)
                 risk_payload = asdict(
                     self.risk.approve(
-                        candidate=candidate,
+                        candidate=chosen,
                         signal=signal,
                         equity=float(self.config["risk"]["starting_equity"]),
+                        size_multiplier=size_mult,
                     )
                 )
+                if not policy_act:
+                    risk_payload["approved"] = False
+                    reasons = list(risk_payload.get("reasons") or [])
+                    reasons.append((policy_payload or {}).get("reason") or "Policy declined to trade this state.")
+                    risk_payload["reasons"] = reasons
+                    selection_reason = (policy_payload or {}).get("reason") or selection_reason
                 rag_context = await self._build_rag_context_async(
                     underlying=underlying,
-                    symbol=candidate.trading_symbol,
+                    symbol=chosen.trading_symbol,
                     signal=signal,
                     regime=regime,
                     candidate=candidate_payload,
@@ -567,7 +598,7 @@ class DirectionalOptionsService:
                         "rv_annualized": float(row.get("rv_annualized", 0.0)),
                         "rv_percentile": float(row.get("rv_percentile", 0.0)),
                         "history_source": history_source,
-                        "price_source": candidate.price_source,
+                        "price_source": chosen.price_source,
                     },
                 )
                 self._apply_rag_context_to_risk(rag_context, risk_payload)
@@ -584,11 +615,59 @@ class DirectionalOptionsService:
             "contract_candidates": candidates_payload,
             "risk": risk_payload,
             "rag_context": rag_context,
+            "policy": policy_payload,
             "selection_reason": selection_reason,
             "data_status": data_status,
             "history_source": history_source,
             "history_symbol": history_symbol,
         }
+
+    def _policy_pick(
+        self,
+        *,
+        signal,
+        regime,
+        candidates: list,
+        default,
+    ) -> tuple[Any, dict[str, Any] | None]:
+        """Run the RL policy over the surfaced candidates.
+
+        Returns (chosen_candidate, policy_payload). When the policy is
+        disabled or there are no candidates, returns (default, None) so
+        the rest of the service degrades gracefully.
+        """
+        if self.policy is None or not candidates:
+            return default, None
+        signal_dict = asdict(signal)
+        regime_dict = asdict(regime)
+        candidates_dicts = [asdict(c) for c in candidates]
+        best_idx, samples = self.policy.rank_candidates(
+            signal=signal_dict,
+            candidates=candidates_dicts,
+            regime=regime_dict,
+        )
+        if best_idx is None:
+            return default, None
+        chosen = candidates[best_idx]
+        decision = self.policy.decide(
+            signal=signal_dict,
+            candidate=candidates_dicts[best_idx],
+            regime=regime_dict,
+        )
+        payload = {
+            "act": bool(decision.act),
+            "size_multiplier": float(decision.size_multiplier),
+            "sampled_value": float(decision.sampled_value),
+            "posterior_mean": float(decision.posterior_mean),
+            "posterior_var": float(decision.posterior_var),
+            "reason": decision.reason,
+            "n_seen": int(decision.n_seen),
+            "feature_dim": int(decision.feature_dim),
+            "candidate_index": int(best_idx),
+            "candidate_samples": [float(s) for s in samples],
+            "size_samples": {f"{m:.2f}": float(v) for m, v in decision.size_samples.items()},
+        }
+        return chosen, payload
 
     def _build_rag_context(
         self,
@@ -734,12 +813,6 @@ class DirectionalOptionsService:
     ) -> dict[str, object]:
         latest_watchlist_time = strategy_health.get("latest_watchlist_time")
         watchlist_age_seconds = strategy_health.get("watchlist_age_seconds")
-        commodity_watchlist_status = {"rows": 0, "latest_time": None}
-        if self._is_supported_commodity(underlying):
-            commodity_watchlist_status = self.store._cached_commodity_watchlist_status(underlying)
-            if int(commodity_watchlist_status.get("rows") or 0) > 0:
-                latest_watchlist_time = commodity_watchlist_status.get("latest_time") or latest_watchlist_time
-                watchlist_age_seconds = None
         latest_spot_map = dict(strategy_health.get("latest_spot_rows") or {})
         latest_spot_time = latest_spot_map.get(str(underlying).upper())
         if not latest_spot_time and not feature_frame.empty:
@@ -752,15 +825,11 @@ class DirectionalOptionsService:
                 spot_ts = spot_ts.tz_localize("UTC")
             spot_age_seconds = max(0.0, (pd.Timestamp.utcnow() - spot_ts).total_seconds())
         watchlist_rows = int(
-            commodity_watchlist_status.get("rows")
-            or strategy_health.get("watchlist_rows_today")
+            strategy_health.get("watchlist_rows_today")
             or strategy_health.get("watchlist_rows_latest")
             or 0
         )
-        market_intelligence_ready = bool(
-            (self._is_supported_commodity(underlying) and watchlist_rows)
-            or strategy_health.get("ready", bool(watchlist_rows))
-        )
+        market_intelligence_ready = bool(strategy_health.get("ready", bool(watchlist_rows)))
         using_latest_session = str(strategy_health.get("readiness_mode") or "") == "latest_session"
         execution_ready = bool(
             not feature_frame.empty
@@ -796,8 +865,8 @@ class DirectionalOptionsService:
             "history_symbol": history_symbol,
             "latest_watchlist_time": latest_watchlist_time,
             "watchlist_age_seconds": watchlist_age_seconds,
-            "watchlist_rows_today": int(commodity_watchlist_status.get("rows") or strategy_health.get("watchlist_rows_today") or 0),
-            "watchlist_rows_latest": int(commodity_watchlist_status.get("rows") or strategy_health.get("watchlist_rows_latest") or 0),
+            "watchlist_rows_today": int(strategy_health.get("watchlist_rows_today") or 0),
+            "watchlist_rows_latest": int(strategy_health.get("watchlist_rows_latest") or 0),
             "readiness_mode": strategy_health.get("readiness_mode"),
             "latest_spot_time": latest_spot_time,
             "spot_age_seconds": spot_age_seconds,
