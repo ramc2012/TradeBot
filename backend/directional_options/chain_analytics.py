@@ -277,23 +277,28 @@ def _as_dict(payload: ChainAnalyticsPayload) -> dict[str, Any]:
 async def fetch_chain_analytics(
     underlying: str,
     expiry: Optional[str] = None,
+    timeout: float = 2.0,
 ) -> Optional[dict[str, Any]]:
     """Pull the cached option chain for an underlying + expiry and
     return the policy-ready feature payload. Returns `None` when no
-    chain is cached (typical pre-market / cold-start)."""
-    cached = await option_chain_service.get_cached(underlying, expiry) if expiry else None
-    if not cached or not cached.get("entries"):
-        # No expiry-specific cache yet — try whatever the service has.
-        # This may race with a refresh; the empty-entries guard below
-        # keeps us from emitting bogus zeros.
-        cached = None
-        try:
-            # Best-effort: ask the option_chain_service for any tracked
-            # entry. Without a known expiry we can't probe it; just
-            # bail.
-            pass
-        except Exception:
-            pass
+    chain is cached (typical pre-market / cold-start) OR when the
+    Redis lookup takes longer than `timeout` seconds — never blocks
+    the caller indefinitely.
+
+    Saturday-evening observation: when broker WS connections are down
+    the option-chain service can leave `get_cached` waiting on a lock
+    held by a stalled refresh task. A hard timeout here keeps the
+    directional snapshot/endpoint snappy regardless of that backpressure.
+    """
+    if not expiry:
+        return None
+    try:
+        cached = await asyncio.wait_for(
+            option_chain_service.get_cached(underlying, expiry),
+            timeout=timeout,
+        )
+    except (asyncio.TimeoutError, Exception):
+        return None
     if not cached or not cached.get("entries"):
         return None
 

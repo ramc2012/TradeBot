@@ -106,10 +106,21 @@ async def chain_analytics(
     Returns the same dict the RL policy receives as `chain` context —
     PCR, ATM IV, IV skew (25-delta), DEX, GEX, max-pain, gamma curve,
     top OI strikes, and chain-wide OI build classification. Returns
-    `{"available": false}` when no chain is cached for the symbol.
+    `{"available": false}` when no chain is cached for the symbol or
+    when the lookup times out (e.g. weekend / broker WS down).
     """
     from directional_options.chain_analytics import fetch_chain_analytics
-    payload = await fetch_chain_analytics(underlying, expiry=expiry)
+    try:
+        # Outer wait_for is a safety belt — fetch_chain_analytics already
+        # bounds its Redis call with its own 2s timeout, but a 5s wall
+        # guarantees this endpoint never hangs the API server even if
+        # the inner timeout were ever bypassed.
+        payload = await asyncio.wait_for(
+            fetch_chain_analytics(underlying, expiry=expiry),
+            timeout=5.0,
+        )
+    except (asyncio.TimeoutError, Exception):
+        payload = None
     if not payload:
         return {"available": False, "underlying": underlying, "expiry": expiry}
     return {"available": True, **payload}
