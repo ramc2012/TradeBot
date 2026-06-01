@@ -1,0 +1,162 @@
+"""Live position-mark overlay.
+
+The strategy agents refresh a position's ``current_price`` only on their
+60-second scan. The watchlist LTP, by contrast, streams sub-second off the
+tick feed. This module bridges the two: it overlays the freshest live tick
+onto open-position dicts in the WebSocket payload layer so the dashboard's
+P&L updates per tick instead of per scan.
+
+Design
+------
+* The held-position **subscription refresh** (in
+  :mod:`market_data.option_subscription_manager`) resolves each open NSE
+  option leg to its Fyers/app symbol and registers the mapping here via
+  :func:`register_position_symbol`. That same routine subscribes the leg to
+  the broker WS so it actually ticks.
+* The WS payload factories call :func:`overlay_live_marks`, which looks up
+  each position's registered app symbol, fetches the freshest mark from
+  ``data_router.get_live_mark`` (in-process buffer → Redis last-value), and
+  recomputes ``current_price`` / ``unrealized_pnl`` / ``return_pct`` /
+  ``notional_value`` from the position's own side + qty + entry.
+
+Safety
+------
+* If a position has no registered symbol, no live tick, or a stale tick
+  (older than the freshness budget inside ``get_live_mark``), the position is
+  left exactly as the agent serialized it — the scan-cadence mark. There is
+  no failure mode that produces a *wrong* mark; the worst case is the old
+  60-second behaviour.
+* The overlay never mutates agent state — it operates on the serialized
+  dicts the WS is about to send.
+"""
+from __future__ import annotations
+
+from typing import Any, Iterable, Optional
+
+from loguru import logger
+
+
+# position identity (its `symbol` field, e.g. "OPT:NIFTY:2026-06-30:24000:PE"
+# or "MCX:NATURALGAS26JUNFUT") -> feed app symbol (e.g. "NSE:NIFTY26JUN24000PE")
+_APP_SYMBOL_BY_POSITION: dict[str, str] = {}
+
+# Long-side markers across the desks: NSE option positions are long-premium
+# (CE/PE), commodity futures carry an explicit BUY/SELL action.
+_LONG_VALUES = {"BUY", "CE", "LONG", "B"}
+
+
+def register_position_symbol(position_symbol: str, app_symbol: str) -> None:
+    """Map a position's identity to the feed app symbol that prices it."""
+    ps = str(position_symbol or "").strip()
+    app = str(app_symbol or "").strip()
+    if ps and app:
+        _APP_SYMBOL_BY_POSITION[ps] = app
+
+
+def registered_app_symbol(position_symbol: str) -> Optional[str]:
+    return _APP_SYMBOL_BY_POSITION.get(str(position_symbol or "").strip())
+
+
+def prune_registry(active_position_symbols: Iterable[str]) -> None:
+    """Drop registry entries for positions that have since closed."""
+    active = {str(s or "").strip() for s in active_position_symbols}
+    for key in list(_APP_SYMBOL_BY_POSITION.keys()):
+        if key not in active:
+            _APP_SYMBOL_BY_POSITION.pop(key, None)
+
+
+def _is_long(side: Any) -> bool:
+    return str(side or "").strip().upper() in _LONG_VALUES
+
+
+async def overlay_live_marks(
+    positions: list[dict[str, Any]],
+    *,
+    side_field: str = "action",
+    symbol_field: str = "symbol",
+    extra_symbol_fields: tuple[str, ...] = ("live_symbol", "trading_symbol"),
+    max_age_seconds: float = 30.0,
+    force_long: bool = False,
+) -> list[dict[str, Any]]:
+    """Return ``positions`` with live LTP + recomputed P&L where available.
+
+    Mutates the dicts in place (they're freshly serialized per WS push) and
+    also returns the list for convenience. Adds a ``mark_source`` field:
+    ``"live_tick"`` when a fresh tick was applied, otherwise left unset so the
+    UI can show whether a row is streaming or scan-marked.
+
+    ``force_long=True`` treats every position as long (multiplier +1). Use it
+    for long-premium option books (NSE S1/S2) where both CE and PE legs are
+    *bought* — there the ``option_type`` field is CE/PE, not a trade
+    direction, so the BUY/SELL heuristic doesn't apply. ``force_long=False``
+    (default) reads ``side_field`` for a BUY/SELL direction (commodity futures).
+    """
+    if not positions:
+        return positions
+    # Local import to avoid a module-load cycle (data_router pulls in broker
+    # adapters which can be heavy).
+    from market_data.data_router import data_router
+
+    for pos in positions:
+        if not isinstance(pos, dict):
+            continue
+        # Resolve the feed symbol: prefer the registered mapping, then any
+        # symbol field that already looks like a feed app symbol.
+        candidates: list[str] = []
+        primary = str(pos.get(symbol_field) or "").strip()
+        if primary:
+            mapped = registered_app_symbol(primary)
+            if mapped:
+                candidates.append(mapped)
+            candidates.append(primary)
+        for fld in extra_symbol_fields:
+            val = str(pos.get(fld) or "").strip()
+            if val:
+                candidates.append(val)
+
+        live: Optional[float] = None
+        for sym in candidates:
+            if not sym:
+                continue
+            try:
+                live = await data_router.get_live_mark(sym, max_age_seconds=max_age_seconds)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[live_marks] get_live_mark failed for {sym}: {exc}")
+                live = None
+            if live:
+                break
+        if not live:
+            continue
+
+        try:
+            entry = float(pos.get("entry_price") or 0.0)
+            qty = float(pos.get("qty") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        mult = 1.0 if (force_long or _is_long(pos.get(side_field))) else -1.0
+        pos["current_price"] = round(live, 4)
+        pos["unrealized_pnl"] = round(mult * (live - entry) * qty, 2)
+        pos["return_pct"] = (
+            round(mult * ((live - entry) / entry) * 100.0, 2) if entry else 0.0
+        )
+        pos["notional_value"] = round(live * qty, 2)
+        pos["mark_source"] = "live_tick"
+    return positions
+
+
+async def overlay_nse_agent_status(status: dict[str, Any]) -> dict[str, Any]:
+    """Overlay live marks onto the NSE strategy-agent status payload in place.
+
+    Walks ``status["strategies"][*]["positions"]`` (long-premium option legs)
+    and applies :func:`overlay_live_marks` with ``force_long=True``. Safe on
+    any shape — silently does nothing if the structure isn't present.
+    """
+    if not isinstance(status, dict):
+        return status
+    strategies = status.get("strategies")
+    if not isinstance(strategies, list):
+        return status
+    for strat in strategies:
+        if isinstance(strat, dict) and isinstance(strat.get("positions"), list):
+            await overlay_live_marks(strat["positions"], force_long=True)
+    return status

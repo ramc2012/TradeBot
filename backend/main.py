@@ -48,7 +48,7 @@ from api.websockets.ticks import (
 )
 from market_data import data_router as market_data_router
 from market_data.live_candle_store import live_candle_store
-from market_data.symbols import LIVE_INDEX_APP_SYMBOLS
+from market_data.symbols import LIVE_INDEX_APP_SYMBOLS, TICK_CAPTURE_APP_SYMBOLS
 from auction_intelligence.rl.automation import rl_auto_trainer
 from paper_engine.commodity_strategy_agent import commodity_strategy_agent
 from paper_engine.strategy_agent import paper_strategy_agent
@@ -86,6 +86,7 @@ async def lifespan(app: FastAPI):
     for symbol in LIVE_INDEX_APP_SYMBOLS:
         market_data_router.register_callback(symbol, market_profile_builder.on_tick)
     market_data_router.register_global_callback(live_candle_store.on_tick)
+    market_data_router.set_required_symbols(list(TICK_CAPTURE_APP_SYMBOLS))
     await live_candle_store.start()
 
     # Prefer the real broker feed when a session exists. Without a broker, keep
@@ -112,7 +113,9 @@ async def lifespan(app: FastAPI):
         )
         market_data_router.set_broker(adapter)
         await market_data_router.subscribe(list(LIVE_INDEX_APP_SYMBOLS))
+        await market_data_router.start_required_feed_watchdog()
     else:
+        await market_data_router.stop_required_feed_watchdog()
         await market_data_router.stop_mock_feed()
         await market_data_router.unsubscribe()
 
@@ -157,6 +160,20 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Option WS subscription manager start skipped: {e}")
         option_ws_task = None
 
+    # Keep open-position option legs subscribed so the dashboard's P&L marks
+    # stream per-tick instead of per-60s-scan. Registers each leg's feed
+    # symbol with market_data.live_marks for the WS overlay.
+    try:
+        from market_data.option_subscription_manager import run_held_position_subscription_loop
+        held_position_ws_task = asyncio.create_task(
+            run_held_position_subscription_loop(),
+            name="held-position-subscription-refresh",
+        )
+        logger.info("✓ Held-position subscription refresh started")
+    except Exception as e:
+        logger.warning(f"Held-position subscription refresh start skipped: {e}")
+        held_position_ws_task = None
+
     if settings.RESEARCH_SYNC_EMBEDDED_ENABLED:
         async def _embedded_research_sync_worker() -> None:
             try:
@@ -188,6 +205,7 @@ async def lifespan(app: FastAPI):
     await paper_strategy_agent.stop()
     await commodity_strategy_agent.stop()
     await live_candle_store.stop()
+    await market_data_router.stop_required_feed_watchdog()
     await market_data_router.stop_mock_feed()
     await close_redis()
     await market_data_router.unsubscribe()
