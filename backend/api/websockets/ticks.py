@@ -293,14 +293,16 @@ async def ws_strategy_overview(websocket: WebSocket):
             get_portfolio_stats,
         )
         from api.routers.trading import strategy_agent_status
+        from market_data.live_marks import overlay_nse_agent_status
 
         return {
-            "agent_status": await strategy_agent_status(),
+            "agent_status": await overlay_nse_agent_status(await strategy_agent_status()),
             "open_signals": await get_open_signals(),
             "comments": await get_agent_comments(),
             "brokers": await broker_status(),
             "pipeline": await get_data_status(),
             "live_portfolio": await get_portfolio_stats(),
+            "fetchedAt": datetime.now(timezone.utc).isoformat(),
         }
 
     await _stream_snapshot(
@@ -323,12 +325,15 @@ async def ws_strategy_dashboard(websocket: WebSocket):
             strategy_equity_history,
         )
 
+        from market_data.live_marks import overlay_nse_agent_status
+
         return {
-            "agent_status": await strategy_agent_status(),
+            "agent_status": await overlay_nse_agent_status(await strategy_agent_status()),
             "kill_switch_state": await get_kill_switch_state(),
             "orders": await get_orders(),
             "risk_status": await risk_status(),
             "equity_curves": await strategy_equity_history(),
+            "fetchedAt": datetime.now(timezone.utc).isoformat(),
         }
 
     await _stream_snapshot(
@@ -378,6 +383,16 @@ async def ws_positions_overview(websocket: WebSocket):
             settle("fractal", fractal_market_profile_paper_positions(symbol=None, status="all", limit=100)),
         )
 
+        # Overlay per-tick marks so the combined positions page streams live
+        # P&L. NSE legs are long-premium (force_long); commodity carries a
+        # BUY/SELL action. Legs not in the feed keep their scan-cadence mark.
+        from market_data.live_marks import overlay_nse_agent_status, overlay_live_marks
+
+        if isinstance(nse_status, dict):
+            await overlay_nse_agent_status(nse_status)
+        if isinstance(commodity_status, dict) and isinstance(commodity_status.get("positions"), list):
+            await overlay_live_marks(commodity_status["positions"], side_field="action")
+
         return {
             "manual": manual_positions,
             "nse": nse_status,
@@ -411,12 +426,30 @@ async def ws_commodity_overview(websocket: WebSocket):
             commodity_strategy_status,
         )
 
+        from market_data.live_marks import overlay_live_marks
+
+        # Overlay per-tick marks onto the open positions so P&L streams
+        # instead of refreshing only on the agent's 60s scan. Commodity
+        # positions carry an "action" (BUY/SELL); legs not in the feed fall
+        # back to the scan-cadence mark untouched.
+        commodity_positions_live = await overlay_live_marks(
+            await commodity_positions(),
+            side_field="action",
+        )
         return {
             "status": await commodity_strategy_status(),
             "kill_switch_state": await commodity_kill_switch_state(),
             "orders": await commodity_orders(limit=40),
-            "positions": await commodity_positions(),
+            "positions": commodity_positions_live,
             "reports": await commodity_reports(limit=24),
+            # Heartbeat. _stream_snapshot only pushes when the encoded payload
+            # changes; without a moving field, the channel goes silent between
+            # the agent's 60s scans even though the client is healthy and
+            # expects a live feed. The timestamp guarantees a push every
+            # interval so the UI's "last update" clock keeps ticking and a
+            # dropped socket is detectable. (Per-tick position marks land in
+            # Stage 2 via the live-mark overlay.)
+            "fetchedAt": datetime.now(timezone.utc).isoformat(),
         }
 
     await _stream_snapshot(

@@ -12,6 +12,14 @@ from db.redis_client import get_redis
 from market_data.symbols import to_app_symbol, to_broker_symbol, to_fyers_symbol
 
 
+# Redis last-value tick hot-cache. `tick:{symbol}` holds the most recent
+# tick JSON so cross-process readers and late WS subscribers can fetch a
+# live mark without the process-local _tick_buffer. TTL evicts symbols the
+# feed has stopped sending (e.g. after an expiry roll or unsubscribe).
+LATEST_TICK_KEY_PREFIX = "tick:"
+LATEST_TICK_TTL_SECONDS = 300
+
+
 class DataRouter:
     """
     Selects the active broker's WebSocket feed.
@@ -211,7 +219,17 @@ class DataRouter:
                 "ask": tick.ask,
                 "timestamp": timestamp.isoformat(),
             })
+            # (1) pub/sub fan-out for live WS subscribers (fire-and-forget).
             await redis.publish(f"ticks:{tick.symbol}", payload)
+            # (2) last-value hot-cache. Unlike pub/sub, this survives between
+            # ticks so late subscribers and *other processes* (workers,
+            # supervisors, the positions WS) can read the latest mark without
+            # depending on the process-local _tick_buffer.
+            await redis.set(
+                f"{LATEST_TICK_KEY_PREFIX}{tick.symbol}",
+                payload,
+                ex=LATEST_TICK_TTL_SECONDS,
+            )
         except Exception as e:
             logger.debug(f"[DataRouter] Redis publish error: {e}")
 
@@ -221,6 +239,42 @@ class DataRouter:
     def get_ltp(self, symbol: str) -> float:
         tick = self._tick_buffer.get(symbol)
         return tick.ltp if tick else 0.0
+
+    async def get_live_mark(
+        self,
+        symbol: str,
+        *,
+        max_age_seconds: float = 30.0,
+    ) -> Optional[float]:
+        """Return the freshest LTP for ``symbol`` across process boundaries.
+
+        Order: in-process ``_tick_buffer`` (instant) → Redis
+        ``tick:{symbol}`` last-value key (cross-process). Returns ``None``
+        when no tick is available or the freshest one is older than
+        ``max_age_seconds`` (so a dead feed never marks positions with a
+        stale price masquerading as live).
+        """
+        tick = self._tick_buffer.get(symbol)
+        if tick is not None and getattr(tick, "ltp", None):
+            ts = self._ensure_utc_timestamp(tick.timestamp)
+            if (datetime.now(timezone.utc) - ts).total_seconds() <= max_age_seconds:
+                return float(tick.ltp)
+        try:
+            redis = await get_redis()
+            raw = await redis.get(f"{LATEST_TICK_KEY_PREFIX}{symbol}")
+            if raw:
+                data = json.loads(raw)
+                ltp = data.get("ltp")
+                ts_raw = data.get("timestamp")
+                if ltp and ts_raw:
+                    ts = datetime.fromisoformat(ts_raw)
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if (datetime.now(timezone.utc) - ts).total_seconds() <= max_age_seconds:
+                        return float(ltp)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[DataRouter] get_live_mark redis read failed for {symbol}: {exc}")
+        return None
 
     def get_status(self) -> dict[str, Any]:
         source_policy = dict(self._source_policy)

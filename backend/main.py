@@ -157,6 +157,20 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Option WS subscription manager start skipped: {e}")
         option_ws_task = None
 
+    # Keep open-position option legs subscribed so the dashboard's P&L marks
+    # stream per-tick instead of per-60s-scan. Registers each leg's feed
+    # symbol with market_data.live_marks for the WS overlay.
+    try:
+        from market_data.option_subscription_manager import run_held_position_subscription_loop
+        held_position_ws_task = asyncio.create_task(
+            run_held_position_subscription_loop(),
+            name="held-position-subscription-refresh",
+        )
+        logger.info("✓ Held-position subscription refresh started")
+    except Exception as e:
+        logger.warning(f"Held-position subscription refresh start skipped: {e}")
+        held_position_ws_task = None
+
     if settings.RESEARCH_SYNC_EMBEDDED_ENABLED:
         async def _embedded_research_sync_worker() -> None:
             try:
