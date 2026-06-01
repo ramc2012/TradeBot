@@ -804,7 +804,25 @@ class DirectionalOptionsService:
                 str(candidate.get("delta_bucket") or ""),
             ],
             numeric_context={key: value for key, value in numeric_context.items() if value is not None},
-            hard_risk_passed=bool((risk_payload or {}).get("approved", True)),
+            # Always tell RAG "upstream gate passed" so it evaluates on
+            # its OWN evidence (resolved-case win-rate / expectancy),
+            # not by echoing the policy's already-made decision.
+            #
+            # Old behavior: if the policy chose to SKIP we'd set
+            # risk_payload.approved=False BEFORE calling RAG, then pass
+            # hard_risk_passed=False here. RAG's first check is
+            # `if not hard_risk_passed: return "block", ["hard_risk_failed"]`
+            # which produced a misleading "RAG blocked" entry in the
+            # journal even though RAG had no actual evidence and the
+            # real skip reason was the policy.
+            #
+            # New behavior: RAG returns its evidence-based verdict
+            # (allow / warn / block-with-real-reasons). If it finds
+            # losses in retrieved cases it still blocks; if it finds
+            # nothing, it returns "warn: insufficient_case_memory"
+            # which doesn't override the policy decision. Either way
+            # the journal accurately reflects WHO is gating the trade.
+            hard_risk_passed=True,
             query=query,
         )
 
@@ -813,9 +831,20 @@ class DirectionalOptionsService:
             return
         if rag_context.get("decision") != "block":
             return
+        # Defensive: ignore any pure hard_risk_failed block. With
+        # hard_risk_passed=True everywhere this shouldn't happen, but
+        # belt-and-suspenders — that reason code is just a mirror of
+        # the upstream gate and adds no signal. We only let RAG
+        # OVERRIDE the policy when it has real evidence reasons
+        # (negative_retrieval_conditional_expectancy /
+        # low_similar_case_win_rate / policy_context_attached).
+        reason_codes = list(rag_context.get("reason_codes") or [])
+        meaningful = [r for r in reason_codes if r and r != "hard_risk_failed"]
+        if not meaningful:
+            return
         risk_payload["approved"] = False
         reasons = list(risk_payload.get("reasons") or [])
-        reasons.append(f"RAG context gate blocked trade: {', '.join(rag_context.get('reason_codes') or ['context_block'])}.")
+        reasons.append(f"RAG context gate blocked trade: {', '.join(meaningful)}.")
         risk_payload["reasons"] = reasons
 
     @staticmethod
