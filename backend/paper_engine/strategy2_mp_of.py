@@ -69,9 +69,19 @@ S2_TICK_SIZE: dict[str, float] = {
 # same across desks — wait for IB to print, then evaluate.
 S2_MP_MIN_PERIODS = 2
 
-# Look-back when loading 1-min spot. Two trading days is enough to cover
-# the prior session (used for prior_profile) plus today's developing one.
-S2_SPOT_LOOKBACK_DAYS = 5
+# Look-back when loading 1-min spot. Two days covers today's developing
+# session plus the prior one (for the prior_profile / open_drive trigger).
+# Kept tight because the load + per-row NSE-hours parse runs every eval and
+# is part of the per-scan CPU cost.
+S2_SPOT_LOOKBACK_DAYS = 2
+
+# Per-underlying MP+OF throttle. A full evaluation (DB load → NSE-hours filter
+# → profile build → CVD/ATR → 4-trigger check) is CPU-heavy; running it for
+# every underlying on every 60s scan saturated the box's single core. We
+# therefore recompute each underlying at most once per this interval and
+# return the cached result in between. With the small universe the evals
+# stagger naturally, so at most one or two run per scan.
+S2_MPOF_THROTTLE_SECONDS = 90.0
 
 # Roll-to-next-expiry threshold. When the nearest expiry for a track is within
 # this many CALENDAR days of expiring, we skip it and use the next one — the
@@ -450,6 +460,10 @@ S2_MP_PERIOD_MINUTES = 15
 # per 15 min per underlying instead of every 60s scan.
 _S2_TODAY_PROFILE_CACHE: dict[tuple[str, str], tuple[int, Any]] = {}
 
+# Throttle cache: underlying -> (monotonic_ts, result). Returns the last
+# result until S2_MPOF_THROTTLE_SECONDS elapse, capping per-scan CPU.
+_S2_MPOF_RESULT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
 
 async def load_strategy2_prior_session_profile(
     underlying: str,
@@ -526,6 +540,17 @@ async def evaluate_strategy2_mp_of(
     once IB has printed, so the historical timeline (Yesterday / Week /
     Month) populates automatically without a separate batch job.
     """
+    from time import monotonic
+
+    # Throttle: a full evaluation is CPU-heavy, so recompute each underlying
+    # at most once per S2_MPOF_THROTTLE_SECONDS and return the cached result
+    # in between. Caps per-scan CPU on the single-core box.
+    u_key = str(underlying or "").upper()
+    now_mono = monotonic()
+    cached_result = _S2_MPOF_RESULT_CACHE.get(u_key)
+    if cached_result is not None and (now_mono - cached_result[0]) < S2_MPOF_THROTTLE_SECONDS:
+        return cached_result[1]
+
     # Late imports keep this module cheap when the flag is off.
     from paper_engine.commodity_mp_signal import evaluate_commodity_mp_signal
     from paper_engine.commodity_strategy_agent import (
@@ -548,7 +573,7 @@ async def evaluate_strategy2_mp_of(
     # scopes to MCX hours.
     closed_1m = _filter_nse_session_hours(closed_1m)
     if not closed_1m or len(closed_1m) < 30:
-        return shape_result_for_s2(
+        shaped = shape_result_for_s2(
             {
                 "signal": None,
                 "reason": "insufficient_1m_spot",
@@ -556,13 +581,17 @@ async def evaluate_strategy2_mp_of(
             },
             underlying=underlying,
         )
+        _S2_MPOF_RESULT_CACHE[u_key] = (now_mono, shaped)
+        return shaped
 
     session_rows, session_date = _latest_session_rows(closed_1m)
     if not session_rows:
-        return shape_result_for_s2(
+        shaped = shape_result_for_s2(
             {"signal": None, "reason": "no_session_rows"},
             underlying=underlying,
         )
+        _S2_MPOF_RESULT_CACHE[u_key] = (now_mono, shaped)
+        return shaped
 
     # Cache the (CPU-heavy) MarketProfileEngine build. Rebuilding it on every
     # 60s scan for all five indices saturates the box's single core and
@@ -609,4 +638,6 @@ async def evaluate_strategy2_mp_of(
         except Exception as exc:
             logger.debug(f"[s2_mp_of] persist failed for {underlying}: {exc}")
 
-    return shape_result_for_s2(result, underlying=underlying)
+    shaped = shape_result_for_s2(result, underlying=underlying)
+    _S2_MPOF_RESULT_CACHE[u_key] = (now_mono, shaped)
+    return shaped

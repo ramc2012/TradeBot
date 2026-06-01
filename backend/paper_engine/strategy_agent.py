@@ -164,7 +164,10 @@ def _report_interval_seconds(value: str) -> int:
     return mapping.get(str(value or "1h"), 3600)
 
 
-STRATEGY2_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
+# S2 trades only the three most liquid index option books. FINNIFTY and
+# MIDCPNIFTY were dropped to keep the per-scan MP+OF cost within the box's
+# single-core budget (running MP+OF for all five pegged the CPU).
+STRATEGY2_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "SENSEX")
 STRATEGY2_OPTION_TIMEFRAME = "15minute"
 STRATEGY2_OPTION_BAR_MINUTES = 15
 STRATEGY2_ENTRY_CUTOFF = time(15, 0)
