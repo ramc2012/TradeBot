@@ -24,6 +24,7 @@ on:
       # Don't redeploy for doc-only changes or sibling-project edits.
       - 'backend/**'
       - 'frontend/**'
+      - 'frontend-v2/**'
       - 'docker-compose.yml'
       - '.github/workflows/deploy.yml'
   workflow_dispatch:
@@ -181,14 +182,24 @@ jobs:
 
           echo "==> HEAD after sync:"
           git log -1 --oneline
-          echo "==> Building + restarting backend and frontend..."
+          echo "==> Building + restarting backend and frontend (v1 on :3000)..."
           docker compose up -d --build ${FORCE_FLAG} backend frontend
+          echo "==> Building + restarting frontend-v2 (on :3001, profile=v2)..."
+          # v2 service is gated behind --profile v2 in docker-compose.yml so
+          # local 'docker compose up' on a dev box doesn't auto-start it.
+          # In prod we want it running alongside v1 until deprecation.
+          docker compose --profile v2 up -d --build ${FORCE_FLAG} frontend-v2
           echo "==> Waiting 30s for services to settle..."
           sleep 30
           echo "==> Container status:"
-          docker compose ps --format "table {{.Name}}\t{{.Status}}"
+          docker compose --profile v2 ps --format "table {{.Name}}\t{{.Status}}"
           echo "==> Backend health probe:"
           curl -sS -m 5 http://localhost:8000/health || (echo "backend /health failed" && exit 1)
+          echo ""
+          echo "==> v1 frontend probe (port 3000):"
+          curl -sS -m 5 -o /dev/null -w "  HTTP %{http_code}\n" http://localhost:3000/ || echo "  v1 unreachable"
+          echo "==> v2 frontend probe (port 3001):"
+          curl -sS -m 5 -o /dev/null -w "  HTTP %{http_code}\n" http://localhost:3001/ || echo "  v2 unreachable"
           echo ""
           echo "==> Commodity overview lane shape:"
           curl -sS -m 5 http://localhost:8000/api/commodity/overview | python3 -c 'import json,sys; s=json.load(sys.stdin)["status"]; print("Lanes:", [x["title"] for x in s.get("strategies", [])]); print("Symbols:", s["config"]["symbols"])'
@@ -290,3 +301,13 @@ jobs:
             echo "Attempt $i: backend not responding yet, waiting 5s..."
             sleep 5
           done
+          echo ""
+          echo "Probing v1 frontend (port 3000)..."
+          curl -sS -m 5 -o /dev/null -w "  v1 HTTP %{http_code}\n" http://15.206.56.206:3000/ || echo "  v1 not reachable from internet"
+          echo "Probing v2 frontend (port 3001)..."
+          # v2 reachability from the public internet requires the EC2
+          # security group to allow inbound TCP 3001. Inside the box the
+          # docker-compose probe above will pass either way; this check
+          # surfaces whether the SG was opened.
+          curl -sS -m 5 -o /dev/null -w "  v2 HTTP %{http_code}\n" http://15.206.56.206:3001/ \
+            || echo "  v2 not reachable from internet — open SG for TCP 3001 if you want external access"
