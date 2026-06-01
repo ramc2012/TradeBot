@@ -44,6 +44,13 @@ _APP_SYMBOL_BY_POSITION: dict[str, str] = {}
 # (CE/PE), commodity futures carry an explicit BUY/SELL action.
 _LONG_VALUES = {"BUY", "CE", "LONG", "B"}
 
+# Max allowed ratio between a live tick and the agent's scan-cadence reference
+# before the tick is treated as broker-feed corruption and discarded. A real
+# 30-DTE option premium barely moves between two 60s scans; the observed
+# cross-wired values are index-magnitude (7x+). 4x cleanly separates them
+# while leaving generous headroom for legitimate fast moves.
+MAX_LIVE_DIVERGENCE_RATIO = 4.0
+
 
 def register_position_symbol(position_symbol: str, app_symbol: str) -> None:
     """Map a position's identity to the feed app symbol that prices it."""
@@ -133,6 +140,33 @@ async def overlay_live_marks(
             qty = float(pos.get("qty") or 0.0)
         except (TypeError, ValueError):
             continue
+
+        # Sanity guard against broker-WS cross-wiring. The Fyers feed
+        # occasionally attributes one instrument's value to another option
+        # symbol (e.g. a deep-OTM stock put showing an index's spot price —
+        # observed: KPITTECH 770 PE reading 702 = NIFTY 24000 PE's value).
+        # The cross-wired values are index-magnitude, always many multiples
+        # of a real option premium, whereas a genuine premium move between
+        # the agent's 60s scans is small. Reject any live mark that diverges
+        # from the agent's reliable reference (the price the agent just
+        # serialized) by more than MAX_LIVE_DIVERGENCE_RATIO, and keep the
+        # scan-cadence price instead. The reference must be > 0 to compare.
+        ref_price = 0.0
+        try:
+            ref_price = float(pos.get("current_price") or 0.0)
+        except (TypeError, ValueError):
+            ref_price = 0.0
+        if ref_price > 0 and (
+            live > ref_price * MAX_LIVE_DIVERGENCE_RATIO
+            or live < ref_price / MAX_LIVE_DIVERGENCE_RATIO
+        ):
+            logger.debug(
+                f"[live_marks] rejected cross-wired mark for {primary}: "
+                f"live={live} vs ref={ref_price} (ratio guard)"
+            )
+            pos["mark_source"] = "scan_guarded"
+            continue
+
         mult = 1.0 if (force_long or _is_long(pos.get(side_field))) else -1.0
         pos["current_price"] = round(live, 4)
         pos["unrealized_pnl"] = round(mult * (live - entry) * qty, 2)
