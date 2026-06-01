@@ -301,7 +301,6 @@ async def ws_strategy_overview(websocket: WebSocket):
             "brokers": await broker_status(),
             "pipeline": await get_data_status(),
             "live_portfolio": await get_portfolio_stats(),
-            "fetchedAt": datetime.now(timezone.utc).isoformat(),
         }
 
     await _stream_snapshot(
@@ -330,7 +329,6 @@ async def ws_strategy_dashboard(websocket: WebSocket):
             "orders": await get_orders(),
             "risk_status": await risk_status(),
             "equity_curves": await strategy_equity_history(),
-            "fetchedAt": datetime.now(timezone.utc).isoformat(),
         }
 
     await _stream_snapshot(
@@ -419,14 +417,6 @@ async def ws_commodity_overview(websocket: WebSocket):
             "orders": await commodity_orders(limit=40),
             "positions": await commodity_positions(),
             "reports": await commodity_reports(limit=24),
-            # Heartbeat. _stream_snapshot only pushes when the encoded payload
-            # changes; without a moving field, the channel goes silent between
-            # the agent's 60s scans even though the client is healthy and
-            # expects a live feed. The timestamp guarantees a push every
-            # interval so the UI's "last update" clock keeps ticking and a
-            # dropped socket is detectable. (Per-tick position marks land in
-            # Stage 2 via the live-mark overlay.)
-            "fetchedAt": datetime.now(timezone.utc).isoformat(),
         }
 
     await _stream_snapshot(
