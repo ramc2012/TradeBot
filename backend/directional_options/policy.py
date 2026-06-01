@@ -304,10 +304,20 @@ class BayesianRidge:
 
     We maintain S_inv = alpha I + beta X^T X and b = beta X^T y so updates
     are O(d^2) per observation, no batch refit.
+
+    Prior tuning rationale: alpha=10 + beta=4 gives a cold-start
+    predictive variance of roughly (||x||^2 / 10) + 0.25 ≈ 1.5 for the
+    typical 51-D feature vector (||x||^2 ~ 12), so Thompson samples
+    cluster in [-2σ, +2σ] = [-2.5, +2.5] — natural R-multiple range.
+
+    The earlier alpha=beta=1 prior gave a cold-start σ of ~5-15 (we saw
+    σ=218 once when the chain-feature scaling went wrong), so a freshly
+    bootstrapped policy almost always sampled deep negative on the
+    first draw → SKIP forever until something updated the posterior.
     """
     dim: int
-    alpha: float = 1.0
-    beta: float = 1.0
+    alpha: float = 10.0
+    beta: float = 4.0
     S_inv: np.ndarray = field(default=None)  # type: ignore[assignment]
     b: np.ndarray = field(default=None)  # type: ignore[assignment]
     n_seen: int = 0
@@ -330,8 +340,19 @@ class BayesianRidge:
         return mean, max(var, 1e-6)
 
     def sample(self, x: np.ndarray, rng: np.random.Generator) -> float:
+        """Thompson sample, then clip to the R-multiple realisable range.
+
+        Cold-start posteriors with high σ otherwise generate Thompson
+        draws like -184 or +37 (way outside any plausible R-multiple).
+        That makes act/skip decisions look near-deterministic on a
+        single draw. Clipping to [REWARD_CLIP_LOW-1, REWARD_CLIP_HIGH+1]
+        keeps the exploration band sane — the policy still explores
+        because the tail probability around 0 is preserved — but a
+        single extreme draw can no longer override the bias term.
+        """
         mean, var = self.predict_mean_var(x)
-        return float(rng.normal(mean, math.sqrt(var)))
+        raw = float(rng.normal(mean, math.sqrt(var)))
+        return float(np.clip(raw, REWARD_CLIP_LOW - 1.0, REWARD_CLIP_HIGH + 1.0))
 
     def update(self, x: np.ndarray, y: float) -> None:
         self.S_inv = self.S_inv + self.beta * np.outer(x, x)

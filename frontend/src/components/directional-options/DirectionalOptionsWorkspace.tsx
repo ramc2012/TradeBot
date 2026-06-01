@@ -19,6 +19,7 @@ import {
 import PolicyDecisionPanel, { type PolicyBlock } from "./PolicyDecisionPanel";
 import PaperTradingTab from "./PaperTradingTab";
 import PolicyLearningTab from "./PolicyLearningTab";
+import OptionAnalyticsPanel from "./OptionAnalyticsPanel";
 import MultiSymbolWatch from "./MultiSymbolWatch";
 import EngineCalculations from "./EngineCalculations";
 import {
@@ -347,14 +348,15 @@ function StatusBadge({ label }: { label: string }) {
   );
 }
 
-type TabKey = "overview" | "paper" | "policy" | "backtest" | "coverage";
+type TabKey = "overview" | "analytics" | "paper" | "policy" | "backtest" | "coverage";
 
 const TABS: { key: TabKey; label: string; icon: typeof Target }[] = [
-  { key: "overview", label: "Live overview", icon: Gauge },
-  { key: "paper", label: "Paper trading", icon: Banknote },
-  { key: "policy", label: "Policy & learning", icon: Brain },
-  { key: "backtest", label: "Backtest", icon: TrendingUp },
-  { key: "coverage", label: "Data coverage", icon: Layers3 },
+  { key: "overview",  label: "Live overview",    icon: Gauge },
+  { key: "analytics", label: "Option analytics", icon: Layers3 },
+  { key: "paper",     label: "Paper trading",    icon: Banknote },
+  { key: "policy",    label: "Policy & learning",icon: Brain },
+  { key: "backtest",  label: "Backtest",         icon: TrendingUp },
+  { key: "coverage",  label: "Data coverage",    icon: Layers3 },
 ];
 
 export default function DirectionalOptionsWorkspace() {
@@ -812,6 +814,13 @@ export default function DirectionalOptionsWorkspace() {
       </section>
 
       </>
+      ) : null}
+
+      {activeTab === "analytics" ? (
+        <OptionAnalyticsPanel
+          underlying={deferredUnderlying}
+          expiry={snapshot?.selected_contract?.expiry ?? null}
+        />
       ) : null}
 
       {activeTab === "paper" ? (
