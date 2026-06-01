@@ -42,6 +42,14 @@ DISPLAY_TO_APP_SYMBOL: dict[str, str] = {
 
 LIVE_INDEX_APP_SYMBOLS: tuple[str, ...] = tuple(APP_TO_BROKER_SYMBOL.keys())
 
+# Symbols that must be continuously captured to `market_ticks`.
+# Keep this intentionally small: these are the MP-critical index streams.
+TICK_CAPTURE_APP_SYMBOLS: tuple[str, ...] = (
+    "NSE:NIFTY50-INDEX",
+    "NSE:BANKNIFTY-INDEX",
+    "BSE:SENSEX-INDEX",
+)
+
 
 def to_broker_symbol(symbol: str) -> str:
     """Translate an app symbol to the broker's instrument key when known."""

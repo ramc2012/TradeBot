@@ -1,0 +1,43 @@
+from __future__ import annotations
+
+from datetime import date
+
+from data.index_futures_backfill import (
+    chunk_dates,
+    fyers_front_month_symbol,
+    normalize_underlyings,
+    normalize_upstox_candles,
+)
+
+
+def test_normalize_underlyings_defaults_to_required_index_futures() -> None:
+    assert normalize_underlyings(None) == ["NIFTY", "BANKNIFTY", "SENSEX"]
+
+
+def test_fyers_front_month_symbol_rolls_after_monthly_expiry() -> None:
+    assert fyers_front_month_symbol("NIFTY", date(2026, 5, 30)) == "NSE:NIFTY26JUNFUT"
+    assert fyers_front_month_symbol("BANKNIFTY", date(2026, 5, 30)) == "NSE:BANKNIFTY26JUNFUT"
+    assert fyers_front_month_symbol("SENSEX", date(2026, 5, 30)) == "BSE:SENSEX26JUNFUT"
+
+
+def test_chunk_dates_inclusive_windows() -> None:
+    assert chunk_dates(date(2024, 1, 1), date(2024, 1, 5), 2) == [
+        (date(2024, 1, 1), date(2024, 1, 2)),
+        (date(2024, 1, 3), date(2024, 1, 4)),
+        (date(2024, 1, 5), date(2024, 1, 5)),
+    ]
+
+
+def test_normalize_upstox_candles_returns_chronological_utc_rows() -> None:
+    rows = normalize_upstox_candles(
+        [
+            ["2026-05-30T09:16:00+05:30", 2, 3, 1, 2.5, 200, 0],
+            ["2026-05-30T09:15:00+05:30", 1, 2, 0.5, 1.5, 100, 0],
+        ]
+    )
+
+    assert [row["time"] for row in rows] == [
+        "2026-05-30T03:45:00+00:00",
+        "2026-05-30T03:46:00+00:00",
+    ]
+    assert rows[0]["volume"] == 100
