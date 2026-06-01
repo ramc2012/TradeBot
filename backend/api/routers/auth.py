@@ -1962,7 +1962,7 @@ async def _sync_market_data_feed() -> None:
     """Keep the shared index tick feed aligned with the current active broker."""
     from market_data import data_router as market_data_router
     from market_data.source_policy import choose_active_adapter, source_policy_snapshot
-    from market_data.symbols import LIVE_INDEX_APP_SYMBOLS
+    from market_data.symbols import LIVE_INDEX_APP_SYMBOLS, TICK_CAPTURE_APP_SYMBOLS
 
     active_adapters = {
         "fyers": get_active_adapter("fyers"),
@@ -1978,9 +1978,12 @@ async def _sync_market_data_feed() -> None:
         )
     )
     if adapter:
+        market_data_router.set_required_symbols(list(TICK_CAPTURE_APP_SYMBOLS))
         market_data_router.set_broker(adapter)
         await market_data_router.subscribe(list(LIVE_INDEX_APP_SYMBOLS))
+        await market_data_router.start_required_feed_watchdog()
     else:
+        await market_data_router.stop_required_feed_watchdog()
         await market_data_router.stop_mock_feed()
         await market_data_router.unsubscribe()
 

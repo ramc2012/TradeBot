@@ -2,9 +2,30 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from brokers.base import Tick
 from market_data.data_router import DataRouter
 from market_data.market_profile import MarketProfileBuilder
+from market_data.symbols import TICK_CAPTURE_APP_SYMBOLS
+
+
+class _FakeWs:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeBroker:
+    def __init__(self, broker_name: str = "fyers") -> None:
+        self.broker_name = broker_name
+        self.subscribe_calls: list[list[str]] = []
+
+    async def subscribe_websocket(self, symbols, callback):
+        self.subscribe_calls.append(list(symbols))
+        return _FakeWs()
 
 
 def test_data_router_normalizes_naive_tick_timestamps_to_utc() -> None:
@@ -116,3 +137,55 @@ def test_data_router_reconnect_schedule_is_rate_limited() -> None:
     router._schedule_reconnect()
 
     assert loop.created == 1
+
+
+@pytest.mark.asyncio
+async def test_data_router_keeps_required_index_capture_symbols_on_fyers_subscribe() -> None:
+    router = DataRouter()
+    broker = _FakeBroker("fyers")
+    router.set_broker(broker)  # type: ignore[arg-type]
+
+    await router.subscribe(["NSE:FINNIFTY-INDEX"])
+
+    assert set(TICK_CAPTURE_APP_SYMBOLS).issubset(set(router._subscribed_symbols))
+    assert "NSE:NIFTY50-INDEX" in broker.subscribe_calls[-1]
+    assert "NSE:NIFTYBANK-INDEX" in broker.subscribe_calls[-1]
+    assert "BSE:SENSEX-INDEX" in broker.subscribe_calls[-1]
+    assert router.get_status()["required_symbols"] == list(TICK_CAPTURE_APP_SYMBOLS)
+
+
+@pytest.mark.asyncio
+async def test_data_router_required_symbols_survive_sticky_option_resubscribe() -> None:
+    router = DataRouter()
+    broker = _FakeBroker("upstox")
+    router.set_broker(broker)  # type: ignore[arg-type]
+
+    await router.subscribe(["NSE:FINNIFTY-INDEX"])
+    await router.add_subscriptions(["NSE:ABC26JUN100CE"])
+
+    assert set(TICK_CAPTURE_APP_SYMBOLS).issubset(set(router._subscribed_symbols))
+    assert "NSE:ABC26JUN100CE" in router._subscribed_symbols
+    assert "NSE_INDEX|Nifty 50" in broker.subscribe_calls[-1]
+    assert "NSE_INDEX|Nifty Bank" in broker.subscribe_calls[-1]
+    assert "BSE_INDEX|SENSEX" in broker.subscribe_calls[-1]
+
+
+@pytest.mark.asyncio
+async def test_data_router_ensure_required_subscriptions_restores_missing_symbols() -> None:
+    router = DataRouter()
+    broker = _FakeBroker("fyers")
+    router.set_broker(broker)  # type: ignore[arg-type]
+    router._subscribed_symbols = ["NSE:FINNIFTY-INDEX"]
+
+    await router.ensure_required_subscriptions()
+
+    assert set(TICK_CAPTURE_APP_SYMBOLS).issubset(set(router._subscribed_symbols))
+    assert broker.subscribe_calls
+
+
+def test_data_router_index_market_hours_gate() -> None:
+    monday_open_ist = datetime(2026, 6, 1, 10, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+    saturday_open_ist = datetime(2026, 5, 30, 10, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+
+    assert DataRouter._is_index_market_open(monday_open_ist) is True
+    assert DataRouter._is_index_market_open(saturday_open_ist) is False

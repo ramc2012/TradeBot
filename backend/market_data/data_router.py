@@ -9,7 +9,15 @@ from loguru import logger
 
 from brokers.base import BrokerAdapter, Tick
 from db.redis_client import get_redis
-from market_data.symbols import to_app_symbol, to_broker_symbol, to_fyers_symbol
+from market_data.symbols import (
+    TICK_CAPTURE_APP_SYMBOLS,
+    to_app_symbol,
+    to_broker_symbol,
+    to_fyers_symbol,
+)
+
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 # Redis last-value tick hot-cache. `tick:{symbol}` holds the most recent
@@ -38,6 +46,13 @@ class DataRouter:
         # set, a spot-only resync from auth / _sync_market_data_feed
         # would wipe a previously-applied option subscription.
         self._sticky_extras: set[str] = set()
+        # Required symbols — the MP-critical index streams that must stay on
+        # every broker subscription so market_ticks never loses NIFTY /
+        # BANKNIFTY / SENSEX. Defaults to the capture set; set_required_symbols
+        # can override. These are always merged into subscribe()'s broker call.
+        self._required_symbols: List[str] = [
+            to_app_symbol(s) for s in TICK_CAPTURE_APP_SYMBOLS
+        ]
         self._callbacks: Dict[str, List[Callable[[Tick], None]]] = {}
         self._global_callbacks: List[Callable[[Tick], None]] = []
         self._tick_buffer: Dict[str, Tick] = {}  # latest tick per symbol
@@ -47,6 +62,13 @@ class DataRouter:
         self._reconnect_task: Optional[asyncio.Task] = None
         self._last_reconnect_attempt_at: Optional[datetime] = None
         self._reconnect_backoff = timedelta(seconds=60)
+        # Required-feed watchdog: a periodic guard that re-subscribes any
+        # required index symbol that dropped off the broker WS, and forces a
+        # reconnect when a required symbol's last tick is older than the
+        # staleness budget during market hours.
+        self._watchdog_task: Optional[asyncio.Task] = None
+        self._watchdog_interval_seconds = 30.0
+        self._required_tick_stale_seconds = 90.0
 
     def set_broker(self, broker: BrokerAdapter):
         self._broker = broker
@@ -61,16 +83,51 @@ class DataRouter:
         if callback not in self._global_callbacks:
             self._global_callbacks.append(callback)
 
+    def set_required_symbols(self, symbols: List[str]) -> None:
+        """Set the symbols that must stay on every broker subscription.
+
+        Normalized to app symbols and de-duplicated. These are always merged
+        into ``subscribe()``'s broker call so the MP-critical index streams
+        never drop off market_ticks.
+        """
+        seen: set[str] = set()
+        required: List[str] = []
+        for symbol in symbols:
+            app = to_app_symbol(symbol)
+            if app and app not in seen:
+                seen.add(app)
+                required.append(app)
+        self._required_symbols = required
+
+    def _compose_subscription_set(self, symbols: List[str]) -> List[str]:
+        """Merge the caller's symbols with required + sticky extras.
+
+        Order is primary → required → sticky; de-duplicated via to_app_symbol
+        so the returned list is the canonical app-symbol subscription set.
+        """
+        seen: set[str] = set()
+        out: List[str] = []
+        for symbol in [
+            *symbols,
+            *self._required_symbols,
+            *getattr(self, "_sticky_extras", set()),
+        ]:
+            app = to_app_symbol(symbol)
+            if app and app not in seen:
+                seen.add(app)
+                out.append(app)
+        return out
+
     async def subscribe(self, symbols: List[str]):
         if not self._broker:
             logger.warning("[DataRouter] No broker set — cannot subscribe")
             return
-        # Merge in any sticky extras (e.g. option contracts pinned by the
-        # OptionWS subscription manager). Without this the broker-session
-        # refresh path that periodically resyncs spot indices would wipe
-        # out a previously-applied option subscription set.
-        sticky_extras = [s for s in getattr(self, "_sticky_extras", set()) if s not in symbols]
-        full_set = list(symbols) + sticky_extras
+        # Merge required index streams + sticky extras (e.g. option contracts
+        # pinned by the OptionWS subscription manager). Without this, a
+        # spot-only resync from the broker-session refresh path would wipe a
+        # previously-applied option subscription or drop a required index.
+        full_set = self._compose_subscription_set(symbols)
+        sticky_extras = [s for s in full_set if s in self._sticky_extras]
         if (
             self._ws_client is not None
             and self._ws_broker is self._broker
@@ -95,7 +152,7 @@ class DataRouter:
         self._ws_broker = self._broker
         logger.info(
             f"[DataRouter] Subscribed to {len(full_set)} symbols "
-            f"(primary={len(symbols)} sticky={len(sticky_extras)})"
+            f"(primary={len(symbols)} required={len(self._required_symbols)} sticky={len(sticky_extras)})"
         )
 
     async def add_subscriptions(self, symbols: List[str]) -> int:
@@ -134,6 +191,107 @@ class DataRouter:
         await self.subscribe(primary)
         logger.info(f"[DataRouter] Removed {len(drop)} subscriptions")
         return len(drop)
+
+    # ── Required-feed watchdog ───────────────────────────────────────────────
+
+    @staticmethod
+    def _is_index_market_open(now: Optional[datetime] = None) -> bool:
+        """True during NSE index regular session (Mon–Fri, 09:15–15:30 IST)."""
+        if now is None:
+            now = datetime.now(IST)
+        now_ist = now.astimezone(IST)
+        if now_ist.weekday() >= 5:  # Saturday / Sunday
+            return False
+        minute_of_day = now_ist.hour * 60 + now_ist.minute
+        return (9 * 60 + 15) <= minute_of_day <= (15 * 60 + 30)
+
+    def _missing_required_symbols(self) -> List[str]:
+        subscribed = set(self._subscribed_symbols)
+        return [s for s in self._required_symbols if s not in subscribed]
+
+    def _stale_required_symbols(self) -> List[str]:
+        """Required symbols whose last tick is older than the staleness budget."""
+        now = datetime.now(timezone.utc)
+        stale: List[str] = []
+        for symbol in self._required_symbols:
+            tick = self._tick_buffer.get(symbol)
+            if tick is None or tick.timestamp is None:
+                stale.append(symbol)
+                continue
+            age = (now - self._ensure_utc_timestamp(tick.timestamp)).total_seconds()
+            if age > self._required_tick_stale_seconds:
+                stale.append(symbol)
+        return stale
+
+    async def ensure_required_subscriptions(self) -> bool:
+        """Re-subscribe if any required index symbol dropped off the WS.
+
+        Returns True if a re-subscribe was issued. Idempotent and cheap when
+        nothing is missing.
+        """
+        if not self._broker:
+            return False
+        if not self._missing_required_symbols():
+            return False
+        # Re-issue subscribe with the current primary (non-sticky) set;
+        # subscribe() re-merges the required symbols and sticky extras.
+        primary = [s for s in self._subscribed_symbols if s not in self._sticky_extras]
+        await self.subscribe(primary)
+        return True
+
+    async def start_required_feed_watchdog(self) -> None:
+        """Start the periodic required-feed guard (idempotent)."""
+        if self._watchdog_task is not None and not self._watchdog_task.done():
+            return
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._watchdog_task = self._loop.create_task(self._required_feed_watchdog_loop())
+        logger.info(
+            f"[DataRouter] Required-feed watchdog started "
+            f"({len(self._required_symbols)} symbols, "
+            f"{int(self._watchdog_interval_seconds)}s interval, "
+            f"{int(self._required_tick_stale_seconds)}s stale budget)"
+        )
+
+    async def stop_required_feed_watchdog(self) -> None:
+        task = self._watchdog_task
+        self._watchdog_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    async def _required_feed_watchdog_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self._watchdog_interval_seconds)
+                try:
+                    # Re-subscribe anything that fell off the broker WS.
+                    restored = await self.ensure_required_subscriptions()
+                    if restored:
+                        logger.warning(
+                            "[DataRouter] Watchdog re-subscribed missing required index symbols."
+                        )
+                    # During market hours, force a reconnect if required
+                    # streams have gone stale even though they're "subscribed".
+                    if self._is_index_market_open() and self._ws_client is not None:
+                        stale = self._stale_required_symbols()
+                        if stale:
+                            logger.warning(
+                                f"[DataRouter] Watchdog: required symbols stale "
+                                f"({len(stale)}/{len(self._required_symbols)}); forcing reconnect."
+                            )
+                            self._schedule_reconnect()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[DataRouter] Watchdog iteration failed: {exc}")
+        except asyncio.CancelledError:
+            pass
 
     async def unsubscribe(self):
         if self._ws_client:
@@ -316,6 +474,8 @@ class DataRouter:
             "broker": broker_name,
             "subscribed_symbols": list(self._subscribed_symbols),
             "subscribed_symbol_count": len(self._subscribed_symbols),
+            "required_symbols": list(self._required_symbols),
+            "watchdog_active": bool(self._watchdog_task and not self._watchdog_task.done()),
             "tick_buffer_size": len(self._tick_buffer),
             "callback_count": callback_count,
             "ws_connected": ws_connected,
