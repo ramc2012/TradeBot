@@ -572,9 +572,14 @@ class DirectionalOptionsService:
                 best_cand = selection.get("best")
                 if best_cand is not None:
                     chain_expiry = getattr(best_cand, "expiry", None)
+                # 6s budget — fetch_chain_analytics itself bounds the
+                # Redis read at 2s and does ~1s of feature aggregation;
+                # we want enough headroom to absorb backend load spikes
+                # without dropping chain context from the snapshot.
+                # When the backend is calm this resolves in <1s.
                 chain_payload = await asyncio.wait_for(
                     fetch_chain_analytics(underlying, expiry=chain_expiry),
-                    timeout=3.0,
+                    timeout=6.0,
                 )
             except Exception:
                 chain_payload = None
