@@ -33,6 +33,7 @@ from typing import Any, Optional
 from loguru import logger
 
 from market_data.option_chain import option_chain_service
+from market_data.symbols import to_app_symbol
 
 
 # Track which (underlying, expiry) pairs have an in-flight background
@@ -45,7 +46,13 @@ _REFRESH_LOCK = asyncio.Lock()
 async def _background_refresh(underlying: str, expiry: str) -> None:
     """Trigger the market endpoint's full cache-miss path (broker
     adapter + track + refresh). Runs detached so callers return
-    immediately; the refreshed chain is available on the NEXT cycle."""
+    immediately; the refreshed chain is available on the NEXT cycle.
+
+    We pass the friendly underlying (e.g. "NIFTY") through to
+    get_option_chain — that route does its own to_app_symbol()
+    normalisation, so the symbol that ends up keying Redis is the
+    app_symbol form ("NSE:NIFTY50-INDEX") regardless of caller.
+    """
     key = (underlying.upper(), expiry)
     async with _REFRESH_LOCK:
         if key in _REFRESH_INFLIGHT:
@@ -57,11 +64,13 @@ async def _background_refresh(underlying: str, expiry: str) -> None:
         # startup (api.routers.market → analysis → … → directional).
         from api.routers.market import get_option_chain
         try:
-            await asyncio.wait_for(get_option_chain(underlying, expiry), timeout=15.0)
+            logger.info(f"[chain_analytics] refreshing chain for {underlying} {expiry}")
+            await asyncio.wait_for(get_option_chain(underlying, expiry), timeout=20.0)
+            logger.info(f"[chain_analytics] refresh done for {underlying} {expiry}")
         except asyncio.TimeoutError:
-            logger.debug(f"[chain_analytics] background refresh timed out for {underlying} {expiry}")
+            logger.warning(f"[chain_analytics] background refresh timed out for {underlying} {expiry}")
         except Exception as exc:
-            logger.debug(f"[chain_analytics] background refresh failed for {underlying} {expiry}: {exc}")
+            logger.warning(f"[chain_analytics] background refresh failed for {underlying} {expiry}: {exc}")
     finally:
         async with _REFRESH_LOCK:
             _REFRESH_INFLIGHT.discard(key)
@@ -326,9 +335,18 @@ async def fetch_chain_analytics(
     """
     if not expiry:
         return None
+    # Normalise the underlying to the same app_symbol form the market
+    # endpoint uses when it writes to Redis ("NSE:NIFTY50-INDEX",
+    # "NSE:BANKNIFTY-INDEX", "BSE:SENSEX-INDEX"). Without this we miss
+    # every cache hit — the market endpoint writes under the app_symbol
+    # form and we'd be reading under "NIFTY" / "BANKNIFTY" / "SENSEX".
+    try:
+        cache_symbol = to_app_symbol(underlying) or underlying
+    except Exception:
+        cache_symbol = underlying
     try:
         cached = await asyncio.wait_for(
-            option_chain_service.get_cached(underlying, expiry),
+            option_chain_service.get_cached(cache_symbol, expiry),
             timeout=timeout,
         )
     except (asyncio.TimeoutError, Exception):
