@@ -77,6 +77,31 @@ S2_SPOT_LOOKBACK_DAYS = 5
 # ─── Spot loader ──────────────────────────────────────────────────────────
 
 
+def _filter_nse_session_hours(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep only rows inside the NSE regular session (09:15–15:30 IST).
+
+    Index 1-minute spot carries pre-open and post-close minutes (the feed
+    keeps emitting flat candles outside trading hours). Building a Market
+    Profile / CVD over those minutes corrupts the auction read, so we scope
+    to regular hours — the index analogue of the commodity desk's MCX-hours
+    scoping.
+    """
+    from paper_engine.commodity_strategy_agent import _parse_iso_timestamp, IST
+
+    open_min = 9 * 60 + 15
+    close_min = 15 * 60 + 30
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        ts = _parse_iso_timestamp(row.get("time"))
+        if ts is None:
+            continue
+        ist = ts.astimezone(IST)
+        minute_of_day = ist.hour * 60 + ist.minute
+        if open_min <= minute_of_day <= close_min:
+            out.append(row)
+    return out
+
+
 async def load_index_1m_spot(
     underlying: str,
     *,
@@ -187,7 +212,15 @@ def resolve_s2_expiry_targets(
     if "monthly" in tracks and monthly_iso:
         out.append(("monthly", monthly_iso))
 
-    if "weekly" in tracks and monthly_iso:
+    # The global ``expiries`` ladder is the NIFTY NSE board — it does NOT
+    # describe SENSEX (BSE) or any other underlying's weeklies. Resolving a
+    # weekly off it for SENSEX yields a NIFTY date with no SENSEX contract,
+    # which blocks the underlying entirely (preparation-failure context).
+    # So the weekly track is only resolvable for the underlying the ladder
+    # actually represents (NIFTY). Everyone else degrades to monthly-only —
+    # the safe, tradeable contract — until a per-underlying expiry source is
+    # wired (a BSE ladder for SENSEX, etc.).
+    if "weekly" in tracks and monthly_iso and underlying == "NIFTY":
         # Walk the broker's expiry ladder for anything earlier than monthly.
         # ``expiries`` is a sorted-ascending list of ISO date strings; we
         # pick the first one strictly between today and monthly_iso.
@@ -319,6 +352,7 @@ async def load_strategy2_prior_session_profile(
         candles = await load_index_1m_spot(underlying, lookback_days=5)
         if candles:
             closed = _filter_closed_interval_rows(candles, interval="1minute")
+            closed = _filter_nse_session_hours(closed)
             latest_session, latest_date = _latest_session_rows(closed)
             if latest_date is not None:
                 prior_rows = [
@@ -378,6 +412,12 @@ async def evaluate_strategy2_mp_of(
 
     closed_1m_raw = await load_index_1m_spot(underlying)
     closed_1m = _filter_closed_interval_rows(closed_1m_raw, interval="1minute")
+    # Scope to the NSE regular session (09:15–15:30 IST). The index 1-min
+    # spot feed keeps writing flat candles before the open and after the
+    # close; including those minutes inflates the session (~3x) and corrupts
+    # the TPO profile, value area and CVD. Mirrors how the commodity desk
+    # scopes to MCX hours.
+    closed_1m = _filter_nse_session_hours(closed_1m)
     if not closed_1m or len(closed_1m) < 30:
         return shape_result_for_s2(
             {

@@ -128,6 +128,19 @@ def test_resolve_sensex_with_only_one_listed_expiry() -> None:
     assert targets == [("monthly", "2026-06-25")]
 
 
+def test_resolve_sensex_ignores_nifty_weekly_ladder() -> None:
+    # The global `expiries` ladder is NIFTY's NSE board; it must NOT be used
+    # to pick a SENSEX weekly (that would be a NIFTY date with no SENSEX
+    # contract, blocking the underlying). SENSEX degrades to monthly-only.
+    scope = _scope(
+        {"SENSEX": "2026-06-30"},
+        ["2026-06-04", "2026-06-11", "2026-06-25", "2026-06-30"],  # NIFTY dates
+    )
+    targets = s2.resolve_s2_expiry_targets("SENSEX", scope)
+    assert targets == [("monthly", "2026-06-30")]
+    assert all(t != "weekly" for t, _ in targets)
+
+
 def test_resolve_empty_scope_drops_all() -> None:
     assert s2.resolve_s2_expiry_targets("NIFTY", {}) == []
     assert s2.resolve_s2_expiry_targets("BANKNIFTY", {"index_monthlies": {}}) == []
