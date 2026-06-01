@@ -2,14 +2,29 @@
 from __future__ import annotations
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
 from brokers.base import BrokerAdapter, Tick
 from db.redis_client import get_redis
-from market_data.symbols import to_app_symbol, to_broker_symbol, to_fyers_symbol
+from market_data.symbols import (
+    TICK_CAPTURE_APP_SYMBOLS,
+    to_app_symbol,
+    to_broker_symbol,
+    to_fyers_symbol,
+)
+
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+# Redis last-value tick hot-cache. `tick:{symbol}` holds the most recent
+# tick JSON so cross-process readers and late WS subscribers can fetch a
+# live mark without the process-local _tick_buffer. TTL evicts symbols the
+# feed has stopped sending (e.g. after an expiry roll or unsubscribe).
+LATEST_TICK_KEY_PREFIX = "tick:"
+LATEST_TICK_TTL_SECONDS = 300
 
 
 class DataRouter:
@@ -39,6 +54,10 @@ class DataRouter:
         self._reconnect_task: Optional[asyncio.Task] = None
         self._last_reconnect_attempt_at: Optional[datetime] = None
         self._reconnect_backoff = timedelta(seconds=60)
+        self._required_symbols: list[str] = list(TICK_CAPTURE_APP_SYMBOLS)
+        self._watchdog_task: Optional[asyncio.Task] = None
+        self._watchdog_interval_seconds = 30.0
+        self._required_tick_stale_seconds = 90.0
 
     def set_broker(self, broker: BrokerAdapter):
         self._broker = broker
@@ -53,16 +72,36 @@ class DataRouter:
         if callback not in self._global_callbacks:
             self._global_callbacks.append(callback)
 
+    def set_required_symbols(self, symbols: List[str]) -> None:
+        """Set symbols that must stay on every live broker subscription."""
+        seen: set[str] = set()
+        required: list[str] = []
+        for symbol in symbols:
+            app_symbol = to_app_symbol(symbol)
+            if app_symbol and app_symbol not in seen:
+                required.append(app_symbol)
+                seen.add(app_symbol)
+        self._required_symbols = required
+
+    def _compose_subscription_set(self, symbols: List[str]) -> list[str]:
+        full_set: list[str] = []
+        seen: set[str] = set()
+        for symbol in [*symbols, *self._required_symbols, *self._sticky_extras]:
+            app_symbol = to_app_symbol(symbol)
+            if app_symbol and app_symbol not in seen:
+                full_set.append(app_symbol)
+                seen.add(app_symbol)
+        return full_set
+
     async def subscribe(self, symbols: List[str]):
         if not self._broker:
             logger.warning("[DataRouter] No broker set — cannot subscribe")
             return
-        # Merge in any sticky extras (e.g. option contracts pinned by the
-        # OptionWS subscription manager). Without this the broker-session
-        # refresh path that periodically resyncs spot indices would wipe
-        # out a previously-applied option subscription set.
-        sticky_extras = [s for s in getattr(self, "_sticky_extras", set()) if s not in symbols]
-        full_set = list(symbols) + sticky_extras
+        # Merge required index capture streams and sticky extras. Required
+        # symbols keep market_ticks populated for MP-critical indices; sticky
+        # extras preserve option contract subscriptions across auth refreshes.
+        full_set = self._compose_subscription_set(symbols)
+        sticky_extras = [s for s in full_set if s in self._sticky_extras]
         if (
             self._ws_client is not None
             and self._ws_broker is self._broker
@@ -87,8 +126,78 @@ class DataRouter:
         self._ws_broker = self._broker
         logger.info(
             f"[DataRouter] Subscribed to {len(full_set)} symbols "
-            f"(primary={len(symbols)} sticky={len(sticky_extras)})"
+            f"(primary={len(symbols)} required={len(self._required_symbols)} sticky={len(sticky_extras)})"
         )
+
+    async def start_required_feed_watchdog(self) -> None:
+        if self._watchdog_task and not self._watchdog_task.done():
+            return
+        self._watchdog_task = asyncio.create_task(
+            self._required_feed_watchdog(),
+            name="required-index-tick-feed-watchdog",
+        )
+
+    async def stop_required_feed_watchdog(self) -> None:
+        if self._watchdog_task and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except asyncio.CancelledError:
+                pass
+        self._watchdog_task = None
+
+    async def _required_feed_watchdog(self) -> None:
+        try:
+            while True:
+                try:
+                    await self.ensure_required_subscriptions()
+                except Exception as exc:
+                    logger.warning(f"[DataRouter] Required feed watchdog check failed: {exc}")
+                await asyncio.sleep(self._watchdog_interval_seconds)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._watchdog_task = None
+
+    async def ensure_required_subscriptions(self) -> None:
+        if not self._broker or not self._required_symbols:
+            return
+        missing = [
+            symbol for symbol in self._required_symbols
+            if symbol not in self._subscribed_symbols
+        ]
+        if missing:
+            primary = [
+                symbol for symbol in self._subscribed_symbols
+                if symbol not in self._sticky_extras
+            ]
+            logger.warning(
+                f"[DataRouter] Required tick capture symbols missing from broker subscription: {missing}"
+            )
+            await self.subscribe(primary)
+            return
+
+        if not self._is_index_market_open():
+            return
+        stale = self._stale_required_symbols()
+        if stale:
+            logger.warning(
+                f"[DataRouter] Required tick capture symbols stale: {stale}. Scheduling reconnect."
+            )
+            self._schedule_reconnect(force=True)
+
+    def _stale_required_symbols(self) -> list[str]:
+        now = datetime.now(timezone.utc)
+        stale: list[str] = []
+        for symbol in self._required_symbols:
+            tick = self._tick_buffer.get(symbol)
+            if tick is None or tick.timestamp is None:
+                stale.append(symbol)
+                continue
+            tick_at = self._ensure_utc_timestamp(tick.timestamp)
+            if (now - tick_at).total_seconds() > self._required_tick_stale_seconds:
+                stale.append(symbol)
+        return stale
 
     async def add_subscriptions(self, symbols: List[str]) -> int:
         """Append symbols to the WebSocket subscription (idempotent).
@@ -211,7 +320,18 @@ class DataRouter:
                 "ask": tick.ask,
                 "timestamp": timestamp.isoformat(),
             })
+            # (1) pub/sub fan-out for live WS subscribers (fire-and-forget).
             await redis.publish(f"ticks:{tick.symbol}", payload)
+            # (2) last-value hot-cache. Unlike pub/sub, this survives between
+            # ticks so late subscribers and *other processes* (workers,
+            # supervisors, the positions WS) can read the latest mark without
+            # depending on the process-local _tick_buffer. TTL keeps stale
+            # symbols from lingering after the feed drops them.
+            await redis.set(
+                f"{LATEST_TICK_KEY_PREFIX}{tick.symbol}",
+                payload,
+                ex=LATEST_TICK_TTL_SECONDS,
+            )
         except Exception as e:
             logger.debug(f"[DataRouter] Redis publish error: {e}")
 
@@ -221,6 +341,52 @@ class DataRouter:
     def get_ltp(self, symbol: str) -> float:
         tick = self._tick_buffer.get(symbol)
         return tick.ltp if tick else 0.0
+
+    async def get_live_mark(
+        self,
+        symbol: str,
+        *,
+        max_age_seconds: float = 30.0,
+    ) -> Optional[float]:
+        """Return the freshest LTP for ``symbol`` across process boundaries.
+
+        Resolution order:
+          1. In-process ``_tick_buffer`` — instant, no I/O. Works when the
+             caller runs in the same process as the broker callback (e.g. the
+             FastAPI WS handlers).
+          2. Redis ``tick:{symbol}`` last-value key — works cross-process
+             (supervisor loops, separate workers) and for late readers.
+
+        Returns ``None`` when no tick is available or the freshest one is
+        older than ``max_age_seconds`` (so a dead feed never marks positions
+        with a stale price masquerading as live).
+        """
+        # 1. Process-local buffer.
+        tick = self._tick_buffer.get(symbol)
+        if tick is not None and getattr(tick, "ltp", None):
+            ts = self._ensure_utc_timestamp(tick.timestamp)
+            age = (datetime.now(timezone.utc) - ts).total_seconds()
+            if age <= max_age_seconds:
+                return float(tick.ltp)
+
+        # 2. Redis last-value key.
+        try:
+            redis = await get_redis()
+            raw = await redis.get(f"{LATEST_TICK_KEY_PREFIX}{symbol}")
+            if raw:
+                data = json.loads(raw)
+                ltp = data.get("ltp")
+                ts_raw = data.get("timestamp")
+                if ltp and ts_raw:
+                    ts = datetime.fromisoformat(ts_raw)
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    age = (datetime.now(timezone.utc) - ts).total_seconds()
+                    if age <= max_age_seconds:
+                        return float(ltp)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[DataRouter] get_live_mark redis read failed for {symbol}: {exc}")
+        return None
 
     def get_status(self) -> dict[str, Any]:
         source_policy = dict(self._source_policy)
@@ -262,6 +428,7 @@ class DataRouter:
             "broker": broker_name,
             "subscribed_symbols": list(self._subscribed_symbols),
             "subscribed_symbol_count": len(self._subscribed_symbols),
+            "required_symbols": list(self._required_symbols),
             "tick_buffer_size": len(self._tick_buffer),
             "callback_count": callback_count,
             "ws_connected": ws_connected,
@@ -272,14 +439,15 @@ class DataRouter:
             "source_policy": source_policy,
         }
 
-    def _schedule_reconnect(self) -> None:
+    def _schedule_reconnect(self, *, force: bool = False) -> None:
         if not self._loop or not self._loop.is_running():
             return
         if self._reconnect_task and not self._reconnect_task.done():
             return
         now = datetime.now(timezone.utc)
         if (
-            self._last_reconnect_attempt_at is not None
+            not force
+            and self._last_reconnect_attempt_at is not None
             and now - self._last_reconnect_attempt_at < self._reconnect_backoff
         ):
             return
@@ -298,6 +466,7 @@ class DataRouter:
             else:
                 broker_symbols = [to_broker_symbol(symbol) for symbol in self._subscribed_symbols]
             self._ws_client = await self._broker.subscribe_websocket(broker_symbols, self._on_tick)
+            self._ws_broker = self._broker
         except Exception as exc:
             logger.warning(f"[DataRouter] Websocket reconnect failed: {exc}")
         finally:
@@ -331,6 +500,13 @@ class DataRouter:
                 await asyncio.sleep(interval_secs)
         finally:
             self._mock_task = None
+
+    @staticmethod
+    def _is_index_market_open(now: Optional[datetime] = None) -> bool:
+        now_ist = (now or datetime.now(timezone.utc)).astimezone(IST)
+        if now_ist.weekday() >= 5:
+            return False
+        return time(9, 10) <= now_ist.time() <= time(15, 35)
 
     @staticmethod
     def _ensure_utc_timestamp(value: Optional[datetime]) -> datetime:
