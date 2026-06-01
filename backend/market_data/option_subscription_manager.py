@@ -35,8 +35,9 @@ but does not call the broker WS.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from loguru import logger
@@ -401,6 +402,65 @@ _held_chain_cache_day: str | None = None
 _held_chain_cache: dict[tuple[str, str], dict[tuple[float, str], str]] = {}
 
 
+def _build_fyers_monthly_option_symbol(
+    underlying: str,
+    expiry: str,
+    strike: float,
+    option_type: str,
+) -> str | None:
+    """Deterministically build a Fyers monthly-option WS symbol.
+
+    Format (confirmed against the broker-resolved index leg
+    ``NSE:MIDCPNIFTY26JUN14400PE``): ``NSE:{SYM}{YY}{MON}{STRIKE}{CE|PE}``
+    where YY = 2-digit year, MON = 3-letter uppercase month, STRIKE = integer.
+
+    Used for NSE STOCK options, which are monthly-only and which the Fyers
+    *index* option-chain endpoint can't resolve. Avoids a REST call entirely.
+    Returns None on bad input. Only valid for monthly expiries — callers must
+    route weekly index contracts through the chain resolver instead.
+    """
+    from datetime import date as _date
+
+    if option_type not in ("CE", "PE") or not underlying or not expiry or not strike:
+        return None
+    try:
+        d = _date.fromisoformat(expiry)
+    except (TypeError, ValueError):
+        return None
+    yy = d.strftime("%y")
+    mon = d.strftime("%b").upper()  # JAN..DEC
+    try:
+        strike_int = int(round(float(strike)))
+    except (TypeError, ValueError):
+        return None
+    return f"NSE:{underlying.upper()}{yy}{mon}{strike_int}{option_type}"
+
+
+async def _resolve_held_option_app_symbol(
+    underlying: str,
+    expiry: str,
+    strike: float,
+    option_type: str,
+    chain_cache: dict[tuple[str, str], dict[tuple[float, str], str]],
+) -> str | None:
+    """Resolve a held option leg to its Fyers/app WS symbol.
+
+    Index underlyings (S2 set) go through the Fyers option-chain endpoint
+    (handles weekly + monthly, returns the exact broker key). Stock
+    underlyings — monthly-only, not served by the index chain — use the
+    deterministic monthly builder.
+    """
+    if underlying.upper() in S2_UNDERLYINGS:
+        return await _resolve_fyers_option_symbol(
+            underlying=underlying,
+            expiry=expiry,
+            strike=strike,
+            option_type=option_type,
+            chain_cache=chain_cache,
+        )
+    return _build_fyers_monthly_option_symbol(underlying, expiry, strike, option_type)
+
+
 def _open_nse_option_positions() -> list[Any]:
     """Collect open NSE option positions across both strategy runtimes."""
     try:
@@ -458,7 +518,7 @@ async def refresh_held_position_subscriptions() -> dict[str, Any]:
             strike_f = float(strike)
         except (TypeError, ValueError):
             continue
-        app_symbol = await _resolve_fyers_option_symbol(
+        app_symbol = await _resolve_held_option_app_symbol(
             underlying=underlying,
             expiry=expiry,
             strike=strike_f,
@@ -505,6 +565,105 @@ async def run_held_position_subscription_loop(interval_seconds: float = 45.0) ->
             raise
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[OptionWS] held-position refresh failed: {exc}")
+        try:
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            raise
+
+
+# ─── Commodity (MCX) mark refresh ──────────────────────────────────────────
+#
+# MCX futures aren't on the broker WebSocket feed — the commodity desk prices
+# positions via REST quote snapshots on its 60s scan, which froze the
+# dashboard's commodity P&L at scan cadence. There's no MCX tick stream to
+# tap, so we bridge with a faster REST poll: pull LTPs every ~12s and write
+# them into the SAME Redis tick:{symbol} hot-cache the WS overlay reads. The
+# commodity position's `symbol` ("MCX:NATURALGAS26JUNFUT") matches the cache
+# key directly, so no live_marks registry is needed. Marks then refresh at
+# ~12s instead of 60s. (Not a true tick — REST-poll cadence — but a 5x
+# improvement, and get_live_mark's 30s freshness budget accommodates it.)
+
+# MCX session window (IST): regular session runs to 23:30; allow a little
+# slack at both ends.
+def _mcx_hours_now() -> bool:
+    now = _now_ist()
+    if now.weekday() >= 5:
+        return False
+    minute_of_day = now.hour * 60 + now.minute
+    return 9 * 60 <= minute_of_day <= 23 * 60 + 35
+
+
+def _open_commodity_position_symbols() -> list[str]:
+    """MCX:...FUT symbols for every open commodity position."""
+    try:
+        from paper_engine.commodity_strategy_agent import commodity_strategy_agent
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[CommodityWS] agent import failed: {exc}")
+        return []
+    runtime = getattr(commodity_strategy_agent, "_runtime", None)
+    positions = getattr(runtime, "positions", None) if runtime else None
+    if not positions:
+        return []
+    out: list[str] = []
+    for pos in (positions.values() if isinstance(positions, dict) else positions):
+        sym = str(getattr(pos, "live_symbol", "") or getattr(pos, "symbol", "") or "").strip()
+        if sym:
+            out.append(sym)
+    return out
+
+
+async def refresh_commodity_marks() -> int:
+    """Pull MCX LTPs for open positions into the Redis tick hot-cache.
+
+    Returns the count of symbols written.
+    """
+    symbols = _open_commodity_position_symbols()
+    if not symbols:
+        return 0
+    from market_data.data_router import LATEST_TICK_KEY_PREFIX, LATEST_TICK_TTL_SECONDS
+    from market_data.upstox_commodity import load_upstox_mcx_quote_snapshots
+    from db.redis_client import get_redis
+
+    snapshots = await load_upstox_mcx_quote_snapshots(symbols)
+    if not snapshots:
+        return 0
+    redis = await get_redis()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    written = 0
+    for symbol, snap in snapshots.items():
+        price = snap.get("price") if isinstance(snap, dict) else None
+        if not price:
+            continue
+        payload = json.dumps({"symbol": symbol, "ltp": float(price), "timestamp": now_iso})
+        try:
+            await redis.set(
+                f"{LATEST_TICK_KEY_PREFIX}{symbol}",
+                payload,
+                ex=LATEST_TICK_TTL_SECONDS,
+            )
+            written += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[CommodityWS] hot-cache write failed for {symbol}: {exc}")
+    return written
+
+
+async def run_commodity_mark_refresh_loop(interval_seconds: float = 12.0) -> None:
+    """Periodically poll MCX LTPs into the tick hot-cache during MCX hours."""
+    logged_once = False
+    while True:
+        try:
+            if _mcx_hours_now():
+                written = await refresh_commodity_marks()
+                if written and not logged_once:
+                    logger.info(
+                        f"[CommodityWS] mark refresh active: {written} MCX symbols "
+                        "streaming to tick hot-cache (~12s cadence)"
+                    )
+                    logged_once = True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[CommodityWS] mark refresh failed: {exc}")
         try:
             await asyncio.sleep(interval_seconds)
         except asyncio.CancelledError:

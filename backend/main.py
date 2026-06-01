@@ -171,6 +171,19 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Held-position subscription refresh start skipped: {e}")
         held_position_ws_task = None
 
+    # MCX futures have no WS feed; bridge a fast REST LTP poll into the tick
+    # hot-cache so commodity position marks stream at ~12s instead of 60s.
+    try:
+        from market_data.option_subscription_manager import run_commodity_mark_refresh_loop
+        commodity_mark_task = asyncio.create_task(
+            run_commodity_mark_refresh_loop(),
+            name="commodity-mark-refresh",
+        )
+        logger.info("✓ Commodity mark refresh started")
+    except Exception as e:
+        logger.warning(f"Commodity mark refresh start skipped: {e}")
+        commodity_mark_task = None
+
     if settings.RESEARCH_SYNC_EMBEDDED_ENABLED:
         async def _embedded_research_sync_worker() -> None:
             try:
