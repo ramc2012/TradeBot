@@ -243,8 +243,11 @@ def build_index_market_profile(underlying: str, rows: list[dict[str, Any]]):
     if not rows or len(rows) < 2:
         return None
     # Late imports — these pull in heavyweight engines we don't want to
-    # load until the flag is on.
-    from analytics.market_profile import MarketProfileEngine, MarketBar
+    # load until the flag is on. Same modules the commodity desk uses;
+    # the previous `analytics.market_profile` path does not exist, which
+    # silently broke MP+OF for S2 (it fell back to the legacy MACD path).
+    from auction_intelligence.market_profile.engine import MarketProfileEngine
+    from auction_intelligence.schemas import MarketBar
     from paper_engine.commodity_strategy_agent import _parse_iso_timestamp
 
     bars: list = []
