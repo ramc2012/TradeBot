@@ -83,6 +83,14 @@ DEFAULT_COMMODITY_HISTORY_DAYS = 21
 DEFAULT_COMMODITY_ATR_PERIOD = 14
 DEFAULT_COMMODITY_LOTS_PER_TRADE = 1
 DEFAULT_COMMODITY_MARGIN_PCT = 0.15
+# Target rupee notional per commodity futures position. Lots are sized so
+# EVERY contract opens at roughly this value, instead of a fixed lot count
+# that left wildly different position sizes (e.g. 1 lot COPPER ≈ ₹21L vs
+# 1 lot ZINCMINI ≈ ₹2.7L). With this, gold/crude/zinc/etc. all open at
+# ~₹15L. Floored at 1 lot (large-lot contracts whose single lot already
+# exceeds the target stay at 1 lot). Scaled by lots_per_trade so the
+# existing config still multiplies the target.
+COMMODITY_TARGET_POSITION_VALUE = 1_500_000.0
 DEFAULT_COMMODITY_REPORTS_MAX = 40
 DEFAULT_COMMODITY_ORDERS_MAX = 80
 DEFAULT_COMMODITY_COMMENTARY_MAX = 80
@@ -1075,6 +1083,25 @@ class CommodityStrategyAgent(BaseStrategyAgent):
     def _estimate_futures_margin_required(self, price: float, qty: int) -> float:
         return max(price, 0.0) * max(qty, 0) * DEFAULT_COMMODITY_MARGIN_PCT
 
+    def _target_lots_for_contract(self, spec: "CommodityContractSpec", price: float) -> int:
+        """Lots sized so the position notional ≈ COMMODITY_TARGET_POSITION_VALUE.
+
+        This makes every contract open at roughly the same rupee size
+        regardless of its lot size and price — e.g. gold, crude, and zinc
+        all open at ~₹15L instead of 1 lot each (which gave ₹7L / ₹5L /
+        ₹2.7L respectively). Floored at 1 lot, so a contract whose single
+        lot already exceeds the target (e.g. COPPER ≈ ₹21L/lot) trades 1
+        lot. Multiplied by the configured `lots_per_trade` so the existing
+        config still scales the target up.
+        """
+        base_lots = max(1, int(self._lots_per_trade or 1))
+        per_lot_notional = float(getattr(spec, "futures_lot_size", 0) or 0) * float(price or 0.0)
+        if per_lot_notional <= 0:
+            return base_lots
+        target_value = COMMODITY_TARGET_POSITION_VALUE * base_lots
+        lots = round(target_value / per_lot_notional)
+        return max(1, int(lots))
+
     def _has_underlying_position(self, strategy_key: str, underlying: str) -> bool:
         return any(
             position.strategy_key == strategy_key and position.underlying == underlying
@@ -1244,7 +1271,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             bar_time = str(row.get("bar_time") or "")
             spec = get_commodity_contract_spec(symbol)
             price = float(row.get("price") or 0.0)
-            qty = spec.futures_lot_size * self._lots_per_trade
+            lots = self._target_lots_for_contract(spec, price)
+            qty = spec.futures_lot_size * lots
             event_reason = _commodity_event_block_reason(underlying)
             risk_block = self._entry_risk_block(underlying)
             validation = "waiting_trigger"
@@ -1321,7 +1349,11 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     "indicator_timeframe": FUTURES_TIMEFRAME,
                     "display_name": spec.display_name,
                     "lot_size": spec.futures_lot_size,
-                    "lots_per_trade": self._lots_per_trade,
+                    # Effective lots for THIS contract, sized to the equal
+                    # notional target (see _target_lots_for_contract).
+                    "lots_per_trade": lots,
+                    "lots": lots,
+                    "target_position_value": COMMODITY_TARGET_POSITION_VALUE,
                     "default_qty": qty,
                     "contract_unit_label": spec.contract_unit_label,
                     "quote_unit_label": spec.quote_unit_label,
@@ -2612,7 +2644,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             atr = float(row.get("atr") or 0.0)
             if price <= 0 or atr <= 0:
                 continue
-            qty = spec.futures_lot_size * self._lots_per_trade
+            # Equal-notional sizing: lots chosen so this position ≈ the
+            # target rupee value, the same for every contract.
+            lots = self._target_lots_for_contract(spec, price)
+            qty = spec.futures_lot_size * lots
             required_margin = self._estimate_futures_margin_required(price, qty)
             if required_margin > self._runtime.portfolio.available_capital:
                 continue
@@ -2664,7 +2699,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 str(row.get("reason") or "futures_signal"),
                 flow="entry",
                 lot_size=spec.futures_lot_size,
-                lots=self._lots_per_trade,
+                lots=lots,
                 strategy_key="commodity_futures",
                 strategy_title=spec.futures_label,
             )
@@ -2680,7 +2715,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 instrument_type="FUT",
                 action=str(row.get("signal") or "BUY"),
                 qty=qty,
-                lots=self._lots_per_trade,
+                lots=lots,
                 lot_size=spec.futures_lot_size,
                 entry_price=fill_price,
                 current_price=fill_price,
@@ -2706,7 +2741,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             self._runtime.processed_signals[f"commodity_futures:{symbol}"] = bar_time
             self._append_commentary(
                 "trade",
-                f"ENTRY {spec.display_name} {row.get('signal')} @{fill_price:.2f} | {self._lots_per_trade} lot | "
+                f"ENTRY {spec.display_name} {row.get('signal')} @{fill_price:.2f} | {lots} lot | "
                 f"{str(row.get('entry_style') or 'fresh_cross').replace('_', ' ')} | MP {row.get('mp_day_type')} | stop {stop_price:.2f}",
             )
             await record_audit_event(
@@ -2719,7 +2754,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 severity="trade",
                 message=(
                     f"{spec.display_name} {row.get('signal')} @ ₹{fill_price:,.2f} "
-                    f"({self._lots_per_trade} lot; MP {row.get('mp_day_type')}; stop ₹{stop_price:,.2f})"
+                    f"({lots} lot; MP {row.get('mp_day_type')}; stop ₹{stop_price:,.2f})"
                 ),
                 new_state="open",
                 payload={
@@ -2728,7 +2763,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     "stop_price": round(stop_price, 2),
                     "target_price": round(target_price, 2),
                     "qty": qty,
-                    "lots": self._lots_per_trade,
+                    "lots": lots,
                     "regime": str(row.get("mp_day_type") or row.get("regime") or ""),
                     "entry_style": str(row.get("entry_style") or "mp_signal"),
                     "confidence": float(row.get("confidence") or 0.0),
@@ -3042,6 +3077,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "cvd_anchor_hour_ist": FUTURES_CVD_ANCHOR_HOUR_IST,
                 "mp_min_periods": FUTURES_MP_MIN_PERIODS,
                 "lots_per_trade": self._lots_per_trade,
+                "target_position_value": COMMODITY_TARGET_POSITION_VALUE,
                 "futures_min_hold_bars": FUTURES_MIN_HOLD_BARS,
                 "futures_min_stop_pct": FUTURES_MIN_STOP_PCT,
                 "futures_trail_atr_multiplier": FUTURES_TRAIL_ATR_MULTIPLIER,
