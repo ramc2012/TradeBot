@@ -36,44 +36,23 @@ from market_data.option_chain import option_chain_service
 from market_data.symbols import to_app_symbol
 
 
-# Track which (underlying, expiry) pairs have an in-flight background
-# refresh so we don't fire a stampede of refreshes when the cache is
-# empty and multiple callers ask in parallel.
-_REFRESH_INFLIGHT: set[tuple[str, str]] = set()
-_REFRESH_LOCK = asyncio.Lock()
-
-
-async def _background_refresh(underlying: str, expiry: str) -> None:
-    """Trigger the market endpoint's full cache-miss path (broker
-    adapter + track + refresh). Runs detached so callers return
-    immediately; the refreshed chain is available on the NEXT cycle.
-
-    We pass the friendly underlying (e.g. "NIFTY") through to
-    get_option_chain — that route does its own to_app_symbol()
-    normalisation, so the symbol that ends up keying Redis is the
-    app_symbol form ("NSE:NIFTY50-INDEX") regardless of caller.
-    """
-    key = (underlying.upper(), expiry)
-    async with _REFRESH_LOCK:
-        if key in _REFRESH_INFLIGHT:
-            return
-        _REFRESH_INFLIGHT.add(key)
-    try:
-        # Lazy import — market router pulls in many transitive deps and
-        # importing at module top would create a circular import at
-        # startup (api.routers.market → analysis → … → directional).
-        from api.routers.market import get_option_chain
-        try:
-            logger.info(f"[chain_analytics] refreshing chain for {underlying} {expiry}")
-            await asyncio.wait_for(get_option_chain(underlying, expiry), timeout=20.0)
-            logger.info(f"[chain_analytics] refresh done for {underlying} {expiry}")
-        except asyncio.TimeoutError:
-            logger.warning(f"[chain_analytics] background refresh timed out for {underlying} {expiry}")
-        except Exception as exc:
-            logger.warning(f"[chain_analytics] background refresh failed for {underlying} {expiry}: {exc}")
-    finally:
-        async with _REFRESH_LOCK:
-            _REFRESH_INFLIGHT.discard(key)
+# NOTE on chain population: we deliberately do NOT trigger broker
+# refreshes from this module. An earlier version did fire-and-forget
+# background tasks that called the market endpoint's full
+# broker→track→refresh path; on prod that destabilised the backend (the
+# refresh holds the option_chain_service lock, runs expensive greeks
+# computation for 200+ strikes per call, and stacked up under load).
+#
+# We just READ the cache here. Whatever already populates the cache in
+# v1 — the market_intelligence_runtime, the agent's option_chain_service
+# poll loop, or a direct hit on /api/market/option-chain/{symbol} —
+# remains responsible for keeping it warm. If empty, we return None
+# and the policy uses zero chain features for that cycle. Next cycle
+# (after something else has populated) we get the data.
+#
+# Operationally: hitting /api/market/option-chain/NIFTY?expiry=…
+# manually once per day, OR letting the existing market-data poll loop
+# track these expiries, is enough to keep this lit during market hours.
 
 
 # Lot sizes for index options. Used for DEX/GEX absolute scale. If a
@@ -352,16 +331,10 @@ async def fetch_chain_analytics(
     except (asyncio.TimeoutError, Exception):
         cached = None
     if not cached or not cached.get("entries"):
-        # Cache miss — fire off a background refresh so the NEXT cycle
-        # has the chain. We don't await; the caller returns now with
-        # None and the policy uses sentinel-zero chain features this
-        # cycle. The dedupe set ensures multiple parallel callers don't
-        # all kick refreshes for the same key.
-        try:
-            asyncio.create_task(_background_refresh(underlying, expiry))
-        except RuntimeError:
-            # No running event loop (unit tests) — skip.
-            pass
+        # Cache miss — return None. Whatever populates the chain
+        # (market-intel runtime, poll loop, /api/market/option-chain
+        # callers) will fill it in due course. Policy gets zero chain
+        # features this cycle and learns the "chain-absent" pattern.
         return None
 
     entries = list(cached.get("entries") or [])
