@@ -2202,13 +2202,16 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 self._last_message = (
                     f"Scanned {len(futures_rows)} futures rows. {open_positions} open positions."
                 )
-                if retained_futures or retained_options:
-                    retention_parts: list[str] = []
-                    if retained_futures:
-                        retention_parts.append(f"retained {len(retained_futures)} futures rows")
-                    if retained_options:
-                        retention_parts.append(f"retained {len(retained_options)} option rows")
-                    self._last_message = f"{self._last_message} Reused the last good snapshot for {', '.join(retention_parts)}."
+                # Options were deprecated from the commodity desk; only the
+                # futures watchlist is stabilized/retained now. (The previous
+                # `retained_options` reference here was never assigned in this
+                # scope and raised NameError on every scan where no futures
+                # rows were retained.)
+                if retained_futures:
+                    self._last_message = (
+                        f"{self._last_message} Reused the last good snapshot for "
+                        f"retained {len(retained_futures)} futures rows."
+                    )
                 health_warning = self._option_history_warning(option_history_health)
                 if health_warning:
                     self._last_message = f"{self._last_message} {health_warning}"
