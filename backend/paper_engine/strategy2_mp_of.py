@@ -439,6 +439,17 @@ def build_index_market_profile(underlying: str, rows: list[dict[str, Any]]):
 # Cleared automatically when the calendar date rolls.
 _S2_PRIOR_PROFILE_CACHE: dict[tuple[str, date], Any] = {}
 
+# MP period length (minutes) used to key today's-profile cache: the build is
+# reused until a new period closes. Matches build_index_market_profile's
+# period_minutes=15.
+S2_MP_PERIOD_MINUTES = 15
+
+# In-process cache for today's developing profile, keyed by
+# (underlying, session_date) -> (period_count, snapshot). Rebuilt only when
+# the period count advances, so the heavy MarketProfileEngine build runs ~once
+# per 15 min per underlying instead of every 60s scan.
+_S2_TODAY_PROFILE_CACHE: dict[tuple[str, str], tuple[int, Any]] = {}
+
 
 async def load_strategy2_prior_session_profile(
     underlying: str,
@@ -553,7 +564,23 @@ async def evaluate_strategy2_mp_of(
             underlying=underlying,
         )
 
-    today_profile = build_index_market_profile(underlying, session_rows)
+    # Cache the (CPU-heavy) MarketProfileEngine build. Rebuilding it on every
+    # 60s scan for all five indices saturates the box's single core and
+    # blocks the event loop (health checks time out). The TPO profile only
+    # changes materially when a new 15-min period closes, so we rebuild only
+    # when the period count advances; the cheap trigger evaluation below still
+    # runs fresh against the latest bars every scan.
+    period_count = max(1, len(session_rows) // S2_MP_PERIOD_MINUTES)
+    profile_key = (underlying.upper(), str(session_date))
+    cached_profile = _S2_TODAY_PROFILE_CACHE.get(profile_key)
+    if cached_profile is not None and cached_profile[0] == period_count:
+        today_profile = cached_profile[1]
+    else:
+        today_profile = build_index_market_profile(underlying, session_rows)
+        _S2_TODAY_PROFILE_CACHE[profile_key] = (period_count, today_profile)
+        # Keep the cache to one entry per underlying (drop stale sessions).
+        for k in [k for k in _S2_TODAY_PROFILE_CACHE if k[0] == underlying.upper() and k != profile_key]:
+            _S2_TODAY_PROFILE_CACHE.pop(k, None)
     prior_profile = await load_strategy2_prior_session_profile(
         underlying, today=session_date,
     )
