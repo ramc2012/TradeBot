@@ -196,7 +196,14 @@ jobs:
           # can pull it with a second SSM RunShellScript on failure.
           (
             set +e
-            docker compose --profile v2 up -d --build ${FORCE_FLAG} frontend-v2 2>&1 | tee /tmp/v2_deploy.log
+            # --no-cache while v2 is still being perfected. The 2026-06-01
+            # :3001 outage was BuildKit reusing a stale COPY layer when src/
+            # changed but package*.json didn't — proxy route was on disk
+            # but never made it into the image. Slow build (~45s npm
+            # install) beats hidden cache bugs. Drop --no-cache once v2
+            # ships parity.
+            docker compose --profile v2 build --no-cache frontend-v2 2>&1 | tee /tmp/v2_deploy.log
+            docker compose --profile v2 up -d --force-recreate frontend-v2 2>&1 | tee -a /tmp/v2_deploy.log
             V2_RC=\$?
             echo "v2 docker compose exit code: \$V2_RC"
             if [ "\$V2_RC" != "0" ]; then
