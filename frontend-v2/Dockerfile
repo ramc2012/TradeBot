@@ -7,9 +7,13 @@ ARG NEXT_PUBLIC_WS_URL=""
 
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_WS_URL=$NEXT_PUBLIC_WS_URL
+# Cap Node heap so `next build` doesn't OOM on small EC2 instances
+# (the v1 frontend uses the default ~1.4GB which is fine; v2 has more
+# routes and was OOM-killing during the first deploy attempt).
+ENV NODE_OPTIONS="--max-old-space-size=1024"
 
 COPY package*.json ./
-RUN npm install
+RUN npm install --no-audit --no-fund
 
 COPY . .
 RUN npm run build
