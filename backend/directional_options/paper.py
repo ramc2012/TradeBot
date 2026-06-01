@@ -350,6 +350,9 @@ class DirectionalOptionsPaperStore:
                     pass
                 # Register the open with the RL policy so the realised
                 # R-multiple flows back into the value posterior on close.
+                # Chain analytics captured at ENTRY — that's the context
+                # the policy will be credited/debited against, not the
+                # chain state at close time.
                 policy_payload = dict(snapshot.get("policy") or {})
                 size_multiplier = float(policy_payload.get("size_multiplier") or 1.0)
                 if self.policy is not None:
@@ -361,6 +364,7 @@ class DirectionalOptionsPaperStore:
                             regime=dict(snapshot.get("regime") or {}),
                             size_multiplier=size_multiplier,
                             risk_budget=float(risk.get("risk_budget") or 0.0),
+                            chain=dict(snapshot.get("chain_analytics") or {}) or None,
                         )
                     except Exception:
                         pass

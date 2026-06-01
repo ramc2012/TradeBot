@@ -96,6 +96,25 @@ async def backtest(
     return payload["backtest"]
 
 
+@router.get("/chain-analytics")
+async def chain_analytics(
+    underlying: str = Query("NIFTY"),
+    expiry: str | None = Query(None),
+) -> dict[str, object]:
+    """Option-chain analytics for the directional engine.
+
+    Returns the same dict the RL policy receives as `chain` context —
+    PCR, ATM IV, IV skew (25-delta), DEX, GEX, max-pain, gamma curve,
+    top OI strikes, and chain-wide OI build classification. Returns
+    `{"available": false}` when no chain is cached for the symbol.
+    """
+    from directional_options.chain_analytics import fetch_chain_analytics
+    payload = await fetch_chain_analytics(underlying, expiry=expiry)
+    if not payload:
+        return {"available": False, "underlying": underlying, "expiry": expiry}
+    return {"available": True, **payload}
+
+
 @router.get("/policy")
 async def policy_state() -> dict[str, object]:
     """Global RL policy state — n_seen, per-size-bucket Mean R, pending positions.

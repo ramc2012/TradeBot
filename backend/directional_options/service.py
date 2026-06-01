@@ -14,6 +14,7 @@ from agentic_rag import ContextGateRequest, rag_service
 from analysis.signal_classifier import classify_status_bucket
 from core.config import settings
 from directional_options.backtest import DirectionalOptionsBacktester
+from directional_options.chain_analytics import fetch_chain_analytics
 from directional_options.config import clone_default_config
 from directional_options.data import DirectionalOptionsDataStore
 from directional_options.features import FeatureEngine
@@ -561,11 +562,28 @@ class DirectionalOptionsService:
             if not option_snapshot_lookup_failed:
                 selection_reason = selection["reason"]
             candidates_payload = [asdict(item) for item in selection["candidates"]]
+            # Pull chain analytics for the selected expiry. Fire-and-
+            # tolerate-failure: a missing chain payload just means the
+            # policy gets sentinel zeros for chain features and falls
+            # back to signal+candidate context alone.
+            chain_payload: dict[str, Any] | None = None
+            try:
+                chain_expiry = None
+                best_cand = selection.get("best")
+                if best_cand is not None:
+                    chain_expiry = getattr(best_cand, "expiry", None)
+                chain_payload = await asyncio.wait_for(
+                    fetch_chain_analytics(underlying, expiry=chain_expiry),
+                    timeout=3.0,
+                )
+            except Exception:
+                chain_payload = None
             chosen, policy_payload = self._policy_pick(
                 signal=signal,
                 regime=regime,
                 candidates=selection["candidates"] or ([selection["best"]] if selection["best"] is not None else []),
                 default=selection["best"],
+                chain=chain_payload,
             )
             size_mult = float((policy_payload or {}).get("size_multiplier", 1.0))
             policy_act = bool((policy_payload or {}).get("act", True))
@@ -616,6 +634,7 @@ class DirectionalOptionsService:
             "risk": risk_payload,
             "rag_context": rag_context,
             "policy": policy_payload,
+            "chain_analytics": chain_payload,
             "selection_reason": selection_reason,
             "data_status": data_status,
             "history_source": history_source,
@@ -629,12 +648,14 @@ class DirectionalOptionsService:
         regime,
         candidates: list,
         default,
+        chain: dict[str, Any] | None = None,
     ) -> tuple[Any, dict[str, Any] | None]:
         """Run the RL policy over the surfaced candidates.
 
         Returns (chosen_candidate, policy_payload). When the policy is
         disabled or there are no candidates, returns (default, None) so
-        the rest of the service degrades gracefully.
+        the rest of the service degrades gracefully. `chain` is the
+        chain-analytics payload (None when no chain is cached).
         """
         if self.policy is None or not candidates:
             return default, None
@@ -645,6 +666,7 @@ class DirectionalOptionsService:
             signal=signal_dict,
             candidates=candidates_dicts,
             regime=regime_dict,
+            chain=chain,
         )
         if best_idx is None:
             return default, None
@@ -653,6 +675,7 @@ class DirectionalOptionsService:
             signal=signal_dict,
             candidate=candidates_dicts[best_idx],
             regime=regime_dict,
+            chain=chain,
         )
         payload = {
             "act": bool(decision.act),

@@ -47,6 +47,7 @@ import EngineCalculations from "./EngineCalculations";
 import PolicyDecisionPanel, { type PolicyBlock } from "./PolicyDecisionPanel";
 import PaperTradingTab from "./PaperTradingTab";
 import PolicyLearningTab from "./PolicyLearningTab";
+import OptionAnalyticsPanel from "./OptionAnalyticsPanel";
 
 // v1 fallback — mounts the full legacy workspace so its recharts
 // (candidate p_trading_edge bar, backtest equity line, monthly +
@@ -60,13 +61,14 @@ const DEFAULT_TIMEFRAME = "5minute";
 const DEFAULT_LOOKBACK = 16;
 
 const TABS = [
-  { key: "live",     label: "Live overview",    icon: Gauge },
-  { key: "paper",    label: "Paper trading",    icon: Banknote },
-  { key: "policy",   label: "Policy & learning", icon: Brain },
-  { key: "backtest", label: "Backtest",         icon: TrendingUp },
+  { key: "live",      label: "Live overview",      icon: Gauge },
+  { key: "analytics", label: "Option analytics",   icon: Layers3 },
+  { key: "paper",     label: "Paper trading",      icon: Banknote },
+  { key: "policy",    label: "Policy & learning",  icon: Brain },
+  { key: "backtest",  label: "Backtest",           icon: TrendingUp },
   // Full v1 view — bundles the recharts diagnostics, dataset coverage
   // cards, and Dash hand-off that aren't ported to native v2 panels yet.
-  { key: "v1",       label: "Full v1 view",     icon: Layers3 },
+  { key: "v1",        label: "Full v1 view",       icon: Layers3 },
 ];
 
 type ModuleSummary = {
@@ -86,7 +88,7 @@ type Snapshot = {
   feature_snapshot?: Record<string, number> | null;
   regime?: { label?: string; confidence?: number; trade_allowed?: boolean; reasons?: string[]; preferred_expiry_kind?: string; delta_target_min?: number; delta_target_max?: number } | null;
   signal?: { direction?: string; confidence?: number; expected_horizon_bars?: number } | null;
-  selected_contract?: { trading_symbol?: string; strike?: number; option_type?: string; delta?: number } | null;
+  selected_contract?: { trading_symbol?: string; strike?: number; option_type?: string; delta?: number; expiry?: string } | null;
   contract_candidates?: Array<Record<string, unknown>>;
   risk?: { approved?: boolean; quantity_lots?: number; risk_budget?: number; premium_at_risk?: number; max_loss?: number; reasons?: string[] } | null;
   policy?: PolicyBlock | null;
@@ -246,6 +248,13 @@ export default function DirectionalDesk() {
             </div>
           </Section>
         </div>
+      ) : null}
+
+      {activeTab === "analytics" ? (
+        <OptionAnalyticsPanel
+          underlying={underlying}
+          expiry={snapshot?.selected_contract?.expiry ?? null}
+        />
       ) : null}
 
       {activeTab === "paper" ? <PaperTradingTab symbol={underlying} paper={paper} /> : null}

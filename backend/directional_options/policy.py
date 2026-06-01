@@ -80,12 +80,30 @@ KNOWN_EXPIRY_KINDS: tuple[str, ...] = ("weekly", "monthly")
 KNOWN_DIRECTIONS: tuple[str, ...] = ("CE", "PE")
 
 
-def _featurize(signal: dict[str, Any], candidate: dict[str, Any], regime: dict[str, Any]) -> np.ndarray:
-    """Build a fixed-length feature vector from signal + candidate + regime.
+def _safe_tanh(value: Any, scale: float) -> float:
+    try:
+        if value is None:
+            return 0.0
+        v = float(value)
+        return float(np.tanh(v / max(scale, 1e-9)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _featurize(
+    signal: dict[str, Any],
+    candidate: dict[str, Any],
+    regime: dict[str, Any],
+    chain: Optional[dict[str, Any]] = None,
+) -> np.ndarray:
+    """Build a fixed-length feature vector from signal + candidate +
+    regime, plus optional chain-level analytics.
 
     Order matters and must be stable across restarts because the
     persisted posterior is in this basis. New features get appended at
     the end, never inserted, and `EXPECTED_FEATURE_DIM` is bumped.
+    `_load()` pads the persisted posterior into the new basis with
+    block-diagonal prior blocks so historical learning is preserved.
     """
     # Continuous scalars from the signal / candidate
     confidence = float(signal.get("confidence") or 0.0)
@@ -121,29 +139,82 @@ def _featurize(signal: dict[str, Any], candidate: dict[str, Any], regime: dict[s
     regime_conf = float(regime.get("confidence") or 0.0)
 
     cont = [
-        1.0,  # bias
-        confidence,
-        expected_move_pct,
-        horizon_bars / 12.0,  # rescale (12 bars ≈ 1 hour at 5m)
-        jump_score,
-        timing_precision,
-        tail_probability,
-        model_uncertainty,
-        p_up,
-        delta_abs,
-        p_trading_edge,
-        p_terminal_edge,
-        p_minus_q_tail,
-        probability_of_profit,
-        skew_tax,
-        timing_fit,
-        expected_return_on_premium,
-        liquidity_score,
-        contract_score / 100.0,  # rescale
-        regime_conf,
+        1.0,  # bias                                            [v1, idx 0]
+        confidence,                                           # [v1, idx 1]
+        expected_move_pct,                                    # [v1, idx 2]
+        horizon_bars / 12.0,  # rescale                       # [v1, idx 3]
+        jump_score,                                           # [v1, idx 4]
+        timing_precision,                                     # [v1, idx 5]
+        tail_probability,                                     # [v1, idx 6]
+        model_uncertainty,                                    # [v1, idx 7]
+        p_up,                                                 # [v1, idx 8]
+        delta_abs,                                            # [v1, idx 9]
+        p_trading_edge,                                       # [v1, idx 10]
+        p_terminal_edge,                                      # [v1, idx 11]
+        p_minus_q_tail,                                       # [v1, idx 12]
+        probability_of_profit,                                # [v1, idx 13]
+        skew_tax,                                             # [v1, idx 14]
+        timing_fit,                                           # [v1, idx 15]
+        expected_return_on_premium,                           # [v1, idx 16]
+        liquidity_score,                                      # [v1, idx 17]
+        contract_score / 100.0,  # rescale                    # [v1, idx 18]
+        regime_conf,                                          # [v1, idx 19]
     ]
 
-    # One-hot encodings
+    # ───────── v2 additions: per-candidate option analytics ──────────
+    # Greeks beyond delta (delta_abs is already at v1 idx 9). theta/vega
+    # normalised by option_price so the scale matches "fraction of
+    # premium" — the same trick we used for p_trading_edge.
+    gamma_raw = float(candidate.get("gamma") or 0.0)
+    theta_raw = float(candidate.get("theta") or 0.0)
+    vega_raw = float(candidate.get("vega") or 0.0)
+    iv_raw = float(candidate.get("implied_vol") or 0.0)
+    oi_change_pct = float(candidate.get("oi_change_pct") or 0.0)  # already a %
+    spread_pct = float(candidate.get("spread_pct") or 0.0)
+    cont.extend([
+        gamma_raw * 100.0,                                    # [v2, idx 20]  gamma ×100 (typ 0–2)
+        theta_raw / option_price,                             # [v2, idx 21]  theta as fraction of premium
+        vega_raw / option_price,                              # [v2, idx 22]  vega as fraction of premium
+        iv_raw,                                               # [v2, idx 23]  IV ratio (0–1 typ)
+        oi_change_pct / 100.0,                                # [v2, idx 24]  OI change normalised
+        spread_pct,                                           # [v2, idx 25]  bid-ask spread %
+    ])
+
+    # ───────── v2 additions: chain-level analytics ──────────────────
+    # Chain context — None when no chain payload (cold-start, pre-market).
+    # We feed sentinel zeros in that case; the policy learns the
+    # "chain-feature-absent" pattern via the bias term + regime label.
+    chain = chain or {}
+    pcr_oi = float(chain.get("pcr_oi") or 0.0)
+    pcr_oi_change = float(chain.get("pcr_oi_change") or 0.0)
+    atm_iv = float(chain.get("atm_iv") or 0.0)
+    iv_skew_norm = float(chain.get("iv_skew_25d_norm") or 0.0)
+    gex_total = chain.get("gex_total")
+    dex_calls = float(chain.get("dex_calls") or 0.0)
+    dex_puts = float(chain.get("dex_puts") or 0.0)
+    dex_net = float(chain.get("dex_net") or 0.0)
+    dex_denom = max(abs(dex_calls) + abs(dex_puts), 1.0)
+    atm_call_oi_chg = float(chain.get("atm_call_oi_change") or 0.0)
+    atm_put_oi_chg = float(chain.get("atm_put_oi_change") or 0.0)
+    atm_call_ltp_chg_pct = float(chain.get("atm_call_ltp_change_pct") or 0.0)
+    atm_put_ltp_chg_pct = float(chain.get("atm_put_ltp_change_pct") or 0.0)
+    cont.extend([
+        # PCR — clipped via tanh to keep the cold-start variance bounded.
+        # tanh((pcr - 1) / 0.5) maps 0.5 → -0.46, 1 → 0, 2 → +0.76.
+        float(np.tanh((pcr_oi - 1.0) / 0.5)) if pcr_oi > 0 else 0.0,  # [v2, idx 26]
+        _safe_tanh(pcr_oi_change, 0.2),                              # [v2, idx 27]  PCR Δ
+        atm_iv,                                                       # [v2, idx 28]  ATM IV (0-1)
+        _safe_tanh(iv_skew_norm, 0.5),                                # [v2, idx 29]  IV skew norm
+        _safe_tanh(gex_total, 1e8),                                   # [v2, idx 30]  GEX (tanh-bounded)
+        float(np.clip(dex_net / dex_denom, -1.0, 1.0)),              # [v2, idx 31]  DEX net ratio
+        _safe_tanh(atm_call_oi_chg, 1e5),                             # [v2, idx 32]
+        _safe_tanh(atm_put_oi_chg, 1e5),                              # [v2, idx 33]
+        _safe_tanh(atm_call_ltp_chg_pct, 5.0),                        # [v2, idx 34]
+        _safe_tanh(atm_put_ltp_chg_pct, 5.0),                         # [v2, idx 35]
+    ])
+
+    # One-hot encodings (positions unchanged from v1 — they remain at
+    # the tail; the v1→v2 padder maps them to the same indices).
     regime_label = str(regime.get("label") or "").lower()
     regime_oh = [1.0 if regime_label == lbl else 0.0 for lbl in KNOWN_REGIMES]
     delta_bucket = str(candidate.get("delta_bucket") or "").lower()
@@ -157,7 +228,69 @@ def _featurize(signal: dict[str, Any], candidate: dict[str, Any], regime: dict[s
     return np.asarray(vec, dtype=np.float64)
 
 
-EXPECTED_FEATURE_DIM = 20 + len(KNOWN_REGIMES) + len(KNOWN_DELTA_BUCKETS) + len(KNOWN_EXPIRY_KINDS) + len(KNOWN_DIRECTIONS)
+# Number of continuous features (including bias) in each version.
+CONT_DIM_V1 = 20
+CONT_DIM_V2 = 36  # 20 v1 + 6 candidate greeks + 10 chain features
+ONE_HOT_DIM = len(KNOWN_REGIMES) + len(KNOWN_DELTA_BUCKETS) + len(KNOWN_EXPIRY_KINDS) + len(KNOWN_DIRECTIONS)
+
+# Feature version. v1 = 35 dims (the original deployment). v2 adds
+# greeks + chain analytics. Bump this any time the feature layout
+# changes; `_load()` will detect the version mismatch and pad the
+# persisted posterior into the new basis (block-diagonal extension).
+FEATURE_VERSION = 2
+EXPECTED_FEATURE_DIM = CONT_DIM_V2 + ONE_HOT_DIM  # = 51
+LEGACY_FEATURE_DIMS = {
+    1: CONT_DIM_V1 + ONE_HOT_DIM,  # = 35
+}
+
+
+def _extend_v1_to_current(state_v1: dict[str, Any]) -> dict[str, Any]:
+    """Block-diagonal embed a v1 posterior (35-D) inside the current
+    basis. Old continuous features keep their indices [0..19]; new
+    continuous features get prior-only (alpha I) blocks. The one-hot
+    tail moves from indices [20..34] to [36..50]; we copy that block
+    into its new home.
+
+    This preserves every closed-trade update so we don't lose the 32
+    trades of learning from the v1 deployment.
+    """
+    alpha = float(state_v1.get("alpha", 1.0))
+    S_inv_old = np.asarray(state_v1["S_inv"], dtype=np.float64)
+    b_old = np.asarray(state_v1["b"], dtype=np.float64)
+    if S_inv_old.shape != (LEGACY_FEATURE_DIMS[1], LEGACY_FEATURE_DIMS[1]):
+        # Shape doesn't match — bail and let the caller fall back to a
+        # fresh prior. Better to lose history than corrupt the math.
+        return state_v1
+    new_dim = EXPECTED_FEATURE_DIM
+    n_new_cont = CONT_DIM_V2 - CONT_DIM_V1  # = 16
+    S_inv_new = alpha * np.eye(new_dim, dtype=np.float64)
+    b_new = np.zeros(new_dim, dtype=np.float64)
+    # Map v1 indices into v2 indices:
+    #   v1 [0..19]          (cont) → v2 [0..19]
+    #   v1 [20..34]         (oh)   → v2 [36..50]
+    # v2 [20..35] (new cont) stays at the alpha-I prior.
+    v1_cont = slice(0, CONT_DIM_V1)
+    v1_oh   = slice(CONT_DIM_V1, LEGACY_FEATURE_DIMS[1])
+    v2_cont = slice(0, CONT_DIM_V1)
+    v2_oh   = slice(CONT_DIM_V2, EXPECTED_FEATURE_DIM)
+    # Copy continuous-continuous block.
+    S_inv_new[v2_cont, v2_cont] = S_inv_old[v1_cont, v1_cont]
+    # Copy one-hot-one-hot block.
+    S_inv_new[v2_oh, v2_oh] = S_inv_old[v1_oh, v1_oh]
+    # Copy off-diagonal cont↔oh cross-terms.
+    S_inv_new[v2_cont, v2_oh] = S_inv_old[v1_cont, v1_oh]
+    S_inv_new[v2_oh, v2_cont] = S_inv_old[v1_oh, v1_cont]
+    # b vector.
+    b_new[v2_cont] = b_old[v1_cont]
+    b_new[v2_oh] = b_old[v1_oh]
+    return {
+        "dim": new_dim,
+        "alpha": alpha,
+        "beta": float(state_v1.get("beta", 1.0)),
+        "S_inv": S_inv_new.tolist(),
+        "b": b_new.tolist(),
+        "n_seen": int(state_v1.get("n_seen", 0)),
+    }
 
 
 @dataclass
@@ -310,11 +443,22 @@ class DirectionalPolicy:
         except Exception:
             return
         value_state = payload.get("value_model")
-        if value_state and int(value_state.get("dim", 0)) == EXPECTED_FEATURE_DIM:
-            try:
+        persisted_version = int(payload.get("feature_version", 1))
+        if not value_state:
+            return
+        old_dim = int(value_state.get("dim", 0))
+        try:
+            if old_dim == EXPECTED_FEATURE_DIM:
                 self._value_model = BayesianRidge.from_state(value_state)
-            except Exception:
-                pass
+            elif old_dim == LEGACY_FEATURE_DIMS.get(1) and persisted_version <= 1:
+                # v1 → current basis (block-diagonal pad). Preserves the
+                # n_seen counter + the learning on the original 35-D
+                # features; new feature dims start with the prior.
+                extended = _extend_v1_to_current(value_state)
+                self._value_model = BayesianRidge.from_state(extended)
+            # else: unknown schema — silently start fresh.
+        except Exception:
+            pass
         size_states = payload.get("size_buckets") or {}
         for key, bucket_state in size_states.items():
             try:
@@ -334,6 +478,7 @@ class DirectionalPolicy:
 
     def _persist(self) -> None:
         payload = {
+            "feature_version": FEATURE_VERSION,
             "value_model": self._value_model.to_state(),
             "size_buckets": {
                 f"{m:.2f}": {"sum_r": b.sum_r, "sum_r_sq": b.sum_r_sq, "n": b.n}
@@ -352,9 +497,16 @@ class DirectionalPolicy:
         signal: dict[str, Any],
         candidate: dict[str, Any],
         regime: dict[str, Any],
+        chain: Optional[dict[str, Any]] = None,
     ) -> PolicyDecision:
-        """Pick act/skip + size multiplier for a single candidate."""
-        x = _featurize(signal, candidate, regime)
+        """Pick act/skip + size multiplier for a single candidate.
+
+        `chain` is the optional chain-analytics dict from
+        `directional_options.chain_analytics.fetch_chain_analytics`. When
+        absent the chain features fall back to sentinel zeros — the
+        policy still works, just with less context.
+        """
+        x = _featurize(signal, candidate, regime, chain)
         with self._lock:
             sampled = self._value_model.sample(x, self._rng)
             mean, var = self._value_model.predict_mean_var(x)
@@ -388,20 +540,23 @@ class DirectionalPolicy:
         signal: dict[str, Any],
         candidates: list[dict[str, Any]],
         regime: dict[str, Any],
+        chain: Optional[dict[str, Any]] = None,
     ) -> tuple[Optional[int], list[float]]:
         """Score every candidate, return (best_idx, samples_per_candidate).
 
         Uses the value posterior (Thompson sampling) so the policy can
         explore — early on it may swap which strike it likes, but as the
         posterior tightens it converges to the strike with the best
-        learned features.
+        learned features. The same `chain` analytics flow into every
+        candidate's feature vector (chain context is per-symbol, not
+        per-strike).
         """
         if not candidates:
             return None, []
         samples: list[float] = []
         with self._lock:
             for c in candidates:
-                x = _featurize(signal, c, regime)
+                x = _featurize(signal, c, regime, chain)
                 samples.append(self._value_model.sample(x, self._rng))
         if not samples:
             return None, []
@@ -417,11 +572,18 @@ class DirectionalPolicy:
         regime: dict[str, Any],
         size_multiplier: float,
         risk_budget: float,
+        chain: Optional[dict[str, Any]] = None,
     ) -> None:
-        """Stash the feature vector so we can credit reward on close."""
+        """Stash the feature vector so we can credit reward on close.
+
+        The features captured here are what the model will be trained on
+        — chain analytics at entry are recorded with the trade so the
+        posterior update on close reflects the conditions that drove
+        the decision, not whatever the chain looks like at close time.
+        """
         if not position_id:
             return
-        x = _featurize(signal, candidate, regime)
+        x = _featurize(signal, candidate, regime, chain)
         with self._lock:
             self._pending[position_id] = {
                 "features": x.tolist(),
@@ -459,6 +621,7 @@ class DirectionalPolicy:
             return {
                 "n_seen": self._value_model.n_seen,
                 "feature_dim": EXPECTED_FEATURE_DIM,
+                "feature_version": FEATURE_VERSION,
                 "size_buckets": {
                     f"{m:.2f}": {
                         "mean_R": (b.sum_r / b.n) if b.n else None,
