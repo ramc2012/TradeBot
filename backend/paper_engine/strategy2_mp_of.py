@@ -73,6 +73,12 @@ S2_MP_MIN_PERIODS = 2
 # the prior session (used for prior_profile) plus today's developing one.
 S2_SPOT_LOOKBACK_DAYS = 5
 
+# Roll-to-next-expiry threshold. When the nearest expiry for a track is within
+# this many CALENDAR days of expiring, we skip it and use the next one — the
+# "decide to trade the next expiry based on its logic" rule. Avoids opening a
+# position on a contract about to expire (decay/assignment risk, thin gamma).
+S2_EXPIRY_ROLL_CALENDAR_DAYS = 1
+
 
 # ─── Spot loader ──────────────────────────────────────────────────────────
 
@@ -172,11 +178,123 @@ def expiry_tracks_for(underlying: str) -> tuple[str, ...]:
     return S2_EXPIRY_ROUTING.get(str(underlying).upper(), ("monthly",))
 
 
+def select_s2_expiry_targets(
+    underlying: str,
+    *,
+    monthlies: list[str],
+    listed_expiries: list[str],
+    today_iso: str,
+) -> list[tuple[str, str]]:
+    """Pure expiry-policy selector, fed from the expiry calendar catalog.
+
+    Inputs (all ISO date strings):
+      * ``monthlies`` — this underlying's MONTHLY expiries from
+        ``fo_expiry_catalog`` (current + next month), sorted ascending.
+      * ``listed_expiries`` — every expiry the underlying actually lists in
+        the option chain / ingested option candles (weeklies + monthlies),
+        sorted ascending. Used to source weeklies.
+
+    Policy:
+      * NIFTY and SENSEX trade WEEKLY + MONTHLY; the other indices trade
+        MONTHLY only (S2_EXPIRY_ROUTING).
+      * **Roll to next expiry** when the nearest candidate for a track is
+        within ``S2_EXPIRY_ROLL_CALENDAR_DAYS`` of expiring — the "decide to
+        trade the next expiry based on its logic" rule.
+
+    Returns ``[(track, expiry_iso), …]``, monthly-first.
+    """
+    underlying = str(underlying or "").upper()
+    tracks = expiry_tracks_for(underlying)
+    out: list[tuple[str, str]] = []
+
+    def _roll(candidates: list[str]) -> Optional[str]:
+        """Pick the nearest future expiry, skipping one that's about to expire."""
+        from datetime import date as _date
+
+        today = _date.fromisoformat(today_iso)
+        future = sorted({c for c in candidates if c and c >= today_iso})
+        for iso in future:
+            try:
+                days = (_date.fromisoformat(iso) - today).days
+            except ValueError:
+                continue
+            if days >= S2_EXPIRY_ROLL_CALENDAR_DAYS:
+                return iso
+        # Everything left is within the roll window AND there's nothing
+        # further out — take the furthest available rather than nothing.
+        return future[-1] if future else None
+
+    monthly_iso = _roll(monthlies)
+    monthly_set = set(monthlies)
+
+    if "monthly" in tracks and monthly_iso:
+        out.append(("monthly", monthly_iso))
+
+    if "weekly" in tracks and monthly_iso:
+        # A weekly is any listed expiry that is NOT a monthly and lands on or
+        # before the chosen monthly. Pick the nearest (roll-adjusted) one.
+        weekly_candidates = [
+            iso for iso in listed_expiries
+            if iso and iso not in monthly_set and iso <= monthly_iso
+        ]
+        weekly_iso = _roll(weekly_candidates)
+        # Don't duplicate the monthly as a "weekly".
+        if weekly_iso and weekly_iso != monthly_iso:
+            out.append(("weekly", weekly_iso))
+
+    return out
+
+
+async def load_s2_expiry_inputs(underlying: str) -> dict[str, list[str]]:
+    """Load per-underlying expiry inputs from the expiry calendar catalog.
+
+    * ``monthlies`` — ``fo_expiry_catalog`` rows for this underlying (the
+      monthly master: current + next month).
+    * ``listed_expiries`` — every expiry the underlying has actually listed in
+      ``option_premium_candles`` recently (weeklies + monthlies), so SENSEX
+      gets its own BSE weeklies rather than NIFTY's NSE ladder.
+    """
+    underlying = str(underlying or "").upper()
+    monthlies: list[str] = []
+    listed: list[str] = []
+    try:
+        async with AsyncSessionLocal() as session:
+            cat = await session.execute(
+                text(
+                    """
+                    SELECT expiry FROM fo_expiry_catalog
+                    WHERE underlying = :u AND expiry >= CURRENT_DATE
+                    ORDER BY expiry
+                    """
+                ),
+                {"u": underlying},
+            )
+            monthlies = [r[0].isoformat() for r in cat.fetchall() if r[0]]
+            chain = await session.execute(
+                text(
+                    """
+                    SELECT DISTINCT expiry FROM option_premium_candles
+                    WHERE underlying = :u
+                      AND expiry >= CURRENT_DATE
+                      AND time > NOW() - INTERVAL '10 days'
+                    ORDER BY expiry
+                    """
+                ),
+                {"u": underlying},
+            )
+            listed = [r[0].isoformat() for r in chain.fetchall() if r[0]]
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[s2_mp_of] expiry-catalog load failed for {underlying}: {exc}")
+    return {"monthlies": monthlies, "listed_expiries": listed}
+
+
 def resolve_s2_expiry_targets(
     underlying: str,
     expiry_scope: dict[str, Any],
 ) -> list[tuple[str, str]]:
-    """Pick the expiry contracts S2 should trade for an underlying.
+    """Legacy scope-based resolver (fallback when the catalog is empty).
+
+    Pick the expiry contracts S2 should trade for an underlying.
 
     Returns a list of ``(track, expiry_iso)`` tuples. ``track`` is
     ``"weekly"`` or ``"monthly"``. The order is monthly-first so the

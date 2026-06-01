@@ -1519,12 +1519,36 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         (``"weekly"`` or ``"monthly"``) so the downstream entry loop
         can size and book each leg independently.
         """
-        from paper_engine.strategy2_mp_of import resolve_s2_expiry_targets
+        from paper_engine.strategy2_mp_of import (
+            load_s2_expiry_inputs,
+            resolve_s2_expiry_targets,
+            select_s2_expiry_targets,
+        )
 
-        # Build the (underlying, track, expiry) request matrix.
+        today_iso = _now_ist().date().isoformat()
+
+        # Build the (underlying, track, expiry) request matrix from the expiry
+        # calendar catalog (fo_expiry_catalog monthlies + the underlying's own
+        # listed expiries for weeklies), so SENSEX trades its BSE weeklies
+        # rather than NIFTY's NSE ladder. Falls back to the legacy scope-based
+        # resolver when the catalog has no rows for an underlying.
         requests: list[tuple[str, str, str]] = []
         for underlying in STRATEGY2_UNDERLYINGS:
-            for track, expiry in resolve_s2_expiry_targets(underlying, expiry_scope):
+            targets: list[tuple[str, str]] = []
+            try:
+                inputs = await load_s2_expiry_inputs(underlying)
+                if inputs.get("monthlies"):
+                    targets = select_s2_expiry_targets(
+                        underlying,
+                        monthlies=inputs.get("monthlies") or [],
+                        listed_expiries=inputs.get("listed_expiries") or [],
+                        today_iso=today_iso,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[Strategy2] catalog expiry resolve failed for {underlying}: {exc}")
+            if not targets:
+                targets = resolve_s2_expiry_targets(underlying, expiry_scope)
+            for track, expiry in targets:
                 if expiry:
                     requests.append((underlying, track, expiry))
         if not requests:

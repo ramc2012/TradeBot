@@ -141,6 +141,79 @@ def test_resolve_sensex_ignores_nifty_weekly_ladder() -> None:
     assert all(t != "weekly" for t, _ in targets)
 
 
+# ─── select_s2_expiry_targets (catalog-backed) ────────────────────────────
+
+
+def test_select_nifty_weekly_and_monthly_from_catalog() -> None:
+    # NIFTY: catalog monthlies 06-30/07-28; listed has its own weeklies.
+    targets = s2.select_s2_expiry_targets(
+        "NIFTY",
+        monthlies=["2026-06-30", "2026-07-28"],
+        listed_expiries=["2026-06-09", "2026-06-16", "2026-06-23", "2026-06-30"],
+        today_iso="2026-06-05",
+    )
+    assert ("monthly", "2026-06-30") in targets
+    weekly = [(t, e) for t, e in targets if t == "weekly"]
+    assert len(weekly) == 1
+    assert weekly[0][1] == "2026-06-09"  # nearest weekly before the monthly
+
+
+def test_select_sensex_uses_its_own_bse_weeklies() -> None:
+    # SENSEX: its OWN listed expiries (BSE), not NIFTY's. Now it gets a weekly.
+    targets = s2.select_s2_expiry_targets(
+        "SENSEX",
+        monthlies=["2026-06-25", "2026-07-30"],
+        listed_expiries=["2026-06-09", "2026-06-16", "2026-06-25"],
+        today_iso="2026-06-05",
+    )
+    assert ("monthly", "2026-06-25") in targets
+    assert ("weekly", "2026-06-09") in targets
+
+
+def test_select_banknifty_monthly_only() -> None:
+    targets = s2.select_s2_expiry_targets(
+        "BANKNIFTY",
+        monthlies=["2026-06-30", "2026-07-28"],
+        listed_expiries=["2026-06-09", "2026-06-30"],
+        today_iso="2026-06-05",
+    )
+    assert targets == [("monthly", "2026-06-30")]
+
+
+def test_select_rolls_monthly_when_about_to_expire() -> None:
+    # Today is the day before the monthly → roll to next month's.
+    targets = s2.select_s2_expiry_targets(
+        "BANKNIFTY",
+        monthlies=["2026-06-30", "2026-07-28"],
+        listed_expiries=["2026-06-30", "2026-07-28"],
+        today_iso="2026-06-30",  # 0 days to 06-30 → roll
+    )
+    assert targets == [("monthly", "2026-07-28")]
+
+
+def test_select_rolls_weekly_when_about_to_expire() -> None:
+    # Nearest weekly expires today → roll to the next weekly.
+    targets = s2.select_s2_expiry_targets(
+        "NIFTY",
+        monthlies=["2026-06-30"],
+        listed_expiries=["2026-06-09", "2026-06-16", "2026-06-30"],
+        today_iso="2026-06-09",  # 06-09 is today → roll to 06-16
+    )
+    weekly = [e for t, e in targets if t == "weekly"]
+    assert weekly == ["2026-06-16"]
+
+
+def test_select_no_weekly_when_only_monthly_listed() -> None:
+    # SENSEX month with no distinct weekly listed → monthly only.
+    targets = s2.select_s2_expiry_targets(
+        "SENSEX",
+        monthlies=["2026-06-25"],
+        listed_expiries=["2026-06-25"],
+        today_iso="2026-06-05",
+    )
+    assert targets == [("monthly", "2026-06-25")]
+
+
 def test_resolve_empty_scope_drops_all() -> None:
     assert s2.resolve_s2_expiry_targets("NIFTY", {}) == []
     assert s2.resolve_s2_expiry_targets("BANKNIFTY", {"index_monthlies": {}}) == []
