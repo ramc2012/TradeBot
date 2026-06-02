@@ -1257,14 +1257,15 @@ async def get_portfolio_stats(
 async def get_open_signals(underlying: str = "SENSEX") -> dict:
     await paper_strategy_agent.ensure_recovered_state()
     agent_status = paper_strategy_agent.get_status()
+    # S2 deleted (2026-06-02): only Strategy 1 live positions + watchlist
+    # are surfaced. strategy2_signals / strategy2_mode kept as empty
+    # constants for one release so any not-yet-updated client doesn't
+    # KeyError; they carry no data and should be dropped by consumers.
     live_positions = _build_strategy1_live_signals(agent_status)
     strategy1_watchlist = await _build_strategy1_watchlist_signals_live(agent_status)
-    strategy2_signals = _build_strategy2_live_signals(agent_status)
-    strategy2_runtime = _find_strategy(agent_status, "index_mp_strategy")
 
     flattened = [
         *live_positions,
-        *[signal for signal in strategy2_signals if signal.get("direction")],
         *strategy1_watchlist,
     ]
 
@@ -1272,8 +1273,8 @@ async def get_open_signals(underlying: str = "SENSEX") -> dict:
         "as_of": _format_dateish(agent_status.get("last_run_at") or datetime.now(IST).isoformat()),
         "live_positions": live_positions,
         "strategy1_watchlist": strategy1_watchlist,
-        "strategy2_signals": strategy2_signals,
-        "strategy2_mode": strategy2_runtime.get("meta", {}).get("mode", "live_runtime"),
+        "strategy2_signals": [],
+        "strategy2_mode": "deleted",
         "signals": flattened[:12],
         "skip_reason": None if flattened else "No live entries or aligned strategy signals right now.",
     }

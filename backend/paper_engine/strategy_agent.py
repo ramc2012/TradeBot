@@ -5140,7 +5140,12 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     "meta": runtime.meta,
                     "instrument_universe": (runtime.meta or {}).get("instrument_universe") or [],
                 }
+                # S2 deleted (2026-06-02): the index_mp_strategy runtime is
+                # kept in _runtimes() for state-file load/persist back-compat,
+                # but it must NOT surface in the API `strategies[]` array —
+                # otherwise the UI still receives a (dead) Strategy 2 lane.
                 for runtime in self._runtimes()
+                if runtime.key != "index_mp_strategy"
             ],
         }
 
