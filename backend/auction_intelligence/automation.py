@@ -21,6 +21,7 @@ from auction_intelligence.schemas import (
 )
 from auction_intelligence.service import AuctionIntelligenceService
 from auction_intelligence.shadow import ShadowPersistenceService
+from loguru import logger
 
 
 _shadow_store = ShadowPersistenceService()
@@ -200,13 +201,46 @@ async def capture_live_paper_cycle(
     )
     records = build_shadow_records_from_snapshot(snapshot, shadow_options)
     storage = await _shadow_store.record_records(records)
+
+    # ── Why-no-trade diagnostics (2026-06-02) ──────────────────────────────
+    # AI has 0 paper trades lifetime, but the journal only records EXECUTED
+    # trades — so the desk was a black box: we couldn't tell whether the
+    # empty execution plan came from (a) every agent returning FLAT,
+    # (b) the risk governor blocking, or (c) options-mapping dropping every
+    # contract (no chain/expiry/strike). Surface all three so a single
+    # market-hours cycle in `last_result_meta` / docker logs names the gate.
+    decisions = list(bundle.agent_decisions or [])
+    non_flat = [d for d in decisions if getattr(d, "action", "FLAT") != "FLAT"]
+    risk_allowed = bool(getattr(bundle.risk, "allowed", False))
+    risk_reasons = list(getattr(bundle.risk, "reasons", []) or [])
+    exec_count = len(list(bundle.execution_plan or []))
+    if exec_count > 0:
+        gate = "executed"
+    elif not non_flat:
+        gate = "all_decisions_flat"
+    elif not risk_allowed:
+        gate = "risk_blocked"
+    else:
+        gate = "options_mapping_empty"  # risk allowed + non-FLAT, yet 0 plan
+    sym_code = str(snapshot.get("symbol_code") or symbol).upper()
+    logger.info(
+        "auction.cycle symbol={sym} gate={gate} decisions={dc} non_flat={nf} "
+        "risk_allowed={ra} risk_reasons={rr} executions={ec}",
+        sym=sym_code, gate=gate, dc=len(decisions), nf=len(non_flat),
+        ra=risk_allowed, rr=risk_reasons, ec=exec_count,
+    )
+
     return {
-        "symbol_code": str(snapshot.get("symbol_code") or symbol).upper(),
+        "symbol_code": sym_code,
         "session_date": snapshot.get("session_date"),
         "snapshot_mode": request.get("metadata", {}).get("snapshot_mode"),
         "source": request.get("metadata", {}).get("history_source"),
-        "decision_count": len(list(bundle.agent_decisions or [])),
-        "execution_count": len(list(bundle.execution_plan or [])),
+        "decision_count": len(decisions),
+        "non_flat_decision_count": len(non_flat),
+        "risk_allowed": risk_allowed,
+        "risk_reasons": risk_reasons,
+        "no_trade_gate": gate,
+        "execution_count": exec_count,
         "journal_paths": journal_paths,
         "journal_path_count": len(journal_paths),
         "paper_positions_summary": paper_positions.get("summary") if isinstance(paper_positions, dict) else None,
@@ -234,12 +268,21 @@ async def run_market_hours_cycle(
         joined = "; ".join(f"{symbol}: {detail}" for symbol, detail in failures.items())
         raise RuntimeError(f"Auction Intelligence paper cycle failed: {joined}")
 
+    # Roll up the per-symbol no-trade gate so last_result_meta shows, at a
+    # glance, WHY the cycle produced (or didn't produce) trades.
+    gate_breakdown: dict[str, int] = {}
+    for item in results:
+        gate = str(item.get("no_trade_gate") or "unknown")
+        gate_breakdown[gate] = gate_breakdown.get(gate, 0) + 1
+
     return {
         "symbols_requested": requested,
         "symbols_completed": [item["symbol_code"] for item in results],
         "result_count": len(results),
         "failure_count": len(failures),
         "failures": failures,
+        "gate_breakdown": gate_breakdown,
+        "execution_total": sum(int(item.get("execution_count") or 0) for item in results),
         "shadow_record_count": sum(int(item.get("shadow_record_count") or 0) for item in results),
         "journal_path_count": sum(int(item.get("journal_path_count") or 0) for item in results),
         "results": results,
