@@ -42,8 +42,11 @@ backend/nse_strategy_state.json
 tmp/
 .tmp/
 
-# Generated research and validation outputs
-reports/
+# Generated research and validation outputs.
+# Anchored to root + backend so the unanchored `reports/` glob does NOT
+# also swallow the frontend app route `frontend/src/app/reports/`
+# (the Reports module added 2026-06-02).
+/reports/
 backend/reports/
 
 # Coverage / build artifacts

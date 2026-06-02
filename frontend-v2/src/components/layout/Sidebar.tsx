@@ -41,6 +41,7 @@ import {
   Waves,
   Workflow,
   Brain,
+  FileText,
 } from "lucide-react";
 
 const SIDEBAR_STORAGE_KEY = "nomad-curie.sidebar.collapsed.v2";
@@ -67,7 +68,7 @@ const NAV_GROUPS: { title: string; subtitle?: string; items: NavItem[] }[] = [
     title: "Strategies",
     subtitle: "One shell per strategy desk",
     items: [
-      { href: "/strategies/nse",         label: "NSE Index",     icon: Crosshair },
+      { href: "/strategies/nse/live",    label: "NSE Index",     icon: Crosshair, matchers: ["/strategies/nse"] },
       { href: "/strategies/cbe",         label: "CBE Scanner",   icon: Radar },
       { href: "/strategies/directional", label: "Long Premium",  icon: Target },
       { href: "/strategies/gann",        label: "Gann TP Delta", icon: Compass },
@@ -102,6 +103,7 @@ const NAV_GROUPS: { title: string; subtitle?: string; items: NavItem[] }[] = [
   {
     title: "System",
     items: [
+      { href: "/reports",     label: "Reports",        icon: FileText },
       { href: "/system",      label: "System hub",     icon: Heart, matchers: ["/system", "/health", "/lane-health"] },
       { href: "/health",      label: "Service health", icon: Heart },
       { href: "/lane-health", label: "Lane invariants",icon: Heart },

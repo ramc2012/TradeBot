@@ -26,6 +26,7 @@ import {
   Workflow,
   Waves,
   CandlestickChart,
+  FileText,
 } from "lucide-react";
 
 const SIDEBAR_STORAGE_KEY = "nomad-curie.sidebar.collapsed";
@@ -38,7 +39,7 @@ const NAV_GROUPS = [
       { href: "/analytics", label: "Portfolio", icon: BriefcaseBusiness },
       { href: "/trading", label: "Execution", icon: Activity },
       { href: "/market", label: "Market", icon: Globe },
-      { href: "/strategy", label: "NSE Desk", icon: Crosshair },
+      { href: "/strategy/live", label: "NSE Desk", icon: Crosshair, matchers: ["/strategy"] },
       { href: "/cbe", label: "CBE Scanner", icon: Radar },
       { href: "/directional-options", label: "Long Premium", icon: Target },
       { href: "/gann-tp-delta", label: "Gann TP Delta", icon: Compass },
@@ -62,6 +63,7 @@ const NAV_GROUPS = [
   {
     title: "System",
     items: [
+      { href: "/reports", label: "Reports", icon: FileText },
       { href: "/settings", label: "Settings", icon: Settings, matchers: ["/settings", "/health"] },
     ],
   },
