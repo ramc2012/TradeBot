@@ -36,23 +36,95 @@ from market_data.option_chain import option_chain_service
 from market_data.symbols import to_app_symbol
 
 
-# NOTE on chain population: we deliberately do NOT trigger broker
-# refreshes from this module. An earlier version did fire-and-forget
-# background tasks that called the market endpoint's full
-# broker→track→refresh path; on prod that destabilised the backend (the
-# refresh holds the option_chain_service lock, runs expensive greeks
-# computation for 200+ strikes per call, and stacked up under load).
+# Cache-warming approach: we don't refresh the chain ourselves (that
+# was destabilising the backend — _refresh holds a lock and computes
+# greeks for 200+ strikes per call). Instead we ensure_chain_tracked()
+# adds the (symbol, expiry) to option_chain_service._tracked. The
+# service's own poll loop refreshes every POLL_INTERVAL (30s) into a
+# Redis key with OC_TTL=60s, so once tracked the cache stays warm
+# without any per-request work.
 #
-# We just READ the cache here. Whatever already populates the cache in
-# v1 — the market_intelligence_runtime, the agent's option_chain_service
-# poll loop, or a direct hit on /api/market/option-chain/{symbol} —
-# remains responsible for keeping it warm. If empty, we return None
-# and the policy uses zero chain features for that cycle. Next cycle
-# (after something else has populated) we get the data.
-#
-# Operationally: hitting /api/market/option-chain/NIFTY?expiry=…
-# manually once per day, OR letting the existing market-data poll loop
-# track these expiries, is enough to keep this lit during market hours.
+# First snapshot for a (symbol, expiry): schedules track, returns
+# None for chain (policy gets zero chain features for this cycle).
+# Within ~30s the poll loop populates Redis. Subsequent snapshots
+# hit cache fast and the policy sees the full 16 chain features.
+
+
+async def ensure_chain_tracked(underlying: str, expiry: str) -> None:
+    """Best-effort: register (app_symbol, expiry) with the
+    option_chain_service so its poll loop keeps Redis warm.
+
+    First-time setup per (symbol, expiry):
+      1. Acquire broker via _get_market_adapter() if not set.
+      2. Add (app_symbol, expiry) to the service's tracked list.
+      3. Start the poll loop if it isn't running yet.
+      4. Fire one immediate `_refresh` so the cache is warm within
+         seconds rather than waiting POLL_INTERVAL (30s).
+
+    Subsequent calls for the same (symbol, expiry) early-out fast
+    without any broker work — the poll loop maintains freshness from
+    then on.
+
+    Failures are silent: if the broker can't be acquired we still add
+    to the tracked list (the next time set_broker fires elsewhere, the
+    poll loop will pick this entry up).
+    """
+    if not expiry or not underlying:
+        return
+    try:
+        app_symbol = to_app_symbol(underlying) or underlying
+    except Exception:
+        app_symbol = underlying
+    key = (app_symbol, expiry)
+    # Fast path: already tracked — nothing to do.
+    if key in getattr(option_chain_service, "_tracked", []):
+        return
+    # First-time setup. Acquire broker if missing.
+    if getattr(option_chain_service, "_broker", None) is None:
+        try:
+            from api.routers.market import _get_market_adapter
+            adapter, _ = await _get_market_adapter()
+            if adapter is not None:
+                option_chain_service.set_broker(adapter)
+                logger.info("[chain_analytics] set broker on option_chain_service")
+        except Exception as exc:
+            logger.debug(f"[chain_analytics] couldn't acquire broker: {exc}")
+    option_chain_service.track(app_symbol, expiry)
+    logger.info(
+        f"[chain_analytics] tracking {app_symbol} {expiry} "
+        f"({len(option_chain_service._tracked)} total)"
+    )
+    # Start the poll loop if it's not running. Guarded so concurrent
+    # callers don't spawn multiple loops — _task is set when start()
+    # is called.
+    task = getattr(option_chain_service, "_task", None)
+    if task is None or (hasattr(task, "done") and task.done()):
+        try:
+            await option_chain_service.start()
+            logger.info("[chain_analytics] started option_chain_service poll loop")
+        except Exception as exc:
+            logger.warning(f"[chain_analytics] start() failed: {exc}")
+    # Fire one immediate refresh so the cache is warm within seconds.
+    # Bounded by a 12s timeout (broker cold-call); failures are silent.
+    if getattr(option_chain_service, "_broker", None) is not None:
+        try:
+            asyncio.create_task(_one_shot_refresh(app_symbol, expiry))
+        except RuntimeError:
+            pass
+
+
+async def _one_shot_refresh(app_symbol: str, expiry: str) -> None:
+    """Bounded one-time _refresh on first track. Failures are silent."""
+    try:
+        await asyncio.wait_for(
+            option_chain_service._refresh(app_symbol, expiry),
+            timeout=12.0,
+        )
+        logger.info(f"[chain_analytics] initial refresh complete for {app_symbol} {expiry}")
+    except asyncio.TimeoutError:
+        logger.warning(f"[chain_analytics] initial refresh timed out for {app_symbol} {expiry}")
+    except Exception as exc:
+        logger.warning(f"[chain_analytics] initial refresh failed for {app_symbol} {expiry}: {exc}")
 
 
 # Lot sizes for index options. Used for DEX/GEX absolute scale. If a

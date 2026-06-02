@@ -14,7 +14,7 @@ from agentic_rag import ContextGateRequest, rag_service
 from analysis.signal_classifier import classify_status_bucket
 from core.config import settings
 from directional_options.backtest import DirectionalOptionsBacktester
-from directional_options.chain_analytics import fetch_chain_analytics
+from directional_options.chain_analytics import ensure_chain_tracked, fetch_chain_analytics
 from directional_options.config import clone_default_config
 from directional_options.data import DirectionalOptionsDataStore
 from directional_options.features import FeatureEngine
@@ -572,6 +572,16 @@ class DirectionalOptionsService:
                 best_cand = selection.get("best")
                 if best_cand is not None:
                     chain_expiry = getattr(best_cand, "expiry", None)
+                # Ensure the option_chain_service is tracking this
+                # (underlying, expiry) so its 30s poll loop keeps the
+                # Redis cache warm. Idempotent — second+ calls return
+                # without touching the broker. Fire-and-forget so the
+                # tracking call never blocks the snapshot.
+                if chain_expiry:
+                    try:
+                        asyncio.create_task(ensure_chain_tracked(underlying, chain_expiry))
+                    except RuntimeError:
+                        pass
                 # 6s budget — fetch_chain_analytics itself bounds the
                 # Redis read at 2s and does ~1s of feature aggregation;
                 # we want enough headroom to absorb backend load spikes
