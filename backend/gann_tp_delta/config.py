@@ -75,6 +75,71 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "structure_lookback": 8,
         "atr_stop_multiplier": 1.1,
     },
+    # ── Regime-gated confluence engine (v2) ─────────────────────────────────
+    # The legacy `confluence_signal` flipped bias on every new pivot, so the
+    # paper agent whipsawed itself (11 of 12 closes were self-reversals). The
+    # v2 engine establishes a STABLE regime (EMA + structure + 1x1 master
+    # angle, gated by ADX) and only trades two explicit archetypes, scored by
+    # how EXACTLY price sits on each Gann element and how important that
+    # element is.
+    "strategy": {
+        "enabled": True,
+        # Regime detection
+        "adx_trend_min": 18.0,          # ADX >= this ⇒ a real trend is present
+        "regime_min_score": 2,          # |EMA+structure+1x1 vote| >= this ⇒ directional
+        "structure_lookback": 8,
+        # Archetype thresholds on the weighted conviction (~0..10 scale)
+        "continuation_min_conviction": 4.0,
+        "reversal_min_conviction": 6.5,
+        "reversal_size_factor": 0.5,    # counter-trend reversals trade half size
+        # Commodities over-trade and are negative-EV at the index-level bar in
+        # backtest (CRUDEOIL −6.5R, NATURALGAS −1.7R, GOLD ~flat across 30-53
+        # trades vs NIFTY's 9). Hold commodity FUTURES entries to a higher
+        # conviction so only the strongest auctions trade until per-commodity
+        # tuning is validated offline. 0 disables the extra floor.
+        "commodity_min_conviction": 5.5,
+        "reversal_edge_over_continuation": 1.0,  # reversal must beat in-trend by this to override
+        # Exactness tolerances (fraction of price) — tight, so a "touch" is real
+        "angle_tolerance_pct": 0.0025,  # 0.25%
+        "sq9_tolerance_pct": 0.0025,
+        "pullback_tolerance_pct": 0.005,  # continuation pullback proximity to support
+        # Element importance weights
+        "weights": {
+            "angle_1x1": 2.0,
+            "angle_major": 1.0,         # 1x2, 2x1
+            "angle_minor": 0.5,
+            "sq9_cardinal": 1.5,        # 90/180/270/360
+            "sq9_ordinal": 0.75,        # 45/135/225/315
+            "cycle_major": 1.5,         # 90/144/180/270/360
+            "cycle_minor": 0.75,
+            "price_time_square": 2.0,
+            "regime_align": 1.5,
+            "structure_align": 1.0,
+            "confirmation_bar": 1.5,
+        },
+        "major_cycles": [90, 144, 180, 270, 360],
+        "major_angles": ["1x2", "2x1"],
+        "stop_atr_buffer": 0.5,         # ATR multiple beyond the Gann level for the stop
+        "min_stop_pct": 0.0015,         # floor the underlying stop distance at 0.15%
+        # Only target Gann levels at least this many R away — a near level gives
+        # a sub-1R win against a full -1R stop, which is negative-expectancy even
+        # at a 50% hit-rate. If no level qualifies, the trade runs on the trail.
+        "min_target_r": 1.5,
+    },
+    # ── Risk / execution ────────────────────────────────────────────────────
+    "risk": {
+        "option_premium_budget": 50000.0,    # ₹ premium outlay target per index option
+        "futures_notional_target": 1500000.0,  # ₹ notional per commodity futures (matches commodity desk)
+        "daily_loss_cap": 25000.0,           # stop opening new trades once today's realized <= -cap
+        "max_portfolio_positions": 12,
+        "breakeven_at_r": 1.0,               # move stop→entry after +1R (on the underlying)
+        "trail_start_r": 1.5,                # start trailing after +1.5R
+        "trail_atr_mult": 2.0,               # trail this many ATR behind the underlying
+        "time_stop_bars": 26,                # exit if held this long without +0.5R progress
+        "time_stop_min_r": 0.5,
+        "option_premium_hard_stop_pct": 55.0,  # premium backstop vs theta bleed
+        "option_expiry_day_exit": True,
+    },
     "backtest": {
         "max_events": 120,
         "max_bars": 260,
@@ -86,14 +151,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "paper_agent": {
         "enabled": True,
         "timeframe": "15minute",
-        "lookback_sessions": 60,
+        "lookback_sessions": 45,
         "anchor_mode": "auto_pivot",
         "h_mode": "median_tpd",
         "live_refresh": False,
         "lots": 1,
         "max_positions": 20,
         "max_days_to_expiry": 45,
-        "scan_concurrency": 6,
+        # Memory guard: each scanned underlying loads a deep 1-min frame (~20-30k
+        # bars) and builds features. Six concurrently OOM-kills the memory-limited
+        # prod box (and a recreate re-syncs the bind mount). 3 matches the old
+        # working peak; open-position management reuses cached scan snapshots so
+        # there is no extra per-position frame load on top.
+        "scan_concurrency": 3,
         "min_score": 3,
         "stop_loss_pct": 35.0,
         "target_pct": 50.0,

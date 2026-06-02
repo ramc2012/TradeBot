@@ -115,6 +115,10 @@ def price_time_square(
     return PriceTimeSquare(abs(ratio - 1.0) <= float(tolerance), ratio, scaled, elapsed, float(tolerance))
 
 
+def angle_by_name(angles: list[GannAngle], name: str) -> GannAngle | None:
+    return next((item for item in angles if item.name == name), None)
+
+
 def nearest_angle(angles: list[GannAngle]) -> GannAngle | None:
     return min(angles, key=lambda item: item.distance_pct, default=None)
 

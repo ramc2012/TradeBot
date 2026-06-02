@@ -19,6 +19,7 @@ from gann_tp_delta.geometry import gann_fan, nearest_angle, nearest_sq9, price_t
 from gann_tp_delta.paper import GannTPDeltaPaperStore
 from gann_tp_delta.scaling import harmonic_speed
 from gann_tp_delta.signals import alert_events, confluence_signal
+from gann_tp_delta.strategy import evaluate_gann_signal
 
 
 class GannTPDeltaService:
@@ -176,7 +177,10 @@ class GannTPDeltaService:
         sq9 = square_of_nine(anchor_price=anchor.price, current_price=current_price, price_unit=float(geometry_cfg["price_unit"]), degrees=geometry_cfg["sq9_degrees"])
         cycles = time_cycles(anchor=anchor, current_bar_index=current_index, cycles=geometry_cfg["bar_cycles"], window_bars=int(geometry_cfg["cycle_window_bars"]))
         square = price_time_square(anchor=anchor, current_bar_index=current_index, current_price=current_price, h=h.value, tolerance=float(geometry_cfg["squaring_tolerance"]))
-        signal = confluence_signal(frame=frame, anchor=anchor, angles=angles, sq9_levels=sq9, cycles=cycles, square=square, config=self.config["signals"], near_pct=float(geometry_cfg["near_pct"]))
+        if self.config.get("strategy", {}).get("enabled", True):
+            signal = evaluate_gann_signal(frame=frame, anchor=anchor, angles=angles, sq9_levels=sq9, cycles=cycles, square=square, h=h.value, config=self.config)
+        else:
+            signal = confluence_signal(frame=frame, anchor=anchor, angles=angles, sq9_levels=sq9, cycles=cycles, square=square, config=self.config["signals"], near_pct=float(geometry_cfg["near_pct"]))
         alerts = alert_events(signal, angles, sq9, cycles, square, float(geometry_cfg["near_pct"]))
         active_cycle = next((item for item in cycles if item.active), None)
         return {

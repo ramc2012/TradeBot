@@ -12,9 +12,29 @@ from typing import Any
 from loguru import logger
 
 from market_data.atm_watchlist import atm_watchlist_service
+from market_data.commodity_contract_specs import get_commodity_contract_spec
 
 
 UTC = timezone.utc
+
+
+def _commodity_spec(underlying: str):
+    """Return the commodity contract spec if `underlying` is an MCX commodity,
+    else None. Indices/stocks fall through to the option path."""
+    try:
+        spec = get_commodity_contract_spec(underlying)
+    except Exception:
+        return None
+    if spec and getattr(spec, "root", "UNKNOWN") not in ("", "UNKNOWN"):
+        return spec
+    return None
+
+
+def _today_ist_date() -> str:
+    # IST = UTC+5:30; the option expiry check only needs the calendar date.
+    from datetime import timedelta
+
+    return (datetime.now(UTC) + timedelta(hours=5, minutes=30)).date().isoformat()
 
 
 def _now() -> str:
@@ -81,10 +101,22 @@ class GannTPDeltaPaperAgent:
         h_mode = h_mode or str(cfg.get("h_mode") or "median_tpd")
         live_refresh = bool(cfg.get("live_refresh") if live_refresh is None else live_refresh)
         max_underlyings = int(max_underlyings or 0)
-        max_positions = max(1, int(cfg.get("max_positions") or 20))
+        risk_cfg = self.config.get("risk", {})
+        max_positions = max(1, int(risk_cfg.get("max_portfolio_positions") or cfg.get("max_positions") or 12))
         min_score = int(cfg.get("min_score") or self.config.get("signals", {}).get("score_threshold") or 3)
 
         state = self._load_state()
+        # Daily realised-loss circuit breaker — once today's booked losses hit
+        # the cap, stop OPENING new trades (existing positions still manage out).
+        daily_loss_cap = float(risk_cfg.get("daily_loss_cap") or 0.0)
+        today_utc = datetime.now(UTC).date().isoformat()
+        realized_today = sum(
+            _safe_float(p.get("realized_pnl"), 0.0) or 0.0
+            for p in (state.get("closed_positions") or [])
+            if isinstance(p, dict) and str(p.get("closed_at") or "")[:10] == today_utc
+        )
+        loss_capped = daily_loss_cap > 0.0 and realized_today <= -daily_loss_cap
+
         try:
             watchlist = await atm_watchlist_service.get_watchlist(live_refresh=live_refresh)
         except Exception as exc:
@@ -112,18 +144,25 @@ class GannTPDeltaPaperAgent:
                 for row in rows
                 if str(row.get("underlying") or "").upper() in configured_universe
             ]
+        # Commodities aren't in the NSE ATM watchlist — inject synthetic rows so
+        # the Gann engine still scans them. They execute as FUTURES (commodity
+        # options are no longer ingested), priced off the live commodity spot
+        # frame the Gann data layer already loads.
+        present = {str(r.get("underlying") or "").upper() for r in rows}
+        for sym in sorted(configured_universe):
+            if sym in present:
+                continue
+            if _commodity_spec(sym) is not None:
+                rows.append({"underlying": sym, "is_commodity": True})
         if max_underlyings > 0:
             rows = rows[:max_underlyings]
 
         row_by_underlying = {str(row.get("underlying") or "").upper(): row for row in rows}
-        closed_count = await self._refresh_open_positions(
-            state,
-            row_by_underlying,
-            timeframe=timeframe,
-            lookback_sessions=lookback_sessions,
-            anchor_mode=anchor_mode,
-            h_mode=h_mode,
-        )
+        # Per-run snapshot cache. The scan builds a live snapshot for every
+        # universe underlying; open-position management then REUSES those rather
+        # than re-loading a deep frame per held position (that double-load made
+        # run_once blow past the supervisor's 120s timeout). Cleared each run.
+        self._run_snapshot_cache = {}
 
         semaphore = asyncio.Semaphore(max(1, int(cfg.get("scan_concurrency") or 6)))
 
@@ -141,6 +180,7 @@ class GannTPDeltaPaperAgent:
                 except Exception as exc:
                     logger.warning(f"[GannPaperAgent] signal scan failed for {underlying}: {exc}")
                     return {"underlying": underlying, "decision": "error", "reason": str(exc)}
+            self._run_snapshot_cache[underlying] = snapshot
             decision = self._scan_decision(row, snapshot, min_score=min_score)
             if decision.get("reason") == "missing_option_quote" and decision.get("option_type"):
                 option = await self._option_from_store(
@@ -154,6 +194,7 @@ class GannTPDeltaPaperAgent:
                         {
                             "decision": "open",
                             "reason": "gann_setup",
+                            "instrument_type": "OPTION",
                             "direction": "long_call" if option["option_type"] == "CE" else "long_put",
                             "option": option,
                         }
@@ -162,10 +203,25 @@ class GannTPDeltaPaperAgent:
 
         scan_results = await asyncio.gather(*[_scan(row) for row in rows])
 
+        # Manage open positions AFTER the scan so it can reuse cached snapshots.
+        closed_count = await self._refresh_open_positions(
+            state,
+            row_by_underlying,
+            timeframe=timeframe,
+            lookback_sessions=lookback_sessions,
+            anchor_mode=anchor_mode,
+            h_mode=h_mode,
+        )
+
         opened = 0
         skipped = 0
         for decision in scan_results:
             if decision.get("decision") != "open":
+                skipped += 1
+                continue
+            if loss_capped:
+                decision["decision"] = "skip"
+                decision["reason"] = "daily_loss_cap_reached"
                 skipped += 1
                 continue
             if len(self._open_positions(state)) >= max_positions:
@@ -218,26 +274,46 @@ class GannTPDeltaPaperAgent:
         anchor_mode: str,
         h_mode: str,
     ) -> int:
+        risk_cfg = self.config.get("risk", {})
+        rev_min = float(self.config.get("strategy", {}).get("reversal_min_conviction", 6.5))
         closed = 0
         remaining: list[dict[str, Any]] = []
         for position in self._open_positions(state):
-            row = rows.get(str(position.get("underlying") or "").upper())
-            mark = self._mark_from_row(row, str(position.get("option_type") or "")) if row else None
-            if mark is None:
-                mark = await self._latest_mark(position)
-            if mark and mark.get("ltp") is not None:
-                position["current_price"] = mark["ltp"]
-                position["updated_at"] = mark.get("as_of") or _now()
+            underlying = str(position.get("underlying") or "").upper()
+            instrument_type = str(position.get("instrument_type") or "OPTION")
 
-            close_reason = self._exit_reason(position)
-            if close_reason is None:
-                close_reason = await self._opposite_signal_reason(
-                    position,
-                    timeframe=timeframe,
-                    lookback_sessions=lookback_sessions,
-                    anchor_mode=anchor_mode,
-                    h_mode=h_mode,
-                )
+            # Reuse the snapshot the scan already built for this underlying
+            # (current spot + live signal for the opposite-exit check); only
+            # load a fresh one if it wasn't scanned this run.
+            snapshot = getattr(self, "_run_snapshot_cache", {}).get(underlying)
+            if not snapshot:
+                try:
+                    snapshot = await self.service.live_snapshot(
+                        underlying, timeframe, lookback_sessions, anchor_mode, h_mode
+                    )
+                except Exception:
+                    snapshot = {}
+            spot = _safe_float((snapshot or {}).get("spot_price"))
+            signal = (snapshot or {}).get("signal") or {}
+
+            # Mark the traded instrument.
+            if instrument_type == "FUTURES":
+                if spot is not None:
+                    position["current_price"] = round(spot, 2)
+                    position["updated_at"] = (snapshot or {}).get("as_of") or _now()
+            else:
+                row = rows.get(underlying)
+                mark = self._mark_from_row(row, str(position.get("option_type") or "")) if row else None
+                if mark is None:
+                    mark = await self._latest_mark(position)
+                if mark and mark.get("ltp") is not None:
+                    position["current_price"] = mark["ltp"]
+                    position["updated_at"] = mark.get("as_of") or _now()
+
+            # Track the underlying, advance break-even / trailing stop, then
+            # decide the exit off Gann levels on the underlying.
+            self._update_underlying_tracking(position, spot, risk_cfg)
+            close_reason = self._risk_exit_reason(position, spot, signal, risk_cfg=risk_cfg, rev_min=rev_min)
 
             if close_reason:
                 closed_position = self._close_position(position, close_reason)
@@ -254,31 +330,78 @@ class GannTPDeltaPaperAgent:
         underlying = str(row.get("underlying") or snapshot.get("underlying") or "").upper()
         signal = snapshot.get("signal") or {}
         state = str(signal.get("state") or "")
-        score = _safe_int(signal.get("score"), 0)
-        option_type = "CE" if state == "bullish_setup" else "PE" if state == "bearish_setup" else ""
+        side = str(signal.get("side") or "")            # long | short | ""
+        archetype = signal.get("archetype")             # continuation | reversal | None
+        conviction = _safe_float(signal.get("conviction"), 0.0) or 0.0
+        spot = snapshot.get("spot_price") or row.get("spot_price")
         decision = {
             "underlying": underlying,
-            "spot_price": snapshot.get("spot_price") or row.get("spot_price"),
+            "spot_price": spot,
             "signal_state": state,
             "signal_bias": signal.get("bias"),
-            "signal_score": score,
+            "signal_score": _safe_int(round(conviction), 0),
             "signal_threshold": signal.get("threshold"),
             "signal_reasons": signal.get("reasons") or [],
+            "regime": signal.get("regime"),
+            "archetype": archetype,
+            "conviction": round(conviction, 3),
+            "size_factor": _safe_float(signal.get("size_factor"), 1.0) or 1.0,
+            "stop_underlying": signal.get("stop_underlying"),
+            "targets_underlying": signal.get("targets_underlying") or [],
+            "risk_per_unit": signal.get("risk_per_unit"),
+            "thesis_side": side,
             "as_of": snapshot.get("as_of") or row.get("as_of") or _now(),
             "decision": "skip",
             "reason": "no_gann_setup",
         }
-        if not option_type:
+        # The engine only emits a setup state once its (archetype-specific)
+        # conviction bar is cleared, so reaching here already means "actionable".
+        if archetype not in ("continuation", "reversal") or side not in ("long", "short"):
             return decision
+
+        spec = _commodity_spec(underlying)
+        if spec is not None:
+            # ── Commodity → FUTURES (options no longer ingested) ────────────
+            price = _safe_float(spot)
+            if price is None or price <= 0:
+                decision["reason"] = "missing_spot_price"
+                return decision
+            # Commodities clear a higher conviction bar than indices — they
+            # over-trade and are negative-EV at the index-level threshold.
+            commodity_floor = float(self.config.get("strategy", {}).get("commodity_min_conviction", 0.0) or 0.0)
+            if commodity_floor > 0.0 and conviction < commodity_floor:
+                decision["reason"] = "commodity_conviction_floor"
+                return decision
+            decision.update({
+                "decision": "open",
+                "reason": "gann_setup",
+                "instrument_type": "FUTURES",
+                "direction": side,  # long | short
+                "futures": {
+                    "underlying": underlying,
+                    "lot_size": int(getattr(spec, "futures_lot_size", 1) or 1),
+                    "price": round(price, 2),
+                    "trading_symbol": f"{underlying} FUT",
+                    "tick_size": float(getattr(spec, "mp_tick_size", 0.05) or 0.05),
+                },
+            })
+            return decision
+
+        # ── Index → ATM OPTION ──────────────────────────────────────────────
+        option_type = "CE" if side == "long" else "PE"
         decision["option_type"] = option_type
-        if score < min_score:
-            decision["reason"] = "score_below_agent_minimum"
-            return decision
         option = self._option_from_row(row, option_type)
         if option is None:
             decision["reason"] = "missing_option_quote"
             return decision
-        decision.update({"decision": "open", "reason": "gann_setup", "direction": "long_call" if option_type == "CE" else "long_put", "option_type": option_type, "option": option})
+        decision.update({
+            "decision": "open",
+            "reason": "gann_setup",
+            "instrument_type": "OPTION",
+            "direction": "long_call" if option_type == "CE" else "long_put",
+            "option_type": option_type,
+            "option": option,
+        })
         return decision
 
     async def _option_from_store(self, *, underlying: str, option_type: str, spot_price: float, cfg: dict[str, Any]) -> dict[str, Any] | None:
@@ -312,6 +435,73 @@ class GannTPDeltaPaperAgent:
         }
 
     def _build_position(self, decision: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any] | None:
+        risk_cfg = self.config.get("risk", {})
+        instrument_type = str(decision.get("instrument_type") or "OPTION")
+        size_factor = max(0.1, _safe_float(decision.get("size_factor"), 1.0) or 1.0)
+        now = _now()
+        entry_underlying = _safe_float(decision.get("spot_price"))
+        stop_underlying = _safe_float(decision.get("stop_underlying"))
+        risk_per_unit = _safe_float(decision.get("risk_per_unit"))
+        targets_underlying = [float(t) for t in (decision.get("targets_underlying") or []) if _safe_float(t) is not None]
+        thesis_side = str(decision.get("thesis_side") or "")
+        eu = round(entry_underlying, 2) if entry_underlying else None
+
+        common: dict[str, Any] = {
+            "position_id": uuid.uuid4().hex,
+            "status": "open",
+            "opened_at": now,
+            "updated_at": now,
+            "underlying": decision.get("underlying"),
+            "instrument_type": instrument_type,
+            "archetype": decision.get("archetype"),
+            "regime": decision.get("regime"),
+            "conviction": decision.get("conviction"),
+            "size_factor": size_factor,
+            "thesis_side": thesis_side,
+            "entry_underlying": eu,
+            "stop_underlying": round(stop_underlying, 2) if stop_underlying else None,
+            "init_stop_underlying": round(stop_underlying, 2) if stop_underlying else None,
+            "targets_underlying": targets_underlying,
+            "risk_per_unit": round(risk_per_unit, 2) if risk_per_unit else None,
+            "current_underlying": eu,
+            "peak_underlying": eu,
+            "trough_underlying": eu,
+            "bars_held": 0,
+            "be_done": False,
+            "trail_active": False,
+            "signal_state": decision.get("signal_state"),
+            "signal_bias": decision.get("signal_bias"),
+            "signal_score": decision.get("signal_score"),
+            "signal_reasons": decision.get("signal_reasons") or [],
+            "spot_price": decision.get("spot_price"),
+            "unrealized_pnl": 0.0,
+            "realized_pnl": 0.0,
+        }
+
+        if instrument_type == "FUTURES":
+            fut = decision.get("futures") or {}
+            entry_price = _safe_float(fut.get("price"))
+            if entry_price is None or entry_price <= 0:
+                return None
+            lot_size = max(1, _safe_int(fut.get("lot_size"), 1))
+            target_notional = float(risk_cfg.get("futures_notional_target", 1500000.0))
+            lots = max(1, int(round((target_notional / max(lot_size * entry_price, 1.0)) * size_factor)))
+            common.update({
+                "direction": str(decision.get("direction") or thesis_side),  # long | short
+                "trading_symbol": fut.get("trading_symbol"),
+                "tick_size": fut.get("tick_size"),
+                "lot_size": lot_size,
+                "qty_lots": lots,
+                "qty_units": lot_size * lots,
+                "entry_price": round(entry_price, 2),
+                "current_price": round(entry_price, 2),
+                "notional": round(lot_size * lots * entry_price, 2),
+                "stop_price": round(stop_underlying, 2) if stop_underlying else None,
+                "target_price": round(targets_underlying[0], 2) if targets_underlying else None,
+            })
+            return common
+
+        # OPTION (index) — always long the premium; thesis side via CE/PE.
         option = decision.get("option") if isinstance(decision.get("option"), dict) else None
         if not option:
             return None
@@ -319,17 +509,11 @@ class GannTPDeltaPaperAgent:
         if entry_price is None or entry_price <= 0:
             return None
         lot_size = max(1, _safe_int(option.get("lot_size"), 1))
-        lots = max(1, _safe_int(cfg.get("lots"), 1))
-        stop_loss_pct = max(1.0, _safe_float(cfg.get("stop_loss_pct"), 35.0) or 35.0)
-        target_pct = max(1.0, _safe_float(cfg.get("target_pct"), 50.0) or 50.0)
-        now = _now()
-        return {
-            "position_id": uuid.uuid4().hex,
-            "status": "open",
-            "opened_at": now,
-            "updated_at": now,
-            "underlying": decision.get("underlying"),
-            "direction": decision.get("direction"),
+        premium_budget = float(risk_cfg.get("option_premium_budget", 50000.0))
+        lots = max(1, int(round((premium_budget / max(lot_size * entry_price, 1.0)) * size_factor)))
+        hard_stop_pct = float(risk_cfg.get("option_premium_hard_stop_pct", 55.0))
+        common.update({
+            "direction": decision.get("direction"),  # long_call | long_put
             "option_type": decision.get("option_type"),
             "expiry": option.get("expiry"),
             "strike": option.get("strike"),
@@ -340,23 +524,21 @@ class GannTPDeltaPaperAgent:
             "qty_units": lot_size * lots,
             "entry_price": round(entry_price, 2),
             "current_price": round(entry_price, 2),
-            "stop_price": round(entry_price * (1.0 - stop_loss_pct / 100.0), 2),
-            "target_price": round(entry_price * (1.0 + target_pct / 100.0), 2),
-            "signal_state": decision.get("signal_state"),
-            "signal_bias": decision.get("signal_bias"),
-            "signal_score": decision.get("signal_score"),
-            "signal_threshold": decision.get("signal_threshold"),
-            "signal_reasons": decision.get("signal_reasons") or [],
-            "spot_price": decision.get("spot_price"),
-            "unrealized_pnl": 0.0,
-            "realized_pnl": 0.0,
-        }
+            "premium_hard_stop": round(entry_price * (1.0 - hard_stop_pct / 100.0), 2),
+            "stop_price": round(entry_price * (1.0 - hard_stop_pct / 100.0), 2),
+            "target_price": None,  # exits run off the underlying Gann levels
+        })
+        return common
 
     def _close_position(self, position: dict[str, Any], reason: str) -> dict[str, Any]:
         exit_price = _safe_float(position.get("current_price"), _safe_float(position.get("entry_price"), 0.0)) or 0.0
         entry = _safe_float(position.get("entry_price"), 0.0) or 0.0
         qty_units = max(1, _safe_int(position.get("qty_units"), 1))
-        realized = round((exit_price - entry) * qty_units, 2)
+        # Futures can be short; options are always long the premium.
+        if str(position.get("instrument_type") or "OPTION") == "FUTURES" and str(position.get("direction") or "long") == "short":
+            realized = round((entry - exit_price) * qty_units, 2)
+        else:
+            realized = round((exit_price - entry) * qty_units, 2)
         closed = {**position}
         closed.update(
             {
@@ -371,43 +553,109 @@ class GannTPDeltaPaperAgent:
         )
         return closed
 
-    def _exit_reason(self, position: dict[str, Any]) -> str | None:
-        current = _safe_float(position.get("current_price"))
-        stop = _safe_float(position.get("stop_price"))
-        target = _safe_float(position.get("target_price"))
-        if current is None:
-            return None
-        if stop is not None and current <= stop:
-            return "option_stop_loss"
-        if target is not None and current >= target:
-            return "option_target"
-        return None
+    def _update_underlying_tracking(self, position: dict[str, Any], spot: float | None, risk_cfg: dict[str, Any]) -> None:
+        """Advance bar count, peak/trough, break-even and trailing stop on the
+        UNDERLYING (in R units, so it works identically for options & futures)."""
+        position["bars_held"] = _safe_int(position.get("bars_held"), 0) + 1
+        if spot is None:
+            return
+        position["current_underlying"] = round(spot, 2)
+        peak = _safe_float(position.get("peak_underlying"), spot) or spot
+        trough = _safe_float(position.get("trough_underlying"), spot) or spot
+        position["peak_underlying"] = round(max(peak, spot), 2)
+        position["trough_underlying"] = round(min(trough, spot), 2)
 
-    async def _opposite_signal_reason(
+        entry = _safe_float(position.get("entry_underlying"))
+        R = _safe_float(position.get("risk_per_unit"))
+        stop = _safe_float(position.get("stop_underlying"))
+        if entry is None or R is None or R <= 0 or stop is None:
+            return
+        side = str(position.get("thesis_side") or "long")
+        be_at = float(risk_cfg.get("breakeven_at_r", 1.0))
+        trail_start = float(risk_cfg.get("trail_start_r", 1.5))
+        if side == "long":
+            r_now = (spot - entry) / R
+            if not position.get("be_done") and r_now >= be_at:
+                stop = max(stop, entry)
+                position["stop_underlying"] = round(stop, 2)
+                position["be_done"] = True
+            peak_r = (position["peak_underlying"] - entry) / R
+            if peak_r >= trail_start:
+                new_stop = entry + (peak_r - 1.0) * R   # lock 1R behind the high-water mark
+                if new_stop > stop:
+                    position["stop_underlying"] = round(new_stop, 2)
+                    position["trail_active"] = True
+        else:
+            r_now = (entry - spot) / R
+            if not position.get("be_done") and r_now >= be_at:
+                stop = min(stop, entry)
+                position["stop_underlying"] = round(stop, 2)
+                position["be_done"] = True
+            trough_r = (entry - position["trough_underlying"]) / R
+            if trough_r >= trail_start:
+                new_stop = entry - (trough_r - 1.0) * R
+                if new_stop < stop:
+                    position["stop_underlying"] = round(new_stop, 2)
+                    position["trail_active"] = True
+
+    def _risk_exit_reason(
         self,
         position: dict[str, Any],
+        spot: float | None,
+        signal: dict[str, Any],
         *,
-        timeframe: str,
-        lookback_sessions: int,
-        anchor_mode: str,
-        h_mode: str,
+        risk_cfg: dict[str, Any],
+        rev_min: float,
     ) -> str | None:
-        try:
-            snapshot = await self.service.live_snapshot(
-                str(position.get("underlying") or ""),
-                timeframe,
-                lookback_sessions,
-                anchor_mode,
-                h_mode,
-            )
-        except Exception:
-            return None
-        signal_state = str((snapshot.get("signal") or {}).get("state") or "")
-        option_type = str(position.get("option_type") or "").upper()
-        if option_type == "CE" and signal_state == "bearish_setup":
-            return "opposite_gann_bearish_setup"
-        if option_type == "PE" and signal_state == "bullish_setup":
-            return "opposite_gann_bullish_setup"
+        side = str(position.get("thesis_side") or "long")
+        instrument_type = str(position.get("instrument_type") or "OPTION")
+        stop = _safe_float(position.get("stop_underlying"))
+        targets = position.get("targets_underlying") or []
+        entry = _safe_float(position.get("entry_underlying"))
+        R = _safe_float(position.get("risk_per_unit"))
+
+        # 1) Gann stop / target on the underlying (BE/trail already applied).
+        if spot is not None and stop is not None:
+            if side == "long" and spot <= stop:
+                return "gann_stop"
+            if side == "short" and spot >= stop:
+                return "gann_stop"
+        if spot is not None and targets:
+            t0 = _safe_float(targets[0])
+            if t0 is not None:
+                if side == "long" and spot >= t0:
+                    return "gann_target"
+                if side == "short" and spot <= t0:
+                    return "gann_target"
+
+        # 2) Option-only backstops: theta hard-stop + expiry-day flat.
+        if instrument_type == "OPTION":
+            prem = _safe_float(position.get("current_price"))
+            hard = _safe_float(position.get("premium_hard_stop"))
+            if prem is not None and hard is not None and prem <= hard:
+                return "option_premium_stop"
+            if risk_cfg.get("option_expiry_day_exit", True):
+                exp = str(position.get("expiry") or "")[:10]
+                if exp and exp <= _today_ist_date():
+                    return "option_expiry"
+
+        # 3) Time stop — drop a position going nowhere.
+        time_stop_bars = int(risk_cfg.get("time_stop_bars", 26))
+        min_r = float(risk_cfg.get("time_stop_min_r", 0.5))
+        if (
+            _safe_int(position.get("bars_held"), 0) >= time_stop_bars
+            and entry is not None and R is not None and R > 0 and spot is not None
+        ):
+            r_now = (spot - entry) / R if side == "long" else (entry - spot) / R
+            if r_now < min_r:
+                return "time_stop"
+
+        # 4) Opposite signal — ONLY a high-conviction (reversal-grade) one. This
+        #    is the whipsaw fix: a routine pivot flip no longer closes us out.
+        opp_side = str(signal.get("side") or "")
+        opp_conv = _safe_float(signal.get("conviction"), 0.0) or 0.0
+        if signal.get("archetype") and opp_side and opp_side != side and opp_conv >= rev_min:
+            return "opposite_high_conviction"
         return None
 
     async def _latest_mark(self, position: dict[str, Any]) -> dict[str, Any] | None:
@@ -477,7 +725,10 @@ class GannTPDeltaPaperAgent:
             entry = _safe_float(position.get("entry_price"), 0.0) or 0.0
             current = _safe_float(position.get("current_price"), entry) or entry
             qty_units = max(1, _safe_int(position.get("qty_units"), 1))
-            position["unrealized_pnl"] = round((current - entry) * qty_units, 2)
+            if str(position.get("instrument_type") or "OPTION") == "FUTURES" and str(position.get("direction") or "long") == "short":
+                position["unrealized_pnl"] = round((entry - current) * qty_units, 2)
+            else:
+                position["unrealized_pnl"] = round((current - entry) * qty_units, 2)
         realized = round(sum(_safe_float(item.get("realized_pnl"), 0.0) or 0.0 for item in closed_positions), 2)
         unrealized = round(sum(_safe_float(item.get("unrealized_pnl"), 0.0) or 0.0 for item in open_positions), 2)
         limit = max(1, min(int(limit), 200))

@@ -28,7 +28,29 @@ class GannTPDeltaDataStore:
     async def load_live_spot_frame(self, underlying: str, lookback_days: int = 10) -> tuple[pd.DataFrame, str, str]:
         commodity_spec = get_commodity_contract_spec(underlying)
         if commodity_spec.root and commodity_spec.root != "UNKNOWN":
-            return await self.directional_store.load_live_spot_frame(underlying, lookback_days=lookback_days)
+            # Commodities: prefer the DEEP timescale 1-minute history. The shared
+            # directional loader short-circuits commodities to a shallow ~1-session
+            # broker fetch (~800 bars), which starves the Gann geometry (pivots,
+            # cycles, regime all need lookback). underlying_spot_candles holds tens
+            # of thousands of bars per commodity — use that, falling back to the
+            # broker path only if the deep source is thin/unavailable.
+            try:
+                from directional_options.data import _frame_from_rows
+                from market_data.market_intelligence_runtime import market_intelligence_runtime
+
+                # Cap the deep 1-min commodity load: ~20 sessions is ample for
+                # 15-min pivots/cycles/regime and keeps the in-memory frame
+                # bounded (a full 60-day 1-min commodity pull is ~50k rows and,
+                # six-wide in the scan, OOMs the box).
+                commodity_lookback = min(max(int(lookback_days), 1), 20)
+                rows, source, history_symbol = await market_intelligence_runtime.load_local_spot_rows(
+                    underlying, lookback_days=commodity_lookback
+                )
+                frame = _frame_from_rows(rows)
+                if frame is not None and not frame.empty and len(frame.index) > 200:
+                    return frame, source, history_symbol
+            except Exception:
+                pass
         return await self.directional_store.load_live_spot_frame(underlying, lookback_days=lookback_days)
 
     def build_feature_frame(

@@ -77,6 +77,20 @@ class ConfluenceSignal:
     trigger: float | None = None
     stop: float | None = None
     targets: list[float] = field(default_factory=list)
+    # ── Regime-gated engine (v2) — all optional for backward-compat ──────────
+    # `bias`/`state`/`score` above are still populated so the existing
+    # service/agent/frontend keep working; these add the richer decision.
+    regime: str = "neutral"            # bull | bear | neutral
+    regime_strength: float = 0.0       # 0..1 trend-strength proxy (ADX-scaled)
+    archetype: str | None = None       # continuation | reversal | None
+    side: str | None = None            # long | short | None
+    conviction: float = 0.0            # weighted, exactness-scaled (~0..10)
+    size_factor: float = 1.0           # <1 shrinks counter-trend reversals
+    confirmation: bool = False         # reversal confirmation bar present
+    stop_underlying: float | None = None   # invalidating level on the UNDERLYING
+    targets_underlying: list[float] = field(default_factory=list)
+    risk_per_unit: float | None = None     # |entry_underlying - stop_underlying|
+    score_breakdown: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
