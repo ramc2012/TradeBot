@@ -480,7 +480,37 @@ async def portfolio_summary():
 
 @router.get("/strategy-agent/status")
 async def strategy_agent_status():
-    return paper_strategy_agent.get_status(refresh=False)
+    """NSE strategy agent status — overlayed with live ticks.
+
+    Held-position prices come from two paths:
+      * the agent's per-cycle `_refresh_prices_from_watchlist`
+        (runs every ~30-60s; only updates positions whose underlying
+        is in the current scan rows)
+      * the `live_marks` registry, fed by the Fyers WS
+        subscription that `refresh_held_position_subscriptions`
+        maintains for every open option leg
+
+    The WebSocket push path (`/ws/strategy-overview`) already calls
+    `overlay_nse_agent_status` to merge the WS ticks onto the agent
+    status. The REST path here didn't — so REST-polled clients
+    (the v1 strategy desk falls back to REST when its WS reconnects)
+    saw scan-marked LTPs only, with "Updated" timestamps as old as
+    the agent's last cycle (typically 30-60s, occasionally 10+ min
+    when the position's underlying isn't in the current scan rows).
+
+    Wrapping with `overlay_nse_agent_status` here gives REST callers
+    the same fresh ticks the WS push has. The overlay falls through
+    silently when no tick is available — no fabricated data.
+    """
+    from market_data.live_marks import overlay_nse_agent_status
+    status = paper_strategy_agent.get_status(refresh=False)
+    try:
+        return await overlay_nse_agent_status(status)
+    except Exception:
+        # Never let the live-mark overlay break the REST response.
+        # Worst case the client gets the scan-cadence prices it had
+        # before this change.
+        return status
 
 
 @router.get("/strategy-agent/equity-history")
