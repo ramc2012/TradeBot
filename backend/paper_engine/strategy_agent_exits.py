@@ -6,8 +6,28 @@ from typing import TYPE_CHECKING, Optional
 
 from analysis.indicators_agent import IndicatorContext, indicators_agent
 from analysis.macd_engine import compute_ema, compute_macd  # noqa: F401  (back-compat; calls now go via indicators_agent)
-from agent.macd_quadrant import check_macd_death_signal
-from agent.strategy_config import EXIT, FIRST_PULLBACK_IGNORE_BARS, MACD_FAST, MACD_MIN_BARS, MACD_SIGNAL, MACD_SLOW, OPTION_ENTRY_MA_FAST, REGIME_DEAD
+# Exit cascade (2026-06-02) trimmed to the canonical S1 design:
+#   ── keep ──
+#     #1 hard_stop          (-25% on premium, fires anytime, no gate)
+#     #5 target_50pct       (partial half-exit at +50% → PHASE_2)
+#     #6 trail activation   (arms trailing_stop at +60%, ratchets up)
+#   ── new ──
+#     #X macd_reversal_30m  (intra-bar opposite zero-cross on 30m option MACD,
+#                            CE→close-on-MACD-crossing-down-through-zero,
+#                            PE→close-on-MACD-crossing-up-through-zero.
+#                            300m is a soft guideline ONLY — not enforced as a
+#                            hold floor. Flip allowed: closing on opposite
+#                            cross lets the same scan re-enter on the other
+#                            side without any cooldown.)
+#   ── deleted (were over-firing on noise) ──
+#     #2 window_end         (premature expiry-fade close)
+#     #3 dead_zone_exit     (regime-flip kill — this was today's BDL killer)
+#     #4 macd_death_signal  (profit-skim)
+#     #7 ma20_pullback_exit (MA-touch kill on the runner)
+#     #8 trailing_stoploss  (premium-trail exit; replaced by macd_reversal as
+#                            the natural exit; trailing_stop level still
+#                            computed by #6 for diagnostic / UI visibility)
+from agent.strategy_config import EXIT, MACD_FAST, MACD_MIN_BARS, MACD_SIGNAL, MACD_SLOW, OPTION_ENTRY_MA_FAST
 from analytics.technicals import latest_macd_rsi
 from core.config import settings
 from db.database import AsyncSessionLocal
@@ -131,26 +151,12 @@ class StrategyExitMixin:
             bars_open = self._bars_since_entry(candles, pos.entered_at)
             return_pct = pos.return_pct
 
+            # ── #1 HARD STOP at -25% — fires anytime, no hold gate ──
             if return_pct <= -EXIT.hard_stop_pct:
                 await self._close_position(runtime, pos, latest_close, "hard_stop", qty=pos.qty)
                 continue
 
-            if pos.window_end:
-                window_end = date.fromisoformat(pos.window_end)
-                if _now_ist().date() >= (window_end - timedelta(days=EXIT.window_end_buffer_days)):
-                    await self._close_position(runtime, pos, latest_close, "window_end", qty=pos.qty)
-                    continue
-
-            quadrant = self._regime_cache.get(pos.underlying)
-            if quadrant and quadrant.regime == REGIME_DEAD:
-                await self._close_position(runtime, pos, latest_close, "dead_zone_exit", qty=pos.qty)
-                continue
-
-            if return_pct >= EXIT.macd_death_min_profit_pct and pos.macd_line:
-                if check_macd_death_signal(pos.macd_line, pos.option_type):
-                    await self._close_position(runtime, pos, latest_close, "macd_death_signal", qty=pos.qty)
-                    continue
-
+            # ── #5 target_50pct partial — half off at +50%, runner stays ──
             if pos.phase == self.PHASE_1 and return_pct >= EXIT.target_pct:
                 exit_qty = max(1, int(pos.qty * EXIT.target_exit_fraction))
                 await self._close_position(runtime, pos, latest_close, "target_50pct", qty=exit_qty, partial=True)
@@ -164,13 +170,12 @@ class StrategyExitMixin:
                 )
                 continue
 
+            # ── #6 trail activation @ +60% — computes pos.trailing_stop for
+            # visibility; trail no longer EXITS the position (that role moves
+            # to the opposite MACD zero-cross). Kept so the UI can show the
+            # ratcheting floor on the runner.
             if pos.phase in (self.PHASE_2, self.PHASE_TRAILING) and return_pct >= EXIT.trail_activation_pct:
                 pos.phase = self.PHASE_TRAILING
-                # Trail floor = MAX of:
-                #   • peak × (1 − trail_drawdown_pct/100)  — % giveback floor
-                #   • peak − trail_atr_multiplier × premium_ATR(14)  — abs giveback floor
-                # Mirrors the commodity NG playbook which uses max(ATR×1.25,
-                # risk_distance). The higher of the two becomes the stop.
                 pct_floor = pos.peak_price * (1.0 - EXIT.trail_drawdown_pct / 100.0)
                 premium_atr = _atr_from_closes(closes) if closes else None
                 atr_floor = (
@@ -178,31 +183,27 @@ class StrategyExitMixin:
                     if premium_atr and premium_atr > 0
                     else None
                 )
-                if atr_floor is not None:
-                    new_stop = max(pct_floor, atr_floor)
-                else:
-                    new_stop = pct_floor
-                # Stops can only ratchet UP, never down.
+                new_stop = max(pct_floor, atr_floor) if atr_floor is not None else pct_floor
                 if pos.trailing_stop is None or new_stop > pos.trailing_stop:
                     pos.trailing_stop = _round_or_none(new_stop, 2)
 
-            ma20_pullback = bool(pos.phase == self.PHASE_TRAILING and option_ma20 is not None and latest_close <= option_ma20)
-            if ma20_pullback:
-                if bars_open is not None and bars_open <= FIRST_PULLBACK_IGNORE_BARS and not pos.first_pullback_ignored_at:
-                    pos.first_pullback_ignored_at = _now_ist().isoformat()
-                    self._append_commentary(
-                        runtime.label,
-                        f"Ignoring first MA20 pullback for {pos.underlying} {pos.option_type}. "
-                        f"Bars open={bars_open}, MA20={option_ma20:.2f}, last={latest_close:.2f}.",
-                        tone="info",
-                    )
-                else:
-                    await self._close_position(runtime, pos, latest_close, "ma20_pullback_exit", qty=pos.qty)
+            # ── macd_reversal_30m — opposite zero-cross on 30m option MACD ──
+            # CE positions exit when MACD crosses DOWN through zero
+            # (prev ≥ 0 and curr < 0). PE positions exit on UP cross.
+            # macd_line[-1] reflects the in-flight bar's close (live LTP) so
+            # this fires INTRA-bar, no wait for bar close. Closing here lets
+            # the same scan re-enter on the opposite side (flip allowed; no
+            # cooldown). 300m hold is a guideline only — NOT enforced.
+            if pos.macd_line and len(pos.macd_line) >= 2:
+                prev_macd = pos.macd_line[-2]
+                curr_macd = pos.macd_line[-1]
+                opposite_cross = (
+                    (pos.option_type == "CE" and prev_macd >= 0 and curr_macd < 0)
+                    or (pos.option_type == "PE" and prev_macd <= 0 and curr_macd > 0)
+                )
+                if opposite_cross:
+                    await self._close_position(runtime, pos, latest_close, "macd_reversal_30m", qty=pos.qty)
                     continue
-
-            if pos.phase == self.PHASE_TRAILING and pos.trailing_stop and latest_close <= pos.trailing_stop:
-                await self._close_position(runtime, pos, latest_close, "trailing_stoploss", qty=pos.qty)
-                continue
 
         latest_prices = {sym: position.current_price for sym, position in runtime.positions.items()}
         if latest_prices:
