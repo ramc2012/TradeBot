@@ -216,6 +216,61 @@ async def run_scan(
     return payload
 
 
+async def refresh_paper_marks() -> dict[str, Any]:
+    """Lightweight LTP refresh for CBE open paper positions only.
+
+    Re-marks held cash-equity positions off the latest 30-min spot bar that the
+    FNO spot ingest has ALREADY written to ``underlying_spot_candles`` — no new
+    broker fetch and no alpha pipeline. One batched query covers every held
+    symbol, so it is cheap enough for a 5-minute cadence during market hours,
+    keeping the UI's LTP fresh between the heavier end-of-day-design scans.
+    """
+    from sqlalchemy import text
+
+    from db.database import AsyncSessionLocal
+
+    from .paper import _norm_symbol, cbe_paper_book
+
+    snapshot = await cbe_paper_book.list_positions(status="open", limit=500)
+    symbols = sorted(
+        {
+            _norm_symbol(pos.get("instrument"))
+            for pos in (snapshot.get("open_positions") or [])
+            if _norm_symbol(pos.get("instrument"))
+        }
+    )
+    if not symbols:
+        return {"refreshed": 0, "symbols": [], "paper_summary": snapshot.get("summary")}
+
+    prices: dict[str, float] = {}
+    async with AsyncSessionLocal() as session:
+        # Latest 30-min bar close per held symbol, straight from the spot
+        # history already being ingested. DISTINCT ON keeps it to one row each.
+        result = await session.execute(
+            text(
+                """
+                SELECT DISTINCT ON (underlying) underlying, close
+                FROM underlying_spot_candles
+                WHERE underlying = ANY(:symbols)
+                  AND interval = '30minute'
+                  AND time >= NOW() - INTERVAL '5 days'
+                ORDER BY underlying, time DESC
+                """
+            ),
+            {"symbols": symbols},
+        )
+        for sym, close in result.fetchall():
+            if close is not None:
+                prices[_norm_symbol(sym)] = float(close)
+
+    summary = await cbe_paper_book.refresh_open_marks(prices)
+    return {
+        "refreshed": len(prices),
+        "symbols": list(prices.keys()),
+        "paper_summary": summary,
+    }
+
+
 def _as_datetime(value: date | datetime | pd.Timestamp) -> datetime:
     if isinstance(value, date) and not isinstance(value, datetime):
         value = datetime.combine(value, time(23, 59, 59), tzinfo=IST)

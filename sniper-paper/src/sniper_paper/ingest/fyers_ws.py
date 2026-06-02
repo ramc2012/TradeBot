@@ -19,21 +19,29 @@ from typing import Any
 import redis.asyncio as aioredis
 
 from sniper_paper.common.logging import get_logger
-from sniper_paper.common.settings import Secrets, Settings
+from sniper_paper.common.settings import Settings
+from sniper_paper.ingest.broker_creds import BrokerCredsStore, FyersCreds
 
 log = get_logger(__name__)
 
 
 class FyersIngest:
-    """Spans a background thread for the Fyers SDK + an asyncio consumer loop."""
+    """Spans a background thread for the Fyers SDK + an asyncio consumer loop.
 
-    def __init__(self, settings: Settings, secrets: Secrets):
+    Credentials are pulled live from the main-app credential store (`BrokerCredsStore`)
+    — the same `app_runtime_state.broker_credentials` row the nomad-curie backend
+    writes when the user connects/refreshes Fyers in the Settings UI. We never
+    initiate OAuth; we only read.
+    """
+
+    def __init__(self, settings: Settings, creds_store: BrokerCredsStore):
         self.settings = settings
-        self.secrets = secrets
+        self.creds_store = creds_store
         self._raw_queue: queue.Queue[dict] = queue.Queue(maxsize=10000)
         self._fyers_thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._redis: aioredis.Redis | None = None
+        self._current_creds: FyersCreds | None = None
 
     # ─── Bridge: SDK thread → asyncio queue ────────────────────────
     def _on_message(self, message: Any) -> None:
@@ -54,20 +62,15 @@ class FyersIngest:
     def _on_error(self, message: Any) -> None:
         log.error("Fyers WS error: %s", message)
 
-    def _run_fyers_socket(self) -> None:
+    def _run_fyers_socket(self, access_token_with_app: str) -> None:
         try:
             from fyers_apiv3.FyersWebsocket import data_ws  # noqa
         except ImportError:
             log.error("fyers-apiv3 not installed; ingest will not produce real ticks")
             return
 
-        access_token = self.secrets.fyers.get("access_token") or ""
-        if not access_token:
-            log.error("FYERS access_token empty; cannot connect WS. Populate secrets.yaml.")
-            return
-
         self._socket = data_ws.FyersDataSocket(
-            access_token=access_token,
+            access_token=access_token_with_app,
             log_path="",
             litemode=self.settings.fyers.websocket_lite_mode,
             write_to_file=False,
@@ -83,9 +86,23 @@ class FyersIngest:
     # ─── Public: start / stop ──────────────────────────────────────
     async def start(self) -> None:
         self._redis = aioredis.from_url(self.settings.redis_url(), decode_responses=False)
-        self._fyers_thread = threading.Thread(target=self._run_fyers_socket, daemon=True)
+        creds = await self.creds_store.get_fyers()
+        if creds is None or not creds.is_usable():
+            raise RuntimeError(
+                "Fyers credentials not available from main app. Open Settings → "
+                "Brokers in the nomad-curie UI and connect Fyers, then retry."
+            )
+        self._current_creds = creds
+        # Fyers SDK expects "<APP_ID>:<ACCESS_TOKEN>" composite.
+        composite = f"{creds.app_id}:{creds.access_token}"
+        log.info(
+            "Starting Fyers WS using main-app creds (token_saved_at=%s, token_len=%d)",
+            creds.token_saved_at, len(creds.access_token),
+        )
+        self._fyers_thread = threading.Thread(
+            target=self._run_fyers_socket, args=(composite,), daemon=True,
+        )
         self._fyers_thread.start()
-        log.info("Fyers ingest started")
 
     async def stop(self) -> None:
         self._stop.set()

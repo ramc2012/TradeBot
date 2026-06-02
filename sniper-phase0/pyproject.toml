@@ -1,50 +1,75 @@
 [project]
-name = "sniper-phase0"
+name = "nomad-curie-sniper"
 version = "0.1.0"
-description = "Phase 0 retroactive validation: does MP + order-flow predict winners/losers on FY25-FY26 Zerodha trades?"
-requires-python = ">=3.12"
+description = "Nomad Curie Sniper — MP + Order Flow expectancy estimator (Phase 0: retroactive validation on FY25-FY26 trade log)"
+requires-python = ">=3.11"
+readme = "README.md"
+authors = [{ name = "Ramachandran" }]
+
 dependencies = [
     "pandas>=2.2",
-    "numpy>=1.26",
+    "numpy>=1.26,<2.1",
+    "polars>=1.0",
     "pyarrow>=15.0",
-    "lightgbm>=4.3",
+    "scipy>=1.13",
     "scikit-learn>=1.5",
-    "pyyaml>=6.0",
-    "pydantic>=2.6",
-    "pydantic-settings>=2.2",
-    "typer>=0.12",
-    "rich>=13.7",
-    "matplotlib>=3.8",
+    "lightgbm>=4.5",
+    "shap>=0.46",
+    "matplotlib>=3.9",
     "seaborn>=0.13",
-    "jupyter>=1.0",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "python-dateutil>=2.9",
+    "pytz>=2024.1",
+    "click>=8.1",
+    "rich>=13.7",
+    "tqdm>=4.66",
+    "joblib>=1.4",
+    "pyyaml>=6.0",
+    "loguru>=0.7",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
+    "pytest>=8.2",
     "pytest-cov>=5.0",
-    "ruff>=0.4",
+    "ruff>=0.5",
     "mypy>=1.10",
+    "ipykernel>=6.29",
+    "jupyter>=1.0",
+]
+db = [
+    "psycopg[binary]>=3.2",
+    "sqlalchemy>=2.0",
+    "redis>=5.0",
 ]
 
 [project.scripts]
-phase0 = "sniper_phase0.cli:app"
+sniper = "nomad_sniper.cli:cli"
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/sniper_phase0"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "N", "B", "UP", "SIM", "RUF"]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "PD"]
 ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+python_files = ["test_*.py"]
+addopts = "-ra -q --strict-markers"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true

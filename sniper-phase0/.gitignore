@@ -1,12 +1,43 @@
-data/raw/
-data/processed/
-data/external/
-*.parquet
-*.provenance.json
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+*.egg
 .pytest_cache/
-.ruff_cache/
 .mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Env
 .venv/
+venv/
+.env
+.env.local
+
+# Notebooks
 .ipynb_checkpoints/
+notebooks/scratch/
+
+# Data — never commit
+data/raw/*
+data/interim/*
+data/processed/*
+!data/raw/.gitkeep
+!data/interim/.gitkeep
+!data/processed/.gitkeep
+
+# Artifacts — never commit
+artifacts/*
+!artifacts/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp

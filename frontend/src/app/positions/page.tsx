@@ -628,7 +628,7 @@ export default function PositionsPage() {
               Strategy Desk
             </div>
             <div className="mt-3 text-xs text-text-secondary">
-              {(data?.portfolio.nse?.strategies || []).reduce((sum, strategy) => sum + (strategy.summary.open_positions || 0), 0)} open option positions across Strategy 1 and Strategy 2.
+              {(data?.portfolio.nse?.strategies || []).reduce((sum, strategy) => sum + (strategy.summary.open_positions || 0), 0)} open option positions on Strategy 1.
             </div>
           </div>
           <div className="rounded-[22px] border border-bg-border bg-bg-secondary/20 p-4">

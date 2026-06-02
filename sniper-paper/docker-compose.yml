@@ -1,0 +1,45 @@
+# Sniper Paper compose. Attaches to the EXISTING `tradebot_default` network
+# (the nomad-curie stack runs as compose project `tradebot` at /opt/TradeBot).
+# Verified on 15.206.56.206:
+#   - DB container: nomadcurie_db   (port 5432 inside network, exposed as 5433 on host)
+#   - Redis:        nomadcurie_redis (port 6379 inside network)
+
+networks:
+  default:
+    name: tradebot_default
+    external: true
+
+services:
+  sniper-paper-runner:
+    build: .
+    image: sniper-paper:0.3.0
+    container_name: sniper-paper-runner
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      TZ: Asia/Kolkata
+      PAPER_DB_DSN: "postgresql://nomadcurie:nomadcurie@nomadcurie_db:5432/nomadcurie"
+      PAPER_REDIS_URL: "redis://nomadcurie_redis:6379/2"
+      # SECRET_KEY comes from .env (shared with nomadcurie_backend). Used to
+      # decrypt main-app broker credentials read from app_runtime_state.
+    volumes:
+      - ./configs:/app/configs:ro
+      - ./artifacts:/app/artifacts
+      - ./data:/app/data
+    command: ["sniper-paper", "run"]
+
+  sniper-paper-api:
+    image: sniper-paper:0.3.0
+    container_name: sniper-paper-api
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      TZ: Asia/Kolkata
+      PAPER_DB_DSN: "postgresql://nomadcurie:nomadcurie@nomadcurie_db:5432/nomadcurie"
+      PAPER_REDIS_URL: "redis://nomadcurie_redis:6379/2"
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./configs:/app/configs:ro
+      - ./artifacts:/app/artifacts:ro
+    command: ["sniper-paper", "api", "--host", "0.0.0.0", "--port", "8001"]

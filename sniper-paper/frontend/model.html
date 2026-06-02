@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Sniper Paper · Model</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <nav class="topnav">
+    <a href="/">Overview</a>
+    <a href="/model.html" class="active">Model</a>
+    <a href="/features.html">Features</a>
+    <a href="/signals.html">Signals</a>
+  </nav>
+
+  <main>
+    <section class="card">
+      <h2>Model</h2>
+      <div id="model-info" class="kv">loading…</div>
+    </section>
+
+    <section class="card">
+      <h2>Walk-forward report</h2>
+      <p class="muted">Gate thresholds (from <code>DECISION_GATE.md</code>):
+        skip-accuracy ≥ 0.65, profit factor ≥ 1.5, max drawdown ≤ 15R.</p>
+      <pre id="wf-json" class="json">loading…</pre>
+    </section>
+
+    <section class="card">
+      <h2>Feature importance (gain)</h2>
+      <p class="muted">Higher gain = the model splits on this feature more profitably during training.
+        If just 1–2 features dominate, the model is probably under-specified.</p>
+      <div class="chartbox" style="height:340px"><canvas id="importance-chart"></canvas></div>
+    </section>
+
+    <section class="card">
+      <h2>NIFTY MP model</h2>
+      <div id="nifty-mp-summary" class="kv">loading…</div>
+    </section>
+
+    <section class="card">
+      <h2>NIFTY MP OOS performance</h2>
+      <div class="two-col">
+        <div>
+          <h3>Monthly ATR P&amp;L</h3>
+          <div class="chartbox" style="height:260px"><canvas id="nifty-monthly-pnl"></canvas></div>
+        </div>
+        <div>
+          <h3>Threshold sweep</h3>
+          <div class="chartbox" style="height:260px"><canvas id="nifty-threshold-sweep"></canvas></div>
+        </div>
+      </div>
+      <div class="two-col" style="margin-top:14px">
+        <div>
+          <h3>Daily cumulative ATR</h3>
+          <div class="chartbox" style="height:260px"><canvas id="nifty-equity"></canvas></div>
+        </div>
+        <div>
+          <h3>Daily drawdown ATR</h3>
+          <div class="chartbox" style="height:260px"><canvas id="nifty-drawdown"></canvas></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>NIFTY MP feature weights</h2>
+      <div class="chartbox" style="height:380px"><canvas id="nifty-feature-weights"></canvas></div>
+    </section>
+
+    <section class="card" id="nifty-period-card" style="display:none">
+      <h2>NIFTY ATR period tests</h2>
+      <div id="nifty-period-summary" class="table-wrap"></div>
+      <div class="chartbox" style="height:260px; margin-top:14px"><canvas id="nifty-period-errors"></canvas></div>
+    </section>
+
+    <section class="card">
+      <h2>Prediction distribution (last 500 signals)</h2>
+      <div class="two-col">
+        <div>
+          <h3>P(win) distribution</h3>
+          <div class="chartbox" style="height:220px"><canvas id="pwin-hist"></canvas></div>
+        </div>
+        <div>
+          <h3>Expected net R distribution</h3>
+          <div class="chartbox" style="height:220px"><canvas id="ev-hist"></canvas></div>
+        </div>
+      </div>
+      <div id="pred-summary" class="kv"></div>
+    </section>
+
+    <section class="card">
+      <h2>Decisions by instrument</h2>
+      <div class="chartbox" style="height:240px"><canvas id="by-instrument"></canvas></div>
+    </section>
+
+    <!-- NN-only sections. Hidden unless the active model is a neural network. -->
+    <section class="card nn-only" id="nn-arch-card" style="display:none">
+      <h2>Neural network architecture</h2>
+      <p class="muted">Shared encoder feeds four output heads. The signal gate reads
+        the <b>expected_R</b> head; <b>p_win</b>, <b>MFE</b> and <b>MAE</b> are auxiliary
+        outputs trained jointly (multi-task loss).</p>
+      <div id="nn-graph" class="nn-graph"></div>
+      <div id="nn-arch-info" class="kv"></div>
+    </section>
+
+    <section class="card nn-only" id="nn-history-card" style="display:none">
+      <h2>Training loss curves (final fit)</h2>
+      <p class="muted">Per-epoch components of the multi-task loss. <code>turnover</code>
+        is the selectivity penalty that discourages the EV head from being
+        optimistic everywhere.</p>
+      <div class="chartbox" style="height:280px"><canvas id="nn-loss"></canvas></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script>
+    (async () => {
+      const info = await fetchJSON("/api/model/info");
+      document.getElementById("model-info").innerHTML = `
+        <div><span>Artifact</span><b>${escapeHTML(info.artifact_id)}</b></div>
+        <div><span>Type</span>${escapeHTML(info.model_type)}</div>
+        <div><span>Features</span>${info.feature_order.length}</div>
+      `;
+      document.getElementById("wf-json").textContent =
+        JSON.stringify(info.walk_forward_report ?? "(no report)", null, 2);
+
+      const isNN = info.backend === "neural_network";
+
+      const imp = await fetchJSON("/api/model/importance");
+      const top = imp.features.slice(0, 25);
+      const impLabel = isNN ? "First-layer weight norm" : "Gain";
+      makeBar("importance-chart", top.map(r => r.feature), top.map(r => r.gain),
+              impLabel, "rgba(99, 168, 234, 0.7)");
+
+      const nifty = await fetchJSON("/api/model/nifty-mp");
+      renderNiftyMP(nifty);
+
+      // NN-only panels.
+      if (isNN) {
+        document.querySelectorAll(".nn-only").forEach(el => { el.style.display = ""; });
+
+        const arch = await fetchJSON("/api/model/nn/architecture");
+        const g = document.getElementById("nn-graph");
+        g.innerHTML = (arch.graph || []).map(n =>
+          `<span class="node node-${escapeHTML(n.kind)}">${escapeHTML(n.label)}</span>`
+        ).join('<span class="arrow">→</span>');
+        const s = arch.summary || {};
+        document.getElementById("nn-arch-info").innerHTML = `
+          <div><span>Encoder blocks</span><b>${s.encoder_blocks ?? "—"}</b></div>
+          <div><span>Hidden / latent</span>${s.hidden ?? "—"} / ${s.latent ?? "—"}</div>
+          <div><span>Dropout</span>${s.dropout ?? "—"}</div>
+          <div><span>Heads</span>${(s.heads || []).join(", ")}</div>
+          <div><span>Parameters</span>${(s.n_params ?? 0).toLocaleString()}</div>
+        `;
+
+        const hist = await fetchJSON("/api/model/nn/history");
+        const h = hist.history || [];
+        if (h.length) {
+          const epochs = h.map(r => r.epoch);
+          makeLines("nn-loss", epochs, [
+            { label: "total",    data: h.map(r => r.total),    color: "rgba(99,168,234,0.9)" },
+            { label: "bce(p_win)", data: h.map(r => r.bce),    color: "rgba(82,196,156,0.9)" },
+            { label: "mse(R)",   data: h.map(r => r.mse_R),    color: "rgba(218,158,80,0.9)" },
+            { label: "mse(MFE)", data: h.map(r => r.mse_mfe),  color: "rgba(160,120,220,0.7)" },
+            { label: "mse(MAE)", data: h.map(r => r.mse_mae),  color: "rgba(200,90,90,0.7)" },
+            { label: "turnover", data: h.map(r => r.turnover), color: "rgba(150,150,150,0.6)" },
+          ]);
+        }
+      }
+
+      const preds = await fetchJSON("/api/model/predictions");
+      if (preds.n > 0) {
+        makeHist("pwin-hist", preds.p_win_hist, "P(win)", "rgba(82, 196, 156, 0.7)");
+        makeHist("ev-hist", preds.ev_hist, "E[net R]", "rgba(218, 158, 80, 0.7)");
+        document.getElementById("pred-summary").innerHTML = `
+          <div><span>n</span><b>${preds.n}</b></div>
+          <div><span>P(win) mean ± std</span>${preds.p_win_mean.toFixed(3)} ± ${preds.p_win_std.toFixed(3)}</div>
+          <div><span>E[R] mean ± std</span>${preds.ev_mean.toFixed(3)} ± ${preds.ev_std.toFixed(3)}</div>
+        `;
+
+        const instruments = Object.keys(preds.by_instrument);
+        const takes = instruments.map(i => preds.by_instrument[i].take || 0);
+        const skips = instruments.map(i => preds.by_instrument[i].skip || 0);
+        new Chart(document.getElementById("by-instrument").getContext("2d"), {
+          type: "bar",
+          data: {
+            labels: instruments,
+            datasets: [
+              { label: "take", data: takes, backgroundColor: "rgba(82, 196, 156, 0.7)" },
+              { label: "skip", data: skips, backgroundColor: "rgba(200, 90, 90, 0.7)" },
+            ],
+          },
+          options: chartOpts({ stacked: true }),
+        });
+      } else {
+        document.getElementById("pred-summary").textContent = "No signals stored yet.";
+      }
+    })().catch((e) => alertErr(e));
+
+    function renderNiftyMP(payload) {
+      const box = document.getElementById("nifty-mp-summary");
+      if (!payload.available) {
+        box.innerHTML = `<div><span>Status</span><b class="neg">Unavailable</b></div>
+          <div><span>Reason</span>${escapeHTML(payload.reason || "artifact missing")}</div>`;
+        return;
+      }
+      const r = payload.backtest_report || {};
+      const s = payload.summary || {};
+      box.innerHTML = `
+        <div><span>Artifact</span><b>${escapeHTML(payload.artifact_dir)}</b></div>
+        <div><span>Threshold</span>${Number(r.threshold ?? s.selected_threshold ?? 0).toFixed(2)}</div>
+        <div><span>OOS rows / acted</span>${r.rows_oos ?? "—"} / <b>${r.n_acted ?? "—"}</b></div>
+        <div><span>Coverage</span>${pct(r.coverage)}</div>
+        <div><span>Hit rate</span>${pct(r.hit_rate)}</div>
+        <div><span>Total / avg ATR</span><b class="${(r.total_pnl_atr ?? 0) >= 0 ? "pos" : "neg"}">${num(r.total_pnl_atr)} / ${num(r.average_pnl_atr)}</b></div>
+        <div><span>Max drawdown</span><b class="neg">${num(r.max_drawdown_atr)} ATR</b></div>
+        <div><span>Profit factor</span>${num(r.profit_factor)}</div>
+        <div><span>Positive months</span>${r.positive_months ?? "—"} / ${r.acted_months ?? "—"}</div>
+      `;
+
+      const monthly = payload.monthly_pnl || [];
+      if (monthly.length) {
+        makeBar("nifty-monthly-pnl", monthly.map(r => r.month), monthly.map(r => Number(r.pnl_atr || 0)),
+          "ATR P&L", "rgba(82, 196, 156, 0.7)");
+      }
+
+      const threshold = payload.threshold_sweep || [];
+      if (threshold.length) {
+        makeDualAxisLine("nifty-threshold-sweep",
+          threshold.map(r => Number(r.threshold).toFixed(2)),
+          [
+            { label: "EV / trade (ATR)", data: threshold.map(r => Number(r.ev_atr || 0)), color: "rgba(99,168,234,0.9)", axis: "y" },
+            { label: "Total ATR", data: threshold.map(r => Number(r.total_atr || 0)), color: "rgba(82,196,156,0.8)", axis: "y1" },
+          ]);
+      }
+
+      const daily = payload.daily_pnl || [];
+      if (daily.length) {
+        makeLines("nifty-equity", daily.map(r => r.date), [
+          { label: "cum ATR", data: daily.map(r => Number(r.cum_pnl_atr || 0)), color: "rgba(82,196,156,0.9)" },
+        ]);
+        makeLines("nifty-drawdown", daily.map(r => r.date), [
+          { label: "drawdown ATR", data: daily.map(r => Number(r.drawdown_atr || 0)), color: "rgba(215,111,111,0.9)" },
+        ]);
+      }
+
+      const weights = (payload.feature_importance || []).slice(0, 25);
+      if (weights.length) {
+        makeBar("nifty-feature-weights", weights.map(r => r.feature), weights.map(r => Number(r.gain || 0)),
+          "LightGBM gain", "rgba(218, 158, 80, 0.75)");
+      }
+
+      const period = payload.period_sweep || {};
+      if (period.available && period.summary && period.summary.length) {
+        document.getElementById("nifty-period-card").style.display = "";
+        renderPeriodTable(period.summary);
+        makeBar("nifty-period-errors", period.summary.map(r => r.name), period.summary.map(r => Number(r.mae_atr || 0)),
+          "MAE ATR", "rgba(99,168,234,0.75)");
+      }
+    }
+
+    function renderPeriodTable(rows) {
+      const cols = ["name", "train_rows", "test_rows", "mae_atr", "rmse_atr", "corr", "sign_accuracy", "buy_hold_return_atr"];
+      const html = `<table><thead><tr>${cols.map(c => `<th>${escapeHTML(c)}</th>`).join("")}</tr></thead><tbody>
+        ${rows.map(r => `<tr>${cols.map(c => `<td>${typeof r[c] === "number" ? num(r[c]) : escapeHTML(r[c])}</td>`).join("")}</tr>`).join("")}
+      </tbody></table>`;
+      document.getElementById("nifty-period-summary").innerHTML = html;
+    }
+
+    function makeDualAxisLine(canvasId, labels, series) {
+      return new Chart(document.getElementById(canvasId).getContext("2d"), {
+        type: "line",
+        data: {
+          labels,
+          datasets: series.map(s => ({
+            label: s.label, data: s.data, borderColor: s.color, backgroundColor: s.color,
+            pointRadius: 1, borderWidth: 1.5, tension: 0.2, yAxisID: s.axis,
+          })),
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: { duration: 250 },
+          plugins: { legend: { labels: { color: "#9aa5be" } } },
+          scales: {
+            x: { ticks: { color: "#9aa5be" }, grid: { color: "rgba(255,255,255,0.05)" } },
+            y: { position: "left", ticks: { color: "#9aa5be" }, grid: { color: "rgba(255,255,255,0.05)" } },
+            y1: { position: "right", ticks: { color: "#9aa5be" }, grid: { drawOnChartArea: false } },
+          },
+        },
+      });
+    }
+
+    function num(v) {
+      const n = Number(v);
+      return Number.isFinite(n) ? n.toFixed(3) : "—";
+    }
+    function pct(v) {
+      const n = Number(v);
+      return Number.isFinite(n) ? `${(n * 100).toFixed(2)}%` : "—";
+    }
+  </script>
+</body>
+</html>

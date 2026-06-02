@@ -491,7 +491,7 @@ export default function AnalyticsPage() {
           <SectionTitle
             icon={<TrendingUp size={16} className="text-accent-green" />}
             title="Per-Strategy Curves"
-            detail="NSE Strategy 1 and Strategy 2 equity paths remain visible for desk-level comparison."
+            detail="NSE Strategy 1 equity path, shown alongside the other live desks for cross-desk comparison."
           />
           <div className="mt-4">
             <ResponsiveContainer width="100%" height={220}>

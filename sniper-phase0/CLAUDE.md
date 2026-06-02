@@ -1,88 +1,126 @@
-# Sniper Phase 0 — Retroactive Validation
+# CLAUDE.md — Nomad Curie Sniper (Phase 0)
 
-This project is the **go/no-go gate** for the larger MP + Order Flow expectancy engine planned for Nomad Curie. Its only job is to answer one question on real FY25-FY26 Zerodha trades:
+> This file is the persistent context for Claude Code working in this repo.
+> Read it fully before any task. Update it whenever architectural decisions change.
 
-> Does an MP + order-flow feature set, scored by a simple LightGBM model, reliably flag the worst losers as "skip"?
+---
 
-If yes (skip-accuracy on the bottom decile of losers ≥ ~65%), Phase 1 (data infrastructure) is justified. If no, the feature set or label scheme needs rework before any infrastructure investment.
+## What this project is
 
-**This project is intentionally small and disposable.** Do not over-engineer it. Do not add abstractions for future phases. Do not import from the main `nomad-curie/backend`. When Phase 1 starts, useful parts get lifted into the platform; the rest is deleted.
+**Nomad Curie Sniper** detects tradeable **directional moves** in NSE index underlyings from
+market structure, so the move can be expressed through options. It complements the existing Nomad
+Curie Scanner (Greeks Confluence Engine): the Scanner narrows the universe; the Sniper decides
+whether *this moment* precedes a move worth trading.
 
-## Hard rules
+**Authoritative spec: `docs/feature_contract.md`.** It defines the target, the label, and every
+feature the model may see. Code is validated against that file. To refactor the current scaffold
+onto it, follow `docs/claude_code_amendments.md` step by step.
 
-1. **No look-ahead.** Every feature carries an explicit `data_available_at` timestamp. The harness asserts `data_available_at <= decision_time` for every feature on every row. A leakage test exists and must stay green — see [tests/test_no_leakage.py](tests/test_no_leakage.py).
-2. **Costs go in labels, not in evaluation.** The triple-barrier labeler returns `net_R` *after* brokerage, STT, exchange fees, GST, stamp duty, and a slippage model calibrated to actual Zerodha fills. Models train on net outcomes from day one. See [src/sniper_phase0/labels/cost_model.py](src/sniper_phase0/labels/cost_model.py).
-3. **Walk-forward only, with purging.** No random shuffles, no k-fold. 6-month train / 1-month validate / 1-month test, rolled monthly. Training rows whose label `exit_ts + purge_minutes` extends into the validation window are dropped — see [src/sniper_phase0/evaluation/walk_forward.py](src/sniper_phase0/evaluation/walk_forward.py).
-4. **EV-ranked skip is the primary metric, not p_win.** Bottom-decile skip-accuracy is ranked by `expected_net_R`. A high-confidence trade with low payoff can be net-negative; a low-confidence trade with large payoff can be net-positive. See [src/sniper_phase0/evaluation/skip_accuracy.py](src/sniper_phase0/evaluation/skip_accuracy.py). `skip_accuracy_by_pwin` is reported as a secondary diagnostic only.
-5. **Honest feature naming.** NSE retail does not give true MBO data. Order-flow features inferred from 5-level book + tick prints are named `inferred_*` or `apparent_*` — never `true_delta`, `actual_absorption`. This is a research-integrity rule.
-6. **Reproducibility.** Every artifact (features, labels, model, eval result) is written with a provenance header: git SHA, config hash, input data hashes, timestamp. See [src/sniper_phase0/utils/provenance.py](src/sniper_phase0/utils/provenance.py).
-7. **No live trading code in this project.** Phase 0 is read-only on historical data. Anything that talks to Fyers/Zerodha live APIs does not belong here.
+## The learning problem (read the contract for detail)
 
-## Two decision_ts sources
+Forward-looking supervised learning on a **time grid over the underlying**, learned from all of
+history — not a filter on trades actually taken, and no hand-crafted setups. At each grid point:
 
-Phase 0 supports two parallel sources for the set of moments to evaluate:
+- **Direction** is read from the **underlying** (front-month future): clean, no theta/IV drift.
+- **Move-vs-no-move, IV regime, and directional lean** are read from the **ATM CE/PE/straddle**:
+  a balancing underlying with disproportionate premium behaviour reveals whether a move is coming.
+- The **label is option-economics-aware**: a "move" means the underlying moved far/fast enough that
+  the option expression nets positive after theta, spread, and cost over the holding horizon.
 
-1. **Trade-log entries** — `paths.trade_log` points at the Zerodha CSV. Each row's `entry_ts` is a decision_ts. This answers "would the model have skipped your actual losers?"
-2. **Setup-family candidates** — `phase0 candidates` runs the six MP-rule detectors (VA rejection, VA acceptance, IB breakout, LVN rejection, POC magnet, failed auction) at 30s sampling cadence across the trade window, producing a trade-log-compatible parquet. Pointing `paths.trade_log` at this parquet then runs the same pipeline.
+The model predicts: `direction` (up/down/none), `is_move`, `magnitude_atr`, `time_to_target`,
+`mae_atr`. LightGBM (multi-head) validates signal; a neural net comes later on this *same* feature
+contract, only after the directional gate clears.
 
-Source #1 is more honest about your past performance; source #2 is more honest about whether the *signal itself* has edge independent of your discretionary entry choices. If Phase 0 fails on #1 but passes on #2, the original entries were the problem, not the model.
+## Why this framing
 
-## What's in scope
+The FY25-FY26 P&L review found **loss management was the binding constraint** (50% loss-containment
+→ ~7.2x P&L). Detecting `none`/chop reliably — knowing when *not* to trade — is therefore as
+valuable as picking direction, which is why move/no-move is a first-class target.
 
-- Load FY25-FY26 Zerodha trade log → align entries to historical NIFTY/BANKNIFTY tick + book data → reconstruct MP and order-flow features at each entry timestamp → label with triple-barrier on net P&L → fit LightGBM → evaluate skip-accuracy on losers.
-- One Jupyter notebook ([notebooks/01_phase0_validation.ipynb](notebooks/01_phase0_validation.ipynb)) that produces the go/no-go report.
+## Go/no-go criteria (pre-committed, in `evaluation/phase0.py`)
 
-## What's out of scope (do not build)
+1. **`none`-class recall ≥ 0.70** — reliably keeps you out of chop.
+2. **up/down precision ≥ 0.55** after the option-economics gate.
+3. **Acted-EV positive at 2× slippage** — taking every up/down call at chosen size nets positive.
+4. **Leakage + instrument-independence tests pass.**
 
-- Live data ingestion, live signal generation, live order routing.
-- Sequence models (Temporal CNN, LSTM, Transformer). LightGBM only.
-- Options pricing, Greeks recomputation, IV surfaces. NIFTY/BANKNIFTY underlying only.
-- Web UI, dashboards, FastAPI endpoints. CLI + notebook only.
-- Database schemas, migrations. Files on disk are fine for Phase 0.
+All four must pass. Partial passes mean return to features, not promote.
 
-## Data sources (to be wired)
+## Hard rules (do not violate)
 
-- **Trade log:** Zerodha Console tradebook export (CSV). Path configured in [configs/base.yaml](configs/base.yaml). Loader stub exists; user will provide CSV later.
-- **Underlying ticks:** Upstox expired-instruments API for NIFTY/BANKNIFTY futures over the FY25-FY26 trade window.
-- **Book snapshots:** Forward-captured only — the document explicitly notes book reconstruction beyond live capture is infeasible. Phase 0 uses tick-derived approximations where book data is missing.
+1. **No look-ahead in features.** Every feature has a `data_available_at`; used at `t` only if
+   `data_available_at <= t`. Enforce via `assert_no_leakage()` in `nomad_sniper.features.base`.
+   Normalizers (ATR, baselines, percentiles) must also use only pre-`t` data.
+2. **Instrument-independence law.** No feature fed to the model carries units of price, volume, or
+   premium. Everything is ATR-normalized, z-scored, ratio, %, or categorical. Guarded by
+   `tests/test_instrument_independence.py`. (See contract §2.)
+3. **Costs / theta go into labels, not evaluation.** The option-economics gate bakes theta, spread,
+   and cost into the label. Do not re-subtract at evaluation.
+4. **Walk-forward only, with embargo + sample-uniqueness weights** for overlapping forward labels.
+   No random splits. (See contract §6.)
+4. **Times are IST.** All timestamps in storage and in code are `Asia/Kolkata` timezone-aware.
+   Naive datetimes are a bug; the loaders raise on them.
+5. **Money is rupees, not paise.** All prices in float rupees; round only at the display layer.
+6. **Reproducibility.** Every model artifact carries a config hash and a git SHA. The
+   `nomad_sniper.utils.provenance` module enforces this.
+7. **Never commit secrets.** Fyers / Zerodha / Upstox API keys live in `.env` only; `.env` is
+   gitignored. The settings loader in `nomad_sniper.utils.settings` reads them.
 
-## Project structure
+## What lives where
 
 ```
-sniper-phase0/
-├── CLAUDE.md                          # this file
-├── pyproject.toml                     # uv-managed, Python 3.12
-├── configs/
-│   ├── base.yaml                      # paths, cost params, walk-forward windows
-│   └── features.yaml                  # feature family toggles
-├── src/sniper_phase0/
-│   ├── data/                          # loaders: trade log, ticks, book, MP state (intraday + completed-session)
-│   ├── features/                      # base.py (leakage guard) + mp.py (intraday + prior-session), of.py, context.py
-│   ├── labels/                        # cost_model.py + triple_barrier.py
-│   ├── models/                        # lightgbm_baseline.py
-│   ├── setups/                        # base.py + detectors.py (6 families) + generate.py (driver)
-│   ├── evaluation/                    # walk_forward.py (purged), skip_accuracy.py (EV-ranked), regime.py, reports.py
-│   ├── utils/                         # settings.py, time.py, provenance.py
-│   └── cli.py                         # `phase0 features|label|train|eval|candidates`
-├── tests/
-│   ├── test_no_leakage.py             # MUST stay green
-│   ├── test_cost_model.py
-│   └── test_triple_barrier.py
-├── notebooks/
-│   └── 01_phase0_validation.ipynb     # produces the go/no-go report
-└── docs/
-    ├── DECISION_GATE.md               # the explicit pass/fail criteria
-    └── FEATURES.md                    # feature dictionary with data_available_at semantics
+src/nomad_sniper/
+  data/          Loaders: Zerodha trade log, Upstox underlying bars, ATM option bars (pending)
+  profiles/      Auction primitives: profile.py (MP: POC/VAH/VAL/HVN/LVN/shape/excess/IB),
+                 open_type.py (Dalton open types), day_type.py (trend/balance/neutral)
+  features/      market_profile (geometry+shape+auction-state), htf (multi-timeframe stack),
+                 order_flow (inferred + depth stubs), context (regime), pipeline (stitch)
+  labels/        triple_barrier geometry (done); directional labeler + gate (pending)
+  models/        DirectionalModel — multi-head LightGBM (pending)
+  evaluation/    walk-forward (done); embargo + uniqueness weights + cross-instrument (pending)
+  utils/         settings, logging, provenance, time/grid, normalize (ATR/z-score/percentile)
+configs/         label.yaml, features.yaml, cost_model.yaml, baseline.yaml
+notebooks/       grid pipeline + verdict notebook
+tests/           leakage + instrument-independence + profiles + labeler tests (28 passing)
+data/raw|interim|processed/   broker exports / feature matrices / labels (read-only raw)
+artifacts/       saved models, evaluation reports
+docs/            feature_contract.md (authoritative), claude_code_amendments.md,
+                 IMPLEMENTATION_STATUS.md (spec→repo map), decision_log.md
 ```
 
-## Decision gate
+## Workflow Claude Code should follow
 
-See [docs/DECISION_GATE.md](docs/DECISION_GATE.md) for the exact pass/fail criteria. Do not change these mid-build; if the model misses the gate, the right response is to refine features, not to relax the gate.
+For any change:
 
-## How Claude Code should work in this repo
+1. **Read the relevant module's docstring** before editing. They state assumptions.
+2. **Run `pytest -q` before and after.** If tests fail after your change, fix them or revert.
+3. **Add a leakage test** for any new feature. Pattern in `tests/test_no_leakage.py`.
+4. **Update `docs/decision_log.md`** with one line per architectural decision.
+5. **Never edit `data/raw/`.** It is the source of truth from broker exports.
 
-- Edit existing files; do not create new modules unless the structure above is missing a file.
-- Run `uv run pytest -q` after any change to features, labels, or models. The leakage test is non-negotiable.
-- When in doubt about whether a feature would leak, write the test first.
-- Do not import from `nomad-curie/backend` — Phase 0 is standalone.
-- Cost model parameters live in [configs/base.yaml](configs/base.yaml). If you need to change them, change the config and add a note in the commit, not the source.
+## What you do NOT do in this repo
+
+- Do not reintroduce raw price / volume / premium as model features (breaks contract §2).
+- Do not train on realized trades — the trade log is a validation overlay only (contract §7).
+- Do not hand-craft setup rules to choose candidate moments — label every grid point.
+- Do not detect *direction* on the option price — direction is read on the underlying.
+- Do not import deep learning frameworks (torch, tensorflow). NN is the next milestone on this
+  same feature contract, only after the directional gate clears.
+- Do not call broker APIs from this repo. Historical CSV/parquet inputs only.
+- Do not adjust the `evaluation/phase0.py` verdict thresholds after seeing results.
+
+## Current open questions (update as resolved)
+
+- [ ] **Option data availability** decides the gate mode: strike-level option history →
+      `actual_option`; underlying + IV estimate → `bs_proxy`; underlying only → `atr_proxy`.
+- [ ] **Calibrate `m_breakeven`** (the ATR move an ATM weekly option needs to clear theta+cost
+      over H) — this single number gates every label.
+- [ ] Calibrate slippage in `ZerodhaFnoCostModel` from your own fills.
+- [ ] Confirm `label_horizon_minutes` H matches the real intended option holding period.
+
+## How to get help when stuck
+
+- Architecture questions: re-read `docs/architecture.md`.
+- Why a rule exists: check `docs/decision_log.md`.
+- "Should I add X?": if it's not in `pyproject.toml` deps and not in the phased roadmap, the
+  default answer is no. Ask before adding.

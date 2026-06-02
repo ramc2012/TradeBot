@@ -679,7 +679,7 @@ export default function StrategyDashboard() {
               <Activity size={16} className="text-accent-blue" />
               NSE Strategy Desk
             </div>
-            <div className="mt-1 text-xs text-text-muted">Multi-lane execution for Strategy 1 and Strategy 2.</div>
+            <div className="mt-1 text-xs text-text-muted">Strategy 1 paper-execution lane — 30m ATM option-premium MACD zero-cross.</div>
             <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-text-muted">
               <span className="rounded-full border border-bg-border bg-bg-primary/40 px-2 py-1">
                 {agentStatus?.loop_active ? "Loop active" : agentStatus?.auto_run_enabled ? "Waiting for next cycle" : "Manual mode"}

@@ -1,42 +1,54 @@
-# Sniper Phase 0
+# Nomad Curie Sniper — Phase 0
 
-Retroactive validation gate for the MP + Order Flow expectancy engine planned for Nomad Curie. See [CLAUDE.md](CLAUDE.md) for the full context.
+Retroactive validation of the MP + Order Flow expectancy feature set on the FY25-FY26 Zerodha
+trade log. **This is a research repo, not production.** See `CLAUDE.md` for the full charter.
 
-## One question
-
-> Does an MP + order-flow feature set, scored by LightGBM, reliably flag the worst losers in FY25-FY26 Zerodha trades as "skip"?
-
-Pass → Phase 1 (data infrastructure) is justified. Fail → refine features/labels before any infrastructure investment.
-
-## Setup
+## Quickstart
 
 ```bash
-cd sniper-phase0
-uv sync                          # installs deps from pyproject.toml
-uv run pytest -q                 # leakage test must pass before anything else
+# 1. Create env and install
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+
+# 2. Drop raw data into data/raw/
+#    - zerodha_trades_fy25_fy26.csv  (export from console.zerodha.com)
+#    - upstox_nifty_fut_<expiry>.parquet  (one file per expired contract)
+#    - upstox_banknifty_fut_<expiry>.parquet
+
+# 3. Run the pipeline
+sniper validate-trades        # sanity-check the trade log
+sniper build-features         # MP + OF + Context features for every trade entry
+sniper label-trades           # apply cost-adjusted triple-barrier labeler
+sniper train-baseline         # walk-forward LightGBM
+sniper evaluate-phase0        # produces artifacts/phase0_report.html with go/no-go verdict
+
+# 4. Or just open the notebook
+jupyter lab notebooks/00_phase0_validation.ipynb
 ```
 
-## Run
+## Phase 0 verdict
 
-```bash
-# 1. Drop your Zerodha tradebook CSV at data/raw/zerodha_tradebook_fy25_fy26.csv
-# 2. Tick/book data goes under data/raw/underlying_ticks/{NIFTY,BANKNIFTY}/date=YYYY-MM-DD/
+The pipeline writes a single JSON file at `artifacts/phase0_verdict.json` with:
 
-# Run A — score the trade log
-uv run phase0 features
-uv run phase0 label
-uv run phase0 train
-uv run phase0 eval
-
-# Run B — score MP setup-family candidates instead (parallel sanity check)
-uv run phase0 candidates --out data/processed/setup_candidates.parquet
-# Then re-point paths.trade_log at setup_candidates.parquet and re-run features → eval.
+```json
+{
+  "verdict": "go" | "no-go",
+  "skip_accuracy_bottom_decile": 0.0,
+  "net_pnl_improvement_pct": 0.0,
+  "retained_sharpe_ratio": 0.0,
+  "leakage_tests_passed": true,
+  "reasons": [...]
+}
 ```
 
-The final report lands at `data/processed/reports/phase0_report.json` with a single `phase0_pass: true|false` flag against the criteria in [docs/DECISION_GATE.md](docs/DECISION_GATE.md).
+All four criteria in CLAUDE.md must pass for `"go"`.
 
-## Interactive
+## What's NOT in this repo
 
-```bash
-uv run jupyter lab notebooks/01_phase0_validation.ipynb
-```
+Live trading, broker APIs, options selection, deep learning. See `CLAUDE.md` § "What you do
+NOT do in this repo".
+
+## Repo layout
+
+See `CLAUDE.md` § "What lives where".

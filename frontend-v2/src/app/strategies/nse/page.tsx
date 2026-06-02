@@ -975,10 +975,12 @@ export default function StrategyPage() {
         ...(openSignals?.live_positions || []),
         ...(openSignals?.strategy1_watchlist || []),
       ]),
-      strategy2Rows: normalizeSignalRows(openSignals?.strategy2_signals || []),
+      // S2 deleted (2026-06-02). Kept as an empty array so downstream
+      // length-based renderers stay safe without branch-by-branch edits.
+      strategy2Rows: [] as ReturnType<typeof normalizeSignalRows>,
       portfolioRows: buildStrategyPortfolioRows(strategies, agentStatus?.last_run_at),
     };
-  }, [agentStatus?.last_run_at, openSignals?.live_positions, openSignals?.strategy1_watchlist, openSignals?.strategy2_signals, strategies]);
+  }, [agentStatus?.last_run_at, openSignals?.live_positions, openSignals?.strategy1_watchlist, strategies]);
   const brokerRows = useMemo(() => brokers || [], [brokers]);
   const commentRows = useMemo(() => comments || [], [comments]);
   const brokerSnapshot = agentStatus?.data_health?.broker_snapshot;
@@ -1031,7 +1033,8 @@ export default function StrategyPage() {
   const marketIntelligenceHealth = ((agentStatus?.data_health || {}) as any).market_intelligence || {};
   const directionalDataStatus = strategyDesk?.directionalLive?.snapshot?.data_status || {};
   const fmpAutomation = strategyDesk?.fmpSummary?.automation || {};
-  const pipelineRows = [...(pipeline?.live_pipeline || []), ...(pipeline?.strategy2_pipeline || [])];
+  // S2 deleted: pipeline now reads only the S1 live_pipeline.
+  const pipelineRows = [...(pipeline?.live_pipeline || [])];
   const okPipelineRows = pipelineRows.filter((item: any) => item.status === "ok").length;
   const currentLiveRows = pipelineRows.filter((item: any) => item.freshness === "live").length;
   const coreStatusLoading = !agentStatus && strategyOverviewQuery.isLoading;
@@ -1097,7 +1100,6 @@ export default function StrategyPage() {
           <MetricTile label="Market Data" value={marketDataLabel} detail={`${okPipelineRows}/${pipelineRows.length || 0} feeds OK`} tone={marketDataTone} />
           <MetricTile label="Open Positions" value={String(allPositions.length)} />
           <MetricTile label="Strategy 1 Open" value={String(strategies.find((strategy) => strategy.key === "macd_strategy")?.summary.open_positions || 0)} />
-          <MetricTile label="Strategy 2 Open" value={String(strategies.find((strategy) => strategy.key === "index_mp_strategy")?.summary.open_positions || 0)} />
           <MetricTile label="Open P&L" value={formatSigned(totalOpenPnl, 0)} tone={pnlTone(totalOpenPnl)} />
           <MetricTile label="Realized" value={formatSigned(totalRealized, 0)} tone={pnlTone(totalRealized)} />
           <MetricTile label="Win Rate" value={totalTrades ? `${combinedWinRate.toFixed(1)}%` : "--"} detail={`${totalTrades} closed trades`} />
@@ -1195,7 +1197,7 @@ export default function StrategyPage() {
                     : "border-bg-border bg-bg-primary/25 text-text-secondary hover:border-bg-active hover:text-text-primary",
                 )}
               >
-                <div className="font-semibold">{strategy.key === "macd_strategy" ? "Strategy 1" : strategy.key === "index_mp_strategy" ? "Strategy 2" : strategy.label}</div>
+                <div className="font-semibold">{strategy.key === "macd_strategy" ? "Strategy 1" : strategy.label}</div>
                 <div className="mt-1 text-[11px] text-text-muted">{strategy.summary.open_positions || 0} open · {strategy.summary.total_trades || 0} trades</div>
               </button>
             ))}
@@ -1429,7 +1431,7 @@ export default function StrategyPage() {
             <div className="rounded-2xl border border-bg-border bg-bg-primary/25 p-4">
               <PanelHeader icon={<Database size={16} className="text-accent-amber" />} title="Market Data Visibility" detail="Shows whether this strategy is seeing current data, session-close replay, or stale inputs." />
               <div className="mt-4 space-y-2 text-xs">
-                {(selectedStrategy?.key === "index_mp_strategy" ? pipeline?.strategy2_pipeline : pipeline?.live_pipeline || []).map((item: any) => (
+                {(pipeline?.live_pipeline || []).map((item: any) => (
                   <div key={item.name} className="rounded-xl border border-bg-border bg-bg-secondary/25 px-3 py-3">
                     <div className="flex items-center justify-between gap-3">
                       <span className="font-semibold text-text-primary">{item.name}</span>
@@ -1558,7 +1560,7 @@ export default function StrategyPage() {
             {activeTab === "portfolio"
               ? `${allPositions.length} live positions`
               : activeTab === "signals"
-                ? `${strategy1Rows.length + strategy2Rows.length} signal rows`
+                ? `${strategy1Rows.length} signal rows`
                 : `${portfolioRows.length} portfolio rows`}
           </div>
         </div>
@@ -1573,7 +1575,7 @@ export default function StrategyPage() {
           <TabButton
             active={activeTab === "signals"}
             label="Signals"
-            detail="Strategy 1 monitoring lane and Strategy 2 MP-confirmed option lane."
+            detail="Strategy 1 monitoring lane — 30m option-premium MACD zero-cross."
             onClick={() => startTransition(() => setActiveTab("signals"))}
           />
           <TabButton
@@ -1590,7 +1592,7 @@ export default function StrategyPage() {
           <PanelHeader
             icon={<CandlestickChart size={16} className="text-accent-green" />}
             title="Live Option Positions"
-            detail="Strategy 1 and Strategy 2 option positions are shown in one table so live exposure is visible before commentary or research status."
+            detail="Strategy 1 option positions, so live exposure is visible before commentary or research status."
             meta={`${allPositions.length} positions`}
           />
 
@@ -1616,7 +1618,7 @@ export default function StrategyPage() {
                     <tr key={`${position.symbol}-${position.entered_at}`} className="border-b border-bg-border/40 align-top">
                       <td className="py-3 pr-3">
                         <StatusBadge
-                          label={position.strategyKey === "macd_strategy" ? "Strategy 1" : "Strategy 2"}
+                          label={position.strategyKey === "macd_strategy" ? "Strategy 1" : position.strategyKey || "—"}
                           tone={position.strategyKey === "macd_strategy" ? "ready" : "warning"}
                         />
                       </td>
@@ -1703,7 +1705,7 @@ export default function StrategyPage() {
                     <tr key={row.id} className="border-b border-bg-border/40 align-top">
                       <td className="py-3 pr-3">
                         <StatusBadge
-                          label={row.strategyKey === "macd_strategy" ? "Strategy 1" : "Strategy 2"}
+                          label={row.strategyKey === "macd_strategy" ? "Strategy 1" : row.strategyKey || "—"}
                           tone={row.strategyKey === "macd_strategy" ? "ready" : "warning"}
                         />
                       </td>
@@ -1834,7 +1836,7 @@ export default function StrategyPage() {
           <PanelHeader
             icon={<Waves size={16} className="text-accent-amber" />}
             title="Strategy 1 · 30m ATM MACD"
-            detail="This lane watches the 30-minute option regime and the live option positions opened from that regime. It stays separate from Strategy 2 so the MP-confirmed index workflow does not obscure the simpler monthly-window book."
+            detail="This lane watches the 30-minute option regime and the live option positions opened from that regime."
             meta={`${strategy1Rows.length} rows`}
           />
 
@@ -1881,92 +1883,11 @@ export default function StrategyPage() {
           </div>
         </div>
 
-        <div className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
-          <PanelHeader
-            icon={<CandlestickChart size={16} className="text-accent-green" />}
-            title="Strategy 2 · 15m Index MACD + MP"
-            detail="This lane is the live MP-confirmed options workflow. Market Profile context is surfaced with the option trigger so each index row reads like an actionable trading lane rather than a CSV monitor."
-            meta={`${strategy2Rows.length} rows`}
-          />
-
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full min-w-[1700px] text-left text-xs">
-              <thead>
-                <tr className="border-b border-bg-border text-text-muted">
-                  <th className="pb-2 pr-3">Index</th>
-                  <th className="pb-2 pr-3">Direction</th>
-                  <th className="pb-2 pr-3">Status</th>
-                  <th className="pb-2 pr-3">MP Context</th>
-                  <th className="pb-2 pr-3">Spot / Value Area</th>
-                  <th className="pb-2 pr-3" title="Bar-CVD agreement + window delta on the chosen side">Flow</th>
-                  <th className="pb-2 pr-3">Freshness</th>
-                  <th className="pb-2">Instruction</th>
-                </tr>
-              </thead>
-              <tbody>
-                {strategy2Rows.length ? (
-                  strategy2Rows.map((rowTyped) => {
-                    // The orderflow fields are added by the backend (see
-                    // commodity_strategy_agent + strategy_agent S2 path) but
-                    // don't appear in the front-end's SignalRow type because
-                    // that's narrower. Cast to any for new fields.
-                    const row = rowTyped as any;
-                    const sideVwap = row.direction === "CE" ? row.ce_vwap : row.direction === "PE" ? row.pe_vwap : null;
-                    const sideCvd = row.direction === "CE" ? row.ce_cvd_session : row.direction === "PE" ? row.pe_cvd_session : null;
-                    return (
-                      <tr key={row._id} className="border-b border-bg-border/40 align-top">
-                        <td className="py-3 pr-3">
-                          <div className="font-medium text-text-primary">{row.underlying}</div>
-                          <div className="mt-1 text-[11px] text-text-muted">{row.as_of || "--"}</div>
-                        </td>
-                        <td className="py-3 pr-3">
-                          {row.direction ? <StatusBadge label={row.direction} tone={row.direction} /> : <span className="text-text-muted">--</span>}
-                        </td>
-                        <td className="py-3 pr-3">
-                          <StatusBadge label={prettify(row.status)} tone={row.status || row.freshness} />
-                        </td>
-                        <td className="py-3 pr-3 text-text-secondary">
-                          <div>{prettify(row.reason)}</div>
-                          {row.mp_day_type ? <div className="mt-1 text-[11px] text-text-muted">{prettify(row.mp_day_type)}</div> : null}
-                        </td>
-                        <td className="py-3 pr-3 font-mono text-text-secondary">
-                          <div>spot {row.spot_price != null ? formatNumber(row.spot_price) : "--"}</div>
-                          <div className="mt-1">POC {row.poc != null ? formatNumber(row.poc) : "--"} · VA {row.val != null ? formatNumber(row.val) : "--"} / {row.vah != null ? formatNumber(row.vah) : "--"}</div>
-                        </td>
-                        <td className="py-3 pr-3 font-mono text-text-secondary" title="CVD = cumulative volume delta (Lee-Ready bar approximation)">
-                          {row.cvd_agrees == null ? (
-                            <span className="text-text-muted">—</span>
-                          ) : (
-                            <StatusBadge label={row.cvd_agrees ? "✓ aligned" : "✗ disagree"} tone={row.cvd_agrees ? "ready" : "error"} />
-                          )}
-                          <div className="mt-1 text-[11px] text-text-muted">
-                            Δ{row.cvd_window_delta != null ? formatSigned(row.cvd_window_delta, 0) : "--"} · sess {sideCvd != null ? formatSigned(sideCvd, 0) : "--"}
-                          </div>
-                          {sideVwap != null ? (
-                            <div className="mt-0.5 text-[11px] text-text-muted">VWAP {formatNumber(sideVwap)}</div>
-                          ) : null}
-                        </td>
-                        <td className="py-3 pr-3 text-text-secondary">
-                          <StatusBadge label={row.freshness || "unknown"} tone={freshnessTone(row.freshness)} />
-                          <div className="mt-2 text-[11px] text-text-muted">
-                            {row.spot_source ? `${row.spot_source} spot` : "--"} · option {row.option_last_bar_time || "--"}
-                          </div>
-                        </td>
-                        <td className="py-3 text-text-muted">{row.instruction || "--"}</td>
-                      </tr>
-                    );
-                  })
-                ) : (
-                  <tr>
-                    <td colSpan={8} className="py-10 text-center text-sm text-text-muted">
-                      No Strategy 2 signal rows are available.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        {/* Strategy 2 · 15m Index MACD + MP — DELETED (2026-06-02) per
+            user instruction. The dedicated S2 panel, table, and rows are
+            removed from the UI; backend lane registry no longer registers
+            S2 either, so this surface had nothing to render. AI gets its
+            own dedicated display elsewhere; the two are NOT merged. */}
 
       </section>
 
@@ -2107,7 +2028,7 @@ export default function StrategyPage() {
                 meta={pipeline?.as_of || "--"}
               />
               <div className="mt-4 space-y-3">
-                {[...(pipeline?.live_pipeline || []), ...(pipeline?.strategy2_pipeline || [])].map((item: any) => (
+                {(pipeline?.live_pipeline || []).map((item: any) => (
                   <div key={item.name} className="rounded-2xl border border-bg-border bg-bg-secondary/20 px-3 py-3 text-xs">
                     <div className="flex items-center gap-2">
                       <StatusBadge label={item.freshness || item.status} tone={item.status || item.freshness} />

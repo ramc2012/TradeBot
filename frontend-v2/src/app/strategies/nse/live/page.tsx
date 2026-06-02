@@ -3,8 +3,9 @@
 /**
  * NSE strategy desk · data-focused live view.
  *
- * Renders Strategy 1 (30m ATM MACD) + Strategy 2 (5m Index MACD + MP)
- * in a single dense screen. Same visual language as /commodity.
+ * Renders Strategy 1 (30m ATM option-premium MACD) in a single dense
+ * screen. Same visual language as /commodity. Strategy 2 was deleted
+ * from the UI on 2026-06-02.
  */
 import { useMemo } from "react";
 import Link from "next/link";

@@ -57,6 +57,11 @@ class RunnerConfig:
     enabled: bool = True
     market_hours_fn: MarketHoursFn | None = None
     next_open_fn: NextOpenFn | None = None
+    # When False, this runner is excluded from the post-close (15:30+) catch-up
+    # pass — it only ever fires inside its market-hours window. Used by runners
+    # that must "act in market hours only" (e.g. CBE) rather than capture a
+    # once-a-day end-of-session snapshot.
+    post_close_catchup: bool = True
 
 
 @dataclass
@@ -336,6 +341,35 @@ class MarketHoursPaperSupervisor:
                 "run_id": payload.get("run_id"),
             }
 
+        async def _cbe_marks_runner() -> dict[str, Any]:
+            """Lightweight 5-min LTP refresh for CBE open paper positions.
+
+            Re-marks held cash-equity positions off the latest close WITHOUT
+            re-running the heavy alpha pipeline — keeps the UI's LTP fresh
+            between scans at a fraction of the CPU cost. Market-hours only
+            (post_close_catchup=False); nothing to refresh after the close."""
+            from cbe_scanner.service import refresh_paper_marks as _refresh_cbe_marks
+
+            try:
+                result = await asyncio.wait_for(_refresh_cbe_marks(), timeout=60.0)
+            except asyncio.TimeoutError:
+                return {
+                    "status": "timeout",
+                    "result_count": 0,
+                    "failure_count": 1,
+                    "failures": {"cbe_marks": "timed out after 60s"},
+                    "results": [],
+                }
+            refreshed = int(result.get("refreshed") or 0)
+            return {
+                "status": "ok",
+                "result_count": refreshed,
+                "actionable_count": refreshed,
+                "failure_count": 0,
+                "paper_summary": dict(result.get("paper_summary") or {}),
+                "symbols": result.get("symbols") or [],
+            }
+
         async def _gann_runner() -> dict[str, Any]:
             try:
                 result = await asyncio.wait_for(
@@ -405,6 +439,21 @@ class MarketHoursPaperSupervisor:
                 interval_seconds=getattr(settings, "CBE_SCANNER_AUTO_INTERVAL_SECONDS", 900),
                 callback=_cbe_runner,
                 enabled=getattr(settings, "CBE_SCANNER_AUTO_ENABLED", True),
+                # Cash-equity book trades NSE hours only — no after-hours
+                # catch-up run. The last in-session scan is its end-of-day act.
+                market_hours_fn=_in_nse_market_hours,
+                next_open_fn=_next_nse_market_open,
+                post_close_catchup=False,
+            ),
+            RunnerConfig(
+                key="cbe_marks",
+                label="CBE Paper Marks Refresh",
+                interval_seconds=getattr(settings, "CBE_MARKS_REFRESH_INTERVAL_SECONDS", 300),
+                callback=_cbe_marks_runner,
+                enabled=getattr(settings, "CBE_SCANNER_AUTO_ENABLED", True),
+                market_hours_fn=_in_nse_market_hours,
+                next_open_fn=_next_nse_market_open,
+                post_close_catchup=False,
             ),
             RunnerConfig(
                 key="gann_tp_delta",
@@ -484,6 +533,7 @@ class MarketHoursPaperSupervisor:
                     continue
                 if (
                     not force
+                    and runtime.config.post_close_catchup
                     and not runtime_market_open
                     and _should_run_post_close_catchup(now)
                     and (

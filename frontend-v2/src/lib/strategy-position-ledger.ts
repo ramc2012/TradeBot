@@ -348,7 +348,7 @@ export function buildClosedTradeRows(snapshot?: AppStrategyPortfolioSnapshot | n
     rows.push({
       id: `commodity-closed-${trade.symbol}-${trade.exit_time}`,
       desk: "Commodity",
-      strategy: trade.instrument_type === "OPTION" ? "Strategy 1 · Options" : "Strategy 2 · Futures",
+      strategy: trade.instrument_type === "OPTION" ? "Commodity · Options" : "Commodity · Futures",
       source: "commodity",
       venue: "MCX",
       underlying: String(trade.symbol || "--").split(/[ :]/)[1] || String(trade.symbol || "--"),

@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Sniper Paper</title>
+<style>
+  :root {
+    --bg:#0c0e14; --fg:#e6e9ef; --muted:#7f8693;
+    --green:#34c759; --red:#ff453a; --amber:#ffd60a;
+    --card:#151821; --border:#22262f;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; }
+  header { padding:16px 24px; border-bottom:1px solid var(--border);
+           display:flex; justify-content:space-between; align-items:center; }
+  h1 { margin:0; font-size:18px; font-weight:600; }
+  .badge { font-size:12px; padding:2px 8px; border-radius:4px;
+           background:#1f2937; color:var(--muted); }
+  main { padding:24px; display:grid; grid-template-columns:repeat(auto-fit,minmax(360px,1fr)); gap:16px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:16px; }
+  .card h2 { margin:0 0 12px; font-size:14px; text-transform:uppercase;
+             letter-spacing:0.05em; color:var(--muted); font-weight:600; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { padding:6px 8px; text-align:left; border-bottom:1px solid var(--border); }
+  th { color:var(--muted); font-weight:500; font-size:11px;
+       text-transform:uppercase; letter-spacing:0.04em; }
+  .pos { color:var(--green); } .neg { color:var(--red); } .ood { color:var(--amber); }
+  .kpi { display:flex; gap:24px; }
+  .kpi .v { font-size:22px; font-weight:600; }
+  .kpi .l { font-size:11px; color:var(--muted); text-transform:uppercase; }
+  .muted { color:var(--muted); font-size:12px; }
+  code { background:#1f2937; padding:1px 5px; border-radius:3px; font-size:12px; }
+</style>
+</head>
+<body>
+<nav style="display:flex;gap:8px;padding:8px 16px;border-bottom:1px solid var(--border);background:rgba(20,24,36,0.8);">
+  <a href="/" style="color:var(--green);text-decoration:none;padding:5px 10px;border-radius:5px;background:rgba(52,199,89,0.12);font-size:12px;font-weight:500;">Overview</a>
+  <a href="/model.html" style="color:var(--muted);text-decoration:none;padding:5px 10px;border-radius:5px;font-size:12px;font-weight:500;">Model</a>
+  <a href="/features.html" style="color:var(--muted);text-decoration:none;padding:5px 10px;border-radius:5px;font-size:12px;font-weight:500;">Features</a>
+  <a href="/signals.html" style="color:var(--muted);text-decoration:none;padding:5px 10px;border-radius:5px;font-size:12px;font-weight:500;">Signals</a>
+</nav>
+<header>
+  <h1>Sniper Paper <span class="badge" id="env">loading…</span></h1>
+  <div class="muted" id="last-update">—</div>
+</header>
+<main>
+  <div class="card">
+    <h2>Today</h2>
+    <div class="kpi">
+      <div><div class="l">Net P&L</div><div class="v" id="netpnl">—</div></div>
+      <div><div class="l">Signals</div><div class="v" id="nsignals">—</div></div>
+      <div><div class="l">Taken</div><div class="v" id="ntaken">—</div></div>
+      <div><div class="l">Skipped</div><div class="v" id="nskipped">—</div></div>
+    </div>
+    <div class="muted" id="kill" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Open positions</h2>
+    <table id="open-pos-tbl">
+      <thead><tr><th>Instrument</th><th>Side</th><th>Entry</th><th>Stop</th><th>Target</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="card" style="grid-column:1/-1">
+    <h2>Recent signals</h2>
+    <table id="sig-tbl">
+      <thead><tr>
+        <th>Time</th><th>Inst</th><th>Setup</th><th>Side</th>
+        <th>p_win</th><th>E[R]</th><th>Gate</th><th>Reason</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="card" style="grid-column:1/-1">
+    <h2>Recent positions</h2>
+    <table id="pos-tbl">
+      <thead><tr>
+        <th>Entry ts</th><th>Inst</th><th>Side</th><th>Entry</th><th>Exit</th>
+        <th>Outcome</th><th>Net R</th><th>Net ₹</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</main>
+
+<script>
+const fmt = (x, d=2) => x === null || x === undefined ? "—" : Number(x).toFixed(d);
+const fmtTs = s => s ? new Date(s).toLocaleTimeString("en-IN", {hour:"2-digit",minute:"2-digit",second:"2-digit"}) : "—";
+const cls = v => v > 0 ? "pos" : v < 0 ? "neg" : "";
+
+async function refresh() {
+  try {
+    const [status, signals, positions] = await Promise.all([
+      fetch("/api/status").then(r=>r.json()),
+      fetch("/api/signals/recent?limit=30").then(r=>r.json()),
+      fetch("/api/positions/recent?limit=30").then(r=>r.json()),
+    ]);
+    const p = status.today_pnl || {};
+    document.getElementById("netpnl").innerHTML =
+      `<span class="${cls(p.net_pnl)}">₹${fmt(p.net_pnl ?? 0, 0)}</span>`;
+    document.getElementById("nsignals").textContent = p.n_signals ?? 0;
+    document.getElementById("ntaken").textContent = p.n_taken ?? 0;
+    document.getElementById("nskipped").textContent = p.n_skipped ?? 0;
+    document.getElementById("kill").textContent =
+      p.kill_switch_tripped ? "🛑 KILL SWITCH TRIPPED" :
+      (p.consec_losses ? `${p.consec_losses} consecutive losses` : "");
+
+    const openTbody = document.querySelector("#open-pos-tbl tbody");
+    openTbody.innerHTML = (status.open_positions||[]).map(o => `
+      <tr><td>${o.instrument}</td><td>${o.side}</td>
+          <td>${fmt(o.entry_price)}</td>
+          <td>${fmt(o.stop_price)}</td>
+          <td>${fmt(o.target_price)}</td></tr>`).join("") || "<tr><td colspan=5 class='muted'>none</td></tr>";
+
+    const sigTbody = document.querySelector("#sig-tbl tbody");
+    sigTbody.innerHTML = signals.map(s => `
+      <tr>
+        <td>${fmtTs(s.decision_ts)}</td>
+        <td>${s.instrument}${s.in_distribution? "" : ' <span class="ood">OOD</span>'}</td>
+        <td>${s.setup_name}</td><td>${s.side}</td>
+        <td>${fmt(s.p_win,3)}</td>
+        <td class="${cls(s.expected_net_R)}">${fmt(s.expected_net_R,3)}</td>
+        <td>${s.gate_decision}</td>
+        <td class="muted">${s.gate_reason||""}</td>
+      </tr>`).join("");
+
+    const posTbody = document.querySelector("#pos-tbl tbody");
+    posTbody.innerHTML = positions.map(p => `
+      <tr>
+        <td>${fmtTs(p.entry_ts)}</td><td>${p.instrument}</td>
+        <td>${p.side}</td><td>${fmt(p.entry_price)}</td>
+        <td>${fmt(p.exit_price)}</td>
+        <td>${p.outcome||"open"}</td>
+        <td class="${cls(p.net_R)}">${fmt(p.net_R,3)}</td>
+        <td class="${cls(p.net_pnl)}">${fmt(p.net_pnl,0)}</td>
+      </tr>`).join("");
+
+    document.getElementById("env").textContent = "live";
+    document.getElementById("last-update").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById("env").textContent = "error";
+    console.error(e);
+  }
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

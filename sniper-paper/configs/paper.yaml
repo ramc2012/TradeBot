@@ -32,7 +32,7 @@ fyers:
 instruments:
   - name: NIFTY
     exchange: NSE
-    near_month_symbol: "NSE:NIFTY25NOVFUT"
+    near_month_symbol: "NSE:NIFTY26JUNFUT"
     spot_symbol: "NSE:NIFTY50-INDEX"
     lot_size: 50
     tick_size: 0.05
@@ -40,7 +40,7 @@ instruments:
     model_in_distribution: true       # v0 model trained on NIFTY → OK
   - name: SENSEX
     exchange: BSE
-    near_month_symbol: "BSE:SENSEX25NOVFUT"
+    near_month_symbol: "BSE:SENSEX26JUNFUT"
     spot_symbol: "BSE:SENSEX-INDEX"
     lot_size: 10
     tick_size: 0.05
@@ -48,7 +48,7 @@ instruments:
     model_in_distribution: false      # OOD — v0 model not trained on SENSEX
   - name: CRUDE
     exchange: MCX
-    near_month_symbol: "MCX:CRUDEOIL25NOVFUT"
+    near_month_symbol: "MCX:CRUDEOIL26JUNFUT"
     spot_symbol: null                 # commodity, no spot index
     lot_size: 100
     tick_size: 1.0

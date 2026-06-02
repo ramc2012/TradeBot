@@ -1,101 +1,81 @@
+"""Triple-barrier labeling tests."""
+
 from __future__ import annotations
 
-import numpy as np
+from datetime import datetime, timedelta
+
 import pandas as pd
 import pytest
 
-from sniper_phase0.labels.triple_barrier import label_one
-from sniper_phase0.utils.settings import Costs
-
-COSTS = Costs(
-    brokerage_per_order_inr=20.0,
-    exchange_txn_charge_bps=0.345,
-    sebi_charge_bps=0.001,
-    stt_bps_sell_side=1.25,
-    stamp_duty_bps_buy_side=0.2,
-    gst_on_brokerage_pct=18.0,
-    gst_on_exchange_pct=18.0,
-    slippage_bps_default=1.5,
-    slippage_bps_event_day=3.0,
-)
+from nomad_sniper.labels.triple_barrier import label_triple_barrier
+from nomad_sniper.utils.timeutil import IST
 
 
-def _ticks(start: str, prices: list[float], step_seconds: int = 1) -> pd.DataFrame:
-    base = pd.Timestamp(start)
-    ts = [base + pd.Timedelta(seconds=i * step_seconds) for i in range(len(prices))]
-    return pd.DataFrame({"ts": ts, "ltp": prices, "last_qty": np.ones(len(prices), dtype=int)})
+def _make_bars(prices):
+    """Build minute bars with given close prices, hi/lo bracketing close ± 1."""
+    start = IST.localize(datetime(2025, 1, 8, 11, 0))
+    rows = []
+    for i, c in enumerate(prices):
+        rows.append({
+            "open": c, "high": c + 1, "low": c - 1, "close": c, "volume": 1000,
+        })
+    idx = pd.date_range(start, periods=len(prices), freq="1min", tz=IST)
+    return pd.DataFrame(rows, index=idx)
 
 
-def test_long_target_hit() -> None:
-    entry_ts = pd.Timestamp("2024-04-15 10:00:00")
-    ticks = _ticks("2024-04-15 10:00:01", [25050, 25080, 25110])
-    res = label_one(
-        trade_id=1, entry_ts=entry_ts, entry_price=25000.0, side="long", qty=25,
-        stop_price=24900.0, target_price=25100.0, max_hold_minutes=60,
-        forward_ticks=ticks, costs=COSTS,
+def test_long_target_hit():
+    bars = _make_bars([22000, 22020, 22040, 22060, 22080])
+    entry = IST.localize(datetime(2025, 1, 8, 10, 59))  # before first bar
+    lbl = label_triple_barrier(
+        bars, entry, "long",
+        stop_price=21980, target_price=22050, max_holding=timedelta(minutes=10),
     )
-    assert res.outcome == "target"
-    assert res.gross_R > 0
-    assert res.net_R < res.gross_R
+    assert lbl is not None
+    assert lbl.exit_reason == "target"
+    assert lbl.realised_r > 0
 
 
-def test_long_stop_hit() -> None:
-    entry_ts = pd.Timestamp("2024-04-15 10:00:00")
-    ticks = _ticks("2024-04-15 10:00:01", [24950, 24920, 24890])
-    res = label_one(
-        trade_id=1, entry_ts=entry_ts, entry_price=25000.0, side="long", qty=25,
-        stop_price=24900.0, target_price=25100.0, max_hold_minutes=60,
-        forward_ticks=ticks, costs=COSTS,
+def test_long_stop_hit():
+    bars = _make_bars([22000, 21990, 21970, 21950, 21940])
+    entry = IST.localize(datetime(2025, 1, 8, 10, 59))
+    lbl = label_triple_barrier(
+        bars, entry, "long",
+        stop_price=21980, target_price=22050, max_holding=timedelta(minutes=10),
     )
-    assert res.outcome == "stop"
-    assert res.gross_R < 0
-    assert res.net_R < res.gross_R
+    assert lbl is not None
+    assert lbl.exit_reason == "stop"
+    assert lbl.realised_r == pytest.approx(-1.0, abs=0.1)
 
 
-def test_short_target_hit() -> None:
-    entry_ts = pd.Timestamp("2024-04-15 10:00:00")
-    ticks = _ticks("2024-04-15 10:00:01", [24950, 24920, 24890])
-    res = label_one(
-        trade_id=1, entry_ts=entry_ts, entry_price=25000.0, side="short", qty=25,
-        stop_price=25100.0, target_price=24900.0, max_hold_minutes=60,
-        forward_ticks=ticks, costs=COSTS,
+def test_timeout_exit():
+    bars = _make_bars([22000, 22005, 22010, 22008, 22012])
+    entry = IST.localize(datetime(2025, 1, 8, 10, 59))
+    lbl = label_triple_barrier(
+        bars, entry, "long",
+        stop_price=21900, target_price=22500, max_holding=timedelta(minutes=4),
     )
-    assert res.outcome == "target"
-    assert res.gross_R > 0
+    assert lbl is not None
+    assert lbl.exit_reason == "timeout"
 
 
-def test_timeout_when_neither_hit() -> None:
-    entry_ts = pd.Timestamp("2024-04-15 10:00:00")
-    ticks = _ticks("2024-04-15 10:00:01", [25010, 25020, 25030])
-    res = label_one(
-        trade_id=1, entry_ts=entry_ts, entry_price=25000.0, side="long", qty=25,
-        stop_price=24900.0, target_price=25100.0, max_hold_minutes=60,
-        forward_ticks=ticks, costs=COSTS,
+def test_short_target_hit():
+    bars = _make_bars([22000, 21980, 21960, 21940, 21920])
+    entry = IST.localize(datetime(2025, 1, 8, 10, 59))
+    lbl = label_triple_barrier(
+        bars, entry, "short",
+        stop_price=22050, target_price=21950, max_holding=timedelta(minutes=10),
     )
-    assert res.outcome == "timeout"
+    assert lbl is not None
+    assert lbl.exit_reason == "target"
+    assert lbl.realised_r > 0
 
 
-def test_invalid_barriers_raise() -> None:
+def test_invalid_long_geometry_raises():
+    bars = _make_bars([22000, 22010])
+    entry = IST.localize(datetime(2025, 1, 8, 10, 59))
+    # Target below entry — invalid for a long
     with pytest.raises(ValueError):
-        label_one(
-            trade_id=1, entry_ts=pd.Timestamp("2024-04-15 10:00"), entry_price=25000.0,
-            side="long", qty=25, stop_price=25100.0, target_price=24900.0,  # swapped
-            max_hold_minutes=60, forward_ticks=_ticks("2024-04-15 10:00:01", [25000]),
-            costs=COSTS,
+        label_triple_barrier(
+            bars, entry, "long",
+            stop_price=21980, target_price=21990, max_holding=timedelta(minutes=10),
         )
-
-
-def test_ticks_at_or_before_entry_are_ignored() -> None:
-    entry_ts = pd.Timestamp("2024-04-15 10:00:00")
-    # Stop-hitting price exactly at entry_ts — must be ignored.
-    bad = pd.DataFrame({
-        "ts": [entry_ts, entry_ts + pd.Timedelta(seconds=1)],
-        "ltp": [24800.0, 25050.0],
-        "last_qty": [1, 1],
-    })
-    res = label_one(
-        trade_id=1, entry_ts=entry_ts, entry_price=25000.0, side="long", qty=25,
-        stop_price=24900.0, target_price=25100.0, max_hold_minutes=60,
-        forward_ticks=bad, costs=COSTS,
-    )
-    assert res.outcome != "stop"

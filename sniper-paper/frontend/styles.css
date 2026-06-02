@@ -1,0 +1,109 @@
+:root {
+  --bg: #0c1019;
+  --card: #131927;
+  --border: #1f2740;
+  --text: #d8dce6;
+  --text-muted: #6b7592;
+  --accent: #63a8ea;
+  --pos: #52c49c;
+  --neg: #d76f6f;
+  --warn: #da9e50;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.topnav {
+  display: flex;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(20, 24, 36, 0.8);
+  position: sticky; top: 0; z-index: 5;
+}
+.topnav a {
+  color: var(--text-muted);
+  text-decoration: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-weight: 500;
+}
+.topnav a:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+.topnav a.active { color: var(--accent); background: rgba(99,168,234,0.10); }
+
+main { padding: 16px; max-width: 1400px; margin: 0 auto; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin-bottom: 14px;
+}
+.card h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; letter-spacing: 0.02em; }
+.card h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.muted { color: var(--text-muted); }
+.small { font-size: 11px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+.pos { color: var(--pos); }
+.neg { color: var(--neg); }
+
+.kv { display: grid; grid-template-columns: 220px 1fr; row-gap: 6px; column-gap: 12px; }
+.kv > div { display: contents; }
+.kv span:first-child { color: var(--text-muted); }
+.kv b { color: var(--text); font-weight: 500; }
+
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+
+/* Bounded chart container — fixes Chart.js infinite vertical growth.
+   maintainAspectRatio:false sizes the canvas to its parent, so the parent MUST
+   have a definite height. The box height is set inline per chart; the canvas
+   fills it absolutely so its own size can never feed back into layout. */
+.chartbox { position: relative; width: 100%; }
+.chartbox > canvas {
+  position: absolute !important;
+  top: 0; left: 0;
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+}
+
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th { text-align: left; padding: 8px 8px; color: var(--text-muted); border-bottom: 1px solid var(--border); font-weight: 500; }
+td { padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,0.03); }
+tr:hover td { background: rgba(255,255,255,0.02); cursor: pointer; }
+
+.controls { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; align-items: end; }
+.controls label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-muted); }
+.controls select, .controls input {
+  background: #0a0e18; border: 1px solid var(--border); color: var(--text);
+  padding: 6px 10px; border-radius: 6px; font-family: inherit; font-size: 12px; min-width: 160px;
+}
+.controls button {
+  background: var(--accent); color: #fff; border: 0; padding: 7px 14px;
+  border-radius: 6px; cursor: pointer; font-weight: 500;
+}
+.controls button:hover { background: #4d92d6; }
+
+pre.json { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  background: #0a0e18; padding: 12px; border-radius: 6px; overflow: auto; max-height: 360px;
+  border: 1px solid var(--border); color: #aac0d6; }
+
+/* Neural-net architecture flow graph */
+.nn-graph { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 14px; }
+.nn-graph .node {
+  display: inline-block; padding: 8px 12px; border-radius: 8px; font-size: 12px;
+  border: 1px solid var(--border); background: #0a0e18; white-space: nowrap;
+}
+.nn-graph .node-input  { border-color: #3a4a66; color: #9aa5be; }
+.nn-graph .node-hidden { border-color: #3a5a8a; color: #8fb4e8; }
+.nn-graph .node-latent { border-color: #5a4a8a; color: #b79ae8; }
+.nn-graph .node-head   { border-color: #2f6b52; color: #6fd0a6; }
+.nn-graph .arrow { color: var(--text-muted); font-size: 14px; }

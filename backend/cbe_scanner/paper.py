@@ -280,6 +280,54 @@ class CBEPaperBook:
             )
             return self._summary(open_positions, closed_positions)
 
+    async def refresh_open_marks(self, prices: dict[str, Any]) -> dict[str, Any]:
+        """Lightweight mark-to-market for OPEN positions only.
+
+        Updates ``latest_close`` + ``unrealized_pnl`` for each held position
+        whose symbol has a fresh price in ``prices``, WITHOUT re-running the
+        alpha scan or touching any open/close/rebalance logic. Intended for a
+        fast (5-minute) cadence so the UI shows a live LTP between the heavier
+        end-of-day-design scans, at a fraction of the CPU cost.
+
+        ``prices`` maps symbol -> latest price. Symbols absent from the map (or
+        with a non-positive price) keep their existing mark.
+        """
+        norm_prices = {
+            _norm_symbol(sym): price
+            for sym, price in (prices or {}).items()
+            if _norm_symbol(sym)
+        }
+        async with self._lock:
+            state = self._load_positions()
+            open_positions: list[dict[str, Any]] = list(state.get("open_positions") or [])
+            closed_positions: list[dict[str, Any]] = list(state.get("closed_positions") or [])
+            refreshed = 0
+            stamp = _utc_now()
+            for pos in open_positions:
+                sym = _norm_symbol(pos.get("instrument"))
+                price = self._coerce_price(norm_prices.get(sym))
+                if price is None:
+                    continue
+                entry = float(pos.get("entry_price") or 0.0)
+                qty = int(pos.get("quantity") or 0)
+                sign = 1 if str(pos.get("direction") or "").lower() == "long" else -1
+                pos["latest_close"] = price
+                pos["unrealized_pnl"] = round((price - entry) * qty * sign, 2)
+                pos["mark_refreshed_at"] = stamp
+                refreshed += 1
+            if refreshed:
+                self._save_positions(
+                    {
+                        "open_positions": open_positions,
+                        "closed_positions": closed_positions,
+                        "last_synced_at": state.get("last_synced_at"),
+                        "last_mark_refresh_at": stamp,
+                    }
+                )
+            summary = self._summary(open_positions, closed_positions)
+            summary["marks_refreshed"] = refreshed
+            return summary
+
     async def list_positions(self, *, status: str = "all", limit: int = 100) -> dict[str, Any]:
         state = self._load_positions()
         open_positions = list(state.get("open_positions") or [])

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Sniper Paper · Signals</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <nav class="topnav">
+    <a href="/">Overview</a>
+    <a href="/model.html">Model</a>
+    <a href="/features.html">Features</a>
+    <a href="/signals.html" class="active">Signals</a>
+  </nav>
+  <main>
+    <section class="card">
+      <h2>Recent signals</h2>
+      <p class="muted">Every candidate the engine evaluated. Click a row to see the SHAP-style explanation.</p>
+      <table id="sig-tbl">
+        <thead>
+          <tr>
+            <th>ID</th><th>Decision</th><th>Inst</th><th>Setup</th><th>Side</th>
+            <th>Entry</th><th>Stop</th><th>Target</th>
+            <th>p_win</th><th>E[R]</th><th>Gate</th><th>Reason</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+  <script>
+    (async () => {
+      const rows = await fetchJSON("/api/signals/recent?limit=200");
+      const tbody = document.querySelector("#sig-tbl tbody");
+      if (!rows.length) { tbody.innerHTML = '<tr><td colspan="12" class="muted">no signals yet — runner is not capturing</td></tr>'; return; }
+      tbody.innerHTML = rows.map(r => `
+        <tr onclick="location.href='/signal.html?id=${r.signal_id}'">
+          <td>${r.signal_id}</td>
+          <td class="mono">${fmtTS(r.decision_ts)}</td>
+          <td>${r.instrument}</td>
+          <td class="mono">${r.setup_name}</td>
+          <td class="${r.side === 'long' ? 'pos' : 'neg'}">${r.side}</td>
+          <td class="mono">${(r.entry_price ?? 0).toFixed(2)}</td>
+          <td class="mono">${(r.stop_price ?? 0).toFixed(2)}</td>
+          <td class="mono">${(r.target_price ?? 0).toFixed(2)}</td>
+          <td>${(r.p_win ?? 0).toFixed(2)}</td>
+          <td class="${(r.expected_net_R ?? 0) > 0 ? 'pos' : 'neg'}">${(r.expected_net_R ?? 0).toFixed(2)}</td>
+          <td class="${r.gate_decision === 'take' ? 'pos' : 'neg'}">${r.gate_decision}</td>
+          <td class="muted small">${r.gate_reason ?? ''}</td>
+        </tr>`).join("");
+    })().catch(alertErr);
+  </script>
+</body>
+</html>

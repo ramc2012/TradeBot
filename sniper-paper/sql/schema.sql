@@ -6,7 +6,7 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 -- ─────────────────────────────────────────────────────────────────
 -- Live ticks (hypertable)
 -- ─────────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS paper_ticks (
+CREATE TABLE IF NOT EXISTS sniper_paper_ticks (
     ts            TIMESTAMPTZ      NOT NULL,
     symbol        TEXT             NOT NULL,
     instrument    TEXT             NOT NULL,  -- NIFTY | SENSEX | CRUDE
@@ -20,14 +20,14 @@ CREATE TABLE IF NOT EXISTS paper_ticks (
     raw           JSONB
 );
 
-SELECT create_hypertable('paper_ticks', 'ts', if_not_exists => TRUE, chunk_time_interval => INTERVAL '1 day');
-CREATE INDEX IF NOT EXISTS ix_paper_ticks_symbol_ts ON paper_ticks(symbol, ts DESC);
-CREATE INDEX IF NOT EXISTS ix_paper_ticks_instrument_ts ON paper_ticks(instrument, ts DESC);
+SELECT create_hypertable('sniper_paper_ticks', 'ts', if_not_exists => TRUE, chunk_time_interval => INTERVAL '1 day');
+CREATE INDEX IF NOT EXISTS ix_sniper_paper_ticks_symbol_ts ON sniper_paper_ticks(symbol, ts DESC);
+CREATE INDEX IF NOT EXISTS ix_sniper_paper_ticks_instrument_ts ON sniper_paper_ticks(instrument, ts DESC);
 
 -- ─────────────────────────────────────────────────────────────────
 -- Every signal evaluation, taken or skipped
 -- ─────────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS paper_signals (
+CREATE TABLE IF NOT EXISTS sniper_paper_signals (
     signal_id     BIGSERIAL        PRIMARY KEY,
     decision_ts   TIMESTAMPTZ      NOT NULL,
     instrument    TEXT             NOT NULL,
@@ -46,15 +46,15 @@ CREATE TABLE IF NOT EXISTS paper_signals (
     model_artifact TEXT            NOT NULL,
     run_id        UUID             NOT NULL
 );
-CREATE INDEX IF NOT EXISTS ix_paper_signals_decision_ts ON paper_signals(decision_ts DESC);
-CREATE INDEX IF NOT EXISTS ix_paper_signals_instrument ON paper_signals(instrument, decision_ts DESC);
+CREATE INDEX IF NOT EXISTS ix_sniper_paper_signals_decision_ts ON sniper_paper_signals(decision_ts DESC);
+CREATE INDEX IF NOT EXISTS ix_sniper_paper_signals_instrument ON sniper_paper_signals(instrument, decision_ts DESC);
 
 -- ─────────────────────────────────────────────────────────────────
 -- Paper orders (placed) and paper positions (open / closed)
 -- ─────────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS paper_orders (
+CREATE TABLE IF NOT EXISTS sniper_paper_orders (
     order_id      BIGSERIAL        PRIMARY KEY,
-    signal_id     BIGINT           REFERENCES paper_signals(signal_id),
+    signal_id     BIGINT           REFERENCES sniper_paper_signals(signal_id),
     placed_ts     TIMESTAMPTZ      NOT NULL,
     instrument    TEXT             NOT NULL,
     symbol        TEXT             NOT NULL,
@@ -66,13 +66,13 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     slippage_inr  DOUBLE PRECISION,
     status        TEXT             NOT NULL  -- 'pending' | 'filled' | 'cancelled'
 );
-CREATE INDEX IF NOT EXISTS ix_paper_orders_placed_ts ON paper_orders(placed_ts DESC);
+CREATE INDEX IF NOT EXISTS ix_sniper_paper_orders_placed_ts ON sniper_paper_orders(placed_ts DESC);
 
-CREATE TABLE IF NOT EXISTS paper_positions (
+CREATE TABLE IF NOT EXISTS sniper_paper_positions (
     position_id   BIGSERIAL        PRIMARY KEY,
-    signal_id     BIGINT           REFERENCES paper_signals(signal_id),
-    open_order_id BIGINT           REFERENCES paper_orders(order_id),
-    close_order_id BIGINT          REFERENCES paper_orders(order_id),
+    signal_id     BIGINT           REFERENCES sniper_paper_signals(signal_id),
+    open_order_id BIGINT           REFERENCES sniper_paper_orders(order_id),
+    close_order_id BIGINT          REFERENCES sniper_paper_orders(order_id),
     instrument    TEXT             NOT NULL,
     symbol        TEXT             NOT NULL,
     side          TEXT             NOT NULL,
@@ -92,12 +92,12 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     mfe           DOUBLE PRECISION,
     status        TEXT             NOT NULL   -- 'open' | 'closed'
 );
-CREATE INDEX IF NOT EXISTS ix_paper_positions_status ON paper_positions(status, entry_ts DESC);
+CREATE INDEX IF NOT EXISTS ix_sniper_paper_positions_status ON sniper_paper_positions(status, entry_ts DESC);
 
 -- ─────────────────────────────────────────────────────────────────
 -- Daily P&L roll-up + run metadata
 -- ─────────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS paper_daily_pnl (
+CREATE TABLE IF NOT EXISTS sniper_paper_daily_pnl (
     date          DATE             PRIMARY KEY,
     n_signals     INTEGER          NOT NULL DEFAULT 0,
     n_taken       INTEGER          NOT NULL DEFAULT 0,
@@ -109,7 +109,7 @@ CREATE TABLE IF NOT EXISTS paper_daily_pnl (
     kill_switch_tripped BOOLEAN    NOT NULL DEFAULT FALSE
 );
 
-CREATE TABLE IF NOT EXISTS paper_runs (
+CREATE TABLE IF NOT EXISTS sniper_paper_runs (
     run_id        UUID             PRIMARY KEY,
     started_ts    TIMESTAMPTZ      NOT NULL,
     stopped_ts    TIMESTAMPTZ,

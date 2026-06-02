@@ -673,10 +673,17 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
     def __init__(self) -> None:
         self._sync_state_file_override()
         self._strategy1 = self._build_runtime("macd_strategy", "Strategy 1 · 30m ATM MACD")
+        # Strategy 2 (2026-06-02): DELETED per user instruction. The runtime
+        # is still built and `self._strategy2` stays defined so persisted
+        # state files (which include `index_mp_strategy` blocks from prior
+        # sessions) deserialize without errors and an Auction-Intelligence
+        # workflow can later read S2's last-known positions for audit. But
+        # S2 is REMOVED from `_strategy_agents` so no scan, no run_cycle,
+        # no positions, no signal lane surfaces — the lane is dark to the
+        # UI and to every downstream consumer.
         self._strategy2 = self._build_runtime("index_mp_strategy", "Strategy 2 · 15m Index MACD + MP")
         self._strategy_agents: list[_BaseNSEStrategyLaneAgent] = [
             _Strategy1LaneAgent(self, self._strategy1),
-            _Strategy2LaneAgent(self, self._strategy2),
         ]
         self._strategy = self._strategy1
         self._task: Optional[asyncio.Task] = None

@@ -1,48 +1,67 @@
+"""Cost model sanity tests. Specific rupee values are spot-checks against the published
+Zerodha charge schedule. If you update fee constants, update these values too."""
+
 from __future__ import annotations
 
-from sniper_phase0.labels.cost_model import compute_costs, net_pnl
-from sniper_phase0.utils.settings import Costs
+import pytest
 
-COSTS = Costs(
-    brokerage_per_order_inr=20.0,
-    exchange_txn_charge_bps=0.345,
-    sebi_charge_bps=0.001,
-    stt_bps_sell_side=1.25,
-    stamp_duty_bps_buy_side=0.2,
-    gst_on_brokerage_pct=18.0,
-    gst_on_exchange_pct=18.0,
-    slippage_bps_default=1.5,
-    slippage_bps_event_day=3.0,
-)
+from nomad_sniper.labels.cost_model import ZerodhaFnoCostModel
 
 
-def test_costs_are_positive_and_finite() -> None:
-    tc = compute_costs(entry_price=25000.0, exit_price=25100.0, qty=25, costs=COSTS)
-    assert tc.total > 0
-    assert tc.brokerage == 40.0  # 20 x 2
-    assert tc.stt > 0
-    assert tc.gst > 0
+def test_long_future_costs_are_positive():
+    cm = ZerodhaFnoCostModel(slippage_inr_per_share=0.05)
+    breakdown = cm.compute(
+        instrument_type="future",
+        direction="long",
+        entry_price=22000.0,
+        exit_price=22050.0,
+        quantity=50,
+    )
+    assert breakdown.brokerage > 0
+    assert breakdown.stt > 0
+    assert breakdown.exchange_fee > 0
+    assert breakdown.gst > 0
+    assert breakdown.slippage == pytest.approx(0.05 * 50 * 2)
+    assert breakdown.total > 0
 
 
-def test_long_pnl_sign() -> None:
-    gross, net, _ = net_pnl(25000, 25100, 25, "long", COSTS)
-    assert gross == 100 * 25
-    assert net < gross  # costs eat into pnl
+def test_short_option_costs_are_positive():
+    cm = ZerodhaFnoCostModel(slippage_inr_per_share=0.20)
+    breakdown = cm.compute(
+        instrument_type="option",
+        direction="short",
+        entry_price=100.0,
+        exit_price=70.0,
+        quantity=50,
+    )
+    assert breakdown.total > 0
+    # Option STT (0.10% on sell) should be higher than future STT (0.02%)
+    fut_breakdown = cm.compute(
+        instrument_type="future",
+        direction="short",
+        entry_price=100.0,
+        exit_price=70.0,
+        quantity=50,
+    )
+    assert breakdown.stt > fut_breakdown.stt
 
 
-def test_short_pnl_sign() -> None:
-    gross, net, _ = net_pnl(25000, 24900, 25, "short", COSTS)
-    assert gross == 100 * 25
-    assert net < gross
+def test_brokerage_cap_at_20_rupees():
+    cm = ZerodhaFnoCostModel()
+    # Large notional — 0.03% would be huge, brokerage should cap at ₹20/leg = ₹40 total
+    breakdown = cm.compute(
+        instrument_type="future",
+        direction="long",
+        entry_price=50000.0,
+        exit_price=50100.0,
+        quantity=100,
+    )
+    assert breakdown.brokerage == pytest.approx(40.0, abs=0.5)
 
 
-def test_event_day_slippage_higher() -> None:
-    _g1, n1, _ = net_pnl(25000, 25100, 25, "long", COSTS, is_event_day=False)
-    _g2, n2, _ = net_pnl(25000, 25100, 25, "long", COSTS, is_event_day=True)
-    assert n2 < n1
-
-
-def test_slippage_multiplier_scales() -> None:
-    _g1, n1, _ = net_pnl(25000, 25100, 25, "long", COSTS, slippage_multiplier=1.0)
-    _g2, n2, _ = net_pnl(25000, 25100, 25, "long", COSTS, slippage_multiplier=2.0)
-    assert n2 < n1
+def test_slippage_calibration():
+    cm = ZerodhaFnoCostModel(slippage_inr_per_share=0.10)
+    cm.calibrate_slippage(0.25)
+    assert cm.slippage_inr_per_share == 0.25
+    with pytest.raises(ValueError):
+        cm.calibrate_slippage(-0.1)

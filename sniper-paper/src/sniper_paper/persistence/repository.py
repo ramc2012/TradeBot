@@ -13,7 +13,7 @@ import asyncpg
 async def insert_tick(pool: asyncpg.Pool, row: dict) -> None:
     await pool.execute(
         """
-        INSERT INTO paper_ticks
+        INSERT INTO sniper_paper_ticks
             (ts, symbol, instrument, ltp, last_qty,
              bid_px_1, ask_px_1, bid_qty_1, ask_qty_1, oi, raw)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -36,7 +36,7 @@ async def insert_ticks_batch(pool: asyncpg.Pool, rows: list[dict]) -> None:
         for r in rows
     ]
     await pool.copy_records_to_table(
-        "paper_ticks",
+        "sniper_paper_ticks",
         records=records,
         columns=["ts", "symbol", "instrument", "ltp", "last_qty",
                  "bid_px_1", "ask_px_1", "bid_qty_1", "ask_qty_1", "oi", "raw"],
@@ -49,7 +49,7 @@ async def recent_ticks(
     rows = await pool.fetch(
         """
         SELECT ts, ltp, last_qty, bid_px_1, ask_px_1, bid_qty_1, ask_qty_1
-        FROM paper_ticks
+        FROM sniper_paper_ticks
         WHERE symbol = $1 AND ts > NOW() - ($2 || ' seconds')::INTERVAL
         ORDER BY ts ASC
         """,
@@ -64,7 +64,7 @@ async def session_ticks(
     rows = await pool.fetch(
         """
         SELECT ts, ltp, last_qty
-        FROM paper_ticks
+        FROM sniper_paper_ticks
         WHERE symbol = $1 AND ts >= $2 AND ts < $3
         ORDER BY ts ASC
         """,
@@ -77,7 +77,7 @@ async def session_ticks(
 async def insert_signal(pool: asyncpg.Pool, sig: dict) -> int:
     return await pool.fetchval(
         """
-        INSERT INTO paper_signals
+        INSERT INTO sniper_paper_signals
             (decision_ts, instrument, symbol, setup_name, side,
              entry_price, stop_price, target_price,
              p_win, expected_net_R, in_distribution,
@@ -97,7 +97,7 @@ async def insert_signal(pool: asyncpg.Pool, sig: dict) -> int:
 async def insert_order(pool: asyncpg.Pool, order: dict) -> int:
     return await pool.fetchval(
         """
-        INSERT INTO paper_orders
+        INSERT INTO sniper_paper_orders
             (signal_id, placed_ts, instrument, symbol, side, qty,
              intended_price, fill_ts, fill_price, slippage_inr, status)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -113,7 +113,7 @@ async def insert_order(pool: asyncpg.Pool, order: dict) -> int:
 async def insert_position(pool: asyncpg.Pool, pos: dict) -> int:
     return await pool.fetchval(
         """
-        INSERT INTO paper_positions
+        INSERT INTO sniper_paper_positions
             (signal_id, open_order_id, instrument, symbol, side, qty,
              entry_ts, entry_price, stop_price, target_price, status)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'open')
@@ -128,7 +128,7 @@ async def insert_position(pool: asyncpg.Pool, pos: dict) -> int:
 async def close_position(pool: asyncpg.Pool, position_id: int, close: dict) -> None:
     await pool.execute(
         """
-        UPDATE paper_positions
+        UPDATE sniper_paper_positions
         SET close_order_id = $2, exit_ts = $3, exit_price = $4,
             outcome = $5, gross_pnl = $6, costs_inr = $7,
             net_pnl = $8, net_R = $9, mae = $10, mfe = $11, status = 'closed'
@@ -141,7 +141,7 @@ async def close_position(pool: asyncpg.Pool, position_id: int, close: dict) -> N
 
 
 async def open_positions(pool: asyncpg.Pool) -> list[dict]:
-    rows = await pool.fetch("SELECT * FROM paper_positions WHERE status = 'open'")
+    rows = await pool.fetch("SELECT * FROM sniper_paper_positions WHERE status = 'open'")
     return [dict(r) for r in rows]
 
 
@@ -149,7 +149,7 @@ async def open_positions(pool: asyncpg.Pool) -> list[dict]:
 async def upsert_daily_pnl(pool: asyncpg.Pool, row: dict) -> None:
     await pool.execute(
         """
-        INSERT INTO paper_daily_pnl
+        INSERT INTO sniper_paper_daily_pnl
             (date, n_signals, n_taken, n_skipped,
              gross_pnl, costs_inr, net_pnl, consec_losses, kill_switch_tripped)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -170,14 +170,14 @@ async def upsert_daily_pnl(pool: asyncpg.Pool, row: dict) -> None:
 
 
 async def get_daily_pnl(pool: asyncpg.Pool, date) -> dict | None:
-    row = await pool.fetchrow("SELECT * FROM paper_daily_pnl WHERE date = $1", date)
+    row = await pool.fetchrow("SELECT * FROM sniper_paper_daily_pnl WHERE date = $1", date)
     return dict(row) if row else None
 
 
 async def insert_run(pool: asyncpg.Pool, run: dict) -> UUID:
     await pool.execute(
         """
-        INSERT INTO paper_runs (run_id, started_ts, model_artifact, config_hash, git_sha, notes)
+        INSERT INTO sniper_paper_runs (run_id, started_ts, model_artifact, config_hash, git_sha, notes)
         VALUES ($1, $2, $3, $4, $5, $6)
         """,
         run["run_id"], run["started_ts"], run["model_artifact"],

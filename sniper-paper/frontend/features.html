@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Sniper Paper · Features</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <nav class="topnav">
+    <a href="/">Overview</a>
+    <a href="/model.html">Model</a>
+    <a href="/features.html" class="active">Features</a>
+    <a href="/signals.html">Signals</a>
+  </nav>
+
+  <main>
+    <section class="card">
+      <h2>Feature inspector</h2>
+      <div class="controls">
+        <label>Feature
+          <select id="feature-pick"></select>
+        </label>
+        <label>Instrument
+          <select id="instrument-pick">
+            <option value="">(all)</option>
+            <option>NIFTY</option><option>SENSEX</option><option>CRUDE</option>
+          </select>
+        </label>
+        <label>Hours (timeseries)
+          <input id="hours" type="number" min="1" max="240" value="24" />
+        </label>
+        <button id="refresh">Refresh</button>
+      </div>
+
+      <div class="two-col">
+        <div>
+          <h3>Distribution (recent signals)</h3>
+          <div class="chartbox" style="height:260px"><canvas id="dist-chart"></canvas></div>
+          <div id="dist-stats" class="kv"></div>
+        </div>
+        <div>
+          <h3>Time series</h3>
+          <div class="chartbox" style="height:260px"><canvas id="ts-chart"></canvas></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script>
+    let distChart, tsChart;
+
+    async function loadFeatures() {
+      const data = await fetchJSON("/api/features/list");
+      const sel = document.getElementById("feature-pick");
+      data.features.forEach(f => {
+        const o = document.createElement("option");
+        o.value = f; o.textContent = f;
+        sel.appendChild(o);
+      });
+      if (data.features.length) {
+        sel.value = data.features[0];
+        await renderAll();
+      }
+    }
+
+    async function renderAll() {
+      const f = document.getElementById("feature-pick").value;
+      const inst = document.getElementById("instrument-pick").value || "";
+      const hours = document.getElementById("hours").value;
+
+      const q1 = new URLSearchParams({ feature: f });
+      if (inst) q1.append("instrument", inst);
+      const dist = await fetchJSON("/api/features/distribution?" + q1.toString());
+
+      if (distChart) distChart.destroy();
+      distChart = makeHist("dist-chart", dist.bins, f, "rgba(99, 168, 234, 0.7)");
+      document.getElementById("dist-stats").innerHTML = dist.n
+        ? `<div><span>n</span><b>${dist.n}</b></div>
+           <div><span>mean ± std</span>${dist.mean.toFixed(4)} ± ${dist.std.toFixed(4)}</div>
+           <div><span>p05 / p50 / p95</span>${dist.p05.toFixed(4)} / ${dist.p50.toFixed(4)} / ${dist.p95.toFixed(4)}</div>`
+        : "(no values for this feature)";
+
+      if (inst) {
+        const q2 = new URLSearchParams({ feature: f, instrument: inst, hours });
+        const ts = await fetchJSON("/api/features/timeseries?" + q2.toString());
+        if (tsChart) tsChart.destroy();
+        tsChart = new Chart(document.getElementById("ts-chart").getContext("2d"), {
+          type: "line",
+          data: {
+            labels: ts.series.map(p => p.ts),
+            datasets: [{
+              label: f,
+              data: ts.series.map(p => p.value),
+              borderColor: "rgba(82, 196, 156, 1.0)",
+              backgroundColor: "rgba(82, 196, 156, 0.15)",
+              pointRadius: 0,
+              tension: 0.15,
+            }],
+          },
+          options: chartOpts(),
+        });
+      }
+    }
+
+    document.getElementById("refresh").addEventListener("click", renderAll);
+    document.getElementById("feature-pick").addEventListener("change", renderAll);
+    document.getElementById("instrument-pick").addEventListener("change", renderAll);
+    loadFeatures().catch(alertErr);
+  </script>
+</body>
+</html>
