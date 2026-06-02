@@ -211,6 +211,18 @@ async def capture_live_paper_cycle(
     # market-hours cycle in `last_result_meta` / docker logs names the gate.
     decisions = list(bundle.agent_decisions or [])
     non_flat = [d for d in decisions if getattr(d, "action", "FLAT") != "FLAT"]
+    # When every agent is FLAT, capture WHY per agent (each agent stamps a
+    # `flat_reason` into decision.metadata — e.g. no_scalp_alignment,
+    # confidence_below_threshold, a setup-mismatch tag). This is the layer
+    # below `all_decisions_flat`: it names which condition each agent failed,
+    # so the fix (loosen a threshold vs add a missing setup) is obvious.
+    flat_reasons: dict[str, str] = {}
+    for d in decisions:
+        if getattr(d, "action", "FLAT") == "FLAT":
+            meta = getattr(d, "metadata", {}) or {}
+            flat_reasons[str(getattr(d, "agent_name", "?"))] = str(
+                meta.get("flat_reason") or "unspecified"
+            )
     risk_allowed = bool(getattr(bundle.risk, "allowed", False))
     risk_reasons = list(getattr(bundle.risk, "reasons", []) or [])
     exec_count = len(list(bundle.execution_plan or []))
@@ -225,9 +237,9 @@ async def capture_live_paper_cycle(
     sym_code = str(snapshot.get("symbol_code") or symbol).upper()
     logger.info(
         "auction.cycle symbol={sym} gate={gate} decisions={dc} non_flat={nf} "
-        "risk_allowed={ra} risk_reasons={rr} executions={ec}",
+        "risk_allowed={ra} risk_reasons={rr} flat_reasons={fr} executions={ec}",
         sym=sym_code, gate=gate, dc=len(decisions), nf=len(non_flat),
-        ra=risk_allowed, rr=risk_reasons, ec=exec_count,
+        ra=risk_allowed, rr=risk_reasons, fr=flat_reasons, ec=exec_count,
     )
 
     return {
@@ -239,6 +251,7 @@ async def capture_live_paper_cycle(
         "non_flat_decision_count": len(non_flat),
         "risk_allowed": risk_allowed,
         "risk_reasons": risk_reasons,
+        "flat_reasons": flat_reasons,
         "no_trade_gate": gate,
         "execution_count": exec_count,
         "journal_paths": journal_paths,
