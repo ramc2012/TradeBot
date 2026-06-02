@@ -335,6 +335,16 @@ class StrategyEntryMixin:
     ) -> None:
         capacity = max(self.max_positions - len(runtime.positions), 0)
         cap_reached = capacity <= 0
+        # Observability: log per-cycle scan dimensions so when entries
+        # don't fire we can tell whether the scan ran at all and what
+        # universe it considered. Was silent before — only successful
+        # signals or post-summary "Scanned N instruments…" reached logs,
+        # and that summary lives on runtime.last_message, not stderr.
+        logger.debug(
+            f"[{runtime.key}] _scan_entries: rows={len(rows)} "
+            f"windows={len(window_map)} positions={len(runtime.positions)}/"
+            f"{self.max_positions} capacity={capacity}"
+        )
 
         candidates: list[dict[str, Any]] = []
         snapshot_state = await self._load_strategy1_recent_snapshot_state(rows)

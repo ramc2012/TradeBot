@@ -164,10 +164,26 @@ def _report_interval_seconds(value: str) -> int:
     return mapping.get(str(value or "1h"), 3600)
 
 
-# S2 trades only the three most liquid index option books. FINNIFTY and
-# MIDCPNIFTY were dropped to keep the per-scan MP+OF cost within the box's
-# single-core budget (running MP+OF for all five pegged the CPU).
-STRATEGY2_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "SENSEX")
+# S2 trades INDEX WEEKLIES on a 15-min MACD + Market-Profile gate.
+# Universe is currently {NIFTY, SENSEX}:
+#   - FINNIFTY + MIDCPNIFTY were dropped earlier to keep the per-scan
+#     MP+OF cost within the box's single-core budget (running MP+OF for
+#     all five pegged the CPU).
+#   - BANKNIFTY was dropped on 2026-06-02 because NSE retired BANKNIFTY
+#     weekly options in November 2024. Only the monthly contract exists,
+#     but S2_CONTRACT_PROFILE asks for `index_expiry="weekly"` — so MI
+#     consistently served only 2 weekly rows per cycle (NIFTY + SENSEX)
+#     and silently dropped BANKNIFTY from the scan. The journal shows it
+#     as `[Strategy2] MI served 2 weekly rows ... expiries=['2026-06-02',
+#     '2026-06-30', '2026-06-04']` — the 2026-06-30 entry was MI
+#     correctly resolving BANKNIFTY's next available expiry as the
+#     monthly, which the weekly-only profile then filtered out.
+#
+# If BANKNIFTY coverage matters more than weekly precision, the right
+# fix is a new profile (e.g. s2_banknifty_monthly) with its own MACD/MP
+# tuning — not stretching the weekly-tuned strike + decay logic onto
+# month-long contracts.
+STRATEGY2_UNDERLYINGS = ("NIFTY", "SENSEX")
 STRATEGY2_OPTION_TIMEFRAME = "15minute"
 STRATEGY2_OPTION_BAR_MINUTES = 15
 STRATEGY2_ENTRY_CUTOFF = time(15, 0)
