@@ -133,6 +133,8 @@ type OrderRow = {
   qty: number;
   price?: number | null;
   status: string;
+  created_at?: string | null;
+  strategy_key?: string | null;
 };
 
 type RiskStatus = {
@@ -352,10 +354,19 @@ const PositionsTable = memo(function PositionsTable({
 });
 
 const TradeHistoryTable = memo(function TradeHistoryTable({ trades }: { trades: TradeRecord[] }) {
-  if (!trades.length) {
+  // Scope to TODAY (IST). Full history is owned by the Reports module, not
+  // by the per-lane Trades tab on the live dashboard — the user's daily
+  // workflow only needs "what closed today".
+  const todayIST = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  const todays = trades.filter((trade) => {
+    const exited = (trade as { exit_time?: string }).exit_time || "";
+    return typeof exited === "string" && exited.startsWith(todayIST);
+  });
+
+  if (!todays.length) {
     return (
       <div className="flex min-h-[160px] items-center justify-center rounded-xl border border-dashed border-bg-border text-sm text-text-muted">
-        No closed trades in this lane yet.
+        No closed trades in this lane today.
       </div>
     );
   }
@@ -375,9 +386,15 @@ const TradeHistoryTable = memo(function TradeHistoryTable({ trades }: { trades: 
           </tr>
         </thead>
         <tbody>
-          {[...trades].reverse().map((trade, index) => {
-            const retPct = trade.entry_price && trade.exit_price
-              ? ((trade.exit_price - trade.entry_price) / trade.entry_price) * 100
+          {[...todays].reverse().map((trade, index) => {
+            // Derive Ret% from realized P&L so the column ALWAYS agrees in
+            // sign and magnitude with the P&L column. The old derivation —
+            // (exit-entry)/entry — ignored trade direction and turned a
+            // profitable SHORT into a negative %, which was the user-flagged
+            // "P&L and % return don't match" bug.
+            const notional = (trade.entry_price || 0) * (trade.qty || 0);
+            const retPct = notional > 0 && trade.pnl != null
+              ? (trade.pnl / notional) * 100
               : null;
             return (
               <tr key={`${trade.symbol}-${trade.exit_time || trade.entry_time || index}`} className="border-b border-bg-border/40">
@@ -566,7 +583,20 @@ export default function StrategyDashboard() {
 
   const agentStatus = dashboardQuery.data?.agent_status;
   const killSwitchState = dashboardQuery.data?.kill_switch_state;
-  const orders = dashboardQuery.data?.orders;
+  // Scope the order queue to today (IST) only. The endpoint returns OPEN
+  // orders so this is normally a no-op, but stale-queue rows from a prior
+  // session that never closed shouldn't surface here — those belong in
+  // Reports, not the live blotter.
+  const rawOrders = dashboardQuery.data?.orders;
+  const orders = useMemo(() => {
+    if (!rawOrders) return rawOrders;
+    const todayIST = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+    return rawOrders.filter((order) => {
+      const ts = order.created_at || "";
+      // Keep undated rows (defensive — better to show than hide a live order).
+      return !ts || ts.startsWith(todayIST);
+    });
+  }, [rawOrders]);
   const riskStatus = dashboardQuery.data?.risk_status;
   const equityCurves = dashboardQuery.data?.equity_curves;
   const isLoading = dashboardQuery.isLoading;

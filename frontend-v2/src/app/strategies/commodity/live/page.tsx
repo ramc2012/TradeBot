@@ -2379,15 +2379,20 @@ function InstrumentDetailModal({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="relative max-h-[94vh] w-full max-w-[1500px] overflow-y-auto rounded-lg bg-bg-primary p-5 ring-1 ring-bg-secondary/40"
+        className="relative max-h-[94vh] w-full max-w-[1500px] rounded-lg bg-bg-primary ring-1 ring-bg-secondary/40 flex flex-col"
       >
+        {/* Close button lives OUTSIDE the scroll container so it stays
+            visible even after scrolling the long detailed-chart body. */}
         <button
           type="button"
           onClick={onClose}
-          className="absolute right-3 top-3 rounded p-1 text-text-muted hover:bg-bg-secondary/30 hover:text-text-primary"
+          aria-label="Close detailed chart"
+          className="absolute right-3 top-3 z-10 rounded p-1 text-text-muted bg-bg-primary/80 backdrop-blur-sm hover:bg-bg-secondary/60 hover:text-text-primary"
         >
           <X className="h-4 w-4" />
         </button>
+
+        <div className="overflow-y-auto p-5">
 
         {/* Title */}
         <div className="mb-4 flex items-baseline justify-between">
@@ -2683,6 +2688,7 @@ function InstrumentDetailModal({
           </div>
         ) : null}
 
+        </div>{/* /scrollable body */}
       </div>
     </div>
   );
