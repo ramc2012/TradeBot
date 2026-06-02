@@ -170,7 +170,7 @@ jobs:
           # failed exec attempts — these accumulate by the tens of
           # thousands when /tmp gets tight.
           find /tmp -maxdepth 1 -name 'runc-process*' -mmin +30 -delete 2>/dev/null || true
-          echo "    /tmp now: \$(df -h /tmp | awk 'NR==2 {print \$3 \" used / \" \$2 \" total (\" \$5 \" used)\"}')"
+          echo "    /tmp now:"; df -h /tmp | tail -1
 
           BACKUP="/tmp/tradebot_runtime_backup_\$(date +%s)"
           mkdir -p "\$BACKUP"
@@ -192,11 +192,24 @@ jobs:
           git clean -fd
 
           echo "==> Restoring runtime state over committed snapshot..."
+          # backend/runtime is GITIGNORED — `git reset --hard` + `git clean -fd`
+          # never touch it, so the on-disk copy is already the authoritative
+          # live state and this restore is belt-and-suspenders. The old
+          # `rm -rf "\$relpath"; cp -a "\$src" "\$relpath"` RACED the bind-mounted
+          # backend container, which actively repopulates runtime/ between the
+          # rm and the cp → "cp: cannot create directory: File exists" → the
+          # whole deploy aborted before the Docker build even started (every
+          # deploy 2026-06-02). Fix: tolerant merge-copy that overwrites in
+          # place, and NEVER let a restore hiccup fail the deploy.
           for relpath in backend/runtime backend/commodity_strategy.json backend/nse_strategy_state.json; do
             src="\$BACKUP/\$relpath"
             if [ -e "\$src" ]; then
-              rm -rf "\$relpath"
-              cp -a "\$src" "\$relpath"
+              if [ -d "\$src" ]; then
+                mkdir -p "\$relpath"
+                cp -af "\$src/." "\$relpath/" 2>/dev/null || true
+              else
+                cp -af "\$src" "\$relpath" 2>/dev/null || true
+              fi
               echo "    restored \$relpath"
             fi
           done
