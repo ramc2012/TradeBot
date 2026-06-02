@@ -151,6 +151,22 @@ jobs:
           # because those contain paper-book history that's only here, not
           # in the database. Code is unaffected because all of it is on
           # origin/main already.
+          # Prune old runtime backups BEFORE writing a new one — keep
+          # only the most recent 1 successful backup (the new one will
+          # become the 2nd). Each backup is ~460MB; without pruning,
+          # /tmp (a 1.9GB tmpfs) fills after 4 deploys and then every
+          # docker exec on the box starts failing with
+          # "no space left on device" — which is the cascade that
+          # silently broke our supervisors / chain-analytics / CBE /
+          # docker-exec diagnostics on 2026-06-02.
+          echo "==> Pruning old runtime backups (keep newest 1)..."
+          ls -1dt /tmp/tradebot_runtime_backup_* 2>/dev/null | tail -n +2 | xargs -r rm -rf
+          # Also clean any stray leaked runc-process files from prior
+          # failed exec attempts — these accumulate by the tens of
+          # thousands when /tmp gets tight.
+          find /tmp -maxdepth 1 -name 'runc-process*' -mmin +30 -delete 2>/dev/null || true
+          echo "    /tmp now: \$(df -h /tmp | awk 'NR==2 {print \$3 \" used / \" \$2 \" total (\" \$5 \" used)\"}')"
+
           BACKUP="/tmp/tradebot_runtime_backup_\$(date +%s)"
           mkdir -p "\$BACKUP"
           echo "==> Backing up live runtime state to \$BACKUP"
