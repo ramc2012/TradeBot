@@ -51,3 +51,43 @@ backend/reports/
 htmlcov/
 dist/
 build/
+
+# ── 2026-06-02 cleanup: keep these OUT of git ──────────────────────────
+# Equity-research / backtesting datasets (multi-ticker minute bars).
+# These live under /data/ and are large (~500MB total). Local working
+# files; not part of the trading platform code.
+/data/AAPL/
+/data/AMZN/
+/data/DIA/
+/data/GOOGL/
+/data/META/
+/data/MSFT/
+/data/NVDA/
+/data/QQQ/
+/data/SPY/
+/data/TSLA/
+
+# Ad-hoc backend diagnostic / probe scripts that get written during
+# investigation. They're useful locally, not part of the deployed app.
+/backend/diag*.py
+/backend/exp_probe.py
+/backend/fut_probe.py
+/backend/fut_span.py
+/backend/tok_test.py
+
+# Sniper-paper work-in-progress files that hadn't been intentionally
+# staged. The 20 baseline files committed before 2026-06-02 remain
+# tracked; only the WIP additions are ignored. (Specific .gitignore
+# in sniper-paper/ takes precedence; this is a backstop.)
+/sniper-paper/Dockerfile
+/sniper-paper/README.md
+/sniper-paper/docker-compose.yml
+/sniper-paper/docs/
+/sniper-paper/frontend/
+/sniper-paper/src/sniper_paper/api/
+/sniper-paper/src/sniper_paper/cli.py
+/sniper-paper/src/sniper_paper/execution/
+/sniper-paper/src/sniper_paper/features/live.py
+/sniper-paper/src/sniper_paper/ingest/broker_creds.py
+/sniper-paper/src/sniper_paper/model/
+/sniper-paper/src/sniper_paper/runner.py

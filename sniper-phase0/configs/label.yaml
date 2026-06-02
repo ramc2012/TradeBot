@@ -1,5 +1,0 @@
-grid_minutes: 5
-label_horizon_minutes: 60
-barrier_m: 1.0
-m_breakeven: 0.75
-gate_mode: atr_proxy
