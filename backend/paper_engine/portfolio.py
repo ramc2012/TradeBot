@@ -246,8 +246,21 @@ class PaperPortfolio:
         return sum(t.pnl for t in self._trade_history)
 
     @property
-    def day_pnl(self) -> float:
+    def day_realized_pnl(self) -> float:
+        """P&L from trades CLOSED today. Distinct from `day_pnl`, which
+        also includes today's mark-to-market on still-open positions."""
         return self._daily_pnl.get(date.today(), 0.0)
+
+    @property
+    def day_pnl(self) -> float:
+        """Today's TOTAL P&L change = realized-today + current unrealized MTM.
+
+        This is what a trader means by "Day P&L" — what the account moved
+        today, whether the move came from closed trades or from open
+        positions riding intra-day. Previously this returned realized-today
+        only, which left the UI showing open P&L under "Day P&L" as a
+        workaround. Lifetime realized P&L remains exposed on `realized_pnl`."""
+        return self.day_realized_pnl + self.unrealized_pnl
 
     @property
     def max_drawdown(self) -> float:
@@ -337,7 +350,11 @@ class PaperPortfolio:
             "total_equity": safe_round(self.total_equity, 2),
             "unrealized_pnl": safe_round(self.unrealized_pnl, 2),
             "realized_pnl": safe_round(self.realized_pnl, 2),
+            # P&L split (2026-06-02): UI now shows Day P&L (realized-today +
+            # open MTM) AND lifetime realized P&L as separate cards.
             "day_pnl": safe_round(self.day_pnl, 2),
+            "day_realized_pnl": safe_round(self.day_realized_pnl, 2),
+            "realized_pnl_lifetime": safe_round(self.realized_pnl, 2),
             "total_trades": len(self._trade_history),
             "win_rate": safe_round(self.win_rate, 4),
             "avg_win": safe_round(self.avg_win, 2),
