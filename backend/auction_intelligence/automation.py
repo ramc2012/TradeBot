@@ -188,6 +188,24 @@ async def capture_live_paper_cycle(
     session_payload = dict(request["session"])
     session_payload["broker_connected"] = True
     session_payload["stale_data_seconds"] = 0.0
+    # Paper-mode portfolio sizing fix (2026-06-03): _load_portfolio_snapshot
+    # populates net_liquidation from the LIVE broker funds (adapter.get_funds).
+    # This data/paper broker account is near-empty, so net_liquidation was a
+    # few thousand rupees → every agent's
+    #   quantity = floor(net_liq * sleeve_fraction / margin_per_lot) * lot_size
+    # floored to 0 → all three agents returned `insufficient_notional` every
+    # cycle → AI made 0 paper trades for its entire lifetime. Paper trading
+    # must size against the PAPER account's notional capital (the same
+    # shadow_net_liquidation the shadow path uses), exactly like every other
+    # paper desk uses its ₹1,000,000 PaperPortfolio — not the real broker
+    # balance. Override net_liquidation for the paper cycle only; live-money
+    # trading still sizes against real funds.
+    portfolio_payload = dict(request.get("portfolio", {}))
+    paper_capital = float(
+        clone_default_config().get("paper_trading", {}).get("shadow_net_liquidation", 1_000_000.0)
+    )
+    if not portfolio_payload.get("net_liquidation") or float(portfolio_payload["net_liquidation"]) < paper_capital:
+        portfolio_payload["net_liquidation"] = paper_capital
     service = AuctionIntelligenceService(paper_mode=True)
     bundle, journal_paths, paper_positions = await service.analyze_and_record_option_paper(
         session=SessionContext(**session_payload),
@@ -196,7 +214,7 @@ async def capture_live_paper_cycle(
         trades=[TradePrint(**_parse_trade(item)) for item in request.get("trades", [])],
         prior_bars=[MarketBar(**_parse_bar(item)) for item in request.get("prior_bars", [])],
         depth=_depth_snapshot(request.get("depth")),
-        portfolio=PortfolioSnapshot(**request.get("portfolio", {})),
+        portfolio=PortfolioSnapshot(**portfolio_payload),
         quote_history=[QuoteSnapshot(**_parse_quote(item)) for item in request.get("quote_history", [])],
     )
     records = build_shadow_records_from_snapshot(snapshot, shadow_options)
