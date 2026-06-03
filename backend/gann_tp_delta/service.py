@@ -123,7 +123,53 @@ class GannTPDeltaService:
         return {"recorded": True, "record": record}
 
     def paper_journal(self, symbol: str | None = None, limit: int = 50) -> dict[str, Any]:
-        return self.paper.list(symbol=symbol, limit=limit)
+        """Trade journal for the AUTONOMOUS paper agent (the supervisor-run trades).
+
+        Historically this read only the manual proposal store (`paper_journal.jsonl`), which is
+        empty unless someone POSTs /paper-proposal — so the agent's real autonomous trades (in
+        `agent_positions.json` / `paper_agent_journal.jsonl`) were invisible to the UI. It now
+        surfaces the agent's closed + open positions as journal rows (and still returns any manual
+        proposals separately). Shape stays backward-compatible: `{records, summary}`."""
+        status = self.paper_agent.status(limit=200)
+        closed = status.get("closed_positions") or []
+        openp = status.get("open_positions") or []
+
+        def _row(p: dict[str, Any], kind: str) -> dict[str, Any]:
+            return {
+                "recorded_at": p.get("updated_at") or p.get("opened_at"),
+                "kind": kind,
+                "underlying": p.get("underlying"),
+                "instrument_type": p.get("instrument_type"),
+                "direction": p.get("thesis_side") or p.get("direction"),
+                "archetype": p.get("archetype"),
+                "regime": p.get("regime"),
+                "conviction": p.get("conviction"),
+                "opened_at": p.get("opened_at"),
+                "closed_at": p.get("updated_at") if kind == "closed" else None,
+                "exit_reason": p.get("exit_reason"),
+                "bars_held": p.get("bars_held"),
+                "realized_pnl": p.get("realized_pnl"),
+                "unrealized_pnl": p.get("unrealized_pnl"),
+                "position": p,
+            }
+
+        records = [_row(p, "closed") for p in closed] + [_row(p, "open") for p in openp]
+        if symbol:
+            records = [r for r in records if str(r.get("underlying") or "").upper() == symbol.upper()]
+        records.sort(key=lambda r: str(r.get("recorded_at") or ""), reverse=True)
+        records = records[: int(limit)]
+        manual = self.paper.list(symbol=symbol, limit=int(limit)).get("records", [])
+        return {
+            "records": records,
+            "manual_proposals": manual,
+            "summary": {
+                **status.get("summary", {}),
+                "count": len(records),
+                "latest": records[0].get("recorded_at") if records else None,
+                "last_scan_at": status.get("last_scan_at"),
+                "last_message": status.get("last_message"),
+            },
+        }
 
     def paper_agent_status(self, limit: int = 50) -> dict[str, Any]:
         return self.paper_agent.status(limit=limit)
