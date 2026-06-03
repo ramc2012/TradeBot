@@ -465,6 +465,21 @@ class FyersAdapter(BrokerAdapter):
 
     def _handle_tick(self, msg: dict, callback: Callable[[Tick], None]):
         try:
+            def _first(*keys):
+                for k in keys:
+                    v = msg.get(k)
+                    if v is not None:
+                        return v
+                return 0
+            # Fyers SymbolUpdate (data_val) carries REAL top-of-book under
+            # bid_price/ask_price + bid_size/ask_size for tradable contracts
+            # (futures/options). The old code read "bid"/"ask" — keys that
+            # don't exist in data_val — and never set sizes, so bid_qty/ask_qty
+            # defaulted to 0. Downstream the auction-intelligence order-flow
+            # path then floored sizes to 1.0 and fabricated the whole book
+            # (the book_pressure=0.1125 / candle-color tape we traced). Read
+            # the real keys with a fallback to the legacy ones. Index spot
+            # symbols carry no book, so these stay 0 there — harmless.
             tick = Tick(
                 symbol=msg.get("symbol") or msg.get("n", ""),
                 ltp=msg.get("ltp", 0),
@@ -474,8 +489,10 @@ class FyersAdapter(BrokerAdapter):
                 close=msg.get("prev_close_price", 0),
                 volume=msg.get("vol_traded_today", 0),
                 oi=msg.get("oi", 0),
-                bid=msg.get("bid", 0),
-                ask=msg.get("ask", 0),
+                bid=_first("bid_price", "bid"),
+                ask=_first("ask_price", "ask"),
+                bid_qty=_first("bid_size", "bid_qty"),
+                ask_qty=_first("ask_size", "ask_qty"),
                 timestamp=datetime.now(UTC),
             )
             callback(tick)

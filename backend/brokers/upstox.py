@@ -335,11 +335,32 @@ class UpstoxAdapter(BrokerAdapter):
                         return entry
                 return ohlc_entries[-1] if ohlc_entries else {}
 
+            def _top_of_book(container: dict) -> tuple[float, float, int, int]:
+                # Upstox full mode (marketFF) and firstLevelWithGreeks carry the
+                # real book under `bidAskQuote` (level fields bidP/bidQ/askP/askQ).
+                # The old build_tick discarded it, so the auction-intelligence
+                # order-flow path saw no sizes and fabricated the whole book.
+                # Pull top-of-book; tolerate list-or-dict shape and missing keys
+                # (index feeds carry no book → returns zeros, harmless).
+                q = container.get("bidAskQuote") if isinstance(container, dict) else None
+                if isinstance(q, list):
+                    q = q[0] if q else None
+                if isinstance(q, dict):
+                    return (
+                        float(q.get("bidP", 0) or 0),
+                        float(q.get("askP", 0) or 0),
+                        int(q.get("bidQ", 0) or 0),
+                        int(q.get("askQ", 0) or 0),
+                    )
+                return (0.0, 0.0, 0, 0)
+
             def build_tick(feed_key: str, feed: dict) -> Optional[Tick]:
                 ltpc = {}
                 ohlc_entries: list[dict] = []
                 volume = 0
                 oi = 0
+                bid = ask = 0.0
+                bid_qty = ask_qty = 0
 
                 if "fullFeed" in feed:
                     full_feed = feed.get("fullFeed", {})
@@ -348,11 +369,13 @@ class UpstoxAdapter(BrokerAdapter):
                     ohlc_entries = (full_union.get("marketOHLC") or {}).get("ohlc", [])
                     volume = int(full_union.get("vtt", 0) or 0)
                     oi = int(full_union.get("oi", 0) or 0)
+                    bid, ask, bid_qty, ask_qty = _top_of_book(full_union.get("marketLevel", {}) or {})
                 elif "firstLevelWithGreeks" in feed:
                     first_level = feed.get("firstLevelWithGreeks", {})
                     ltpc = first_level.get("ltpc", {})
                     volume = int(first_level.get("vtt", 0) or 0)
                     oi = int(first_level.get("oi", 0) or 0)
+                    bid, ask, bid_qty, ask_qty = _top_of_book(first_level.get("firstLevel", {}) or {})
                 else:
                     ltpc = feed.get("ltpc", {})
 
@@ -372,6 +395,10 @@ class UpstoxAdapter(BrokerAdapter):
                     close=prev_close,
                     volume=volume,
                     oi=oi,
+                    bid=bid,
+                    ask=ask,
+                    bid_qty=bid_qty,
+                    ask_qty=ask_qty,
                     timestamp=datetime.utcnow(),
                 )
 
