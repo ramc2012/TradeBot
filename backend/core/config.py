@@ -126,6 +126,16 @@ class Settings(BaseSettings):
     DATA_QUALITY_SCAN_GATE_ENABLED: bool = True
     AUCTION_INTELLIGENCE_AUTO_ENABLED: bool = True
     AUCTION_INTELLIGENCE_AUTO_INTERVAL_SECONDS: int = 180
+    # Real order-flow book source (2026-06-03). Maps an index app-symbol to the
+    # market_ticks symbol whose REAL order book feeds auction-intelligence order
+    # flow — a front-month futures or ATM option contract, which (unlike the
+    # order-book-less index) carries genuine bid/ask sizes + tape. Format:
+    #   "NSE:NIFTY50-INDEX=NSE:NIFTY26JUNFUT,BSE:SENSEX-INDEX=BSE:SENSEX26JUNFUT"
+    # EMPTY = OFF → the desk stays on the legacy bar-inference path (unchanged
+    # behaviour). When set, those book symbols are also pinned onto the WS
+    # capture set so their ticks land in market_ticks. Flag-gated so it can be
+    # enabled + verified during a live RTH session without risking the default.
+    AUCTION_OF_BOOK_SYMBOLS: str = ""
     FRACTAL_MARKET_PROFILE_AUTO_ENABLED: bool = True
     FRACTAL_MARKET_PROFILE_AUTO_INTERVAL_SECONDS: int = 300
     DIRECTIONAL_OPTIONS_AUTO_ENABLED: bool = True
@@ -221,3 +231,21 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+
+def auction_of_book_symbols() -> dict[str, str]:
+    """Parse AUCTION_OF_BOOK_SYMBOLS into {index_app_symbol: book_market_ticks_symbol}.
+
+    Format: "NSE:NIFTY50-INDEX=NSE:NIFTY26JUNFUT,BSE:SENSEX-INDEX=BSE:SENSEX26JUNFUT".
+    Empty / malformed entries are skipped; empty string → {} (feature OFF).
+    """
+    out: dict[str, str] = {}
+    for pair in str(settings.AUCTION_OF_BOOK_SYMBOLS or "").split(","):
+        pair = pair.strip()
+        if "=" not in pair:
+            continue
+        key, value = pair.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if key and value:
+            out[key] = value
+    return out

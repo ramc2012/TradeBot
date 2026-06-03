@@ -56,7 +56,7 @@ from auction_intelligence.schemas import (
     TradePrint,
 )
 from brokers.base import Tick
-from core.config import settings
+from core.config import auction_of_book_symbols, settings
 from db.database import AsyncSessionLocal
 from market_data import data_router as market_data_router
 from market_data.commodity_runtime_history import load_commodity_history_rows
@@ -1074,12 +1074,37 @@ async def _build_order_flow_inputs(
     snapshot_mode: str,
     symbol_code: str | None = None,
 ) -> dict[str, Any]:
+    # Real order-flow book redirect (P1c, 2026-06-03). The index app_symbol has
+    # NO order book, so its market_ticks rows carry zero sizes → the engine
+    # fabricates the book. When AUCTION_OF_BOOK_SYMBOLS maps this index to a
+    # front-month futures / ATM option contract (which DOES carry genuine
+    # bid/ask sizes + tape now that the adapters keep them), read order flow
+    # from THAT contract's rows instead. Graceful: if the book contract isn't
+    # delivering enough sized ticks (after-hours, or no depth), fall back to
+    # the index rows so behaviour degrades to the legacy path, never worse.
+    snapshot_end = _row_time(current_rows[-1]).astimezone(timezone.utc)
+    book_symbol = auction_of_book_symbols().get(app_symbol)
+    using_book = bool(book_symbol)
     recent_ticks = await _fetch_recent_tick_rows(
-        app_symbol,
-        snapshot_end=_row_time(current_rows[-1]).astimezone(timezone.utc),
+        book_symbol or app_symbol,
+        snapshot_end=snapshot_end,
         symbol_code=symbol_code,
     )
-    if current_tick is not None:
+    if using_book:
+        real_sized = sum(
+            1 for r in recent_ticks
+            if (r.get("bid_qty") or 0) > 0 and (r.get("ask_qty") or 0) > 0
+        )
+        if real_sized < 4:
+            using_book = False
+            recent_ticks = await _fetch_recent_tick_rows(
+                app_symbol,
+                snapshot_end=snapshot_end,
+                symbol_code=symbol_code,
+            )
+    # Only fold the live index tick in when NOT on the book path — mixing the
+    # index's price/size into the futures/option tape would corrupt the flow.
+    if current_tick is not None and not using_book:
         recent_ticks = _append_live_tick_row(recent_ticks, current_tick)
 
     quote_history_payload = _build_quote_history_from_ticks(recent_ticks, tick_size=tick_size)
@@ -1109,8 +1134,8 @@ async def _build_order_flow_inputs(
             "depth": depth_payload,
             "trades": trades_payload,
             "quote_history": quote_history_payload,
-            "quote_source": "market_ticks",
-            "order_flow_source": "tick_reconstruction",
+            "quote_source": book_symbol if using_book else "market_ticks",
+            "order_flow_source": "tick_reconstruction_book" if using_book else "tick_reconstruction",
             "stale_data_seconds": stale_data_seconds,
         }
 
