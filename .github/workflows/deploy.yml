@@ -216,6 +216,18 @@ jobs:
 
           echo "==> HEAD after sync:"
           git log -1 --oneline
+          # Reclaim Docker disk BEFORE building. The --no-cache frontend builds
+          # churn fresh image layers every deploy; without this the 50G root
+          # disk fills and npm install dies with ENOSPC (which red-failed the
+          # 2026-06-03 deploy AFTER the backend + migration had already applied,
+          # leaving a half-deployed state). Prune unused images + build cache +
+          # stopped containers. NEVER --volumes (that would wipe the DB/redis
+          # named volumes). Running containers keep their images (in-use).
+          echo "==> Reclaiming Docker disk (images + build cache; volumes untouched)..."
+          docker image prune -af 2>/dev/null | tail -1 || true
+          docker builder prune -af 2>/dev/null | tail -1 || true
+          docker container prune -f 2>/dev/null | tail -1 || true
+          echo "    root disk now:"; df -h / | tail -1
           echo "==> Building backend (cached) + restarting..."
           docker compose up -d --build ${FORCE_FLAG} backend
           echo "==> Building v1 frontend (--no-cache) + restarting..."
