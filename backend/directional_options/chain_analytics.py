@@ -152,6 +152,28 @@ def _safe_float(value: Any) -> Optional[float]:
         return None
 
 
+def _net_gex(value: Any) -> Optional[float]:
+    """Net gamma exposure as a single scalar.
+
+    The option-chain builder stores `gamma_exposure` as a PER-STRIKE dict
+    `{strike: sign·gamma·OI·spot}` (CE +, PE −) — the repo convention. The old
+    code did `_safe_float(dict)` which is always None, so GEX was null for every
+    underlying (NIFTY, BANKNIFTY, SENSEX) on the panel AND as policy feature 30.
+    Net GEX is just the signed sum across strikes. Tolerates a scalar too."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        total = 0.0
+        seen = False
+        for v in value.values():
+            f = _safe_float(v)
+            if f is not None:
+                total += f
+                seen = True
+        return round(total, 2) if seen else None
+    return _safe_float(value)
+
+
 def _interpolate_iv_at_delta(
     entries: list[dict],
     target_delta_abs: float,
@@ -437,7 +459,7 @@ async def fetch_chain_analytics(
         pcr_oi_change=_safe_float(cached.get("pcr_oi_change")),
         iv_skew_25d=iv_skew,
         iv_skew_25d_norm=iv_skew_norm,
-        gex_total=_safe_float(cached.get("gamma_exposure")),
+        gex_total=_net_gex(cached.get("gamma_exposure")),
         dex_calls=dex_calls,
         dex_puts=dex_puts,
         dex_net=dex_net,

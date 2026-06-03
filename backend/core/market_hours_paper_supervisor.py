@@ -432,6 +432,12 @@ class MarketHoursPaperSupervisor:
                 interval_seconds=settings.DIRECTIONAL_OPTIONS_AUTO_INTERVAL_SECONDS,
                 callback=_directional_runner,
                 enabled=settings.DIRECTIONAL_OPTIONS_AUTO_ENABLED,
+                # NSE index options only — trade during the session, never on the
+                # post-close frozen `live_tick` heartbeat (last price re-stamped
+                # with 0 volume after 15:30 IST). No after-hours catch-up either.
+                market_hours_fn=_in_nse_market_hours,
+                next_open_fn=_next_nse_market_open,
+                post_close_catchup=False,
             ),
             RunnerConfig(
                 key="cbe_scanner",
