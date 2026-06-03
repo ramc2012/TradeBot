@@ -75,6 +75,8 @@ class StrategyEntryMixin:
     async def _load_strategy1_recent_snapshot_state(
         self: "PaperStrategyAgent",
         rows: list[dict[str, Any]],
+        *,
+        bucket_minutes: int = 30,
     ) -> dict[str, dict[int, dict[str, Any]]]:
         instrument_keys = sorted(
             {
@@ -101,9 +103,16 @@ class StrategyEntryMixin:
             if trading_day is None:
                 return {}
 
+            # bucket_minutes controls the timeframe — 30 for the primary
+            # S1 path, 15 for the re-entry-within-trend path. Both bucket
+            # off the same `atm_option_watchlist_snapshots` rows; only the
+            # truncation interval differs.
+            bm = int(bucket_minutes)
+            if bm not in (5, 10, 15, 20, 30, 60):
+                bm = 30  # safety guard — only common timeframes allowed
             result = await session.execute(
                 text(
-                    """
+                    f"""
                     WITH ranked AS (
                         SELECT *,
                                ROW_NUMBER() OVER (
@@ -117,8 +126,8 @@ class StrategyEntryMixin:
                                    (
                                        date_trunc('hour', timezone('Asia/Kolkata', time))
                                        + (
-                                           floor(date_part('minute', timezone('Asia/Kolkata', time)) / 30)::int
-                                           * interval '30 minutes'
+                                           floor(date_part('minute', timezone('Asia/Kolkata', time)) / {bm})::int
+                                           * interval '{bm} minutes'
                                        )
                                    ) AS macd_bucket,
                                    macd,
@@ -131,8 +140,8 @@ class StrategyEntryMixin:
                                                     (
                                                         date_trunc('hour', timezone('Asia/Kolkata', time))
                                                         + (
-                                                            floor(date_part('minute', timezone('Asia/Kolkata', time)) / 30)::int
-                                                            * interval '30 minutes'
+                                                            floor(date_part('minute', timezone('Asia/Kolkata', time)) / {bm})::int
+                                                            * interval '{bm} minutes'
                                                         )
                                                     )
                                        ORDER BY time DESC
@@ -347,7 +356,21 @@ class StrategyEntryMixin:
         )
 
         candidates: list[dict[str, Any]] = []
-        snapshot_state = await self._load_strategy1_recent_snapshot_state(rows)
+        snapshot_state = await self._load_strategy1_recent_snapshot_state(rows, bucket_minutes=30)
+        # 15-min snapshot enables the "trend re-entry" path: a fresh
+        # 15-min zero-cross on a name whose 30-min MACD is already above
+        # zero (CE) or below zero (PE). Used to catch intraday pullback
+        # entries within an established higher-TF trend, especially after
+        # a prior position closed on stop/target.
+        snapshot_state_15m: dict[str, dict[int, dict[str, Any]]] = {}
+        if getattr(settings, "NSE_S1_ALLOW_15M_REENTRY", True):
+            try:
+                snapshot_state_15m = await self._load_strategy1_recent_snapshot_state(
+                    rows, bucket_minutes=15
+                )
+            except Exception as exc:
+                logger.warning(f"[{runtime.key}] 15m snapshot load failed: {exc}")
+                snapshot_state_15m = {}
         persist_observation = getattr(self, "_persist_agent_signal_observation", None)
 
         def _tally(reason: str, row: Optional[dict] = None) -> None:
@@ -449,34 +472,75 @@ class StrategyEntryMixin:
             # still evaluate a PE-direction trade on those, just not the CE.
             ce_snapshot = self._strategy1_side_snapshot(ce_side, snapshot_state) if ce_side else {}
             pe_snapshot = self._strategy1_side_snapshot(pe_side, snapshot_state) if pe_side else {}
+            ce_snapshot_15m = (
+                self._strategy1_side_snapshot(ce_side, snapshot_state_15m)
+                if ce_side and snapshot_state_15m else {}
+            )
+            pe_snapshot_15m = (
+                self._strategy1_side_snapshot(pe_side, snapshot_state_15m)
+                if pe_side and snapshot_state_15m else {}
+            )
             ce_macd = ce_snapshot.get("current_macd") if ce_side else None
             pe_macd = pe_snapshot.get("current_macd") if pe_side else None
             if ce_macd is None and pe_macd is None:
                 _tally("no_macd_values", row)
                 continue
 
-            ce_cross = (
+            # Primary path — fresh 30-min zero-cross.
+            ce_cross_30m = (
                 ce_macd is not None
                 and ce_snapshot.get("previous_macd") is not None
                 and ce_snapshot["previous_macd"] <= 0 < ce_macd
             )
-            pe_cross = (
+            pe_cross_30m = (
                 pe_macd is not None
                 and pe_snapshot.get("previous_macd") is not None
                 and pe_snapshot["previous_macd"] >= 0 > pe_macd
             )
+
+            # Re-entry path — 30-min MACD already in trend AND fresh
+            # 15-min cross today. Catches intraday pullback re-entries
+            # within an established higher-TF trend (especially after a
+            # prior position closed via stop/target).
+            ce_15m_curr = ce_snapshot_15m.get("current_macd")
+            ce_15m_prev = ce_snapshot_15m.get("previous_macd")
+            pe_15m_curr = pe_snapshot_15m.get("current_macd")
+            pe_15m_prev = pe_snapshot_15m.get("previous_macd")
+            ce_15m_fresh = (
+                ce_15m_curr is not None and ce_15m_prev is not None
+                and ce_15m_prev <= 0 < ce_15m_curr
+            )
+            pe_15m_fresh = (
+                pe_15m_curr is not None and pe_15m_prev is not None
+                and pe_15m_prev >= 0 > pe_15m_curr
+            )
+            ce_reentry = (
+                not ce_cross_30m
+                and ce_macd is not None and ce_macd > 0
+                and ce_15m_fresh
+            )
+            pe_reentry = (
+                not pe_cross_30m
+                and pe_macd is not None and pe_macd < 0
+                and pe_15m_fresh
+            )
+
+            ce_cross = ce_cross_30m or ce_reentry
+            pe_cross = pe_cross_30m or pe_reentry
             if ce_cross:
                 side = ce_side
                 side_snapshot = ce_snapshot
                 opt_type = "CE"
                 regime_name = REGIME_BULLISH
                 expected_mp_direction = "CE"
+                entry_kind = "reentry_15m" if ce_reentry else "primary_30m"
             elif pe_cross:
                 side = pe_side
                 side_snapshot = pe_snapshot
                 opt_type = "PE"
                 regime_name = REGIME_BEARISH
                 expected_mp_direction = "PE"
+                entry_kind = "reentry_15m" if pe_reentry else "primary_30m"
             else:
                 _tally("no_fresh_macd_cross", row)
                 continue
@@ -489,8 +553,8 @@ class StrategyEntryMixin:
                 continue
 
             strength = abs(float(side_snapshot.get("current_macd") or 0.0))
-            reason = "macd_zero_cross"
-            signal_key = f"{underlying}:{opt_type}"
+            reason = "macd_zero_cross_15m_reentry" if entry_kind == "reentry_15m" else "macd_zero_cross"
+            signal_key = f"{underlying}:{opt_type}:{entry_kind}"
 
             async def persist_raw_signal(status_value: str, block_reason: Optional[str] = None, **extra: Any) -> None:
                 # In-memory rejection / observation tally. Gives the status
@@ -541,6 +605,16 @@ class StrategyEntryMixin:
                     "pe_cross": pe_cross,
                     "latest_macd_bucket": side_snapshot.get("latest_macd_bucket"),
                     "previous_macd_bucket": side_snapshot.get("previous_macd_bucket"),
+                    # New v15-reentry audit fields.
+                    "entry_kind": entry_kind,
+                    "ce_15m_current": ce_15m_curr,
+                    "ce_15m_previous": ce_15m_prev,
+                    "pe_15m_current": pe_15m_curr,
+                    "pe_15m_previous": pe_15m_prev,
+                    "ce_cross_30m": ce_cross_30m,
+                    "pe_cross_30m": pe_cross_30m,
+                    "ce_reentry": ce_reentry,
+                    "pe_reentry": pe_reentry,
                     **extra,
                 }
                 await persist_observation(

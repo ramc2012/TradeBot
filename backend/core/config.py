@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     # it. Without this flag, learning was purely a size/confidence
     # advisor and never actually filtered bad-history setups out.
     STRATEGY_LEARNING_BLOCK_ENTRIES_ENABLED: bool = True
+    # S1 (NSE ATM MACD) re-entry path. When True, an underlying whose
+    # 30-min MACD is already above zero (CE) or below zero (PE) can fire
+    # a new entry on a fresh 15-min MACD zero-cross. Catches intraday
+    # pullback re-entries within an established higher-TF trend,
+    # especially after a prior position closed via stop/target. Set to
+    # False to revert to the strict "30-min cross only" behavior.
+    NSE_S1_ALLOW_15M_REENTRY: bool = True
     # Per-purpose adapter routing. The goal is to distribute load between the
     # two live brokers so neither hits 429 first and a single rate-limit storm
     # doesn't cascade across desks. Rationale per purpose:
