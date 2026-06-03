@@ -261,6 +261,8 @@ type StatusPayload = {
   watchlist?: WatchRow[];
   positions?: CommodityPosition[];
   trade_history?: TradeRow[];
+  today_trades?: TradeRow[];
+  historical_trades?: TradeRow[];
   orders?: Order[];
   reports?: Record<string, unknown>[];
   commentary?: { time?: string; tone?: string; message?: string }[];
@@ -1186,7 +1188,7 @@ function OrdersTab({ orders, onSelect }: { orders: Order[]; onSelect: (sym: stri
       </FilterBar>
       {filtered.length === 0 ? (
         <div className="flex flex-1 items-center justify-center text-[11px] text-text-muted">
-          {orders.length === 0 ? "No orders this session." : "No orders match the filter."}
+          {orders.length === 0 ? "No orders today. (Full history → Reports)" : "No orders match the filter."}
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto">
@@ -1311,7 +1313,7 @@ function TradesTab({ trades, onSelect }: { trades: TradeRow[]; onSelect: (sym: s
       </FilterBar>
       {filtered.length === 0 ? (
         <div className="flex flex-1 items-center justify-center text-[11px] text-text-muted">
-          {trades.length === 0 ? "No closed trades yet." : "No trades match the filter."}
+          {trades.length === 0 ? "No closed trades today. (Full history → Reports)" : "No trades match the filter."}
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto">
@@ -2797,8 +2799,26 @@ export default function CommodityLivePage() {
   // Socket-streamed positions / orders / trade history are inside the
   // overview payload. No more separate polls for those.
   const positions = (status.positions ?? []) as CommodityPosition[];
-  const orders = (status.orders ?? []) as Order[];
-  const trades = (status.trade_history ?? []) as TradeRow[];
+  // Orders + Trades tabs show TODAY only (IST). Full lifetime history lives
+  // in the Reports module — same scoping as the NSE desk. Orders carry an
+  // IST ISO `time`; trades carry `exit_time`. Prefer the backend's pre-split
+  // `today_trades` when present, else filter trade_history by exit date.
+  // Undated orders are kept (defensive — never hide a live order).
+  const todayStrIST = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  const orders = ((status.orders ?? []) as Order[]).filter(
+    (o) => !o.time || String(o.time).startsWith(todayStrIST),
+  );
+  const trades = (
+    status.today_trades !== undefined
+      ? status.today_trades
+      : ((status.trade_history ?? []) as TradeRow[]).filter((t) =>
+          String(t.exit_time || "").startsWith(todayStrIST),
+        )
+  ) as TradeRow[];
+  // Stats tab keeps the FULL trade history — win rate / profit factor / W-L /
+  // per-underlying are lifetime aggregates and would be meaningless scoped to
+  // a single day. Only the Trades + Orders LISTS are today-only.
+  const allTrades = (status.trade_history ?? []) as TradeRow[];
 
   const contracts = useMemo(
     () =>
@@ -3317,7 +3337,7 @@ export default function CommodityLivePage() {
             ) : null}
             {bottomTab === "expiry" ? <ExpiryTab rows={rows} /> : null}
             {bottomTab === "stats" ? (
-              <StatsTab summary={summary} trades={trades} positions={positions} />
+              <StatsTab summary={summary} trades={allTrades} positions={positions} />
             ) : null}
             {bottomTab === "audit" ? <AuditFeed events={auditEvents} /> : null}
           </div>
