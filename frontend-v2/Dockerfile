@@ -13,7 +13,11 @@ ENV NEXT_PUBLIC_WS_URL=$NEXT_PUBLIC_WS_URL
 ENV NODE_OPTIONS="--max-old-space-size=1024"
 
 COPY package*.json ./
-RUN npm install --no-audit --no-fund
+# --no-cache fresh install every deploy → harden against npm-registry blips
+# with fetch-retries + a fallback retry (see frontend/Dockerfile note).
+RUN npm install --no-audit --no-fund \
+        --fetch-retries=5 --fetch-retry-mintimeout=20000 --fetch-retry-maxtimeout=120000 \
+    || npm install --no-audit --no-fund
 
 COPY . .
 RUN npm run build
