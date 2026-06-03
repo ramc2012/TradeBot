@@ -2966,12 +2966,21 @@ export default function CommodityLivePage() {
   // ── Header / status tiles ──────────────────────────────────────────
   const totalEquity = finiteNumber(summary.total_equity);
   const initialCapital = finiteNumber(summary.initial_capital, 1_000_000);
-  const dayRealized = finiteNumber(summary.day_pnl);
   const unrealized = positions.reduce(
     (acc, p) => acc + finiteNumber(p.unrealized_pnl),
     0,
   );
-  const dayPnl = dayRealized + unrealized;
+  // P&L semantics (2026-06-02): backend `day_pnl` is now realized-today +
+  // open MTM, `day_realized_pnl` is realized-today alone. Old UI read
+  // day_pnl (then realized-only) and re-added unrealized — now double-counts.
+  // Use backend fields directly. `realized_pnl_lifetime` = total realized
+  // since the paper account opened.
+  const dayRealized = finiteNumber(summary.day_realized_pnl);
+  const dayPnl =
+    summary.day_pnl != null ? finiteNumber(summary.day_pnl) : dayRealized + unrealized;
+  const realizedLifetime = finiteNumber(
+    summary.realized_pnl_lifetime ?? summary.realized_pnl,
+  );
   const equityPct =
     initialCapital > 0 ? ((totalEquity - initialCapital) / initialCapital) * 100 : 0;
   const armedCount = rows.filter((r) => r.entry_style && r.signal).length;
@@ -3081,6 +3090,12 @@ export default function CommodityLivePage() {
             v={formatINR(dayPnl)}
             sub={`r ${formatINR(dayRealized)} · u ${formatINR(unrealized)}`}
             tone={dayPnl >= 0 ? "text-emerald-300" : "text-rose-300"}
+          />
+          <HeaderStat
+            k="REALIZED (LIFE)"
+            v={formatINR(realizedLifetime)}
+            sub="since account start"
+            tone={realizedLifetime >= 0 ? "text-emerald-300" : "text-rose-300"}
           />
           <HeaderStat
             k="OPEN / ARMED"
