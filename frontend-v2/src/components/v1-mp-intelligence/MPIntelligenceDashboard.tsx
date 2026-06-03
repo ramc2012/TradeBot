@@ -37,8 +37,108 @@ import {
   YAxis,
 } from "recharts";
 
-import { getMarketIntelligenceContext, getMPAnalytics } from "@/lib/api";
+import {
+  getAuctionIntelligenceLiveSnapshot,
+  getMarketIntelligenceContext,
+  getMPAnalytics,
+} from "@/lib/api";
 import { usePersistentSnapshotQuery } from "@/hooks/usePersistentSnapshotQuery";
+
+// ─── Live order-flow (real microstructure from the auction engine) ──────────
+
+const OF_SOURCE_BADGE: Record<string, { label: string; cls: string; note: string }> = {
+  tick_reconstruction_book: {
+    label: "LIVE BOOK",
+    cls: "border-emerald-500/50 bg-emerald-500/15 text-emerald-300",
+    note: "Real futures/option order book — genuine sizes + trade tape.",
+  },
+  tick_reconstruction: {
+    label: "TICK-RECON",
+    cls: "border-amber-500/50 bg-amber-500/15 text-amber-200",
+    note: "Reconstructed from index ticks; L2 sizes floored (index has no book).",
+  },
+  bar_inference: {
+    label: "SYNTHETIC",
+    cls: "border-rose-500/50 bg-rose-500/15 text-rose-300",
+    note: "Fabricated from candle colour — no real microstructure. Wire AUCTION_OF_BOOK_SYMBOLS to a real book.",
+  },
+};
+
+function OFMetric({ label, value, tone, hint }: { label: string; value: string; tone?: string; hint?: string }) {
+  return (
+    <div className="rounded-md border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5" title={hint}>
+      <div className="text-[9.5px] uppercase tracking-wider text-zinc-500">{label}</div>
+      <div className={clsx("mt-0.5 font-mono text-sm font-semibold", tone || "text-zinc-200")}>{value}</div>
+    </div>
+  );
+}
+
+function LiveOrderFlowPanel({ snapshot, loading }: { snapshot: any; loading: boolean }) {
+  if (loading && !snapshot) {
+    return <p className="text-xs text-zinc-500">Loading live order flow…</p>;
+  }
+  const of = snapshot?.analysis?.order_flow;
+  const source = String(snapshot?.request?.metadata?.order_flow_source || "bar_inference");
+  const badge = OF_SOURCE_BADGE[source] || OF_SOURCE_BADGE.bar_inference;
+  if (!of) {
+    return (
+      <p className="text-xs text-zinc-500">
+        No live order-flow snapshot available (market closed or desk idle).
+      </p>
+    );
+  }
+  const sign = (v: number | undefined, d = 4) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${Number(v).toFixed(d)}`);
+  const num = (v: number | undefined, d = 2) => (v == null ? "—" : Number(v).toFixed(d));
+  const tone = (v: number | undefined) =>
+    v == null ? "" : v > 0 ? "text-emerald-300" : v < 0 ? "text-rose-300" : "text-zinc-300";
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className={clsx("inline-flex rounded border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider", badge.cls)}>
+          {badge.label}
+        </span>
+        <span className="text-[10px] text-zinc-500">{badge.note}</span>
+      </div>
+      <div>
+        <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">Book / imbalance</div>
+        <div className="grid grid-cols-3 gap-1.5 md:grid-cols-4">
+          <OFMetric label="Book pressure" value={sign(of.book_pressure)} tone={tone(of.book_pressure)} hint="0.45·top + 0.30·depth + 0.25·ofi" />
+          <OFMetric label="Top imbalance" value={sign(of.top_imbalance)} tone={tone(of.top_imbalance)} hint="(bid_size − ask_size)/(bid+ask)" />
+          <OFMetric label="Depth imbalance" value={sign(of.depth_imbalance)} tone={tone(of.depth_imbalance)} />
+          <OFMetric label="Queue pressure" value={sign(of.queue_pressure)} tone={tone(of.queue_pressure)} />
+          <OFMetric label="OFI" value={sign(of.order_flow_imbalance)} tone={tone(of.order_flow_imbalance)} />
+          <OFMetric label="Spread" value={num(of.spread)} />
+          <OFMetric label="Mid" value={num(of.mid_price)} />
+          <OFMetric label="Micro price" value={num(of.micro_price)} />
+        </div>
+      </div>
+      <div>
+        <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">Tape / delta</div>
+        <div className="grid grid-cols-3 gap-1.5 md:grid-cols-4">
+          <OFMetric label="Delta" value={sign(of.delta, 1)} tone={tone(of.delta)} />
+          <OFMetric label="Cum. delta" value={sign(of.cumulative_delta, 1)} tone={tone(of.cumulative_delta)} />
+          <OFMetric label="Trade imbalance" value={sign(of.trade_imbalance)} tone={tone(of.trade_imbalance)} />
+          <OFMetric label="Aggr. buy vol" value={num(of.aggressive_buy_volume, 0)} tone="text-emerald-300" />
+          <OFMetric label="Aggr. sell vol" value={num(of.aggressive_sell_volume, 0)} tone="text-rose-300" />
+          <OFMetric label="Intensity/min" value={num(of.trade_intensity_per_minute, 1)} />
+          <OFMetric label="VWAP" value={num(of.vwap)} />
+          <OFMetric label="VWAP drift" value={sign(of.vwap_drift)} tone={tone(of.vwap_drift)} />
+        </div>
+      </div>
+      <div>
+        <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">Quality / timing</div>
+        <div className="grid grid-cols-3 gap-1.5 md:grid-cols-4">
+          <OFMetric label="Toxicity" value={num(of.toxicity_score, 3)} tone={(of.toxicity_score ?? 0) > 0.6 ? "text-rose-300" : "text-zinc-300"} />
+          <OFMetric label="Timing conf." value={num(of.timing_confidence, 3)} />
+          <OFMetric label="Volatility burst" value={num(of.volatility_burst, 2)} />
+          <OFMetric label="Adverse-sel. risk" value={num(of.adverse_selection_risk, 3)} />
+          <OFMetric label="Quote reprice" value={num(of.quote_repricing_rate, 2)} />
+          <OFMetric label="Exec aggression" value={String(of.execution_aggression ?? "—")} />
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ─── Colour palette ───────────────────────────────────────────────────────────
 
@@ -1359,6 +1459,17 @@ export default function MPIntelligenceDashboard() {
     refetchOnWindowFocus: false,
   });
 
+  // Live microstructure order flow (the auction engine's OrderFlowSnapshot).
+  // Real when AUCTION_OF_BOOK_SYMBOLS maps this index to a futures/option book,
+  // else synthetic (the panel badge is explicit about which).
+  const liveOFQuery = useQuery({
+    queryKey: ["mp-intelligence", "live-of", underlying],
+    queryFn: () => getAuctionIntelligenceLiveSnapshot(underlying).then((r) => r.data),
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: false,
+  });
+
   const analyticsUnderlying =
     typeof data?.underlying === "string" ? data.underlying : undefined;
   const activeData =
@@ -1624,13 +1735,23 @@ export default function MPIntelligenceDashboard() {
             )}
 
             {activeTab === "cvd" && (
-              <section>
-                <SectionHeader
-                  icon={Zap}
-                  title="Orderflow Proxy"
-                  sub="CVD approximation from daily auction structure — NSE MBO not available"
-                />
-                <OrderflowPanel data={activeData.orderflow_proxy} />
+              <section className="space-y-5">
+                <div>
+                  <SectionHeader
+                    icon={Activity}
+                    title="Live Order Flow · microstructure"
+                    sub="OrderFlowSnapshot from the auction engine — REAL when a futures/option book is wired (AUCTION_OF_BOOK_SYMBOLS), else synthetic. Badge shows which."
+                  />
+                  <LiveOrderFlowPanel snapshot={liveOFQuery.data} loading={liveOFQuery.isLoading} />
+                </div>
+                <div>
+                  <SectionHeader
+                    icon={Zap}
+                    title="Orderflow Proxy · CVD"
+                    sub="CVD approximation from daily auction structure — NSE MBO not available"
+                  />
+                  <OrderflowPanel data={activeData.orderflow_proxy} />
+                </div>
               </section>
             )}
 
