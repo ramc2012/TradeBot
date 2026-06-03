@@ -162,6 +162,11 @@ class Tick:
     ask: float = 0.0
     bid_qty: int = 0
     ask_qty: int = 0
+    # Aggregate order-book depth (total buy/sell qty across the book). Real
+    # depth_imbalance source for auction-intelligence order flow (P1d). 0 for
+    # index spot (no book); populated for futures/option book contracts.
+    total_buy_qty: int = 0
+    total_sell_qty: int = 0
     timestamp: Optional[datetime] = None
 
 

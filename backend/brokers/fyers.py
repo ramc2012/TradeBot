@@ -493,6 +493,10 @@ class FyersAdapter(BrokerAdapter):
                 ask=_first("ask_price", "ask"),
                 bid_qty=_first("bid_size", "bid_qty"),
                 ask_qty=_first("ask_size", "ask_qty"),
+                # Aggregate book depth (P1d) — Fyers SymbolUpdate carries the
+                # whole-book buy/sell totals; real depth_imbalance source.
+                total_buy_qty=_first("tot_buy_qty", "total_buy_qty"),
+                total_sell_qty=_first("tot_sell_qty", "total_sell_qty"),
                 timestamp=datetime.now(UTC),
             )
             callback(tick)

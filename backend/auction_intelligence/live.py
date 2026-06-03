@@ -1182,7 +1182,8 @@ async def _fetch_recent_tick_rows(
         result = await session.execute(
             text(
                 """
-                SELECT time, ltp, bid, ask, bid_qty, ask_qty, volume, oi
+                SELECT time, ltp, bid, ask, bid_qty, ask_qty,
+                       total_buy_qty, total_sell_qty, volume, oi
                 FROM market_ticks
                 WHERE symbol = :symbol
                   AND time >= :from_time
@@ -1207,6 +1208,8 @@ async def _fetch_recent_tick_rows(
             "ask": float(row["ask"] or 0.0),
             "bid_qty": float(row["bid_qty"] or 0.0),
             "ask_qty": float(row["ask_qty"] or 0.0),
+            "total_buy_qty": float(row.get("total_buy_qty") or 0.0),
+            "total_sell_qty": float(row.get("total_sell_qty") or 0.0),
             "volume": float(row["volume"] or 0.0),
             "oi": float(row["oi"] or 0.0),
         }
@@ -1267,6 +1270,11 @@ def _build_quote_history_from_ticks(
                 "ask": ask,
                 "bid_size": max(float(row.get("bid_qty") or 0.0), 1.0),
                 "ask_size": max(float(row.get("ask_qty") or 0.0), 1.0),
+                # Aggregate whole-book depth (P1d) — carried through so the
+                # depth ladder (and thus depth_imbalance) is REAL when the
+                # book contract supplies it; 0 → falls back to synthetic.
+                "total_buy_qty": float(row.get("total_buy_qty") or 0.0),
+                "total_sell_qty": float(row.get("total_sell_qty") or 0.0),
                 "last_price": ltp,
             }
         )
@@ -1288,6 +1296,16 @@ def _build_depth_from_tick_history(
     bid_anchor = max(bid_size, avg_bid_size)
     ask_anchor = max(ask_size, avg_ask_size)
     decay = (1.0, 0.72, 0.51)
+    # P1d: when the book contract supplies real whole-book totals
+    # (total_buy_qty/total_sell_qty), distribute them across the ladder so the
+    # SUM per side equals the real total → depth_imbalance = (tbq−tsq)/(tbq+tsq)
+    # is a REAL whole-book imbalance instead of the synthetic top-size decay.
+    real_bid_total = float(latest.get("total_buy_qty") or 0.0)
+    real_ask_total = float(latest.get("total_sell_qty") or 0.0)
+    if real_bid_total > 0 and real_ask_total > 0:
+        decay_sum = sum(decay) or 1.0
+        bid_anchor = real_bid_total / decay_sum
+        ask_anchor = real_ask_total / decay_sum
     return {
         "timestamp": str(latest["timestamp"]),
         "bids": [

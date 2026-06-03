@@ -163,6 +163,8 @@ class LiveCandleStore:
                 "ask": float(tick.ask or 0.0),
                 "bid_qty": int(tick.bid_qty or 0),
                 "ask_qty": int(tick.ask_qty or 0),
+                "total_buy_qty": int(getattr(tick, "total_buy_qty", 0) or 0),
+                "total_sell_qty": int(getattr(tick, "total_sell_qty", 0) or 0),
             }
             for tick in self._tick_batch
             if tick.timestamp is not None
@@ -177,10 +179,10 @@ class LiveCandleStore:
                     """
                     INSERT INTO market_ticks (
                         time, symbol, ltp, open, high, low, close, volume,
-                        oi, bid, ask, bid_qty, ask_qty
+                        oi, bid, ask, bid_qty, ask_qty, total_buy_qty, total_sell_qty
                     ) VALUES (
                         :time, :symbol, :ltp, :open, :high, :low, :close, :volume,
-                        :oi, :bid, :ask, :bid_qty, :ask_qty
+                        :oi, :bid, :ask, :bid_qty, :ask_qty, :total_buy_qty, :total_sell_qty
                     )
                     """
                 ),

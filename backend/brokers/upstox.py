@@ -361,6 +361,7 @@ class UpstoxAdapter(BrokerAdapter):
                 oi = 0
                 bid = ask = 0.0
                 bid_qty = ask_qty = 0
+                total_buy_qty = total_sell_qty = 0
 
                 if "fullFeed" in feed:
                     full_feed = feed.get("fullFeed", {})
@@ -370,6 +371,10 @@ class UpstoxAdapter(BrokerAdapter):
                     volume = int(full_union.get("vtt", 0) or 0)
                     oi = int(full_union.get("oi", 0) or 0)
                     bid, ask, bid_qty, ask_qty = _top_of_book(full_union.get("marketLevel", {}) or {})
+                    # Aggregate book depth (P1d) — Upstox full feed carries
+                    # total buy/sell qty; real depth_imbalance source.
+                    total_buy_qty = int(full_union.get("tbq", 0) or 0)
+                    total_sell_qty = int(full_union.get("tsq", 0) or 0)
                 elif "firstLevelWithGreeks" in feed:
                     first_level = feed.get("firstLevelWithGreeks", {})
                     ltpc = first_level.get("ltpc", {})
@@ -399,6 +404,8 @@ class UpstoxAdapter(BrokerAdapter):
                     ask=ask,
                     bid_qty=bid_qty,
                     ask_qty=ask_qty,
+                    total_buy_qty=total_buy_qty,
+                    total_sell_qty=total_sell_qty,
                     timestamp=datetime.utcnow(),
                 )
 
