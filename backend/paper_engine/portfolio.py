@@ -3,13 +3,26 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 import numpy as np
 from loguru import logger
 
 from paper_engine.order_book import PaperOrder
+
+# Indian market timezone. P&L is bucketed by the IST trading date so "Day P&L" matches the
+# session the trader sees — the container clock runs UTC, so date.today() would mis-bucket.
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _ist_date(ts: Optional[datetime]) -> date:
+    """IST calendar date of a timestamp (naive timestamps are assumed UTC)."""
+    if ts is None:
+        return datetime.now(IST).date()
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(IST).date()
 
 
 @dataclass
@@ -159,7 +172,7 @@ class PaperPortfolio:
         )
         self._trade_history.append(trade)
 
-        trade_day = trade.exit_time.date()
+        trade_day = _ist_date(trade.exit_time)
         self._daily_pnl[trade_day] = self._daily_pnl[trade_day] + pnl
 
         margin_released = self._estimate_margin(
@@ -183,6 +196,65 @@ class PaperPortfolio:
             self._peak_equity = equity
 
         logger.info(f"[Portfolio] Closed position: {pos.symbol} PnL={pnl:.2f}")
+
+    def book_close(
+        self,
+        *,
+        symbol: str,
+        entry_action: str,            # the OPEN side: "BUY" (long) or "SELL" (short)
+        qty: int,
+        entry_price: float,
+        exit_price: float,
+        opened_at: Optional[datetime] = None,
+        instrument_type: str = "FUT",
+        expiry: Optional[str] = None,
+        strike: Optional[float] = None,
+        option_type: Optional[str] = None,
+        signal_id: Optional[str] = None,
+        setup_type: Optional[str] = None,
+        regime: Optional[str] = None,
+    ) -> "TradeRecord":
+        """Explicitly book a closed trade into the ledger.
+
+        Single source of truth used when the order_book→on_fill close path fails to match an
+        opposing VirtualPosition (the historical commodity-futures freeze, where ~6 days of
+        closes booked zero trades). Mirrors `_close_position`: appends a TradeRecord, books
+        realized P&L to the IST trading day, removes the matching open VirtualPosition (releasing
+        its margin), and credits cash. Callers MUST guard against double-booking (the close path
+        only calls this when on_fill did not already append a trade)."""
+        multiplier = 1.0 if str(entry_action).upper() == "BUY" else -1.0
+        pnl = multiplier * (float(exit_price) - float(entry_price)) * int(qty)
+        now_utc = datetime.now(timezone.utc)
+        trade = TradeRecord(
+            symbol=symbol, action=str(entry_action).upper(), qty=int(qty),
+            entry_price=float(entry_price), exit_price=float(exit_price), pnl=pnl,
+            entry_time=opened_at or now_utc, exit_time=now_utc,
+            instrument_type=instrument_type, expiry=expiry, strike=strike,
+            option_type=option_type, signal_id=signal_id, setup_type=setup_type, regime=regime,
+        )
+        self._trade_history.append(trade)
+        self._daily_pnl[_ist_date(trade.exit_time)] += pnl
+
+        # Release the matching open VirtualPosition (if the open registered one) + its margin.
+        key = self._find_position_key(symbol, str(entry_action).upper())
+        margin_released = 0.0
+        if key is not None:
+            pos = self._positions[key]
+            margin_released = self._estimate_margin(
+                pos.symbol, qty, pos.avg_price,
+                instrument_type=pos.instrument_type, option_type=pos.option_type)
+            if qty >= pos.qty:
+                del self._positions[key]
+            else:
+                pos.qty -= qty
+        self.available_capital += margin_released + pnl
+
+        equity = self.total_equity
+        self._equity_curve.append((now_utc, equity))
+        if equity > self._peak_equity:
+            self._peak_equity = equity
+        logger.info(f"[Portfolio] Booked external close: {symbol} {entry_action} x{qty} PnL={pnl:.2f}")
+        return trade
 
     def update_prices(self, price_map: dict[str, float]):
         """Update mark-to-market prices for all open positions."""
@@ -248,8 +320,11 @@ class PaperPortfolio:
     @property
     def day_realized_pnl(self) -> float:
         """P&L from trades CLOSED today. Distinct from `day_pnl`, which
-        also includes today's mark-to-market on still-open positions."""
-        return self._daily_pnl.get(date.today(), 0.0)
+        also includes today's mark-to-market on still-open positions.
+
+        Keyed by the IST trading date (the container clock is UTC, so date.today()
+        would read the wrong bucket after ~18:30 UTC and zero out the day)."""
+        return self._daily_pnl.get(datetime.now(IST).date(), 0.0)
 
     @property
     def day_pnl(self) -> float:

@@ -2532,6 +2532,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         actor: str = "strategy_agent",
     ) -> None:
         exit_action = "SELL" if position.action == "BUY" else "BUY"
+        portfolio = self._runtime.portfolio
+        trades_before = len(portfolio._trade_history)
         order = self._runtime.order_book.place_order(
             symbol=position.live_symbol,
             action=exit_action,
@@ -2580,6 +2582,23 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "return_pct": round(position.return_pct, 2),
             },
         )
+        # Self-healing booking: if the order_book→on_fill close path did not append a trade (the
+        # futures-ledger freeze where ~6 days of closes booked nothing → realized/Day/Life P&L
+        # stuck), record it explicitly. Idempotent — only fires when on_fill did NOT book.
+        if len(portfolio._trade_history) == trades_before:
+            portfolio._positions.pop(order.order_id, None)  # drop any phantom on_fill opened
+            portfolio.book_close(
+                symbol=position.live_symbol,
+                entry_action=position.action,
+                qty=position.qty,
+                entry_price=position.entry_price,
+                exit_price=current_price,
+                opened_at=_parse_datetime(position.entered_at),
+                instrument_type="FUT",
+                signal_id=position.position_key,
+                setup_type=position.signal_reason,
+                regime=position.regime,
+            )
         self._runtime.positions.pop(position_key, None)
 
     async def _close_option_position(
