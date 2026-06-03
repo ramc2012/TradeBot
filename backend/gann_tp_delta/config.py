@@ -88,16 +88,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "adx_trend_min": 18.0,          # ADX >= this ⇒ a real trend is present
         "regime_min_score": 2,          # |EMA+structure+1x1 vote| >= this ⇒ directional
         "structure_lookback": 8,
-        # Archetype thresholds on the weighted conviction (~0..10 scale)
-        "continuation_min_conviction": 4.0,
+        # Archetype thresholds on the weighted conviction (~0..10 scale).
+        # Tuned from a 150-day offline sweep (gann_tp_delta/tune_sweep.py): the
+        # conviction floor is the dominant lever — higher = fewer, better trades
+        # almost everywhere. 5.0 peaks NIFTY (+6.4R) and SENSEX (+8.3R) vs 4.0.
+        "continuation_min_conviction": 5.0,
         "reversal_min_conviction": 6.5,
         "reversal_size_factor": 0.5,    # counter-trend reversals trade half size
-        # Commodities over-trade and are negative-EV at the index-level bar in
-        # backtest (CRUDEOIL −6.5R, NATURALGAS −1.7R, GOLD ~flat across 30-53
-        # trades vs NIFTY's 9). Hold commodity FUTURES entries to a higher
-        # conviction so only the strongest auctions trade until per-commodity
-        # tuning is validated offline. 0 disables the extra floor.
-        "commodity_min_conviction": 5.5,
+        # Commodities over-trade and are negative-EV at the index bar. The sweep
+        # flips the commodity book from deeply negative to net +5.2R at a 6.0
+        # floor (GOLD +4.0R, SILVERM +1.6R, NATURALGAS +0.6R; CRUDEOIL still
+        # ~-1R — structurally weak, watch it). 0 disables the extra floor.
+        "commodity_min_conviction": 6.0,
+        # Per-underlying floor overrides (max'd with the above). BANKNIFTY is
+        # negative-EV at every floor in backtest (-7.75R @4.0); 6.0 brings it to
+        # ~breakeven (-0.72R) so it stops bleeding the otherwise-strong index book.
+        "per_underlying_min_conviction": {"BANKNIFTY": 6.0},
         "reversal_edge_over_continuation": 1.0,  # reversal must beat in-trend by this to override
         # Exactness tolerances (fraction of price) — tight, so a "touch" is real
         "angle_tolerance_pct": 0.0025,  # 0.25%

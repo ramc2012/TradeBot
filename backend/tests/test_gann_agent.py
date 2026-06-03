@@ -225,6 +225,28 @@ def test_commodity_conviction_floor_gates_weak_setups():
 
     floor = CFG["strategy"]["commodity_min_conviction"]
     gated = ag._scan_decision(row, snap(floor - 1.0), min_score=0)
-    assert gated["decision"] == "skip" and gated["reason"] == "commodity_conviction_floor"
+    assert gated["decision"] == "skip" and gated["reason"] == "conviction_floor"
     opened = ag._scan_decision(row, snap(floor + 0.5), min_score=0)
     assert opened["decision"] == "open" and opened["instrument_type"] == "FUTURES"
+
+
+def test_per_underlying_conviction_floor_gates_banknifty():
+    """BANKNIFTY (negative-EV at every floor in backtest) gets a per-underlying
+    6.0 floor — a setup that clears the engine's 5.0 bar is still gated for it."""
+    ag = _agent()
+    bn_floor = CFG["strategy"]["per_underlying_min_conviction"]["BANKNIFTY"]
+    row = {"underlying": "BANKNIFTY", "spot_price": 53000.0,
+           "ce": {"ltp": 300.0, "lot_size": 35, "strike": 53000, "expiry": "2026-12-25",
+                  "instrument_key": "K", "trading_symbol": "BN"}}
+
+    def snap(conv):
+        return {"spot_price": 53000.0, "as_of": "t", "underlying": "BANKNIFTY",
+                "signal": {"state": "bullish_setup", "side": "long", "archetype": "continuation",
+                           "conviction": conv, "regime": "bull", "size_factor": 1.0,
+                           "stop_underlying": 52800.0, "targets_underlying": [53400.0],
+                           "risk_per_unit": 200.0, "bias": "bullish"}}
+
+    gated = ag._scan_decision(row, snap(bn_floor - 0.5), min_score=0)
+    assert gated["decision"] == "skip" and gated["reason"] == "conviction_floor"
+    opened = ag._scan_decision(row, snap(bn_floor + 0.2), min_score=0)
+    assert opened["decision"] == "open" and opened["instrument_type"] == "OPTION"

@@ -359,18 +359,24 @@ class GannTPDeltaPaperAgent:
         if archetype not in ("continuation", "reversal") or side not in ("long", "short"):
             return decision
 
+        # Extra conviction floor on top of the engine's continuation bar — the
+        # max of the commodity floor (commodities over-trade / are negative-EV
+        # at the index bar) and any per-underlying override (e.g. BANKNIFTY).
+        # All tuned from the offline 150-day sweep.
+        strat_cfg = self.config.get("strategy", {})
         spec = _commodity_spec(underlying)
+        extra_floor = float((strat_cfg.get("per_underlying_min_conviction") or {}).get(underlying, 0.0) or 0.0)
+        if spec is not None:
+            extra_floor = max(extra_floor, float(strat_cfg.get("commodity_min_conviction", 0.0) or 0.0))
+        if extra_floor > 0.0 and conviction < extra_floor:
+            decision["reason"] = "conviction_floor"
+            return decision
+
         if spec is not None:
             # ── Commodity → FUTURES (options no longer ingested) ────────────
             price = _safe_float(spot)
             if price is None or price <= 0:
                 decision["reason"] = "missing_spot_price"
-                return decision
-            # Commodities clear a higher conviction bar than indices — they
-            # over-trade and are negative-EV at the index-level threshold.
-            commodity_floor = float(self.config.get("strategy", {}).get("commodity_min_conviction", 0.0) or 0.0)
-            if commodity_floor > 0.0 and conviction < commodity_floor:
-                decision["reason"] = "commodity_conviction_floor"
                 return decision
             decision.update({
                 "decision": "open",
