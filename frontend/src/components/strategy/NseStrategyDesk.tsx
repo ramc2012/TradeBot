@@ -83,6 +83,7 @@ type WatchlistRow = {
   rsi?: number | null;
   priority_score?: number | null;
   as_of?: string | null;
+  mark_source?: string | null;
 };
 
 type PositionRow = {
@@ -102,6 +103,7 @@ type PositionRow = {
   signal_reason?: string | null;
   entered_at?: string | null;
   price_updated_at?: string | null;
+  mark_source?: string | null;
 };
 
 type TradeRow = {
@@ -555,7 +557,17 @@ function WatchlistTab({ rows }: { rows: WatchlistRow[] }) {
                 </td>
                 <td className="py-2.5 pr-3"><DirBadge direction={r.direction} /></td>
                 <td className="py-2.5 pr-3 text-right font-mono text-text-secondary">{fmt(r.strike ?? r.atm_strike, 0)}</td>
-                <td className="py-2.5 pr-3 text-right font-mono text-text-primary">{fmt(r.ltp)}</td>
+                <td className="py-2.5 pr-3 text-right font-mono text-text-primary">
+                  <span className="inline-flex items-center justify-end gap-1">
+                    {r.mark_source === "live_tick" ? (
+                      <span
+                        className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent-green"
+                        title="Live tick"
+                      />
+                    ) : null}
+                    {fmt(r.ltp)}
+                  </span>
+                </td>
                 <td className="py-2.5 pr-3 text-right font-mono text-text-secondary">{r.iv_pct != null ? fmt(r.iv_pct, 1) : "—"}</td>
                 <td className="py-2.5 pr-3 text-right font-mono text-text-secondary">{r.rsi != null ? fmt(r.rsi, 1) : "—"}</td>
                 <td className="py-2.5 pr-3"><MacdTrend macd={r.macd} prev={r.previous_macd} hist={r.macd_histogram} /></td>
@@ -605,7 +617,17 @@ function PositionsTab({ rows }: { rows: PositionRow[] }) {
                 <td className="py-2.5 pr-3"><DirBadge direction={p.option_type} /></td>
                 <td className="py-2.5 pr-3 text-right font-mono text-text-secondary">{p.qty}</td>
                 <td className="py-2.5 pr-3 text-right font-mono text-text-primary">{fmt(p.entry_price)}</td>
-                <td className="py-2.5 pr-3 text-right font-mono text-text-primary">{fmt(p.current_price)}</td>
+                <td className="py-2.5 pr-3 text-right font-mono text-text-primary">
+                  <span className="inline-flex items-center justify-end gap-1">
+                    {p.mark_source === "live_tick" ? (
+                      <span
+                        className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent-green"
+                        title="Live tick"
+                      />
+                    ) : null}
+                    {fmt(p.current_price)}
+                  </span>
+                </td>
                 <td className={clsx("py-2.5 pr-3 text-right font-mono font-semibold", pnlTone(p.unrealized_pnl))}>
                   {fmtSigned(p.unrealized_pnl, 0)}
                   {p.return_pct != null ? <div className="text-[10px] font-normal text-text-muted">{fmtSigned(p.return_pct, 1, "%")}</div> : null}

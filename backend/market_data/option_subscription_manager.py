@@ -509,9 +509,9 @@ async def refresh_held_position_subscriptions() -> dict[str, Any]:
 
     positions = _open_nse_option_positions()
     active_symbols: list[str] = []
-    if not positions:
-        live_marks.prune_registry([])
-        return {"held": 0, "subscribed": 0}
+    # NOTE: do NOT early-return when there are no open positions — the S1
+    # watchlist ATM legs still need subscribing so the desk's watchlist
+    # streams even with a flat book. Held-leg loop just no-ops below.
 
     today_ist = _now_ist().strftime("%Y-%m-%d")
     if _held_chain_cache_day != today_ist:
@@ -548,17 +548,106 @@ async def refresh_held_position_subscriptions() -> dict[str, Any]:
         desired.append(app_symbol)
         resolved += 1
 
-    # Drop registry entries for positions that have closed.
+    # Also subscribe the S1 watchlist ATM index legs (≤10 — the 5 index
+    # underlyings × CE/PE). These aren't held positions but the strategy
+    # desk's watchlist needs their live ticks to stream instead of
+    # step-changing on the periodic snapshot write. Trivial WS load.
+    watchlist_resolved = 0
+    try:
+        wl_legs = await _strategy1_watchlist_legs()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[OptionWS] watchlist-leg resolve failed: {exc}")
+        wl_legs = []
+    for leg in wl_legs:
+        app_symbol = await _resolve_held_option_app_symbol(
+            underlying=leg["underlying"],
+            expiry=leg["expiry"],
+            strike=leg["strike"],
+            option_type=leg["option_type"],
+            chain_cache=_held_chain_cache,
+        )
+        if not app_symbol:
+            continue
+        # Register both the snapshot trading_symbol AND instrument_key →
+        # app_symbol so the watchlist overlay (which keys on those fields)
+        # resolves the live tick.
+        for key in (leg.get("trading_symbol"), leg.get("instrument_key")):
+            if key:
+                live_marks.register_position_symbol(str(key), app_symbol)
+        desired.append(app_symbol)
+        active_symbols.append(str(leg.get("trading_symbol") or app_symbol))
+        watchlist_resolved += 1
+
+    # Drop registry entries for positions/legs no longer tracked.
     live_marks.prune_registry(active_symbols)
 
     subscribed = 0
     if desired and _is_enabled():
         current = set(data_router._subscribed_symbols)  # type: ignore[attr-defined]
-        to_add = [s for s in desired if s not in current]
+        to_add = [s for s in dict.fromkeys(desired) if s not in current]
         if to_add:
             subscribed = await data_router.add_subscriptions(to_add)
 
-    return {"held": len(positions), "resolved": resolved, "subscribed": subscribed}
+    return {
+        "held": len(positions),
+        "resolved": resolved,
+        "watchlist_resolved": watchlist_resolved,
+        "subscribed": subscribed,
+    }
+
+
+async def _strategy1_watchlist_legs() -> list[dict[str, Any]]:
+    """Return the current S1 ATM index option legs to keep WS-subscribed.
+
+    Reads the latest-day ATM CE/PE rows from atm_option_watchlist_snapshots
+    for the 5 S1 index underlyings. One leg per (underlying, option_type) —
+    the most-recent snapshot row, which carries the live ATM strike + expiry
+    + instrument_key + trading_symbol.
+    """
+    from db.database import AsyncSessionLocal
+    from sqlalchemy import text
+
+    legs: list[dict[str, Any]] = []
+    focus = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT DISTINCT ON (underlying, option_type)
+                       underlying, option_type, expiry, strike,
+                       instrument_key, trading_symbol
+                FROM atm_option_watchlist_snapshots
+                WHERE underlying = ANY(:focus)
+                  AND timezone('Asia/Kolkata', time)::date = (
+                      SELECT MAX(timezone('Asia/Kolkata', time)::date)
+                      FROM atm_option_watchlist_snapshots
+                  )
+                ORDER BY underlying, option_type, time DESC
+                """
+            ),
+            {"focus": list(focus)},
+        )
+        for row in result.mappings().all():
+            try:
+                strike = float(row.get("strike") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            underlying = str(row.get("underlying") or "").upper()
+            option_type = str(row.get("option_type") or "").upper()
+            expiry = str(row.get("expiry") or "").strip()
+            if not (underlying and option_type in ("CE", "PE") and strike and expiry):
+                continue
+            legs.append(
+                {
+                    "underlying": underlying,
+                    "option_type": option_type,
+                    "expiry": expiry,
+                    "strike": strike,
+                    "instrument_key": row.get("instrument_key"),
+                    "trading_symbol": row.get("trading_symbol"),
+                }
+            )
+    return legs
 
 
 async def run_held_position_subscription_loop(interval_seconds: float = 45.0) -> None:

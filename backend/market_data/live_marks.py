@@ -194,3 +194,87 @@ async def overlay_nse_agent_status(status: dict[str, Any]) -> dict[str, Any]:
         if isinstance(strat, dict) and isinstance(strat.get("positions"), list):
             await overlay_live_marks(strat["positions"], force_long=True)
     return status
+
+
+async def overlay_watchlist_live_marks(
+    rows: list[dict[str, Any]],
+    *,
+    ltp_field: str = "ltp",
+    symbol_fields: tuple[str, ...] = ("trading_symbol", "instrument_key", "option_key"),
+    max_age_seconds: float = 30.0,
+) -> list[dict[str, Any]]:
+    """Overlay live ticks onto S1 watchlist rows in place.
+
+    The watchlist LTP is otherwise read straight from the periodic
+    ``atm_option_watchlist_snapshots`` write (minutes-cadence). For any row
+    whose option leg is on the WS tick feed (the S1 ATM index legs are
+    subscribed by ``refresh_held_position_subscriptions``), this swaps in
+    the live tick so the desk streams instead of step-changing on snapshot
+    writes.
+
+    A ratio guard rejects cross-wired ticks (Fyers occasionally attributes
+    an index spot value to an option key). ``change_pct`` is recomputed off
+    the row's prior-close anchor when available. Adds
+    ``mark_source="live_tick"`` to rows it updated; ``"scan_guarded"`` to
+    rows whose live tick failed the ratio guard.
+    """
+    if not rows:
+        return rows
+    from market_data.data_router import data_router
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        candidates: list[str] = []
+        for fld in symbol_fields:
+            val = str(row.get(fld) or "").strip()
+            if not val:
+                continue
+            mapped = registered_app_symbol(val)
+            if mapped:
+                candidates.append(mapped)
+            candidates.append(val)
+
+        live: Optional[float] = None
+        for sym in candidates:
+            if not sym:
+                continue
+            try:
+                live = await data_router.get_live_mark(sym, max_age_seconds=max_age_seconds)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[live_marks] watchlist get_live_mark failed for {sym}: {exc}")
+                live = None
+            if live:
+                break
+        if not live or live <= 0:
+            continue
+
+        # Ratio guard against cross-wired ticks — compare to the snapshot LTP
+        # the row already carries. Real intra-snapshot premium moves are small.
+        try:
+            ref = float(row.get(ltp_field) or 0.0)
+        except (TypeError, ValueError):
+            ref = 0.0
+        if ref > 0 and (
+            live > ref * MAX_LIVE_DIVERGENCE_RATIO
+            or live < ref / MAX_LIVE_DIVERGENCE_RATIO
+        ):
+            row["mark_source"] = "scan_guarded"
+            continue
+
+        # Recompute change_pct off a prior-close anchor when present.
+        prev_close = None
+        for anchor_field in ("prev_close", "previous_close", "ltp_open"):
+            raw = row.get(anchor_field)
+            try:
+                prev_close = float(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                prev_close = None
+            if prev_close:
+                break
+
+        row[ltp_field] = round(live, 4)
+        if prev_close and prev_close > 0:
+            row["change_pct"] = round((live - prev_close) / prev_close * 100.0, 2)
+        row["mark_source"] = "live_tick"
+    return rows

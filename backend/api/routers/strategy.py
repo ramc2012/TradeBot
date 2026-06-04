@@ -734,7 +734,18 @@ async def _build_strategy1_snapshot_watchlist_signals(limit: int = 500) -> list[
 
     deduped = list(best_by_side.values())
     deduped.sort(key=lambda item: float(item.get("priority_score") or 0.0), reverse=True)
-    return deduped[:limit]
+    top = deduped[:limit]
+    # Live-tick overlay: the ltp above came from the periodic
+    # atm_option_watchlist_snapshots write (minutes-cadence). For any leg
+    # on the WS feed (S1 ATM index legs are subscribed by the option
+    # subscription manager) swap in the fresh tick so the desk streams.
+    # Best-effort — falls through to the snapshot ltp when no tick.
+    try:
+        from market_data.live_marks import overlay_watchlist_live_marks
+        await overlay_watchlist_live_marks(top)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[Strategy] watchlist live overlay skipped: {exc}")
+    return top
 
 
 def _build_strategy1_watchlist_signals(agent_status: dict[str, Any]) -> list[dict[str, Any]]:
