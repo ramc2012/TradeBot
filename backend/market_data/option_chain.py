@@ -45,6 +45,26 @@ class OptionChainService:
     async def start(self):
         self._task = asyncio.create_task(self._poll_loop())
 
+    async def ensure_running(self) -> None:
+        """Acquire a broker (if missing) and start the poll loop (if not
+        running). Idempotent — safe to call repeatedly. Lets callers that want
+        a chain *guaranteed* tracked + persisted (e.g. the session-open pick
+        registering the active index expiries) get the loop up without
+        depending on a desk having started it first."""
+        if self._broker is None:
+            try:
+                from api.routers.market import _get_market_adapter
+                adapter, _ = await _get_market_adapter()
+                if adapter is not None:
+                    self.set_broker(adapter)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[OC] ensure_running broker acquire failed: {exc}")
+        if self._task is None or self._task.done():
+            try:
+                await self.start()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[OC] ensure_running start failed: {exc}")
+
     async def stop(self):
         if self._task:
             self._task.cancel()

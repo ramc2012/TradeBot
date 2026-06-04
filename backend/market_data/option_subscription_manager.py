@@ -46,7 +46,8 @@ from api.routers.auth import get_active_adapter
 from core.config import settings
 from market_data import data_router
 from market_data.atm_watchlist import atm_watchlist_service
-from market_data.symbols import to_fyers_symbol
+from market_data.option_chain import option_chain_service
+from market_data.symbols import to_app_symbol, to_fyers_symbol
 from paper_engine.base_strategy_agent import _now_ist
 
 
@@ -230,6 +231,20 @@ async def compute_session_option_symbols() -> tuple[list[str], list[str]]:
 
     for underlying, row in by_underlying.items():
         expiry = str(row.get("expiry") or "").strip()
+        # Part 2 (2026-06-04): guarantee the FULL chain for each index
+        # underlying's active expiry is tracked + persisted to
+        # option_chain_snapshots regardless of whether any trading desk
+        # happens to request it that day. Reuses the watchlist's authoritative
+        # expiry (already resolved above) and starts the chain poll loop if
+        # nothing else has. Best-effort — a failure here never blocks the
+        # subscription pick. (Same app-symbol key the desks use, so the
+        # directional cache benefits too.)
+        if expiry:
+            try:
+                option_chain_service.track(to_app_symbol(underlying) or underlying, expiry)
+                await option_chain_service.ensure_running()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[OptionWS] chain auto-track failed {underlying} {expiry}: {exc}")
         for side_key in ("ce", "pe"):
             side = row.get(side_key) or {}
             if not isinstance(side, dict):
