@@ -61,10 +61,24 @@ def _as_float(value: Any) -> Optional[float]:
 
 
 class PaperPositionBook:
-    def __init__(self, root: Path | str):
+    def __init__(self, root: Path | str, *, limits: dict[str, Any] | None = None):
         self.root = resolve_journal_root(root)
         self.path = self.root / "paper_positions.json"
         self._lock = asyncio.Lock()
+        if limits is None:
+            try:
+                from auction_intelligence.config import clone_default_config
+
+                limits = clone_default_config().get("position_limits", {})
+            except Exception:
+                limits = {}
+        # Position-discipline knobs (see config defaults.json::position_limits):
+        #   one_position_per_symbol  -> at most ONE open position per underlying
+        #                               (the 3 agents collapse to the best decision;
+        #                               opposite direction flips, no CE+PE concurrently).
+        #   max_symbol_capital_fraction -> clamp qty so premium outgo <= frac * capital.
+        #   hard_stop_premium_fraction  -> exit when the option premium falls this far.
+        self.limits = dict(limits or {})
 
     async def list_positions(
         self,
@@ -116,112 +130,25 @@ class PaperPositionBook:
             )
             now = _utc_now()
 
-            for agent_name, decision in decisions_by_agent.items():
-                matching = [
-                    position
-                    for position in open_positions
-                    if position.get("agent_name") == agent_name
-                    and _normalize_underlying(position.get("underlying_symbol")) == underlying
-                ]
-                if not matching:
-                    execution = executions_by_agent.get(agent_name)
-                    if execution is not None and decision.action != "FLAT":
-                        open_positions.append(
-                            self._open_position(
-                                bundle=bundle,
-                                decision=decision,
-                                execution=execution,
-                                now=now,
-                                underlying=underlying,
-                            )
-                        )
-                    continue
-
-                primary = matching[0]
-                for extra in matching[1:]:
-                    await self._close_position(
-                        position=extra,
-                        bundle=bundle,
-                        now=now,
-                        reason="dedupe_repair",
-                        execution=None,
-                    )
-                    open_positions.remove(extra)
-                    closed_positions.append(extra)
-
-                execution = executions_by_agent.get(agent_name)
-                if decision.action == "FLAT":
-                    await self._close_position(
-                        position=primary,
-                        bundle=bundle,
-                        now=now,
-                        reason="flat_signal",
-                        execution=None,
-                    )
-                    open_positions.remove(primary)
-                    closed_positions.append(primary)
-                    continue
-
-                if execution is None:
-                    await self._refresh_open_position(
-                        position=primary,
-                        bundle=bundle,
-                        decision=decision,
-                        now=now,
-                        execution=None,
-                    )
-                    exit_reason = self._exit_reason_for_position(primary, bundle=bundle)
-                    if exit_reason is not None:
-                        await self._close_position(
-                            position=primary,
-                            bundle=bundle,
-                            now=now,
-                            reason=exit_reason,
-                            execution=None,
-                        )
-                        open_positions.remove(primary)
-                        closed_positions.append(primary)
-                    continue
-
-                if primary.get("signal_action") == decision.action and _same_contract(primary, execution):
-                    await self._refresh_open_position(
-                        position=primary,
-                        bundle=bundle,
-                        decision=decision,
-                        now=now,
-                        execution=execution,
-                    )
-                    exit_reason = self._exit_reason_for_position(primary, bundle=bundle)
-                    if exit_reason is not None:
-                        await self._close_position(
-                            position=primary,
-                            bundle=bundle,
-                            now=now,
-                            reason=exit_reason,
-                            execution=execution,
-                        )
-                        open_positions.remove(primary)
-                        closed_positions.append(primary)
-                    continue
-
-                close_reason = "signal_flip" if primary.get("signal_action") != decision.action else "contract_roll"
-                await self._close_position(
-                    position=primary,
+            if bool(self.limits.get("one_position_per_symbol", True)):
+                await self._sync_one_per_symbol(
                     bundle=bundle,
+                    underlying=underlying,
+                    decisions_by_agent=decisions_by_agent,
+                    executions_by_agent=executions_by_agent,
+                    open_positions=open_positions,
+                    closed_positions=closed_positions,
                     now=now,
-                    reason=close_reason,
-                    execution=None,
                 )
-                open_positions.remove(primary)
-                closed_positions.append(primary)
-                open_positions.append(
-                    self._open_position(
-                        bundle=bundle,
-                        decision=decision,
-                        execution=execution,
-                        now=now,
-                        underlying=underlying,
-                    )
+            else:
+                await self._sync_per_agent(
+                    bundle=bundle,
+                    underlying=underlying,
+                    decisions_by_agent=decisions_by_agent,
+                    executions_by_agent=executions_by_agent,
+                    open_positions=open_positions,
+                    closed_positions=closed_positions,
+                    now=now,
                 )
 
             closed_positions.sort(key=lambda item: str(item.get("closed_at") or ""), reverse=True)
@@ -232,6 +159,272 @@ class PaperPositionBook:
             }
             await self._save_state(state)
             return self._summary(state, symbol=underlying)
+
+    async def _sync_one_per_symbol(
+        self,
+        *,
+        bundle: AnalysisBundle,
+        underlying: str,
+        decisions_by_agent: dict[str, Any],
+        executions_by_agent: dict[str, Any],
+        open_positions: list[dict[str, Any]],
+        closed_positions: list[dict[str, Any]],
+        now: str,
+    ) -> None:
+        """One open position per underlying. The 3 agents (positional/swing/scalp)
+        all evaluate the SAME single-symbol bundle, so we collapse them to the one
+        best actionable decision and manage a single position keyed by underlying
+        (not by agent). Opposite direction FLIPS (close then open the other leg);
+        same direction HOLDS (no contract roll → no churn, never CE+PE together);
+        a dominant FLAT closes. Quantity / hard-stop limits are applied at open /
+        exit respectively.
+        """
+        matching = [
+            position
+            for position in open_positions
+            if _normalize_underlying(position.get("underlying_symbol")) == underlying
+        ]
+        primary = matching[0] if matching else None
+        for extra in matching[1:]:  # repair any pre-existing duplicates for this symbol
+            await self._close_position(
+                position=extra, bundle=bundle, now=now, reason="dedupe_repair", execution=None
+            )
+            if extra in open_positions:
+                open_positions.remove(extra)
+            closed_positions.append(extra)
+
+        actionable = [
+            (decision, executions_by_agent.get(agent_name))
+            for agent_name, decision in decisions_by_agent.items()
+            if decision.action != "FLAT" and executions_by_agent.get(agent_name) is not None
+        ]
+        if actionable:
+            chosen_decision, chosen_execution = max(
+                actionable, key=lambda pair: float(pair[0].confidence or 0.0)
+            )
+        else:
+            chosen_decision, chosen_execution = None, None
+        best_any = (
+            max(decisions_by_agent.values(), key=lambda d: float(d.confidence or 0.0))
+            if decisions_by_agent
+            else None
+        )
+
+        if primary is None:
+            if chosen_decision is not None:
+                open_positions.append(
+                    self._open_position(
+                        bundle=bundle,
+                        decision=chosen_decision,
+                        execution=chosen_execution,
+                        now=now,
+                        underlying=underlying,
+                    )
+                )
+            return
+
+        # We already hold a position on this underlying.
+        if chosen_decision is None:
+            if best_any is not None and best_any.action == "FLAT":
+                await self._close_position(
+                    position=primary, bundle=bundle, now=now, reason="flat_signal", execution=None
+                )
+                if primary in open_positions:
+                    open_positions.remove(primary)
+                closed_positions.append(primary)
+                return
+            if best_any is not None:
+                await self._refresh_open_position(
+                    position=primary, bundle=bundle, decision=best_any, now=now, execution=None
+                )
+                await self._maybe_exit(
+                    primary,
+                    bundle=bundle,
+                    now=now,
+                    execution=None,
+                    open_positions=open_positions,
+                    closed_positions=closed_positions,
+                )
+            return
+
+        if str(primary.get("signal_action") or "").upper() == str(chosen_decision.action or "").upper():
+            # SAME direction → HOLD the single position (no roll → no churn, no CE+PE).
+            await self._refresh_open_position(
+                position=primary,
+                bundle=bundle,
+                decision=chosen_decision,
+                now=now,
+                execution=chosen_execution,
+            )
+            await self._maybe_exit(
+                primary,
+                bundle=bundle,
+                now=now,
+                execution=chosen_execution,
+                open_positions=open_positions,
+                closed_positions=closed_positions,
+            )
+            return
+
+        # OPPOSITE direction → FLIP (close the existing leg, open the other side).
+        await self._close_position(
+            position=primary, bundle=bundle, now=now, reason="signal_flip", execution=None
+        )
+        if primary in open_positions:
+            open_positions.remove(primary)
+        closed_positions.append(primary)
+        open_positions.append(
+            self._open_position(
+                bundle=bundle,
+                decision=chosen_decision,
+                execution=chosen_execution,
+                now=now,
+                underlying=underlying,
+            )
+        )
+
+    async def _maybe_exit(
+        self,
+        position: dict[str, Any],
+        *,
+        bundle: AnalysisBundle,
+        now: str,
+        execution: Any | None,
+        open_positions: list[dict[str, Any]],
+        closed_positions: list[dict[str, Any]],
+    ) -> bool:
+        exit_reason = self._exit_reason_for_position(position, bundle=bundle)
+        if exit_reason is None:
+            return False
+        await self._close_position(
+            position=position, bundle=bundle, now=now, reason=exit_reason, execution=execution
+        )
+        if position in open_positions:
+            open_positions.remove(position)
+        closed_positions.append(position)
+        return True
+
+    async def _sync_per_agent(
+        self,
+        *,
+        bundle: AnalysisBundle,
+        underlying: str,
+        decisions_by_agent: dict[str, Any],
+        executions_by_agent: dict[str, Any],
+        open_positions: list[dict[str, Any]],
+        closed_positions: list[dict[str, Any]],
+        now: str,
+    ) -> None:
+        """Legacy behaviour: one position PER AGENT per underlying (can stack
+        positional+swing+scalp on the same symbol). Kept behind the
+        one_position_per_symbol=false config toggle."""
+        for agent_name, decision in decisions_by_agent.items():
+            matching = [
+                position
+                for position in open_positions
+                if position.get("agent_name") == agent_name
+                and _normalize_underlying(position.get("underlying_symbol")) == underlying
+            ]
+            if not matching:
+                execution = executions_by_agent.get(agent_name)
+                if execution is not None and decision.action != "FLAT":
+                    open_positions.append(
+                        self._open_position(
+                            bundle=bundle,
+                            decision=decision,
+                            execution=execution,
+                            now=now,
+                            underlying=underlying,
+                        )
+                    )
+                continue
+
+            primary = matching[0]
+            for extra in matching[1:]:
+                await self._close_position(
+                    position=extra,
+                    bundle=bundle,
+                    now=now,
+                    reason="dedupe_repair",
+                    execution=None,
+                )
+                open_positions.remove(extra)
+                closed_positions.append(extra)
+
+            execution = executions_by_agent.get(agent_name)
+            if decision.action == "FLAT":
+                await self._close_position(
+                    position=primary,
+                    bundle=bundle,
+                    now=now,
+                    reason="flat_signal",
+                    execution=None,
+                )
+                open_positions.remove(primary)
+                closed_positions.append(primary)
+                continue
+
+            if execution is None:
+                await self._refresh_open_position(
+                    position=primary,
+                    bundle=bundle,
+                    decision=decision,
+                    now=now,
+                    execution=None,
+                )
+                exit_reason = self._exit_reason_for_position(primary, bundle=bundle)
+                if exit_reason is not None:
+                    await self._close_position(
+                        position=primary,
+                        bundle=bundle,
+                        now=now,
+                        reason=exit_reason,
+                        execution=None,
+                    )
+                    open_positions.remove(primary)
+                    closed_positions.append(primary)
+                continue
+
+            if primary.get("signal_action") == decision.action and _same_contract(primary, execution):
+                await self._refresh_open_position(
+                    position=primary,
+                    bundle=bundle,
+                    decision=decision,
+                    now=now,
+                    execution=execution,
+                )
+                exit_reason = self._exit_reason_for_position(primary, bundle=bundle)
+                if exit_reason is not None:
+                    await self._close_position(
+                        position=primary,
+                        bundle=bundle,
+                        now=now,
+                        reason=exit_reason,
+                        execution=execution,
+                    )
+                    open_positions.remove(primary)
+                    closed_positions.append(primary)
+                continue
+
+            close_reason = "signal_flip" if primary.get("signal_action") != decision.action else "contract_roll"
+            await self._close_position(
+                position=primary,
+                bundle=bundle,
+                now=now,
+                reason=close_reason,
+                execution=None,
+            )
+            open_positions.remove(primary)
+            closed_positions.append(primary)
+            open_positions.append(
+                self._open_position(
+                    bundle=bundle,
+                    decision=decision,
+                    execution=execution,
+                    now=now,
+                    underlying=underlying,
+                )
+            )
 
     async def _refresh_open_position(
         self,
@@ -272,6 +465,20 @@ class PaperPositionBook:
         latest_premium = _as_float(position.get("latest_premium"))
         if latest_premium is not None and latest_premium <= 0:
             return "premium_zero"
+
+        # Hard stop on PREMIUM drawdown (symmetric for CE & PE — both are option BUYS,
+        # so a falling premium is the loss either way). Capital at risk per position is
+        # capped to this fraction of the premium paid.
+        hard_stop_fraction = float(self.limits.get("hard_stop_premium_fraction", 0.25))
+        entry_premium = _as_float(position.get("entry_premium"))
+        if (
+            hard_stop_fraction > 0
+            and entry_premium is not None
+            and entry_premium > 0
+            and latest_premium is not None
+            and latest_premium <= entry_premium * (1.0 - hard_stop_fraction)
+        ):
+            return "hard_stop"
 
         latest_spot = _as_float(position.get("latest_spot_price"))
         action = str(position.get("signal_action") or "").upper()
@@ -410,6 +617,32 @@ class PaperPositionBook:
             pass
         return record_dict
 
+    def _clamp_quantity_to_symbol_cap(
+        self,
+        quantity: int,
+        premium: float,
+        lot_size: Any,
+    ) -> int:
+        """Cap a new position's size so its PREMIUM OUTGO (qty x premium — the real
+        capital at risk for an option buy) stays within ``max_symbol_capital_fraction``
+        of the account, floored to whole lots."""
+        fraction = float(self.limits.get("max_symbol_capital_fraction", 0.0) or 0.0)
+        if fraction <= 0 or quantity <= 0 or premium is None or premium <= 0:
+            return quantity
+        cap_capital = fraction * AI_INITIAL_CAPITAL
+        max_qty = int(cap_capital // premium)
+        try:
+            lot = int(lot_size or 0)
+        except (TypeError, ValueError):
+            lot = 0
+        if lot > 0:
+            max_qty = (max_qty // lot) * lot  # floor to whole lots
+        if max_qty <= 0:
+            # One lot already exceeds the cap — keep a single lot rather than skip,
+            # so the symbol can still be traded (only relevant at very small capital).
+            return lot if lot > 0 else 0
+        return min(quantity, max_qty)
+
     def _build_open_position(
         self,
         *,
@@ -421,6 +654,9 @@ class PaperPositionBook:
     ) -> dict[str, Any]:
         entry_premium = float(getattr(execution, "premium", None) or getattr(execution, "limit_price", None) or 0.0)
         spot_price = self._spot_from_execution_or_bundle(bundle=bundle, execution=execution, fallback=None)
+        raw_quantity = int(getattr(execution, "quantity", None) or decision.quantity or 0)
+        lot_size = getattr(execution, "lot_size", None)
+        quantity = self._clamp_quantity_to_symbol_cap(raw_quantity, entry_premium, lot_size)
         record = PaperPositionRecord(
             position_id=uuid4().hex,
             status="open",
@@ -433,7 +669,7 @@ class PaperPositionBook:
             symbol=str(getattr(execution, "symbol", None) or underlying),
             regime_entry=str(bundle.regime.label),
             regime_last=str(bundle.regime.label),
-            quantity=int(getattr(execution, "quantity", None) or decision.quantity or 0),
+            quantity=quantity,
             entry_confidence=float(decision.confidence or 0.0),
             latest_confidence=float(decision.confidence or 0.0),
             entry_premium=round(entry_premium, 2),
