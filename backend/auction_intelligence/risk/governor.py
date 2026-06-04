@@ -147,9 +147,15 @@ class RiskGovernor:
         return round(numeric / max(net_liquidation, 1.0), 4)
 
     def _margin_fraction(self, symbol: str) -> float:
+        # This governor evaluates ATM option-BUY decisions — capital at risk is the PREMIUM OUTGO,
+        # not the full index notional. Use the option-buy fraction (a NIFTY ATM premium ≈ 2% of the
+        # index notional) and DEFAULT to it for any symbol without an explicit per-contract margin.
+        # (Previously defaulted to 1.0 = full notional, which sized one NIFTY lot at ~₹1.86M and
+        # tripped the 0.35 symbol-exposure cap on every entry, blocking all NSE option opens.)
+        premium_fraction = float(self.scope.get("option_buy_price_fraction", 0.02))
         if str(self.scope.get("instrument_type") or "").lower() == "options_buy":
-            return float(self.scope.get("option_buy_price_fraction", 0.02))
+            return premium_fraction
         normalized_symbol = str(symbol or "").upper().replace(" INDEX", "").replace(" FUT", "").strip()
         return float(
-            self.contract_specs.get(normalized_symbol, {}).get("margin_fraction_per_lot", 1.0)
+            self.contract_specs.get(normalized_symbol, {}).get("margin_fraction_per_lot", premium_fraction)
         )
