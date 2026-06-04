@@ -1628,6 +1628,9 @@ def test_scalp_agent_trades_responsive_sell_at_upper_value() -> None:
 
 def test_risk_governor_blocks_stale_and_loss_breach() -> None:
     config = clone_default_config()
+    # Pin the loss cap so this test verifies the governor's blocking LOGIC,
+    # decoupled from the (intentionally loosened, paper-lane) prod default.
+    config["risk"]["max_daily_loss"] = 75000.0
     governor = RiskGovernor(config["risk"])
     decision_bundle = [
         service_decision
