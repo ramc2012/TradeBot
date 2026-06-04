@@ -230,6 +230,7 @@ type TradeRow = {
   entry_time?: string;
   exit_time?: string;
   reason?: string;
+  status?: string;
 };
 
 type LatestTickSnapshot = {
@@ -337,6 +338,19 @@ function formatTime(iso: string | null | undefined): string {
   } catch {
     return iso;
   }
+}
+
+function istDateKey(iso: string | null | undefined): string {
+  if (!iso) return "";
+  try {
+    return new Date(iso).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  } catch {
+    return "";
+  }
+}
+
+function isClosedTrade(trade: TradeRow): boolean {
+  return Boolean(trade.exit_time) && String(trade.status || "").toLowerCase() !== "open";
 }
 
 function finiteNumber(value: unknown, fallback = 0): number {
@@ -2810,15 +2824,17 @@ export default function CommodityLivePage() {
   );
   const trades = (
     status.today_trades !== undefined
-      ? status.today_trades
+      ? status.today_trades.filter(isClosedTrade)
       : ((status.trade_history ?? []) as TradeRow[]).filter((t) =>
-          String(t.exit_time || "").startsWith(todayStrIST),
+          isClosedTrade(t) && istDateKey(t.exit_time) === todayStrIST,
         )
   ) as TradeRow[];
   // Stats tab keeps the FULL trade history — win rate / profit factor / W-L /
   // per-underlying are lifetime aggregates and would be meaningless scoped to
   // a single day. Only the Trades + Orders LISTS are today-only.
   const allTrades = (status.trade_history ?? []) as TradeRow[];
+  const closedTrades = allTrades.filter(isClosedTrade);
+  const closedTodayTrades = closedTrades.filter((t) => istDateKey(t.exit_time) === todayStrIST);
 
   const contracts = useMemo(
     () =>
@@ -2990,14 +3006,10 @@ export default function CommodityLivePage() {
     (acc, p) => acc + finiteNumber(p.unrealized_pnl),
     0,
   );
-  // P&L semantics (2026-06-02): backend `day_pnl` is now realized-today +
-  // open MTM, `day_realized_pnl` is realized-today alone. Old UI read
-  // day_pnl (then realized-only) and re-added unrealized — now double-counts.
-  // Use backend fields directly. `realized_pnl_lifetime` = total realized
-  // since the paper account opened.
-  const dayRealized = finiteNumber(summary.day_realized_pnl);
-  const dayPnl =
-    summary.day_pnl != null ? finiteNumber(summary.day_pnl) : dayRealized + unrealized;
+  // Day P&L = closed trades booked today + current open MTM. Backend
+  // `today_trades` can include open rows, so rebuild the closed bucket here.
+  const dayClosedRealized = closedTodayTrades.reduce((acc, t) => acc + finiteNumber(t.pnl), 0);
+  const dayPnl = dayClosedRealized + unrealized;
   const realizedLifetime = finiteNumber(
     summary.realized_pnl_lifetime ?? summary.realized_pnl,
   );
@@ -3108,7 +3120,7 @@ export default function CommodityLivePage() {
           <HeaderStat
             k="DAY P&L"
             v={formatINR(dayPnl)}
-            sub={`r ${formatINR(dayRealized)} · u ${formatINR(unrealized)}`}
+            sub={`closed ${formatINR(dayClosedRealized)} · open ${formatINR(unrealized)}`}
             tone={dayPnl >= 0 ? "text-emerald-300" : "text-rose-300"}
           />
           <HeaderStat
@@ -3362,7 +3374,7 @@ export default function CommodityLivePage() {
                 {unrealized >= 0 ? "▲" : "▼"} {formatSigned(unrealized, 0)} unrealised
               </span>
               <span className="font-mono text-text-muted">
-                · {positions.length} open · realised today {formatINR(dayRealized)}
+                · {positions.length} open · closed today {formatINR(dayClosedRealized)}
               </span>
             </>
           ) : null}
