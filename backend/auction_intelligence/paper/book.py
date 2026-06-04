@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -17,9 +18,11 @@ from market_data.option_history import option_history_service
 
 # Notional paper-account capital for the Auction Intelligence lane. The
 # summary surface reports total_equity, available_capital, drawdown, and
-# Sharpe against this anchor so cross-strategy comparisons (S1/S2/Commodity/
-# FMP all at ₹10L) are apples-to-apples.
-AI_INITIAL_CAPITAL = 1_000_000.0
+# Sharpe against this anchor. Raised to ₹50L to match the unbounded commodity
+# book (DEFAULT_COMMODITY_INITIAL_CAPITAL) so the AI lane has headroom to deploy
+# many concurrent option-buy positions without the account-capital reservation
+# becoming the binding constraint. Override via env AI_INITIAL_CAPITAL.
+AI_INITIAL_CAPITAL = float(os.environ.get("AI_INITIAL_CAPITAL", 5_000_000.0))
 
 
 def _utc_now() -> str:
