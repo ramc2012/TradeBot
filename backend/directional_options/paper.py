@@ -535,8 +535,26 @@ class DirectionalOptionsPaperStore:
         position["price_source"] = mark.get("price_source") or position.get("price_source")
         position["mark_time"] = mark.get("mark_time") or position.get("mark_time")
         position["unrealized_pnl"] = 0.0
-        realized = round((latest_premium - entry_premium) * quantity, 2)
+        realized_gross = round((latest_premium - entry_premium) * quantity, 2)
+        # Deduct real round-trip charges (brokerage + STT + exchange txn + SEBI
+        # + GST + stamp) so paper P&L is NET, not gross — paper used to overstate
+        # live by the entire charge stack (STT alone is 0.10% of sell-side
+        # premium on index options). WS-1.4a paper fidelity.
+        try:
+            from paper_engine.transaction_costs import round_trip_cost
+            txn_cost = round_trip_cost(
+                instrument_type=str(position.get("option_type") or "CE"),
+                underlying=str(position.get("underlying") or ""),
+                entry_price=entry_premium,
+                exit_price=latest_premium,
+                quantity=quantity,
+            )
+        except Exception:  # noqa: BLE001
+            txn_cost = 0.0
+        realized = round(realized_gross - txn_cost, 2)
         position["realized_pnl"] = realized
+        position["realized_pnl_gross"] = realized_gross
+        position["transaction_cost"] = round(txn_cost, 2)
         # Feed the realized PnL back to the RL policy so the value
         # posterior tightens and the multiplier buckets converge.
         if self.policy is not None:
