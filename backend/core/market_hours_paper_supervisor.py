@@ -62,6 +62,9 @@ class RunnerConfig:
     # that must "act in market hours only" (e.g. CBE) rather than capture a
     # once-a-day end-of-session snapshot.
     post_close_catchup: bool = True
+    # WS-0.5a — per-runner hard timeout (seconds). None → use the global
+    # settings.MARKET_HOURS_SUPERVISOR_RUNNER_TIMEOUT_SECONDS ceiling.
+    timeout_seconds: float | None = None
 
 
 @dataclass
@@ -607,8 +610,17 @@ class MarketHoursPaperSupervisor:
         runtime.running = True
         runtime.last_started_at = now
         runtime.last_error = None
+        timeout_s = float(
+            runtime.config.timeout_seconds
+            or settings.MARKET_HOURS_SUPERVISOR_RUNNER_TIMEOUT_SECONDS
+        )
         try:
-            result = await runtime.config.callback()
+            try:
+                result = await asyncio.wait_for(runtime.config.callback(), timeout=timeout_s)
+            except (asyncio.TimeoutError, TimeoutError) as _timeout:
+                raise RuntimeError(
+                    f"runner exceeded {timeout_s:g}s timeout — killed to protect the supervisor loop"
+                ) from _timeout
         except Exception as exc:
             runtime.last_error = str(exc)
             runtime.last_finished_at = self._now_fn()
@@ -632,6 +644,17 @@ class MarketHoursPaperSupervisor:
             await self._emit_scan_audit(runtime.config.key, result=result, error=None)
         finally:
             runtime.running = False
+            # WS-0.2 — per-lane scan wall-time (records on success and failure).
+            try:
+                from core.metrics import observe_scan
+
+                if runtime.last_started_at is not None:
+                    observe_scan(
+                        runtime.config.key,
+                        (self._now_fn() - runtime.last_started_at).total_seconds(),
+                    )
+            except Exception:
+                pass
 
     # State carried across scan cycles to dedupe audit emits — we only want
     # to push to the audit log on actionable signals, transitions, errors,

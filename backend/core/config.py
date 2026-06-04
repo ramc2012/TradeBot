@@ -77,6 +77,12 @@ class Settings(BaseSettings):
     PAPER_RUNTIME_PREWARM_ENABLED: bool = True
     MARKET_HOURS_PAPER_SUPERVISOR_ENABLED: bool = True
     MARKET_HOURS_SUPERVISOR_LOOP_SECONDS: int = 15
+    # WS-0.5a — hard ceiling on a single runner's callback so one hung scan can't
+    # stall the gather (and every other lane) indefinitely. Deliberately generous:
+    # it catches true hangs, not slow-but-working scans. Tighten per-lane once the
+    # WS-0.2 nomad_scan_duration_seconds p99 is known. Per-runner override:
+    # RunnerConfig.timeout_seconds.
+    MARKET_HOURS_SUPERVISOR_RUNNER_TIMEOUT_SECONDS: int = 300
     MARKET_INTELLIGENCE_AUTO_ENABLED: bool = True
     MARKET_INTELLIGENCE_REFRESH_INTERVAL_SECONDS: int = 60
     MARKET_INTELLIGENCE_GAP_FILL_LOOKBACK_DAYS: int = 10

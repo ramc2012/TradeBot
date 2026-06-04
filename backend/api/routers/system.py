@@ -31,6 +31,10 @@ router = APIRouter(prefix="/api/system", tags=["system"])
 _perf = PerformanceAnalytics()
 IST = timezone(timedelta(hours=5, minutes=30))
 _HEALTH_CACHE_TTL_SECONDS = 5.0
+# WS-0.5b — per-sub-check hard timeout. Bounds the endpoint's worst case (the
+# broker snapshot is a network call and was the long pole) so a slow/hung
+# dependency degrades just that one service instead of stalling the whole probe.
+_HEALTH_CHECK_TIMEOUT_SECONDS = 4.0
 _OVERVIEW_CACHE_TTL_SECONDS = 5.0
 _health_cache: dict[str, Any] = {"payload": None, "expires_at": 0.0}
 _health_cache_lock = asyncio.Lock()
@@ -544,6 +548,36 @@ async def update_trading_calendar(body: TradingCalendarSettingsRequest) -> dict[
     return trading_calendar.status_payload()
 
 
+async def _timed_service(
+    coro,
+    *,
+    key: str,
+    label: str,
+    timeout: float = _HEALTH_CHECK_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Run a health sub-check under a hard timeout (WS-0.5b).
+
+    On timeout/error, returns a degraded service entry instead of letting a slow
+    or hung dependency stall the whole /health probe.
+    """
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except (asyncio.TimeoutError, TimeoutError):
+        return _service(
+            key=key,
+            label=label,
+            status="degraded",
+            detail=f"Health check timed out after {timeout:.0f}s.",
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return _service(
+            key=key,
+            label=label,
+            status="degraded",
+            detail=f"Health check error: {exc}",
+        )
+
+
 @router.get("/health")
 async def system_health() -> dict[str, Any]:
     cached = _health_cache.get("payload")
@@ -589,11 +623,15 @@ async def system_health() -> dict[str, Any]:
             auction_service,
             fractal_market_profile_service,
         ) = await asyncio.gather(
-            _postgres_service(),
-            _redis_service(),
-            _broker_service(now_utc),
-            _auction_service(),
-            _fractal_market_profile_service(),
+            _timed_service(_postgres_service(), key="postgres", label="PostgreSQL"),
+            _timed_service(_redis_service(), key="redis", label="Redis"),
+            _timed_service(_broker_service(now_utc), key="brokers", label="Broker Sessions"),
+            _timed_service(_auction_service(), key="auction_intelligence", label="Auction Intelligence"),
+            _timed_service(
+                _fractal_market_profile_service(),
+                key="fractal_market_profile",
+                label="Fractal Market Profile",
+            ),
         )
 
         services = [

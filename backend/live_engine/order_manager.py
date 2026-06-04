@@ -1,6 +1,7 @@
 """Live order manager — routes orders to broker, manages state machine."""
 from __future__ import annotations
 import asyncio
+import time
 import uuid
 from datetime import datetime, timedelta
 from threading import RLock
@@ -10,6 +11,12 @@ from loguru import logger
 
 from brokers.base import BrokerAdapter, OrderRequest, OrderResponse
 from live_engine.risk_manager import RiskManager
+
+try:  # WS-0.2 instrumentation — must never block order placement
+    from core.metrics import observe_order_rtt as _observe_order_rtt
+except Exception:  # pragma: no cover
+    def _observe_order_rtt(*_a, **_k) -> None:  # type: ignore[misc]
+        ...
 
 
 # ── Duplicate guard ──────────────────────────────────────────────────────────
@@ -92,8 +99,11 @@ class LiveOrderManager:
 
         # Place with broker
         local_id = str(uuid.uuid4())
+        _broker_name = getattr(self.broker, "broker_name", None) or type(self.broker).__name__
+        _t0 = time.perf_counter()
         try:
             response: OrderResponse = await self.broker.place_order(order_req)
+            _observe_order_rtt(_broker_name, "ok", time.perf_counter() - _t0)
             live_order = LiveOrder(
                 local_id=local_id,
                 broker_id=response.order_id,
@@ -106,6 +116,7 @@ class LiveOrderManager:
             logger.info(f"[LiveOM] Placed {order_req.action} {order_req.qty} {order_req.symbol} → broker_id={response.order_id}")
             return live_order
         except Exception as e:
+            _observe_order_rtt(_broker_name, "error", time.perf_counter() - _t0)
             logger.error(f"[LiveOM] Place order failed: {e}")
             raise
 

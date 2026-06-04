@@ -294,6 +294,30 @@ class DataRouter:
                                 f"({len(stale)}/{len(self._required_symbols)}); forcing reconnect."
                             )
                             self._schedule_reconnect()
+                            # WS-0.3a — alert once per stale episode (edge-triggered;
+                            # reset on recovery). Flows via the audit→Telegram bridge.
+                            if not getattr(self, "_stale_alerted", False):
+                                self._stale_alerted = True
+                                try:
+                                    from agentic_rag.audit_agent import record_audit_event
+
+                                    await record_audit_event(
+                                        market="system",
+                                        strategy_key="market_data_feed",
+                                        event_type="feed_stale",
+                                        actor="data_router_watchdog",
+                                        severity="warning",
+                                        message=(
+                                            f"{len(stale)}/{len(self._required_symbols)} required index "
+                                            f"feed(s) stale >{int(self._required_tick_stale_seconds)}s: "
+                                            f"{', '.join(stale[:6])}"
+                                        ),
+                                    )
+                                except Exception:
+                                    pass
+                        elif getattr(self, "_stale_alerted", False):
+                            # Feed recovered — reset so the next episode re-alerts.
+                            self._stale_alerted = False
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -324,6 +348,20 @@ class DataRouter:
         tick.symbol = to_app_symbol(tick.symbol)
         tick.timestamp = self._ensure_utc_timestamp(tick.timestamp)
         self._tick_buffer[tick.symbol] = tick
+        # WS-0.2 instrumentation — tick throughput + age at ingest. Fully
+        # isolated: a metrics fault must never disturb the tick hot path.
+        try:
+            from core.metrics import observe_tick
+
+            _src = getattr(self._broker, "broker_name", None) or "unknown"
+            _age = (
+                (datetime.now(timezone.utc) - tick.timestamp).total_seconds()
+                if tick.timestamp is not None
+                else None
+            )
+            observe_tick(f"{_src}_tick", _age)
+        except Exception:
+            pass
         # Notify the DataQualityAgent so strategy agents can short-circuit
         # on stale data. Producers are encouraged to feed this agent on every
         # observed tick or quote.
