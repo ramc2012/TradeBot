@@ -38,6 +38,7 @@ from auction_intelligence.market_profile.engine import MarketProfileEngine
 from auction_intelligence.paper import PaperPositionBook, PaperTradingService
 from auction_intelligence.paper.journal import JournalReader
 from auction_intelligence.shadow import ShadowPersistenceService
+from auction_intelligence.sniper_signal import SniperSignal, sniper_signal_store
 from auction_intelligence.validation.gate_b import GateBValidator
 from auction_intelligence.validation.gate_c import GateCValidator
 from auction_intelligence.validation.persistence import ValidationPersistenceService
@@ -60,6 +61,67 @@ _shadow_store = ShadowPersistenceService()
 _paper_journal = JournalReader(clone_default_config()["paper_trading"]["journal_root"])
 _paper_book = PaperPositionBook(clone_default_config()["paper_trading"]["journal_root"])
 _paper_service = PaperTradingService(clone_default_config()["paper_trading"]["journal_root"])
+
+
+class SniperSignalPayload(BaseModel):
+    """Per-underlying sniper prediction pushed by the isolated sniper sidecar."""
+
+    symbol: str
+    direction: str = "FLAT"
+    magnitude_atr: float = 0.0
+    confidence: float = 0.0
+    horizon: str = ""
+    decision_time: Optional[str] = None
+    model: Optional[str] = None
+    up_atr: Optional[float] = None
+    down_atr: Optional[float] = None
+    extras: dict = Field(default_factory=dict)
+
+
+@router.post("/sniper-signal")
+async def ingest_sniper_signal(payload: SniperSignalPayload = Body(...)) -> dict:
+    """Receive a sniper alpha signal from the sidecar and cache it in-process.
+
+    The Auction Intelligence decision cycle reads this via
+    ``AuctionIntelligenceService._apply_sniper_overlay`` to nudge agent
+    confidence. Returns the normalized key it was stored under.
+    """
+    signal = SniperSignal(
+        symbol=payload.symbol,
+        direction=str(payload.direction or "FLAT").upper(),
+        magnitude_atr=float(payload.magnitude_atr or 0.0),
+        confidence=float(payload.confidence or 0.0),
+        horizon=payload.horizon or "",
+        decision_time=payload.decision_time,
+        model=payload.model,
+        up_atr=payload.up_atr,
+        down_atr=payload.down_atr,
+        extras=dict(payload.extras or {}),
+    )
+    key = sniper_signal_store.put(signal)
+    if not key:
+        raise HTTPException(status_code=422, detail="empty/unresolvable symbol")
+    logger.info(
+        f"sniper.signal symbol={key} dir={signal.direction} "
+        f"mag_atr={signal.magnitude_atr:.3f} conf={signal.confidence:.3f} horizon={signal.horizon}"
+    )
+    return {"status": "ok", "stored": key}
+
+
+@router.get("/sniper-signal")
+async def read_sniper_signals(symbol: Optional[str] = Query(default=None)) -> dict:
+    """Inspect the cached sniper signals (debug / dashboard)."""
+    if symbol:
+        signal = sniper_signal_store.get(symbol)
+        return {
+            "symbol": symbol,
+            "signal": (
+                {**asdict(signal), "age_sec": round(signal.age_seconds(), 1)}
+                if signal
+                else None
+            ),
+        }
+    return {"signals": sniper_signal_store.snapshot()}
 
 
 class BarPayload(BaseModel):
