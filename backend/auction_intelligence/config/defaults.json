@@ -143,6 +143,11 @@
     "stale_data_seconds": 10,
     "min_model_confidence": 0.0
   },
+  "position_limits": {
+    "one_position_per_symbol": true,
+    "max_symbol_capital_fraction": 0.1,
+    "hard_stop_premium_fraction": 0.25
+  },
   "paper_trading": {
     "journal_root": "runtime/auction_intelligence",
     "shadow_net_liquidation": 5000000.0,
