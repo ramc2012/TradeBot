@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import math
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from statistics import median
 from typing import Any, Optional
 
 from loguru import logger
@@ -13,6 +16,12 @@ from brokers.base import Tick
 from db.database import AsyncSessionLocal
 from market_data.candle_timeframes import CANDLE_INTERVALS_MINUTES, floor_timestamp
 from market_data.symbols import DISPLAY_NAMES
+
+try:  # WS-0.1a — reject counter; must never block ingest
+    from core.metrics import record_reject as _record_reject
+except Exception:  # pragma: no cover
+    def _record_reject(*_a, **_k) -> None:  # type: ignore[misc]
+        ...
 
 
 @dataclass
@@ -33,6 +42,16 @@ class _CandleBucket:
 class LiveCandleStore:
     FLUSH_INTERVAL_SECONDS = 5.0
     BATCH_SIZE = 250
+    # WS-0.1a ingest validation — magnitude guard for index spot (where the
+    # documented cross-symbol contamination lands, e.g. NIFTY prints at 53k/75k vs
+    # ~23k spot). The reference is a rolling median (robust to a minority of bad
+    # prints); ±50% is far outside any legit index intraday move yet catches the
+    # documented 2.3-3.3x contamination with margin. Options are exempt (premiums
+    # legitimately move multiples). Conservative by design — watch
+    # nomad_ingest_rejected_total{reason} before tightening.
+    SPOT_DEVIATION_THRESHOLD = 0.5
+    SPOT_REF_WINDOW = 30
+    SPOT_REF_WARMUP = 5
 
     def __init__(self) -> None:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -42,6 +61,7 @@ class LiveCandleStore:
         self._buckets: dict[tuple[str, str], _CandleBucket] = {}
         self._metadata_cache: dict[str, Optional[dict[str, Any]]] = {}
         self._latest_spot: dict[str, float] = {}
+        self._spot_window: dict[str, deque] = {}  # WS-0.1a rolling spot reference
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -59,6 +79,44 @@ class LiveCandleStore:
             pass
         self._task = None
 
+    def _validate_tick(self, tick: Tick) -> bool:
+        """WS-0.1a — drop corrupt ticks at the ingest boundary. Returns True to
+        accept, False to drop.
+
+        Structural checks apply to every symbol; a rolling-median magnitude guard
+        applies to index spot only (where the documented cross-symbol contamination
+        lands). Rejects increment nomad_ingest_rejected_total{reason} so the
+        false-drop rate is observable before tightening.
+        """
+        try:
+            ltp = float(tick.ltp)
+        except (TypeError, ValueError):
+            _record_reject("non_numeric_price")
+            return False
+        if not math.isfinite(ltp) or ltp <= 0:
+            _record_reject("nonpositive_price")
+            return False
+        try:
+            if int(tick.volume or 0) < 0:
+                _record_reject("negative_volume")
+                return False
+        except (TypeError, ValueError):
+            _record_reject("non_numeric_volume")
+            return False
+
+        # Magnitude guard — index spot only (options legitimately move multiples).
+        if tick.symbol in DISPLAY_NAMES:
+            window = self._spot_window.setdefault(
+                tick.symbol, deque(maxlen=self.SPOT_REF_WINDOW)
+            )
+            window.append(ltp)
+            if len(window) >= self.SPOT_REF_WARMUP:
+                ref = median(window)
+                if ref > 0 and abs(ltp - ref) / ref > self.SPOT_DEVIATION_THRESHOLD:
+                    _record_reject("spot_magnitude")
+                    return False
+        return True
+
     def on_tick(self, tick: Tick) -> None:
         if not self._loop or not self._loop.is_running():
             return
@@ -68,6 +126,11 @@ class LiveCandleStore:
             tick.timestamp = tick.timestamp.replace(tzinfo=timezone.utc)
         else:
             tick.timestamp = tick.timestamp.astimezone(timezone.utc)
+
+        # WS-0.1a — reject corrupt prints at the boundary, before they pollute the
+        # tick log or the candle buckets.
+        if not self._validate_tick(tick):
+            return
 
         try:
             running_loop = asyncio.get_running_loop()
