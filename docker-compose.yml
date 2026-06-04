@@ -69,6 +69,11 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
+      # Startup runway: the lifespan (agents, supervisor, broker restore, AI lane)
+      # can take >1m. Without start_period the backend is marked unhealthy during
+      # startup and compose aborts the `up`, orphaning the frontend (deploy casualty
+      # seen 2026-06-04). During this window failing checks don't count as unhealthy.
+      start_period: 150s
     command: >
       sh -c "python scripts/wait_for_db.py &&
              alembic upgrade head &&
@@ -141,7 +146,10 @@ services:
       APP_WRITE_TOKEN: ${APP_WRITE_TOKEN:-}
     depends_on:
       backend:
-        condition: service_healthy
+        # service_started (not _healthy): the UI must never be orphaned by a slow
+        # backend healthcheck. It tolerates a not-yet-ready backend (WS reconnect /
+        # loading states) until the API comes up.
+        condition: service_started
     restart: unless-stopped
 
   # ──────────────────────────────────────────────────────────────────
@@ -173,7 +181,10 @@ services:
       APP_WRITE_TOKEN: ${APP_WRITE_TOKEN:-}
     depends_on:
       backend:
-        condition: service_healthy
+        # service_started (not _healthy): the UI must never be orphaned by a slow
+        # backend healthcheck. It tolerates a not-yet-ready backend (WS reconnect /
+        # loading states) until the API comes up.
+        condition: service_started
     restart: unless-stopped
 
 volumes:
