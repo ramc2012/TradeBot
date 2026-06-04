@@ -157,20 +157,12 @@ def _is_within_minutes(current_time: time, event_time: time, minutes: int) -> bo
 
 
 def _commodity_event_block_reason(symbol_or_underlying: str, now: Optional[datetime] = None) -> Optional[str]:
-    current = (now or _now_ist()).astimezone(IST)
-    underlying = extract_commodity_root(str(symbol_or_underlying or ""))
-    if underlying == "CRUDEOIL" and current.weekday() == 2 and _is_within_minutes(
-        current.time(),
-        time(20, 30),
-        COMMODITY_EVENT_BLOCK_MINUTES,
-    ):
-        return "scheduled_crude_inventory_window"
-    # NATURALGAS is INTENTIONALLY NOT event-blocked. The Thursday EIA gas-storage reaction
-    # (~20:00-21:00 IST) is a primary OPPORTUNITY for the MP+OF breakout engine, not just risk —
-    # blocking ±90 min around it removed the strategy's best setups of the week. Entries are already
-    # gated by confirmed triggers (2 closed bars beyond IB + CVD/VWAP agreement + conviction floor)
-    # and hard stops, so the engine catches the confirmed post-report thrust rather than entering
-    # blind into the print. (CRUDEOIL's Wed inventory block is left in place pending the same review.)
+    # Scheduled-report event blocks REMOVED by design (2026-06-04, user direction). The EIA
+    # crude-inventory (Wed ~20:00 IST) and natural-gas-storage (Thu ~20:30 IST) reactions are PRIMARY
+    # OPPORTUNITIES for the MP+OF breakout engine, not risks to sit out — a ±90-min blackout removed
+    # the best directional setups of the week. Entries are already gated by confirmed 2-bar + CVD/VWAP
+    # triggers, a conviction floor, and hard stops, so the engine reacts to the confirmed post-report
+    # thrust rather than entering blind into the print. Re-enable per-symbol here if event risk bites.
     return None
 
 
