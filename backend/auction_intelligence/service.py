@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from loguru import logger
+
 from auction_intelligence.agents import PositionalAgent, ScalpAgent, SwingAgent
 from auction_intelligence.config import clone_default_config
 from auction_intelligence.execution import ExecutionPlanner
@@ -102,6 +104,7 @@ class AuctionIntelligenceService:
         ]
         coordinated = self.meta_controller.coordinate(decisions, regime)
         coordinated = self._apply_ntm_volx_overlay(coordinated, ntm_volx)
+        coordinated = self._apply_sniper_overlay(coordinated, session)
         risk = self.risk.evaluate(session=session, portfolio=portfolio, decisions=coordinated)
         execution_plan = []
         if risk.allowed:
@@ -314,3 +317,138 @@ class AuctionIntelligenceService:
             adjusted.append(decision)
 
         return adjusted
+
+    def _apply_sniper_overlay(self, decisions: list, session: SessionContext) -> list:
+        """Overlay the Sniper excursion-estimator alpha onto agent decisions.
+
+        The sidecar POSTs a per-underlying directional prediction (direction +
+        ATR-magnitude + confidence) which we read from the in-process
+        ``sniper_signal_store``. We annotate EVERY decision with the sniper's
+        read (so the journal/scorer can learn whether the overlay helps) and
+        apply a bounded confidence nudge to actionable, non-FLAT decisions of
+        the configured agents — aligned -> small boost, conflicted -> small
+        penalty, mirroring the proven NTM VolX overlay. An optional (default
+        OFF) hard-flatten vetoes a low-conviction setup that the sniper strongly
+        opposes. Fully feature-flagged and wrapped so a sniper hiccup can never
+        break the live cycle.
+        """
+        cfg = self.config.get("sniper_overlay", {}) or {}
+        if not cfg.get("enabled", False):
+            return decisions
+        try:
+            from auction_intelligence.sniper_signal import sniper_signal_store
+
+            max_staleness = float(cfg.get("max_staleness_seconds", 2700.0))
+            signal = sniper_signal_store.get(
+                session.symbol, max_staleness_seconds=max_staleness
+            )
+            if signal is None:
+                return decisions
+
+            apply_to = set(cfg.get("apply_to_agents", ["positional", "swing"]))
+            aligned_boost = float(cfg.get("aligned_confidence_boost", 0.08))
+            conflict_penalty = float(cfg.get("conflict_confidence_penalty", 0.10))
+            min_signal_conf = float(cfg.get("min_signal_confidence", 0.5))
+            min_magnitude = float(cfg.get("min_magnitude_atr", 0.25))
+            flatten_enabled = bool(cfg.get("conflict_flatten_enabled", False))
+            flatten_signal_conf = float(cfg.get("conflict_flatten_signal_confidence", 0.78))
+            flatten_decision_ceiling = float(cfg.get("conflict_flatten_decision_ceiling", 0.6))
+
+            direction = str(signal.direction or "FLAT").upper()
+            confidence = max(0.0, min(1.0, float(signal.confidence or 0.0)))
+            magnitude = float(signal.magnitude_atr or 0.0)
+            actionable = (
+                direction in ("LONG", "SHORT")
+                and confidence >= min_signal_conf
+                and magnitude >= min_magnitude
+            )
+
+            base_meta_extra = {
+                "sniper_direction": direction,
+                "sniper_magnitude_atr": round(magnitude, 4),
+                "sniper_confidence": round(confidence, 4),
+                "sniper_horizon": signal.horizon,
+                "sniper_age_sec": round(signal.age_seconds(), 1),
+                "sniper_model": signal.model,
+            }
+
+            adjusted = []
+            for decision in decisions:
+                meta = {**decision.metadata, **base_meta_extra}
+                if (
+                    decision.action == "FLAT"
+                    or decision.agent_name not in apply_to
+                    or not actionable
+                ):
+                    tag = "no_signal" if not actionable else "skipped"
+                    adjusted.append(
+                        replace(decision, metadata={**meta, "sniper_alignment": tag})
+                    )
+                    continue
+
+                rationale = list(decision.rationale)
+                is_aligned = decision.action == direction
+
+                if is_aligned:
+                    boost = round(min(aligned_boost, aligned_boost * confidence), 4)
+                    rationale.append(
+                        f"Sniper alpha confirms {decision.action.lower()} "
+                        f"(~{magnitude:.2f} ATR @ {confidence:.0%} conf, {signal.horizon}); confidence boosted."
+                    )
+                    adjusted.append(
+                        replace(
+                            decision,
+                            confidence=round(min(1.0, float(decision.confidence) + boost), 4),
+                            rationale=rationale,
+                            metadata={**meta, "sniper_alignment": "aligned"},
+                        )
+                    )
+                    continue
+
+                # Conflicted.
+                if (
+                    flatten_enabled
+                    and confidence >= flatten_signal_conf
+                    and float(decision.confidence) <= flatten_decision_ceiling
+                ):
+                    rationale.append(
+                        f"Sniper alpha strongly opposes this {decision.action.lower()} "
+                        f"setup (~{magnitude:.2f} ATR {direction.lower()} @ {confidence:.0%}); vetoed."
+                    )
+                    adjusted.append(
+                        replace(
+                            decision,
+                            action="FLAT",
+                            confidence=0.0,
+                            entry_price=None,
+                            stop_price=None,
+                            target_price=None,
+                            quantity=0,
+                            rationale=rationale,
+                            metadata={
+                                **meta,
+                                "sniper_alignment": "vetoed",
+                                "flat_reason": "sniper_conflict",
+                            },
+                        )
+                    )
+                    continue
+
+                penalty = round(min(conflict_penalty, conflict_penalty * confidence), 4)
+                rationale.append(
+                    f"Sniper alpha leans {direction.lower()} (~{magnitude:.2f} ATR @ {confidence:.0%}); "
+                    f"confidence discounted on this {decision.action.lower()} setup."
+                )
+                adjusted.append(
+                    replace(
+                        decision,
+                        confidence=round(max(0.0, float(decision.confidence) - penalty), 4),
+                        rationale=rationale,
+                        metadata={**meta, "sniper_alignment": "conflicted"},
+                    )
+                )
+
+            return adjusted
+        except Exception as exc:  # never let the sniper overlay break the cycle
+            logger.warning(f"sniper overlay skipped: {exc}")
+            return decisions

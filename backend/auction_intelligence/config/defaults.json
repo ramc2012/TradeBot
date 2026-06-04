@@ -149,6 +149,18 @@
     "slippage_bps": 1.0,
     "fees_per_order": 20.0
   },
+  "sniper_overlay": {
+    "enabled": true,
+    "apply_to_agents": ["positional", "swing"],
+    "aligned_confidence_boost": 0.08,
+    "conflict_confidence_penalty": 0.1,
+    "min_signal_confidence": 0.5,
+    "min_magnitude_atr": 0.25,
+    "max_staleness_seconds": 2700.0,
+    "conflict_flatten_enabled": false,
+    "conflict_flatten_signal_confidence": 0.78,
+    "conflict_flatten_decision_ceiling": 0.6
+  },
   "options_mapping": {
     "enabled": true,
     "min_premium": 2.0,
