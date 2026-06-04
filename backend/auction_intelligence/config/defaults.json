@@ -134,18 +134,18 @@
     "allow_countertrend_scalp_in_balance": true
   },
   "risk": {
-    "max_daily_loss": 75000.0,
-    "max_agent_drawdown": 0.08,
-    "max_symbol_exposure": 0.35,
-    "max_correlated_exposure": 0.55,
-    "max_concurrent_positions": 3,
+    "max_daily_loss": 2500000.0,
+    "max_agent_drawdown": 1.0,
+    "max_symbol_exposure": 1.0,
+    "max_correlated_exposure": 1.0,
+    "max_concurrent_positions": 1000,
     "session_close_buffer_minutes": 15,
     "stale_data_seconds": 10,
-    "min_model_confidence": 0.5
+    "min_model_confidence": 0.0
   },
   "paper_trading": {
     "journal_root": "runtime/auction_intelligence",
-    "shadow_net_liquidation": 1000000.0,
+    "shadow_net_liquidation": 5000000.0,
     "slippage_bps": 1.0,
     "fees_per_order": 20.0
   },

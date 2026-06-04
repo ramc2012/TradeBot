@@ -98,6 +98,7 @@ def test_unified_close_books_before_removing_from_runtime(monkeypatch):
 
     monkeypatch.setattr(csa, "record_audit_event", _fake_audit)
     monkeypatch.setattr(csa, "record_paper_trade", lambda **kw: True)
+    monkeypatch.setattr("paper_engine.costs.PAPER_APPLY_COSTS", False)  # WS-1.4: assert gross close math here
 
     agent = CommodityStrategyAgent()
     pos = _mk_position()
