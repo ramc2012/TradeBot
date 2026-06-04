@@ -48,7 +48,12 @@ from auction_intelligence.schemas import MarketBar
 from brokers.base import BrokerAdapter
 from core.config import settings
 from core.trading_calendar import trading_calendar
-from core.runtime_state import load_runtime_state, save_runtime_state
+from core.runtime_state import (
+    load_paper_trade_book,
+    load_runtime_state,
+    record_paper_trade,
+    save_runtime_state,
+)
 from market_data.commodity_contract_specs import (
     extract_commodity_root,
     get_commodity_contract_spec,
@@ -244,6 +249,30 @@ def _position_open_trade_row(p: Any) -> dict[str, Any]:
         "stop_price": getattr(p, "stop_price", None),
         "target_price": getattr(p, "target_price", None),
         "status": "open",
+    }
+
+
+def _db_trade_to_row(r: dict[str, Any]) -> dict[str, Any]:
+    """Map a durable paper_trade_book DB row to the trade-log row shape the
+    frontend renders (mirrors _serialize_trade_history, status=closed)."""
+    return {
+        "symbol": r.get("symbol"),
+        "underlying": r.get("underlying"),
+        "action": r.get("action"),
+        "qty": r.get("qty"),
+        "lots": r.get("lots"),
+        "entry_price": r.get("entry_price"),
+        "exit_price": r.get("exit_price"),
+        "pnl": r.get("pnl"),
+        "entry_time": r.get("entry_time"),
+        "exit_time": r.get("exit_time"),
+        "instrument_type": r.get("instrument_type"),
+        "setup_type": r.get("setup_type"),
+        "regime": r.get("regime"),
+        "exit_reason": r.get("exit_reason"),
+        "signal_id": r.get("signal_id"),
+        "recorded_at": r.get("recorded_at"),
+        "status": "closed",
     }
 
 
@@ -2538,6 +2567,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                         },
                     )
                     self._runtime.positions.pop(position_key, None)
+                    self._record_close_to_book(position, current_price, reason)
                 continue
 
             # Any non-futures position (legacy `commodity_options` rows
@@ -2547,6 +2577,38 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             # *open* legacy option position can be manually flat-closed via
             # the reset-paper endpoint if it exists.
             continue
+
+    def _record_close_to_book(self, position: "CommodityPositionState", current_price: float, reason: str) -> None:
+        """Append the just-closed trade to the durable DB ledger
+        (paper_trade_book) with entry/exit timestamps. Best-effort — never
+        raises into the close path. Survives paper-account resets, unlike the
+        mutable runtime-state blob."""
+        try:
+            mult = 1.0 if str(getattr(position, "action", "") or "").upper() == "BUY" else -1.0
+            entry = float(getattr(position, "entry_price", 0.0) or 0.0)
+            qty = int(getattr(position, "qty", 0) or 0)
+            record_paper_trade(
+                market="commodity",
+                strategy_key=getattr(position, "strategy_key", "commodity_futures"),
+                session_id=getattr(self._runtime.portfolio, "session_id", None),
+                symbol=getattr(position, "live_symbol", None) or getattr(position, "symbol", None),
+                underlying=getattr(position, "underlying", None),
+                instrument_type="FUT",
+                action=getattr(position, "action", None),
+                qty=qty,
+                lots=getattr(position, "lots", None),
+                entry_price=entry,
+                exit_price=float(current_price),
+                pnl=mult * (float(current_price) - entry) * qty,
+                entry_time=_parse_datetime(getattr(position, "entered_at", None)),
+                exit_time=datetime.now(timezone.utc),
+                setup_type=getattr(position, "signal_reason", None),
+                regime=getattr(position, "regime", None),
+                exit_reason=reason,
+                signal_id=getattr(position, "position_key", None),
+            )
+        except Exception as exc:
+            logger.warning(f"[CommodityStrategy] trade-book DB record failed: {exc}")
 
     async def _close_futures_position(
         self,
@@ -2626,6 +2688,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 regime=position.regime,
             )
         self._runtime.positions.pop(position_key, None)
+        self._record_close_to_book(position, current_price, reason)
 
     async def _close_option_position(
         self,
@@ -3068,6 +3131,31 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "closed_positions": closed_positions or [],
         }
 
+    def _durable_closed_trades(self) -> list[dict[str, Any]]:
+        """Closed trades for the trade log, sourced from the DURABLE DB ledger
+        (paper_trade_book — survives paper-account resets) merged with any
+        in-session trades not yet persisted there. Deduped by
+        (symbol, entry_price, exit_price, qty)."""
+        try:
+            rows = [_db_trade_to_row(r) for r in load_paper_trade_book(market="commodity", limit=500)]
+        except Exception:
+            rows = []
+
+        def _key(t: dict[str, Any]) -> tuple[Any, ...]:
+            return (
+                str(t.get("symbol")),
+                round(float(t.get("entry_price") or 0.0), 2),
+                round(float(t.get("exit_price") or 0.0), 2),
+                int(t.get("qty") or 0),
+            )
+
+        seen = {_key(r) for r in rows}
+        for t in _serialize_trade_history(self._runtime.portfolio):
+            if _key(t) not in seen:
+                rows.append({**t, "status": "closed"})
+                seen.add(_key(t))
+        return rows
+
     def get_status(self, *, refresh: bool = True) -> dict[str, Any]:
         if refresh:
             self._refresh_state_from_store()
@@ -3145,7 +3233,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "today_trades": _split_today_history(open_rows + closed)[0],
                 "historical_trades": _split_today_history(open_rows + closed)[1],
             })(
-                _serialize_trade_history(self._runtime.portfolio),
+                self._durable_closed_trades(),
                 [_position_open_trade_row(p) for p in self._runtime.positions.values()],
             ),
             "orders": list(self._runtime.orders),
