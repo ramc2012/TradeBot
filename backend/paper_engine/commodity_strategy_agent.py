@@ -748,7 +748,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._state_synced_at = saved_updated_at
         self._persist_state()
 
-    def _apply_saved_state(self, saved_state: dict[str, Any]) -> None:
+    def _apply_saved_state(self, saved_state: dict[str, Any], *, preserve_runtime: bool = False) -> None:
         saved_config = saved_state["config"]
         self._symbols = list(saved_config["symbols"])
         self._lots_per_trade = max(1, int(saved_config.get("lots_per_trade") or DEFAULT_COMMODITY_LOTS_PER_TRADE))
@@ -777,6 +777,20 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 else "Configure MCX symbols to start the commodity agent."
             )
         )
+        if preserve_runtime:
+            # The running scan loop is the AUTHORITY on its own live positions,
+            # portfolio ledger, and processed-signal de-dup map. Skipping the
+            # runtime reload here stops a competing writer of the shared
+            # `commodity_strategy_state` blob (a second worker, an admin/API call
+            # on another process, or an out-of-band script) from WIPING
+            # freshly-opened positions or RESURRECTING just-closed ones via
+            # last-writer-wins — the root cause of the position churn that
+            # produced orphan "entry @ X but never entered at that time" audits
+            # and exits that vanished before they could book. Config + control
+            # above are still synced, so kill-switch / symbol changes from other
+            # workers apply. Single-writer invariant: only the loop mutates
+            # positions; refresh never reloads them while the loop owns them.
+            return
         self._restore_runtime_state(saved_state["runtime"])
 
     def _refresh_state_from_store(self, *, force: bool = False) -> bool:
@@ -790,7 +804,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             and updated_at <= self._state_synced_at
         ):
             return False
-        self._apply_saved_state(saved_state)
+        self._apply_saved_state(saved_state, preserve_runtime=self._loop_active())
         if updated_at is not None:
             self._state_synced_at = updated_at
         return True
@@ -2517,57 +2531,15 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                         reason = "macd_reversal"
 
                 if reason:
-                    exit_action = "SELL" if position.action == "BUY" else "BUY"
-                    order = self._runtime.order_book.place_order(
-                        symbol=position.live_symbol,
-                        action=exit_action,
-                        order_type="MARKET",
-                        qty=position.qty,
-                        instrument_type="FUT",
-                        session_id=self._runtime.portfolio.session_id,
-                        ltp=current_price,
-                    )
-                    self._record_order(
-                        order,
-                        reason,
-                        flow="exit",
-                        lot_size=position.lot_size,
-                        lots=position.lots,
-                        strategy_key=position.strategy_key,
-                        strategy_title=position.strategy_title,
-                    )
-                    self._append_commentary(
-                        "trade",
-                        f"EXIT {position.display_name} {exit_action} @{current_price:.2f} ({reason}) | {position.lots} lot",
-                    )
-                    multiplier = 1 if position.action == "BUY" else -1
-                    realized_pnl = multiplier * (current_price - position.entry_price) * position.qty
-                    await record_audit_event(
-                        market="commodity",
-                        strategy_key=position.strategy_key,
-                        event_type="position_exit",
-                        actor="strategy_agent",
-                        symbol=position.symbol,
-                        underlying=position.underlying,
-                        severity="trade",
-                        message=(
-                            f"{position.display_name} {exit_action} @ ₹{current_price:,.2f} "
-                            f"({reason}); P&L ₹{realized_pnl:,.0f}"
-                        ),
-                        previous_state="open",
-                        new_state="closed",
-                        payload={
-                            "reason": reason,
-                            "entry_price": round(position.entry_price, 2),
-                            "exit_price": round(current_price, 2),
-                            "qty": position.qty,
-                            "lots": position.lots,
-                            "realized_pnl": round(realized_pnl, 2),
-                            "return_pct": round(position.return_pct, 2),
-                        },
-                    )
-                    self._runtime.positions.pop(position_key, None)
-                    self._record_close_to_book(position, current_price, reason)
+                    # Unified close path: stop_loss / trail_stop / macd_reversal /
+                    # target exits all route through _close_futures_position so the
+                    # trade is BOOKED (on_fill or self-heal book_close), audited, and
+                    # written to the durable DB ledger consistently. The old inline
+                    # block here audited the exit but omitted the self-heal book_close
+                    # — so a close could be audited yet leave realized P&L unbooked
+                    # ("exited but not logged"). The exit DECISION (`reason`) is
+                    # unchanged; only the booking mechanism is unified.
+                    await self._close_futures_position(position_key, position, current_price, reason)
                 continue
 
             # Any non-futures position (legacy `commodity_options` rows
@@ -2646,6 +2618,25 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         )
         multiplier = 1 if position.action == "BUY" else -1
         realized_pnl = multiplier * (current_price - position.entry_price) * position.qty
+        # Book the trade FIRST (on_fill above, or the self-heal here) so the exit is
+        # never audited-but-unbooked. The self-heal is idempotent — book_close only
+        # fires when order_book→on_fill did NOT already append a TradeRecord (the
+        # ~6-day futures-ledger freeze where closes booked nothing → realized/Day/Life
+        # P&L stuck). It also drops any phantom position on_fill may have opened.
+        if len(portfolio._trade_history) == trades_before:
+            portfolio._positions.pop(order.order_id, None)  # drop any phantom on_fill opened
+            portfolio.book_close(
+                symbol=position.live_symbol,
+                entry_action=position.action,
+                qty=position.qty,
+                entry_price=position.entry_price,
+                exit_price=current_price,
+                opened_at=_parse_datetime(position.entered_at),
+                instrument_type="FUT",
+                signal_id=position.position_key,
+                setup_type=position.signal_reason,
+                regime=position.regime,
+            )
         await record_audit_event(
             market="commodity",
             strategy_key=position.strategy_key,
@@ -2670,23 +2661,6 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "return_pct": round(position.return_pct, 2),
             },
         )
-        # Self-healing booking: if the order_book→on_fill close path did not append a trade (the
-        # futures-ledger freeze where ~6 days of closes booked nothing → realized/Day/Life P&L
-        # stuck), record it explicitly. Idempotent — only fires when on_fill did NOT book.
-        if len(portfolio._trade_history) == trades_before:
-            portfolio._positions.pop(order.order_id, None)  # drop any phantom on_fill opened
-            portfolio.book_close(
-                symbol=position.live_symbol,
-                entry_action=position.action,
-                qty=position.qty,
-                entry_price=position.entry_price,
-                exit_price=current_price,
-                opened_at=_parse_datetime(position.entered_at),
-                instrument_type="FUT",
-                signal_id=position.position_key,
-                setup_type=position.signal_reason,
-                regime=position.regime,
-            )
         self._runtime.positions.pop(position_key, None)
         self._record_close_to_book(position, current_price, reason)
 
