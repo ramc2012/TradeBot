@@ -390,6 +390,50 @@ def _as_dict(payload: ChainAnalyticsPayload) -> dict[str, Any]:
     }
 
 
+async def chain_strike_mark(
+    underlying: str,
+    expiry: str,
+    strike: float,
+    option_type: str,
+    *,
+    timeout: float = 1.0,
+) -> Optional[float]:
+    """Latest LTP for a single (strike, option_type) from the cached chain.
+
+    Used to live-mark held option positions whose specific contract isn't on
+    the WS premium feed (so their stored mark freezes at entry). The chain
+    poll keeps EVERY strike's LTP fresh (~30s), so reading it here streams
+    the position's P/L. Best-effort, bounded — returns None on cache miss.
+    """
+    if not underlying or not expiry or not strike or not option_type:
+        return None
+    try:
+        cache_symbol = to_app_symbol(underlying) or underlying
+    except Exception:
+        cache_symbol = underlying
+    try:
+        cached = await asyncio.wait_for(
+            option_chain_service.get_cached(cache_symbol, expiry),
+            timeout=timeout,
+        )
+    except (asyncio.TimeoutError, Exception):
+        cached = None
+    if not cached or not cached.get("entries"):
+        return None
+    want = str(option_type or "").upper()
+    for entry in cached.get("entries") or []:
+        try:
+            if (
+                str(entry.get("option_type") or "").upper() == want
+                and abs(float(entry.get("strike") or 0.0) - float(strike)) < 0.01
+            ):
+                ltp = entry.get("ltp")
+                return float(ltp) if ltp is not None else None
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 async def fetch_chain_analytics(
     underlying: str,
     expiry: Optional[str] = None,
