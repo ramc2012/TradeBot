@@ -3,18 +3,25 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
+from sqlalchemy import text
 
 from brokers.base import BrokerAdapter, OptionChain
+from db.database import AsyncSessionLocal
 from db.redis_client import get_redis
 from market_data.symbols import to_broker_symbol, to_fyers_symbol
 
 
-POLL_INTERVAL = 30  # seconds
-OC_TTL = 60         # Redis TTL for option chain
+POLL_INTERVAL = 30   # seconds — Redis cache refresh cadence
+OC_TTL = 60          # Redis TTL for option chain
+# Durable-history persistence cadence (option_chain_snapshots). Coarser than
+# the 30s Redis poll so the DB doesn't take ~80 rows × N chains every 30s, but
+# fine-grained enough for intraday PCR/max-pain/GEX time-series + pre-market
+# analysis. 120s ≈ 190 snapshots/contract/session.
+PERSIST_INTERVAL = 120
 
 
 class OptionChainService:
@@ -24,6 +31,9 @@ class OptionChainService:
         self._broker: Optional[BrokerAdapter] = None
         self._tracked: List[tuple[str, str]] = []  # (symbol, expiry) pairs
         self._task: Optional[asyncio.Task] = None
+        # Last DB-persist time per (symbol, expiry) — throttles the durable
+        # option_chain_snapshots write to PERSIST_INTERVAL.
+        self._last_persist: Dict[tuple[str, str], datetime] = {}
 
     def set_broker(self, broker: BrokerAdapter):
         self._broker = broker
@@ -104,8 +114,69 @@ class OptionChainService:
             redis = await get_redis()
             await redis.set(f"oc:{symbol}:{expiry}", json.dumps(payload), ex=OC_TTL)
             logger.debug(f"[OC] Refreshed {symbol} {expiry}")
+
+            # Durable persistence for analysis (2026-06-04). The Redis cache is
+            # ephemeral (60s TTL) — it vanishes after market close, so there was
+            # no chain history in the DB for pre-market reads or PCR/OI/GEX
+            # time-series. Persist the full chain to option_chain_snapshots,
+            # throttled to PERSIST_INTERVAL. Best-effort: a DB error here must
+            # never break the live cache / poll loop.
+            now = datetime.now(timezone.utc)
+            last = self._last_persist.get((symbol, expiry))
+            if last is None or (now - last).total_seconds() >= PERSIST_INTERVAL:
+                try:
+                    await self._persist_snapshot(symbol, expiry, chain, now)
+                    self._last_persist[(symbol, expiry)] = now
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[OC] persist failed {symbol}/{expiry}: {exc}")
         except Exception as e:
             logger.error(f"[OC] Refresh failed {symbol}/{expiry}: {e}")
+
+    async def _persist_snapshot(
+        self, symbol: str, expiry: str, chain: OptionChain, ts: datetime
+    ) -> None:
+        """Write the full chain to option_chain_snapshots (TimescaleDB hypertable).
+
+        One row per strike×side: time, symbol, expiry, strike, option_type,
+        ltp, oi, volume, iv, delta, gamma, theta, vega — a durable, queryable
+        history for PCR / max-pain / GEX-DEX time-series and pre-market
+        analysis. Short-lived session (mindful of the small connection pool).
+        """
+        rows = [
+            {
+                "time": ts,
+                "symbol": symbol,
+                "expiry": str(expiry),
+                "strike": float(e.strike),
+                "option_type": e.option_type,
+                "ltp": float(e.ltp) if e.ltp is not None else None,
+                "oi": int(e.oi or 0),
+                "volume": int(e.volume or 0),
+                "iv": float(e.iv) if e.iv is not None else None,
+                "delta": float(e.delta) if e.delta is not None else None,
+                "gamma": float(e.gamma) if e.gamma is not None else None,
+                "theta": float(e.theta) if e.theta is not None else None,
+                "vega": float(e.vega) if e.vega is not None else None,
+            }
+            for e in chain.entries
+        ]
+        if not rows:
+            return
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO option_chain_snapshots
+                        (time, symbol, expiry, strike, option_type, ltp, oi,
+                         volume, iv, delta, gamma, theta, vega)
+                    VALUES
+                        (:time, :symbol, :expiry, :strike, :option_type, :ltp, :oi,
+                         :volume, :iv, :delta, :gamma, :theta, :vega)
+                    """
+                ),
+                rows,
+            )
+            await session.commit()
 
     def _calculate_analytics(self, chain: OptionChain) -> dict:
         ce_entries = [e for e in chain.entries if e.option_type == "CE"]
