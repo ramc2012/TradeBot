@@ -9,13 +9,19 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
-from brokers.base import BrokerAdapter, OrderRequest, OrderResponse
+from brokers.base import BrokerAdapter, Order, OrderRequest, OrderResponse
 from live_engine.risk_manager import RiskManager
 
-try:  # WS-0.2 instrumentation — must never block order placement
-    from core.metrics import observe_order_rtt as _observe_order_rtt
+try:  # WS-0.2 / WS-1.2 instrumentation — must never block order placement
+    from core.metrics import (
+        observe_fill_confirm as _observe_fill_confirm,
+        observe_order_rtt as _observe_order_rtt,
+    )
 except Exception:  # pragma: no cover
     def _observe_order_rtt(*_a, **_k) -> None:  # type: ignore[misc]
+        ...
+
+    def _observe_fill_confirm(*_a, **_k) -> None:  # type: ignore[misc]
         ...
 
 
@@ -48,6 +54,7 @@ class LiveOrder:
         self.status = "PENDING"    # PENDING → OPEN → FILLED / REJECTED / CANCELLED / SEND_FAILED
         self.fill_price: Optional[float] = None
         self.fill_time: Optional[datetime] = None
+        self.filled_qty: int = 0   # WS-1.2 partial-fill tracking (broker-reported filled units)
         self.created_at = datetime.utcnow()
 
 
@@ -200,24 +207,138 @@ class LiveOrderManager:
                 logger.error(f"[LiveOM] Reconciliation error: {e}")
 
     async def _reconcile_positions(self):
-        """Sync broker order book against internal state."""
+        """WS-1.2 active reconciliation: sync the broker order book against internal
+        state, track partial fills, alert on breaks, and adopt untracked broker
+        orders so a crash-after-place can't leave an orphan position."""
         try:
             broker_orders = await self.broker.get_order_book()
-            broker_map = {o.order_id: o for o in broker_orders}
-            with self._orders_lock:
-                live_orders = list(self._orders.values())
-            for live_order in live_orders:
-                if not live_order.broker_id:
-                    continue
-                broker_order = broker_map.get(live_order.broker_id)
-                if broker_order:
-                    if broker_order.status != live_order.status:
-                        logger.info(
-                            f"[LiveOM] Reconcile: {live_order.local_id[:8]} "
-                            f"{live_order.status} → {broker_order.status}"
-                        )
-                        live_order.status = broker_order.status
-                        live_order.fill_price = broker_order.fill_price
-                        live_order.fill_time = broker_order.fill_time
         except Exception as e:
-            logger.error(f"[LiveOM] Reconcile failed: {e}")
+            logger.error(f"[LiveOM] Reconcile: get_order_book failed: {e}")
+            return
+
+        broker_map = {o.order_id: o for o in broker_orders}
+        with self._orders_lock:
+            live_orders = list(self._orders.values())
+            tracked_broker_ids = {o.broker_id for o in live_orders if o.broker_id}
+
+        # 1) Update tracked orders; track partial fills; alert on breaks.
+        for live_order in live_orders:
+            if not live_order.broker_id:
+                continue
+            bo = broker_map.get(live_order.broker_id)
+            if bo is None:
+                continue
+            prev_status = live_order.status
+            bo_filled = int(getattr(bo, "filled_qty", 0) or 0)
+            if bo.status == prev_status and bo_filled == live_order.filled_qty:
+                continue
+            live_order.status = bo.status
+            live_order.fill_price = bo.fill_price
+            live_order.fill_time = bo.fill_time
+            if bo_filled:
+                live_order.filled_qty = bo_filled
+            logger.info(
+                f"[LiveOM] Reconcile {live_order.local_id[:8]}: {prev_status}→{bo.status} "
+                f"filled={live_order.filled_qty}/{getattr(live_order.order, 'qty', 0)}"
+            )
+            if str(bo.status).upper() == "FILLED" and str(prev_status).upper() != "FILLED":
+                self._record_fill_latency(live_order)
+            await self._alert_reconcile_break(live_order, prev_status, bo)
+
+        # 2) Adopt untracked, still-active broker orders (orphan-position guard).
+        for bo in broker_orders:
+            if bo.order_id in tracked_broker_ids:
+                continue
+            if str(bo.status).upper() not in ("OPEN", "PENDING", "TRIGGER_PENDING", "FILLED"):
+                continue
+            await self._adopt_broker_order(bo)
+
+    def _record_fill_latency(self, live_order: "LiveOrder") -> None:
+        """WS-1.2 — observe decision→fill latency (nomad_fill_confirm_seconds)."""
+        try:
+            ft = live_order.fill_time
+            ca = live_order.created_at
+            if ft is None or ca is None:
+                return
+            if ft.tzinfo is not None and ca.tzinfo is None:
+                ca = ca.replace(tzinfo=ft.tzinfo)
+            elif ft.tzinfo is None and ca.tzinfo is not None:
+                ft = ft.replace(tzinfo=ca.tzinfo)
+            secs = (ft - ca).total_seconds()
+            if secs >= 0:
+                _observe_fill_confirm("live", secs)
+        except Exception:
+            pass
+
+    async def _alert_reconcile_break(self, live_order: "LiveOrder", prev_status: str, bo: Order) -> None:
+        """Emit an audit event on a reconcile transition. REJECTED/CANCELLED/EXPIRED
+        are 'breaks' (warning → paged via the audit→Telegram bridge); FILLED is normal
+        (info). Never raises into the reconcile loop."""
+        new_status = str(bo.status).upper()
+        severity = "warning" if new_status in ("REJECTED", "CANCELLED", "EXPIRED") else "info"
+        try:
+            from agentic_rag.audit_agent import record_audit_event
+
+            await record_audit_event(
+                market="live",
+                strategy_key="live_order_manager",
+                event_type="order_reconcile",
+                actor="live_order_manager",
+                severity=severity,
+                symbol=getattr(live_order.order, "symbol", None),
+                previous_state=prev_status,
+                new_state=bo.status,
+                message=(
+                    f"order {live_order.broker_id} {prev_status}->{bo.status} "
+                    f"filled={live_order.filled_qty}/{getattr(live_order.order, 'qty', 0)}"
+                ),
+            )
+        except Exception:
+            pass
+
+    async def _adopt_broker_order(self, bo: Order) -> None:
+        """WS-1.2 — adopt an untracked broker order into local state (so kill-switch /
+        position views see it) and alert: an order at the broker we don't track is a
+        crash-after-place orphan (or out-of-band order) that represents live risk."""
+        local_id = f"adopted-{bo.order_id}"
+        try:
+            with self._orders_lock:
+                if local_id in self._orders:
+                    return
+            synth = OrderRequest(
+                symbol=bo.symbol,
+                exchange=getattr(bo, "exchange", "NSE"),
+                action=bo.action,
+                order_type=getattr(bo, "order_type", "MARKET"),
+                qty=int(getattr(bo, "qty", 0) or 0),
+                price=getattr(bo, "price", None),
+                instrument_type=getattr(bo, "instrument_type", "CE"),
+            )
+            lo = LiveOrder(local_id=local_id, broker_id=bo.order_id, order=synth)
+            lo.status = bo.status
+            lo.fill_price = bo.fill_price
+            lo.fill_time = bo.fill_time
+            lo.filled_qty = int(getattr(bo, "filled_qty", 0) or 0)
+            with self._orders_lock:
+                self._orders[local_id] = lo
+            logger.warning(
+                f"[LiveOM] Adopted untracked broker order {bo.order_id} "
+                f"({bo.symbol} {bo.action} {bo.status})"
+            )
+            from agentic_rag.audit_agent import record_audit_event
+
+            await record_audit_event(
+                market="live",
+                strategy_key="live_order_manager",
+                event_type="orphan_order_adopted",
+                actor="live_order_manager",
+                severity="warning",
+                symbol=bo.symbol,
+                new_state=bo.status,
+                message=(
+                    f"adopted untracked broker order {bo.order_id} "
+                    f"{bo.action} {bo.qty} {bo.symbol} status={bo.status}"
+                ),
+            )
+        except Exception as e:
+            logger.error(f"[LiveOM] Adopt failed for {getattr(bo, 'order_id', '?')}: {e}")
