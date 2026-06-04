@@ -96,6 +96,10 @@ class OrderRequest:
     expiry: Optional[str] = None
     strike: Optional[float] = None
     option_type: Optional[str] = None
+    # WS-0.4a — caller-supplied idempotency key. A request carrying an id already
+    # seen this session is never re-sent to the broker; to genuinely retry a failed
+    # order, mint a NEW id.
+    client_order_id: Optional[str] = None
 
 
 @dataclass

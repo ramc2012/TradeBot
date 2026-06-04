@@ -4,11 +4,12 @@ import asyncio
 import hmac
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
 
+from core import metrics as app_metrics
 from core.config import settings
 from core.market_hours_paper_supervisor import market_hours_paper_supervisor
 from core.paper_bootstrap import bootstrap_paper_trading_runtime
@@ -62,6 +63,18 @@ async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
     logger.info("═══ Nomad Curie starting up ═══")
     research_sync_task: asyncio.Task | None = None
+    loop_lag_task: asyncio.Task | None = None
+
+    # Event-loop lag monitor (WS-0.2): pure observation, started first so it
+    # captures startup contention too. Cancelled on shutdown below.
+    try:
+        loop_lag_task = asyncio.create_task(
+            app_metrics.run_loop_lag_monitor(),
+            name="event-loop-lag-monitor",
+        )
+        logger.info("✓ Event-loop lag monitor started")
+    except Exception as e:
+        logger.warning(f"Event-loop lag monitor start skipped: {e}")
 
     # Ensure Redis is reachable
     try:
@@ -116,8 +129,16 @@ async def lifespan(app: FastAPI):
         await market_data_router.stop_mock_feed()
         await market_data_router.unsubscribe()
 
-    await paper_strategy_agent.start()
-    await commodity_strategy_agent.start()
+    # WS-0.5c — bound these starts so a hang can't block the process from ever
+    # becoming healthy. They normally just spawn background loops and return fast.
+    try:
+        await asyncio.wait_for(paper_strategy_agent.start(), timeout=60.0)
+    except Exception as e:
+        logger.warning(f"NSE paper strategy agent start degraded: {e}")
+    try:
+        await asyncio.wait_for(commodity_strategy_agent.start(), timeout=60.0)
+    except Exception as e:
+        logger.warning(f"Commodity strategy agent start degraded: {e}")
     try:
         await bootstrap_paper_trading_runtime()
     except Exception as e:
@@ -210,6 +231,12 @@ async def lifespan(app: FastAPI):
             await research_sync_task
         except asyncio.CancelledError:
             logger.info("Embedded research sync daemon stopped")
+    if loop_lag_task is not None:
+        loop_lag_task.cancel()
+        try:
+            await loop_lag_task
+        except asyncio.CancelledError:
+            pass
     await market_hours_paper_supervisor.stop()
     await rl_auto_trainer.stop()
     await paper_strategy_agent.stop()
@@ -378,6 +405,14 @@ async def websocket_proposals(websocket: WebSocket):
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "1.0.0"}
+
+
+# ── Metrics (WS-0.2) — Prometheus text exposition; not under /api so it is not
+# gated by the write-token middleware. Lock down at the reverse proxy / SG. ─────
+@app.get("/metrics")
+async def metrics() -> Response:
+    body, content_type = app_metrics.render()
+    return Response(content=body, media_type=content_type)
 
 
 @app.get("/")
