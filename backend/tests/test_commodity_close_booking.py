@@ -14,7 +14,16 @@ realized P&L from the agent's own data even when no open VirtualPosition exists.
 """
 from __future__ import annotations
 
+import pytest
+
 from paper_engine.portfolio import PaperPortfolio
+
+
+@pytest.fixture(autouse=True)
+def _disable_paper_costs(monkeypatch):
+    # WS-1.4: these tests assert gross close-booking math; the transaction-cost
+    # model is validated separately (test_paper_costs). Disable so net == gross.
+    monkeypatch.setattr("paper_engine.costs.PAPER_APPLY_COSTS", False)
 
 
 def test_book_close_records_trade_without_open_virtualposition_short():

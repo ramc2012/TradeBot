@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 import numpy as np
 from loguru import logger
 
+from paper_engine.costs import round_trip_charges
 from paper_engine.order_book import PaperOrder
 
 # Indian market timezone. P&L is bucketed by the IST trading date so "Day P&L" matches the
@@ -70,6 +71,10 @@ class TradeRecord:
     setup_type: Optional[str] = None
     entry_iv_pct: Optional[float] = None
     regime: Optional[str] = None
+    # WS-1.4 — transaction costs. `pnl` is NET of `charges`; `gross_pnl` is the
+    # pre-cost figure for transparency. Defaults keep existing callers working.
+    charges: float = 0.0
+    gross_pnl: Optional[float] = None
 
 
 class PaperPortfolio:
@@ -150,7 +155,16 @@ class PaperPortfolio:
         pos = self._positions[pos_key]
         fill_price = close_order.fill_price or 0
         multiplier = 1 if pos.action == "BUY" else -1
-        pnl = multiplier * (fill_price - pos.avg_price) * close_order.qty
+        gross_pnl = multiplier * (fill_price - pos.avg_price) * close_order.qty
+        charges = round_trip_charges(
+            symbol=pos.symbol,
+            instrument_type=pos.instrument_type,
+            entry_price=pos.avg_price,
+            exit_price=fill_price,
+            qty=close_order.qty,
+            entry_action=pos.action,
+        )
+        pnl = gross_pnl - charges  # WS-1.4: realised P&L is net of round-trip costs
 
         trade = TradeRecord(
             symbol=pos.symbol,
@@ -169,6 +183,8 @@ class PaperPortfolio:
             setup_type=pos.setup_type,
             entry_iv_pct=pos.entry_iv_pct,
             regime=pos.regime,
+            charges=charges,
+            gross_pnl=gross_pnl,
         )
         self._trade_history.append(trade)
 
@@ -195,7 +211,7 @@ class PaperPortfolio:
         if equity > self._peak_equity:
             self._peak_equity = equity
 
-        logger.info(f"[Portfolio] Closed position: {pos.symbol} PnL={pnl:.2f}")
+        logger.info(f"[Portfolio] Closed position: {pos.symbol} PnL={pnl:.2f} (gross={gross_pnl:.2f} charges={charges:.2f})")
 
     def book_close(
         self,
@@ -223,7 +239,16 @@ class PaperPortfolio:
         its margin), and credits cash. Callers MUST guard against double-booking (the close path
         only calls this when on_fill did not already append a trade)."""
         multiplier = 1.0 if str(entry_action).upper() == "BUY" else -1.0
-        pnl = multiplier * (float(exit_price) - float(entry_price)) * int(qty)
+        gross_pnl = multiplier * (float(exit_price) - float(entry_price)) * int(qty)
+        charges = round_trip_charges(
+            symbol=symbol,
+            instrument_type=instrument_type,
+            entry_price=float(entry_price),
+            exit_price=float(exit_price),
+            qty=int(qty),
+            entry_action=entry_action,
+        )
+        pnl = gross_pnl - charges  # WS-1.4: net of round-trip costs
         now_utc = datetime.now(timezone.utc)
         trade = TradeRecord(
             symbol=symbol, action=str(entry_action).upper(), qty=int(qty),
@@ -231,6 +256,7 @@ class PaperPortfolio:
             entry_time=opened_at or now_utc, exit_time=now_utc,
             instrument_type=instrument_type, expiry=expiry, strike=strike,
             option_type=option_type, signal_id=signal_id, setup_type=setup_type, regime=regime,
+            charges=charges, gross_pnl=gross_pnl,
         )
         self._trade_history.append(trade)
         self._daily_pnl[_ist_date(trade.exit_time)] += pnl

@@ -156,7 +156,8 @@ def test_trade_history_persists_signal_metadata() -> None:
     assert trade.regime == "bullish"
 
 
-def test_paper_portfolio_option_close_does_not_double_count_pnl() -> None:
+def test_paper_portfolio_option_close_does_not_double_count_pnl(monkeypatch) -> None:
+    monkeypatch.setattr("paper_engine.costs.PAPER_APPLY_COSTS", False)  # WS-1.4: gross double-count check
     portfolio = PaperPortfolio(initial_capital=1_000_000.0, session_id="cash")
     order_book = PaperOrderBook(on_fill=portfolio.on_fill)
 
