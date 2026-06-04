@@ -73,6 +73,7 @@ from paper_engine.base_strategy_agent import (
     _parse_iso_timestamp,
     _round_or_none,
     _serialize_trade_history,
+    _sort_trades_recent_first,
     _split_today_history,
 )
 from paper_engine.order_book import PaperOrder, PaperOrderBook
@@ -211,6 +212,39 @@ def _repair_portfolio_ledger(portfolio: PaperPortfolio) -> None:
     for trade in repaired_history:
         portfolio._daily_pnl[trade.exit_time.date()] += float(trade.pnl)
     portfolio.reconcile_available_capital()
+
+
+def _position_open_trade_row(p: Any) -> dict[str, Any]:
+    """Surface a currently-OPEN futures position as a trade-log row, in the same
+    shape as a closed TradeRecord row (exit_price=None, status="open"), so a
+    trade is RECORDED in the trade history the moment it opens — not only when
+    it closes. Previously trade_history/today_trades held closed trades only, so
+    a freshly-opened book showed an empty trade log."""
+    return {
+        "symbol": getattr(p, "symbol", None),
+        "underlying": getattr(p, "underlying", None),
+        "action": getattr(p, "action", None),
+        "qty": int(getattr(p, "qty", 0) or 0),
+        "lots": getattr(p, "lots", None),
+        "entry_price": float(getattr(p, "entry_price", 0.0) or 0.0),
+        "exit_price": None,
+        "pnl": _round_or_none(getattr(p, "unrealized_pnl", None), 2),
+        "unrealized_pnl": _round_or_none(getattr(p, "unrealized_pnl", None), 2),
+        "return_pct": _round_or_none(getattr(p, "return_pct", None), 2),
+        "entry_time": str(getattr(p, "entered_at", "") or ""),
+        "exit_time": None,
+        "instrument_type": getattr(p, "instrument_type", "FUT"),
+        "expiry": getattr(p, "expiry", None),
+        "strike": None,
+        "option_type": None,
+        "signal_id": getattr(p, "position_key", None),
+        "setup_type": getattr(p, "signal_reason", None),
+        "entry_iv_pct": None,
+        "regime": getattr(p, "regime", None),
+        "stop_price": getattr(p, "stop_price", None),
+        "target_price": getattr(p, "target_price", None),
+        "status": "open",
+    }
 
 
 def _is_rate_limit_error(exc: Exception | str) -> bool:
@@ -3102,11 +3136,18 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 }
                 for position in self._runtime.positions.values()
             ],
-            **(lambda all_trades: {
-                "trade_history": list(reversed(all_trades)),
-                "today_trades": _split_today_history(all_trades)[0],
-                "historical_trades": _split_today_history(all_trades)[1],
-            })(_serialize_trade_history(self._runtime.portfolio)),
+            # Trade log = closed round-trips (from the ledger) PLUS the
+            # currently-open positions surfaced as open trade rows, so a trade is
+            # recorded the instant it opens. _split_today_history buckets by
+            # exit_time→entry_time, so today's opens land in today_trades.
+            **(lambda closed, open_rows: {
+                "trade_history": _sort_trades_recent_first(open_rows + closed),
+                "today_trades": _split_today_history(open_rows + closed)[0],
+                "historical_trades": _split_today_history(open_rows + closed)[1],
+            })(
+                _serialize_trade_history(self._runtime.portfolio),
+                [_position_open_trade_row(p) for p in self._runtime.positions.values()],
+            ),
             "orders": list(self._runtime.orders),
             "reports": [asdict(report) for report in self._runtime.reports],
             "commentary": [asdict(entry) for entry in self._commentary],
