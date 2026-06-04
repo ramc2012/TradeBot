@@ -2,6 +2,7 @@
 from __future__ import annotations
 import asyncio
 import json
+import random
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -69,14 +70,20 @@ class DataRouter:
         self._source_policy: dict[str, Any] = {}
         self._reconnect_task: Optional[asyncio.Task] = None
         self._last_reconnect_attempt_at: Optional[datetime] = None
-        self._reconnect_backoff = timedelta(seconds=60)
+        # WS-1.3b adaptive reconnect: fast first retry, exponential backoff + jitter
+        # on repeated failure (capped), reset on success. Replaces the old fixed 60s
+        # blind window — transient drops now recover in seconds, while a sustained
+        # broker outage is not hammered and parallel instances desynchronise.
+        self._reconnect_base_seconds = 5.0
+        self._reconnect_cap_seconds = 120.0
+        self._reconnect_failures = 0
         # Required-feed watchdog: a periodic guard that re-subscribes any
         # required index symbol that dropped off the broker WS, and forces a
         # reconnect when a required symbol's last tick is older than the
         # staleness budget during market hours.
         self._watchdog_task: Optional[asyncio.Task] = None
         self._watchdog_interval_seconds = 30.0
-        self._required_tick_stale_seconds = 90.0
+        self._required_tick_stale_seconds = 45.0  # WS-1.3a: was 90s — faster dead-feed detection (RTH indices tick sub-second)
 
     def set_broker(self, broker: BrokerAdapter):
         self._broker = broker
@@ -532,6 +539,16 @@ class DataRouter:
             "source_policy": source_policy,
         }
 
+    def _current_reconnect_backoff(self) -> timedelta:
+        """WS-1.3b: exponential backoff (base·2^failures, capped) + up to 50% jitter.
+        ``_reconnect_failures`` is 0 after a success, so the first retry waits only
+        ~base seconds; it grows only while reconnects keep failing."""
+        raw = min(
+            self._reconnect_base_seconds * (2 ** self._reconnect_failures),
+            self._reconnect_cap_seconds,
+        )
+        return timedelta(seconds=raw + raw * 0.5 * random.random())
+
     def _schedule_reconnect(self) -> None:
         if not self._loop or not self._loop.is_running():
             return
@@ -540,7 +557,7 @@ class DataRouter:
         now = datetime.now(timezone.utc)
         if (
             self._last_reconnect_attempt_at is not None
-            and now - self._last_reconnect_attempt_at < self._reconnect_backoff
+            and now - self._last_reconnect_attempt_at < self._current_reconnect_backoff()
         ):
             return
         self._last_reconnect_attempt_at = now
@@ -558,8 +575,12 @@ class DataRouter:
             else:
                 broker_symbols = [to_broker_symbol(symbol) for symbol in self._subscribed_symbols]
             self._ws_client = await self._broker.subscribe_websocket(broker_symbols, self._on_tick)
+            self._reconnect_failures = 0  # success → reset backoff to fast-retry
         except Exception as exc:
-            logger.warning(f"[DataRouter] Websocket reconnect failed: {exc}")
+            self._reconnect_failures = min(self._reconnect_failures + 1, 8)  # escalate (cap exponent)
+            logger.warning(
+                f"[DataRouter] Websocket reconnect failed (failure streak={self._reconnect_failures}): {exc}"
+            )
         finally:
             self._reconnect_task = None
 
