@@ -280,13 +280,31 @@ class DirectionalOptionsService:
         open_positions = await self.paper.list_positions(symbol=underlying, status="open", limit=50)
         position_marks: dict[str, dict[str, object]] = {}
         for row in open_positions.get("open_positions", []):
+            row_underlying = str(row.get("underlying") or underlying)
+            row_expiry = str(row.get("expiry") or "")
+            row_strike = float(row.get("strike") or 0.0)
+            row_otype = str(row.get("option_type") or "")
             premium, mark_time, price_source = await self.store.latest_local_option_mark(
-                underlying=str(row.get("underlying") or underlying),
-                expiry=str(row.get("expiry") or ""),
-                strike=float(row.get("strike") or 0.0),
-                option_type=str(row.get("option_type") or ""),
+                underlying=row_underlying,
+                expiry=row_expiry,
+                strike=row_strike,
+                option_type=row_otype,
                 instrument_key=str(row.get("instrument_key") or "") or None,
             )
+            if premium is None:
+                # The held contract often isn't on the WS premium feed (e.g. a
+                # monthly strike), so latest_local_option_mark returns nothing
+                # and the position's mark FREEZES at entry — every trade then
+                # closes at exit==entry == ₹0 realized P&L (27 such ₹0 trades
+                # on 2026-06-04). Fall back to the option-chain cache, which
+                # carries every strike's LTP (~30s fresh), so positions are
+                # marked-to-market and closes realize real P&L.
+                from directional_options.chain_analytics import chain_strike_mark
+                chain_mark = await chain_strike_mark(row_underlying, row_expiry, row_strike, row_otype)
+                if chain_mark is not None and chain_mark > 0:
+                    premium = chain_mark
+                    mark_time = None
+                    price_source = "chain_cache_live"
             if premium is None:
                 continue
             position_marks[str(row.get("position_id") or "")] = {
