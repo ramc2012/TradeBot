@@ -344,7 +344,7 @@ class DirectionalOptionsService:
     async def paper_summary(self) -> dict[str, object]:
         """Capital + P&L snapshot — matches AI/FMP/S1/S2 shape so the
         frontend portfolio panel renders uniformly across all lanes."""
-        return await asyncio.to_thread(self.paper.capital_status)
+        return await self.paper.capital_status()
 
     async def reset_paper_account(self, *, actor: str | None = None) -> dict[str, object]:
         """Archive the JSON book and restore the funded baseline."""

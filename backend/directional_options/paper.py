@@ -8,8 +8,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from loguru import logger
+from sqlalchemy import text
+
 from analysis.instruments import normalize_index_contract_expiry
 from core.paper_trade_recorder import paper_trade_recorder
+from db.database import AsyncSessionLocal
 from directional_options.config import DIRECTIONAL_INITIAL_CAPITAL
 from directional_options.policy import DirectionalPolicy
 
@@ -38,6 +42,36 @@ def _parse_iso(value: Any) -> datetime | None:
         return ts
     except Exception:
         return None
+
+
+def _safe_float_or_none(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int_or_none(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_dict(payload: Any) -> dict[str, Any]:
+    """JSONB columns come back as a dict (asyncpg) or a JSON string — normalise."""
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, str):
+        try:
+            return json.loads(payload)
+        except json.JSONDecodeError:
+            return {}
+    return {}
 
 
 def _has_satisfied_min_hold(
@@ -109,15 +143,19 @@ class DirectionalOptionsPaperStore:
         self.root = Path(root)
         if not self.root.is_absolute():
             self.root = Path(__file__).resolve().parent.parent / self.root
+        # Legacy file paths — retained only to seed the DB once (one-time
+        # import) and for reset_account archival. The book now lives in
+        # directional_paper_positions / directional_paper_journal.
         self.journal_path = self.root / "paper_journal.jsonl"
         self.positions_path = self.root / "paper_positions.json"
         self._lock = asyncio.Lock()
+        self._db_seeded = False  # one-time file→DB import guard
         self.min_hold_bars = int(min_hold_bars)
         self.one_position_per_symbol = bool(one_position_per_symbol)
         self.policy = policy
 
     async def list_journal(self, symbol: str | None = None, limit: int = 50) -> dict[str, Any]:
-        records = self._load_journal()
+        records = await self._load_journal()
         normalized = _normalize_symbol(symbol)
         if normalized:
             records = [row for row in records if _normalize_symbol(row.get("underlying")) == normalized]
@@ -129,7 +167,7 @@ class DirectionalOptionsPaperStore:
         }
 
     async def list_positions(self, symbol: str | None = None, status: str = "all", limit: int = 50) -> dict[str, Any]:
-        state = self._load_positions()
+        state = await self._load_positions()
         normalized = _normalize_symbol(symbol)
         open_positions = [_with_current_expiry_calendar(row) for row in state.get("open_positions", [])]
         closed_positions = [_with_current_expiry_calendar(row) for row in state.get("closed_positions", [])]
@@ -235,10 +273,10 @@ class DirectionalOptionsPaperStore:
             "rag_context": rag_context,
             "data_status": data_status,
         }
-        self._append_journal(journal_entry)
+        await self._append_journal(journal_entry)
 
         async with self._lock:
-            state = self._load_positions()
+            state = await self._load_positions()
             open_positions = list(state.get("open_positions", []))
             closed_positions = list(state.get("closed_positions", []))
             matching = [row for row in open_positions if _normalize_symbol(row.get("underlying")) == underlying]
@@ -259,7 +297,7 @@ class DirectionalOptionsPaperStore:
                     row["unrealized_pnl"] = round((latest_value - entry_premium) * quantity, 2)
 
             if not execution_ready:
-                self._save_positions(
+                await self._save_positions(
                     {
                         "last_synced_at": recorded_at,
                         "open_positions": open_positions,
@@ -304,7 +342,7 @@ class DirectionalOptionsPaperStore:
                     )
                     open_positions.remove(row)
                     closed_positions.append(row)
-                self._save_positions(
+                await self._save_positions(
                     {
                         "last_synced_at": recorded_at,
                         "open_positions": open_positions,
@@ -361,7 +399,7 @@ class DirectionalOptionsPaperStore:
                 for row in open_positions
             )
             if self.one_position_per_symbol and symbol_already_open and not refreshed:
-                self._save_positions(
+                await self._save_positions(
                     {
                         "last_synced_at": recorded_at,
                         "open_positions": open_positions,
@@ -455,7 +493,7 @@ class DirectionalOptionsPaperStore:
                     }
                 )
 
-            self._save_positions(
+            await self._save_positions(
                 {
                     "last_synced_at": recorded_at,
                     "open_positions": open_positions,
@@ -619,13 +657,12 @@ class DirectionalOptionsPaperStore:
                 self.positions_path.replace(archive_dir / "paper_positions.json")
             if self.journal_path.exists():
                 self.journal_path.replace(archive_dir / "paper_journal.jsonl")
-            self._save_positions(
-                {
-                    "open_positions": [],
-                    "closed_positions": [],
-                    "last_synced_at": _utc_now(),
-                }
-            )
+            # Wipe the DB book (the upsert-based _save_positions can't clear
+            # rows by passing empty lists — it only inserts/updates).
+            async with AsyncSessionLocal() as session:
+                await session.execute(text("DELETE FROM directional_paper_positions"))
+                await session.execute(text("DELETE FROM directional_paper_journal"))
+                await session.commit()
         return {
             "reset": True,
             "actor": actor,
@@ -633,41 +670,170 @@ class DirectionalOptionsPaperStore:
             "initial_capital": DIRECTIONAL_INITIAL_CAPITAL,
         }
 
-    def capital_status(self) -> dict[str, Any]:
-        state = self._load_positions()
+    async def capital_status(self) -> dict[str, Any]:
+        state = await self._load_positions()
         return self._summary(
             list(state.get("open_positions", [])),
             list(state.get("closed_positions", [])),
         )
 
-    def _append_journal(self, payload: dict[str, Any]) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        with self.journal_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, default=str) + "\n")
+    # ── DB-backed persistence (directional_paper_positions / _journal) ───────
+    #
+    # The book used to be JSON files (paper_positions.json / paper_journal.jsonl)
+    # — no durable history, frozen on container recreate, closed trades capped
+    # at 250 then lost. It now lives in the DB: each position is one row keyed
+    # by position_id with the FULL dict in a JSONB `payload` (so the open/close
+    # logic is untouched — it still operates on the same in-memory dict lists)
+    # plus extracted key columns for analysis. Closed positions ACCUMULATE.
 
-    def _load_journal(self) -> list[dict[str, Any]]:
-        if not self.journal_path.exists():
-            return []
-        records: list[dict[str, Any]] = []
-        with self.journal_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        return records
+    @staticmethod
+    def _ts(value: Any) -> datetime | None:
+        return _parse_iso(value)
 
-    def _load_positions(self) -> dict[str, Any]:
-        if not self.positions_path.exists():
-            return {"open_positions": [], "closed_positions": [], "last_synced_at": None}
+    def _position_db_params(self, payload: dict[str, Any], status: str) -> dict[str, Any]:
+        return {
+            "position_id": str(payload.get("position_id") or ""),
+            "status": status,
+            "underlying": payload.get("underlying"),
+            "expiry": str(payload.get("expiry") or "") or None,
+            "strike": _safe_float_or_none(payload.get("strike")),
+            "option_type": payload.get("option_type"),
+            "direction": payload.get("direction"),
+            "quantity_units": _safe_int_or_none(payload.get("quantity_units")),
+            "entry_premium": _safe_float_or_none(payload.get("entry_premium")),
+            "latest_premium": _safe_float_or_none(payload.get("latest_premium")),
+            "exit_premium": _safe_float_or_none(payload.get("exit_premium")),
+            "unrealized_pnl": _safe_float_or_none(payload.get("unrealized_pnl")),
+            "realized_pnl": _safe_float_or_none(payload.get("realized_pnl")),
+            "opened_at": self._ts(payload.get("opened_at")),
+            "updated_at": self._ts(payload.get("updated_at")),
+            "closed_at": self._ts(payload.get("closed_at")),
+            "close_reason": payload.get("close_reason"),
+            "payload": json.dumps(payload, default=str),
+        }
+
+    async def _maybe_seed_from_file(self) -> None:
+        """One-time import of the legacy JSON book into the DB (only when the
+        DB is empty and a file exists). Idempotent + best-effort."""
+        if self._db_seeded:
+            return
+        self._db_seeded = True
         try:
-            return json.loads(self.positions_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return {"open_positions": [], "closed_positions": [], "last_synced_at": None}
+            async with AsyncSessionLocal() as session:
+                count = (await session.execute(
+                    text("SELECT count(*) FROM directional_paper_positions")
+                )).scalar() or 0
+            if count > 0:
+                return
+            if self.positions_path.exists():
+                try:
+                    state = json.loads(self.positions_path.read_text(encoding="utf-8"))
+                    if state.get("open_positions") or state.get("closed_positions"):
+                        await self._save_positions(state)
+                        logger.info("[DirPaper] seeded positions from legacy file into DB")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[DirPaper] file→DB position seed failed: {exc}")
+            if self.journal_path.exists():
+                try:
+                    lines = self.journal_path.read_text(encoding="utf-8").splitlines()[-2000:]
+                    for line in lines:
+                        line = line.strip()
+                        if line:
+                            try:
+                                await self._append_journal(json.loads(line))
+                            except json.JSONDecodeError:
+                                continue
+                    logger.info("[DirPaper] seeded journal from legacy file into DB")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[DirPaper] file→DB journal seed failed: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[DirPaper] seed check failed: {exc}")
 
-    def _save_positions(self, state: dict[str, Any]) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        self.positions_path.write_text(json.dumps(state, default=str, indent=2), encoding="utf-8")
+    async def _append_journal(self, payload: dict[str, Any]) -> None:
+        async with AsyncSessionLocal() as session:
+            approved = payload.get("approved")
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO directional_paper_journal
+                        (recorded_at, underlying, approved, payload)
+                    VALUES (:recorded_at, :underlying, :approved, CAST(:payload AS JSONB))
+                    """
+                ),
+                {
+                    "recorded_at": self._ts(payload.get("recorded_at")),
+                    "underlying": payload.get("underlying"),
+                    "approved": bool(approved) if approved is not None else None,
+                    "payload": json.dumps(payload, default=str),
+                },
+            )
+            await session.commit()
+
+    async def _load_journal(self) -> list[dict[str, Any]]:
+        await self._maybe_seed_from_file()
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                text(
+                    "SELECT payload FROM directional_paper_journal "
+                    "ORDER BY recorded_at DESC NULLS LAST, id DESC LIMIT 1000"
+                )
+            )).mappings().all()
+        return [_as_dict(r["payload"]) for r in rows]
+
+    async def _load_positions(self) -> dict[str, Any]:
+        await self._maybe_seed_from_file()
+        async with AsyncSessionLocal() as session:
+            open_rows = (await session.execute(
+                text("SELECT payload FROM directional_paper_positions WHERE status = 'open'")
+            )).mappings().all()
+            closed_rows = (await session.execute(
+                text(
+                    "SELECT payload FROM directional_paper_positions WHERE status = 'closed' "
+                    "ORDER BY closed_at DESC NULLS LAST LIMIT 500"
+                )
+            )).mappings().all()
+        return {
+            "open_positions": [_as_dict(r["payload"]) for r in open_rows],
+            "closed_positions": [_as_dict(r["payload"]) for r in closed_rows],
+            "last_synced_at": _utc_now(),
+        }
+
+    async def _save_positions(self, state: dict[str, Any]) -> None:
+        """Upsert the open + closed positions by position_id. Closed positions
+        accumulate (never deleted) → durable trade history. A position moves
+        open→closed when it appears in the closed list (the logic always closes
+        before it leaves the open list, so no stale-open rows linger)."""
+        rows = [(p, "open") for p in (state.get("open_positions") or [])]
+        rows += [(p, "closed") for p in (state.get("closed_positions") or [])]
+        params = [self._position_db_params(p, s) for p, s in rows if p.get("position_id")]
+        if not params:
+            return
+        upsert = text(
+            """
+            INSERT INTO directional_paper_positions
+                (position_id, status, underlying, expiry, strike, option_type,
+                 direction, quantity_units, entry_premium, latest_premium,
+                 exit_premium, unrealized_pnl, realized_pnl, opened_at,
+                 updated_at, closed_at, close_reason, payload)
+            VALUES
+                (:position_id, :status, :underlying, :expiry, :strike, :option_type,
+                 :direction, :quantity_units, :entry_premium, :latest_premium,
+                 :exit_premium, :unrealized_pnl, :realized_pnl, :opened_at,
+                 :updated_at, :closed_at, :close_reason, CAST(:payload AS JSONB))
+            ON CONFLICT (position_id) DO UPDATE SET
+                status=EXCLUDED.status, underlying=EXCLUDED.underlying,
+                expiry=EXCLUDED.expiry, strike=EXCLUDED.strike,
+                option_type=EXCLUDED.option_type, direction=EXCLUDED.direction,
+                quantity_units=EXCLUDED.quantity_units,
+                entry_premium=EXCLUDED.entry_premium,
+                latest_premium=EXCLUDED.latest_premium,
+                exit_premium=EXCLUDED.exit_premium,
+                unrealized_pnl=EXCLUDED.unrealized_pnl,
+                realized_pnl=EXCLUDED.realized_pnl, opened_at=EXCLUDED.opened_at,
+                updated_at=EXCLUDED.updated_at, closed_at=EXCLUDED.closed_at,
+                close_reason=EXCLUDED.close_reason, payload=EXCLUDED.payload
+            """
+        )
+        async with AsyncSessionLocal() as session:
+            await session.execute(upsert, params)
+            await session.commit()
