@@ -155,7 +155,13 @@ class DirectionalOptionsPaperStore:
         snapshot_payload: dict[str, Any],
         *,
         position_marks: dict[str, dict[str, Any]] | None = None,
+        allow_entries: bool = True,
     ) -> dict[str, Any]:
+        # allow_entries gates ONLY the opening of NEW positions — existing
+        # positions are still marked + managed (mark-to-market, two-stage
+        # close). The caller passes False outside the session so an after-hours
+        # API poll / request can't open a position on the frozen post-close
+        # heartbeat (a SENSEX CE opened 15:45 IST on 2026-06-03 this way).
         snapshot = dict(snapshot_payload.get("snapshot") or {})
         selection = dict(snapshot_payload.get("selection") or {})
         underlying = _normalize_symbol(selection.get("underlying") or snapshot.get("underlying"))
@@ -328,7 +334,7 @@ class DirectionalOptionsPaperStore:
                 )
                 return self._summary(open_positions, closed_positions)
 
-            if not refreshed:
+            if not refreshed and allow_entries:
                 new_position_id = uuid4().hex
                 try:
                     await paper_trade_recorder.record_event(

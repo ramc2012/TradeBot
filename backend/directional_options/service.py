@@ -295,7 +295,18 @@ class DirectionalOptionsService:
                 "mark_time": mark_time,
                 "price_source": price_source,
             }
-        paper_summary = await self.paper.sync_snapshot(payload, position_marks=position_marks)
+        # Bug A guard (2026-06-04): record_paper_snapshot is also reachable via
+        # the (ungated) API endpoint, so a UI poll / request after 15:30 could
+        # open a position on the frozen post-close heartbeat — which is how a
+        # SENSEX CE opened at 15:45 IST. Only allow NEW entries when the
+        # underlying's exchange is in session; existing positions are still
+        # marked + managed regardless.
+        from core.trading_calendar import trading_calendar
+        exchange = "BSE" if str(underlying).upper() in ("SENSEX", "BANKEX") else "NSE"
+        allow_entries = trading_calendar.is_exchange_open(exchange)
+        paper_summary = await self.paper.sync_snapshot(
+            payload, position_marks=position_marks, allow_entries=allow_entries
+        )
         payload["paper_summary"] = paper_summary
         payload["paper_positions"] = await self.paper.list_positions(symbol=underlying, status="all", limit=8)
         payload["paper_journal"] = await self.paper.list_journal(symbol=underlying, limit=8)
