@@ -165,12 +165,12 @@ def _commodity_event_block_reason(symbol_or_underlying: str, now: Optional[datet
         COMMODITY_EVENT_BLOCK_MINUTES,
     ):
         return "scheduled_crude_inventory_window"
-    if underlying == "NATURALGAS" and current.weekday() == 3 and _is_within_minutes(
-        current.time(),
-        time(20, 30),
-        COMMODITY_EVENT_BLOCK_MINUTES,
-    ):
-        return "scheduled_ng_storage_window"
+    # NATURALGAS is INTENTIONALLY NOT event-blocked. The Thursday EIA gas-storage reaction
+    # (~20:00-21:00 IST) is a primary OPPORTUNITY for the MP+OF breakout engine, not just risk —
+    # blocking ±90 min around it removed the strategy's best setups of the week. Entries are already
+    # gated by confirmed triggers (2 closed bars beyond IB + CVD/VWAP agreement + conviction floor)
+    # and hard stops, so the engine catches the confirmed post-report thrust rather than entering
+    # blind into the print. (CRUDEOIL's Wed inventory block is left in place pending the same review.)
     return None
 
 
