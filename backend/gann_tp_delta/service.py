@@ -93,11 +93,34 @@ class GannTPDeltaService:
         manual_h: float | None = None,
     ) -> dict[str, Any]:
         spot, source, history_symbol = await self.store.load_live_spot_frame(underlying, lookback_days=max(int(lookback_sessions), 1))
-        frame = self.store.build_feature_frame(spot, timeframe, lookback_sessions=lookback_sessions)
-        payload = self._snapshot(frame, underlying=underlying, timeframe=timeframe, anchor_mode=anchor_mode, h_mode=h_mode, manual_h=manual_h)
+        # WS-1.1 bulkhead: the feature-frame build + Gann geometry are CPU-bound and
+        # were running inline on the event loop — a fully-inline ~12.8s scan that froze
+        # tick ingest / Redis publish / WS push. Offload to a worker thread so the data
+        # plane stays responsive during the scan (verified via nomad_event_loop_lag_seconds).
+        payload = await asyncio.to_thread(
+            self._live_snapshot_compute,
+            spot, underlying, timeframe, lookback_sessions, anchor_mode, h_mode, manual_h,
+        )
         payload["history_source"] = source
         payload["history_symbol"] = history_symbol
         return payload
+
+    def _live_snapshot_compute(
+        self,
+        spot: pd.DataFrame,
+        underlying: str,
+        timeframe: str,
+        lookback_sessions: int,
+        anchor_mode: str,
+        h_mode: str,
+        manual_h: float | None,
+    ) -> dict[str, Any]:
+        """Pure-CPU portion of live_snapshot — runs in a worker thread (WS-1.1)."""
+        frame = self.store.build_feature_frame(spot, timeframe, lookback_sessions=lookback_sessions)
+        return self._snapshot(
+            frame, underlying=underlying, timeframe=timeframe,
+            anchor_mode=anchor_mode, h_mode=h_mode, manual_h=manual_h,
+        )
 
     def backtest(self, underlying: str, timeframe: str, lookback_sessions: int, anchor_mode: str, h_mode: str) -> dict[str, Any]:
         spot = self.store.load_spot_frame(underlying)
