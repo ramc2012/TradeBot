@@ -539,15 +539,24 @@ class DirectionalOptionsPaperStore:
         # Deduct real round-trip charges (brokerage + STT + exchange txn + SEBI
         # + GST + stamp) so paper P&L is NET, not gross — paper used to overstate
         # live by the entire charge stack (STT alone is 0.10% of sell-side
-        # premium on index options). WS-1.4a paper fidelity.
+        # premium on index options). WS-1.4 paper fidelity. The directional book
+        # uses its own paper store (NOT PaperPortfolio), so the shared
+        # portfolio.py cost wiring doesn't reach it — apply the same shared
+        # paper_engine.costs model here. Directional is long-premium (BUY entry).
         try:
-            from paper_engine.transaction_costs import round_trip_cost
-            txn_cost = round_trip_cost(
+            from paper_engine.costs import round_trip_charges
+            txn_cost = round_trip_charges(
+                symbol=str(
+                    position.get("trading_symbol")
+                    or position.get("instrument_key")
+                    or position.get("underlying")
+                    or ""
+                ),
                 instrument_type=str(position.get("option_type") or "CE"),
-                underlying=str(position.get("underlying") or ""),
                 entry_price=entry_premium,
                 exit_price=latest_premium,
-                quantity=quantity,
+                qty=quantity,
+                entry_action="BUY",
             )
         except Exception:  # noqa: BLE001
             txn_cost = 0.0
