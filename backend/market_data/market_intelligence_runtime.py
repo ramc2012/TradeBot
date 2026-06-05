@@ -264,10 +264,28 @@ class MarketIntelligenceRuntime:
         *,
         symbols: Optional[list[str]] = None,
         lookback_days: int = 10,
+        force: bool = False,
     ) -> dict[str, Any]:
         from auction_intelligence.live import _fetch_recent_minute_rows
+        from time import monotonic
 
         requested = [str(symbol).upper() for symbol in (symbols or list(NSE_INDEX_SCOPE))]
+        # Cooldown: this is a full 10-day broker backfill per symbol — the single
+        # dominant cost (~88s) of the 60s market-intel scan. The live tick feed
+        # already populates recent candles in real time, so the broker backfill is
+        # periodic reconciliation, not a per-cycle need. Run it at most once per
+        # cooldown window (keyed by symbol set); `force=True` bypasses it.
+        cooldown_key = tuple(sorted(requested))
+        if not force:
+            gap_fill_state = getattr(self, "_gap_fill_cooldown", None) or {}
+            expires_at = gap_fill_state.get(cooldown_key)
+            if expires_at is not None and expires_at > monotonic():
+                return {
+                    "symbols_requested": requested,
+                    "stored_total": 0,
+                    "results": [],
+                    "status": "skipped_cooldown",
+                }
         results: list[dict[str, Any]] = []
         stored_total = 0
 
@@ -307,6 +325,9 @@ class MarketIntelligenceRuntime:
                 )
             await asyncio.sleep(0.1)
 
+        if not hasattr(self, "_gap_fill_cooldown") or self._gap_fill_cooldown is None:
+            self._gap_fill_cooldown = {}
+        self._gap_fill_cooldown[cooldown_key] = monotonic() + 600.0
         return {
             "symbols_requested": requested,
             "stored_total": stored_total,

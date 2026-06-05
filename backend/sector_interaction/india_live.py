@@ -394,6 +394,17 @@ class IndiaLiveSectorService:
         }
 
     async def market_intelligence_payload(self) -> dict[str, Any]:
+        # TTL cache: this payload is driven by DAILY sector returns + a VAR/Granger
+        # model that takes ~30s to fit. The market-intel runner calls it every 60s,
+        # so recomputing it each cycle was ~30s of pure-Python (GIL-bound) waste that
+        # also stalled the event loop. Daily data does not move within minutes, so a
+        # 10-minute cache is safe and removes the recompute from 9 of every 10 scans.
+        from time import monotonic
+
+        cached = getattr(self, "_mi_payload_cache", None)
+        if cached is not None and cached[0] > monotonic():
+            return cached[1]
+
         overview = await self.overview()
         try:
             from sector_interaction.real_history import real_sector_history_service
@@ -413,7 +424,7 @@ class IndiaLiveSectorService:
                 "source_mode": "error",
                 "error": str(exc),
             }
-        return {
+        payload = {
             "module": "sector_interaction",
             "source_mode": overview["source_mode"],
             "universe": overview["universe"],
@@ -423,6 +434,8 @@ class IndiaLiveSectorService:
             "rrg": overview["rrg"],
             "real_model": real_model_summary,
         }
+        self._mi_payload_cache = (monotonic() + 600.0, payload)
+        return payload
 
     async def signals_payload(self) -> dict[str, Any]:
         overview = await self.overview()
