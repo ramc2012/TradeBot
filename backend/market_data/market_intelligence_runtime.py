@@ -756,18 +756,29 @@ class MarketIntelligenceRuntime:
         }
 
     async def refresh_nse_runtime(self) -> dict[str, Any]:
-        spot_gap_fill = await self.gap_fill_spot_history(
+        from time import monotonic
+
+        _timings: dict[str, float] = {}
+
+        async def _timed(name: str, coro):
+            _s = monotonic()
+            try:
+                return await coro
+            finally:
+                _timings[name] = round(monotonic() - _s, 2)
+
+        spot_gap_fill = await _timed("gap_fill", self.gap_fill_spot_history(
             symbols=list(NSE_INDEX_SCOPE),
             lookback_days=max(int(settings.MARKET_INTELLIGENCE_GAP_FILL_LOOKBACK_DAYS), 1),
-        )
-        watchlists = await self.refresh_nse_watchlists()
-        option_chains = await self.refresh_index_option_chains()
+        ))
+        watchlists = await _timed("watchlists", self.refresh_nse_watchlists())
+        option_chains = await _timed("option_chains", self.refresh_index_option_chains())
         # Top up 30m option premium candles across the full ATM watchlist
         # so S1's MACD scan sees fresh bars throughout the session.
         # Failure here MUST NOT abort the cycle — strategy fall-back paths
         # use whatever DB has.
         try:
-            premium_refresh = await self.refresh_atm_premium_candles()
+            premium_refresh = await _timed("premium", self.refresh_atm_premium_candles())
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[MarketIntelligence] Option premium refresh failed: {exc}")
             premium_refresh = {"status": "error", "error": str(exc)}
@@ -776,12 +787,12 @@ class MarketIntelligenceRuntime:
         # entry decision sees fresh learning signal. Has its own 5-min
         # cooldown; failure here is non-fatal.
         try:
-            learning_refresh = await self.refresh_learning_scores()
+            learning_refresh = await _timed("learning", self.refresh_learning_scores())
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[MarketIntelligence] Learning refresh failed: {exc}")
             learning_refresh = {"status": "error", "error": str(exc)}
         try:
-            sector_interaction = await india_live_sector_service.market_intelligence_payload()
+            sector_interaction = await _timed("sector", india_live_sector_service.market_intelligence_payload())
         except Exception as exc:
             logger.warning(f"[MarketIntelligence] Sector interaction refresh failed: {exc}")
             sector_interaction = {
@@ -790,7 +801,7 @@ class MarketIntelligenceRuntime:
                 "error": str(exc),
             }
         try:
-            macro_research = await macro_research_service.overview(refresh=False)
+            macro_research = await _timed("macro", macro_research_service.overview(refresh=False))
         except Exception as exc:
             logger.warning(f"[MarketIntelligence] Macro research refresh failed: {exc}")
             macro_research = {
@@ -798,6 +809,10 @@ class MarketIntelligenceRuntime:
                 "source_mode": "error",
                 "error": str(exc),
             }
+        logger.info(
+            f"[MarketIntelProfile] step timings(s): {_timings} "
+            f"total={round(sum(_timings.values()), 1)}"
+        )
         return {
             "spot_gap_fill": spot_gap_fill,
             "watchlists": watchlists,
@@ -806,6 +821,7 @@ class MarketIntelligenceRuntime:
             "learning_refresh": learning_refresh,
             "sector_interaction": sector_interaction,
             "macro_research": macro_research,
+            "_step_timings": _timings,
         }
 
     async def get_strategy_health(self) -> dict[str, Any]:
