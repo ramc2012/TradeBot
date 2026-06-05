@@ -219,7 +219,7 @@ class DirectionalOptionsPaperStore:
         return {
             "symbol_filter": normalized or None,
             "status": status,
-            "summary": self._summary(open_positions, closed_positions),
+            "summary": await self._summary(open_positions, closed_positions),
             "open_positions": open_positions[:limit],
             "closed_positions": closed_positions[:limit],
         }
@@ -304,7 +304,7 @@ class DirectionalOptionsPaperStore:
                         "closed_positions": closed_positions[-250:],
                     }
                 )
-                return self._summary(open_positions, closed_positions)
+                return await self._summary(open_positions, closed_positions)
 
             if not actionable:
                 # Two-stage close: require persistent flat signal before
@@ -349,7 +349,7 @@ class DirectionalOptionsPaperStore:
                         "closed_positions": closed_positions[-250:],
                     }
                 )
-                return self._summary(open_positions, closed_positions)
+                return await self._summary(open_positions, closed_positions)
 
             refreshed = False
             position_timeframe = str(selection.get("timeframe") or "")
@@ -406,7 +406,7 @@ class DirectionalOptionsPaperStore:
                         "closed_positions": closed_positions[-250:],
                     }
                 )
-                return self._summary(open_positions, closed_positions)
+                return await self._summary(open_positions, closed_positions)
 
             if not refreshed and allow_entries:
                 new_position_id = uuid4().hex
@@ -500,7 +500,7 @@ class DirectionalOptionsPaperStore:
                     "closed_positions": closed_positions[-250:],
                 }
             )
-            return self._summary(open_positions, closed_positions)
+            return await self._summary(open_positions, closed_positions)
 
     def _close_position(
         self,
@@ -598,8 +598,24 @@ class DirectionalOptionsPaperStore:
             # No running event loop (e.g. unit tests) — skip event logging.
             pass
 
-    def _summary(self, open_positions: list[dict[str, Any]], closed_positions: list[dict[str, Any]]) -> dict[str, Any]:
-        realized = round(sum(float(row.get("realized_pnl") or 0.0) for row in closed_positions), 2)
+    async def _summary(self, open_positions: list[dict[str, Any]], closed_positions: list[dict[str, Any]]) -> dict[str, Any]:
+        # Lifetime realized from the DB-wide SUM over ALL closed positions — not the
+        # capped in-memory list (LIMIT 500 on load + [-250:] on save), which silently
+        # understated realized/equity once closed-trade history outgrew the cap.
+        # Falls back to the in-memory sum if the DB is unavailable (tests/degraded).
+        realized: float | None = None
+        try:
+            async with AsyncSessionLocal() as session:
+                val = (await session.execute(text(
+                    "SELECT COALESCE(SUM((payload->>'realized_pnl')::float8), 0.0) "
+                    "FROM directional_paper_positions WHERE status = 'closed'"
+                ))).scalar()
+            realized = float(val if val is not None else 0.0)
+        except Exception:
+            realized = None
+        if realized is None:
+            realized = sum(float(row.get("realized_pnl") or 0.0) for row in closed_positions)
+        realized = round(realized, 2)
         unrealized = round(sum(float(row.get("unrealized_pnl") or 0.0) for row in open_positions), 2)
 
         # Capital accounting matches the AI/FMP/S1/S2 canonical shape so the
@@ -699,7 +715,7 @@ class DirectionalOptionsPaperStore:
 
     async def capital_status(self) -> dict[str, Any]:
         state = await self._load_positions()
-        return self._summary(
+        return await self._summary(
             list(state.get("open_positions", [])),
             list(state.get("closed_positions", [])),
         )
