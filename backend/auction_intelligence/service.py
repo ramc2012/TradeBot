@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import functools
 from dataclasses import replace
 
 from loguru import logger
@@ -164,16 +166,24 @@ class AuctionIntelligenceService:
         quote_history: list[QuoteSnapshot] | None = None,
     ) -> AnalysisBundle:
         ntm_volx = await self.options.build_ntm_volx(session=session)
-        bundle = self.analyze(
-            session=session,
-            bars=bars,
-            quote=quote,
-            trades=trades,
-            prior_bars=prior_bars,
-            depth=depth,
-            portfolio=portfolio,
-            quote_history=quote_history,
-            ntm_volx=ntm_volx,
+        # CPU-bulkhead: analyze() is a pure synchronous CPU block (no awaits) —
+        # market-profile/order-flow/regime/agents/meta/risk/execution loops over
+        # the passed-in bars/quote/trades. Offload it to a worker thread so the
+        # 200-320s compute does not block the event loop during the live cycle.
+        # ntm_volx is already awaited above and passed in, so the thread does no IO.
+        bundle = await asyncio.to_thread(
+            functools.partial(
+                self.analyze,
+                session=session,
+                bars=bars,
+                quote=quote,
+                trades=trades,
+                prior_bars=prior_bars,
+                depth=depth,
+                portfolio=portfolio,
+                quote_history=quote_history,
+                ntm_volx=ntm_volx,
+            )
         )
         bundle.execution_plan = await self.options.map_execution_plan(
             session=session,

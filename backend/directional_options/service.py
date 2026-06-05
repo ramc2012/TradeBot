@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from time import monotonic
 from typing import Any, Optional
@@ -578,15 +578,25 @@ class DirectionalOptionsService:
                 .replace("_", " ")
             )
         elif signal is not None:
-            selection = self.selector.select_from_live_snapshots(
-                underlying=underlying,
-                timestamp=timestamp,
-                spot_price=spot_price,
-                row=row,
-                signal=signal,
-                regime=regime,
-                timeframe=timeframe,
-                snapshot_rows=snapshot_rows,
+            # CPU-bound contract scoring (Black-Scholes greeks +
+            # distributional metrics per candidate, pure Python math).
+            # Offloaded to a worker thread so the per-candidate
+            # transcendental math does not block the event loop /health.
+            # select_from_live_snapshots has zero awaits and only reads
+            # read-only self.config + the passed snapshot_rows, so it is
+            # safe on a worker thread and byte-identical in behaviour.
+            selection = await asyncio.to_thread(
+                partial(
+                    self.selector.select_from_live_snapshots,
+                    underlying=underlying,
+                    timestamp=timestamp,
+                    spot_price=spot_price,
+                    row=row,
+                    signal=signal,
+                    regime=regime,
+                    timeframe=timeframe,
+                    snapshot_rows=snapshot_rows,
+                )
             )
             if not option_snapshot_lookup_failed:
                 selection_reason = selection["reason"]
@@ -622,12 +632,22 @@ class DirectionalOptionsService:
                 )
             except Exception:
                 chain_payload = None
-            chosen, policy_payload = self._policy_pick(
-                signal=signal,
-                regime=regime,
-                candidates=selection["candidates"] or ([selection["best"]] if selection["best"] is not None else []),
-                default=selection["best"],
-                chain=chain_payload,
+            # CPU-bound RL policy ranking + decision (per-candidate
+            # BayesianRidge sampling -> numpy matrix inversion). Offloaded
+            # to a worker thread; rank_candidates/decide already serialize
+            # all shared-state access under self.policy._lock, so running
+            # the call off-loop keeps the same lock and is safe. Thompson
+            # sampling is stochastic by design, so RNG draw ordering is
+            # not an observable behaviour change.
+            chosen, policy_payload = await asyncio.to_thread(
+                partial(
+                    self._policy_pick,
+                    signal=signal,
+                    regime=regime,
+                    candidates=selection["candidates"] or ([selection["best"]] if selection["best"] is not None else []),
+                    default=selection["best"],
+                    chain=chain_payload,
+                )
             )
             size_mult = float((policy_payload or {}).get("size_multiplier", 1.0))
             policy_act = bool((policy_payload or {}).get("act", True))
