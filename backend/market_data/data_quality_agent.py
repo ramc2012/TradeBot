@@ -50,6 +50,11 @@ class _SymbolHealth:
     flagged: bool = False
     flag_reason: Optional[str] = None
     consecutive_stale_checks: int = 0
+    # When last_value last actually CHANGED. A feed that keeps delivering ticks
+    # but repeats the same value (a frozen/stuck WS session) holds an old
+    # value_changed_at while last_seen_at advances — that gap is the freeze a
+    # plain timestamp-age check can't see.
+    value_changed_at: Optional[datetime] = None
 
 
 @dataclass
@@ -90,10 +95,20 @@ class DataQualityAgent:
         "default": 60,
     }
 
+    # An NSE/BSE index recomputes continuously from its constituents during
+    # market hours — it essentially never holds the exact same LTP for more
+    # than a few seconds. If the feed keeps ticking (age within budget) but the
+    # value is byte-identical for longer than this, the WS session is frozen,
+    # not the market. Conservative (90s) so a genuine lull never false-flags;
+    # the indices still move sub-second in practice. A frozen required index
+    # rolls the aggregate to "critical" → the NSE lane skips entries (fail-safe).
+    FROZEN_VALUE_BUDGET_SECONDS: int = 90
+
     def __init__(self) -> None:
         self._lock = RLock()
         self._ledger: dict[tuple[str, str], _SymbolHealth] = {}
         self._budgets: dict[str, int] = dict(self.DEFAULT_BUDGETS)
+        self._frozen_budget_seconds: int = int(self.FROZEN_VALUE_BUDGET_SECONDS)
 
     def update_budget(self, source: str, seconds: int) -> None:
         with self._lock:
@@ -101,6 +116,24 @@ class DataQualityAgent:
 
     def _budget_for(self, source: str) -> int:
         return int(self._budgets.get(source, self._budgets["default"]))
+
+    def _frozen_seconds(self, health: "_SymbolHealth", when: datetime) -> Optional[float]:
+        """Seconds the LTP has been stuck while the feed keeps ticking.
+
+        Returns None when frozen detection does not apply: a non-NSE/BSE symbol,
+        market closed, no value history yet, or the feed is already DEAD (age
+        beyond budget — caught by the ordinary staleness check, not this one).
+        A positive return means ticks are still arriving but the value has not
+        moved for that many seconds.
+        """
+        if health.value_changed_at is None or health.last_value is None:
+            return None
+        if not _is_nse_realtime_symbol(health.symbol) or not _is_nse_market_hours(when):
+            return None
+        age = (when - health.last_seen_at).total_seconds()
+        if age > self._budget_for(health.source):
+            return None  # dead feed, not a frozen one
+        return (when - health.value_changed_at).total_seconds()
 
     def record_tick(
         self,
@@ -122,6 +155,20 @@ class DataQualityAgent:
             if existing and existing.last_seen_at >= when:
                 # Don't downgrade freshness if an older tick arrives late.
                 return
+            # Track when the value last actually MOVED so a frozen feed (ticks
+            # arriving, value stuck) is detectable. Preserve the prior change
+            # time only when the new value is byte-identical to the last one;
+            # any change — or a first/None value — stamps `when`.
+            if (
+                existing is not None
+                and existing.value_changed_at is not None
+                and existing.last_value is not None
+                and last_value is not None
+                and last_value == existing.last_value
+            ):
+                value_changed_at = existing.value_changed_at
+            else:
+                value_changed_at = when
             self._ledger[key] = _SymbolHealth(
                 symbol=symbol,
                 source=source,
@@ -130,6 +177,7 @@ class DataQualityAgent:
                 flagged=False,
                 flag_reason=None,
                 consecutive_stale_checks=0,
+                value_changed_at=value_changed_at,
             )
 
     def flag(self, *, symbol: str, source: str, reason: str) -> None:
@@ -182,6 +230,16 @@ class DataQualityAgent:
                     f"Last {source} observation is {int(age)}s old, "
                     f"beyond the {budget}s budget."
                 )
+            else:
+                # Feed is delivering ticks on time — but is the value moving?
+                frozen_for = self._frozen_seconds(health, when)
+                if frozen_for is not None and frozen_for > self._frozen_budget_seconds:
+                    stale = True
+                    reason = (
+                        f"{source} LTP stuck at {health.last_value} for "
+                        f"{int(frozen_for)}s (>{self._frozen_budget_seconds}s) while "
+                        f"ticks keep arriving — frozen feed."
+                    )
             if stale:
                 health.consecutive_stale_checks += 1
             else:
@@ -239,19 +297,26 @@ class DataQualityAgent:
     def is_ready(self, *, symbol: str, source: str) -> bool:
         return not self.assess_freshness(symbol=symbol, source=source).stale
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, *, now: Optional[datetime] = None) -> dict[str, Any]:
         with self._lock:
-            now = datetime.now(timezone.utc)
+            now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
             entries = []
             stale_entry_count = 0
             flagged_count = 0
+            frozen_entry_count = 0
             by_symbol: dict[str, list[dict[str, Any]]] = {}
             for (symbol, source), health in self._ledger.items():
                 age = (now - health.last_seen_at).total_seconds()
                 budget = self._budget_for(source)
                 stale = age > budget or health.flagged
+                frozen_for = self._frozen_seconds(health, now)
+                frozen = frozen_for is not None and frozen_for > self._frozen_budget_seconds
+                if frozen:
+                    stale = True
                 if stale:
                     stale_entry_count += 1
+                if frozen:
+                    frozen_entry_count += 1
                 if health.flagged:
                     flagged_count += 1
                 entry = {
@@ -265,30 +330,41 @@ class DataQualityAgent:
                     "flag_reason": health.flag_reason,
                     "consecutive_stale_checks": health.consecutive_stale_checks,
                     "last_value": health.last_value,
+                    "frozen": frozen,
+                    "frozen_seconds": round(frozen_for, 1) if frozen_for is not None else None,
                 }
                 entries.append(entry)
                 by_symbol.setdefault(symbol, []).append(entry)
             entries.sort(key=lambda item: (-item["stale"], item["symbol"]))
             symbol_health: list[dict[str, Any]] = []
             stale_symbol_count = 0
+            frozen_symbol_count = 0
             for symbol, source_entries in sorted(by_symbol.items()):
                 symbol_stale = all(bool(item["stale"]) for item in source_entries)
                 symbol_flagged = any(bool(item["flagged"]) for item in source_entries)
+                symbol_frozen = any(bool(item.get("frozen")) for item in source_entries)
                 if symbol_stale:
                     stale_symbol_count += 1
+                if symbol_frozen:
+                    frozen_symbol_count += 1
                 freshest = min(source_entries, key=lambda item: float(item["age_seconds"]))
                 symbol_health.append(
                     {
                         "symbol": symbol,
                         "stale": symbol_stale,
                         "flagged": symbol_flagged,
+                        "frozen": symbol_frozen,
                         "freshest_source": freshest["source"],
                         "freshest_age_seconds": freshest["age_seconds"],
                         "sources": len(source_entries),
                     }
                 )
             overall = "healthy"
-            if flagged_count:
+            # A frozen required index feed (ticks arriving, value stuck) is as
+            # dangerous as a flagged/dead one — both put a stale price in front
+            # of the agent. Roll it into "critical" so the NSE lane's
+            # critical-gate skips entries until the value moves again.
+            if flagged_count or frozen_symbol_count:
                 overall = "critical"
             elif stale_symbol_count:
                 stale_symbols = [
@@ -307,6 +383,8 @@ class DataQualityAgent:
                 "entry_count": len(entries),
                 "stale_count": stale_symbol_count,
                 "stale_entry_count": stale_entry_count,
+                "frozen_count": frozen_symbol_count,
+                "frozen_entry_count": frozen_entry_count,
                 "flagged_count": flagged_count,
                 "budgets": dict(self._budgets),
                 "symbol_health": symbol_health,
