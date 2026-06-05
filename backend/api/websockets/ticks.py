@@ -86,6 +86,26 @@ async def _accept_authenticated_socket(websocket: WebSocket, channel: str) -> di
     return claims
 
 
+async def _close_pubsub(pubsub) -> None:
+    """Release a pub/sub's dedicated Redis connection on disconnect.
+
+    unsubscribe() alone does NOT free the underlying connection — without this every
+    WS disconnect leaks one Redis client, and a market day of UI reconnects eventually
+    exhausts Redis maxclients ('max number of clients reached'), breaking tick pub/sub.
+    """
+    for name in ("aclose", "close"):
+        closer = getattr(pubsub, name, None)
+        if closer is None:
+            continue
+        try:
+            result = closer()
+            if hasattr(result, "__await__"):
+                await result
+        except Exception:
+            pass
+        return
+
+
 async def ws_ticks(websocket: WebSocket, symbol: str):
     """Stream real-time ticks for a symbol via Redis pub/sub."""
     await _accept_authenticated_socket(websocket, f"ticks:{symbol}")
@@ -119,6 +139,7 @@ async def ws_ticks(websocket: WebSocket, symbol: str):
             await pubsub.unsubscribe(f"ticks:{symbol}")
         except Exception:
             pass
+        await _close_pubsub(pubsub)  # release the connection or it leaks → Redis maxclients
 
 
 async def _tick_snapshot_payload(symbol: str) -> str:
@@ -628,4 +649,8 @@ async def ws_proposals(websocket: WebSocket):
     except Exception as e:
         logger.error(f"[WS] Proposals error: {e}")
     finally:
-        await pubsub.unsubscribe("proposals")
+        try:
+            await pubsub.unsubscribe("proposals")
+        except Exception:
+            pass
+        await _close_pubsub(pubsub)  # release the connection or it leaks → Redis maxclients
