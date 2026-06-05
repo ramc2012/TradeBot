@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # Unbounded, the pool grew without limit under tick-cache SET bursts (amplified
     # when the loop blocks on heavy scans) until it exhausted maxclients and tick
     # pub/sub failed (2026-06-05). Idle connections are reused, so this is headroom.
-    REDIS_MAX_CONNECTIONS: int = 256
+    REDIS_MAX_CONNECTIONS: int = 1000
     RESEARCH_SYNC_AUTO_ENABLED: bool = False
     RESEARCH_SYNC_EMBEDDED_ENABLED: bool = False
     STRATEGY_SPOT_SYNC_ENABLED: bool = False
