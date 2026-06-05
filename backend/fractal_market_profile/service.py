@@ -158,6 +158,49 @@ def _aggregate_rows(rows: list[dict[str, Any]], interval_minutes: int, symbol_co
     return aggregated
 
 
+def _drop_contaminated_bars(rows: list[dict[str, Any]], *, band: float = 0.2) -> list[dict[str, Any]]:
+    """Drop cross-symbol-contaminated OHLC bars within a session.
+
+    The ``underlying_spot_candles`` feed occasionally carries a garbage print —
+    e.g. a NIFTY minute whose ``high`` is 54,285 while ``close``/``low`` sit at
+    ~23,400 (another index's value mislabelled). One such bar explodes the TPO
+    price ladder (it iterates ``low -> high`` in tick-size steps) from a few
+    hundred levels into thousands, and the GIL-bound profile build then runs for
+    tens of seconds — starving the event loop and stalling the live dashboards.
+
+    Reject any bar whose O/H/L/C falls outside +/-``band`` of the session median
+    close. Within one session an index never ranges 20%, so this drops only
+    contamination and never legitimate bars.
+    """
+    if len(rows) < 3:
+        return rows
+    closes = sorted(r["close"] for r in rows if r.get("close") and r["close"] > 0)
+    if not closes:
+        return rows
+    med = closes[len(closes) // 2]
+    if med <= 0:
+        return rows
+    lo, hi = med * (1.0 - band), med * (1.0 + band)
+
+    def _ok(row: dict[str, Any]) -> bool:
+        c = row.get("close") or 0.0
+        if c <= 0 or not (lo <= c <= hi):
+            return False
+        h = row.get("high") or 0.0
+        l = row.get("low") or 0.0
+        o = row.get("open") or 0.0
+        if h > 0 and h > hi:
+            return False
+        if l > 0 and l < lo:
+            return False
+        if o > 0 and not (lo <= o <= hi):
+            return False
+        return True
+
+    clean = [r for r in rows if _ok(r)]
+    return clean if clean else rows
+
+
 def _group_rows_by_session(
     rows: list[dict[str, Any]],
     *,
@@ -182,6 +225,8 @@ def _group_rows_by_session(
         grouped.setdefault(timestamp.date(), []).append(normalized)
     for session_rows in grouped.values():
         session_rows.sort(key=lambda item: item["time"])
+    # Strip contaminated prints before any TPO profile is built off these rows.
+    grouped = {day: _drop_contaminated_bars(session_rows) for day, session_rows in grouped.items()}
     now_ist = datetime.now(IST)
     return {
         key: rows
@@ -1063,9 +1108,18 @@ class FractalMarketProfileService:
             )
         daily_30m_rows = _aggregate_rows(current_rows, 30, normalized)
         prior_30m_rows = _aggregate_rows(prior_rows, 30, normalized)
-        daily_profile["shape"] = _shape_from_snapshot(self._raw_profile_snapshot(normalized, daily_30m_rows, tick_size, 30, 2))
-        daily_profile["direction_bias"] = _direction_from_snapshot(self._raw_profile_snapshot(normalized, daily_30m_rows, tick_size, 30, 2))
-        daily_profile["day_type"] = _daily_day_type(self._raw_profile_snapshot(normalized, daily_30m_rows, tick_size, 30, 2), None if not prior_daily_profile else self._raw_profile_snapshot(normalized, prior_30m_rows, tick_size, 30, 2))
+        # Build each 30m snapshot ONCE and reuse it — shape, direction_bias and
+        # day_type previously rebuilt the identical current-session snapshot three
+        # separate times (3x redundant profile compute on every scan).
+        daily_30m_snapshot = self._raw_profile_snapshot(normalized, daily_30m_rows, tick_size, 30, 2)
+        prior_30m_snapshot = (
+            self._raw_profile_snapshot(normalized, prior_30m_rows, tick_size, 30, 2)
+            if prior_daily_profile
+            else None
+        )
+        daily_profile["shape"] = _shape_from_snapshot(daily_30m_snapshot)
+        daily_profile["direction_bias"] = _direction_from_snapshot(daily_30m_snapshot)
+        daily_profile["day_type"] = _daily_day_type(daily_30m_snapshot, prior_30m_snapshot)
         daily_profile["avg_daily_ib"] = round(float(daily_references["avg_daily_ib"]), 2)
         daily_profile["daily_ib_ratio"] = round(
             float(daily_profile["initial_balance_range"]) / max(float(daily_references["avg_daily_ib"]) or 1.0, 1.0),
