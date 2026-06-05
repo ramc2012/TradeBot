@@ -40,6 +40,8 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { usePaperDeskQueries } from "@/hooks/usePaperDeskQueries";
+import { PaperPerformance } from "@/components/strategies/shared";
+import type { PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
 
 import UniverseWatchlist from "./UniverseWatchlist";
@@ -65,7 +67,7 @@ const TABS = [
   { key: "analytics", label: "Option analytics",   icon: Layers3 },
   { key: "paper",     label: "Paper trading",      icon: Banknote },
   { key: "policy",    label: "Policy & learning",  icon: Brain },
-  { key: "backtest",  label: "Backtest",           icon: TrendingUp },
+  { key: "performance", label: "Performance",      icon: TrendingUp },
   // Full v1 view — bundles the recharts diagnostics, dataset coverage
   // cards, and Dash hand-off that aren't ported to native v2 panels yet.
   { key: "v1",        label: "Full v1 view",       icon: Layers3 },
@@ -261,14 +263,11 @@ export default function DirectionalDesk() {
 
       {activeTab === "policy" ? <PolicyLearningTab /> : null}
 
-      {activeTab === "backtest" ? (
-        <Section title="Backtest" icon={<TrendingUp size={16} />}>
-          <div className="rounded-xl border border-bg-border bg-bg-primary/15 p-4 text-sm text-text-secondary">
-            A native v2 backtest tab is on the porting roadmap. The "Full
-            v1 view" tab above contains the equity / monthly / regime
-            recharts and the trades table in the meantime.
-          </div>
-        </Section>
+      {activeTab === "performance" ? (
+        <PaperPerformance
+          summary={paper.summary.data as Record<string, number> | undefined}
+          positions={paper.positions.data as PositionsPayload | undefined}
+        />
       ) : null}
 
       {activeTab === "v1" ? (
