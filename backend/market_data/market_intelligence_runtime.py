@@ -39,6 +39,39 @@ APP_SYMBOLS = {
 }
 
 
+def _drop_contaminated_spot_rows(rows: list[dict[str, Any]], *, band: float = 0.5) -> list[dict[str, Any]]:
+    """Drop cross-symbol-contaminated OHLC rows from a spot-history payload.
+
+    The underlying_spot_candles feed occasionally carries a garbage print (e.g. a
+    NIFTY minute whose high is ~54k while close ~23.4k). Such a row explodes any
+    downstream TPO price-ladder build (low->high in tick steps) into thousands of
+    levels, and the GIL-bound profile compute then stalls the event loop. Reject
+    rows whose O/H/L/C falls outside +/-band of the median close. Over a 10-day
+    index window even a wide ``band`` (default 50%) only ever trims contamination.
+    """
+    if len(rows) < 3:
+        return rows
+    closes = sorted(float(r["close"]) for r in rows if r.get("close") and float(r["close"]) > 0)
+    if not closes:
+        return rows
+    med = closes[len(closes) // 2]
+    if med <= 0:
+        return rows
+    lo, hi = med * (1.0 - band), med * (1.0 + band)
+    clean: list[dict[str, Any]] = []
+    for r in rows:
+        c = float(r.get("close") or 0.0)
+        if c <= 0 or not (lo <= c <= hi):
+            continue
+        h = float(r.get("high") or 0.0)
+        l = float(r.get("low") or 0.0)
+        o = float(r.get("open") or 0.0)
+        if (h > 0 and h > hi) or (l > 0 and l < lo) or (o > 0 and not (lo <= o <= hi)):
+            continue
+        clean.append(r)
+    return clean if clean else rows
+
+
 def _runtime_root() -> Path:
     return Path(__file__).resolve().parents[1] / "runtime" / "index_analytics_data"
 
@@ -195,6 +228,7 @@ class MarketIntelligenceRuntime:
             }
             for row in rows
         ]
+        payload = _drop_contaminated_spot_rows(payload)
         if payload:
             return payload, "timescaledb_spot_1minute", symbol_code.upper()
 
