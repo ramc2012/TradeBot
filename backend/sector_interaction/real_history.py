@@ -1,6 +1,7 @@
 """Real sector-index history adapter for sector interaction models."""
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import numpy as np
@@ -11,6 +12,21 @@ from sector_interaction.service import sector_interaction_service
 
 
 REAL_MODEL_MIN_PERIODS = 48
+
+
+def _india_model_compute(returns: "pd.DataFrame", max_lag: int, alpha: float):
+    """Pure CPU compute for india_model — runs on a worker thread (WS-1.1 bulkhead).
+
+    The VAR lag-selection (statsmodels) + Granger causality tests + correlation +
+    centrality were the dominant inline CPU on the market-intel scan path (~every
+    60s), blocking the event loop. They operate read-only on the already-loaded
+    `returns` frame, so they are safe to run off-loop.
+    """
+    selected_lag = sector_interaction_service._select_lag_aic(returns, max_lag=max_lag)
+    edges = sector_interaction_service._granger_edges(returns, lag=selected_lag, alpha=alpha)
+    corr = returns.corr()
+    centrality = sector_interaction_service._centrality(list(returns.columns), edges)
+    return selected_lag, edges, corr, centrality
 
 
 class RealSectorHistoryService:
@@ -42,10 +58,12 @@ class RealSectorHistoryService:
             )
 
         max_lag = max(1, min(int(max_lag), 6))
-        selected_lag = sector_interaction_service._select_lag_aic(returns, max_lag=max_lag)
-        edges = sector_interaction_service._granger_edges(returns, lag=selected_lag, alpha=alpha)
-        corr = returns.corr()
-        centrality = sector_interaction_service._centrality(list(returns.columns), edges)
+        # CPU-bulkhead: offload the VAR/Granger/correlation/centrality compute off the
+        # event loop (it ran inline every market-intel scan, blocking it). Read-only on
+        # `returns`; returns the same four values used below.
+        selected_lag, edges, corr, centrality = await asyncio.to_thread(
+            _india_model_compute, returns, max_lag, alpha
+        )
         return {
             "country": "IN",
             "label": "India",
