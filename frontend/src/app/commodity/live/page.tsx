@@ -176,6 +176,10 @@ type CommoditySnapshotContract = {
 
 type CommodityWatchlistSnapshot = {
   contract_catalog?: { contracts?: CommoditySnapshotContract[] };
+  // Full watchlist rows with heavy TPO/prior-session fields — served by the
+  // 8s watchlist socket. The 2s overview socket strips these fields to stay
+  // within the WebSocket frame budget; the client merges them back here.
+  futures_watchlist?: WatchRow[];
 };
 
 type CommodityPosition = {
@@ -2842,10 +2846,37 @@ export default function CommodityLivePage() {
     [watchlistSnapshotQuery.data?.contract_catalog?.contracts],
   );
 
-  // Build the row list: prefer the agent's live watchlist; fall back to the
-  // contract catalog so the table never empties when the agent is between
-  // scans.
-  const runtimeRows = (status.futures_watchlist ?? status.watchlist ?? []) as WatchRow[];
+  // TPO chart data (mp_tpo_letters, mp_tpo_counts, prior_session_profile) is
+  // stripped from the 2s overview socket to keep that frame under ~100 KB.
+  // The 8s watchlist socket carries the full rows; build a symbol-keyed map
+  // so we can merge the heavy chart fields back into the live rows below.
+  const watchlistFullRows = (watchlistSnapshotQuery.data?.futures_watchlist ?? []) as WatchRow[];
+  const watchlistTpoMap = useMemo(() => {
+    const m = new Map<string, WatchRow>();
+    for (const r of watchlistFullRows) {
+      if (r.symbol) m.set(r.symbol, r);
+    }
+    return m;
+  }, [watchlistFullRows]);
+
+  // Build the row list: prefer the agent's live watchlist (fast, slim) merged
+  // with TPO fields from the watchlist socket (slow, full).  Fall back to the
+  // contract catalog so the table never empties when the agent is between scans.
+  const runtimeRows = useMemo(() => {
+    const liveRows = (status.futures_watchlist ?? status.watchlist ?? []) as WatchRow[];
+    return liveRows.map((r) => {
+      const tpo = watchlistTpoMap.get(String(r.symbol ?? ""));
+      return {
+        // Heavy chart fields from the slow channel — stripped from overview.
+        mp_tpo_letters: tpo?.mp_tpo_letters ?? null,
+        mp_tpo_counts: tpo?.mp_tpo_counts ?? null,
+        prior_session_profile: tpo?.prior_session_profile ?? null,
+        // Live signal/price fields from the fast channel override everything.
+        ...r,
+      } as WatchRow;
+    });
+  }, [status.futures_watchlist, status.watchlist, watchlistTpoMap]);
+
   const fallbackRows: WatchRow[] = useMemo(
     () =>
       contracts.map((c) => ({
