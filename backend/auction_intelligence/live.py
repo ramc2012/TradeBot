@@ -527,6 +527,16 @@ async def _fetch_recent_minute_rows(
     def _filter_symbol_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not rows:
             return []
+        # Relative-median guard, layered on top of the absolute INDEX_PRICE_BANDS.
+        # The fixed bands are wide (e.g. FINNIFTY 10k-60k) so cross-index
+        # contamination — a FINNIFTY minute carrying a ~54k BANKNIFTY high while
+        # the real value is ~26k — sits *inside* the band and slips through. One
+        # such bar explodes the TPO price ladder (low->high in tick steps) into
+        # thousands of levels and the GIL-bound profile build then stalls the loop.
+        closes = sorted(float(r.get("close") or 0.0) for r in rows if (r.get("close") or 0) > 0)
+        median_close = closes[len(closes) // 2] if closes else 0.0
+        rel_lo = median_close * 0.6 if median_close > 0 else 0.0
+        rel_hi = median_close * 1.4 if median_close > 0 else float("inf")
         filtered: list[dict[str, Any]] = []
         for row in rows:
             open_price = row.get("open", row.get("close"))
@@ -536,7 +546,12 @@ async def _fetch_recent_minute_rows(
             if not all(_valid_price(value) for value in (open_price, high_price, low_price, close_price)):
                 continue
             try:
-                if float(high_price) < float(low_price):
+                hp = float(high_price)
+                lp = float(low_price)
+                cp = float(close_price)
+                if hp < lp:
+                    continue
+                if median_close > 0 and (hp > rel_hi or lp < rel_lo or not (rel_lo <= cp <= rel_hi)):
                     continue
             except (TypeError, ValueError):
                 continue
