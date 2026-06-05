@@ -1859,15 +1859,23 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 save_profile,
             )
 
-            if today_profile is not None and int(getattr(today_profile, "period_count", 0) or 0) >= FUTURES_MP_MIN_PERIODS:
-                snapshot = build_daily_profile_from_snapshot(spec.root, today_profile)
-                if snapshot is not None:
-                    save_profile(snapshot)
+            def _persist_daily_profiles() -> None:
+                if today_profile is not None and int(getattr(today_profile, "period_count", 0) or 0) >= FUTURES_MP_MIN_PERIODS:
+                    snapshot = build_daily_profile_from_snapshot(spec.root, today_profile)
+                    if snapshot is not None:
+                        save_profile(snapshot)
 
-            if prior_profile is not None:
-                prior_snapshot = build_daily_profile_from_snapshot(spec.root, prior_profile)
-                if prior_snapshot is not None:
-                    save_profile(prior_snapshot)
+                if prior_profile is not None:
+                    prior_snapshot = build_daily_profile_from_snapshot(spec.root, prior_profile)
+                    if prior_snapshot is not None:
+                        save_profile(prior_snapshot)
+
+            # Offload the profile build + blocking JSON file writes off the event
+            # loop. _analyze_futures_symbol runs per symbol on every ~30s scan;
+            # inline this added up to ~1s of loop stall per cycle across the
+            # 5-20 commodity symbols. today_profile/prior_profile/spec are locals
+            # to this call, so the worker thread reads them without a data race.
+            await asyncio.to_thread(_persist_daily_profiles)
         except Exception as persist_exc:
             logger.debug(
                 f"[CommodityStrategy] daily profile persist skipped for {spec.root}: {persist_exc}"

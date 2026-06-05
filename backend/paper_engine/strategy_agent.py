@@ -920,9 +920,13 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             },
         }
 
-    def _persist_state(self) -> None:
+    def _build_state_payload(self) -> dict[str, Any]:
+        # Built on the event loop (pure dict/list comprehension over instance
+        # state, ~microseconds). Keeping the build on-loop avoids a cross-thread
+        # "list changed size during iteration" race on self._commentary /
+        # self._runtimes() that would exist if the whole method were offloaded.
         self._sync_state_file_override()
-        payload = {
+        return {
             "last_run_at": self._last_run_at,
             "last_paper_reset_at": self._last_paper_reset_at,
             "last_error": self._last_error,
@@ -940,7 +944,23 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 for runtime in self._runtimes()
             },
         }
+
+    def _persist_state(self) -> None:
+        # Synchronous persist — retained for the few sync callers (e.g.
+        # set_kill_switch). _save_strategy_state writes a JSON file + DB row and
+        # blocks; acceptable on the rare operator paths.
+        payload = self._build_state_payload()
         updated_at = _save_strategy_state(payload)
+        if updated_at is not None:
+            self._state_synced_at = updated_at
+
+    async def _apersist_state(self) -> None:
+        # Async persist for hot async paths (run_once's per-scan finally, ~60s):
+        # build the payload on the loop, then offload only the blocking
+        # json.dumps + file write + DB INSERT to a worker thread so a slow disk
+        # / DB (observed spiking to ~2s) cannot freeze the event loop.
+        payload = self._build_state_payload()
+        updated_at = await asyncio.to_thread(_save_strategy_state, payload)
         if updated_at is not None:
             self._state_synced_at = updated_at
 
@@ -2551,7 +2571,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 raise
             finally:
                 self._running = False
-                self._persist_state()
+                await self._apersist_state()
 
     # ── Entry Scanning ───────────────────────────────────────────────────────
 
