@@ -1,5 +1,5 @@
-import CBEWorkspace from "@/components/v1-cbe/CBEWorkspace";
+import CbeDesk from "@/components/strategies/cbe/CbeDesk";
 
 export default function CBEPage() {
-  return <CBEWorkspace />;
+  return <CbeDesk />;
 }

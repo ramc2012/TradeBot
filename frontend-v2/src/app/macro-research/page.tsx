@@ -1,5 +1,5 @@
-import MacroResearchWorkspace from "@/components/v1-macro-research/MacroResearchWorkspace";
+import MacroDesk from "@/components/strategies/macro/MacroDesk";
 
 export default function MacroResearchPage() {
-  return <MacroResearchWorkspace />;
+  return <MacroDesk />;
 }
