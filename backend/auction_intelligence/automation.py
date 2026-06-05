@@ -285,15 +285,24 @@ async def run_market_hours_cycle(
     *,
     shadow_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    from time import monotonic
+
     requested = list(dict.fromkeys(symbols or auto_symbols()))
     results: list[dict[str, Any]] = []
     failures: dict[str, str] = {}
+    _sym_timings: dict[str, float] = {}
 
     for symbol in requested:
         try:
+            _s = monotonic()
             results.append(await capture_live_paper_cycle(symbol, shadow_options=shadow_options))
+            _sym_timings[symbol] = round(monotonic() - _s, 2)
         except Exception as exc:
             failures[symbol] = str(exc)
+    logger.info(
+        f"[AuctionProfile] per-symbol cycle(s): {_sym_timings} "
+        f"total={round(sum(_sym_timings.values()), 1)}"
+    )
 
     if not results and failures:
         joined = "; ".join(f"{symbol}: {detail}" for symbol, detail in failures.items())
