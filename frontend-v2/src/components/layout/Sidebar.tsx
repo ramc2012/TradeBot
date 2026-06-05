@@ -76,6 +76,7 @@ const NAV_GROUPS: { title: string; subtitle?: string; items: NavItem[] }[] = [
       { href: "/strategies/auction",     label: "Auction IQ",    icon: Layers3 },
       { href: "/strategies/fractal",     label: "Fractal MP",    icon: Fingerprint },
       { href: "/strategies/mp",          label: "MP Live",       icon: Brain },
+      { href: "/strategies/sniper",      label: "Sniper",        icon: Crosshair },
     ],
   },
   {
