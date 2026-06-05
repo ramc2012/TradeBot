@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
@@ -16,6 +16,10 @@ PRICE_STEP = 0.5
 CANDLE_MINS = 3
 PERIODS_PER_HOUR = 60 // CANDLE_MINS
 MAX_TICKS_PER_SYMBOL = 6000
+# The 2-day cutoff scan over the tick buffer is O(n); run it only once every
+# TICK_TRIM_INTERVAL ticks so the per-tick hot path (100-500/sec at peak) stays
+# O(1). deque(maxlen) handles the count cap in O(1) on every append.
+TICK_TRIM_INTERVAL = 500
 
 
 @dataclass
@@ -58,12 +62,13 @@ class MarketProfileBuilder:
         self._candles: Dict[str, List[TPOCandle]] = {}
         self._current_candle: Dict[str, Optional[TPOCandle]] = {}
         self._candle_start: Dict[str, Optional[datetime]] = {}
-        self._ticks: Dict[str, List[Tick]] = {}
+        self._ticks: Dict[str, "deque[Tick]"] = {}
+        self._ticks_since_trim: Dict[str, int] = {}
 
     def on_tick(self, tick: Tick):
         sym = tick.symbol
         ts = self._ensure_utc_timestamp(tick.timestamp)
-        self._ticks.setdefault(sym, []).append(
+        self._ticks.setdefault(sym, deque(maxlen=MAX_TICKS_PER_SYMBOL)).append(
             Tick(
                 symbol=sym,
                 ltp=tick.ltp,
@@ -298,12 +303,25 @@ class MarketProfileBuilder:
         return candles
 
     def _trim_ticks(self, sym: str):
-        ticks = self._ticks.get(sym, [])
-        if len(ticks) > MAX_TICKS_PER_SYMBOL:
-            self._ticks[sym] = ticks[-MAX_TICKS_PER_SYMBOL:]
+        # deque(maxlen) already evicts oldest ticks by count in O(1) on append, so
+        # there is no per-tick slice. The only remaining work is the 2-day cutoff,
+        # an O(n) scan — amortise it across TICK_TRIM_INTERVAL ticks instead of
+        # running it on every tick (was ~0.5-2ms/tick at MAX, the dominant hot-path
+        # CPU). Offloading to a thread would be worse: dispatch overhead exceeds the
+        # amortised work, so this is purely algorithmic.
+        n = self._ticks_since_trim.get(sym, 0) + 1
+        if n < TICK_TRIM_INTERVAL:
+            self._ticks_since_trim[sym] = n
+            return
+        self._ticks_since_trim[sym] = 0
+        ticks = self._ticks.get(sym)
+        if not ticks:
             return
         cutoff = datetime.now(timezone.utc) - timedelta(days=2)
-        self._ticks[sym] = [tick for tick in ticks if self._ensure_utc_timestamp(tick.timestamp) >= cutoff]
+        self._ticks[sym] = deque(
+            (tick for tick in ticks if self._ensure_utc_timestamp(tick.timestamp) >= cutoff),
+            maxlen=MAX_TICKS_PER_SYMBOL,
+        )
 
     def _trim_candles(self, sym: str):
         candles = self._candles.get(sym, [])
