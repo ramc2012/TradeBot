@@ -414,8 +414,37 @@ async def ws_positions_overview(websocket: WebSocket):
     )
 
 
+# Fields stripped from every watchlist row in the 2s overview socket.
+# They are large display-only objects (TPO letter maps, prior-session profile
+# with its own tpo_letters) that change at the agent's 30s scan cadence, not
+# tick-by-tick. The 8s commodity_watchlist socket carries the full rows so the
+# detail modal still has all the chart data.
+_OVERVIEW_WS_WATCHLIST_STRIP = frozenset({
+    "mp_tpo_letters",
+    "mp_tpo_counts",
+    "prior_session_profile",
+})
+
+
+def _slim_watchlist_rows(rows: list) -> list:
+    """Return watchlist rows with heavy display fields removed."""
+    if not rows:
+        return rows
+    return [
+        {k: v for k, v in row.items() if k not in _OVERVIEW_WS_WATCHLIST_STRIP}
+        for row in rows
+    ]
+
+
 async def ws_commodity_overview(websocket: WebSocket):
-    """Stream the commodity execution desk snapshot."""
+    """Stream the commodity execution desk snapshot.
+
+    Payload is kept under ~100 KB so it fits comfortably within the WebSocket
+    frame budget.  Heavy display-only fields (TPO letter maps, prior-session
+    profile — ~90 KB per symbol × 8 symbols = ~720 KB duplicated) are stripped
+    from the watchlist rows here and served by the 8s commodity_watchlist
+    socket instead. signal_audit (360 KB) is served by /api/audit/events.
+    """
 
     async def payload_factory():
         from api.routers.commodity import (
@@ -436,8 +465,25 @@ async def ws_commodity_overview(websocket: WebSocket):
             await commodity_positions(),
             side_field="action",
         )
+        status = await commodity_strategy_status()
+
+        # Slim the status dict before streaming it.
+        #
+        # 1. Strip heavy per-row fields from watchlist arrays — these are
+        #    served by the 8s watchlist socket and merged back on the client.
+        #    "watchlist" is an alias for "futures_watchlist"; only keep one key
+        #    to avoid shipping the same ~645 KB blob twice.
+        status["futures_watchlist"] = _slim_watchlist_rows(
+            status.get("futures_watchlist") or status.get("watchlist") or []
+        )
+        status.pop("watchlist", None)  # alias — deduplicate
+
+        # 2. signal_audit (360 KB, 600 entries) is already polled separately
+        #    via /api/audit/events. No need to push it on the 2s live channel.
+        status.pop("signal_audit", None)
+
         return {
-            "status": await commodity_strategy_status(),
+            "status": status,
             "kill_switch_state": await commodity_kill_switch_state(),
             "orders": await commodity_orders(limit=40),
             "positions": commodity_positions_live,
@@ -461,10 +507,18 @@ async def ws_commodity_overview(websocket: WebSocket):
 
 
 async def ws_commodity_watchlist(websocket: WebSocket):
-    """Stream the commodity watchlist setup snapshot."""
+    """Stream the commodity watchlist setup snapshot.
+
+    Runs at 8s (slower than the overview).  Carries the full watchlist rows
+    including the heavy TPO letter maps and prior-session profile objects that
+    are stripped from the 2s overview socket.  The frontend merges these into
+    the live signal/price rows received from the overview socket so the detail
+    modal can render the full TPO chart.
+    """
 
     async def payload_factory():
         from api.routers.commodity import (
+            commodity_strategy_status,
             commodity_watchlist_snapshot,
         )
 
@@ -472,7 +526,16 @@ async def ws_commodity_watchlist(websocket: WebSocket):
         # on its scan cadence. Do not make every websocket client force a live
         # option-chain refresh; that fans out into broker REST calls and trips
         # Fyers 429 limits, leaving rows stale for everyone.
-        return await commodity_watchlist_snapshot(live_refresh=False)
+        snapshot = await commodity_watchlist_snapshot(live_refresh=False)
+
+        # Attach the full watchlist rows (with TPO/prior-session chart data)
+        # that the overview socket strips. The client uses these for the detail
+        # modal only — they change at scan cadence, not tick-by-tick.
+        status = await commodity_strategy_status()
+        snapshot["futures_watchlist"] = (
+            status.get("futures_watchlist") or status.get("watchlist") or []
+        )
+        return snapshot
 
     await _stream_snapshot(
         websocket,
