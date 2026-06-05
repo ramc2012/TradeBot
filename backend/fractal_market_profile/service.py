@@ -540,7 +540,9 @@ class FractalMarketProfileService:
                 return jsonable_encoder(cached[1])
 
             rows, history_source, history_symbol = await self._load_live_rows(normalized)
-            sessions = _group_rows_by_session(rows, allow_partial_live_session=True, symbol_code=normalized)
+            sessions = await asyncio.to_thread(
+                _group_rows_by_session, rows, allow_partial_live_session=True, symbol_code=normalized
+            )
             if not sessions:
                 degraded_payload = await self._degraded_live_snapshot(
                     normalized,
@@ -1647,6 +1649,16 @@ class FractalMarketProfileService:
         quote_history = await self._recent_quote_history(app_symbol, snapshot_end=snapshot_end, tick_size=tick_size)
         if not quote_history:
             return self._build_bar_order_flow(current_rows)
+        return await asyncio.to_thread(
+            self._live_order_flow_compute, current_rows, quote_history, tick_size
+        )
+
+    def _live_order_flow_compute(
+        self,
+        current_rows: list[dict[str, Any]],
+        quote_history: list[dict[str, Any]],
+        tick_size: float,
+    ) -> dict[str, Any]:
         trades = self._recent_trade_prints_from_history(quote_history)
         quote = quote_history[-1] if quote_history else self._bar_quote(current_rows[-1], tick_size=tick_size)
         depth = self._depth_from_quote_history(quote_history or [quote], tick_size=tick_size)

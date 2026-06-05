@@ -53,6 +53,7 @@ persistence so the frontend continues to render:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -326,12 +327,15 @@ async def score_option_candidates(
     No option-side data is touched here (paper book is pure cash equity).
     """
     from db.database import AsyncSessionLocal
-    from sqlalchemy import text
 
     enriched: list[dict[str, Any]] = []
     if not candidates:
         return enriched
 
+    # PHASE 1 (async, on the event loop): fetch-all. Pull every symbol's
+    # daily-close series, preserving candidate order. No CPU-bound indicator
+    # math here — only the awaited DB reads stay on the loop.
+    loaded: list[tuple[dict[str, Any], list[float]]] = []
     async with AsyncSessionLocal() as session:
         for row in candidates:
             symbol = str(row.get("instrument") or "").upper()
@@ -342,39 +346,61 @@ async def score_option_candidates(
             # 220 days is enough for ~150 trading-day MACD warm-up + 30-week
             # weekly trend reference.
             daily_closes = await _fetch_daily_closes(session, symbol, lookback_days=220)
-            if len(daily_closes) < 35:
-                continue  # not enough history for MACD/RSI
+            loaded.append((row, daily_closes))
 
-            indicators = compute_daily_indicators(daily_closes)
-            weekly = compute_weekly_context(daily_closes)
-            macd_score, macd_meta = score_macd(indicators)
-            rsi_score, rsi_meta = score_rsi(indicators)
-            bias = _bias_from_signals(
-                {**row, "macd": indicators, "weekly": weekly},
-                trend_score=indicators.get("rsi_14") or 50.0,  # unused in new bias rule
-            )
+    # PHASE 2 (sync, offloaded): compute-all. Run the entire O(universe)
+    # indicator grind on a worker thread so it cannot block the event loop
+    # (mirrors the gann to_thread fix). The helper is pure — it only reads the
+    # passed-in data + read-only config and returns a fresh list.
+    return await asyncio.to_thread(_score_candidates_compute, loaded, config)
 
-            enriched.append(
-                {
-                    **row,
-                    "latest_close": daily_closes[-1],
-                    "macd_line": indicators.get("macd_line"),
-                    "macd_signal": indicators.get("macd_signal"),
-                    "macd_hist": indicators.get("macd_histogram"),
-                    "macd_bullish": indicators.get("macd_bullish"),
-                    "macd_score": round(macd_score, 2),
-                    "macd_meta": macd_meta,
-                    "rsi_14": indicators.get("rsi_14"),
-                    "rsi_score": round(rsi_score, 2),
-                    "rsi_meta": rsi_meta,
-                    "weekly_close_vs_ema20": weekly.get("close_vs_ema20"),
-                    "weekly_trend": weekly.get("trend"),
-                    "directional_bias": bias,
-                    # Last 30 EOD closes for the row's sparkline. Rounded
-                    # to 2dp to keep the JSON payload compact.
-                    "recent_closes_30d": [round(c, 2) for c in daily_closes[-30:]],
-                }
-            )
+
+def _score_candidates_compute(
+    loaded: list[tuple[dict[str, Any], list[float]]],
+    config: AlphaEngineConfig,
+) -> list[dict[str, Any]]:
+    """Pure CPU-bound compute half of ``score_option_candidates``.
+
+    Runs on a worker thread via ``asyncio.to_thread``. Must NOT touch the DB
+    session or any shared mutable state — it only reads ``loaded`` (per-symbol
+    daily closes already fetched in phase 1) and the read-only ``config``,
+    and returns a freshly-built list.
+    """
+    enriched: list[dict[str, Any]] = []
+    for row, daily_closes in loaded:
+        if len(daily_closes) < 35:
+            continue  # not enough history for MACD/RSI
+
+        indicators = compute_daily_indicators(daily_closes)
+        weekly = compute_weekly_context(daily_closes)
+        macd_score, macd_meta = score_macd(indicators)
+        rsi_score, rsi_meta = score_rsi(indicators)
+        bias = _bias_from_signals(
+            {**row, "macd": indicators, "weekly": weekly},
+            trend_score=indicators.get("rsi_14") or 50.0,  # unused in new bias rule
+        )
+
+        enriched.append(
+            {
+                **row,
+                "latest_close": daily_closes[-1],
+                "macd_line": indicators.get("macd_line"),
+                "macd_signal": indicators.get("macd_signal"),
+                "macd_hist": indicators.get("macd_histogram"),
+                "macd_bullish": indicators.get("macd_bullish"),
+                "macd_score": round(macd_score, 2),
+                "macd_meta": macd_meta,
+                "rsi_14": indicators.get("rsi_14"),
+                "rsi_score": round(rsi_score, 2),
+                "rsi_meta": rsi_meta,
+                "weekly_close_vs_ema20": weekly.get("close_vs_ema20"),
+                "weekly_trend": weekly.get("trend"),
+                "directional_bias": bias,
+                # Last 30 EOD closes for the row's sparkline. Rounded
+                # to 2dp to keep the JSON payload compact.
+                "recent_closes_30d": [round(c, 2) for c in daily_closes[-30:]],
+            }
+        )
     return enriched
 
 

@@ -1139,7 +1139,12 @@ class MarketIntelligenceRuntime:
         chain: Any,
         source: str,
     ) -> None:
-        analytics = option_chain_service._calculate_analytics(chain)
+        # CPU-bulkhead offload: option-chain analytics (PCR/OI sums, per-strike
+        # gamma-exposure loop, O(strikes^2) max-pain loop) is pure sync compute
+        # over the just-fetched `chain`. Run it on a worker thread so it does not
+        # block the event loop during the per-index refresh loop. Behaviour is
+        # identical — same pure function, same inputs/outputs.
+        analytics = await asyncio.to_thread(option_chain_service._calculate_analytics, chain)
         payload = {
             "symbol": app_symbol,
             "expiry": expiry_iso,
