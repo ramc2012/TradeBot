@@ -40,6 +40,8 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { usePaperDeskQueries } from "@/hooks/usePaperDeskQueries";
+import { PaperPerformance, GammaDensity } from "@/components/strategies/shared";
+import type { PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
 
 import UniverseWatchlist from "./UniverseWatchlist";
@@ -49,13 +51,6 @@ import PaperTradingTab from "./PaperTradingTab";
 import PolicyLearningTab from "./PolicyLearningTab";
 import OptionAnalyticsPanel from "./OptionAnalyticsPanel";
 
-// v1 fallback — mounts the full legacy workspace so its recharts
-// (candidate p_trading_edge bar, backtest equity line, monthly +
-// regime breakdowns, backtest trades table), dataset-coverage cards,
-// and Dash hand-off iframe are visible inside v2. Until each v1 piece
-// gets a native v2 panel, this tab guarantees zero feature loss.
-import V1DirectionalWorkspace from "@/components/v1-directional-options/DirectionalOptionsWorkspace";
-
 const DEFAULT_UNDERLYING = "NIFTY";
 const DEFAULT_TIMEFRAME = "5minute";
 const DEFAULT_LOOKBACK = 16;
@@ -63,12 +58,10 @@ const DEFAULT_LOOKBACK = 16;
 const TABS = [
   { key: "live",      label: "Live overview",      icon: Gauge },
   { key: "analytics", label: "Option analytics",   icon: Layers3 },
+  { key: "gamma",     label: "Gamma / GEX",         icon: Layers3 },
   { key: "paper",     label: "Paper trading",      icon: Banknote },
   { key: "policy",    label: "Policy & learning",  icon: Brain },
-  { key: "backtest",  label: "Backtest",           icon: TrendingUp },
-  // Full v1 view — bundles the recharts diagnostics, dataset coverage
-  // cards, and Dash hand-off that aren't ported to native v2 panels yet.
-  { key: "v1",        label: "Full v1 view",       icon: Layers3 },
+  { key: "performance", label: "Performance",      icon: TrendingUp },
 ];
 
 type ModuleSummary = {
@@ -257,30 +250,17 @@ export default function DirectionalDesk() {
         />
       ) : null}
 
+      {activeTab === "gamma" ? <GammaDensity symbol={underlying} /> : null}
+
       {activeTab === "paper" ? <PaperTradingTab symbol={underlying} paper={paper} /> : null}
 
       {activeTab === "policy" ? <PolicyLearningTab /> : null}
 
-      {activeTab === "backtest" ? (
-        <Section title="Backtest" icon={<TrendingUp size={16} />}>
-          <div className="rounded-xl border border-bg-border bg-bg-primary/15 p-4 text-sm text-text-secondary">
-            A native v2 backtest tab is on the porting roadmap. The "Full
-            v1 view" tab above contains the equity / monthly / regime
-            recharts and the trades table in the meantime.
-          </div>
-        </Section>
-      ) : null}
-
-      {activeTab === "v1" ? (
-        <div className="rounded-2xl border border-bg-border bg-bg-secondary/12 p-3">
-          <div className="mb-2 text-[11px] text-text-muted">
-            Embedded v1 workspace — backtest equity, monthly + regime
-            diagnostics, top-candidate recharts, dataset coverage cards,
-            and Dash hand-off. Everything still functional; will be
-            ported into native v2 panels over time.
-          </div>
-          <V1DirectionalWorkspace />
-        </div>
+      {activeTab === "performance" ? (
+        <PaperPerformance
+          summary={paper.summary.data as Record<string, number> | undefined}
+          positions={paper.positions.data as PositionsPayload | undefined}
+        />
       ) : null}
     </DeskShell>
   );

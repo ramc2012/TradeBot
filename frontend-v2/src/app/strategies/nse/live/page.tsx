@@ -1,14 +1,12 @@
-"use client";
-
 /**
- * NSE Strategy 1 desk — canonical merged page (2026-06-02).
+ * NSE Index desk — native v2 surface.
  *
- * The former dense "live view" and the classic NSE strategy workspace were
- * merged into a single tabbed NSE-S1 desk. /strategies/nse redirects here.
- * All rendering lives in the NseStrategyDesk component.
+ * Replaces the former v1 NseStrategyDesk embed with the native NseDesk
+ * (DeskShell + shared strategy primitives). /strategies/nse permanently
+ * redirects here, so both routes resolve to the same desk.
  */
-import NseStrategyDesk from "@/components/v1-strategy/NseStrategyDesk";
+import NseDesk from "@/components/strategies/nse/NseDesk";
 
 export default function NseStrategyLivePage() {
-  return <NseStrategyDesk />;
+  return <NseDesk />;
 }

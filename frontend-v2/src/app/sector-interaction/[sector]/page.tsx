@@ -1,5 +1,7 @@
-import SectorDetailPage from "@/components/v1-sector-interaction/SectorDetailPage";
+import { redirect } from "next/navigation";
 
-export default function Page({ params }: { params: { sector: string } }) {
-  return <SectorDetailPage sectorKey={params.sector} />;
+// The native Sector Interaction desk's Detail tab covers per-sector drill-down;
+// this legacy deep-link consolidates into it.
+export default function Page() {
+  redirect("/sector-interaction");
 }

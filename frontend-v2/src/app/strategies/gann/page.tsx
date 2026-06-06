@@ -1,5 +1,5 @@
-import GannTPDeltaWorkspace from "@/components/v1-gann-tp-delta/GannTPDeltaWorkspace";
+import GannDesk from "@/components/strategies/gann/GannDesk";
 
 export default function GannTPDeltaPage() {
-  return <GannTPDeltaWorkspace />;
+  return <GannDesk />;
 }

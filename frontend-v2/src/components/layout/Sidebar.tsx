@@ -1,17 +1,15 @@
 "use client";
 
 /**
- * v2 sidebar — reorganised around a verb-first mental model.
+ * v2 sidebar — consolidated, function-first, collapsible groups.
  *
- * v1 had three groups (Operate / Validate / System) with 18 items that
- * mixed execution, market data, strategy desks, research, and LLM
- * agents. v2 splits those into five groups by what the user is DOING:
- * trading, browsing a strategy desk, watching the market, doing research,
- * or operating the platform.
- *
- * Every desk (NSE / CBE / Directional / Gann / Commodity / Auction /
- * Fractal / MP) lives under /strategies/<name> so the URL prefix tells
- * the trader they're in "the same kind of surface" as they navigate.
+ * Reduces the left rail two ways:
+ *  1. Removes entries that are already TABS inside a hub page (Validation /
+ *     Backtester / Data-ingest live in /research; Service-health /
+ *     Lane-invariants live in /system) — the hub is the single menu entry.
+ *  2. Collapsible groups: only the group containing the current route is
+ *     expanded by default, so the visible menu is short. Manual toggles
+ *     persist. Width-collapse (icon rail) still works on top.
  */
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -24,110 +22,133 @@ import {
   Bot,
   BriefcaseBusiness,
   CandlestickChart,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Compass,
   Crosshair,
-  FlaskConical,
+  FileText,
   Fingerprint,
+  FlaskConical,
   Globe,
-  Heart,
+  Inbox,
   LayoutDashboard,
   Layers3,
   Network,
   Radar,
+  Server,
   Settings,
+  Sigma,
   Target,
   Waves,
   Workflow,
-  Brain,
-  FileText,
 } from "lucide-react";
 
 const SIDEBAR_STORAGE_KEY = "nomad-curie.sidebar.collapsed.v2";
+const GROUPS_STORAGE_KEY = "nomad-curie.sidebar.groups.v2";
 
-type NavItem = {
-  href: string;
-  label: string;
-  icon: typeof Target;
-  matchers?: string[];
-};
+type NavItem = { href: string; label: string; icon: typeof Target; matchers?: string[] };
+type NavGroup = { title: string; icon: typeof Target; items: NavItem[] };
 
-const NAV_GROUPS: { title: string; subtitle?: string; items: NavItem[] }[] = [
+const NAV_GROUPS: NavGroup[] = [
   {
     title: "Trade",
-    subtitle: "Active surfaces during market hours",
+    icon: Banknote,
     items: [
       { href: "/", label: "Overview", icon: LayoutDashboard },
       { href: "/trading", label: "Execution", icon: Activity },
       { href: "/positions", label: "Positions", icon: Banknote },
+      { href: "/proposals", label: "Proposals", icon: Inbox },
       { href: "/analytics", label: "Portfolio", icon: BriefcaseBusiness },
     ],
   },
   {
-    title: "Strategies",
-    subtitle: "One shell per strategy desk",
+    title: "Strategy desks",
+    icon: Target,
     items: [
-      { href: "/strategies/nse/live",    label: "NSE Index",     icon: Crosshair, matchers: ["/strategies/nse"] },
-      { href: "/strategies/cbe",         label: "CBE Scanner",   icon: Radar },
-      { href: "/strategies/directional", label: "Long Premium",  icon: Target },
-      { href: "/strategies/gann",        label: "Gann TP Delta", icon: Compass },
-      { href: "/strategies/commodity",   label: "Commodity",     icon: Waves },
-      { href: "/strategies/auction",     label: "Auction IQ",    icon: Layers3 },
-      { href: "/strategies/fractal",     label: "Fractal MP",    icon: Fingerprint },
-      { href: "/strategies/mp",          label: "MP Live",       icon: Brain },
+      { href: "/strategies/nse/live", label: "NSE Index", icon: Crosshair, matchers: ["/strategies/nse"] },
+      { href: "/strategies/directional", label: "Long Premium", icon: Target },
+      { href: "/strategies/auction", label: "Auction IQ", icon: Layers3 },
+      { href: "/strategies/fractal", label: "Fractal MP", icon: Fingerprint },
+      { href: "/strategies/gann", label: "Gann TP Delta", icon: Compass },
+      { href: "/strategies/mp", label: "MP Live", icon: Sigma },
+      { href: "/strategies/cbe", label: "CBE Scanner", icon: Radar },
+      { href: "/strategies/commodity", label: "Commodity", icon: Waves },
+      { href: "/strategies/sniper", label: "Sniper", icon: Crosshair },
     ],
   },
   {
-    title: "Market",
-    subtitle: "Raw market data",
+    title: "Markets",
+    icon: Globe,
     items: [
-      { href: "/market",             label: "Market",         icon: Globe },
-      { href: "/charts",             label: "Charts",         icon: CandlestickChart },
-      { href: "/orderflow",          label: "Orderflow",      icon: Workflow },
-      { href: "/sector-interaction", label: "Sector Network", icon: Network },
+      { href: "/market", label: "Option chain", icon: Globe },
+      { href: "/charts", label: "Charts", icon: CandlestickChart },
+      { href: "/orderflow", label: "Orderflow", icon: Workflow },
+      { href: "/sector-interaction", label: "Sector network", icon: Network },
+      { href: "/macro-research", label: "Macro", icon: BarChart3 },
     ],
   },
   {
     title: "Research",
-    subtitle: "Non-live — backtests, LLM",
+    icon: FlaskConical,
     items: [
-      { href: "/research",       label: "Research",   icon: FlaskConical, matchers: ["/research", "/analysis", "/backtester", "/data"] },
-      { href: "/analysis",       label: "Validation", icon: FlaskConical },
-      { href: "/backtester",     label: "Backtester", icon: FlaskConical },
-      { href: "/data",           label: "Data ingest",icon: FlaskConical },
-      { href: "/macro-research", label: "Macro",      icon: BarChart3 },
-      { href: "/agent",          label: "Agent",      icon: Bot },
+      { href: "/research", label: "Research lab", icon: FlaskConical, matchers: ["/research", "/analysis", "/backtester", "/data"] },
+      { href: "/agent", label: "AI agent", icon: Bot },
     ],
   },
   {
-    title: "System",
+    title: "Platform",
+    icon: Server,
     items: [
-      { href: "/reports",     label: "Reports",        icon: FileText },
-      { href: "/system",      label: "System hub",     icon: Heart, matchers: ["/system", "/health", "/lane-health"] },
-      { href: "/health",      label: "Service health", icon: Heart },
-      { href: "/lane-health", label: "Lane invariants",icon: Heart },
-      { href: "/settings",    label: "Settings",       icon: Settings },
+      { href: "/system", label: "System hub", icon: Server, matchers: ["/system", "/health", "/lane-health"] },
+      { href: "/reports", label: "Reports", icon: FileText },
+      { href: "/settings", label: "Settings", icon: Settings },
     ],
   },
 ];
 
+function matchesItem(item: NavItem, pathname: string): boolean {
+  const ms = item.matchers || [item.href];
+  return ms.some((m) => (m === "/" ? pathname === "/" : pathname === m || pathname.startsWith(`${m}/`)));
+}
+
 export default function Sidebar() {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
+  const [overrides, setOverrides] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     try {
       setCollapsed(window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === "1");
-    } catch {}
+      setOverrides(JSON.parse(window.localStorage.getItem(GROUPS_STORAGE_KEY) || "{}"));
+    } catch {
+      /* ignore */
+    }
   }, []);
 
+  const activeGroup = NAV_GROUPS.find((g) => g.items.some((it) => matchesItem(it, pathname)))?.title ?? NAV_GROUPS[0].title;
+  const isGroupOpen = (title: string) => (collapsed ? true : title in overrides ? overrides[title] : title === activeGroup);
+
   const toggleCollapsed = () => {
-    setCollapsed((current) => {
-      const next = !current;
+    setCollapsed((c) => {
+      const next = !c;
       try {
         window.localStorage.setItem(SIDEBAR_STORAGE_KEY, next ? "1" : "0");
-      } catch {}
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  };
+
+  const toggleGroup = (title: string) => {
+    setOverrides((prev) => {
+      const next = { ...prev, [title]: !isGroupOpen(title) };
+      try {
+        window.localStorage.setItem(GROUPS_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        /* ignore */
+      }
       return next;
     });
   };
@@ -136,14 +157,12 @@ export default function Sidebar() {
     <nav
       className={clsx(
         "relative z-20 h-full shrink-0 overflow-y-auto border-r border-bg-border bg-bg-secondary/70 px-2 py-2.5 backdrop-blur-sm transition-[width] duration-200",
-        collapsed ? "w-[58px]" : "w-[212px]",
+        collapsed ? "w-[58px]" : "w-[208px]",
       )}
     >
       <div className={clsx("mb-2 flex items-start gap-2", collapsed ? "flex-col items-center" : "justify-between")}>
         <div className={collapsed ? "text-center" : undefined}>
-          <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">
-            {collapsed ? "NC" : "Nomad Curie"}
-          </div>
+          <div className="text-[10px] uppercase tracking-[0.18em] text-text-muted">{collapsed ? "NC" : "Nomad Curie"}</div>
           {!collapsed ? (
             <div className="mt-0.5 flex items-center gap-1.5">
               <div className="text-xs font-semibold text-text-primary">Trader Workspace</div>
@@ -162,66 +181,64 @@ export default function Sidebar() {
         </button>
       </div>
 
-      <div className="space-y-3">
-        {NAV_GROUPS.map((group) => (
-          <div key={group.title}>
-            {collapsed ? (
-              <div className="mb-1 border-t border-bg-border/70" />
-            ) : (
-              <div className="px-2">
-                <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">
-                  {group.title}
+      <div className="space-y-1.5">
+        {NAV_GROUPS.map((group) => {
+          const open = isGroupOpen(group.title);
+          return (
+            <div key={group.title}>
+              {collapsed ? (
+                <div className="my-1 border-t border-bg-border/70" />
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => toggleGroup(group.title)}
+                  className="flex w-full items-center justify-between rounded-md px-2 py-1 text-left text-text-muted transition-colors hover:text-text-secondary"
+                >
+                  <span className="text-[10px] font-semibold uppercase tracking-[0.12em]">{group.title}</span>
+                  <ChevronDown size={12} className={clsx("transition-transform", open ? "" : "-rotate-90")} />
+                </button>
+              )}
+              {open ? (
+                <div className={clsx("space-y-0.5", collapsed ? "mt-0" : "mt-0.5")}>
+                  {group.items.map(({ href, label, icon: Icon, matchers }) => {
+                    const active = matchesItem({ href, label, icon: Icon, matchers }, pathname);
+                    return (
+                      <Link
+                        key={href}
+                        href={href}
+                        title={label}
+                        className={clsx(
+                          "group relative flex rounded-lg text-xs transition-colors",
+                          collapsed ? "justify-center px-0 py-1.5" : "items-center gap-2 px-2 py-1.5",
+                          active ? "bg-accent-blue/14 text-accent-blue" : "text-text-secondary hover:bg-bg-hover hover:text-text-primary",
+                        )}
+                      >
+                        <div
+                          className={clsx(
+                            "flex h-7 w-7 items-center justify-center rounded-md border transition-colors",
+                            active ? "border-accent-blue/35 bg-accent-blue/12" : "border-transparent bg-bg-primary/25 group-hover:border-bg-active",
+                          )}
+                        >
+                          <Icon size={15} />
+                        </div>
+                        {!collapsed ? (
+                          <>
+                            <span className="truncate">{label}</span>
+                            {active ? <span className="ml-auto h-1.5 w-1.5 rounded-full bg-accent-blue" /> : null}
+                          </>
+                        ) : (
+                          <span className="pointer-events-none absolute left-full top-1/2 z-20 ml-2 -translate-y-1/2 whitespace-nowrap rounded-lg border border-bg-border bg-bg-card px-2 py-1 text-[11px] text-text-primary opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
+                            {label}
+                          </span>
+                        )}
+                      </Link>
+                    );
+                  })}
                 </div>
-                {group.subtitle ? (
-                  <div className="text-[10px] text-text-muted/70">{group.subtitle}</div>
-                ) : null}
-              </div>
-            )}
-            <div className={clsx("space-y-0.5", collapsed ? "mt-0" : "mt-1")}>
-              {group.items.map(({ href, label, icon: Icon, matchers }) => {
-                const activeMatchers = matchers || [href];
-                const active = activeMatchers.some((matcher) =>
-                  matcher === "/" ? pathname === "/" : pathname === matcher || pathname.startsWith(`${matcher}/`),
-                );
-                return (
-                  <Link
-                    key={href}
-                    href={href}
-                    title={label}
-                    className={clsx(
-                      "group relative flex rounded-lg text-xs transition-colors",
-                      collapsed ? "justify-center px-0 py-1.5" : "items-center gap-2 px-2 py-1.5",
-                      active
-                        ? "bg-accent-blue/14 text-accent-blue"
-                        : "text-text-secondary hover:bg-bg-hover hover:text-text-primary",
-                    )}
-                  >
-                    <div
-                      className={clsx(
-                        "flex h-7 w-7 items-center justify-center rounded-md border transition-colors",
-                        active
-                          ? "border-accent-blue/35 bg-accent-blue/12"
-                          : "border-transparent bg-bg-primary/25 group-hover:border-bg-active",
-                      )}
-                    >
-                      <Icon size={15} />
-                    </div>
-                    {!collapsed ? (
-                      <>
-                        <span className="truncate">{label}</span>
-                        {active ? <span className="ml-auto h-1.5 w-1.5 rounded-full bg-accent-blue" /> : null}
-                      </>
-                    ) : (
-                      <span className="pointer-events-none absolute left-full top-1/2 z-20 ml-2 -translate-y-1/2 whitespace-nowrap rounded-lg border border-bg-border bg-bg-card px-2 py-1 text-[11px] text-text-primary opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
-                        {label}
-                      </span>
-                    )}
-                  </Link>
-                );
-              })}
+              ) : null}
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </nav>
   );

@@ -1,5 +1,5 @@
-import SectorInteractionWorkspace from "@/components/v1-sector-interaction/SectorInteractionWorkspace";
+import SectorDesk from "@/components/strategies/sector/SectorDesk";
 
 export default function SectorInteractionPage() {
-  return <SectorInteractionWorkspace />;
+  return <SectorDesk />;
 }

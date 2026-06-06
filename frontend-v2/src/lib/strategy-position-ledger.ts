@@ -1,4 +1,7 @@
-import type { StrategyAgentStatus } from "@/components/v1-trading/StrategyAgentMonitor";
+// Loose shape for the NSE strategy-agent status payload (consumed opaquely here,
+// only `.strategies[]` is iterated). Kept local so v1 can be fully retired.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type StrategyAgentStatus = { strategies?: any[]; [k: string]: any };
 import {
   getAuctionIntelligencePaperPositions,
   getCommodityStrategyStatus,

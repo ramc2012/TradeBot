@@ -4,15 +4,75 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  --bg-primary: #080b18;
-  --bg-secondary: #0d1117;
-  --bg-card: #0f1724;
-  --border: #1e2d45;
-  --accent-green: #00d4a3;
-  --accent-red: #ff4757;
-  --accent-amber: #ffa502;
+/*
+ * Theme tokens are space-separated RGB CHANNELS so Tailwind can apply alpha
+ * via `rgb(var(--x) / <alpha-value>)` (preserves bg-bg-secondary/28 etc.) and
+ * so themes swap by re-declaring the channels on <html data-theme>.
+ */
+:root,
+html[data-theme="dark"] {
+  --bg-primary: 8 11 24;
+  --bg-secondary: 13 17 23;
+  --bg-tertiary: 19 25 41;
+  --bg-card: 15 23 36;
+  --bg-hover: 26 37 64;
+  --bg-border: 30 45 69;
+  --bg-active: 36 52 84;
+  --accent-green: 0 212 163;
+  --accent-red: 255 71 87;
+  --accent-amber: 255 165 2;
+  --accent-blue: 59 130 246;
+  --accent-purple: 139 92 246;
+  --accent-cyan: 6 182 212;
+  --text-primary: 226 232 240;
+  --text-secondary: 148 163 184;
+  --text-muted: 74 85 104;
 }
+
+/* Midnight — deeper OLED-friendly dark. */
+html[data-theme="midnight"] {
+  --bg-primary: 2 4 10;
+  --bg-secondary: 7 10 18;
+  --bg-tertiary: 14 19 33;
+  --bg-card: 10 15 26;
+  --bg-hover: 20 29 52;
+  --bg-border: 24 36 58;
+  --bg-active: 32 47 78;
+  --accent-green: 16 224 178;
+  --accent-red: 255 86 100;
+  --accent-amber: 255 176 32;
+  --accent-blue: 79 140 255;
+  --accent-purple: 155 110 255;
+  --accent-cyan: 34 200 230;
+  --text-primary: 230 237 243;
+  --text-secondary: 150 166 186;
+  --text-muted: 90 104 128;
+}
+
+/* Light — institutional daylight. */
+html[data-theme="light"] {
+  --bg-primary: 247 249 252;
+  --bg-secondary: 255 255 255;
+  --bg-tertiary: 237 242 248;
+  --bg-card: 255 255 255;
+  --bg-hover: 226 232 240;
+  --bg-border: 203 213 225;
+  --bg-active: 148 163 184;
+  --accent-green: 0 168 132;
+  --accent-red: 225 45 60;
+  --accent-amber: 200 124 0;
+  --accent-blue: 37 99 235;
+  --accent-purple: 124 58 237;
+  --accent-cyan: 8 145 178;
+  --text-primary: 15 23 42;
+  --text-secondary: 51 65 85;
+  --text-muted: 100 116 139;
+}
+
+/* Density — scales rem-based spacing/text globally for information density. */
+html { font-size: 16px; }
+html[data-density="compact"] { font-size: 14px; }
+html[data-density="ultra"] { font-size: 13px; }
 
 * {
   box-sizing: border-box;
@@ -20,28 +80,28 @@
 
 html,
 body {
-  background-color: var(--bg-primary);
-  color: #e2e8f0;
+  background-color: rgb(var(--bg-primary));
+  color: rgb(var(--text-primary));
   font-family: "Inter", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
 ::-webkit-scrollbar { width: 4px; height: 4px; }
-::-webkit-scrollbar-track { background: var(--bg-secondary); }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-::-webkit-scrollbar-thumb:hover { background: #2d3f5f; }
+::-webkit-scrollbar-track { background: rgb(var(--bg-secondary)); }
+::-webkit-scrollbar-thumb { background: rgb(var(--bg-border)); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgb(var(--bg-active)); }
 
 .font-mono { font-family: "JetBrains Mono", monospace; }
 
-.pnl-positive { color: var(--accent-green); }
-.pnl-negative { color: var(--accent-red); }
+.pnl-positive { color: rgb(var(--accent-green)); }
+.pnl-negative { color: rgb(var(--accent-red)); }
 
 .card {
   @apply bg-bg-card border border-bg-border rounded-lg;
 }
 
 .live-glow {
-  box-shadow: 0 0 20px rgba(255, 165, 2, 0.15);
+  box-shadow: 0 0 20px rgb(var(--accent-amber) / 0.15);
 }
 
 .terminal-input {
@@ -52,7 +112,7 @@ body {
 
 /* v2-specific: subtle badge to make it obvious which app is running */
 .v2-badge {
-  background: linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(59, 130, 246, 0.2));
-  border: 1px solid rgba(139, 92, 246, 0.35);
-  color: #c4b5fd;
+  background: linear-gradient(135deg, rgb(var(--accent-purple) / 0.2), rgb(var(--accent-blue) / 0.2));
+  border: 1px solid rgb(var(--accent-purple) / 0.35);
+  color: rgb(var(--accent-purple));
 }

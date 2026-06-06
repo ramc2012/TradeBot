@@ -30,18 +30,21 @@ class PositionalAgent(StrategyAgent):
             fraction=float(self.config.get("value_tolerance_fraction", 0.18)),
             minimum=float(self.config.get("value_tolerance_min_points", 12.0)),
             maximum=float(self.config.get("value_tolerance_max_points", 45.0)),
+            price=float(current.close_price),
         )
         gap_tolerance = self._bounded_tolerance(
             reference_range=max(float(prior.vah) - float(prior.val), value_width),
             fraction=float(self.config.get("gap_tolerance_fraction", 0.12)),
             minimum=float(self.config.get("gap_tolerance_min_points", 10.0)),
             maximum=float(self.config.get("gap_tolerance_max_points", 40.0)),
+            price=float(current.close_price),
         )
         vpoc_tolerance = self._bounded_tolerance(
             reference_range=max(value_width, float(current.initial_balance_range)),
             fraction=float(self.config.get("vpoc_tolerance_fraction", 0.12)),
             minimum=float(self.config.get("vpoc_tolerance_min_points", 8.0)),
             maximum=float(self.config.get("vpoc_tolerance_max_points", 30.0)),
+            price=float(current.close_price),
         )
         balance_labels = {"balance", "developing_balance", "rotational_day", "neutral_extreme"}
         enable_gap_continuation = bool(self.config.get("enable_gap_continuation", True))

@@ -78,10 +78,22 @@ export function DeskShell({
             ) : null}
             <div className="mt-2 flex flex-wrap items-center gap-3 text-[11.5px] text-text-muted">
               <span className="inline-flex items-center gap-1.5">
-                <Activity size={12} />
+                <Activity size={12} className={isFetching ? "animate-pulse text-accent-blue" : undefined} />
                 {isFetching ? "Refreshing" : "Idle"}
               </span>
-              {asOf ? <span>As of {formatIST(asOf)}</span> : null}
+              {asOf ? (
+                (() => {
+                  const ageSec = Math.max(0, (Date.now() - new Date(asOf).getTime()) / 1000);
+                  const stale = ageSec > 90;
+                  return (
+                    <span className={clsx("inline-flex items-center gap-1.5", stale && "text-accent-amber")}>
+                      {stale ? <span className="h-1.5 w-1.5 rounded-full bg-accent-amber" /> : null}
+                      As of {formatIST(asOf)}
+                      {stale ? ` · ${Math.round(ageSec)}s stale` : ""}
+                    </span>
+                  );
+                })()
+              ) : null}
             </div>
           </div>
           <div className="flex items-center gap-2">
