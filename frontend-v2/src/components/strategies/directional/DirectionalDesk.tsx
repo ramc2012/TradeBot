@@ -51,13 +51,6 @@ import PaperTradingTab from "./PaperTradingTab";
 import PolicyLearningTab from "./PolicyLearningTab";
 import OptionAnalyticsPanel from "./OptionAnalyticsPanel";
 
-// v1 fallback — mounts the full legacy workspace so its recharts
-// (candidate p_trading_edge bar, backtest equity line, monthly +
-// regime breakdowns, backtest trades table), dataset-coverage cards,
-// and Dash hand-off iframe are visible inside v2. Until each v1 piece
-// gets a native v2 panel, this tab guarantees zero feature loss.
-import V1DirectionalWorkspace from "@/components/v1-directional-options/DirectionalOptionsWorkspace";
-
 const DEFAULT_UNDERLYING = "NIFTY";
 const DEFAULT_TIMEFRAME = "5minute";
 const DEFAULT_LOOKBACK = 16;
@@ -69,9 +62,6 @@ const TABS = [
   { key: "paper",     label: "Paper trading",      icon: Banknote },
   { key: "policy",    label: "Policy & learning",  icon: Brain },
   { key: "performance", label: "Performance",      icon: TrendingUp },
-  // Full v1 view — bundles the recharts diagnostics, dataset coverage
-  // cards, and Dash hand-off that aren't ported to native v2 panels yet.
-  { key: "v1",        label: "Full v1 view",       icon: Layers3 },
 ];
 
 type ModuleSummary = {
@@ -271,18 +261,6 @@ export default function DirectionalDesk() {
           summary={paper.summary.data as Record<string, number> | undefined}
           positions={paper.positions.data as PositionsPayload | undefined}
         />
-      ) : null}
-
-      {activeTab === "v1" ? (
-        <div className="rounded-2xl border border-bg-border bg-bg-secondary/12 p-3">
-          <div className="mb-2 text-[11px] text-text-muted">
-            Embedded v1 workspace — backtest equity, monthly + regime
-            diagnostics, top-candidate recharts, dataset coverage cards,
-            and Dash hand-off. Everything still functional; will be
-            ported into native v2 panels over time.
-          </div>
-          <V1DirectionalWorkspace />
-        </div>
       ) : null}
     </DeskShell>
   );
