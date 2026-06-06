@@ -176,7 +176,8 @@ def _simulate_day(underlying, d, ce_bars, pe_bars, by_kind):
         seq.sort(key=lambda x: x[0])
         # closed 30m closes (last 3m close of each completed bucket)
         closed, last_close_in_bucket, cur_b = [], None, None
-        per_bar = []  # (t, low, close, forming_macd, prev_closed_macd)
+        prev_forming = None  # forming MACD of the PREVIOUS 3m sub-bar (for edge detection)
+        per_bar = []  # (t, low, close, forming_macd, prev_closed_macd, prev_forming_macd)
         for (t, o, h, l, c) in seq:
             b = _bucket(t, 30)
             if cur_b is None:
@@ -193,11 +194,12 @@ def _simulate_day(underlying, d, ce_bars, pe_bars, by_kind):
                 if ef is not None and es is not None:
                     prev_macd = ef - es
                     forming = (A_FAST * float(c) + (1 - A_FAST) * ef) - (A_SLOW * float(c) + (1 - A_SLOW) * es)
-            per_bar.append((t, float(l) if l is not None else float(c), float(c), forming, prev_macd))
+            per_bar.append((t, float(l) if l is not None else float(c), float(c), forming, prev_macd, prev_forming))
+            prev_forming = forming
         return per_bar
 
-    ce = {t: (lo, cl, fm, pm) for (t, lo, cl, fm, pm) in prep(ce_bars)}
-    pe = {t: (lo, cl, fm, pm) for (t, lo, cl, fm, pm) in prep(pe_bars)}
+    ce = {t: (lo, cl, fm, pm, pf) for (t, lo, cl, fm, pm, pf) in prep(ce_bars)}
+    pe = {t: (lo, cl, fm, pm, pf) for (t, lo, cl, fm, pm, pf) in prep(pe_bars)}
     # 15m re-entry context per side (signal-cross set on 15m + 30m macd>0 gate)
     ce15_cross, ce15_macd = _macd15_for(ce_bars)
     pe15_cross, pe15_macd = _macd15_for(pe_bars)
@@ -206,20 +208,32 @@ def _simulate_day(underlying, d, ce_bars, pe_bars, by_kind):
     ts_all = sorted(t for t in set(ce) | set(pe) if t.astimezone(IST).date() == d)
     rets = []
     pos = None  # dict(side, entry, ot)
+    reentry_used = set()  # (side, 15m-bucket) already used for a re-entry → no churn
 
+    # A zero-cross fires ONCE per 30m bucket per side: the forming 30m MACD transitions
+    # up through zero (prev_forming <= 0 < curr_forming) WHILE the last CLOSED 30m MACD
+    # is genuinely negative (prev_closed < 0). The per-bucket 'fired' guard stops the
+    # noisy forming line re-triggering after an exit within the same window — that churn
+    # produced unrealistic >100-trade days. (v = (low, close, forming, prev_closed, prev_forming))
     def cross_up(side_map, t):
         v = side_map.get(t)
-        return v is not None and v[2] is not None and v[3] is not None and v[3] < 0 < v[2]
+        return (v is not None and v[2] is not None and v[3] is not None and v[4] is not None
+                and v[3] < 0 and v[4] <= 0 < v[2])
 
     def cross_down(side_map, t):
         v = side_map.get(t)
-        return v is not None and v[2] is not None and v[3] is not None and v[3] > 0 > v[2]
+        return (v is not None and v[2] is not None and v[3] is not None and v[4] is not None
+                and v[3] > 0 and v[4] >= 0 > v[2])
+
+    fired = set()  # (side, 30m-bucket) already used for a primary/flip entry
 
     for t in ts_all:
+        bkt = _bucket(t, 30)
         # manage open position first
         if pos is not None:
             sm = ce if pos["ot"] == "CE" else pe
             opp = pe if pos["ot"] == "CE" else ce
+            opp_ot = "PE" if pos["ot"] == "CE" else "CE"
             v = sm.get(t)
             if v is not None:
                 lo, cl = v[0], v[1]
@@ -227,12 +241,13 @@ def _simulate_day(underlying, d, ce_bars, pe_bars, by_kind):
                 if lo <= pos["entry"] * (1 - HARD_STOP):
                     rets.append(-HARD_STOP * 100.0); by_kind[pos["kind"]].append(-HARD_STOP * 100.0)
                     pos = None
-                # 2) flip on opposite cross-up
-                elif cross_up(opp, t):
+                # 2) flip on opposite fresh cross-up (once per bucket)
+                elif cross_up(opp, t) and (opp_ot, bkt) not in fired:
+                    fired.add((opp_ot, bkt))
                     r = (cl - pos["entry"]) / pos["entry"] * 100.0
                     rets.append(r); by_kind[pos["kind"]].append(r)
                     ov = opp.get(t)
-                    pos = {"ot": ("PE" if pos["ot"] == "CE" else "CE"), "entry": ov[1], "kind": "primary_pe" if pos["ot"] == "CE" else "primary_ce"}
+                    pos = {"ot": opp_ot, "entry": ov[1], "kind": f"primary_{opp_ot.lower()}"}
                     continue
                 # 3) same-side reversal (macd down through zero)
                 elif cross_down(sm, t):
@@ -241,10 +256,10 @@ def _simulate_day(underlying, d, ce_bars, pe_bars, by_kind):
                     pos = None
         # entries when flat
         if pos is None:
-            if cross_up(ce, t):
-                pos = {"ot": "CE", "entry": ce[t][1], "kind": "primary_ce"}
-            elif cross_up(pe, t):
-                pos = {"ot": "PE", "entry": pe[t][1], "kind": "primary_pe"}
+            if cross_up(ce, t) and ("CE", bkt) not in fired:
+                fired.add(("CE", bkt)); pos = {"ot": "CE", "entry": ce[t][1], "kind": "primary_ce"}
+            elif cross_up(pe, t) and ("PE", bkt) not in fired:
+                fired.add(("PE", bkt)); pos = {"ot": "PE", "entry": pe[t][1], "kind": "primary_pe"}
             else:
                 # 15m re-entry: 30m macd>0 AND 15m macd/signal cross-up at this 15m bucket
                 for ot, sm, cross15, m15 in (("CE", ce, ce15_cross, ce15_macd), ("PE", pe, pe15_cross, pe15_macd)):
@@ -252,7 +267,8 @@ def _simulate_day(underlying, d, ce_bars, pe_bars, by_kind):
                     if v is None or v[2] is None or v[2] <= 0:
                         continue
                     bts = _bucket(t, 15)
-                    if cross15.get(bts):
+                    if cross15.get(bts) and (ot, bts) not in reentry_used:
+                        reentry_used.add((ot, bts))
                         pos = {"ot": ot, "entry": v[1], "kind": "reentry"}
                         break
     # square off at day end
