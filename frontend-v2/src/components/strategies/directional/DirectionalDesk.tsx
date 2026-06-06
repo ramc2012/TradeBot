@@ -40,7 +40,7 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { usePaperDeskQueries } from "@/hooks/usePaperDeskQueries";
-import { PaperPerformance } from "@/components/strategies/shared";
+import { PaperPerformance, GammaDensity } from "@/components/strategies/shared";
 import type { PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
 
@@ -65,6 +65,7 @@ const DEFAULT_LOOKBACK = 16;
 const TABS = [
   { key: "live",      label: "Live overview",      icon: Gauge },
   { key: "analytics", label: "Option analytics",   icon: Layers3 },
+  { key: "gamma",     label: "Gamma / GEX",         icon: Layers3 },
   { key: "paper",     label: "Paper trading",      icon: Banknote },
   { key: "policy",    label: "Policy & learning",  icon: Brain },
   { key: "performance", label: "Performance",      icon: TrendingUp },
@@ -258,6 +259,8 @@ export default function DirectionalDesk() {
           expiry={snapshot?.selected_contract?.expiry ?? null}
         />
       ) : null}
+
+      {activeTab === "gamma" ? <GammaDensity symbol={underlying} /> : null}
 
       {activeTab === "paper" ? <PaperTradingTab symbol={underlying} paper={paper} /> : null}
 

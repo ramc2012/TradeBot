@@ -40,9 +40,12 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import {
+  CandleChart,
+  CHART,
   MarketProfileChart,
   OrderFlowPanel,
   PaperPerformance,
+  type ChartPriceLine,
   type OrderFlow,
 } from "@/components/strategies/shared";
 import type { PositionsPayload, PaperSummary, PaperPosition } from "@/lib/strategy-stats";
@@ -227,6 +230,21 @@ export default function FractalDesk() {
             <MetricTile label="VAL" value={formatNumber(daily?.val, 1)} detail={`IB lo ${formatNumber(daily?.initial_balance_low, 0)}`} />
             <MetricTile label="CVD" value={formatSignedNumber(cvd, 0)} detail={`delta ${formatSignedNumber(of?.delta, 0)}`} color={tone(cvd)} />
           </section>
+
+          <Section title="Price action" icon={<Activity size={16} />} description="3-min candles with market-profile levels (POC / value area) overlaid">
+            <CandleChart
+              bars={
+                (snap as unknown as { intraday_bars_3m?: { time: string; open: number; high: number; low: number; close: number; volume?: number }[] })
+                  ?.intraday_bars_3m || []
+              }
+              height={300}
+              priceLines={[
+                daily?.poc != null ? { price: daily.poc, color: CHART.amber, title: "POC" } : null,
+                daily?.vah != null ? { price: daily.vah, color: CHART.blue, title: "VAH", dashed: true } : null,
+                daily?.val != null ? { price: daily.val, color: CHART.blue, title: "VAL", dashed: true } : null,
+              ].filter(Boolean) as ChartPriceLine[]}
+            />
+          </Section>
 
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
             <Section
