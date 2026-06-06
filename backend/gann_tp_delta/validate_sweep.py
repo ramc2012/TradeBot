@@ -36,6 +36,13 @@ DSN = os.environ.get("SWEEP_DSN", "postgresql://nomadcurie:nomadcurie@db:5432/no
 LOOKBACK_DAYS = int(os.environ.get("SWEEP_DAYS", "420"))
 FLOORS = [float(x) for x in os.environ.get("SWEEP_FLOORS", "4.0,4.5,5.0,5.5,6.0,6.5").split(",")]
 OUT_DIR = Path(os.environ.get("SWEEP_OUT", "runtime/validation"))
+# All sources by default — the guard cleans contamination, and the clean
+# `timescaledb_spot_1minute` source is too shallow (~30d) for walk-forward.
+SOURCE = os.environ.get("SWEEP_SOURCE") or None
+# Windows sized for the available 1m depth (~110d); raise once backfill lands.
+IS_DAYS = int(os.environ.get("SWEEP_IS_DAYS", "60"))
+OOS_DAYS = int(os.environ.get("SWEEP_OOS_DAYS", "20"))
+STRIDE_DAYS = int(os.environ.get("SWEEP_STRIDE_DAYS", "15"))
 
 GRID = {"entry_conviction": FLOORS, "anchor_mode": ["auto_pivot"], "h_mode": ["median_tpd"]}
 
@@ -52,7 +59,7 @@ async def validate_underlying(conn, underlying: str) -> dict | None:
     cfg = clone_default_config()
     cfg.setdefault("backtest", {})["max_events"] = 100_000  # don't truncate the trade list
     raw = await load_guarded_candles(conn, underlying, interval="1minute", days=LOOKBACK_DAYS,
-                                     source="timescaledb_spot_1minute")
+                                     source=SOURCE)
     if raw is None or len(raw) < 5000:
         print(f"{underlying:<11} SKIP — only {0 if raw is None else len(raw)} guarded 1m bars", flush=True)
         return None
@@ -69,7 +76,7 @@ async def validate_underlying(conn, underlying: str) -> dict | None:
     report = validate_strategy(
         frame, run_fn, GRID, _events_returns,
         extract_exit_times=_events_times, daily_closes=daily_closes,
-        time_col="time", is_days=210, oos_days=60, stride_days=30,
+        time_col="time", is_days=IS_DAYS, oos_days=OOS_DAYS, stride_days=STRIDE_DAYS,
         select="total", target_sr_annual=1.0,
     )
     report["underlying"] = underlying
