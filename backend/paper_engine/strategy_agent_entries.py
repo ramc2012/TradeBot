@@ -43,6 +43,22 @@ if TYPE_CHECKING:
     from paper_engine.strategy_agent import detect_macd_zero_cross
 
 
+def _macd_signal_cross_up(snap15: dict[str, Any]) -> bool:
+    """True when the 15m MACD line just crossed UP over its SIGNAL line.
+
+    (prev_macd <= prev_signal AND curr_macd > curr_signal). This is the MACD/
+    signal-line crossover used by the re-entry path — NOT a zero-line cross.
+    """
+    mp = snap15.get("previous_macd")
+    sp = snap15.get("previous_signal")
+    mc = snap15.get("current_macd")
+    sc = snap15.get("current_signal")
+    return (
+        mp is not None and sp is not None and mc is not None and sc is not None
+        and mp <= sp and mc > sc
+    )
+
+
 def _data_quality_observation_block_reason(
     *,
     symbol: str,
@@ -264,21 +280,27 @@ class StrategyEntryMixin:
             buckets[str(r.get("instrument_key") or "").strip()][bucket] = float(ltp)
 
         out: dict[str, dict[str, Any]] = {}
-        min_bars = slow + 2  # need a valid macd line for the last two bars
+        # Need the SIGNAL line valid for the last two bars (signal = EMA_signal of
+        # MACD), which warms up slower than the MACD line — slow-1 + signal-1.
+        min_bars = slow + signal + 1
         for instrument_key, bmap in buckets.items():
             if not instrument_key or len(bmap) < min_bars:
                 continue
             ordered = sorted(bmap.items())
             closes = [v for _, v in ordered]
-            macd_line, _signal_line, _hist = compute_macd(closes, fast, slow, signal)
+            macd_line, signal_line, _hist = compute_macd(closes, fast, slow, signal)
             current = macd_line[-1]
             previous = macd_line[-2]
-            if current is None or previous is None:
+            cur_sig = signal_line[-1]
+            prev_sig = signal_line[-2]
+            if current is None or previous is None or cur_sig is None or prev_sig is None:
                 continue
             out[instrument_key] = {
                 "instrument_key": instrument_key,
                 "current_macd": float(current),
                 "previous_macd": float(previous),
+                "current_signal": float(cur_sig),
+                "previous_signal": float(prev_sig),
                 "latest_bar_time": ordered[-1][0].isoformat(),
                 "latest_ltp": closes[-1],
                 "bars_15m": len(closes),
@@ -607,39 +629,28 @@ class StrategyEntryMixin:
                 and pe_snapshot["previous_macd"] < 0 < pe_macd
             )
 
-            # Re-entry path — 30-min MACD already in trend AND fresh
-            # 15-min cross today. Catches intraday pullback re-entries
-            # within an established higher-TF trend (especially after a
-            # prior position closed via stop/target).
+            # Re-entry path — ride an ESTABLISHED higher-timeframe move. When the
+            # contract's 30-min premium MACD is already ABOVE zero (the bigger-TF
+            # trend is up on that premium — CE on a bullish underlying, PE on a
+            # bearish one), take an entry whenever the 15-min MACD crosses UP over
+            # its SIGNAL line (a 15m MACD/signal crossover — NOT a zero-cross). This
+            # catches intraday pullback re-entries within the established 30m trend.
+            # Same rule for CE and PE (both on their own premium).
             ce_15m_curr = ce_snapshot_15m.get("current_macd")
             ce_15m_prev = ce_snapshot_15m.get("previous_macd")
             pe_15m_curr = pe_snapshot_15m.get("current_macd")
             pe_15m_prev = pe_snapshot_15m.get("previous_macd")
-            # Same option-premium semantics as the 30m path: a fresh 15m buy on a
-            # contract is its premium MACD crossing UP through zero (prev < 0 < curr)
-            # for BOTH CE and PE. (PE was previously a down-cross — inverted.)
-            ce_15m_fresh = (
-                ce_15m_curr is not None and ce_15m_prev is not None
-                and ce_15m_prev < 0 < ce_15m_curr
-            )
-            pe_15m_fresh = (
-                pe_15m_curr is not None and pe_15m_prev is not None
-                and pe_15m_prev < 0 < pe_15m_curr
-            )
-            # Re-entry: the contract's 30m premium MACD is already in an established
-            # up-trend (> 0) AND a fresh 15m up-cross fires — catches intraday
-            # pullback re-entries within the higher-TF trend. For PE this is also
-            # `pe_macd > 0` (premium above zero = established bearish-underlying
-            # trend); the previous `pe_macd < 0` was the inverted side.
+            ce_15m_sig_cross = _macd_signal_cross_up(ce_snapshot_15m)
+            pe_15m_sig_cross = _macd_signal_cross_up(pe_snapshot_15m)
             ce_reentry = (
                 not ce_cross_30m
                 and ce_macd is not None and ce_macd > 0
-                and ce_15m_fresh
+                and ce_15m_sig_cross
             )
             pe_reentry = (
                 not pe_cross_30m
                 and pe_macd is not None and pe_macd > 0
-                and pe_15m_fresh
+                and pe_15m_sig_cross
             )
 
             ce_cross = ce_cross_30m or ce_reentry
