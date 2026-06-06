@@ -26,7 +26,7 @@ export default function TopBar() {
           v2 preview
         </span>
         <span className="hidden text-text-muted sm:inline">
-          API · <span className="font-mono">{API_URL}</span>
+          API · <span className="font-mono">{API_URL || "same-origin"}</span>
         </span>
       </div>
       <div className="flex items-center gap-2.5">

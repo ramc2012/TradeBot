@@ -4,14 +4,6 @@ function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
 }
 
-function pushUnique(values: string[], candidate: string | null | undefined): void {
-  const normalized = trimTrailingSlash(String(candidate || "").trim());
-  if (!normalized || values.includes(normalized)) {
-    return;
-  }
-  values.push(normalized);
-}
-
 function deriveCloudRunBackendHost(hostname: string): string | null {
   const normalized = String(hostname || "").trim();
   if (!normalized || !normalized.includes("-ui-")) {
@@ -30,36 +22,27 @@ function isLocalHostname(hostname: string): boolean {
 
 export function resolveApiBaseUrlCandidates(): string[] {
   const configured = (process.env.NEXT_PUBLIC_API_URL || "").trim();
-  const candidates: string[] = [];
   if (configured) {
-    pushUnique(candidates, configured);
-    return candidates;
+    return [trimTrailingSlash(configured)];
   }
 
-  if (typeof window === "undefined") {
-    return ["http://localhost:8000"];
-  }
-
-  const protocol = window.location.protocol === "https:" ? "https:" : "http:";
-  const origin = `${protocol}//${window.location.host}`;
-  const hostname = window.location.hostname || "localhost";
-  const cloudRunBackendHost = deriveCloudRunBackendHost(hostname);
-  if (cloudRunBackendHost) {
-    pushUnique(candidates, origin);
-  }
-  if (cloudRunBackendHost) {
-    pushUnique(candidates, `${protocol}//${cloudRunBackendHost}`);
-  }
-  if (isLocalHostname(hostname)) {
-    pushUnique(candidates, `${protocol}//${hostname}:${DEFAULT_BACKEND_PORT}`);
-  }
-  pushUnique(candidates, origin);
-  return candidates;
+  // Unconfigured: use a SAME-ORIGIN RELATIVE base ("") identically on the server
+  // and the client. This is critical for two reasons:
+  //   1. Determinism — the old code returned "http://localhost:8000" during SSR
+  //      but window.location.origin on the client, so the API badge text (and any
+  //      API_URL-derived markup) differed between server and client. That tripped
+  //      React hydration errors (#418/#423/#425) which blanked the desk until React
+  //      re-rendered, so every panel flashed "no data" before the queries ran.
+  //   2. Correctness — a relative base routes requests through the same-origin Next
+  //      proxy at app/api/[...path]/route.ts (which forwards to the backend via the
+  //      server-side API_URL env), so there's no CORS and no host guessing.
+  // The cloud-run / localhost host derivation is dropped (the GCP UI is retired and
+  // local dev sets NEXT_PUBLIC_API_URL); the proxy covers every deployed topology.
+  return [""];
 }
 
 export function resolveApiBaseUrl(): string {
-  const candidates = resolveApiBaseUrlCandidates();
-  return candidates[0] || "http://localhost:8000";
+  return resolveApiBaseUrlCandidates()[0] ?? "";
 }
 
 export function resolveWebSocketBaseUrl(): string {
