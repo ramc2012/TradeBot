@@ -1,5 +1,5 @@
-import AuctionIntelligenceWorkspace from "@/components/v1-auction-intelligence/AuctionIntelligenceWorkspace";
+import AuctionDesk from "@/components/strategies/auction/AuctionDesk";
 
 export default function AuctionIntelligencePage() {
-  return <AuctionIntelligenceWorkspace />;
+  return <AuctionDesk />;
 }

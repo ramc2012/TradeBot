@@ -1,5 +1,5 @@
-import FractalMarketProfileWorkspace from "@/components/v1-fractal-market-profile/FractalMarketProfileWorkspace";
+import FractalDesk from "@/components/strategies/fractal/FractalDesk";
 
 export default function FractalMarketProfilePage() {
-  return <FractalMarketProfileWorkspace />;
+  return <FractalDesk />;
 }
