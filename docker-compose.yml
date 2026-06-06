@@ -1,8 +1,9 @@
 # Port mapping (host:container)
 #   db       → 5433:5432   (5432 already in use on host)
 #   redis    → 6383:6379   (6379-6382 already in use on host)
-#   backend  → 8000:8000
-#   frontend → 3000:3000
+#   backend     → 8000:8000
+#   frontend-v2 → 3000:3001   (v2 is the primary workspace, served on :3000)
+#   frontend    → 3001:3000   (legacy v1, retained on :3001 as fallback)
 
 services:
   db:
@@ -133,7 +134,7 @@ services:
       dockerfile: Dockerfile
     container_name: nomadcurie_frontend
     ports:
-      - "3000:3000"
+      - "3001:3000"
     env_file:
       - .env
     environment:
@@ -153,22 +154,19 @@ services:
     restart: unless-stopped
 
   # ──────────────────────────────────────────────────────────────────
-  # frontend-v2: reorganised trader workspace (port 3001).
-  # Runs alongside the v1 frontend so we can perfect the new structure
-  # against the same backend. Once v2 reaches feature parity, the v1
-  # service is removed and v2 takes over port 3000.
-  #
-  # Profile gates the service so a default `docker compose up` only
-  # starts v1. To run v2 alongside v1:  docker compose --profile v2 up.
+  # frontend-v2: reorganised trader workspace — now the PRIMARY UI on :3000.
+  # It reached feature parity and took over port 3000; the legacy v1
+  # `frontend` service is retained on :3001 as a fallback (not deleted until
+  # live-market testing concludes). v2 starts by default (no profile gate).
+  # Once v1 is fully retired, remove the `frontend` service above.
   # ──────────────────────────────────────────────────────────────────
   frontend-v2:
-    profiles: ["v2"]
     build:
       context: ./frontend-v2
       dockerfile: Dockerfile
     container_name: nomadcurie_frontend_v2
     ports:
-      - "3001:3001"
+      - "3000:3001"
     env_file:
       - .env
     environment:
