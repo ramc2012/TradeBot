@@ -8,7 +8,8 @@ Rules (exactly as specified):
     candle to close: each 3-minute sub-bar extends the forming 30m bar and the MACD is
     recomputed incrementally (mirrors the live synthetic-forming-bar).
   • Buy whichever of ATM CE / PE gives the cross. ONE position per underlying (CE or PE).
-  • Hard stop: −25% on premium (intrabar 3m low ≤ 0.75×entry ⇒ exit at the stop).
+  • Hard stop: −25% on premium. Once premium reaches +50% over entry, switch to a
+    TRAILING stop 25% below the running peak premium (follows the peak up).
   • Flip: if the OPPOSITE side gives a fresh zero-cross-up while in a position, close the
     current and open the new one.
   • Same-side reversal: if the held side's 30m MACD crosses DOWN through zero, exit
@@ -41,7 +42,9 @@ IST = timezone(timedelta(hours=5, minutes=30))
 JUNE_START = date(2026, 6, 1)
 JUNE_END = date(2026, 7, 1)
 FAST, SLOW, SIGNAL = 12, 26, 9
-HARD_STOP = 0.25          # 25% premium hard stop
+HARD_STOP = 0.25          # 25% premium hard stop (before trail activates)
+TRAIL_ACTIVATE = 0.50     # once premium is +50% over entry, switch to a trailing stop
+TRAIL_GIVEBACK = 0.25     # trailing stop sits 25% below the running peak premium
 RTH_OPEN, RTH_CLOSE = 9 * 60 + 15, 15 * 60 + 30
 A_FAST, A_SLOW = 2 / (FAST + 1), 2 / (SLOW + 1)
 
@@ -174,10 +177,9 @@ def _simulate_day(underlying, d, ce_bars, pe_bars, by_kind):
         # ascending; compute per-3m forming 30m macd using closed 30m closes up to each bar
         seq = [(t, o, h, l, c) for (t, o, h, l, c) in bars if c and _in_rth(t)]
         seq.sort(key=lambda x: x[0])
-        # closed 30m closes (last 3m close of each completed bucket)
         closed, last_close_in_bucket, cur_b = [], None, None
         prev_forming = None  # forming MACD of the PREVIOUS 3m sub-bar (for edge detection)
-        per_bar = []  # (t, low, close, forming_macd, prev_closed_macd, prev_forming_macd)
+        per_bar = []  # (t, low, high, close, forming, prev_closed, prev_forming)
         for (t, o, h, l, c) in seq:
             b = _bucket(t, 30)
             if cur_b is None:
@@ -194,89 +196,95 @@ def _simulate_day(underlying, d, ce_bars, pe_bars, by_kind):
                 if ef is not None and es is not None:
                     prev_macd = ef - es
                     forming = (A_FAST * float(c) + (1 - A_FAST) * ef) - (A_SLOW * float(c) + (1 - A_SLOW) * es)
-            per_bar.append((t, float(l) if l is not None else float(c), float(c), forming, prev_macd, prev_forming))
+            lo = float(l) if l is not None else float(c)
+            hi = float(h) if h is not None else float(c)
+            per_bar.append((t, lo, hi, float(c), forming, prev_macd, prev_forming))
             prev_forming = forming
         return per_bar
 
-    ce = {t: (lo, cl, fm, pm, pf) for (t, lo, cl, fm, pm, pf) in prep(ce_bars)}
-    pe = {t: (lo, cl, fm, pm, pf) for (t, lo, cl, fm, pm, pf) in prep(pe_bars)}
-    # 15m re-entry context per side (signal-cross set on 15m + 30m macd>0 gate)
+    # v = (low, high, close, forming, prev_closed, prev_forming)
+    ce = {t: (lo, hi, cl, fm, pm, pf) for (t, lo, hi, cl, fm, pm, pf) in prep(ce_bars)}
+    pe = {t: (lo, hi, cl, fm, pm, pf) for (t, lo, hi, cl, fm, pm, pf) in prep(pe_bars)}
     ce15_cross, ce15_macd = _macd15_for(ce_bars)
     pe15_cross, pe15_macd = _macd15_for(pe_bars)
 
-    # timeline = union of CE/PE 3m timestamps on day d, ascending
     ts_all = sorted(t for t in set(ce) | set(pe) if t.astimezone(IST).date() == d)
     rets = []
-    pos = None  # dict(side, entry, ot)
-    reentry_used = set()  # (side, 15m-bucket) already used for a re-entry → no churn
+    pos = None
+    reentry_used = set()
+    fired = set()
 
-    # A zero-cross fires ONCE per 30m bucket per side: the forming 30m MACD transitions
-    # up through zero (prev_forming <= 0 < curr_forming) WHILE the last CLOSED 30m MACD
-    # is genuinely negative (prev_closed < 0). The per-bucket 'fired' guard stops the
-    # noisy forming line re-triggering after an exit within the same window — that churn
-    # produced unrealistic >100-trade days. (v = (low, close, forming, prev_closed, prev_forming))
+    # Zero-cross fires once per 30m bucket per side: forming MACD transitions up through
+    # zero (prev_forming<=0<forming) while the last CLOSED 30m MACD is negative.
     def cross_up(side_map, t):
         v = side_map.get(t)
-        return (v is not None and v[2] is not None and v[3] is not None and v[4] is not None
-                and v[3] < 0 and v[4] <= 0 < v[2])
+        return (v is not None and v[3] is not None and v[4] is not None and v[5] is not None
+                and v[4] < 0 and v[5] <= 0 < v[3])
 
     def cross_down(side_map, t):
         v = side_map.get(t)
-        return (v is not None and v[2] is not None and v[3] is not None and v[4] is not None
-                and v[3] > 0 and v[4] >= 0 > v[2])
+        return (v is not None and v[3] is not None and v[4] is not None and v[5] is not None
+                and v[4] > 0 and v[5] >= 0 > v[3])
 
-    fired = set()  # (side, 30m-bucket) already used for a primary/flip entry
+    def _open(ot, entry):
+        return {"ot": ot, "entry": entry, "peak": entry, "kind": f"primary_{ot.lower()}"}
+
+    def _stop_level(p):
+        # after +50% profit, trail 25% below the running peak; else the −25% hard stop
+        if p["peak"] >= p["entry"] * (1 + TRAIL_ACTIVATE):
+            return p["peak"] * (1 - TRAIL_GIVEBACK)
+        return p["entry"] * (1 - HARD_STOP)
 
     for t in ts_all:
         bkt = _bucket(t, 30)
-        # manage open position first
         if pos is not None:
             sm = ce if pos["ot"] == "CE" else pe
             opp = pe if pos["ot"] == "CE" else ce
             opp_ot = "PE" if pos["ot"] == "CE" else "CE"
             v = sm.get(t)
             if v is not None:
-                lo, cl = v[0], v[1]
-                # 1) hard stop −25% (intrabar low)
-                if lo <= pos["entry"] * (1 - HARD_STOP):
-                    rets.append(-HARD_STOP * 100.0); by_kind[pos["kind"]].append(-HARD_STOP * 100.0)
+                lo, hi, cl = v[0], v[1], v[2]
+                pos["peak"] = max(pos["peak"], hi)
+                stop = _stop_level(pos)
+                # 1) stop (−25% hard, or trailing-25%-of-peak once +50% reached)
+                if lo <= stop:
+                    r = (stop - pos["entry"]) / pos["entry"] * 100.0
+                    rets.append(r); by_kind[pos["kind"]].append(r)
                     pos = None
                 # 2) flip on opposite fresh cross-up (once per bucket)
                 elif cross_up(opp, t) and (opp_ot, bkt) not in fired:
                     fired.add((opp_ot, bkt))
                     r = (cl - pos["entry"]) / pos["entry"] * 100.0
                     rets.append(r); by_kind[pos["kind"]].append(r)
-                    ov = opp.get(t)
-                    pos = {"ot": opp_ot, "entry": ov[1], "kind": f"primary_{opp_ot.lower()}"}
+                    pos = _open(opp_ot, opp.get(t)[2])
                     continue
                 # 3) same-side reversal (macd down through zero)
                 elif cross_down(sm, t):
                     r = (cl - pos["entry"]) / pos["entry"] * 100.0
                     rets.append(r); by_kind[pos["kind"]].append(r)
                     pos = None
-        # entries when flat
         if pos is None:
             if cross_up(ce, t) and ("CE", bkt) not in fired:
-                fired.add(("CE", bkt)); pos = {"ot": "CE", "entry": ce[t][1], "kind": "primary_ce"}
+                fired.add(("CE", bkt)); pos = _open("CE", ce[t][2])
             elif cross_up(pe, t) and ("PE", bkt) not in fired:
-                fired.add(("PE", bkt)); pos = {"ot": "PE", "entry": pe[t][1], "kind": "primary_pe"}
+                fired.add(("PE", bkt)); pos = _open("PE", pe[t][2])
             else:
                 # 15m re-entry: 30m macd>0 AND 15m macd/signal cross-up at this 15m bucket
                 for ot, sm, cross15, m15 in (("CE", ce, ce15_cross, ce15_macd), ("PE", pe, pe15_cross, pe15_macd)):
                     v = sm.get(t)
-                    if v is None or v[2] is None or v[2] <= 0:
+                    if v is None or v[3] is None or v[3] <= 0:
                         continue
                     bts = _bucket(t, 15)
                     if cross15.get(bts) and (ot, bts) not in reentry_used:
                         reentry_used.add((ot, bts))
-                        pos = {"ot": ot, "entry": v[1], "kind": "reentry"}
+                        pos = {"ot": ot, "entry": v[2], "peak": v[2], "kind": "reentry"}
                         break
     # square off at day end
     if pos is not None:
         sm = ce if pos["ot"] == "CE" else pe
         last_t = max((t for t in sm if t.astimezone(IST).date() == d), default=None)
         if last_t is not None:
-            r = (sm[last_t][1] - pos["entry"]) / pos["entry"] * 100.0
+            r = (sm[last_t][2] - pos["entry"]) / pos["entry"] * 100.0
             rets.append(r); by_kind[pos["kind"]].append(r)
     return rets
 
