@@ -13,7 +13,8 @@
  */
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Sigma } from "lucide-react";
+import { Activity, Sigma } from "lucide-react";
+import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { MetricTile, REFRESH_MS, Section, formatNumber, formatPct, tone } from "@/components/desk-ui";
 import { api } from "@/lib/api";
@@ -74,6 +75,26 @@ export function GammaDensity({ symbol = "NIFTY" }: { symbol?: string }) {
 
   const strikes = useMemo(() => normalizeChain(chainQ.data, spot), [chainQ.data, spot]);
 
+  // IV smile from the per-strike greeks rows (always populated; no live chain needed).
+  const smile = useMemo(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows: any[] = (fnoQ.data?.nse?.greeks?.rows ?? []).filter(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (r: any) => String(r.underlying).toUpperCase() === symbol.toUpperCase(),
+    );
+    const m = new Map<number, { strike: number; ceIv?: number; peIv?: number }>();
+    for (const r of rows) {
+      const k = Number(r.strike);
+      if (!k) continue;
+      const e = m.get(k) ?? { strike: k };
+      const iv = Number(r.iv) * 100;
+      if (String(r.option_type).toUpperCase() === "CE") e.ceIv = iv;
+      else e.peIv = iv;
+      m.set(k, e);
+    }
+    return Array.from(m.values()).sort((a, b) => a.strike - b.strike);
+  }, [fnoQ.data, symbol]);
+
   const { netGex, flip } = useMemo(() => {
     const total = strikes.reduce((s, r) => s + r.gex, 0);
     // cumulative-from-bottom crossing zero → flip strike
@@ -94,6 +115,7 @@ export function GammaDensity({ symbol = "NIFTY" }: { symbol?: string }) {
   const maxAbs = Math.max(1, ...strikes.map((s) => Math.abs(s.gex)));
 
   return (
+    <div className="space-y-4">
     <Section
       title="Gamma density (dealer GEX)"
       icon={<Sigma size={16} />}
@@ -119,7 +141,40 @@ export function GammaDensity({ symbol = "NIFTY" }: { symbol?: string }) {
         )}
       </div>
     </Section>
+
+    {smile.length ? (
+      <Section title="Implied-volatility smile" icon={<Activity size={16} />} description="Per-strike IV — CE vs PE skew across the chain">
+        <div className="h-56 w-full">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={smile} margin={{ top: 8, right: 8, left: 4, bottom: 0 }}>
+              <CartesianGrid stroke={CHART.grid} vertical={false} />
+              <XAxis dataKey="strike" stroke={CHART.axis} fontSize={10} tickLine={false} />
+              <YAxis stroke={CHART.axis} fontSize={10} tickLine={false} width={36} tickFormatter={(v) => `${Number(v).toFixed(0)}%`} />
+              {spot ? <ReferenceLine x={nearestStrike(smile, spot)} stroke="#e6edf3" strokeDasharray="3 3" /> : null}
+              <Tooltip contentStyle={{ background: CHART.surface, border: `1px solid ${CHART.border}`, borderRadius: 8, fontSize: 11 }} />
+              <Line type="monotone" dataKey="ceIv" name="CE IV" stroke={CHART.green} dot={false} strokeWidth={1.5} connectNulls />
+              <Line type="monotone" dataKey="peIv" name="PE IV" stroke={CHART.red} dot={false} strokeWidth={1.5} connectNulls />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="mt-1 flex items-center justify-center gap-4 text-[10px] text-text-muted">
+          <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm" style={{ background: CHART.green }} /> CE IV</span>
+          <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm" style={{ background: CHART.red }} /> PE IV</span>
+        </div>
+      </Section>
+    ) : null}
+    </div>
   );
+}
+
+function nearestStrike(rows: { strike: number }[], spot: number): number {
+  let best = rows[0]?.strike ?? spot;
+  let bd = Infinity;
+  for (const r of rows) {
+    const d = Math.abs(r.strike - spot);
+    if (d < bd) { bd = d; best = r.strike; }
+  }
+  return best;
 }
 
 function GexProfile({
