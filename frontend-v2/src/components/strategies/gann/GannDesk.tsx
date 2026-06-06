@@ -199,7 +199,7 @@ function ConfluencePanel({ snap }: { snap?: Snapshot }) {
                 <StatusBadge label={triggered ? sig.state || "triggered" : sig.state || "below threshold"} variant={triggered ? "success" : "warn"} />
               </div>
               <div className="mt-2 h-2 overflow-hidden rounded-full bg-bg-primary/40">
-                <div className="h-full rounded-full" style={{ width: `${pct}%`, background: triggered ? "var(--accent-green)" : "var(--accent-amber)" }} />
+                <div className="h-full rounded-full" style={{ width: `${pct}%`, background: triggered ? "rgb(var(--accent-green))" : "rgb(var(--accent-amber))" }} />
               </div>
             </div>
             <div className="grid grid-cols-3 gap-2 text-center text-[12px]">

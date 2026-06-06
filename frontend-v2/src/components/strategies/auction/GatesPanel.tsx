@@ -82,7 +82,7 @@ function GateCard({ gate, result, loading }: { gate: string; result?: GateResult
         <div className="space-y-3">
           <div className="flex items-center gap-3">
             <div className="h-2 flex-1 overflow-hidden rounded-full bg-bg-primary/40">
-              <div className="h-full rounded-full" style={{ width: `${Math.round((result?.score ?? 0) * 100)}%`, background: passed ? "var(--accent-green)" : "var(--accent-amber)" }} />
+              <div className="h-full rounded-full" style={{ width: `${Math.round((result?.score ?? 0) * 100)}%`, background: passed ? "rgb(var(--accent-green))" : "rgb(var(--accent-amber))" }} />
             </div>
             <span className="font-mono text-[12px] text-text-secondary">{formatPct(result?.score, 0)}</span>
           </div>

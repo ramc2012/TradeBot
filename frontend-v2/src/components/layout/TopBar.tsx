@@ -16,6 +16,7 @@ import { ExternalLink } from "lucide-react";
 
 import { API_URL } from "@/lib/api";
 import TopBarStatus from "./TopBarStatus";
+import ThemeControl from "./ThemeControl";
 
 export default function TopBar() {
   return (
@@ -30,6 +31,7 @@ export default function TopBar() {
       </div>
       <div className="flex items-center gap-2.5">
         <TopBarStatus />
+        <ThemeControl />
         <Link
           href="http://localhost:3000"
           target="_blank"

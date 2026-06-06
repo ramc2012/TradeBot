@@ -214,7 +214,7 @@ function SignalCard({ row }: { row: SniperRow }) {
   const mag = Math.abs(row.magnitude_atr || 0);
   const stale = (row.age_sec ?? 0) > STALE_SEC;
   const barColor =
-    variant === "success" ? "var(--accent-green)" : variant === "error" ? "var(--accent-red)" : "var(--accent-amber)";
+    variant === "success" ? "rgb(var(--accent-green))" : variant === "error" ? "rgb(var(--accent-red))" : "rgb(var(--accent-amber))";
   const extras = (row.extras || {}) as Record<string, unknown>;
   const hasOpt = extras.has_options === true;
   const hasOf = extras.has_live_of === true;

@@ -454,7 +454,7 @@ function LeadersTab({
                             style={{
                               width: `${mag}%`,
                               left: c >= 0 ? "50%" : `${50 - mag / 2}%`,
-                              background: c >= 0 ? "var(--accent-green)" : "var(--accent-red)",
+                              background: c >= 0 ? "rgb(var(--accent-green))" : "rgb(var(--accent-red))",
                             }}
                           />
                           <div className="absolute left-1/2 top-0 h-full w-px bg-bg-border" />

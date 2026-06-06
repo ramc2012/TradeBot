@@ -338,7 +338,7 @@ export default function CbeDesk() {
 // ── Sub-components ──────────────────────────────────────────────────────────
 
 function QuadrantCard({ q, n, note }: { q: string; n: number; note: string }) {
-  const col = QUADRANT_COLOR[q] || "var(--accent-blue)";
+  const col = QUADRANT_COLOR[q] || "rgb(var(--accent-blue))";
   return (
     <div className="rounded-xl border border-bg-border bg-bg-primary/14 p-3">
       <div className="flex items-center justify-between">
@@ -374,7 +374,7 @@ function CandidateTable({ rows }: { rows: ScanResult[] }) {
         <tbody>
           {rows.length ? (
             rows.map((r, i) => {
-              const col = QUADRANT_COLOR[r.stock_quadrant ?? ""] || "var(--accent-blue)";
+              const col = QUADRANT_COLOR[r.stock_quadrant ?? ""] || "rgb(var(--accent-blue))";
               return (
                 <tr key={r.instrument} className="border-b border-bg-border/25 hover:bg-bg-primary/20">
                   <td className="px-2.5 py-1.5 text-left font-mono text-[11px] text-text-muted">{i + 1}</td>
@@ -438,7 +438,7 @@ function SectorTable({ sectors }: { sectors: SectorRow[] }) {
         <tbody>
           {sectors.length ? (
             sectors.map((s) => {
-              const col = QUADRANT_COLOR[s.quadrant] || "var(--accent-blue)";
+              const col = QUADRANT_COLOR[s.quadrant] || "rgb(var(--accent-blue))";
               const breadth = s.count ? s.leaders / s.count : 0;
               return (
                 <tr key={s.code} className="border-b border-bg-border/25 hover:bg-bg-primary/20">

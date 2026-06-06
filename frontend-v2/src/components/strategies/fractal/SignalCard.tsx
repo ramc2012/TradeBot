@@ -118,7 +118,7 @@ export function SignalCard({ signal, lastPrice }: { signal?: CurrentSignal; last
                   className="h-full rounded-full"
                   style={{
                     width: `${Math.min(100, conf * 100)}%`,
-                    background: conf >= 0.6 ? "var(--accent-green)" : conf >= 0.4 ? "var(--accent-amber)" : "var(--accent-red)",
+                    background: conf >= 0.6 ? "rgb(var(--accent-green))" : conf >= 0.4 ? "rgb(var(--accent-amber))" : "rgb(var(--accent-red))",
                   }}
                 />
               </div>

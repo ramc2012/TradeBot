@@ -257,7 +257,7 @@ function OverviewTab({ indicators, read, loading }: { indicators: MacroIndicator
                       {up ? "▲" : "▼"} {formatSigned(ind.change)} YoY
                     </div>
                   </div>
-                  <Sparkline values={(ind.history || []).map((h) => h.value)} width={104} height={38} color={good ? "var(--accent-green)" : "var(--accent-red)"} />
+                  <Sparkline values={(ind.history || []).map((h) => h.value)} width={104} height={38} color={good ? "rgb(var(--accent-green))" : "rgb(var(--accent-red))"} />
                 </div>
                 <div className="mt-2.5 flex items-center justify-between border-t border-bg-border/40 pt-2 text-[11px]">
                   <span className="text-text-muted">z-score</span>
@@ -437,7 +437,7 @@ function DiscoveryTab({
                   </div>
                 </div>
                 <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-bg-primary/40">
-                  <div className="h-full rounded-full" style={{ width: `${pct}%`, background: "var(--accent-blue)" }} />
+                  <div className="h-full rounded-full" style={{ width: `${pct}%`, background: "rgb(var(--accent-blue))" }} />
                 </div>
                 {t.why_now ? <div className="mt-2 text-[11.5px] leading-snug text-text-secondary">{t.why_now}</div> : null}
                 <div className="mt-2 flex items-center gap-3 text-[10px] text-text-muted">
