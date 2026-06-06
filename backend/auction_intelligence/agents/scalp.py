@@ -22,6 +22,7 @@ class ScalpAgent(StrategyAgent):
             fraction=float(self.config.get("value_tolerance_fraction", 0.12)),
             minimum=float(self.config.get("value_tolerance_min_points", 6.0)),
             maximum=float(self.config.get("value_tolerance_max_points", 20.0)),
+            price=float(current.close_price),
         )
 
         if flow.execution_aggression == "WAIT" or flow.toxicity_score >= 0.82:

@@ -57,6 +57,7 @@ class SwingAgent(StrategyAgent):
             fraction=float(self.config.get("value_entry_tolerance_fraction", 0.25)),
             minimum=float(self.config.get("value_entry_tolerance_min_points", 10.0)),
             maximum=float(self.config.get("value_entry_tolerance_max_points", 50.0)),
+            price=float(current.close_price),
         )
         prior_value_width = value_width if prior is None else max(float(prior.vah) - float(prior.val), float(current.tick_size))
         prior_reentry_tolerance = self._bounded_tolerance(
@@ -64,18 +65,21 @@ class SwingAgent(StrategyAgent):
             fraction=float(self.config.get("prior_value_reentry_tolerance_fraction", 0.15)),
             minimum=float(self.config.get("prior_value_reentry_tolerance_min_points", 8.0)),
             maximum=float(self.config.get("prior_value_reentry_tolerance_max_points", 35.0)),
+            price=float(current.close_price),
         )
         ib_break_tolerance = self._bounded_tolerance(
             reference_range=max(float(current.initial_balance_range), float(current.tick_size)),
             fraction=float(self.config.get("ib_break_tolerance_fraction", 0.12)),
             minimum=float(self.config.get("ib_break_tolerance_min_points", 8.0)),
             maximum=float(self.config.get("ib_break_tolerance_max_points", 35.0)),
+            price=float(current.close_price),
         )
         trend_pullback_tolerance = self._bounded_tolerance(
             reference_range=max(value_width, float(current.initial_balance_range), float(current.tick_size)),
             fraction=float(self.config.get("trend_pullback_tolerance_fraction", 0.20)),
             minimum=float(self.config.get("trend_pullback_tolerance_min_points", 8.0)),
             maximum=float(self.config.get("trend_pullback_tolerance_max_points", 35.0)),
+            price=float(current.close_price),
         )
         trend_pullback_timing_floor = float(self.config.get("trend_pullback_timing_floor", 0.38))
         delta_strength = min(abs(float(flow.delta or 0.0)) / 10.0, 1.0)
