@@ -7,4 +7,6 @@ export { StrategyStats } from "./StrategyStats";
 export { TradeBook } from "./TradeBook";
 export { PerformanceCharts } from "./PerformanceCharts";
 export { PaperPerformance } from "./PaperPerformance";
+export { MarketProfileChart, normalizeTpo, type TpoLevel } from "./MarketProfileChart";
+export { OrderFlowPanel, type OrderFlow } from "./OrderFlowPanel";
 export { CHART, pnlColor } from "./chartTheme";
