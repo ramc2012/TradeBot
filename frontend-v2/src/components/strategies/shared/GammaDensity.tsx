@@ -13,11 +13,12 @@
  */
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Sigma } from "lucide-react";
-import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Activity, Sigma, Waves } from "lucide-react";
+import { Area, AreaChart, CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { MetricTile, REFRESH_MS, Section, formatNumber, formatPct, tone } from "@/components/desk-ui";
 import { api } from "@/lib/api";
+import { bsGamma } from "@/lib/black-scholes";
 import { CHART } from "./chartTheme";
 
 type StrikeGex = { strike: number; gex: number; ceOi: number; peOi: number };
@@ -95,6 +96,57 @@ export function GammaDensity({ symbol = "NIFTY" }: { symbol?: string }) {
     return Array.from(m.values()).sort((a, b) => a.strike - b.strike);
   }, [fnoQ.data, symbol]);
 
+  // Per-strike IV + time-to-expiry for the gamma-progression recompute.
+  const optStrikes = useMemo(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows: any[] = (fnoQ.data?.nse?.greeks?.rows ?? []).filter(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (r: any) => String(r.underlying).toUpperCase() === symbol.toUpperCase(),
+    );
+    const m = new Map<number, { strike: number; T: number; ceIv?: number; peIv?: number }>();
+    for (const r of rows) {
+      const k = Number(r.strike);
+      if (!k) continue;
+      const e = m.get(k) ?? { strike: k, T: Math.max(1, Number(r.days_to_expiry) || 1) / 365 };
+      const iv = Number(r.iv);
+      if (String(r.option_type).toUpperCase() === "CE") e.ceIv = iv;
+      else e.peIv = iv;
+      m.set(k, e);
+    }
+    return Array.from(m.values());
+  }, [fnoQ.data, symbol]);
+
+  const oiByStrike = useMemo(() => {
+    const m = new Map<number, { ce: number; pe: number }>();
+    strikes.forEach((s) => m.set(s.strike, { ce: s.ceOi, pe: s.peOi }));
+    return m;
+  }, [strikes]);
+
+  // Gamma progression — net dealer GEX recomputed (Black-Scholes) at hypothetical
+  // spots ±8%: shows how the gamma wall / flip moves with price. OI-weighted when
+  // the live chain is present, else the total-gamma magnitude profile.
+  const progression = useMemo(() => {
+    if (!optStrikes.length || !spot) return { points: [] as { spot: number; gex: number }[], oiWeighted: false };
+    const hasOi = Array.from(oiByStrike.values()).some((v) => v.ce > 0 || v.pe > 0);
+    const lo = spot * 0.92;
+    const hi = spot * 1.08;
+    const steps = 41;
+    const scale = spot * spot * 0.01;
+    const points: { spot: number; gex: number }[] = [];
+    for (let i = 0; i < steps; i++) {
+      const Sp = lo + ((hi - lo) * i) / (steps - 1);
+      let g = 0;
+      for (const o of optStrikes) {
+        const oi = oiByStrike.get(o.strike) || { ce: 1, pe: 1 };
+        const ceG = o.ceIv ? bsGamma(Sp, o.strike, o.T, o.ceIv) : 0;
+        const peG = o.peIv ? bsGamma(Sp, o.strike, o.T, o.peIv) : 0;
+        g += hasOi ? scale * (ceG * oi.ce - peG * oi.pe) : (ceG + peG) * 1e6;
+      }
+      points.push({ spot: Math.round(Sp), gex: g });
+    }
+    return { points, oiWeighted: hasOi };
+  }, [optStrikes, oiByStrike, spot]);
+
   const { netGex, flip } = useMemo(() => {
     const total = strikes.reduce((s, r) => s + r.gex, 0);
     // cumulative-from-bottom crossing zero → flip strike
@@ -160,6 +212,41 @@ export function GammaDensity({ symbol = "NIFTY" }: { symbol?: string }) {
         <div className="mt-1 flex items-center justify-center gap-4 text-[10px] text-text-muted">
           <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm" style={{ background: CHART.green }} /> CE IV</span>
           <span className="inline-flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm" style={{ background: CHART.red }} /> PE IV</span>
+        </div>
+      </Section>
+    ) : null}
+
+    {progression.points.length ? (
+      <Section
+        title="Gamma progression"
+        icon={<Waves size={16} />}
+        description={progression.oiWeighted ? "Net dealer GEX recomputed (Black-Scholes) across hypothetical spot — where the gamma flip migrates as price moves" : "Total gamma vs hypothetical spot — OI-weighted net GEX streams during market hours"}
+      >
+        <div className="h-56 w-full">
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={progression.points} margin={{ top: 8, right: 8, left: 4, bottom: 0 }}>
+              <defs>
+                <linearGradient id="gammaProg" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={CHART.blue} stopOpacity={0.4} />
+                  <stop offset="100%" stopColor={CHART.blue} stopOpacity={0.04} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid stroke={CHART.grid} vertical={false} />
+              <XAxis dataKey="spot" type="number" domain={["dataMin", "dataMax"]} stroke={CHART.axis} fontSize={10} tickLine={false} tickFormatter={(v) => Number(v).toFixed(0)} />
+              <YAxis stroke={CHART.axis} fontSize={10} tickLine={false} width={46} tickFormatter={(v) => fmtBn(Number(v))} />
+              <ReferenceLine y={0} stroke={CHART.axis} strokeDasharray="3 3" />
+              <ReferenceLine x={Math.round(spot)} stroke="#e6edf3" strokeDasharray="3 3" />
+              <Tooltip
+                contentStyle={{ background: CHART.surface, border: `1px solid ${CHART.border}`, borderRadius: 8, fontSize: 11 }}
+                formatter={(v: number) => [fmtBn(Number(v)), progression.oiWeighted ? "Net GEX" : "Gamma"]}
+                labelFormatter={(l) => `spot ${Number(l).toFixed(0)}`}
+              />
+              <Area type="monotone" dataKey="gex" stroke={CHART.blue} strokeWidth={1.5} fill="url(#gammaProg)" isAnimationActive={false} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="mt-1 text-center text-[10px] text-text-muted">
+          x = hypothetical spot · vertical line = current spot{progression.oiWeighted ? " · zero-crossing = gamma flip" : ""}
         </div>
       </Section>
     ) : null}
