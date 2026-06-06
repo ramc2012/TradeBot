@@ -9,7 +9,7 @@ from typing import Any, Optional, TYPE_CHECKING
 from loguru import logger
 from sqlalchemy import text
 
-from analysis.macd_engine import check_iv_filter, compute_spot_ma_context
+from analysis.macd_engine import check_iv_filter, compute_macd, compute_spot_ma_context
 from agent.iv_size_policy import iv_size_scaler
 from agent.strategy_config import (
     COMMENTARY_MAX,
@@ -189,6 +189,102 @@ class StrategyEntryMixin:
             state.setdefault(instrument_key, {})[rank] = dict(row)
         return state
 
+    async def _load_strategy1_15m_macd_from_snapshots(
+        self: "PaperStrategyAgent",
+        rows: list[dict[str, Any]],
+        *,
+        lookback_days: int = 7,
+        fast: int = 12,
+        slow: int = 26,
+        signal: int = 9,
+    ) -> dict[str, dict[str, Any]]:
+        """Compute a TRUE, independent 15-minute option-premium MACD per contract.
+
+        The 15m re-entry path needs a 15m MACD that is genuinely distinct from the
+        30m one. The stored snapshot `macd` is computed on 30-minute candles
+        (ATMWatchlistService._load_technicals → interval='30minute'); re-bucketing
+        those values into 15m windows just yields the 30m MACD sampled at 15m, so
+        the re-entry condition (30m MACD > 0 AND a fresh 15m up-cross from < 0) can
+        never hold — the two series are identical. 15-/3-minute option candles are
+        ingested only episodically and lag a session, so the freshest premium series
+        is the live `ltp` in atm_option_watchlist_snapshots. We resample that ltp to
+        15-minute RTH buckets across the last few sessions and run MACD(12,26,9) on
+        it, giving a real 15m line whose zero-cross is independent of the 30m line.
+
+        Returns {instrument_key: {current_macd, previous_macd, latest_bar_time,
+        latest_ltp, bars_15m}}.
+        """
+        instrument_keys = sorted(
+            {
+                str((side or {}).get("instrument_key") or "").strip()
+                for row in rows
+                for side in (row.get("ce"), row.get("pe"))
+                if str((side or {}).get("instrument_key") or "").strip()
+            }
+        )
+        if not instrument_keys:
+            return {}
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT instrument_key, time, ltp
+                    FROM atm_option_watchlist_snapshots
+                    WHERE instrument_key = ANY(:instrument_keys)
+                      AND ltp IS NOT NULL
+                      AND time > now() - make_interval(days => :lookback_days)
+                    ORDER BY instrument_key ASC, time ASC
+                    """
+                ),
+                {"instrument_keys": instrument_keys, "lookback_days": int(lookback_days)},
+            )
+            db_rows = result.mappings().all()
+
+        from collections import defaultdict
+        from datetime import timedelta, timezone as _tz
+
+        ist = _tz(timedelta(hours=5, minutes=30))
+        # instrument -> {bucket_start_datetime: last_ltp_in_bucket}
+        buckets: dict[str, dict[Any, float]] = defaultdict(dict)
+        for r in db_rows:
+            ltp = r.get("ltp")
+            t = r.get("time")
+            if ltp is None or t is None:
+                continue
+            try:
+                local = t.astimezone(ist)
+            except Exception:  # noqa: BLE001 — naive timestamps fall back to as-is
+                local = t
+            mins = local.hour * 60 + local.minute
+            if mins < 9 * 60 + 15 or mins > 15 * 60 + 30:  # NSE RTH only
+                continue
+            bucket = local.replace(minute=(local.minute // 15) * 15, second=0, microsecond=0)
+            # rows are ascending → later write wins = last ltp (15m bar close)
+            buckets[str(r.get("instrument_key") or "").strip()][bucket] = float(ltp)
+
+        out: dict[str, dict[str, Any]] = {}
+        min_bars = slow + 2  # need a valid macd line for the last two bars
+        for instrument_key, bmap in buckets.items():
+            if not instrument_key or len(bmap) < min_bars:
+                continue
+            ordered = sorted(bmap.items())
+            closes = [v for _, v in ordered]
+            macd_line, _signal_line, _hist = compute_macd(closes, fast, slow, signal)
+            current = macd_line[-1]
+            previous = macd_line[-2]
+            if current is None or previous is None:
+                continue
+            out[instrument_key] = {
+                "instrument_key": instrument_key,
+                "current_macd": float(current),
+                "previous_macd": float(previous),
+                "latest_bar_time": ordered[-1][0].isoformat(),
+                "latest_ltp": closes[-1],
+                "bars_15m": len(closes),
+            }
+        return out
+
     @staticmethod
     def _strategy1_side_snapshot(
         side: dict[str, Any],
@@ -362,15 +458,15 @@ class StrategyEntryMixin:
         # zero (CE) or below zero (PE). Used to catch intraday pullback
         # entries within an established higher-TF trend, especially after
         # a prior position closed on stop/target.
-        snapshot_state_15m: dict[str, dict[int, dict[str, Any]]] = {}
+        # True 15m MACD (per contract) computed from the fresh snapshot ltp series —
+        # genuinely independent of the 30m line (see _load_strategy1_15m_macd_from_snapshots).
+        macd15: dict[str, dict[str, Any]] = {}
         if getattr(settings, "NSE_S1_ALLOW_15M_REENTRY", True):
             try:
-                snapshot_state_15m = await self._load_strategy1_recent_snapshot_state(
-                    rows, bucket_minutes=15
-                )
+                macd15 = await self._load_strategy1_15m_macd_from_snapshots(rows)
             except Exception as exc:
-                logger.warning(f"[{runtime.key}] 15m snapshot load failed: {exc}")
-                snapshot_state_15m = {}
+                logger.warning(f"[{runtime.key}] 15m MACD compute failed: {exc}")
+                macd15 = {}
         persist_observation = getattr(self, "_persist_agent_signal_observation", None)
 
         def _tally(reason: str, row: Optional[dict] = None) -> None:
@@ -473,12 +569,12 @@ class StrategyEntryMixin:
             ce_snapshot = self._strategy1_side_snapshot(ce_side, snapshot_state) if ce_side else {}
             pe_snapshot = self._strategy1_side_snapshot(pe_side, snapshot_state) if pe_side else {}
             ce_snapshot_15m = (
-                self._strategy1_side_snapshot(ce_side, snapshot_state_15m)
-                if ce_side and snapshot_state_15m else {}
+                macd15.get(str(ce_side.get("instrument_key") or "").strip(), {})
+                if ce_side else {}
             )
             pe_snapshot_15m = (
-                self._strategy1_side_snapshot(pe_side, snapshot_state_15m)
-                if pe_side and snapshot_state_15m else {}
+                macd15.get(str(pe_side.get("instrument_key") or "").strip(), {})
+                if pe_side else {}
             )
             ce_macd = ce_snapshot.get("current_macd") if ce_side else None
             pe_macd = pe_snapshot.get("current_macd") if pe_side else None
@@ -487,15 +583,28 @@ class StrategyEntryMixin:
                 continue
 
             # Primary path — fresh 30-min zero-cross.
+            #
+            # MACD here is computed on the OPTION PREMIUM (each contract's own
+            # close series — see ATMWatchlistService._load_technicals), NOT on the
+            # underlying. So the buy signal for BOTH CE and PE is the *same*: the
+            # contract's premium MACD crossing UP through zero (prev < 0 < curr).
+            #   • CE premium rises on a bullish underlying  → buy CE on its up-cross.
+            #   • PE premium rises on a bearish underlying  → buy PE on its up-cross.
+            # This matches the canonical detectors (backtester.find_zero_crossovers
+            # "MACD crosses above 0 = buy" and audits.replay.detect_zero_cross_signals
+            # ZERO_CROSS_UP). The previous PE condition (prev >= 0 > curr) was a
+            # DOWN-cross — it inverted the side, so real PE entries were missed and
+            # false PE entries fired on a bullish underlying. Boundary is strict
+            # `< 0` to match the replay detector (avoids a prev==0 false positive).
             ce_cross_30m = (
                 ce_macd is not None
                 and ce_snapshot.get("previous_macd") is not None
-                and ce_snapshot["previous_macd"] <= 0 < ce_macd
+                and ce_snapshot["previous_macd"] < 0 < ce_macd
             )
             pe_cross_30m = (
                 pe_macd is not None
                 and pe_snapshot.get("previous_macd") is not None
-                and pe_snapshot["previous_macd"] >= 0 > pe_macd
+                and pe_snapshot["previous_macd"] < 0 < pe_macd
             )
 
             # Re-entry path — 30-min MACD already in trend AND fresh
@@ -506,14 +615,22 @@ class StrategyEntryMixin:
             ce_15m_prev = ce_snapshot_15m.get("previous_macd")
             pe_15m_curr = pe_snapshot_15m.get("current_macd")
             pe_15m_prev = pe_snapshot_15m.get("previous_macd")
+            # Same option-premium semantics as the 30m path: a fresh 15m buy on a
+            # contract is its premium MACD crossing UP through zero (prev < 0 < curr)
+            # for BOTH CE and PE. (PE was previously a down-cross — inverted.)
             ce_15m_fresh = (
                 ce_15m_curr is not None and ce_15m_prev is not None
-                and ce_15m_prev <= 0 < ce_15m_curr
+                and ce_15m_prev < 0 < ce_15m_curr
             )
             pe_15m_fresh = (
                 pe_15m_curr is not None and pe_15m_prev is not None
-                and pe_15m_prev >= 0 > pe_15m_curr
+                and pe_15m_prev < 0 < pe_15m_curr
             )
+            # Re-entry: the contract's 30m premium MACD is already in an established
+            # up-trend (> 0) AND a fresh 15m up-cross fires — catches intraday
+            # pullback re-entries within the higher-TF trend. For PE this is also
+            # `pe_macd > 0` (premium above zero = established bearish-underlying
+            # trend); the previous `pe_macd < 0` was the inverted side.
             ce_reentry = (
                 not ce_cross_30m
                 and ce_macd is not None and ce_macd > 0
@@ -521,7 +638,7 @@ class StrategyEntryMixin:
             )
             pe_reentry = (
                 not pe_cross_30m
-                and pe_macd is not None and pe_macd < 0
+                and pe_macd is not None and pe_macd > 0
                 and pe_15m_fresh
             )
 

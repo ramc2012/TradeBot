@@ -187,19 +187,22 @@ class StrategyExitMixin:
                 if pos.trailing_stop is None or new_stop > pos.trailing_stop:
                     pos.trailing_stop = _round_or_none(new_stop, 2)
 
-            # ── macd_reversal_30m — opposite zero-cross on 30m option MACD ──
-            # CE positions exit when MACD crosses DOWN through zero
-            # (prev ≥ 0 and curr < 0). PE positions exit on UP cross.
-            # macd_line[-1] reflects the in-flight bar's close (live LTP) so
-            # this fires INTRA-bar, no wait for bar close. Closing here lets
-            # the same scan re-enter on the opposite side (flip allowed; no
-            # cooldown). 300m hold is a guideline only — NOT enforced.
+            # ── macd_reversal_30m — exit on the OPTION PREMIUM MACD rolling over ──
+            # MACD here is on the option's OWN premium, and entries buy on the
+            # premium MACD crossing UP through zero (for BOTH CE and PE — see
+            # strategy_agent_entries). So the symmetric exit for BOTH sides is the
+            # premium MACD crossing DOWN through zero (prev ≥ 0 and curr < 0): the
+            # premium's momentum has rolled over. The PE branch previously used an
+            # UP-cross, which mirrored the (now-fixed) inverted PE entry and would
+            # have made a corrected PE exit on its own entry condition.
+            # macd_line[-1] reflects the in-flight bar's close (live LTP) so this
+            # fires INTRA-bar, no wait for bar close. 300m hold is a guideline only.
             if pos.macd_line and len(pos.macd_line) >= 2:
                 prev_macd = pos.macd_line[-2]
                 curr_macd = pos.macd_line[-1]
                 opposite_cross = (
-                    (pos.option_type == "CE" and prev_macd >= 0 and curr_macd < 0)
-                    or (pos.option_type == "PE" and prev_macd <= 0 and curr_macd > 0)
+                    prev_macd is not None and curr_macd is not None
+                    and prev_macd >= 0 and curr_macd < 0
                 )
                 if opposite_cross:
                     await self._close_position(runtime, pos, latest_close, "macd_reversal_30m", qty=pos.qty)
