@@ -1,5 +1,5 @@
-import MPIntelligenceDashboard from "@/components/v1-mp-intelligence/MPIntelligenceDashboard";
+import MpDesk from "@/components/strategies/mp/MpDesk";
 
 export default function MPIntelligencePage() {
-  return <MPIntelligenceDashboard />;
+  return <MpDesk />;
 }
