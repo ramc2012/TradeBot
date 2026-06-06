@@ -56,6 +56,8 @@ async def validate_underlying(conn, underlying: str) -> dict | None:
     if raw is None or len(raw) < 5000:
         print(f"{underlying:<11} SKIP — only {0 if raw is None else len(raw)} guarded 1m bars", flush=True)
         return None
+    if "oi" not in raw.columns:
+        raw["oi"] = 0.0  # gann _resample_15m aggregates oi; index spot has none
     frame = _build_frame(raw, cfg)
     bt = GannTPDeltaBacktester(cfg)
 
