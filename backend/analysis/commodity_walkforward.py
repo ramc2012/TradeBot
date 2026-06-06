@@ -1,9 +1,18 @@
 """Walk-forward replay for the commodity futures sleeve.
 
-The live commodity futures agent enters only when a 15-minute MACD zero-line
-signal agrees with the intraday Market Profile gate. This module replays that
-same decision shape on historical MCX futures candles and writes reusable
-runtime artifacts for review and RAG bootstrapping.
+The live commodity futures agent (``_analyze_futures_symbol``) enters when the
+intraday Market-Profile + order-flow signal (``evaluate_commodity_mp_signal``)
+fires one of its triggers (open_drive / ib_break / failed_auction / va_migration /
+lvn_fade). This module replays that same per-bar decision on historical MCX futures
+candles and writes reusable runtime artifacts, and exposes a harness-ready
+R-multiple backtest (:func:`simulate_signal_backtest`).
+
+PREREQUISITE — DATA DEPTH: meaningful (MinBTL-satisfying) validation needs >= ~2y of
+1-minute commodity history in ``underlying_spot_candles``. The live agent only loads
+``DEFAULT_COMMODITY_HISTORY_DAYS`` (~21 days) from the broker, which is far too
+shallow for walk-forward statistics. Until a deeper 1-minute commodity backfill
+exists, this module's output is a smoke/plumbing artifact, not a validated edge.
+See docs/STRATEGY_TESTING_RESULTS.md Run 3.
 """
 from __future__ import annotations
 
@@ -12,6 +21,7 @@ import csv
 import json
 import math
 from dataclasses import dataclass
+from datetime import date as _date
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -20,8 +30,8 @@ import pandas as pd
 
 from market_data.commodity_contract_specs import get_commodity_contract_spec
 from paper_engine.commodity_strategy_agent import (
+    IST,
     FUTURES_BREAK_EVEN_R_MULTIPLIER,
-    FUTURES_CONTINUATION_LOOKBACK_BARS,
     FUTURES_MAX_POSITIONS,
     FUTURES_MIN_HOLD_BARS,
     FUTURES_MIN_STOP_PCT,
@@ -29,7 +39,11 @@ from paper_engine.commodity_strategy_agent import (
     FUTURES_TIMEFRAME,
     FUTURES_TRAIL_ATR_MULTIPLIER,
     CommodityStrategyAgent,
-    evaluate_commodity_signal,
+    _compute_atr_series,
+    _infer_09ist_anchor,
+    _latest_session_rows,
+    _parse_iso_timestamp,
+    evaluate_commodity_mp_signal,
 )
 
 
@@ -86,32 +100,90 @@ def _round_or_none(value: Any, digits: int = 4) -> Optional[float]:
     return round(number, digits) if number is not None else None
 
 
-def _session_rows(rows: list[dict[str, Any]], index: int) -> list[dict[str, Any]]:
-    current_time = pd.Timestamp(rows[index]["time"])
-    current_date = current_time.date()
-    session = []
-    for row in rows[: index + 1]:
-        try:
-            row_time = pd.Timestamp(row["time"])
-        except Exception:
-            continue
-        if row_time.date() == current_date:
-            session.append(row)
-    return session
+def _row_session_date(row: dict[str, Any]) -> Optional[_date]:
+    parsed = _parse_iso_timestamp(row.get("time"))
+    if parsed is None:
+        return None
+    try:
+        return parsed.astimezone(IST).date()
+    except Exception:
+        return parsed.date()
+
+
+def _prior_profile(
+    agent: CommodityStrategyAgent,
+    *,
+    symbol: str,
+    history: list[dict[str, Any]],
+    session_date: Optional[_date],
+    cache: dict,
+):
+    """Build the profile for the session immediately before ``session_date``.
+
+    Mirrors ``CommodityStrategyAgent._load_prior_session_profile`` but off the
+    in-memory walk-forward history (no broker call). Cached per session date.
+    """
+    if session_date in cache:
+        return cache[session_date]
+    prior_profile = None
+    if session_date is not None:
+        prior_rows = [r for r in history if (d := _row_session_date(r)) is not None and d < session_date]
+        if prior_rows:
+            prior_session, _ = _latest_session_rows(prior_rows)
+            if prior_session:
+                prior_profile = agent._build_market_profile(symbol, prior_session)  # noqa: SLF001
+    cache[session_date] = prior_profile
+    return prior_profile
+
+
+def _evaluate_mp(
+    agent: CommodityStrategyAgent,
+    *,
+    symbol: str,
+    rows: list[dict[str, Any]],
+    index: int,
+    prior_cache: dict,
+) -> dict[str, Any]:
+    """Replay the live ``evaluate_commodity_mp_signal`` decision for bar ``index``.
+
+    Builds the same arguments the live ``_analyze_futures_symbol`` constructs:
+    today_profile (current session), prior_profile (previous session),
+    cvd_anchor_index (09:00 IST anchor), atr_1m. Operates only on closed bars up
+    to and including ``index`` (no look-ahead).
+    """
+    history = rows[: index + 1]
+    session_rows, session_date = _latest_session_rows(history)
+    today_profile = agent._build_market_profile(symbol, session_rows)  # noqa: SLF001
+    prior_profile = _prior_profile(
+        agent, symbol=symbol, history=history, session_date=session_date, cache=prior_cache
+    )
+    cvd_anchor_index = _infer_09ist_anchor(history)
+    atr_1m = _compute_atr_series(history, period=14)
+    return evaluate_commodity_mp_signal(
+        history,
+        symbol=symbol,
+        today_profile=today_profile,
+        prior_profile=prior_profile,
+        cvd_anchor_index=cvd_anchor_index,
+        atr_1m=atr_1m,
+    )
 
 
 def _candidate_from_analysis(analysis: dict[str, Any]) -> tuple[Optional[str], str, Optional[str]]:
+    """Map the MP+OF signal row to (BUY/SELL, reason, entry_style).
+
+    The MP signal already fuses the Market-Profile gate and the order-flow
+    confirmation, so a fired ``signal`` is the actionable candidate — there is no
+    separate continuation channel like the legacy MACD evaluator had.
+    """
     signal = analysis.get("signal")
     if signal in {"BUY", "SELL"}:
-        return str(signal), str(analysis.get("reason") or "macd_zero_cross"), "fresh_cross"
-    continuation = analysis.get("continuation_signal")
-    if continuation in {"BUY", "SELL"}:
         return (
-            str(continuation),
-            str(analysis.get("continuation_reason") or analysis.get("reason") or "macd_continuation"),
-            "continuation",
+            str(signal),
+            str(analysis.get("reason") or "mp_trigger"),
+            str(analysis.get("entry_style") or "mp_trigger"),
         )
-    return None, str(analysis.get("reason") or "no_cross"), None
+    return None, str(analysis.get("reason") or "no_trigger"), None
 
 
 def _entry_row(
@@ -120,51 +192,42 @@ def _entry_row(
     symbol: str,
     rows: list[dict[str, Any]],
     index: int,
+    prior_cache: dict,
+    analysis: Optional[dict[str, Any]] = None,
 ) -> Optional[dict[str, Any]]:
-    history = rows[: index + 1]
-    analysis = evaluate_commodity_signal(history, symbol=symbol, timeframe=FUTURES_TIMEFRAME)
+    if analysis is None:
+        analysis = _evaluate_mp(agent, symbol=symbol, rows=rows, index=index, prior_cache=prior_cache)
     candidate_signal, candidate_reason, entry_style = _candidate_from_analysis(analysis)
     if candidate_signal not in {"BUY", "SELL"}:
         return None
 
-    latest_close = _safe_float(analysis.get("latest_close"))
-    if latest_close is None or latest_close <= 0:
-        return None
-
-    session = _session_rows(rows, index)
-    profile = agent._build_market_profile(symbol, session)  # noqa: SLF001 - replaying live gate.
-    if profile is None or len(session) < 8:
-        return None
-
-    mp_direction, mp_day_type, mp_reason = agent._classify_market_profile(  # noqa: SLF001 - replaying live gate.
-        profile=profile,
-        current_price=latest_close,
-        session_rows=session,
-    )
-    if entry_style == "continuation" and mp_day_type not in {"trend_up", "trend_down"}:
-        return None
-    if candidate_signal != mp_direction:
+    # The MP signal does not echo the bar close, so anchor entry on the bar itself.
+    price = _safe_float(rows[index].get("close"))
+    if price is None or price <= 0:
         return None
 
     return {
         "symbol": symbol,
         "underlying": get_commodity_contract_spec(symbol).root,
         "signal": candidate_signal,
-        "reason": f"{candidate_reason}_{mp_reason}",
+        "reason": candidate_reason,
         "entry_style": entry_style,
-        "price": latest_close,
+        "price": price,
         "atr": _safe_float(analysis.get("atr")) or 0.0,
         "bar_time": str(analysis.get("bar_time") or rows[index].get("time") or ""),
         "raw_signal": analysis.get("signal"),
-        "mp_day_type": mp_day_type,
-        "mp_reason": mp_reason,
-        "mp_poc": _round_or_none(getattr(profile, "poc", None), 2),
-        "mp_vah": _round_or_none(getattr(profile, "vah", None), 2),
-        "mp_val": _round_or_none(getattr(profile, "val", None), 2),
-        "mp_ib_high": _round_or_none(getattr(profile, "initial_balance_high", None), 2),
-        "mp_ib_low": _round_or_none(getattr(profile, "initial_balance_low", None), 2),
-        "macd": analysis.get("macd"),
-        "macd_histogram": analysis.get("macd_histogram"),
+        "mp_day_type": str(analysis.get("mp_day_type") or analysis.get("regime") or ""),
+        "mp_reason": str(analysis.get("mp_reason") or ""),
+        "mp_poc": _round_or_none(analysis.get("mp_poc"), 2),
+        "mp_vah": _round_or_none(analysis.get("mp_vah"), 2),
+        "mp_val": _round_or_none(analysis.get("mp_val"), 2),
+        "mp_ib_high": _round_or_none(analysis.get("mp_ib_high"), 2),
+        "mp_ib_low": _round_or_none(analysis.get("mp_ib_low"), 2),
+        "confidence": _round_or_none(analysis.get("confidence"), 3),
+        "stop_hint": _round_or_none(analysis.get("stop_hint"), 4),
+        "target_hint": _round_or_none(analysis.get("target_hint"), 4),
+        "macd": None,
+        "macd_histogram": None,
     }
 
 
@@ -409,9 +472,10 @@ class CommodityFuturesWalkForwardRunner:
             return []
         trades: list[dict[str, Any]] = []
         position: ReplayPosition | None = None
+        prior_cache: dict = {}
         for index in range(40, len(rows)):
             row = rows[index]
-            analysis = evaluate_commodity_signal(rows[: index + 1], symbol=symbol, timeframe=FUTURES_TIMEFRAME)
+            analysis = _evaluate_mp(self.agent, symbol=symbol, rows=rows, index=index, prior_cache=prior_cache)
             if position is not None:
                 hold_bars = index - position.entry_index
                 reason = None
@@ -424,7 +488,9 @@ class CommodityFuturesWalkForwardRunner:
                     position = None
                 continue
 
-            entry = _entry_row(self.agent, symbol=symbol, rows=rows, index=index)
+            entry = _entry_row(
+                self.agent, symbol=symbol, rows=rows, index=index, prior_cache=prior_cache, analysis=analysis
+            )
             if not entry:
                 continue
             position = _open_position(entry, index=index, lots=self.lots)
@@ -467,6 +533,63 @@ class CommodityFuturesWalkForwardRunner:
                 f"- {row['symbol']}: {row['candles']} candles, {row['trades']} trades, status={row['status']}"
             )
         (self.output_root / "report.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def simulate_signal_backtest(
+    rows: list[dict[str, Any]],
+    *,
+    symbol: str,
+    agent: Optional[CommodityStrategyAgent] = None,
+    sl_atr: float = 1.5,
+    tp_atr: float = 3.0,
+    warmup_bars: int = 40,
+) -> dict[str, Any]:
+    """Harness-ready R-multiple backtest of the MP+OF commodity signal.
+
+    Maps the per-bar ``evaluate_commodity_mp_signal`` decision to an integer signal
+    (+1 BUY / -1 SELL / 0 flat) and runs it through the shared neutral ATR-stop
+    executor (:func:`analysis.signal_backtest.simulate_underlying`, stop = -1R), so
+    the result plugs straight into ``analysis.walk_forward.validate_strategy`` via
+    ``extract_returns``/``extract_exit_times``. Trades the underlying futures price.
+
+    Returns ``{"events": [{r_multiple, exit_time, ...}], "summary": {...}}``.
+    """
+    from analysis.signal_backtest import simulate_underlying
+
+    agent = agent or CommodityStrategyAgent()
+    rows = CommodityFuturesWalkForwardRunner._normalize_rows(rows)
+    if len(rows) <= warmup_bars + 5:
+        return {"events": [], "summary": {"trades": 0}}
+
+    prior_cache: dict = {}
+    records: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        sig = 0
+        atr = 0.0
+        if index >= warmup_bars:
+            analysis = _evaluate_mp(agent, symbol=symbol, rows=rows, index=index, prior_cache=prior_cache)
+            raw = analysis.get("signal")
+            sig = 1 if raw == "BUY" else (-1 if raw == "SELL" else 0)
+            atr = _safe_float(analysis.get("atr")) or 0.0
+        records.append(
+            {
+                "time": row["time"],
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "atr": float(atr),
+                "sig": int(sig),
+            }
+        )
+
+    frame = pd.DataFrame.from_records(records)
+    # Give every bar a positive ATR stop unit (fall back to 1% of price if the
+    # signal had not yet computed an ATR).
+    atr = frame["atr"].astype(float).where(frame["atr"].astype(float) > 0)
+    atr = atr.ffill().bfill().fillna(frame["close"].astype(float) * 0.01)
+    frame["atr"] = atr.astype(float)
+    return simulate_underlying(frame, sl_atr=sl_atr, tp_atr=tp_atr, atr_col="atr", signal_col="sig")
 
 
 async def amain() -> None:
