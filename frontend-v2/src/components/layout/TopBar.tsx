@@ -15,6 +15,7 @@ import Link from "next/link";
 import { ExternalLink } from "lucide-react";
 
 import { API_URL } from "@/lib/api";
+import TopBarStatus from "./TopBarStatus";
 
 export default function TopBar() {
   return (
@@ -23,21 +24,19 @@ export default function TopBar() {
         <span className="v2-badge rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em]">
           v2 preview
         </span>
-        <span className="text-text-muted">
+        <span className="hidden text-text-muted sm:inline">
           API · <span className="font-mono">{API_URL}</span>
         </span>
       </div>
-      <div className="flex items-center gap-2">
-        <span className="text-text-muted">
-          Need a feature that's not here yet? Use
-        </span>
+      <div className="flex items-center gap-2.5">
+        <TopBarStatus />
         <Link
           href="http://localhost:3000"
           target="_blank"
           rel="noreferrer"
           className="inline-flex items-center gap-1 rounded border border-bg-border bg-bg-primary/30 px-1.5 py-0.5 text-text-secondary hover:border-bg-active hover:text-text-primary"
         >
-          v1 (port 3000)
+          v1
           <ExternalLink size={10} />
         </Link>
       </div>
