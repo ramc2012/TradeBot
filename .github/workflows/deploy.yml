@@ -230,18 +230,9 @@ jobs:
           echo "    root disk now:"; df -h / | tail -1
           echo "==> Building backend (cached) + restarting..."
           docker compose up -d --build ${FORCE_FLAG} backend
-          echo "==> Building v1 frontend (--no-cache) + restarting..."
-          # --no-cache on the v1 frontend for the SAME reason as v2: the
-          # Next.js image is COPY . . + next build, and BuildKit will reuse
-          # a stale COPY layer when src/ changed but package*.json didn't —
-          # the route exists (200) but its compiled JS/HTML is the OLD page.
-          # That's exactly what bit the 2026-06-02 NSE-merge + Reports
-          # deploy: backend updated, /reports + /strategy/live returned 200,
-          # but served stale content. A clean frontend build (~60-90s) is
-          # cheap insurance until the layer-cache story is fixed properly.
-          docker compose build --no-cache frontend
-          docker compose up -d --force-recreate frontend
-          echo "==> Building + restarting frontend-v2 (on :3001, profile=v2)..."
+          # v1 frontend RETIRED 2026-06-07 — service removed from docker-compose.yml.
+          # (Previously built + restarted nomadcurie_frontend here.)
+          echo "==> Building + restarting frontend-v2 (the sole UI, on :3000)..."
           # v2 service is gated behind --profile v2 in docker-compose.yml so
           # local 'docker compose up' on a dev box doesn't auto-start it.
           # In prod we want it running alongside v1 until deprecation.

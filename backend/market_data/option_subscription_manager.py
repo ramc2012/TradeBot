@@ -44,6 +44,7 @@ from loguru import logger
 
 from api.routers.auth import get_active_adapter
 from core.config import settings
+from core.trading_calendar import trading_calendar
 from market_data import data_router
 from market_data.atm_watchlist import atm_watchlist_service
 from market_data.option_chain import option_chain_service
@@ -752,11 +753,18 @@ async def refresh_commodity_marks() -> int:
 
 
 async def run_commodity_mark_refresh_loop(interval_seconds: float = 12.0) -> None:
-    """Periodically poll MCX LTPs into the tick hot-cache during MCX hours."""
+    """Poll MCX LTPs into the tick hot-cache, but only while MCX is actually open.
+
+    Uses the holiday-aware trading_calendar (not just weekday+time) so the loop
+    does NOT ping the broker on MCX holidays, and idles to the next session open
+    (capped at 5 min) when closed instead of waking every 12s round the clock.
+    """
     logged_once = False
     while True:
+        sleep_for = interval_seconds
         try:
-            if _mcx_hours_now():
+            now = _now_ist()
+            if trading_calendar.is_exchange_open("MCX", now):
                 written = await refresh_commodity_marks()
                 if written and not logged_once:
                     logger.info(
@@ -764,11 +772,19 @@ async def run_commodity_mark_refresh_loop(interval_seconds: float = 12.0) -> Non
                         "streaming to tick hot-cache (~12s cadence)"
                     )
                     logged_once = True
+            else:
+                logged_once = False
+                # Idle until the next MCX session (holiday/weekend/overnight aware).
+                try:
+                    nxt = trading_calendar.next_exchange_open("MCX", now)
+                    sleep_for = max(interval_seconds, min((nxt - now).total_seconds(), 300.0))
+                except Exception:
+                    sleep_for = 300.0
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[CommodityWS] mark refresh failed: {exc}")
         try:
-            await asyncio.sleep(interval_seconds)
+            await asyncio.sleep(sleep_for)
         except asyncio.CancelledError:
             raise

@@ -52,7 +52,7 @@ from api.websockets.ticks import (
 )
 from market_data import data_router as market_data_router
 from market_data.live_candle_store import live_candle_store
-from market_data.symbols import LIVE_INDEX_APP_SYMBOLS
+from market_data.symbols import LIVE_INDEX_APP_SYMBOLS, SECTOR_INDEX_APP_SYMBOLS
 from auction_intelligence.rl.automation import rl_auto_trainer
 from paper_engine.commodity_strategy_agent import commodity_strategy_agent
 from paper_engine.strategy_agent import paper_strategy_agent
@@ -134,6 +134,25 @@ async def lifespan(app: FastAPI):
         )
         market_data_router.set_broker(adapter)
         await market_data_router.subscribe(list(LIVE_INDEX_APP_SYMBOLS))
+        # Sector-network coverage: stream the NSE sector indices so the quote_bus
+        # tape (and terminal / sector views) carry them live. Trivial RAM (<10 MB),
+        # ~7 extra symbols vs the 5000 WS cap. Pinned via add_subscriptions →
+        # survives an auth/session resync.
+        try:
+            await market_data_router.add_subscriptions(list(SECTOR_INDEX_APP_SYMBOLS))
+        except Exception as exc:
+            logger.warning(f"Sector index subscription failed: {exc}")
+        # Phase-2 (flag-gated, default OFF): the full ~206 F&O sector constituents.
+        # Heavy on backend RSS (live_candle_store per-symbol OHLC) — only enable
+        # after v1 is retired and RSS headroom is confirmed on the t3.medium.
+        if getattr(settings, "STOCK_WS_SUBSCRIPTIONS_ENABLED", False):
+            try:
+                from analytics.sector import SECTOR_STOCKS
+                stock_syms = [f"NSE:{s}-EQ" for s in sorted(SECTOR_STOCKS)]
+                added = await market_data_router.add_subscriptions(stock_syms)
+                logger.info(f"Stock WS subscriptions enabled: +{added} sector constituents")
+            except Exception as exc:
+                logger.warning(f"Stock WS subscription failed: {exc}")
     else:
         await market_data_router.stop_mock_feed()
         await market_data_router.unsubscribe()

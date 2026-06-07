@@ -13,10 +13,9 @@
  * One shell removes that divergence in one stroke.
  */
 import { clsx } from "clsx";
-import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback } from "react";
-import { Activity, ExternalLink } from "lucide-react";
+import { Activity } from "lucide-react";
 
 import { StatusBadge } from "./StatusBadge";
 import { formatIST } from "./formatters";
@@ -98,17 +97,9 @@ export function DeskShell({
           </div>
           <div className="flex items-center gap-2">
             {rightSlot}
-            {v1Href ? (
-              <Link
-                href={v1Href}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-bg-border bg-bg-primary/30 px-2.5 py-1.5 text-[11px] text-text-secondary hover:border-bg-active hover:text-text-primary"
-                title="Open the equivalent v1 page in a new tab"
-                target="_blank"
-              >
-                v1 view
-                <ExternalLink size={11} />
-              </Link>
-            ) : null}
+            {/* v1 deprecated — the "v1 view" link is intentionally not rendered.
+                The v1Href prop is kept for back-compat but no longer surfaces a
+                link (v1 frontend is being retired; v2 is the primary UI). */}
           </div>
         </div>
       </header>

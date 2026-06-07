@@ -50,6 +50,20 @@ TICK_CAPTURE_APP_SYMBOLS: tuple[str, ...] = (
     "BSE:SENSEX-INDEX",
 )
 
+# NSE sector indices streamed for the sector-network + live terminal. These are
+# already broker-native Fyers keys (to_fyers_symbol passes them through), so the
+# quote_bus tape carries them once subscribed. BANKNIFTY is intentionally omitted
+# — it is already in LIVE_INDEX_APP_SYMBOLS (NSE:BANKNIFTY-INDEX → NSE:NIFTYBANK).
+SECTOR_INDEX_APP_SYMBOLS: tuple[str, ...] = (
+    "NSE:NIFTYIT-INDEX",
+    "NSE:NIFTYAUTO-INDEX",
+    "NSE:NIFTYPHARMA-INDEX",
+    "NSE:NIFTYFMCG-INDEX",
+    "NSE:NIFTYMETAL-INDEX",
+    "NSE:NIFTYENERGY-INDEX",
+    "NSE:NIFTYREALTY-INDEX",
+)
+
 
 def to_broker_symbol(symbol: str) -> str:
     """Translate an app symbol to the broker's instrument key when known."""

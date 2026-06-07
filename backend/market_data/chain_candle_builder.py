@@ -27,6 +27,8 @@ from typing import Any, Optional
 
 from loguru import logger
 
+from core.trading_calendar import trading_calendar
+
 BUCKET_SECONDS = 180  # 3-minute bars
 
 # Per-kind poll cadence (seconds). INDEX gets a tighter cadence for true OHLC;
@@ -276,6 +278,19 @@ class ChainCandleBuilder:
         logger.info("[chain-builder] started full-universe 3m chain → option_premium_candles")
         try:
             while self._running:
+                # Holiday/weekend/after-hours gate: the chain only moves while NSE
+                # is open. When closed, idle to the next session (capped 5 min)
+                # instead of polling the full option universe every 15s round the
+                # clock — this is the dominant off-hours Fyers REST saver.
+                if not trading_calendar.is_exchange_open("NSE"):
+                    try:
+                        nxt = trading_calendar.next_exchange_open("NSE")
+                        now = datetime.now(nxt.tzinfo) if nxt.tzinfo else datetime.now()
+                        idle = max(cycle_seconds, min((nxt - now).total_seconds(), 300.0))
+                    except Exception:
+                        idle = 300.0
+                    await asyncio.sleep(idle)
+                    continue
                 try:
                     stats = await self.poll_once()
                     if stats["persisted"]:
