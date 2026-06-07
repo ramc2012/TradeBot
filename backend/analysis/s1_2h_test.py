@@ -35,6 +35,16 @@ HARD_STOP, TRAIL_ACT, TRAIL_GB = 0.25, 0.50, 0.25
 RTH_OPEN, RTH_CLOSE = 9 * 60 + 15, 15 * 60 + 30
 TF_MIN = 120  # 2 hours
 INDICES = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "BANKEX"}
+# DATA HYGIENE: option_premium_candles carries phantom Thursday-expiry (06-25) contracts
+# for NSE names — NSE actually expires 06-30 (Tuesday); 06-25 is the BSE/SENSEX expiry.
+# Restrict each underlying to its real monthly expiry to avoid the contaminated series.
+BSE_UNDERS = {"SENSEX", "BANKEX", "SENSEX50"}
+NSE_EXPIRY = os.environ.get("NSE_EXPIRY", "2026-06-30")
+BSE_EXPIRY = os.environ.get("BSE_EXPIRY", "2026-06-25")
+
+
+def _valid_expiry(u):
+    return BSE_EXPIRY if u in BSE_UNDERS else NSE_EXPIRY
 
 
 def _ist(ts):
@@ -163,8 +173,9 @@ async def main():
         unders = [r["underlying"] for r in await conn.fetch(
             "SELECT DISTINCT underlying FROM option_premium_candles WHERE interval='30minute'")]
         for u in unders:
+            ve = _valid_expiry(u)
             exps = [r["expiry"] for r in await conn.fetch(
-                "SELECT DISTINCT expiry FROM option_premium_candles WHERE interval='30minute' AND underlying=$1 ORDER BY expiry", u)]
+                "SELECT DISTINCT expiry FROM option_premium_candles WHERE interval='30minute' AND underlying=$1 AND expiry::text=$2 ORDER BY expiry", u, ve)]
             for e in exps:
                 strikes = [float(r["strike"]) for r in await conn.fetch(
                     "SELECT DISTINCT strike FROM option_premium_candles WHERE interval='30minute' AND underlying=$1 AND expiry=$2", u, e)]
