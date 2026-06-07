@@ -109,12 +109,15 @@ async def _close_pubsub(pubsub) -> None:
 async def ws_ticks(websocket: WebSocket, symbol: str):
     """Stream real-time ticks for a symbol via Redis pub/sub."""
     await _accept_authenticated_socket(websocket, f"ticks:{symbol}")
+    pubsub = None
     try:
         redis = await get_redis()
         pubsub = redis.pubsub()
         await pubsub.subscribe(f"ticks:{symbol}")
     except Exception as exc:
         logger.warning(f"[WS] Redis tick stream unavailable for {symbol}; using snapshot fallback: {exc}")
+        if pubsub is not None:
+            await _close_pubsub(pubsub)  # subscribe() failed after pubsub() — release it or it leaks
         await _stream_tick_snapshot_fallback(websocket, symbol)
         return
 
@@ -778,12 +781,15 @@ async def ws_quotes(websocket: WebSocket):
 
     from market_data.quote_bus import QUOTES_BUS_CHANNEL
 
+    pubsub = None
     try:
         redis = await get_redis()
         pubsub = redis.pubsub()
         await pubsub.subscribe(QUOTES_BUS_CHANNEL)
     except Exception as exc:  # noqa: BLE001 — Redis down → degrade, don't blackout
         logger.warning(f"[WS] quotes pub/sub unavailable, closing: {exc}")
+        if pubsub is not None:
+            await _close_pubsub(pubsub)  # B2: release the half-open conn or it leaks → Redis maxclients
         return
 
     try:
@@ -823,12 +829,15 @@ async def ws_depth(websocket: WebSocket, symbol: str):
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"[WS] depth subscribe trigger failed for {symbol}: {exc}")
 
+    pubsub = None
     try:
         redis = await get_redis()
         pubsub = redis.pubsub()
         await pubsub.subscribe(f"depth:{symbol}")
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[WS] depth pub/sub unavailable for {symbol}: {exc}")
+        if pubsub is not None:
+            await _close_pubsub(pubsub)  # B2: release the half-open conn or it leaks
         try:
             await data_router.unsubscribe_depth(symbol)
         except Exception:
@@ -863,9 +872,16 @@ async def ws_depth(websocket: WebSocket, symbol: str):
 async def ws_proposals(websocket: WebSocket):
     """Stream real-time agent proposals via Redis pub/sub."""
     await _accept_authenticated_socket(websocket, "proposals")
-    redis = await get_redis()
-    pubsub = redis.pubsub()
-    await pubsub.subscribe("proposals")
+    pubsub = None
+    try:
+        redis = await get_redis()
+        pubsub = redis.pubsub()
+        await pubsub.subscribe("proposals")
+    except Exception as exc:  # B3: init was previously unguarded → a subscribe() failure leaked the conn
+        logger.warning(f"[WS] proposals pub/sub unavailable: {exc}")
+        if pubsub is not None:
+            await _close_pubsub(pubsub)
+        return
     try:
         async for message in pubsub.listen():
             if message["type"] == "message":

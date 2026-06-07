@@ -65,6 +65,32 @@ OAUTH_CALLBACK_PATHS = {"/api/auth/fyers/callback", "/api/auth/upstox/callback"}
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
     logger.info("═══ Nomad Curie starting up ═══")
+
+    # ── Production security guardrails (gap-audit B1/H7) ─────────────────────────
+    # Refuse to boot a money-control API unauthenticated in production. APP_ENV must
+    # be "production" on prod (it is in /opt/TradeBot/.env). Auth-off in prod = any
+    # internet client can flip live mode + place real Fyers orders → hard fail.
+    if settings.APP_ENV == "production":
+        if not settings.APP_TOKEN_AUTH_ENABLED:
+            raise RuntimeError(
+                "REFUSING TO BOOT: APP_TOKEN_AUTH_ENABLED is False in production. "
+                "The /api surface would accept UNAUTHENTICATED trade control. "
+                "Set APP_TOKEN_AUTH_ENABLED=true and APP_WRITE_TOKEN in the prod .env."
+            )
+        if not settings.APP_WRITE_TOKEN.strip():
+            raise RuntimeError(
+                "REFUSING TO BOOT: APP_WRITE_TOKEN is empty in production while auth is enabled."
+            )
+        if "change-me" in settings.SECRET_KEY.lower() or settings.SECRET_KEY == "change-me-to-a-random-secret-key":
+            # WARN (not fatal): a hard fail here would brick the live box until the
+            # key is rotated WITH credential re-encryption (creds are Fernet-encrypted
+            # under sha256(SECRET_KEY)). Rotate via the supervised migration instead.
+            logger.critical(
+                "SECURITY: SECRET_KEY is a weak/default value in production — broker "
+                "credentials at rest are weakly encrypted. Rotate SECRET_KEY (with "
+                "credential re-encryption) ASAP."
+            )
+
     research_sync_task: asyncio.Task | None = None
     loop_lag_task: asyncio.Task | None = None
 
@@ -275,6 +301,22 @@ async def lifespan(app: FastAPI):
             await loop_lag_task
         except asyncio.CancelledError:
             pass
+    # B4 (gap-audit): cancel the market-data background loops too — previously they
+    # kept running after `yield`, leaking DB/Redis connections into the next boot and
+    # hanging restarts. All three re-raise CancelledError, so this is clean.
+    for _name, _task in (
+        ("option-ws", option_ws_task),
+        ("held-position-ws", held_position_ws_task),
+        ("commodity-mark", commodity_mark_task),
+    ):
+        if _task is not None:
+            _task.cancel()
+            try:
+                await _task
+            except asyncio.CancelledError:
+                pass
+            except Exception as _exc:  # noqa: BLE001
+                logger.debug(f"shutdown: {_name} task stop error: {_exc}")
     if settings.CHAIN_CANDLE_BUILDER_ENABLED:
         try:
             from market_data.chain_candle_builder import chain_candle_builder
