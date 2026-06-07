@@ -1,6 +1,7 @@
 """Shared option-history access for watchlists and paper strategies."""
 from __future__ import annotations
 
+import asyncio
 from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 import math
@@ -282,26 +283,39 @@ class OptionHistoryService:
                 f"{encoded_key}/{self._upstox_interval(interval)}/{to_date.isoformat()}/{from_date.isoformat()}"
             )
 
+        # Throttle the backfill lane through the shared Upstox limiter (8/s,
+        # 1800/30min) + retry 429/5xx so an off-hours full-universe backfill
+        # never trips Upstox's 2000/30min governor.
+        from brokers.rate_limiter import UPSTOX_DATA_LIMITER
+
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(
-                    url,
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Accept": "application/json",
-                    },
-                )
-            if response.status_code != 200:
+            response = None
+            for attempt in range(4):
+                await UPSTOX_DATA_LIMITER.acquire()
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.get(
+                        url,
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Accept": "application/json",
+                        },
+                    )
+                if response.status_code in (429, 503) and attempt < 3:
+                    await asyncio.sleep(min(2 ** attempt, 20))
+                    continue
+                break
+            if response is None or response.status_code != 200:
+                status = response.status_code if response is not None else "no-response"
                 self._record_health(
                     broker="upstox",
                     instrument_key=instrument_key,
                     interval=interval,
                     status="failure",
-                    detail=f"historical API returned HTTP {response.status_code}",
+                    detail=f"historical API returned HTTP {status}",
                 )
                 logger.warning(
                     f"[OptionHistory] Upstox historical fetch failed for {instrument_key} {interval}: "
-                    f"HTTP {response.status_code}"
+                    f"HTTP {status}"
                 )
                 return []
             payload = response.json()
@@ -539,7 +553,19 @@ class OptionHistoryService:
                       AND strike = :strike
                       AND option_type = :option_type
                       AND interval = :interval
-                    ORDER BY time, synced_at DESC NULLS LAST
+                    -- Dedup precedence: at a shared timestamp prefer the
+                    -- greeks-bearing chain/history row over a greeks-null live
+                    -- row (fyers_chain > fyers > upstox > live_tick/ws), then
+                    -- the freshest within that source. Timestamps written by
+                    -- only one source are unaffected (no competing row).
+                    ORDER BY time,
+                        CASE source
+                            WHEN 'fyers_chain' THEN 0
+                            WHEN 'fyers' THEN 1
+                            WHEN 'upstox' THEN 2
+                            ELSE 3
+                        END,
+                        synced_at DESC NULLS LAST
                 ) deduped
                 ORDER BY time DESC
                 LIMIT :limit
@@ -724,8 +750,29 @@ class OptionHistoryService:
         instrument_key: str,
         interval: str,
         already_in_db: set[str],
+        source: Optional[str] = None,
     ) -> None:
-        """Upsert broker-fetched candles into option_premium_candles."""
+        """Upsert broker-fetched candles into option_premium_candles.
+
+        ``source`` records WHICH broker/feed produced the rows so the read-path
+        dedup can prefer greeks-bearing chain rows over greeks-null live rows.
+        Falls back to inferring upstox-vs-fyers from the instrument_key when the
+        caller does not pass one (back-compat).
+        """
+        if not source:
+            source = "upstox" if self._is_upstox_key(instrument_key) else "fyers"
+        # Reject phantom index contracts: the upstox expired-instruments feed returns
+        # NSE-index series on the BSE expiry day (e.g. NIFTY 'Thursday'/06-25), which
+        # NSE never lists — a distinct, non-existent contract that contaminates any
+        # expiry-grouped backtest. Drop at the write chokepoint. (Stocks pass through.)
+        from analysis.instruments import is_valid_index_expiry
+
+        if not is_valid_index_expiry(underlying, expiry):
+            logger.warning(
+                f"[option_history] rejecting phantom expiry: {underlying} {expiry} "
+                f"(weekday {getattr(expiry, 'weekday', lambda: '?')()}) — not a valid index expiry"
+            )
+            return
         new_rows = [
             r for r in rows
             if _normalize_time(r.get("time")) not in already_in_db
@@ -747,7 +794,7 @@ class OptionHistoryService:
                             :time, :underlying, 'NSE', :expiry, :strike, :option_type,
                             :open, :high, :low, :close, :volume, :oi, :iv,
                             :delta, :gamma, :theta, :vega, :underlying_price,
-                            :instrument_key, :trading_symbol, :interval, 'upstox', now()
+                            :instrument_key, :trading_symbol, :interval, :source, now()
                         )
                         ON CONFLICT (instrument_key, interval, time) DO NOTHING
                         """
@@ -773,6 +820,7 @@ class OptionHistoryService:
                         "instrument_key": instrument_key,
                         "trading_symbol": None,
                         "interval": interval,
+                        "source": source,
                     },
                 )
             await session.commit()

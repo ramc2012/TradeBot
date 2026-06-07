@@ -22,7 +22,7 @@
 import { useMemo, useState, useTransition } from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { Banknote, Brain, Gauge, Layers3, TrendingUp } from "lucide-react";
+import { Banknote, Brain, Gauge, Layers3, Radio, TrendingUp } from "lucide-react";
 
 import {
   DeskShell,
@@ -40,10 +40,14 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { usePaperDeskQueries } from "@/hooks/usePaperDeskQueries";
+import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStrategyPositionsStream";
+import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
+import { createStrategySnapshotSocket } from "@/lib/websocket";
 import { PaperPerformance, GammaDensity } from "@/components/strategies/shared";
 import type { PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
 
+import { TerminalPanel } from "@/components/terminal/TerminalPanel";
 import UniverseWatchlist from "./UniverseWatchlist";
 import EngineCalculations from "./EngineCalculations";
 import PolicyDecisionPanel, { type PolicyBlock } from "./PolicyDecisionPanel";
@@ -57,6 +61,7 @@ const DEFAULT_LOOKBACK = 16;
 
 const TABS = [
   { key: "live",      label: "Live overview",      icon: Gauge },
+  { key: "terminal",  label: "Terminal",           icon: Radio },
   { key: "analytics", label: "Option analytics",   icon: Layers3 },
   { key: "gamma",     label: "Gamma / GEX",         icon: Layers3 },
   { key: "paper",     label: "Paper trading",      icon: Banknote },
@@ -90,7 +95,8 @@ type Snapshot = {
 };
 
 export default function DirectionalDesk() {
-  const [activeTab, setActiveTab] = useUrlTab("live");
+  // Open positions / paper book is the headline view when the desk opens.
+  const [activeTab, setActiveTab] = useUrlTab("paper");
   const [isPending, startTransition] = useTransition();
   const [underlying, setUnderlying] = useState(DEFAULT_UNDERLYING);
   const timeframe = DEFAULT_TIMEFRAME;
@@ -103,7 +109,9 @@ export default function DirectionalDesk() {
     refetchOnWindowFocus: false,
   });
 
-  const liveQuery = useQuery({
+  // Live watchlist + analytics: 8s WS push (real index spot) with a polling
+  // fallback. Reuses the generic /ws/strategy-snapshot channel.
+  const liveQuery = useLiveSnapshotQuery<{ snapshot?: Snapshot }>({
     queryKey: ["directional", "live-snapshot", underlying, timeframe, lookback],
     queryFn: async () =>
       (
@@ -111,6 +119,13 @@ export default function DirectionalDesk() {
           params: { underlying, timeframe, lookback_sessions: lookback },
         })
       ).data as { snapshot?: Snapshot },
+    storageKey: `directional-live-${underlying}-${timeframe}`,
+    streamFactory: (onData, onStatusChange) =>
+      createStrategySnapshotSocket(
+        "directional", underlying, timeframe,
+        (d) => onData(d as { snapshot?: Snapshot }),
+        onStatusChange,
+      ),
     refetchInterval: REFRESH_MS.live,
     refetchOnWindowFocus: false,
   });
@@ -134,6 +149,20 @@ export default function DirectionalDesk() {
     },
   });
 
+  // Live open-positions stream (shared /ws/positions-overview channel). Only
+  // active on the tabs that render the book; falls back to paper.positions
+  // polling when the socket is down or the slice is absent.
+  const posStream = useStrategyPositionsStream({
+    enabled: activeTab === "paper" || activeTab === "performance",
+  });
+  const streamSlice = selectStrategySlice(posStream.data, "directional");
+  const streamLive = posStream.isStreamConnected && Boolean(streamSlice);
+  // Shadow `paper` with the streamed slice so PaperTradingTab (which reads
+  // paper.positions.data internally) and PaperPerformance both go live.
+  const livePaper = streamLive
+    ? ({ ...paper, positions: { ...paper.positions, data: streamSlice } } as typeof paper)
+    : paper;
+
   const reg = snapshot?.regime || {};
   const sig = snapshot?.signal || {};
   const pol = snapshot?.policy || null;
@@ -154,6 +183,12 @@ export default function DirectionalDesk() {
       v1Href="http://localhost:3000/directional-options"
       rightSlot={
         <div className="flex items-center gap-2">
+          {(activeTab === "paper" || activeTab === "performance") ? (
+            <StatusBadge
+              label={streamLive ? "● live" : "polling"}
+              variant={streamLive ? "success" : "info"}
+            />
+          ) : null}
           <label className="rounded-lg border border-bg-border bg-bg-primary/30 px-2.5 py-1 text-[11.5px] text-text-secondary">
             <span className="mr-1.5 text-[10.5px] uppercase tracking-[0.12em] text-text-muted">Symbol</span>
             <select
@@ -252,14 +287,16 @@ export default function DirectionalDesk() {
 
       {activeTab === "gamma" ? <GammaDensity symbol={underlying} /> : null}
 
-      {activeTab === "paper" ? <PaperTradingTab symbol={underlying} paper={paper} /> : null}
+      {activeTab === "terminal" ? <TerminalPanel /> : null}
+
+      {activeTab === "paper" ? <PaperTradingTab symbol={underlying} paper={livePaper} /> : null}
 
       {activeTab === "policy" ? <PolicyLearningTab /> : null}
 
       {activeTab === "performance" ? (
         <PaperPerformance
           summary={paper.summary.data as Record<string, number> | undefined}
-          positions={paper.positions.data as PositionsPayload | undefined}
+          positions={livePaper.positions.data as PositionsPayload | undefined}
         />
       ) : null}
     </DeskShell>

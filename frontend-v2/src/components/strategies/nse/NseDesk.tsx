@@ -63,6 +63,8 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { PaperPerformance } from "@/components/strategies/shared";
+import { useStrategyPositionsStream } from "@/hooks/useStrategyPositionsStream";
+import { TerminalPanel } from "@/components/terminal/TerminalPanel";
 import type { PaperPosition, PaperSummary, PositionsPayload } from "@/lib/strategy-stats";
 import {
   api as apiClient,
@@ -196,9 +198,10 @@ type EquityLane = { key?: string; label?: string; equity_curve?: Array<{ time?: 
 type AuditEvent = { id?: string; time?: string; severity?: string; level?: string; scope?: string; message?: string; market?: string };
 
 const TABS = [
+  { key: "positions", label: "Positions", icon: Wallet },
+  { key: "terminal", label: "Terminal", icon: Radio },
   { key: "overview", label: "Overview", icon: TrendingUp },
   { key: "signals", label: "Signals", icon: ListChecks },
-  { key: "positions", label: "Positions", icon: Wallet },
   { key: "performance", label: "Performance", icon: BarChart3 },
   { key: "activity", label: "Activity", icon: Activity },
 ];
@@ -251,7 +254,8 @@ function positionToPaperPosition(p: PositionRow): PaperPosition {
 // ── Main ────────────────────────────────────────────────────────────────────
 
 export default function NseDesk() {
-  const [activeTab, setActiveTab] = useUrlTab("overview");
+  // Open positions is the headline view when the desk opens.
+  const [activeTab, setActiveTab] = useUrlTab("positions");
 
   const statusQuery = useQuery({
     queryKey: ["nse", "status"],
@@ -299,7 +303,16 @@ export default function NseDesk() {
     refetchOnWindowFocus: false,
   });
 
-  const status = statusQuery.data;
+  // Live positions: stream the NSE agent-status slice off /ws/positions-overview
+  // (carries overlay_nse_agent_status per-tick marks on held legs → more
+  // accurate than the 30s poll). Falls back to the polled status when the
+  // socket is down. The S1 signals watchlist stays on poll — those rows only
+  // change at the 60s strategy scan, so streaming would add cadence not accuracy.
+  const posStream = useStrategyPositionsStream({
+    enabled: activeTab === "positions" || activeTab === "performance" || activeTab === "overview",
+  });
+  const streamLive = posStream.isStreamConnected && Boolean(posStream.data?.nse);
+  const status = (streamLive ? (posStream.data?.nse as unknown as AgentStatus) : statusQuery.data);
   const lane = useMemo<StrategyLane | undefined>(
     () => (status?.strategies || []).find((s) => s.key === "macd_strategy") || (status?.strategies || [])[0],
     [status?.strategies],
@@ -375,6 +388,7 @@ export default function NseDesk() {
       ) : null}
 
       {activeTab === "signals" ? <WatchlistTab rows={watchlist} /> : null}
+      {activeTab === "terminal" ? <TerminalPanel /> : null}
       {activeTab === "positions" ? <PositionsTab rows={positions} /> : null}
       {activeTab === "performance" ? (
         <PaperPerformance summary={summary as PaperSummary} positions={paperPositions} />

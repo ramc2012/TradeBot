@@ -12,7 +12,7 @@
  */
 import { useMemo, useState, useTransition } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Brain, Compass, Gauge, ListChecks, Map as MapIcon, ShieldAlert, TrendingUp } from "lucide-react";
+import { Activity, Brain, Compass, Gauge, ListChecks, Map as MapIcon, Radio, ShieldAlert, TrendingUp } from "lucide-react";
 
 import {
   DeskShell,
@@ -28,6 +28,10 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { MarketProfileChart, OrderFlowPanel, PaperPerformance } from "@/components/strategies/shared";
+import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStrategyPositionsStream";
+import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
+import { TerminalPanel } from "@/components/terminal/TerminalPanel";
+import { createStrategySnapshotSocket } from "@/lib/websocket";
 import type { PaperPosition, PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
 
@@ -38,6 +42,7 @@ import type { ExecutionStep, NtmVolx, Regime, Risk, Snapshot } from "./types";
 
 const TABS = [
   { key: "auction", label: "Auction", icon: MapIcon },
+  { key: "terminal", label: "Terminal", icon: Radio },
   { key: "gates", label: "Gates", icon: ListChecks },
   { key: "performance", label: "Performance", icon: TrendingUp },
   { key: "memory", label: "Memory", icon: Brain },
@@ -58,13 +63,19 @@ function normalizePosition(p: any): PaperPosition {
 }
 
 export default function AuctionDesk() {
-  const [activeTab, setActiveTab] = useUrlTab("auction");
+  // Open positions (PaperPerformance shows the open book) is the headline view on open.
+  const [activeTab, setActiveTab] = useUrlTab("performance");
   const [, startTransition] = useTransition();
   const [symbol, setSymbol] = useState("NIFTY");
 
-  const liveQuery = useQuery({
+  // Live auction snapshot (market profile + order flow + regime): 8s WS push
+  // with polling fallback, via the generic /ws/strategy-snapshot channel.
+  const liveQuery = useLiveSnapshotQuery<Snapshot>({
     queryKey: ["auction", "live", symbol],
     queryFn: async () => (await apiClient.get("/api/auction-intelligence/live-snapshot", { params: { symbol } })).data as Snapshot,
+    storageKey: `auction-live-${symbol}`,
+    streamFactory: (onData, onStatusChange) =>
+      createStrategySnapshotSocket("auction", symbol, null, (d) => onData(d as Snapshot), onStatusChange),
     refetchInterval: REFRESH_MS.live,
     refetchOnWindowFocus: false,
   });
@@ -99,8 +110,14 @@ export default function AuctionDesk() {
     | { summary?: Record<string, number>; open_positions?: unknown[]; closed_positions?: unknown[] }
     | undefined;
 
+  // Live open-positions stream (shared /ws/positions-overview channel); active
+  // on the performance tab, falls back to the polled paper-positions otherwise.
+  const posStream = useStrategyPositionsStream({ enabled: activeTab === "performance" });
+  const streamSlice = selectStrategySlice(posStream.data, "auction");
+  const streamLive = posStream.isStreamConnected && Boolean(streamSlice);
+
   const positions = useMemo<PositionsPayload>(() => {
-    const src = posData ?? status;
+    const src = streamLive ? streamSlice : (posData ?? status);
     return {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       open_positions: ((src?.open_positions as any[]) || []).map(normalizePosition),
@@ -108,7 +125,7 @@ export default function AuctionDesk() {
       closed_positions: ((src?.closed_positions as any[]) || []).map(normalizePosition),
       summary: (src?.summary as PositionsPayload["summary"]) || undefined,
     };
-  }, [posData, status]);
+  }, [streamLive, streamSlice, posData, status]);
 
   const ds = snap?.data_status;
   const paperMode = (snap?.mode ?? "paper") !== "live";
@@ -127,6 +144,9 @@ export default function AuctionDesk() {
       v1Href="http://localhost:3000/auction-intelligence"
       rightSlot={
         <div className="flex items-center gap-2">
+          {activeTab === "performance" ? (
+            <StatusBadge label={streamLive ? "● live" : "polling"} variant={streamLive ? "success" : "info"} />
+          ) : null}
           {ds?.snapshot_mode ? <StatusBadge label={ds.snapshot_mode.replace(/_/g, " ")} variant="info" /> : null}
           <Picker label="Symbol" value={symbol} options={universe} onChange={(v) => startTransition(() => setSymbol(v))} />
         </div>
@@ -135,6 +155,8 @@ export default function AuctionDesk() {
       {activeTab === "auction" ? (
         <AuctionTab snap={snap} spot={spot} regime={regime} mp={mp} of={of} />
       ) : null}
+
+      {activeTab === "terminal" ? <TerminalPanel /> : null}
 
       {activeTab === "gates" ? <GatesPanel symbol={symbol} snapshot={snap} /> : null}
 

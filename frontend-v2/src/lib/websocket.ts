@@ -246,6 +246,55 @@ export function createMarketWatchlistSocket(
   );
 }
 
+/**
+ * Multiplexed live quote tape — the terminal hot path. ONE socket per client
+ * carries coalesced multi-symbol frames ({q:[...]}) the instant the backend
+ * publishes them (event-driven, no snapshot timer). The frontend tick store
+ * filters to the symbols each component subscribes to.
+ */
+export function createQuotesSocket(
+  onMessage: (data: unknown) => void,
+  onStatusChange?: (connected: boolean) => void,
+): ReconnectingWS {
+  return createReconnectingSocket(`${resolveWebSocketBaseUrl()}/ws/quotes`, onMessage, onStatusChange);
+}
+
+/**
+ * 5-level depth (DOM) ladder for one focused symbol. The backend ref-counts the
+ * DepthUpdate subscription, so opening this socket adds the depth feed for that
+ * symbol and closing it releases it.
+ */
+export function createDepthSocket(
+  symbol: string,
+  onMessage: (data: unknown) => void,
+  onStatusChange?: (connected: boolean) => void,
+): ReconnectingWS {
+  return createReconnectingSocket(
+    `${resolveWebSocketBaseUrl()}/ws/depth/${encodeURIComponent(symbol)}`,
+    onMessage,
+    onStatusChange,
+  );
+}
+
+/**
+ * Generic per-desk live-snapshot stream (watchlist + analytics view).
+ * Upgrades a desk's 15-30s live-snapshot poll to an 8s push with reconnect.
+ * `desk` ∈ directional | gann | auction | fractal.
+ */
+export function createStrategySnapshotSocket(
+  desk: string,
+  symbol: string,
+  timeframe: string | null | undefined,
+  onMessage: (data: unknown) => void,
+  onStatusChange?: (connected: boolean) => void,
+): ReconnectingWS {
+  return createReconnectingSocket(
+    withQuery(`${resolveWebSocketBaseUrl()}/ws/strategy-snapshot`, { desk, symbol, timeframe }),
+    onMessage,
+    onStatusChange,
+  );
+}
+
 export function createMarketOptionChainSocket(
   symbol: string,
   expiry: string,

@@ -704,15 +704,27 @@ def _get_active_session_access_token(broker: str) -> str | None:
 
 
 async def _validate_upstox_access_token(access_token: str) -> bool:
+    """Validate the Upstox token against a DATA endpoint, not /user/profile.
+
+    Upstox API-key/algo "access tokens" and the analytics token are DATA-scoped: they return
+    403/401 on /user/profile but 200 on market-data endpoints. The old /user/profile probe
+    therefore reported valid data tokens as "expired_reconnect_required" → the app showed Upstox
+    DISCONNECTED even though it fetched data perfectly (verified live: historical-candle returned
+    200 with candles while /user/profile returned 403). We only use Upstox for read-only
+    historical/backfill, so validate the capability we actually rely on: historical candles.
+    """
     if not access_token:
         return False
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Accept": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+    today = datetime.now(timezone.utc).date()
+    frm = (today - timedelta(days=7)).isoformat()
+    url = (
+        "https://api.upstox.com/v2/historical-candle/"
+        f"NSE_INDEX%7CNifty%2050/day/{today.isoformat()}/{frm}"
+    )
     try:
-        async with httpx.AsyncClient(timeout=4.0) as client:
-            resp = await client.get("https://api.upstox.com/v2/user/profile", headers=headers)
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            resp = await client.get(url, headers=headers)
         return resp.status_code == 200
     except Exception as exc:
         logger.debug(f"Upstox token validation failed: {exc}")

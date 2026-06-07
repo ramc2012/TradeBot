@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, List, Optional
 from loguru import logger
 
 from brokers.base import BrokerAdapter, Tick
-from core.config import auction_of_book_symbols
+from core.config import auction_of_book_symbols, settings
 from db.redis_client import get_redis
 from market_data.symbols import (
     TICK_CAPTURE_APP_SYMBOLS,
@@ -65,6 +65,8 @@ class DataRouter:
         self._callbacks: Dict[str, List[Callable[[Tick], None]]] = {}
         self._global_callbacks: List[Callable[[Tick], None]] = []
         self._tick_buffer: Dict[str, Tick] = {}  # latest tick per symbol
+        self._depth_refs: Dict[str, int] = {}  # ref-counted DepthUpdate subscriptions
+        self._tbt_client: Any = None  # Phase 6 — lazily-created TBT 50-level socket
         self._mock_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._source_policy: dict[str, Any] = {}
@@ -161,10 +163,24 @@ class DataRouter:
             broker_symbols = [to_fyers_symbol(symbol) for symbol in full_set]
         else:
             broker_symbols = [to_broker_symbol(symbol) for symbol in full_set]
-        self._ws_client = await self._broker.subscribe_websocket(
-            broker_symbols, self._on_tick
-        )
+        if broker_name == "fyers":
+            # Fyers adapter accepts an optional depth callback for the 5-level
+            # DepthUpdate ladder (subscribed incrementally per focused symbol).
+            self._ws_client = await self._broker.subscribe_websocket(
+                broker_symbols, self._on_tick, on_depth_callback=self._on_depth
+            )
+        else:
+            self._ws_client = await self._broker.subscribe_websocket(
+                broker_symbols, self._on_tick
+            )
         self._ws_broker = self._broker
+        # Re-arm any depth subscriptions that were active before a resubscribe.
+        if self._depth_refs and broker_name == "fyers":
+            for dsym in list(self._depth_refs):
+                try:
+                    self._ws_client.subscribe(symbols=[dsym], data_type="DepthUpdate")
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[DataRouter] depth re-arm failed for {dsym}: {exc}")
         logger.info(
             f"[DataRouter] Subscribed to {len(full_set)} symbols "
             f"(primary={len(symbols)} required={len(self._required_symbols)} sticky={len(sticky_extras)})"
@@ -443,6 +459,103 @@ class DataRouter:
             )
         except Exception as e:
             logger.debug(f"[DataRouter] Redis publish error: {e}")
+
+    # ── Depth (5-level DOM ladder) ───────────────────────────────────────────
+    def _on_depth(self, depth: dict):
+        """Depth callback (fires on the broker SDK thread) → schedule publish."""
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop and running_loop is self._loop:
+            asyncio.create_task(self._publish_depth(depth))
+        elif self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._publish_depth(depth), self._loop)
+
+    async def _publish_depth(self, depth: dict):
+        try:
+            symbol = depth.get("symbol")
+            if not symbol:
+                return
+            redis = await get_redis()
+            ts = self._ensure_utc_timestamp(depth.get("timestamp"))
+            payload = json.dumps({
+                "symbol": symbol,
+                "bids": depth.get("bids", []),
+                "asks": depth.get("asks", []),
+                "tbq": depth.get("tbq", 0),
+                "tsq": depth.get("tsq", 0),
+                "timestamp": ts.isoformat(),
+            })
+            await redis.publish(f"depth:{symbol}", payload)
+        except Exception as e:
+            logger.debug(f"[DataRouter] Redis depth publish error: {e}")
+
+    async def subscribe_depth(self, broker_symbol: str) -> None:
+        """Ref-counted DepthUpdate subscription on the live WS client.
+
+        ``broker_symbol`` is the broker-native key (e.g. ``NSE:NIFTY...CE``) — the
+        same key the tick feed publishes, so the depth:{symbol} channel aligns.
+        """
+        if not broker_symbol or self._ws_client is None:
+            return
+        n = self._depth_refs.get(broker_symbol, 0)
+        self._depth_refs[broker_symbol] = n + 1
+        if n == 0:
+            # Phase 6: route through the TBT 50-level socket when enabled +
+            # entitled; fall back to the 5-level DataSocket DepthUpdate on any error.
+            if settings.FYERS_TBT_DEPTH_ENABLED and self._is_fyers_broker():
+                if await self._tbt_subscribe(broker_symbol):
+                    return
+            try:
+                sub = getattr(self._ws_client, "subscribe", None)
+                if callable(sub):
+                    sub(symbols=[broker_symbol], data_type="DepthUpdate")
+                    logger.info(f"[DataRouter] depth subscribed (5-level): {broker_symbol}")
+            except Exception as e:
+                logger.debug(f"[DataRouter] depth subscribe failed for {broker_symbol}: {e}")
+
+    async def unsubscribe_depth(self, broker_symbol: str) -> None:
+        if not broker_symbol:
+            return
+        n = self._depth_refs.get(broker_symbol, 0)
+        if n <= 1:
+            self._depth_refs.pop(broker_symbol, None)
+            if settings.FYERS_TBT_DEPTH_ENABLED and self._tbt_client is not None:
+                try:
+                    self._broker.tbt_unsubscribe(self._tbt_client, [broker_symbol])
+                except Exception as e:
+                    logger.debug(f"[DataRouter] TBT depth unsubscribe failed for {broker_symbol}: {e}")
+            if self._ws_client is not None:
+                try:
+                    unsub = getattr(self._ws_client, "unsubscribe", None)
+                    if callable(unsub):
+                        unsub(symbols=[broker_symbol], data_type="DepthUpdate")
+                except Exception as e:
+                    logger.debug(f"[DataRouter] depth unsubscribe failed for {broker_symbol}: {e}")
+        else:
+            self._depth_refs[broker_symbol] = n - 1
+
+    def _is_fyers_broker(self) -> bool:
+        return getattr(self._broker, "broker_name", "") == "fyers"
+
+    async def _tbt_subscribe(self, broker_symbol: str) -> bool:
+        """Subscribe a symbol on the TBT 50-level socket (lazily created). Returns
+        True on success; False to let the caller fall back to the 5-level path."""
+        try:
+            if self._tbt_client is None:
+                self._tbt_client = await self._broker.subscribe_tbt_websocket(
+                    [broker_symbol], self._on_depth
+                )
+                logger.info(f"[DataRouter] TBT depth socket opened; subscribed {broker_symbol}")
+            else:
+                self._broker.tbt_subscribe(self._tbt_client, [broker_symbol])
+                logger.info(f"[DataRouter] TBT depth subscribed: {broker_symbol}")
+            return True
+        except Exception as e:
+            logger.warning(f"[DataRouter] TBT depth unavailable for {broker_symbol} ({e}); using 5-level")
+            self._tbt_client = None
+            return False
 
     def get_latest_tick(self, symbol: str) -> Optional[Tick]:
         return self._tick_buffer.get(symbol)

@@ -365,74 +365,160 @@ async def ws_strategy_dashboard(websocket: WebSocket):
     )
 
 
-async def ws_positions_overview(websocket: WebSocket):
-    """Stream the combined positions page snapshot."""
+async def _build_positions_overview_structure() -> dict:
+    """Gather the combined positions snapshot from all desks (NO live overlay).
 
-    async def payload_factory():
-        from api.routers.commodity import commodity_strategy_status
-        from api.routers.auction_intelligence import paper_positions as auction_paper_positions
-        from api.routers.directional_options import paper_positions as directional_paper_positions
-        from api.routers.fractal_market_profile import fractal_market_profile_paper_positions
-        from api.routers.gann_tp_delta import paper_agent_status as gann_paper_agent_status
-        from api.routers.trading import get_positions, strategy_agent_status
+    This is the expensive part (7 source reads) — it runs only on the 2s
+    heartbeat / on connect, so DB load is unchanged from the old 2s cadence.
+    Live marks are applied separately (cheap) on each tick.
+    """
+    from api.routers.commodity import commodity_strategy_status
+    from api.routers.auction_intelligence import paper_positions as auction_paper_positions
+    from api.routers.cbe import cbe_paper_positions
+    from api.routers.directional_options import paper_positions as directional_paper_positions
+    from api.routers.fractal_market_profile import fractal_market_profile_paper_positions
+    from api.routers.gann_tp_delta import paper_agent_status as gann_paper_agent_status
+    from api.routers.trading import get_positions, strategy_agent_status
 
-        errors: dict[str, str] = {}
+    errors: dict[str, str] = {}
 
-        async def settle(key: str, task):
-            try:
-                return await task
-            except Exception as exc:  # pragma: no cover - defensive stream isolation
-                errors[key] = str(exc)
-                logger.warning(f"[WS] positions overview source failed: {key}: {exc}")
-                return None
+    async def settle(key: str, task):
+        try:
+            return await task
+        except Exception as exc:  # pragma: no cover - defensive stream isolation
+            errors[key] = str(exc)
+            logger.warning(f"[WS] positions overview source failed: {key}: {exc}")
+            return None
 
-        (
-            manual_positions,
-            nse_status,
-            commodity_status,
-            directional_positions,
-            gann_status,
-            auction_positions,
-            fractal_positions,
-        ) = await asyncio.gather(
-            settle("manual", get_positions()),
-            settle("nse", strategy_agent_status()),
-            settle("commodity", commodity_strategy_status()),
-            settle("directional", directional_paper_positions(symbol=None, status="all", limit=100)),
-            settle("gann", gann_paper_agent_status(limit=100)),
-            settle("auction", auction_paper_positions(symbol=None, status="all", limit=100)),
-            settle("fractal", fractal_market_profile_paper_positions(symbol=None, status="all", limit=100)),
-        )
-
-        # Overlay per-tick marks so the combined positions page streams live
-        # P&L. NSE legs are long-premium (force_long); commodity carries a
-        # BUY/SELL action. Legs not in the feed keep their scan-cadence mark.
-        from market_data.live_marks import overlay_nse_agent_status, overlay_live_marks
-
-        if isinstance(nse_status, dict):
-            await overlay_nse_agent_status(nse_status)
-        if isinstance(commodity_status, dict) and isinstance(commodity_status.get("positions"), list):
-            await overlay_live_marks(commodity_status["positions"], side_field="action")
-
-        return {
-            "manual": manual_positions,
-            "nse": nse_status,
-            "strategy": nse_status,
-            "commodity": commodity_status,
-            "directional": directional_positions,
-            "gann": gann_status,
-            "auction": auction_positions,
-            "fractal": fractal_positions,
-            "errors": errors,
-            "fetchedAt": datetime.now(timezone.utc).isoformat(),
-        }
-
-    await _stream_snapshot(
-        websocket,
-        channel="positions_overview",
-        interval_seconds=2.0,
-        payload_factory=payload_factory,
+    (
+        manual_positions, nse_status, commodity_status, directional_positions,
+        gann_status, auction_positions, fractal_positions, cbe_positions,
+    ) = await asyncio.gather(
+        settle("manual", get_positions()),
+        settle("nse", strategy_agent_status()),
+        settle("commodity", commodity_strategy_status()),
+        settle("directional", directional_paper_positions(symbol=None, status="all", limit=100)),
+        settle("gann", gann_paper_agent_status(limit=100)),
+        settle("auction", auction_paper_positions(symbol=None, status="all", limit=100)),
+        settle("fractal", fractal_market_profile_paper_positions(symbol=None, status="all", limit=100)),
+        settle("cbe", cbe_paper_positions(status="all", limit=100)),
     )
+    return {
+        "manual": manual_positions, "nse": nse_status, "commodity": commodity_status,
+        "directional": directional_positions, "gann": gann_status,
+        "auction": auction_positions, "fractal": fractal_positions,
+        "cbe": cbe_positions, "errors": errors,
+    }
+
+
+async def _overlay_positions_overview(structure: dict) -> dict:
+    """Re-mark the cached structure to live prices (cheap — reads hot-cache only).
+
+    NSE legs are long-premium (force_long); commodity carries a BUY/SELL action.
+    Both overlays mutate in place and are idempotent (recompute P&L from entry vs
+    fresh mark), so re-running them on each tick streams live P&L. Legs without a
+    live tick keep their scan-cadence mark.
+    """
+    from market_data.live_marks import overlay_nse_agent_status, overlay_live_marks
+
+    nse_status = structure.get("nse")
+    commodity_status = structure.get("commodity")
+    if isinstance(nse_status, dict):
+        await overlay_nse_agent_status(nse_status)
+    if isinstance(commodity_status, dict) and isinstance(commodity_status.get("positions"), list):
+        await overlay_live_marks(commodity_status["positions"], side_field="action")
+
+    return {
+        "manual": structure.get("manual"),
+        "nse": nse_status, "strategy": nse_status,
+        "commodity": commodity_status,
+        "directional": structure.get("directional"),
+        "gann": structure.get("gann"),
+        "auction": structure.get("auction"),
+        "fractal": structure.get("fractal"),
+        "cbe": structure.get("cbe"),
+        "errors": structure.get("errors", {}),
+        "fetchedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def ws_positions_overview(websocket: WebSocket):
+    """Event-driven combined positions stream.
+
+    Structure (which positions exist) is rebuilt on a 2s heartbeat — same DB load
+    as the old timer. Live P&L marks are re-applied within ≤0.4s of ANY tick (via
+    the quotes:bus), so open-position P&L is sub-second instead of 2s. Identical
+    frames are de-duplicated (ignoring the fetchedAt clock). Degrades to a 2s timer
+    if Redis pub/sub is unavailable.
+    """
+    await _accept_authenticated_socket(websocket, "positions_overview")
+
+    def _encode(payload: dict) -> str:
+        return json.dumps(jsonable_encoder(payload), separators=(",", ":"))
+
+    def _dedup_key(payload: dict) -> str:
+        core = {k: v for k, v in payload.items() if k != "fetchedAt"}
+        return json.dumps(jsonable_encoder(core), separators=(",", ":"))
+
+    from market_data.quote_bus import QUOTES_BUS_CHANNEL
+
+    structure: dict | None = None
+    last_build = 0.0
+    last_dedup: str | None = None
+
+    async def _emit_if_changed() -> bool:
+        nonlocal last_dedup
+        if structure is None:
+            return True
+        payload = await _overlay_positions_overview(structure)
+        key = _dedup_key(payload)
+        if key != last_dedup:
+            if not _socket_is_connected(websocket):
+                return False
+            await websocket.send_text(_encode(payload))
+            last_dedup = key
+        return True
+
+    pubsub = None
+    try:
+        redis = await get_redis()
+        pubsub = redis.pubsub()
+        await pubsub.subscribe(QUOTES_BUS_CHANNEL)
+    except Exception as exc:  # noqa: BLE001 — degrade to a timer loop
+        logger.warning(f"[WS] positions overview pub/sub unavailable, using timer: {exc}")
+        pubsub = None
+
+    try:
+        while _socket_is_connected(websocket):
+            tick_arrived = False
+            if pubsub is not None:
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.4)
+                tick_arrived = bool(message and message.get("type") == "message")
+            else:
+                await asyncio.sleep(2.0)
+
+            now = monotonic()
+            rebuilt = False
+            if structure is None or (now - last_build) >= 2.0:
+                structure = await _build_positions_overview_structure()
+                last_build = now
+                rebuilt = True
+
+            if tick_arrived or rebuilt:
+                if not await _emit_if_changed():
+                    break
+    except WebSocketDisconnect:
+        logger.info("[WS] Client disconnected from positions_overview")
+    except Exception as e:
+        if not _is_socket_closed_error(e):
+            logger.error(f"[WS] Error in positions_overview: {e}")
+    finally:
+        if pubsub is not None:
+            try:
+                await pubsub.unsubscribe(QUOTES_BUS_CHANNEL)
+            except Exception:
+                pass
+            await _close_pubsub(pubsub)
 
 
 # Fields stripped from every watchlist row in the 2s overview socket.
@@ -631,6 +717,147 @@ async def ws_fractal_market_profile(websocket: WebSocket, symbol: str):
         interval_seconds=5.0,
         payload_factory=payload_factory,
     )
+
+
+async def ws_strategy_snapshot(websocket: WebSocket):
+    """Generic per-desk live-snapshot stream (watchlist + analytics).
+
+    Query params: ?desk=directional|gann|auction|fractal&symbol=NIFTY&timeframe=5minute
+    Thin wrapper over each desk's existing REST live_snapshot fn — upgrades the
+    desk's watchlist/analytics view from a 15-30s poll to an 8s push with instant
+    reconnect. NB (honesty): spot for the 3 live indices is real-time inside this
+    payload; greeks/IV/OI remain rebuild-cadence until F1 (chain builder) is on.
+    """
+    desk = str(websocket.query_params.get("desk") or "").strip().lower()
+    symbol = str(websocket.query_params.get("symbol") or "NIFTY").strip().upper() or "NIFTY"
+    timeframe = str(websocket.query_params.get("timeframe") or "").strip() or None
+
+    async def payload_factory():
+        if desk == "directional":
+            from api.routers.directional_options import live_snapshot
+            return await live_snapshot(underlying=symbol, timeframe=timeframe or "5minute")
+        if desk == "gann":
+            from api.routers.gann_tp_delta import live_snapshot
+            return await live_snapshot(underlying=symbol, timeframe=timeframe or "15minute")
+        if desk == "auction":
+            from api.routers.auction_intelligence import live_snapshot
+            return await live_snapshot(symbol=symbol)
+        if desk == "fractal":
+            from api.routers.fractal_market_profile import fractal_market_profile_live_snapshot
+            return await fractal_market_profile_live_snapshot(symbol=symbol)
+        return {"error": f"unknown desk: {desk}"}
+
+    await _stream_snapshot(
+        websocket,
+        channel=f"strategy_snapshot:{desk}:{symbol}:{timeframe or 'default'}",
+        interval_seconds=8.0,
+        payload_factory=payload_factory,
+    )
+
+
+async def ws_quotes(websocket: WebSocket):
+    """Multiplexed, event-driven live quote tape — the terminal hot path.
+
+    Forwards the quote_bus's coalesced multi-symbol frames the INSTANT they are
+    published to Redis (the ws_proposals ``listen()`` pattern) — there is NO
+    ``asyncio.sleep`` / snapshot timer in this path, so glass-to-glass latency is
+    bounded only by the 150 ms coalesce window + network, not a 1-15 s poll floor.
+
+    The stream is unfiltered (all changed symbols per frame); the frontend tick
+    store filters to the symbols each component subscribes to. On connect we replay
+    a one-shot snapshot frame so a freshly-opened grid paints immediately.
+    """
+    await _accept_authenticated_socket(websocket, "quotes")
+
+    # Paint instantly: last-known value for every symbol the bus has seen.
+    try:
+        from market_data.quote_bus import quote_bus
+        await websocket.send_text(quote_bus.snapshot_frame())
+    except Exception as exc:  # noqa: BLE001 — snapshot is best-effort
+        logger.debug(f"[WS] quotes snapshot replay failed: {exc}")
+
+    from market_data.quote_bus import QUOTES_BUS_CHANNEL
+
+    try:
+        redis = await get_redis()
+        pubsub = redis.pubsub()
+        await pubsub.subscribe(QUOTES_BUS_CHANNEL)
+    except Exception as exc:  # noqa: BLE001 — Redis down → degrade, don't blackout
+        logger.warning(f"[WS] quotes pub/sub unavailable, closing: {exc}")
+        return
+
+    try:
+        async for message in pubsub.listen():
+            if message["type"] != "message":
+                continue
+            if not _socket_is_connected(websocket):
+                break
+            data = message["data"]
+            await websocket.send_text(data if isinstance(data, str) else data.decode())
+    except WebSocketDisconnect:
+        logger.info("[WS] Client disconnected from quotes")
+    except Exception as e:
+        if not _is_socket_closed_error(e):
+            logger.error(f"[WS] Error in quotes handler: {e}")
+    finally:
+        try:
+            await pubsub.unsubscribe(QUOTES_BUS_CHANNEL)
+        except Exception:
+            pass
+        await _close_pubsub(pubsub)  # release the connection or it leaks → Redis maxclients
+
+
+async def ws_depth(websocket: WebSocket, symbol: str):
+    """Stream the 5-level DOM ladder for one focused symbol (event-driven).
+
+    On connect, triggers a ref-counted incremental DepthUpdate subscription on the
+    live Fyers WS client; forwards depth:{symbol} frames via listen() (no timer);
+    releases the depth ref + pub/sub connection on disconnect. `symbol` is the
+    broker-native key (same key the quote tape uses), so no translation is needed.
+    """
+    await _accept_authenticated_socket(websocket, f"depth:{symbol}")
+    from market_data import data_router
+
+    try:
+        await data_router.subscribe_depth(symbol)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[WS] depth subscribe trigger failed for {symbol}: {exc}")
+
+    try:
+        redis = await get_redis()
+        pubsub = redis.pubsub()
+        await pubsub.subscribe(f"depth:{symbol}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[WS] depth pub/sub unavailable for {symbol}: {exc}")
+        try:
+            await data_router.unsubscribe_depth(symbol)
+        except Exception:
+            pass
+        return
+
+    try:
+        async for message in pubsub.listen():
+            if message["type"] != "message":
+                continue
+            if not _socket_is_connected(websocket):
+                break
+            data = message["data"]
+            await websocket.send_text(data if isinstance(data, str) else data.decode())
+    except WebSocketDisconnect:
+        logger.info(f"[WS] Client disconnected from depth:{symbol}")
+    except Exception as e:
+        if not _is_socket_closed_error(e):
+            logger.error(f"[WS] Error in depth handler: {e}")
+    finally:
+        try:
+            await pubsub.unsubscribe(f"depth:{symbol}")
+        except Exception:
+            pass
+        await _close_pubsub(pubsub)
+        try:
+            await data_router.unsubscribe_depth(symbol)
+        except Exception:
+            pass
 
 
 async def ws_proposals(websocket: WebSocket):

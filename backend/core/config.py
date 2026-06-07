@@ -62,6 +62,21 @@ class Settings(BaseSettings):
     RESEARCH_SYNC_AUTO_ENABLED: bool = False
     RESEARCH_SYNC_EMBEDDED_ENABLED: bool = False
     STRATEGY_SPOT_SYNC_ENABLED: bool = False
+    # F1 feed — full-universe option-chain → 3m CE+PE OHLC builder (chain_candle_builder).
+    # OFF by default: scales Fyers REST (~30k calls/day, governed by FYERS_DATA_LIMITER);
+    # enable deliberately in prod after sign-off + a market-open verification.
+    CHAIN_CANDLE_BUILDER_ENABLED: bool = False
+    # Phase 6 — Fyers v3 TBT 50-level depth socket (FyersTbtSocket). OFF by default:
+    # requires the PAID TBT entitlement on the Fyers app. When True, /ws/depth routes a
+    # focused symbol through the TBT socket (50 levels + per-level order counts + seqNo)
+    # instead of the 5-level DataSocket DepthUpdate. Enable only after confirming
+    # entitlement + a market-open verification; falls back to 5-level on any TBT error.
+    FYERS_TBT_DEPTH_ENABLED: bool = False
+    # Phase-2 sector coverage: stream the full ~206 F&O sector constituents on the
+    # broker WS (for sector-network live quotes). OFF by default — +40-90 MB backend
+    # RSS (live_candle_store per-symbol OHLC) on a 3.7 GiB box. Enable only after v1
+    # is retired and RSS headroom is confirmed; sector INDICES stream regardless.
+    STOCK_WS_SUBSCRIPTIONS_ENABLED: bool = False
     # Legacy global bypass flag — used as a fallback when the per-lane
     # flags aren't set. Kept for backward compatibility with the prod .env;
     # new code should consult NSE_S1_/NSE_S2_BYPASS_MARKET_PROFILE_GATE.

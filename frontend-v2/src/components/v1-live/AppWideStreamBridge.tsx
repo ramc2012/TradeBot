@@ -24,6 +24,7 @@ function normalizePortfolioSnapshot(payload: Record<string, unknown>) {
     gann: payload.gann ?? null,
     auction: payload.auction ?? null,
     fractal: payload.fractal ?? null,
+    cbe: payload.cbe ?? null,
     errors: payload.errors ?? {},
     fetchedAt: payload.fetchedAt ?? new Date().toISOString(),
   };

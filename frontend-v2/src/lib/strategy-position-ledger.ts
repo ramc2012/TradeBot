@@ -4,6 +4,7 @@
 type StrategyAgentStatus = { strategies?: any[]; [k: string]: any };
 import {
   getAuctionIntelligencePaperPositions,
+  getCBEPaperPositions,
   getCommodityStrategyStatus,
   getDirectionalOptionsPaperPositions,
   getFractalMarketProfilePaperPositions,
@@ -95,6 +96,7 @@ export type AppStrategyPortfolioSnapshot = {
   gann: GannAgentStatus | null;
   auction: PaperPositionsPayload | null;
   fractal: PaperPositionsPayload | null;
+  cbe: PaperPositionsPayload | null;
   errors: Record<string, string>;
   fetchedAt: string;
 };
@@ -133,13 +135,14 @@ async function settle<T>(key: string, task: Promise<T>, errors: Record<string, s
 
 export async function fetchAppStrategyPortfolioSnapshot(): Promise<AppStrategyPortfolioSnapshot> {
   const errors: Record<string, string> = {};
-  const [nse, commodity, directional, gann, auction, fractal] = await Promise.all([
+  const [nse, commodity, directional, gann, auction, fractal, cbe] = await Promise.all([
     settle("nse", getStrategyAgentStatus().then((response) => response.data as StrategyAgentStatus), errors),
     settle("commodity", getCommodityStrategyStatus().then((response) => response.data as CommodityStrategyStatus), errors),
     settle("directional", getDirectionalOptionsPaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
     settle("gann", getGannTPDeltaPaperAgentStatus(100).then((response) => response.data as GannAgentStatus), errors),
     settle("auction", getAuctionIntelligencePaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
     settle("fractal", getFractalMarketProfilePaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
+    settle("cbe", getCBEPaperPositions("all", 100).then((response) => response.data as PaperPositionsPayload), errors),
   ]);
 
   return {
@@ -149,6 +152,7 @@ export async function fetchAppStrategyPortfolioSnapshot(): Promise<AppStrategyPo
     gann,
     auction,
     fractal,
+    cbe,
     errors,
     fetchedAt: new Date().toISOString(),
   };
@@ -227,6 +231,41 @@ function genericOptionRow(
       (Array.isArray(position.signal_reasons) ? position.signal_reasons.join(", ") : position.signal_reasons) ||
       position.setup_name ||
       null,
+    status,
+  };
+}
+
+function cbeCashRow(position: Record<string, any>, status: PositionStatus): AppStrategyPositionRow {
+  const qty = asNumber(position.quantity, 0);
+  const entry = asNumber(position.entry_price, 0);
+  const current = asNumber(position.exit_price ?? position.latest_close ?? entry, entry);
+  const pnl = asNumber(status === "open" ? position.unrealized_pnl : position.realized_pnl, 0);
+  const direction = String(position.direction || "").toUpperCase();
+  const grossCost = entry * Math.max(qty, 1);
+  const symbol = String(position.instrument || "--");
+
+  return {
+    id: `cbe-${status}-${position.position_id || symbol}-${position.opened_at || position.closed_at || "na"}`,
+    desk: "CBE Scanner",
+    strategy: "Compression Before Expansion",
+    source: "cbe",
+    venue: "NSE",
+    underlying: symbol,
+    symbol,
+    contract: symbol,
+    instrumentGroup: "other",
+    action: direction || "LONG",
+    qty,
+    entryPrice: entry,
+    currentPrice: current,
+    unrealizedPnl: status === "open" ? pnl : 0,
+    realizedPnl: status === "closed" ? pnl : null,
+    returnPct: grossCost > 0 ? (pnl / grossCost) * 100 : null,
+    updatedAt: position.updated_at ?? position.mark_refreshed_at ?? position.closed_at ?? position.opened_at ?? null,
+    enteredAt: position.opened_at ?? null,
+    closedAt: position.closed_at ?? null,
+    phase: position.bias ?? position.close_reason ?? null,
+    signalReason: position.pending_close_reason ?? position.close_reason ?? null,
     status,
   };
 }
@@ -318,6 +357,9 @@ export function buildOpenPositionRows(snapshot?: AppStrategyPortfolioSnapshot | 
   for (const position of snapshot.fractal?.open_positions || []) {
     rows.push(genericOptionRow("fractal", "Fractal Profile", "Fractal Market Profile", "NSE", position, "open"));
   }
+  for (const position of snapshot.cbe?.open_positions || []) {
+    rows.push(cbeCashRow(position, "open"));
+  }
 
   return rows.sort((left, right) => Math.abs(right.unrealizedPnl || 0) - Math.abs(left.unrealizedPnl || 0));
 }
@@ -389,6 +431,9 @@ export function buildClosedTradeRows(snapshot?: AppStrategyPortfolioSnapshot | n
   for (const position of snapshot.fractal?.closed_positions || []) {
     rows.push(genericOptionRow("fractal", "Fractal Profile", "Fractal Market Profile", "NSE", position, "closed"));
   }
+  for (const position of snapshot.cbe?.closed_positions || []) {
+    rows.push(cbeCashRow(position, "closed"));
+  }
 
   return rows.sort((left, right) => toEpoch(right.closedAt || right.updatedAt) - toEpoch(left.closedAt || left.updatedAt));
 }
@@ -437,6 +482,7 @@ export function buildStrategyBookSummaries(snapshot?: AppStrategyPortfolioSnapsh
     ["gann", "Gann TP Delta", "Gann TP Delta", "NSE", snapshot.gann] as const,
     ["auction", "Auction Intelligence", "Auction Intelligence", "NSE", snapshot.auction] as const,
     ["fractal", "Fractal Market Profile", "Fractal Profile", "NSE", snapshot.fractal] as const,
+    ["cbe", "CBE Scanner", "Compression Before Expansion", "NSE", snapshot.cbe] as const,
   ];
 
   for (const [key, label, desk, venue, payload] of generic) {
