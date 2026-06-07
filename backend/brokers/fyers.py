@@ -56,23 +56,68 @@ class FyersAdapter(BrokerAdapter):
             self._client.headers.update({"Authorization": f"{settings.FYERS_APP_ID}:{self._access_token}"})
 
     async def _get_data_json(self, path: str, params: Optional[dict] = None) -> dict:
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.get(
-                f"{self.DATA_URL}{path}",
-                params=params or {},
-                headers=self._auth_header(),
-            )
-        try:
-            payload = response.json()
-        except Exception as exc:
-            body = response.text[:240]
-            raise ValueError(f"Fyers data API returned non-JSON payload: {body}") from exc
-        if response.status_code != 200:
-            message = payload.get("message") if isinstance(payload, dict) else response.text[:240]
-            raise ValueError(f"Fyers data API error {response.status_code}: {message}")
-        if isinstance(payload, dict) and payload.get("s") == "error":
-            raise ValueError(payload.get("message") or "Fyers data API returned an error")
-        return payload
+        """Single chokepoint for ALL Fyers data REST (/history, /options-chain-v3, /quotes).
+
+        Every call passes through the process-global FYERS_DATA_LIMITER so the
+        ~227-name chain poller + gap-fill + 09:15 eager poll share one 10/s·200/min
+        ·100k/day budget and get spread under the governor instead of bursting into
+        a 429 against the sole live lane. 429 / 5xx / transport errors are retried
+        with exponential back-off; bodies are parsed defensively (Fyers can return
+        concatenated JSON objects on a burst).
+        """
+        from brokers.rate_limiter import FYERS_DATA_LIMITER, parse_first_json
+
+        last_error: Optional[str] = None
+        for attempt in range(5):
+            await FYERS_DATA_LIMITER.acquire()
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    response = await client.get(
+                        f"{self.DATA_URL}{path}",
+                        params=params or {},
+                        headers=self._auth_header(),
+                    )
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                last_error = f"transport: {exc}"
+                await asyncio.sleep(min(2 ** attempt, 30))
+                continue
+
+            if response.status_code == 429:
+                retry_after = 0.0
+                try:
+                    retry_after = float(response.headers.get("Retry-After") or 0)
+                except (TypeError, ValueError):
+                    retry_after = 0.0
+                backoff = retry_after if retry_after > 0 else min(2 ** attempt, 30)
+                logger.warning(f"Fyers 429 on {path} — backoff {backoff:.1f}s (attempt {attempt + 1}/5)")
+                await asyncio.sleep(backoff)
+                last_error = "429 rate limited"
+                continue
+
+            try:
+                payload = response.json()
+            except Exception:
+                # Concatenated-JSON guard: decode just the leading object.
+                try:
+                    payload = parse_first_json(response.text)
+                except Exception as exc:
+                    body = response.text[:240]
+                    raise ValueError(f"Fyers data API returned non-JSON payload: {body}") from exc
+
+            if response.status_code >= 500:
+                message = payload.get("message") if isinstance(payload, dict) else response.text[:240]
+                last_error = f"{response.status_code}: {message}"
+                logger.warning(f"Fyers 5xx on {path} — retrying (attempt {attempt + 1}/5): {message}")
+                await asyncio.sleep(min(2 ** attempt, 30))
+                continue
+            if response.status_code != 200:
+                message = payload.get("message") if isinstance(payload, dict) else response.text[:240]
+                raise ValueError(f"Fyers data API error {response.status_code}: {message}")
+            if isinstance(payload, dict) and payload.get("s") == "error":
+                raise ValueError(payload.get("message") or "Fyers data API returned an error")
+            return payload
+
+        raise ValueError(f"Fyers data API failed after retries on {path}: {last_error}")
 
     @staticmethod
     def _expiry_date_to_epoch(expiry: str, expiry_rows: list[dict]) -> Optional[str]:
@@ -441,8 +486,16 @@ class FyersAdapter(BrokerAdapter):
         self,
         symbols: list[str],
         on_tick_callback: Callable[[Tick], None],
+        on_depth_callback: Optional[Callable[[dict], None]] = None,
     ) -> Any:
-        """Open Fyers WebSocket for real-time data."""
+        """Open Fyers WebSocket for real-time data.
+
+        ``on_depth_callback`` (optional) receives parsed 5-level DepthUpdate
+        frames. Depth subscriptions themselves are added incrementally on the
+        returned client by the data router (``client.subscribe(..., DepthUpdate)``)
+        only for the focused symbols, so the base feed stays lean.
+        """
+        self._on_depth_callback = on_depth_callback
         try:
             from fyers_apiv3.FyersWebsocket import data_ws
             client = data_ws.FyersDataSocket(
@@ -454,7 +507,7 @@ class FyersAdapter(BrokerAdapter):
                 on_connect=lambda: logger.info("Fyers WS connected"),
                 on_close=lambda: logger.warning("Fyers WS closed"),
                 on_error=lambda e: logger.error(f"Fyers WS error: {e}"),
-                on_message=lambda msg: self._handle_tick(msg, on_tick_callback),
+                on_message=lambda msg: self._handle_message(msg, on_tick_callback),
             )
             client.connect()
             client.subscribe(symbols=symbols, data_type="SymbolUpdate")
@@ -462,6 +515,130 @@ class FyersAdapter(BrokerAdapter):
         except Exception as e:
             logger.error(f"Failed to start Fyers WebSocket: {e}")
             raise
+
+    async def subscribe_tbt_websocket(
+        self,
+        symbols: list[str],
+        on_depth_callback: Callable[[dict], None],
+    ) -> Any:
+        """Open the Fyers v3 TBT (50-level depth) socket — Phase 6, paid entitlement.
+
+        Returns the FyersTbtSocket so the data router can add/remove symbols
+        incrementally. Parses each Depth message into the SAME compact ladder shape
+        as the 5-level path, just with up to 50 levels, so the frontend is unchanged.
+        Raises on connect/entitlement failure — the caller falls back to 5-level.
+        """
+        from fyers_apiv3.FyersWebsocket import tbt_ws
+
+        def _on_depth(ticker: str, message: Any):
+            try:
+                on_depth_callback(self._parse_tbt_depth(ticker, message))
+            except Exception as e:
+                logger.error(f"Error parsing Fyers TBT depth for {ticker}: {e}")
+
+        client = tbt_ws.FyersTbtSocket(
+            access_token=f"{settings.FYERS_APP_ID}:{self._access_token}",
+            write_to_file=False,
+            log_path="",
+            reconnect=True,
+            on_depth_update=_on_depth,
+            on_error=lambda e: logger.error(f"Fyers TBT WS error: {e}"),
+            on_connect=lambda: (
+                logger.info("Fyers TBT WS connected"),
+                client.subscribe(
+                    symbol_tickers=set(symbols),
+                    channelNo="1",
+                    mode=tbt_ws.SubscriptionModes.DEPTH,
+                ),
+            ),
+            on_close=lambda m: logger.warning(f"Fyers TBT WS closed: {m}"),
+        )
+        client.connect()
+        return client
+
+    def tbt_subscribe(self, client: Any, symbols: list[str]) -> None:
+        from fyers_apiv3.FyersWebsocket import tbt_ws
+        client.subscribe(symbol_tickers=set(symbols), channelNo="1", mode=tbt_ws.SubscriptionModes.DEPTH)
+
+    def tbt_unsubscribe(self, client: Any, symbols: list[str]) -> None:
+        from fyers_apiv3.FyersWebsocket import tbt_ws
+        client.unsubscribe(symbol_tickers=set(symbols), channelNo="1", mode=tbt_ws.SubscriptionModes.DEPTH)
+
+    @staticmethod
+    def _parse_tbt_depth(ticker: str, msg: Any) -> dict:
+        """Parse a 50-level TBT Depth object into the compact ladder shape."""
+        def _arr(name: str) -> list:
+            return list(getattr(msg, name, []) or [])
+
+        bidprice, bidqty, bidordn = _arr("bidprice"), _arr("bidqty"), _arr("bidordn")
+        askprice, askqty, askordn = _arr("askprice"), _arr("askqty"), _arr("askordn")
+
+        def _levels(prices: list, qtys: list, ordns: list) -> list[dict]:
+            rows = []
+            for i, p in enumerate(prices):
+                if p in (None, 0, "0"):
+                    continue
+                rows.append({
+                    "p": float(p),
+                    "q": int(qtys[i]) if i < len(qtys) else 0,
+                    "o": int(ordns[i]) if i < len(ordns) else 0,
+                })
+            return rows
+
+        return {
+            "symbol": ticker,
+            "bids": _levels(bidprice, bidqty, bidordn),
+            "asks": _levels(askprice, askqty, askordn),
+            "tbq": getattr(msg, "tbq", 0) or 0,
+            "tsq": getattr(msg, "tsq", 0) or 0,
+            "seq": getattr(msg, "seqNo", 0) or 0,
+            "timestamp": datetime.now(UTC),
+        }
+
+    def _handle_message(self, msg: dict, callback: Callable[[Tick], None]):
+        """Route a raw WS frame to the tick or depth handler.
+
+        DepthUpdate frames carry level-indexed keys (``bid_price1``…); SymbolUpdate
+        frames carry the singular ``bid_price``. Distinguish on the level-1 key so a
+        single on_message can serve both data_types on one socket.
+        """
+        try:
+            if isinstance(msg, dict) and ("bid_price1" in msg or "ask_price1" in msg):
+                self._handle_depth(msg)
+            else:
+                self._handle_tick(msg, callback)
+        except Exception as e:
+            logger.error(f"Error routing Fyers WS message: {e}")
+
+    def _handle_depth(self, msg: dict):
+        """Parse a 5-level DepthUpdate into a compact ladder and dispatch it."""
+        cb = getattr(self, "_on_depth_callback", None)
+        if cb is None:
+            return
+        try:
+            def _lvl(side: str) -> list[dict]:
+                rows = []
+                for i in range(1, 6):
+                    price = msg.get(f"{side}_price{i}")
+                    if price in (None, 0, "0"):
+                        continue
+                    rows.append({
+                        "p": float(price),
+                        "q": int(msg.get(f"{side}_size{i}", 0) or 0),
+                        "o": int(msg.get(f"{side}_order{i}", 0) or 0),
+                    })
+                return rows
+            depth = {
+                "symbol": msg.get("symbol") or msg.get("n", ""),
+                "bids": _lvl("bid"),
+                "asks": _lvl("ask"),
+                "tbq": msg.get("tot_buy_qty") or msg.get("total_buy_qty") or 0,
+                "tsq": msg.get("tot_sell_qty") or msg.get("total_sell_qty") or 0,
+                "timestamp": datetime.now(UTC),
+            }
+            cb(depth)
+        except Exception as e:
+            logger.error(f"Error parsing Fyers depth: {e}")
 
     def _handle_tick(self, msg: dict, callback: Callable[[Tick], None]):
         try:

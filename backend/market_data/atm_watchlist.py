@@ -19,6 +19,7 @@ from analysis.instruments import (
     get_fo_market,
     get_monthly_expiry,
     get_index_monthly_expiry,
+    is_valid_index_expiry,
 )
 from api.routers.auth import ensure_fyers_session, ensure_upstox_session, get_active_adapter, get_broker_token
 from brokers.base import BrokerAdapter, OptionChain, OptionChainEntry
@@ -54,6 +55,13 @@ def _normalize_nse_expiry_ladder(expiries: list[str]) -> list[str]:
         try:
             parsed = date.fromisoformat(str(raw_expiry))
         except (TypeError, ValueError):
+            continue
+        # Drop phantom contracts: the broker's expired-instruments feed returns
+        # NSE-index series on the BSE expiry weekday (e.g. a NIFTY 'Thursday'/06-25
+        # that NSE never lists). These sit BEFORE the real monthly Tuesday, so the
+        # post-monthly snap below never catches them — gate on the index weekday.
+        # ("NIFTY" is the canonical NSE Tuesday board this ladder represents.)
+        if not is_valid_index_expiry("NIFTY", parsed):
             continue
         monthly = get_monthly_expiry(parsed.year, parsed.month)
         if parsed > monthly:

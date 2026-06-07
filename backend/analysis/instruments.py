@@ -245,6 +245,55 @@ def normalize_index_contract_expiry(symbol: str | None, expiry_value: date | str
     return monthly_expiry if stale_month_end_expiry else expiry
 
 
+# NSE indices migrated their expiry weekday from Thursday to Tuesday effective
+# Sept 2025 (last Thursday monthlies were Aug-2025; first Tuesday monthly was
+# 2025-09-30). Before the cutover the listed weekday was Thursday (wd=3); after, it
+# is Tuesday (wd=1) — see INDEX_EXPIRY_WEEKDAY. SENSEX (Thu) / BANKEX (Mon) are BSE
+# and unaffected by this NSE migration.
+NSE_INDEX_TUESDAY_MIGRATION = date(2025, 9, 1)
+_NSE_INDEX_LEGACY_WEEKDAY = 3  # Thursday, the pre-migration NSE index expiry day
+
+
+def is_valid_index_expiry(symbol: str | None, expiry_value: date | str | None) -> bool:
+    """True if `expiry_value` is a plausible exchange expiry for index `symbol`.
+
+    Each index expires on a fixed weekday (INDEX_EXPIRY_WEEKDAY: NSE indices
+    Tuesday=1, SENSEX Thursday=3, BANKEX Monday=0). A market holiday can only shift
+    an expiry EARLIER (to the prior trading day), never later — so an index expiry
+    whose weekday is *after* the expected weekday cannot be a real listed contract.
+
+    This catches the phantom contracts that the broker's expired-instruments feed
+    returns for NSE indices on the BSE expiry day (e.g. a NIFTY 'Thursday'/06-25
+    series, which is a separate, non-existent contract from the real 06-30 Tuesday
+    one). Such rows must be REJECTED (not snapped — they carry distinct premiums and
+    would corrupt the real contract).
+
+    ERA-AWARE: NSE indices expired Thursday before the Sept-2025 migration, so a
+    pre-cutover Thursday index expiry (e.g. NIFTY 2025-06-26, a real, deeply-liquid
+    contract) is VALID and must not be flagged. Only post-cutover NSE index expiries
+    are held to the Tuesday rule.
+
+    Non-index / unknown symbols (stocks) are not gated here → return True.
+    """
+    if not expiry_value:
+        return False
+    try:
+        expiry = expiry_value if isinstance(expiry_value, date) else date.fromisoformat(str(expiry_value)[:10])
+    except Exception:  # noqa: BLE001
+        return False
+    expected = INDEX_EXPIRY_WEEKDAY.get(str(symbol or "").upper().strip())
+    if expected is None:
+        return True  # not a gated index underlying (e.g. a stock)
+    # Weekend dates are never expiries.
+    if expiry.weekday() >= 5:
+        return False
+    # NSE Tuesday indices: before the migration they expired Thursday — allow the
+    # legacy weekday for pre-cutover dates so real historical data is preserved.
+    if expected == 1 and expiry < NSE_INDEX_TUESDAY_MIGRATION:
+        return expiry.weekday() <= _NSE_INDEX_LEGACY_WEEKDAY
+    return expiry.weekday() <= expected
+
+
 def get_monthly_expiries(from_date: date, to_date: date) -> list[date]:
     """
     Return all monthly NSE F&O expiry dates between from_date and to_date.

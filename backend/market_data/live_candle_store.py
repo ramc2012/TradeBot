@@ -288,6 +288,17 @@ class LiveCandleStore:
                 )
                 continue
 
+            # Reject phantom index contracts on an invalid expiry weekday (e.g. a
+            # NIFTY 'Thursday' series that only exists on BSE) before they pollute
+            # option_premium_candles. Stocks/non-index symbols pass through.
+            from analysis.instruments import is_valid_index_expiry
+
+            if not is_valid_index_expiry(metadata.get("underlying"), metadata.get("expiry")):
+                logger.warning(
+                    f"[live_candle_store] skipping phantom expiry {metadata.get('underlying')} "
+                    f"{metadata.get('expiry')} (invalid index expiry weekday)"
+                )
+                continue
             option_rows.append(
                 {
                     "time": bucket.bucket_start,

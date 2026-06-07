@@ -11,7 +11,7 @@
  */
 import { useMemo, useState, useTransition } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, AlertTriangle, Compass, Gauge, Sparkles, TrendingUp } from "lucide-react";
+import { Activity, AlertTriangle, Compass, Gauge, Radio, Sparkles, TrendingUp } from "lucide-react";
 
 import {
   DeskShell,
@@ -27,6 +27,10 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { PaperPerformance } from "@/components/strategies/shared";
+import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStrategyPositionsStream";
+import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
+import { createStrategySnapshotSocket } from "@/lib/websocket";
+import { TerminalPanel } from "@/components/terminal/TerminalPanel";
 import type { PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
 
@@ -34,6 +38,7 @@ import { GannChart, type GannAngle, type GannBar, type Sq9Level, type TimeCycle,
 
 const TABS = [
   { key: "geometry", label: "Geometry", icon: Compass },
+  { key: "terminal", label: "Terminal", icon: Radio },
   { key: "confluence", label: "Confluence", icon: Sparkles },
   { key: "paper", label: "Performance", icon: TrendingUp },
   { key: "backtest", label: "Backtest", icon: Activity },
@@ -71,7 +76,8 @@ type Snapshot = {
 const biasVariant = (b?: string) => (b === "bullish" ? "success" : b === "bearish" ? "error" : "neutral");
 
 export default function GannDesk() {
-  const [activeTab, setActiveTab] = useUrlTab("geometry");
+  // Open positions / paper book is the headline view when the desk opens.
+  const [activeTab, setActiveTab] = useUrlTab("paper");
   const [, startTransition] = useTransition();
   const [underlying, setUnderlying] = useState("NIFTY");
   const [timeframe, setTimeframe] = useState("15minute");
@@ -83,9 +89,12 @@ export default function GannDesk() {
     refetchOnWindowFocus: false,
   });
 
-  const liveQuery = useQuery({
+  const liveQuery = useLiveSnapshotQuery<Snapshot>({
     queryKey: ["gann", "live", underlying, timeframe],
     queryFn: async () => (await apiClient.get("/api/gann-tp-delta/live-snapshot", { params: { underlying, timeframe } })).data as Snapshot,
+    storageKey: `gann-live-${underlying}-${timeframe}`,
+    streamFactory: (onData, onStatusChange) =>
+      createStrategySnapshotSocket("gann", underlying, timeframe, (d) => onData(d as Snapshot), onStatusChange),
     refetchInterval: REFRESH_MS.live,
     refetchOnWindowFocus: false,
   });
@@ -114,14 +123,20 @@ export default function GannDesk() {
     | { summary?: Record<string, number>; open_positions?: unknown[]; closed_positions?: unknown[]; recent_signals?: unknown[] }
     | undefined;
 
-  const positions = useMemo<PositionsPayload>(
-    () => ({
-      open_positions: (status?.open_positions as PositionsPayload["open_positions"]) || [],
-      closed_positions: (status?.closed_positions as PositionsPayload["closed_positions"]) || [],
-      summary: status?.summary,
-    }),
-    [status],
-  );
+  // Live open-positions stream (shared /ws/positions-overview channel); active
+  // on the paper tab, falls back to status polling when the socket is down.
+  const posStream = useStrategyPositionsStream({ enabled: activeTab === "paper" });
+  const streamSlice = selectStrategySlice(posStream.data, "gann");
+  const streamLive = posStream.isStreamConnected && Boolean(streamSlice);
+
+  const positions = useMemo<PositionsPayload>(() => {
+    const src = streamLive ? streamSlice : status;
+    return {
+      open_positions: (src?.open_positions as PositionsPayload["open_positions"]) || [],
+      closed_positions: (src?.closed_positions as PositionsPayload["closed_positions"]) || [],
+      summary: (src?.summary as PositionsPayload["summary"]) ?? status?.summary,
+    };
+  }, [streamLive, streamSlice, status]);
 
   return (
     <DeskShell
@@ -136,6 +151,9 @@ export default function GannDesk() {
       v1Href="http://localhost:3000/gann-tp-delta"
       rightSlot={
         <div className="flex items-center gap-2">
+          {activeTab === "paper" ? (
+            <StatusBadge label={streamLive ? "● live" : "polling"} variant={streamLive ? "success" : "info"} />
+          ) : null}
           <Picker label="Symbol" value={underlying} options={universe} onChange={(v) => startTransition(() => setUnderlying(v))} />
           <Picker label="TF" value={timeframe} options={timeframes} onChange={(v) => startTransition(() => setTimeframe(v))} />
         </div>
@@ -172,6 +190,8 @@ export default function GannDesk() {
       ) : null}
 
       {activeTab === "confluence" ? <ConfluencePanel snap={snap} /> : null}
+
+      {activeTab === "terminal" ? <TerminalPanel /> : null}
 
       {activeTab === "paper" ? (
         <PaperPerformance summary={status?.summary as Record<string, number> | undefined} positions={positions} />

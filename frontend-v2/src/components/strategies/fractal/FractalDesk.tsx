@@ -48,6 +48,7 @@ import {
   type ChartPriceLine,
   type OrderFlow,
 } from "@/components/strategies/shared";
+import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStrategyPositionsStream";
 import type { PositionsPayload, PaperSummary, PaperPosition } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
 
@@ -128,7 +129,8 @@ function dayTypeVariant(dayType?: string | null): "success" | "warn" | "error" |
 }
 
 export default function FractalDesk() {
-  const [activeTab, setActiveTab] = useUrlTab("profile");
+  // Open positions / paper book is the headline view when the desk opens.
+  const [activeTab, setActiveTab] = useUrlTab("performance");
   const [, startTransition] = useTransition();
   const [symbol, setSymbol] = useState("NIFTY");
 
@@ -169,16 +171,24 @@ export default function FractalDesk() {
   const universe = snap?.supported_symbols?.length ? snap.supported_symbols : SYMBOLS_FALLBACK;
   const dataStatus = snap?.data_status;
 
+  // Live open-positions stream (shared /ws/positions-overview channel); active
+  // on the performance tab, falls back to the dedicated paper endpoint.
+  const posStream = useStrategyPositionsStream({ enabled: activeTab === "performance" });
+  const streamSlice = selectStrategySlice(posStream.data, "fractal");
+  const streamLive = posStream.isStreamConnected && Boolean(streamSlice);
+
   // Performance tab: prefer the dedicated /paper-positions endpoint, fall
   // back to the embedded paper_positions block on the live snapshot.
   const positions = useMemo<PositionsPayload>(() => {
-    const src = positionsQuery.data ?? (snap?.paper_positions as PositionsResponse | null) ?? undefined;
+    const src = streamLive
+      ? streamSlice
+      : positionsQuery.data ?? (snap?.paper_positions as PositionsResponse | null) ?? undefined;
     return {
       open_positions: (src?.open_positions as PaperPosition[]) || [],
       closed_positions: (src?.closed_positions as PaperPosition[]) || [],
-      summary: src?.summary,
+      summary: src?.summary as PaperSummary | undefined,
     };
-  }, [positionsQuery.data, snap?.paper_positions]);
+  }, [streamLive, streamSlice, positionsQuery.data, snap?.paper_positions]);
 
   const cvd = of?.cumulative_delta;
 
@@ -195,6 +205,9 @@ export default function FractalDesk() {
       v1Href="http://localhost:3000/fractal-market-profile"
       rightSlot={
         <div className="flex items-center gap-2">
+          {activeTab === "performance" ? (
+            <StatusBadge label={streamLive ? "● live" : "polling"} variant={streamLive ? "success" : "info"} />
+          ) : null}
           {dataStatus?.status ? (
             <StatusBadge
               label={String(dataStatus.status)}

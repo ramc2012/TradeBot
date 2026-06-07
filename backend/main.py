@@ -40,9 +40,12 @@ from api.websockets.ticks import (
     ws_market_watchlist,
     ws_positions,
     ws_positions_overview,
+    ws_depth,
     ws_proposals,
+    ws_quotes,
     ws_strategy_dashboard,
     ws_strategy_overview,
+    ws_strategy_snapshot,
     ws_system_health,
     ws_system_overview,
     ws_ticks,
@@ -100,6 +103,12 @@ async def lifespan(app: FastAPI):
         market_data_router.register_callback(symbol, market_profile_builder.on_tick)
     market_data_router.register_global_callback(live_candle_store.on_tick)
     await live_candle_store.start()
+
+    # Terminal-grade low-latency quote fan-out: the quote_bus taps the same tick
+    # feed and coalesces it into ~150ms multi-symbol frames on Redis 'quotes:bus'
+    # for the event-driven /ws/quotes endpoint (no snapshot-timer latency floor).
+    from market_data.quote_bus import quote_bus
+    await quote_bus.start()
 
     # Prefer the real broker feed when a session exists. Without a broker, keep
     # the shared header feed idle so the UI falls back to stored spot closes
@@ -222,6 +231,16 @@ async def lifespan(app: FastAPI):
         )
         logger.info("✓ Embedded research sync daemon started")
 
+    # F1 feed: full-universe option-chain → 3m CE+PE OHLC (S1's headline feed).
+    # Gated OFF by default; the poll self-staggers through FYERS_DATA_LIMITER.
+    if settings.CHAIN_CANDLE_BUILDER_ENABLED:
+        try:
+            from market_data.chain_candle_builder import chain_candle_builder
+            await chain_candle_builder.start()
+            logger.info("✓ Chain candle builder (F1 3m CE+PE) started")
+        except Exception as e:
+            logger.warning(f"Chain candle builder start skipped: {e}")
+
     yield
 
     # Shutdown
@@ -237,11 +256,19 @@ async def lifespan(app: FastAPI):
             await loop_lag_task
         except asyncio.CancelledError:
             pass
+    if settings.CHAIN_CANDLE_BUILDER_ENABLED:
+        try:
+            from market_data.chain_candle_builder import chain_candle_builder
+            await chain_candle_builder.stop()
+        except Exception:
+            pass
     await market_hours_paper_supervisor.stop()
     await rl_auto_trainer.stop()
     await paper_strategy_agent.stop()
     await commodity_strategy_agent.stop()
     await live_candle_store.stop()
+    from market_data.quote_bus import quote_bus
+    await quote_bus.stop()
     await market_data_router.stop_mock_feed()
     await close_redis()
     await market_data_router.unsubscribe()
@@ -394,6 +421,21 @@ async def websocket_market_option_chain(websocket: WebSocket, symbol: str):
 @app.websocket("/ws/fractal-market-profile/{symbol}")
 async def websocket_fractal_market_profile(websocket: WebSocket, symbol: str):
     await ws_fractal_market_profile(websocket, symbol)
+
+
+@app.websocket("/ws/strategy-snapshot")
+async def websocket_strategy_snapshot(websocket: WebSocket):
+    await ws_strategy_snapshot(websocket)
+
+
+@app.websocket("/ws/quotes")
+async def websocket_quotes(websocket: WebSocket):
+    await ws_quotes(websocket)
+
+
+@app.websocket("/ws/depth/{symbol:path}")
+async def websocket_depth(websocket: WebSocket, symbol: str):
+    await ws_depth(websocket, symbol)
 
 
 @app.websocket("/ws/proposals")

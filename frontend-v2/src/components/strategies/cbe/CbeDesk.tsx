@@ -36,6 +36,7 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { PaperPerformance } from "@/components/strategies/shared";
+import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStrategyPositionsStream";
 import type { PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
 
@@ -126,7 +127,8 @@ const trendTone = (t?: string | null) =>
   t === "up" ? "text-accent-green" : t === "down" ? "text-accent-red" : undefined;
 
 export default function CbeDesk() {
-  const [activeTab, setActiveTab] = useUrlTab("rotation");
+  // Open positions / paper book is the headline view when the desk opens.
+  const [activeTab, setActiveTab] = useUrlTab("performance");
 
   const latestQuery = useQuery({
     queryKey: ["cbe", "latest"],
@@ -154,8 +156,14 @@ export default function CbeDesk() {
   const scan = latestQuery.data;
   const results = useMemo(() => scan?.results ?? [], [scan?.results]);
   const watchlist = scan?.watchlist ?? [];
-  const paperSum = paperSummaryQuery.data;
-  const positions = paperPositionsQuery.data;
+
+  // Live open-positions stream (shared /ws/positions-overview channel); active
+  // on the performance tab, falls back to CBE's dedicated paper endpoints.
+  const posStream = useStrategyPositionsStream({ enabled: activeTab === "performance" });
+  const streamSlice = selectStrategySlice(posStream.data, "cbe");
+  const streamLive = posStream.isStreamConnected && Boolean(streamSlice);
+  const paperSum = (streamLive ? streamSlice?.summary : paperSummaryQuery.data) as PaperSummary | undefined;
+  const positions = (streamLive ? streamSlice : paperPositionsQuery.data) as PositionsPayload | undefined;
 
   // RRG scatter points — every scored name, x=stock RS%, y=MACD histogram.
   const rrgPoints = useMemo<RrgPoint[]>(
@@ -225,6 +233,9 @@ export default function CbeDesk() {
       v1Href="http://localhost:3000/cbe"
       rightSlot={
         <div className="flex items-center gap-2">
+          {activeTab === "performance" ? (
+            <StatusBadge label={streamLive ? "● live" : "polling"} variant={streamLive ? "success" : "info"} />
+          ) : null}
           <StatusBadge
             label={`scan ${scan?.scan_date ?? "—"}`}
             variant="info"

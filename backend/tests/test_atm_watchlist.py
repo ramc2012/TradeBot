@@ -107,12 +107,19 @@ def test_get_broker_expiries_prefers_live_fyers_ladder_when_upstox_is_offline(mo
         assert symbol == "NIFTY"
         return ["2026-04-28", "2026-05-26"]
 
+    # NSE indices expire Tuesday; a Thursday NIFTY series is a phantom that the ladder
+    # filter now rejects. Use a live fyers ladder of VALID Tuesday expiries that differs
+    # from the persisted ladder (the 06-30 is the tell that live-fyers was preferred).
+    class _ValidNseFyersAdapter(_FakeFyersAdapter):
+        async def get_option_contracts(self, symbol: str) -> list[dict]:
+            return [{"expiry": "2026-04-28"}, {"expiry": "2026-06-30"}]
+
     monkeypatch.setattr(atm_watchlist_module, "get_redis", lambda: _fake_get_redis(redis))
     monkeypatch.setattr(service, "_load_persisted_expiries_for_symbol", fake_load_persisted)
 
-    expiries = asyncio.run(service._get_broker_expiries_for_symbol(meta, None, _FakeFyersAdapter()))
+    expiries = asyncio.run(service._get_broker_expiries_for_symbol(meta, None, _ValidNseFyersAdapter()))
 
-    assert expiries == ["2026-04-23", "2026-05-26"]
+    assert expiries == ["2026-04-28", "2026-06-30"]
     assert redis._values["atm_watchlist:sym_expiries:v2:NIFTY"] == json.dumps(
         {"expiries": expiries, "source": "fyers"}
     )

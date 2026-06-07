@@ -37,10 +37,13 @@ function normalizePositionsOverview(payload: PositionsOverviewPayload): AppStrat
     gann: payload.gann ?? null,
     auction: payload.auction ?? null,
     fractal: payload.fractal ?? null,
+    cbe: payload.cbe ?? null,
     errors: payload.errors ?? {},
     fetchedAt: payload.fetchedAt ?? new Date().toISOString(),
   };
 }
+
+const RESEARCH_BOOK_SOURCES = ["directional", "gann", "auction", "fractal", "cbe"];
 
 function formatNumber(value?: number | null, digits = 2) {
   if (value == null || Number.isNaN(value)) return "--";
@@ -646,7 +649,7 @@ export default function PositionsPage() {
               Research Strategy Books
             </div>
             <div className="mt-3 text-xs text-text-secondary">
-              {openRows.filter((row) => ["directional", "gann", "auction", "fractal"].includes(row.source)).length} open and {closedRows.filter((row) => ["directional", "gann", "auction", "fractal"].includes(row.source)).length} closed positions from directional, Gann, auction, and fractal strategy pages.
+              {openRows.filter((row) => RESEARCH_BOOK_SOURCES.includes(row.source)).length} open and {closedRows.filter((row) => RESEARCH_BOOK_SOURCES.includes(row.source)).length} closed positions from directional, Gann, auction, fractal, and CBE strategy pages.
             </div>
           </div>
         </div>
