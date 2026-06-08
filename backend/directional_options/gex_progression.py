@@ -12,12 +12,15 @@ returns `available=False` when the band has too little history.
 from __future__ import annotations
 
 import asyncio
+import bisect
 from datetime import date, datetime, time as dtime, timedelta
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from loguru import logger
+from sqlalchemy import text
 
+from db.database import AsyncSessionLocal
 from directional_options.gex_engine import compute_progression
 from market_data.option_chain import option_chain_service
 from market_data.option_history import option_history_service
@@ -43,6 +46,63 @@ def _parse_dt(value: Any) -> Optional[datetime]:
 
 def _label(dt: datetime, multiday: bool) -> str:
     return dt.strftime("%d-%b %H:%M") if multiday else dt.strftime("%H:%M")
+
+
+async def _load_spot_series(root: str, *, ref_spot: float, limit: int = 600) -> dict[datetime, float]:
+    """Index 30-min close series from underlying_spot_candles, keyed by IST-naive
+    datetime. option_premium_candles often lacks underlying_price, so this is the
+    reliable per-bucket spot. Guards the known garbage prints (±20% of ref_spot)
+    and dedups duplicate timestamps (keep freshest)."""
+    out: dict[datetime, float] = {}
+    if ref_spot <= 0:
+        return out
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT DISTINCT ON (time) time, close
+                    FROM underlying_spot_candles
+                    WHERE underlying = :u AND interval = '30minute'
+                    ORDER BY time DESC, synced_at DESC NULLS LAST
+                    LIMIT :limit
+                    """
+                ),
+                {"u": root, "limit": limit},
+            )
+            for row in result.fetchall():
+                if row.time is None or row.close is None:
+                    continue
+                try:
+                    close = float(row.close)
+                except (TypeError, ValueError):
+                    continue
+                if abs(close - ref_spot) / ref_spot > 0.20:  # garbage-print guard
+                    continue
+                dt = row.time
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(IST).replace(tzinfo=None)
+                out[dt] = close
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[gex-prog] spot series load failed for {root}: {exc}")
+    return out
+
+
+def _nearest_spot(spot_map: dict[datetime, float], keys: list[datetime], dt: datetime) -> Optional[float]:
+    if not keys:
+        return None
+    if dt in spot_map:
+        return spot_map[dt]
+    i = bisect.bisect_left(keys, dt)
+    best: Optional[datetime] = None
+    for cand in (keys[i - 1] if i > 0 else None, keys[i] if i < len(keys) else None):
+        if cand is None:
+            continue
+        if best is None or abs((cand - dt).total_seconds()) < abs((best - dt).total_seconds()):
+            best = cand
+    if best is not None and abs((best - dt).total_seconds()) <= 16 * 60:
+        return spot_map[best]
+    return None
 
 
 async def _strike_series(
@@ -154,6 +214,16 @@ async def fetch_gex_progression(
                     px = row["spot"]
                     break
         underlying_px.append(px)
+
+    # Fallback: fill missing per-bucket spot from underlying_spot_candles
+    # (option candles frequently lack underlying_price -> would null the GEX).
+    if any(px is None for px in underlying_px):
+        spot_map = await _load_spot_series(root, ref_spot=spot)
+        if spot_map:
+            keys = sorted(spot_map)
+            for i, dt in enumerate(grid_dts):
+                if underlying_px[i] is None:
+                    underlying_px[i] = _nearest_spot(spot_map, keys, dt)
 
     exp_instant = datetime.combine(exp_date, _EXPIRY_CLOSE)
     T_by_bucket = [max((exp_instant - dt).total_seconds() / _YEAR_SECONDS, 1e-6) for dt in grid_dts]
