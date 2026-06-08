@@ -1,332 +1,397 @@
 "use client";
 
 /**
- * Option-chain analytics panel — the new rich-data view the RL policy
- * is now consuming.
+ * Dealer-positioning analytics panel for the long-premium (directional) desk.
  *
- * Shows everything the bandit sees as chain context: PCR, ATM IV,
- * IV skew (25-delta), max pain, DEX, GEX, gamma curve around ATM, top
- * OI strikes on each side, OI-build classification. All metrics
- * tolerate nulls and degrade to "—" when the chain isn't cached.
+ * Black-76 GEX engine ported from the fyers-webapp options-analytics module:
+ * per-expiry GEX-by-strike profile, Net GEX (₹Cr), gamma flip (zero-gamma spot),
+ * gamma density, DEX, max-pain, call/put walls, IV smile — plus a term structure
+ * across the nearest expiries and a 30-min net-GEX / OI progression with
+ * strike×time heatmaps.
+ *
+ * Data: GET /api/directional-options/gex (per-expiry + term) and
+ *       GET /api/directional-options/gex-progression (lazy, per expiry).
+ * Additive to /chain-analytics (which still feeds the RL policy).
  */
+import { useState } from "react";
 import { clsx } from "clsx";
 import { useQuery } from "@tanstack/react-query";
 import {
+  Area,
+  AreaChart,
   Bar,
   BarChart,
   Cell,
+  Line,
+  LineChart,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
-import { Activity, Layers, TrendingDown, TrendingUp } from "lucide-react";
+import { Activity, ChevronDown, Layers, Sigma, TrendingUp } from "lucide-react";
 
-import {
-  MetricTile,
-  REFRESH_MS,
-  Section,
-  StatusBadge,
-  formatNumber,
-  formatPct,
-  tone,
-} from "@/components/desk-ui";
+import { MetricTile, REFRESH_MS, Section, formatNumber, tone } from "@/components/desk-ui";
 import { api as apiClient } from "@/lib/api";
+import GexHeatmap from "./GexHeatmap";
 
-type ChainAnalytics = {
+const POS = "#00d4a3";
+const NEG = "#ff4757";
+const CHART_TT = { background: "#0f1724", border: "1px solid #1e2d45", borderRadius: 8, fontSize: 12 } as const;
+
+type Meta = {
+  expiry: string;
+  days: number | null;
+  fp: number | null;
+  spot: number | null;
+  basis: number | null;
+  pcr: number | null;
+  atm: number | null;
+  atm_iv: number | null;
+  max_pain: number | null;
+  call_wall: number | null;
+  put_wall: number | null;
+  net_gex: number | null;
+  net_dex: number | null;
+  gamma_flip: number | null;
+};
+type Row = {
+  strike: number;
+  ce_iv: number | null;
+  pe_iv: number | null;
+  ce_oi: number;
+  pe_oi: number;
+  gex: number;
+  dex: number;
+  gdens: number;
+};
+type PerExpiry = { meta: Meta; rows: Row[] };
+type Term = {
+  labels: (string | null)[];
+  days: (number | null)[];
+  pcr: (number | null)[];
+  atm_iv: (number | null)[];
+  net_gex: (number | null)[];
+  max_pain: (number | null)[];
+  tot_oi: (number | null)[];
+};
+type GexPayload = {
   available?: boolean;
   underlying?: string;
-  expiry?: string | null;
   spot?: number | null;
-  atm_strike?: number | null;
-  atm_iv?: number | null;
-  pcr_oi?: number | null;
-  pcr_volume?: number | null;
-  pcr_oi_change?: number | null;
-  iv_skew_25d?: number | null;
-  iv_skew_25d_norm?: number | null;
-  gex_total?: number | null;
-  dex_calls?: number | null;
-  dex_puts?: number | null;
-  dex_net?: number | null;
-  total_ce_oi?: number | null;
-  total_pe_oi?: number | null;
-  total_ce_oi_change?: number | null;
-  total_pe_oi_change?: number | null;
-  atm_call_oi_change?: number | null;
-  atm_put_oi_change?: number | null;
-  atm_call_ltp_change_pct?: number | null;
-  atm_put_ltp_change_pct?: number | null;
-  max_pain?: number | null;
-  top_ce_oi?: Array<{ strike: number; oi: number; moneyness_pct: number }>;
-  top_pe_oi?: Array<{ strike: number; oi: number; moneyness_pct: number }>;
-  oi_build_ce?: Record<string, number>;
-  oi_build_pe?: Record<string, number>;
-  gamma_curve?: Array<{
-    strike: number;
-    moneyness_pct: number;
-    ce_gamma_oi: number;
-    pe_gamma_oi: number;
-    total_gamma_oi: number;
-  }>;
+  per_expiry?: PerExpiry[];
+  term?: Term | null;
 };
+type Progression = {
+  times: string[];
+  strikes: number[];
+  idx: (number | null)[];
+  gdens: (number | null)[][];
+  oi_call: (number | null)[][];
+  oi_put: (number | null)[][];
+  gex: (number | null)[];
+  regime: (string | null)[];
+  atm: number | null;
+};
+type ProgPayload = { available?: boolean; expiry?: string; atm?: number | null; progression?: Progression };
 
-function compact(n: number | null | undefined): string {
+function compact(n: number | null | undefined, unit = ""): string {
   if (n == null || Number.isNaN(n)) return "—";
   const abs = Math.abs(n);
-  if (abs >= 1e10) return `${(n / 1e10).toFixed(2)} kCr`;
-  if (abs >= 1e7) return `${(n / 1e7).toFixed(2)} Cr`;
-  if (abs >= 1e5) return `${(n / 1e5).toFixed(2)} L`;
-  if (abs >= 1e3) return `${(n / 1e3).toFixed(1)} K`;
-  return n.toFixed(0);
+  let s: string;
+  if (abs >= 1e7) s = `${(n / 1e7).toFixed(2)}Cr`;
+  else if (abs >= 1e5) s = `${(n / 1e5).toFixed(2)}L`;
+  else if (abs >= 1e3) s = `${(n / 1e3).toFixed(1)}K`;
+  else s = n.toFixed(abs < 10 && abs > 0 ? 2 : 0);
+  return unit ? `${s}${unit}` : s;
 }
-
-function pcrTone(pcr: number | null | undefined): string {
-  // PCR > 1.2 = bullish (more puts, contrarian); PCR < 0.8 = bearish.
-  if (pcr == null) return "text-text-muted";
-  if (pcr > 1.2) return "text-accent-green";
-  if (pcr < 0.8) return "text-accent-red";
+function pcrTone(p?: number | null): string {
+  if (p == null) return "text-text-muted";
+  if (p > 1.2) return "text-accent-green";
+  if (p < 0.8) return "text-accent-red";
   return "text-text-secondary";
 }
 
-export default function OptionAnalyticsPanel({
-  underlying,
-  expiry,
-}: {
-  underlying: string;
-  expiry?: string | null;
-}) {
+export default function OptionAnalyticsPanel({ underlying, expiry }: { underlying: string; expiry?: string | null }) {
   const { data, isLoading } = useQuery({
-    queryKey: ["directional", "chain-analytics", underlying, expiry || ""],
+    queryKey: ["directional", "gex", underlying],
     queryFn: async () =>
-      (
-        await apiClient.get("/api/directional-options/chain-analytics", {
-          params: { underlying, expiry: expiry || undefined },
-        })
-      ).data as ChainAnalytics,
+      (await apiClient.get("/api/directional-options/gex", { params: { underlying } })).data as GexPayload,
     refetchInterval: REFRESH_MS.live,
     refetchOnWindowFocus: false,
   });
 
+  const expiries = data?.per_expiry?.map((p) => p.meta.expiry) ?? [];
+  const [selected, setSelected] = useState<string | null>(null);
+  const activeExpiry = selected ?? (expiry && expiries.includes(expiry) ? expiry : expiries[0] ?? null);
+  const current = data?.per_expiry?.find((p) => p.meta.expiry === activeExpiry) ?? null;
+
   if (isLoading) {
     return (
-      <Section title="Option-chain analytics" icon={<Layers size={16} />}>
-        <div className="text-sm text-text-muted">Loading chain…</div>
+      <Section title="Dealer positioning · GEX" icon={<Sigma size={16} />}>
+        <div className="text-sm text-text-muted">Loading option chain…</div>
       </Section>
     );
   }
-
-  if (!data?.available) {
+  if (!data?.available || !current) {
     return (
-      <Section title="Option-chain analytics" icon={<Layers size={16} />}>
+      <Section title="Dealer positioning · GEX" icon={<Sigma size={16} />}>
         <div className="rounded-xl border border-bg-border bg-bg-primary/15 p-3 text-sm text-text-muted">
-          No chain cached for <span className="font-mono">{underlying}</span>
-          {expiry ? ` · ${expiry}` : ""}. Chain analytics show up once the
-          broker websocket has filled the option chain.
+          No chain cached for <span className="font-mono">{underlying}</span>. GEX analytics populate once the broker
+          websocket fills the option chain. Open Market → Option Chain once for this underlying to prime it.
         </div>
       </Section>
     );
   }
 
-  const pcrOi = data.pcr_oi;
-  const pcrOiChg = data.pcr_oi_change;
-  const ivSkewNorm = data.iv_skew_25d_norm;
-  const dexDenom = Math.max(Math.abs(data.dex_calls ?? 0) + Math.abs(data.dex_puts ?? 0), 1);
-  const dexRatio = (data.dex_net ?? 0) / dexDenom;
-  const totalCeOiChg = data.total_ce_oi_change ?? 0;
-  const totalPeOiChg = data.total_pe_oi_change ?? 0;
+  const m = current.meta;
+  const gexData = current.rows.map((r) => ({ strike: r.strike, gex: r.gex, gdens: r.gdens }));
+  const smileData = current.rows
+    .map((r) => ({ strike: r.strike, ce_iv: r.ce_iv, pe_iv: r.pe_iv }))
+    .filter((r) => r.ce_iv != null || r.pe_iv != null);
 
   return (
     <div className="space-y-4">
-      <Section
-        title={`Option-chain analytics · ${data.underlying || underlying}`}
-        icon={<Layers size={16} />}
-        rightSlot={
-          <span className="text-[11px] text-text-muted">
-            {data.expiry ? `expiry ${data.expiry}` : ""}
-            {data.atm_strike ? ` · ATM ${data.atm_strike}` : ""}
-          </span>
-        }
-      >
+      {/* Expiry tabs */}
+      <div className="flex flex-wrap items-center gap-2">
+        {expiries.map((e) => (
+          <button
+            key={e}
+            onClick={() => setSelected(e)}
+            className={clsx(
+              "rounded-full border px-3 py-1 text-xs font-medium transition",
+              e === activeExpiry
+                ? "border-accent-blue/60 bg-accent-blue/15 text-text-primary"
+                : "border-bg-border bg-bg-secondary/30 text-text-muted hover:text-text-secondary",
+            )}
+          >
+            {e}
+          </button>
+        ))}
+        <span className="ml-auto text-[11px] text-text-muted">
+          spot {formatNumber(m.spot, 1)} · fwd {formatNumber(m.fp, 1)} · {m.days != null ? `${m.days}d` : "—"}
+        </span>
+      </div>
+
+      {/* KPI row */}
+      <Section title={`Dealer positioning · ${underlying} ${activeExpiry ?? ""}`} icon={<Sigma size={16} />}>
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
           <MetricTile
-            label="PCR (OI)"
-            value={formatNumber(pcrOi, 2)}
-            color={pcrTone(pcrOi)}
-            detail={pcrOiChg != null ? `Δ ${(pcrOiChg >= 0 ? "+" : "") + pcrOiChg.toFixed(3)}` : ""}
+            label="Net GEX"
+            value={`${m.net_gex != null && m.net_gex >= 0 ? "+" : ""}${compact(m.net_gex)} Cr`}
+            color={tone(m.net_gex)}
+            detail={m.net_gex != null ? (m.net_gex >= 0 ? "long-gamma · stabilizing" : "short-gamma · trending") : ""}
           />
           <MetricTile
-            label="PCR (Vol)"
-            value={formatNumber(data.pcr_volume, 2)}
-            color={pcrTone(data.pcr_volume)}
+            label="Gamma flip"
+            value={m.gamma_flip != null ? formatNumber(m.gamma_flip, 0) : "—"}
+            color={m.gamma_flip != null && m.spot != null ? (m.spot >= m.gamma_flip ? "text-accent-green" : "text-accent-red") : undefined}
+            detail={m.gamma_flip != null && m.spot != null ? `${m.spot >= m.gamma_flip ? "above" : "below"} flip` : "no crossing"}
           />
-          <MetricTile
-            label="ATM IV"
-            value={data.atm_iv != null ? formatPct(data.atm_iv, 2) : "—"}
-            detail={ivSkewNorm != null ? `skew ${(ivSkewNorm * 100).toFixed(1)}%` : ""}
-          />
-          <MetricTile
-            label="IV skew (25Δ)"
-            value={data.iv_skew_25d != null ? (data.iv_skew_25d >= 0 ? "+" : "") + data.iv_skew_25d.toFixed(2) : "—"}
-            color={tone(data.iv_skew_25d)}
-            detail="put IV − call IV"
-          />
+          <MetricTile label="ATM IV" value={m.atm_iv != null ? `${m.atm_iv.toFixed(2)}%` : "—"} />
+          <MetricTile label="PCR (OI)" value={m.pcr != null ? m.pcr.toFixed(3) : "—"} color={pcrTone(m.pcr)} />
           <MetricTile
             label="Max pain"
-            value={data.max_pain != null ? formatNumber(data.max_pain, 0) : "—"}
-            detail={data.spot != null && data.max_pain != null ? `${(((data.max_pain - data.spot) / data.spot) * 100).toFixed(2)}% from spot` : ""}
+            value={formatNumber(m.max_pain, 0)}
+            detail={m.spot != null && m.max_pain != null ? `${(((m.max_pain - m.spot) / m.spot) * 100).toFixed(2)}% vs spot` : ""}
           />
           <MetricTile
-            label="GEX"
-            value={compact(data.gex_total)}
-            color={tone(data.gex_total)}
-            detail="γ × OI × side"
+            label="Net DEX"
+            value={`${m.net_dex != null && m.net_dex >= 0 ? "+" : ""}${compact(m.net_dex)} Cr`}
+            color={tone(m.net_dex)}
+            detail={`walls C${formatNumber(m.call_wall, 0)} / P${formatNumber(m.put_wall, 0)}`}
           />
         </div>
       </Section>
 
+      {/* GEX-by-strike profile */}
+      <Section title="GEX by strike · ₹Cr per 1% move" icon={<Layers size={16} />}>
+        <div className="h-72">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={gexData} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
+              <XAxis dataKey="strike" type="number" domain={["dataMin", "dataMax"]} tick={{ fill: "#94a3b8", fontSize: 11 }} />
+              <YAxis tick={{ fill: "#94a3b8", fontSize: 11 }} tickFormatter={(v) => compact(v)} />
+              <Tooltip formatter={(v: number) => [`${compact(v)} Cr`, "GEX"]} labelFormatter={(s) => `Strike ${s}`} contentStyle={CHART_TT} />
+              <ReferenceLine y={0} stroke="#1e2d45" />
+              {m.spot != null ? (
+                <ReferenceLine x={m.spot} stroke="#3b82f6" strokeDasharray="3 3" label={{ value: "spot", fill: "#3b82f6", fontSize: 10, position: "top" }} />
+              ) : null}
+              {m.gamma_flip != null ? (
+                <ReferenceLine x={m.gamma_flip} stroke="#f5c842" strokeDasharray="4 2" label={{ value: "flip", fill: "#f5c842", fontSize: 10, position: "top" }} />
+              ) : null}
+              <Bar dataKey="gex">
+                {gexData.map((d) => (
+                  <Cell key={d.strike} fill={d.gex >= 0 ? POS : NEG} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <p className="mt-2 text-[11px] text-text-muted">
+          Positive (green) = dealers long gamma at that strike (mean-reverting / pin); negative (red) = short gamma
+          (move-amplifying). The yellow line is the zero-gamma flip — spot above it is the stabilizing regime.
+        </p>
+      </Section>
+
       <div className="grid gap-4 lg:grid-cols-2">
-        <Section title="Delta exposure (DEX)" icon={<Activity size={16} />}>
-          <div className="grid grid-cols-3 gap-3">
-            <MetricTile label="Calls" value={compact(data.dex_calls)} color="text-accent-green" />
-            <MetricTile label="Puts" value={compact(data.dex_puts)} color="text-accent-red" />
-            <MetricTile
-              label="Net (ratio)"
-              value={(dexRatio >= 0 ? "+" : "") + dexRatio.toFixed(2)}
-              color={tone(dexRatio)}
-              detail="(C − P) / (|C| + |P|)"
-            />
-          </div>
-          <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-text-muted">
-            <div className="rounded border border-bg-border bg-bg-primary/10 p-2">
-              <div className="uppercase tracking-[0.14em]">CE OI / Δ</div>
-              <div className="mt-1 font-mono text-text-primary">{compact(data.total_ce_oi)}</div>
-              <div className={clsx("mt-0.5 font-mono", tone(totalCeOiChg))}>Δ {compact(totalCeOiChg)}</div>
-            </div>
-            <div className="rounded border border-bg-border bg-bg-primary/10 p-2">
-              <div className="uppercase tracking-[0.14em]">PE OI / Δ</div>
-              <div className="mt-1 font-mono text-text-primary">{compact(data.total_pe_oi)}</div>
-              <div className={clsx("mt-0.5 font-mono", tone(totalPeOiChg))}>Δ {compact(totalPeOiChg)}</div>
-            </div>
-          </div>
-        </Section>
-
-        <Section title="ATM activity (this bar)" icon={<TrendingUp size={16} />}>
-          <div className="grid grid-cols-2 gap-3">
-            <MetricTile
-              label="ATM CE  Δ LTP%"
-              value={data.atm_call_ltp_change_pct != null ? (data.atm_call_ltp_change_pct >= 0 ? "+" : "") + data.atm_call_ltp_change_pct.toFixed(2) + "%" : "—"}
-              color={tone(data.atm_call_ltp_change_pct)}
-              detail={`Δ OI ${compact(data.atm_call_oi_change)}`}
-            />
-            <MetricTile
-              label="ATM PE  Δ LTP%"
-              value={data.atm_put_ltp_change_pct != null ? (data.atm_put_ltp_change_pct >= 0 ? "+" : "") + data.atm_put_ltp_change_pct.toFixed(2) + "%" : "—"}
-              color={tone(data.atm_put_ltp_change_pct)}
-              detail={`Δ OI ${compact(data.atm_put_oi_change)}`}
-            />
-          </div>
-          {data.oi_build_ce || data.oi_build_pe ? (
-            <div className="mt-3">
-              <div className="mb-1 text-[10.5px] uppercase tracking-[0.16em] text-text-muted">
-                OI build classification (chain-wide)
-              </div>
-              <table className="w-full text-[11px]">
-                <thead className="text-[10px] uppercase tracking-wide text-text-muted">
-                  <tr><th className="text-left pb-1">Side</th><th>Long Bld</th><th>Short Bld</th><th>Long Unw</th><th>Short Cov</th></tr>
-                </thead>
-                <tbody>
-                  <tr className="border-t border-bg-border/30">
-                    <td className="py-1 text-accent-green font-semibold">CE</td>
-                    <td className="text-center font-mono">{data.oi_build_ce?.long_buildup ?? 0}</td>
-                    <td className="text-center font-mono">{data.oi_build_ce?.short_buildup ?? 0}</td>
-                    <td className="text-center font-mono">{data.oi_build_ce?.long_unwind ?? 0}</td>
-                    <td className="text-center font-mono">{data.oi_build_ce?.short_cover ?? 0}</td>
-                  </tr>
-                  <tr className="border-t border-bg-border/30">
-                    <td className="py-1 text-accent-red font-semibold">PE</td>
-                    <td className="text-center font-mono">{data.oi_build_pe?.long_buildup ?? 0}</td>
-                    <td className="text-center font-mono">{data.oi_build_pe?.short_buildup ?? 0}</td>
-                    <td className="text-center font-mono">{data.oi_build_pe?.long_unwind ?? 0}</td>
-                    <td className="text-center font-mono">{data.oi_build_pe?.short_cover ?? 0}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          ) : null}
-        </Section>
-      </div>
-
-      {data.gamma_curve && data.gamma_curve.length > 0 ? (
-        <Section title="Gamma curve · γ × OI around ATM" icon={<TrendingDown size={16} />}>
+        {/* Gamma density */}
+        <Section title="Gamma density · γ·OI concentration" icon={<Activity size={16} />}>
           <div className="h-56">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={data.gamma_curve}>
-                <XAxis dataKey="strike" tick={{ fill: "#94a3b8", fontSize: 11 }} />
-                <YAxis tick={{ fill: "#94a3b8", fontSize: 11 }} tickFormatter={(v) => compact(v)} />
-                <Tooltip
-                  formatter={(value: number, name: string) => [compact(value), name === "ce_gamma_oi" ? "CE γ·OI" : "PE γ·OI"]}
-                  labelFormatter={(strike) => `Strike ${strike}`}
-                  contentStyle={{ background: "#0f1724", border: "1px solid #1e2d45" }}
-                />
-                {data.spot ? <ReferenceLine x={data.atm_strike ?? undefined} stroke="#3b82f6" strokeDasharray="3 3" label={{ value: "ATM", fill: "#94a3b8", fontSize: 10 }} /> : null}
-                <Bar dataKey="ce_gamma_oi" stackId="g" fill="#00d4a3" />
-                <Bar dataKey="pe_gamma_oi" stackId="g" fill="#ff4757" />
-              </BarChart>
+              <AreaChart data={gexData} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
+                <defs>
+                  <linearGradient id="gd" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.55} />
+                    <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.04} />
+                  </linearGradient>
+                </defs>
+                <XAxis dataKey="strike" type="number" domain={["dataMin", "dataMax"]} tick={{ fill: "#94a3b8", fontSize: 11 }} />
+                <YAxis tick={{ fill: "#94a3b8", fontSize: 11 }} />
+                <Tooltip formatter={(v: number) => [v.toFixed(2), "γ·OI (M)"]} labelFormatter={(s) => `Strike ${s}`} contentStyle={CHART_TT} />
+                {m.atm != null ? <ReferenceLine x={m.atm} stroke="#3b82f6" strokeDasharray="3 3" /> : null}
+                <Area type="monotone" dataKey="gdens" stroke="#3b82f6" fill="url(#gd)" />
+              </AreaChart>
             </ResponsiveContainer>
           </div>
         </Section>
-      ) : null}
 
-      {data.top_ce_oi && data.top_pe_oi ? (
-        <div className="grid gap-4 lg:grid-cols-2">
-          <Section title="Top CE strikes by OI">
-            <table className="w-full text-[12px]">
-              <thead className="text-[10.5px] uppercase tracking-wide text-text-muted">
-                <tr className="border-b border-bg-border/40">
-                  <th className="px-2 py-1.5 text-left">Strike</th>
-                  <th className="px-2 py-1.5 text-right">OI</th>
-                  <th className="px-2 py-1.5 text-right">% from spot</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.top_ce_oi.map((r) => (
-                  <tr key={`ce-${r.strike}`} className="border-b border-bg-border/20">
-                    <td className="px-2 py-1.5 font-mono">{r.strike}</td>
-                    <td className="px-2 py-1.5 text-right font-mono">{compact(r.oi)}</td>
-                    <td className={clsx("px-2 py-1.5 text-right font-mono", tone(r.moneyness_pct))}>
-                      {((r.moneyness_pct ?? 0) * 100).toFixed(2)}%
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </Section>
-          <Section title="Top PE strikes by OI">
-            <table className="w-full text-[12px]">
-              <thead className="text-[10.5px] uppercase tracking-wide text-text-muted">
-                <tr className="border-b border-bg-border/40">
-                  <th className="px-2 py-1.5 text-left">Strike</th>
-                  <th className="px-2 py-1.5 text-right">OI</th>
-                  <th className="px-2 py-1.5 text-right">% from spot</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.top_pe_oi.map((r) => (
-                  <tr key={`pe-${r.strike}`} className="border-b border-bg-border/20">
-                    <td className="px-2 py-1.5 font-mono">{r.strike}</td>
-                    <td className="px-2 py-1.5 text-right font-mono">{compact(r.oi)}</td>
-                    <td className={clsx("px-2 py-1.5 text-right font-mono", tone(-(r.moneyness_pct ?? 0)))}>
-                      {((r.moneyness_pct ?? 0) * 100).toFixed(2)}%
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </Section>
-        </div>
-      ) : null}
+        {/* IV smile */}
+        <Section title="IV smile / skew" icon={<TrendingUp size={16} />}>
+          <div className="h-56">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={smileData} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
+                <XAxis dataKey="strike" type="number" domain={["dataMin", "dataMax"]} tick={{ fill: "#94a3b8", fontSize: 11 }} />
+                <YAxis tick={{ fill: "#94a3b8", fontSize: 11 }} tickFormatter={(v) => `${v}%`} />
+                <Tooltip formatter={(v: number, n: string) => [`${v?.toFixed?.(2)}%`, n === "ce_iv" ? "Call IV" : "Put IV"]} labelFormatter={(s) => `Strike ${s}`} contentStyle={CHART_TT} />
+                {m.atm != null ? <ReferenceLine x={m.atm} stroke="#3b82f6" strokeDasharray="3 3" /> : null}
+                <Line type="monotone" dataKey="ce_iv" stroke={POS} dot={false} connectNulls />
+                <Line type="monotone" dataKey="pe_iv" stroke={NEG} dot={false} connectNulls />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </Section>
+      </div>
+
+      {/* Term structure */}
+      {data.term && data.term.labels.length > 1 ? <TermStructure term={data.term} /> : null}
+
+      {/* Progression (lazy) */}
+      <ProgressionSection underlying={underlying} expiry={activeExpiry} />
     </div>
+  );
+}
+
+function TermStructure({ term }: { term: Term }) {
+  const rows = term.labels.map((label, i) => ({
+    label: label ?? "—",
+    days: term.days[i],
+    pcr: term.pcr[i],
+    atm_iv: term.atm_iv[i],
+    net_gex: term.net_gex[i],
+    max_pain: term.max_pain[i],
+  }));
+  return (
+    <Section title="Term structure" icon={<Layers size={16} />}>
+      <div className="grid gap-4 lg:grid-cols-[1.1fr,1fr]">
+        <table className="w-full text-[12px]">
+          <thead className="text-[10px] uppercase tracking-wide text-text-muted">
+            <tr className="border-b border-bg-border/40">
+              <th className="px-2 py-1.5 text-left">Expiry</th>
+              <th className="px-2 py-1.5 text-right">Days</th>
+              <th className="px-2 py-1.5 text-right">ATM IV</th>
+              <th className="px-2 py-1.5 text-right">PCR</th>
+              <th className="px-2 py-1.5 text-right">Net GEX</th>
+              <th className="px-2 py-1.5 text-right">Max pain</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.label} className="border-b border-bg-border/20">
+                <td className="px-2 py-1.5 font-mono">{r.label}</td>
+                <td className="px-2 py-1.5 text-right font-mono">{r.days ?? "—"}</td>
+                <td className="px-2 py-1.5 text-right font-mono">{r.atm_iv != null ? `${r.atm_iv}%` : "—"}</td>
+                <td className={clsx("px-2 py-1.5 text-right font-mono", pcrTone(r.pcr))}>{r.pcr ?? "—"}</td>
+                <td className={clsx("px-2 py-1.5 text-right font-mono", tone(r.net_gex))}>{compact(r.net_gex)}</td>
+                <td className="px-2 py-1.5 text-right font-mono">{formatNumber(r.max_pain, 0)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="h-48">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={rows} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
+              <XAxis dataKey="label" tick={{ fill: "#94a3b8", fontSize: 11 }} />
+              <YAxis yAxisId="l" tick={{ fill: "#94a3b8", fontSize: 11 }} />
+              <YAxis yAxisId="r" orientation="right" tick={{ fill: "#94a3b8", fontSize: 11 }} tickFormatter={(v) => `${v}%`} />
+              <Tooltip contentStyle={CHART_TT} />
+              <ReferenceLine yAxisId="l" y={0} stroke="#1e2d45" />
+              <Line yAxisId="l" type="monotone" dataKey="net_gex" name="Net GEX" stroke="#f5c842" dot />
+              <Line yAxisId="r" type="monotone" dataKey="atm_iv" name="ATM IV" stroke="#3b82f6" dot />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
+function ProgressionSection({ underlying, expiry }: { underlying: string; expiry: string | null }) {
+  const [open, setOpen] = useState(false);
+  const { data, isLoading } = useQuery({
+    queryKey: ["directional", "gex-prog", underlying, expiry],
+    queryFn: async () =>
+      (await apiClient.get("/api/directional-options/gex-progression", { params: { underlying, expiry } })).data as ProgPayload,
+    enabled: open && !!expiry,
+    refetchInterval: open ? REFRESH_MS.summary : false,
+    refetchOnWindowFocus: false,
+  });
+  const prog = data?.progression;
+  const gexSeries = prog?.times.map((t, i) => ({ t, gex: prog.gex[i], regime: prog.regime[i] })) ?? [];
+
+  return (
+    <Section
+      title="Intraday GEX progression · 30-min"
+      icon={<Activity size={16} />}
+      rightSlot={
+        <button onClick={() => setOpen((v) => !v)} className="flex items-center gap-1 text-[11px] text-text-muted hover:text-text-secondary">
+          {open ? "hide" : "load"}
+          <ChevronDown size={14} className={clsx("transition", open && "rotate-180")} />
+        </button>
+      }
+    >
+      {!open ? (
+        <div className="text-[11px] text-text-muted">Net-GEX / OI over the day + strike×time heatmaps (history fetch — click load).</div>
+      ) : isLoading ? (
+        <div className="text-sm text-text-muted">Loading 30-min history…</div>
+      ) : !data?.available || !prog ? (
+        <div className="rounded-xl border border-bg-border bg-bg-primary/15 p-3 text-[12px] text-text-muted">
+          Not enough 30-min option history for {expiry}. The progression needs option_premium_candles coverage across
+          the strike band (ingest is episodic).
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div className="h-56">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={gexSeries} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
+                <XAxis dataKey="t" tick={{ fill: "#94a3b8", fontSize: 10 }} />
+                <YAxis tick={{ fill: "#94a3b8", fontSize: 11 }} tickFormatter={(v) => compact(v)} />
+                <Tooltip formatter={(v: number) => [`${compact(v)} Cr`, "Net GEX"]} contentStyle={CHART_TT} />
+                <ReferenceLine y={0} stroke="#1e2d45" />
+                <Bar dataKey="gex">
+                  {gexSeries.map((d, i) => (
+                    <Cell key={i} fill={(d.gex ?? 0) >= 0 ? POS : NEG} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <GexHeatmap title="Gamma density (strike × time)" strikes={prog.strikes} times={prog.times} matrix={prog.gdens} atm={prog.atm} diverging />
+            <GexHeatmap title="Call OI (strike × time)" strikes={prog.strikes} times={prog.times} matrix={prog.oi_call} atm={prog.atm} />
+          </div>
+        </div>
+      )}
+    </Section>
   );
 }
