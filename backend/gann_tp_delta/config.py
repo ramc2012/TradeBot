@@ -136,7 +136,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "risk": {
         "option_premium_budget": 50000.0,    # ₹ premium outlay target per index option
         "futures_notional_target": 1500000.0,  # ₹ notional per commodity futures (matches commodity desk)
-        "daily_loss_cap": 25000.0,           # stop opening new trades once today's realized <= -cap
+        "daily_loss_cap": 0.0,               # [DAILY-LOSS DISABLED 2026-06-08 — restore 25000.0 for production] 0 disables (agent.py guards `> 0`)
         "max_portfolio_positions": 12,
         "breakeven_at_r": 1.0,               # move stop→entry after +1R (on the underlying)
         "trail_start_r": 1.5,                # start trailing after +1.5R

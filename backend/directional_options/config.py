@@ -138,7 +138,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Capital safety caps — these are NOT edge gates. They prevent
         # blowups on bad days but never block individual trades from
         # firing based on signal quality.
-        "daily_loss_cap_r": 4.0,
+        # [DAILY-LOSS DISABLED 2026-06-08 — fine-tuning; restore 4.0 for production.]
+        # 0.0 disables the daily loss cap (gate in risk.py guarded with `> 0`).
+        "daily_loss_cap_r": 0.0,
         "weekly_loss_cap_r": 10.0,
     },
     "execution": {

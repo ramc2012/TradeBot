@@ -121,8 +121,11 @@ FUTURES_BREAK_EVEN_R_MULTIPLIER = 1.0
 FUTURES_PARTIAL_LOCK_R_MULTIPLIER = 1.5
 FUTURES_TARGET_ARM_R_MULTIPLIER = 2.0
 FUTURES_MIN_STOP_PCT = 0.005
-COMMODITY_DAILY_LOSS_LIMIT = 25_000.0
-COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT = 15_000.0
+# [DAILY-LOSS DISABLED 2026-06-08 — disabled for fine-tuning; restore 25_000.0 /
+# 15_000.0 for production.] 0.0 disables the cap (gates in _entry_risk_block are
+# guarded with `> 0`).
+COMMODITY_DAILY_LOSS_LIMIT = 0.0
+COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT = 0.0
 COMMODITY_STOP_COOLDOWN_MINUTES = 60
 COMMODITY_EVENT_BLOCK_MINUTES = 90
 COMMODITY_MAX_DRAWDOWN_PCT = 15.0
@@ -1244,13 +1247,13 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 ),
             }
         daily_pnl = self._today_realized_pnl(current)
-        if daily_pnl <= -COMMODITY_DAILY_LOSS_LIMIT:
+        if COMMODITY_DAILY_LOSS_LIMIT > 0 and daily_pnl <= -COMMODITY_DAILY_LOSS_LIMIT:
             return {
                 "code": "daily_loss_limit",
                 "detail": f"Commodity desk daily loss is {daily_pnl:.0f}; new entries are blocked.",
             }
         underlying_pnl = self._underlying_today_realized_pnl(underlying, current)
-        if underlying_pnl <= -COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT:
+        if COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT > 0 and underlying_pnl <= -COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT:
             return {
                 "code": "underlying_loss_limit",
                 "detail": f"{extract_commodity_root(underlying)} daily loss is {underlying_pnl:.0f}; new entries are blocked.",
