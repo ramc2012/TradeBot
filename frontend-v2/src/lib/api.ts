@@ -136,6 +136,13 @@ api.interceptors.response.use(
       reachableApiBaseUrl = null;
       reachableApiBaseUrlPromise = null;
     }
+    // Auth gate: a 403 on /api/* means the write token is missing/invalid. Emit a
+    // global event so the in-app unlock modal can prompt for it (no devtools needed).
+    if (typeof window !== "undefined" && error?.response?.status === 403) {
+      if (String(error?.config?.url || "").includes("/api/")) {
+        window.dispatchEvent(new CustomEvent("nomad:auth-required"));
+      }
+    }
     return Promise.reject(error);
   },
 );
