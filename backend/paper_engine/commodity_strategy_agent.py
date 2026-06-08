@@ -1701,6 +1701,15 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         if not rows:
             return None
         spec = get_commodity_contract_spec(symbol)
+        # underlying_spot_candles carries duplicate-timestamp rows for some
+        # commodities (CRUDEOIL ~28%); collapse to one bar per timestamp
+        # (keep-last) so the TPO ladder isn't double-counted.
+        deduped: dict[Any, dict[str, Any]] = {}
+        for row in rows:
+            ts = row.get("time")
+            if ts is not None:
+                deduped[ts] = row
+        rows = list(deduped.values())
         bars: list[MarketBar] = []
         for row in rows:
             parsed = _parse_iso_timestamp(row.get("time"))
@@ -1726,6 +1735,11 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "initial_balance_periods": 4,
                 "value_area_pct": 0.70,
                 "min_tail_tpos": 2,
+                # Size the TPO bracket to the day's range, not the raw exchange
+                # tick — otherwise high-priced commodities (SILVERM ~2.6L @ tick 1)
+                # shatter into thousands of one-tick rows and the profile is noise.
+                "target_rows": 50,
+                "max_rows": 90,
             }
         )
         try:
