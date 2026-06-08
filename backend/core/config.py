@@ -103,6 +103,13 @@ class Settings(BaseSettings):
     # WS-0.2 nomad_scan_duration_seconds p99 is known. Per-runner override:
     # RunnerConfig.timeout_seconds.
     MARKET_HOURS_SUPERVISOR_RUNNER_TIMEOUT_SECONDS: int = 300
+    # The market-intelligence runner does the full-universe ATM watchlist +
+    # technicals + snapshot persist; at the global 300s cap it was killed
+    # mid-sweep, so atm_option_watchlist_snapshots coverage collapsed from 217
+    # names at the open to ~5 through midday (S1 went blind on most names). It
+    # runs every FULL_WATCHLIST_REFRESH_MINUTES (15), so a 10-min budget lets it
+    # finish without overlapping the next cycle. Per-runner override.
+    MARKET_INTELLIGENCE_RUNNER_TIMEOUT_SECONDS: int = 600
     MARKET_INTELLIGENCE_AUTO_ENABLED: bool = True
     MARKET_INTELLIGENCE_REFRESH_INTERVAL_SECONDS: int = 60
     MARKET_INTELLIGENCE_GAP_FILL_LOOKBACK_DAYS: int = 10
@@ -126,6 +133,14 @@ class Settings(BaseSettings):
     # especially after a prior position closed via stop/target. Set to
     # False to revert to the strict "30-min cross only" behavior.
     NSE_S1_ALLOW_15M_REENTRY: bool = True
+    # S1 signal source. The snapshot feed (atm_option_watchlist_snapshots) that
+    # normally drives S1's 30m MACD collapses to ~5 names through the midday
+    # session (the full-universe refresh times out), so S1 misses most crosses
+    # after the open. When True, S1 instead picks the nearest WELL-TRADED strike
+    # that has fresh history and computes its 30m MACD from the dense 3m feed
+    # (paper_engine/s1_strike_selection). Default off — enable after validating
+    # the emitted signals on a live session.
+    NSE_S1_USE_3M_FEED: bool = False
     # Per-purpose adapter routing. The goal is to distribute load between the
     # two live brokers so neither hits 429 first and a single rate-limit storm
     # doesn't cascade across desks. Rationale per purpose:

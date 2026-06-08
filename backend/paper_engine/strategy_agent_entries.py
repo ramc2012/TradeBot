@@ -590,6 +590,55 @@ class StrategyEntryMixin:
             # still evaluate a PE-direction trade on those, just not the CE.
             ce_snapshot = self._strategy1_side_snapshot(ce_side, snapshot_state) if ce_side else {}
             pe_snapshot = self._strategy1_side_snapshot(pe_side, snapshot_state) if pe_side else {}
+
+            # S1 3m-feed override (NSE_S1_USE_3M_FEED, default off). The snapshot
+            # feed (atm_option_watchlist_snapshots) collapses to ~5 names midday
+            # (its full-universe refresh times out), so S1 goes blind on most
+            # names after the open. When a side's snapshot MACD is MISSING or
+            # STALE (>35m), re-source its 30m MACD from the dense 3m feed and the
+            # nearest WELL-TRADED strike with fresh history, and trade that strike.
+            if settings.NSE_S1_USE_3M_FEED and expiry_str:
+                try:
+                    _spot_3m = float(row.get("spot_price") or 0.0)
+                except (TypeError, ValueError):
+                    _spot_3m = 0.0
+                _underlying_3m = str(row.get("underlying") or "")
+                if _spot_3m > 0 and _underlying_3m:
+                    from paper_engine.s1_strike_selection import compute_s1_signal
+                    for _side, _snap, _otype in ((ce_side, ce_snapshot, "CE"), (pe_side, pe_snapshot, "PE")):
+                        if not _side:
+                            continue
+                        _stale = _snap.get("current_macd") is None or _snap.get("previous_macd") is None
+                        if not _stale:
+                            _pt = _parse_iso_timestamp(str(_snap.get("latest_bar_time") or ""))
+                            if _pt is None:
+                                _stale = True
+                            else:
+                                try:
+                                    _n = _now_ist()
+                                    if _pt.tzinfo is None:
+                                        _pt = _pt.replace(tzinfo=_n.tzinfo)
+                                    _stale = (_n - _pt).total_seconds() > 35 * 60
+                                except Exception:  # noqa: BLE001
+                                    _stale = True
+                        if not _stale:
+                            continue
+                        try:
+                            _sig = await compute_s1_signal(_underlying_3m, expiry_str, _otype, _spot_3m)
+                        except Exception:  # noqa: BLE001
+                            _sig = None
+                        if _sig and _sig.get("available"):
+                            _snap["current_macd"] = _sig.get("macd")
+                            _snap["previous_macd"] = _sig.get("macd_prev")
+                            _snap["latest_bar_time"] = _sig.get("last_bar_time")
+                            _snap["source"] = "s1_3m_feed"
+                            if _sig.get("instrument_key"):
+                                _side["instrument_key"] = _sig["instrument_key"]
+                            if _sig.get("strike"):
+                                _side["strike"] = _sig["strike"]
+                            if _sig.get("latest_close"):
+                                _side["ltp"] = _sig["latest_close"]
+
             ce_snapshot_15m = (
                 macd15.get(str(ce_side.get("instrument_key") or "").strip(), {})
                 if ce_side else {}

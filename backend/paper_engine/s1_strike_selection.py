@@ -139,7 +139,9 @@ async def _strike_stats(
                    count(*) AS bars,
                    max(oi) AS oi,
                    coalesce(sum(volume), 0) AS volume,
-                   max(time) AS last_time
+                   max(time) AS last_time,
+                   (array_agg(instrument_key ORDER BY time DESC)
+                       FILTER (WHERE instrument_key IS NOT NULL))[1] AS instrument_key
             FROM option_premium_candles
             WHERE underlying = :u AND expiry = :e AND option_type = :o
               AND interval = '3minute'
@@ -160,6 +162,7 @@ async def _strike_stats(
             "oi": float(row.oi or 0.0),
             "volume": float(row.volume or 0.0),
             "last": last,
+            "instrument_key": getattr(row, "instrument_key", None),
         })
     return out
 
@@ -240,11 +243,13 @@ async def compute_s1_signal(
         "underlying": underlying,
         "option_type": option_type,
         "strike": chosen["strike"],
+        "instrument_key": chosen.get("instrument_key"),
         "oi": chosen["oi"],
         "volume": chosen["volume"],
         "bars_30m": len(closes),
         "fresh_cross": fresh,
         "macd": round(cur, 4) if cur is not None else None,
         "macd_prev": round(prev, 4) if prev is not None else None,
+        "latest_close": round(closes[-1], 2) if closes else None,
         "last_bar_time": last_bar_time,
     }
