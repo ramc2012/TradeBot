@@ -45,6 +45,15 @@ class DirectionalOptionsService:
         self.paper = DirectionalOptionsPaperStore(
             self.config["paper_trading"]["journal_root"],
             min_hold_bars=int(self.config["paper_trading"].get("min_hold_bars", 3)),
+            min_hold_floor_minutes=float(
+                self.config["paper_trading"].get("min_hold_floor_minutes", 0.0)
+            ),
+            reentry_cooldown_bars=int(
+                self.config["paper_trading"].get("reentry_cooldown_bars", 0)
+            ),
+            reentry_cooldown_floor_seconds=float(
+                self.config["paper_trading"].get("reentry_cooldown_floor_seconds", 0.0)
+            ),
             one_position_per_symbol=bool(
                 self.config["paper_trading"].get("one_position_per_symbol", True)
             ),

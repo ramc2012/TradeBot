@@ -79,15 +79,19 @@ def _has_satisfied_min_hold(
     *,
     min_hold_bars: int,
     timeframe: str | None,
+    floor_minutes: float = 0.0,
 ) -> bool:
-    if min_hold_bars <= 0:
+    minutes_per_bar = _TIMEFRAME_MINUTES.get(str(timeframe or "").lower(), 5)
+    # min_hold_bars is bar-count; for fast timeframes (1m -> 3min) that is too
+    # short to be meaningful, so enforce a wall-clock floor on top of it.
+    required = max(float(min_hold_bars) * minutes_per_bar, float(floor_minutes))
+    if required <= 0:
         return True
     opened = _parse_iso(position.get("opened_at"))
     if opened is None:
         return True
-    minutes_per_bar = _TIMEFRAME_MINUTES.get(str(timeframe or "").lower(), 5)
     elapsed = (datetime.now(timezone.utc) - opened).total_seconds() / 60.0
-    return elapsed >= float(min_hold_bars * minutes_per_bar)
+    return elapsed >= required
 
 
 def _normalize_symbol(value: str | None) -> str:
@@ -137,6 +141,9 @@ class DirectionalOptionsPaperStore:
         root: Path | str,
         *,
         min_hold_bars: int = 3,
+        min_hold_floor_minutes: float = 0.0,
+        reentry_cooldown_bars: int = 0,
+        reentry_cooldown_floor_seconds: float = 0.0,
         one_position_per_symbol: bool = True,
         policy: DirectionalPolicy | None = None,
     ):
@@ -151,8 +158,48 @@ class DirectionalOptionsPaperStore:
         self._lock = asyncio.Lock()
         self._db_seeded = False  # one-time file→DB import guard
         self.min_hold_bars = int(min_hold_bars)
+        self.min_hold_floor_minutes = float(min_hold_floor_minutes)
+        self.reentry_cooldown_bars = int(reentry_cooldown_bars)
+        self.reentry_cooldown_floor_seconds = float(reentry_cooldown_floor_seconds)
         self.one_position_per_symbol = bool(one_position_per_symbol)
         self.policy = policy
+
+    def _in_reentry_cooldown(
+        self,
+        underlying: str,
+        closed_positions: list[dict[str, Any]],
+        *,
+        timeframe: str | None,
+    ) -> bool:
+        """Block re-opening a symbol immediately after a whipsaw close.
+
+        After a flat_signal / signal_flip exit the same fading setup tends to
+        re-trigger within a bar or two — open->fade->close->reopen churn that
+        only bleeds spread. Suppress new opens on the symbol for a cooldown
+        window measured from the most recent such close (bar-scaled, with a
+        wall-clock floor). A natural close (stop/target/expiry) does NOT arm
+        the cooldown — only the two whipsaw reasons do.
+        """
+        minutes_per_bar = _TIMEFRAME_MINUTES.get(str(timeframe or "").lower(), 5)
+        cooldown = max(
+            self.reentry_cooldown_bars * minutes_per_bar * 60.0,
+            self.reentry_cooldown_floor_seconds,
+        )
+        if cooldown <= 0:
+            return False
+        whipsaw = {"flat_signal", "signal_flip"}
+        latest: datetime | None = None
+        for row in closed_positions:
+            if _normalize_symbol(row.get("underlying")) != underlying:
+                continue
+            if str(row.get("close_reason") or "") not in whipsaw:
+                continue
+            closed = _parse_iso(row.get("closed_at"))
+            if closed is not None and (latest is None or closed > latest):
+                latest = closed
+        if latest is None:
+            return False
+        return (datetime.now(timezone.utc) - latest).total_seconds() < cooldown
 
     async def list_journal(self, symbol: str | None = None, limit: int = 50) -> dict[str, Any]:
         records = await self._load_journal()
@@ -321,6 +368,7 @@ class DirectionalOptionsPaperStore:
                         row,
                         min_hold_bars=self.min_hold_bars,
                         timeframe=row.get("timeframe") or position_timeframe,
+                        floor_minutes=self.min_hold_floor_minutes,
                     ):
                         # Held too briefly — refuse to flatten on a single
                         # noisy bar. Keep the position open; it will close
@@ -375,6 +423,7 @@ class DirectionalOptionsPaperStore:
                     row,
                     min_hold_bars=self.min_hold_bars,
                     timeframe=row.get("timeframe") or position_timeframe,
+                    floor_minutes=self.min_hold_floor_minutes,
                 ):
                     # Held too briefly — keep position open through a single
                     # noisy regime flip. Will reassess on the next bar.
@@ -408,7 +457,12 @@ class DirectionalOptionsPaperStore:
                 )
                 return await self._summary(open_positions, closed_positions)
 
-            if not refreshed and allow_entries:
+            cooldown_active = self._in_reentry_cooldown(
+                underlying,
+                closed_positions,
+                timeframe=selection.get("timeframe"),
+            )
+            if not refreshed and allow_entries and not cooldown_active:
                 new_position_id = uuid4().hex
                 try:
                     await paper_trade_recorder.record_event(

@@ -159,6 +159,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # honouring a signal-flip or flat-signal close. Stop / target
         # exits still fire immediately.
         "min_hold_bars": 3,
+        # Wall-clock floor on the min-hold (on top of min_hold_bars). Fast
+        # timeframes (1m -> 3 bars = 3 min) otherwise let a position flatten
+        # within minutes; 8 min stops sub-bar noise churning the book.
+        "min_hold_floor_minutes": 8.0,
+        # Anti-churn re-entry cooldown: after a flat_signal / signal_flip
+        # exit on a symbol, suppress NEW opens on that symbol for max(bars *
+        # tf, floor_seconds). Stops the open->fade->close->reopen cycle that
+        # bled the book (16 closes / 3 symbols on 2026-06-08, all whipsaw).
+        "reentry_cooldown_bars": 3,
+        "reentry_cooldown_floor_seconds": 600.0,
         # One open position per underlying. New signals on a symbol that
         # already has an open position are journaled but do NOT open a
         # second position. (Refresh / signal-flip on the SAME symbol is
