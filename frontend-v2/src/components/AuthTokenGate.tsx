@@ -32,15 +32,18 @@ export default function AuthTokenGate() {
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    if (!hasToken()) setOpen(true);
+    // Open ONLY when the backend actually demands auth (a 403 from /api/*). When
+    // auth is disabled (paper-trading test phase) no 403 fires, so the modal stays
+    // dormant — no token prompt, no friction. Open on first 403 once per load.
     const onRequired = () => {
       if (!hasToken()) setOpen(true);
     };
+    const onManual = () => setOpen(true);
     window.addEventListener("nomad:auth-required", onRequired);
-    // Manual trigger so a "change token" affordance can open it later.
-    window.addEventListener("nomad:open-token-gate", () => setOpen(true));
+    window.addEventListener("nomad:open-token-gate", onManual);
     return () => {
       window.removeEventListener("nomad:auth-required", onRequired);
+      window.removeEventListener("nomad:open-token-gate", onManual);
     };
   }, []);
 

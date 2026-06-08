@@ -67,19 +67,20 @@ async def lifespan(app: FastAPI):
     logger.info("═══ Nomad Curie starting up ═══")
 
     # ── Production security guardrails (gap-audit B1/H7) ─────────────────────────
-    # Refuse to boot a money-control API unauthenticated in production. APP_ENV must
-    # be "production" on prod (it is in /opt/TradeBot/.env). Auth-off in prod = any
-    # internet client can flip live mode + place real Fyers orders → hard fail.
+    # During the PAPER-TRADING test phase auth is intentionally off (no real money
+    # moves), so don't block boot — just warn loudly. Hard-fail ONLY the dangerous
+    # misconfig: auth enabled but no token. Re-enable APP_TOKEN_AUTH_ENABLED before
+    # going LIVE (the in-app unlock modal then handles the token).
     if settings.APP_ENV == "production":
         if not settings.APP_TOKEN_AUTH_ENABLED:
-            raise RuntimeError(
-                "REFUSING TO BOOT: APP_TOKEN_AUTH_ENABLED is False in production. "
-                "The /api surface would accept UNAUTHENTICATED trade control. "
-                "Set APP_TOKEN_AUTH_ENABLED=true and APP_WRITE_TOKEN in the prod .env."
+            logger.critical(
+                "SECURITY: API auth is DISABLED in production — /api accepts UNAUTHENTICATED "
+                "requests. OK for paper-trading testing; MUST set APP_TOKEN_AUTH_ENABLED=true "
+                "before enabling LIVE trading."
             )
-        if not settings.APP_WRITE_TOKEN.strip():
+        elif not settings.APP_WRITE_TOKEN.strip():
             raise RuntimeError(
-                "REFUSING TO BOOT: APP_WRITE_TOKEN is empty in production while auth is enabled."
+                "REFUSING TO BOOT: APP_TOKEN_AUTH_ENABLED is true but APP_WRITE_TOKEN is empty."
             )
         if "change-me" in settings.SECRET_KEY.lower() or settings.SECRET_KEY == "change-me-to-a-random-secret-key":
             # WARN (not fatal): a hard fail here would brick the live box until the
