@@ -2378,6 +2378,11 @@ class ATMWatchlistService:
             return premium_closes
 
         async with AsyncSessionLocal() as session:
+            # RTH-only (09:15–15:30 IST): pre-/post-market snapshot rows carry a
+            # FROZEN ltp (no trading), which decays the MACD toward 0 and then
+            # false-crosses on the first open tick (HAL 4250 CE / ASIANPAINT 2700
+            # CE fired at 09:16 this way). The dense 3m feed above is already
+            # RTH-only; this guards the fallback.
             snapshot_rows = await session.execute(
                 text("""
                     SELECT ltp
@@ -2386,6 +2391,7 @@ class ATMWatchlistService:
                       AND expiry = :expiry
                       AND strike = :strike
                       AND option_type = :option_type
+                      AND timezone('Asia/Kolkata', time)::time BETWEEN '09:15:00' AND '15:30:00'
                     ORDER BY time DESC
                     LIMIT 60
                 """),

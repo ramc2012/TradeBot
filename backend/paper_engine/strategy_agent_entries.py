@@ -166,6 +166,10 @@ class StrategyEntryMixin:
                             WHERE timezone('Asia/Kolkata', time)::date = :trading_day
                               AND instrument_key = ANY(:instrument_keys)
                               AND macd IS NOT NULL
+                              -- RTH only: pre-/post-market rows carry a frozen ltp
+                              -- + stale MACD that false-cross on the first open tick
+                              -- (HAL 4250 CE / ASIANPAINT 2700 CE fired at 09:16).
+                              AND timezone('Asia/Kolkata', time)::time BETWEEN '09:15:00' AND '15:30:00'
                         ) bucketed
                         WHERE bucket_rn = 1
                     )

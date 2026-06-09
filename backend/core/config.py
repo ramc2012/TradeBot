@@ -63,9 +63,13 @@ class Settings(BaseSettings):
     RESEARCH_SYNC_EMBEDDED_ENABLED: bool = False
     STRATEGY_SPOT_SYNC_ENABLED: bool = False
     # F1 feed — full-universe option-chain → 3m CE+PE OHLC builder (chain_candle_builder).
-    # OFF by default: scales Fyers REST (~30k calls/day, governed by FYERS_DATA_LIMITER);
-    # enable deliberately in prod after sign-off + a market-open verification.
-    CHAIN_CANDLE_BUILDER_ENABLED: bool = False
+    # Scales Fyers REST (~30k calls/day, governed by FYERS_DATA_LIMITER). Enabled
+    # 2026-06-09 after sign-off + market-open verification: it is the ONLY
+    # full-universe 3m source (on-demand/Upstox paths collapsed to ~13 names under
+    # broker degradation, starving S1 + every lane). Verified live: 13→217
+    # underlyings, fetches NEAREST expiry so it bypasses the watchlist expiry
+    # mismatch. Set False to revert.
+    CHAIN_CANDLE_BUILDER_ENABLED: bool = True
     # Phase 6 — Fyers v3 TBT 50-level depth socket (FyersTbtSocket). OFF by default:
     # requires the PAID TBT entitlement on the Fyers app. When True, /ws/depth routes a
     # focused symbol through the TBT socket (50 levels + per-level order counts + seqNo)
