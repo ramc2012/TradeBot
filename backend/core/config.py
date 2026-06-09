@@ -142,9 +142,11 @@ class Settings(BaseSettings):
     # session (the full-universe refresh times out), so S1 misses most crosses
     # after the open. When True, S1 instead picks the nearest WELL-TRADED strike
     # that has fresh history and computes its 30m MACD from the dense 3m feed
-    # (paper_engine/s1_strike_selection). Default off — enable after validating
-    # the emitted signals on a live session.
-    NSE_S1_USE_3M_FEED: bool = False
+    # (paper_engine/s1_strike_selection). Enabled 2026-06-09 after live
+    # validation: with the full-universe chain candle builder running, the 3m
+    # feed is dense enough to source a well-traded strike's 30m MACD whenever the
+    # collapsing snapshot feed goes stale midday.
+    NSE_S1_USE_3M_FEED: bool = True
     # Per-purpose adapter routing. The goal is to distribute load between the
     # two live brokers so neither hits 429 first and a single rate-limit storm
     # doesn't cascade across desks. Rationale per purpose:
