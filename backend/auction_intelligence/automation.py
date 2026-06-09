@@ -204,8 +204,13 @@ async def capture_live_paper_cycle(
     paper_capital = float(
         clone_default_config().get("paper_trading", {}).get("shadow_net_liquidation", 1_000_000.0)
     )
-    if not portfolio_payload.get("net_liquidation") or float(portfolio_payload["net_liquidation"]) < paper_capital:
-        portfolio_payload["net_liquidation"] = paper_capital
+    # The paper cycle ALWAYS sizes against the paper book's notional capital —
+    # never the real broker balance. The old condition only floored net_liq UP to
+    # paper_capital, so whenever the real account held MORE than paper_capital it
+    # sized against the real funds → gross oversizing (open premium ₹57L on a
+    # ₹10L paper book; 0/18 wins; ~₹29L MTD drawdown). Force it unconditionally
+    # (a no-op when the real balance is already ≤ paper_capital).
+    portfolio_payload["net_liquidation"] = paper_capital
     service = AuctionIntelligenceService(paper_mode=True)
     bundle, journal_paths, paper_positions = await service.analyze_and_record_option_paper(
         session=SessionContext(**session_payload),
