@@ -141,7 +141,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # [DAILY-LOSS DISABLED 2026-06-08 — fine-tuning; restore 4.0 for production.]
         # 0.0 disables the daily loss cap (gate in risk.py guarded with `> 0`).
         "daily_loss_cap_r": 0.0,
-        "weekly_loss_cap_r": 10.0,
+        "weekly_loss_cap_r": 0.0,
     },
     "execution": {
         "entry_slippage_pct": 0.0075,

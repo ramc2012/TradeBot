@@ -89,7 +89,8 @@ class DirectionalOptionsRiskEngine:
                 f"Daily loss cap breached (realized {daily_realized:.0f} ≤ "
                 f"-{base_risk_budget * daily_cap_R:.0f}); trading paused for the session."
             )
-        if weekly_realized <= -(base_risk_budget * weekly_cap_R):
+        # weekly_cap_R <= 0 disables the weekly loss cap (exploration, 2026-06-09).
+        if weekly_cap_R > 0 and weekly_realized <= -(base_risk_budget * weekly_cap_R):
             reasons.append(
                 f"Weekly loss cap breached (realized {weekly_realized:.0f} ≤ "
                 f"-{base_risk_budget * weekly_cap_R:.0f}); trading paused for the week."

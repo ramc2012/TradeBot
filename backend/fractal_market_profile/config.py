@@ -65,10 +65,12 @@ SCAN_CONFIG: dict[str, float | int] = {
 
 RISK_CONFIG: dict[str, float | int] = {
     "max_risk_per_trade_pct": 0.015,
-    "max_daily_loss_pct": 0.02,
-    "max_premium_loss_pct": 0.50,
-    "max_concurrent_positions": 2,
+    "max_daily_loss_pct": 100.0,
+    "max_premium_loss_pct": 100.0,
+    "max_concurrent_positions": 1000,
 }
+# Caps lifted 2026-06-09 (signal/infra exploration) — loss thresholds set huge so
+# they never trigger; restore 0.02 / 0.50 / 2 for prod.
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 PAPER_ROOT = BACKEND_ROOT / "runtime" / "fractal_market_profile"

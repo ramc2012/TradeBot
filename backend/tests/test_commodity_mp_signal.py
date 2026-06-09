@@ -156,11 +156,12 @@ def test_ib_break_requires_two_closes_and_cvd_agreement() -> None:
         high_price=102.0, low_price=98.0, close_price=102.0,
         period_count=6,  # IB done
     )
-    # Build an uptrend that finishes well above IBH=101.5.
-    candles = _make_uptrend(num_bars=120, start=99.0, step=0.05)
-    # Force the last 2 closes well above IBH.
-    candles[-2] = _candle(minutes_after_open=118, open_=101.6, high=101.9, low=101.5, close=101.8, volume=250)
-    candles[-1] = _candle(minutes_after_open=119, open_=101.8, high=102.2, low=101.7, close=102.0, volume=300)
+    # Slow steady uptrend that finishes JUST above IBH=101.5 (so IB extension
+    # stays < 50% and ib_break isn't skipped) with no end pullback — the 30-min
+    # regime stays TREND_UP, which is the with-trend break the redesign rides.
+    candles = _make_uptrend(num_bars=120, start=99.0, step=0.025)
+    candles[-2] = _candle(minutes_after_open=118, open_=101.85, high=101.95, low=101.8, close=101.9, volume=250)
+    candles[-1] = _candle(minutes_after_open=119, open_=101.9, high=102.05, low=101.85, close=102.0, volume=300)
     result = evaluate_commodity_mp_signal(
         candles, symbol="MCX:GOLD26JUNFUT",
         today_profile=today, prior_profile=None,  # no prior → open_drive skipped

@@ -128,7 +128,7 @@ COMMODITY_DAILY_LOSS_LIMIT = 0.0
 COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT = 0.0
 COMMODITY_STOP_COOLDOWN_MINUTES = 60
 COMMODITY_EVENT_BLOCK_MINUTES = 90
-COMMODITY_MAX_DRAWDOWN_PCT = 15.0
+COMMODITY_MAX_DRAWDOWN_PCT = 100000.0  # drawdown cap lifted 2026-06-09 (exploration); restore 15.0 for prod
 
 # Options sleeve deprecated — constants intentionally removed. Historical option
 # trades remain in the persisted trade_history for audit only.
@@ -631,6 +631,8 @@ class CommodityPositionState:
     entry_iv_pct: Optional[float] = None
     entry_style: Optional[str] = None
     last_reviewed_bar_time: Optional[str] = None
+    trade_mode: Optional[str] = None       # "ride" (trend) | "scalp" (balance)
+    regime_htf: Optional[str] = None       # 30-min regime at entry
 
     @property
     def unrealized_pnl(self) -> float:
@@ -2510,10 +2512,25 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 #            scale — knocks out the runner before structure
                 #            actually breaks. No analog in the S1 design.
                 trailing_label: Optional[str] = None
+                is_scalp = position.trade_mode == "scalp"
                 if risk_distance > 0:
                     if position.action == "BUY":
                         favorable_move = current_price - position.entry_price
-                        if not position.target_reached and position.target_price is not None and current_price >= position.target_price:
+                        target_hit = position.target_price is not None and current_price >= position.target_price
+                    else:
+                        favorable_move = position.entry_price - current_price
+                        target_hit = position.target_price is not None and current_price <= position.target_price
+
+                    if is_scalp:
+                        # SCALP (mean-revert): take the fade profit at the target
+                        # (POC) — the rotation back to value is complete; do not
+                        # ride. Tight stop on the other side manages the risk.
+                        if target_hit:
+                            reason = "scalp_target"
+                    elif position.action == "BUY":
+                        # RIDE (trend): at 2R lock +0.5R and arm the ATR runner
+                        # trail to capture the MAXIMUM move — never a fixed target.
+                        if not position.target_reached and target_hit:
                             position.target_reached = True
                             position.stop_price = max(
                                 position.stop_price,
@@ -2528,8 +2545,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                             position.stop_price = max(position.stop_price, round(position.peak_price - trail_buffer, 2))
                             trailing_label = "trail_stop"
                     else:
-                        favorable_move = position.entry_price - current_price
-                        if not position.target_reached and position.target_price is not None and current_price <= position.target_price:
+                        if not position.target_reached and target_hit:
                             position.target_reached = True
                             position.stop_price = min(
                                 position.stop_price,
@@ -2544,16 +2560,22 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                             position.stop_price = min(position.stop_price, round(position.peak_price + trail_buffer, 2))
                             trailing_label = "trail_stop"
 
-                if position.action == "BUY":
-                    if current_price <= position.stop_price:
+                if not reason:
+                    if position.action == "BUY" and current_price <= position.stop_price:
                         reason = trailing_label or "stop_loss"
-                    elif hold_bars >= FUTURES_MIN_HOLD_BARS and row.get("raw_signal") == "SELL":
-                        reason = "macd_reversal"
-                else:
-                    if current_price >= position.stop_price:
+                    elif position.action == "SELL" and current_price >= position.stop_price:
                         reason = trailing_label or "stop_loss"
-                    elif hold_bars >= FUTURES_MIN_HOLD_BARS and row.get("raw_signal") == "BUY":
-                        reason = "macd_reversal"
+
+                # RIDE structural exit: close a trend runner only when the 30-min
+                # regime FLIPS against it (confirmed higher-TF reversal). This
+                # replaces the churny 1-min raw-signal-flip exit — no MACD, no
+                # flip-flop on intrabar noise.
+                if not reason and not is_scalp and hold_bars >= FUTURES_MIN_HOLD_BARS:
+                    regime_now = str(row.get("regime_htf") or "")
+                    if position.action == "BUY" and regime_now == "TREND_DOWN":
+                        reason = "regime_flip"
+                    elif position.action == "SELL" and regime_now == "TREND_UP":
+                        reason = "regime_flip"
 
                 if reason:
                     # Unified close path: stop_loss / trail_stop / macd_reversal /
@@ -2774,6 +2796,18 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 stop_price = min(stop_candidates)
                 target_price = price - ((stop_price - price) * 2.0)
 
+            # SCALP (mean-revert, BALANCE regime): target the POC — the fade is
+            # complete on rotation back to value, so don't ride to 2R. Only
+            # override when POC is a valid profit target on the right side.
+            if str(row.get("trade_mode") or "") == "scalp":
+                try:
+                    poc = float(row.get("mp_poc"))
+                except (TypeError, ValueError):
+                    poc = None
+                side = str(row.get("signal") or "")
+                if poc is not None and ((side == "BUY" and poc > price) or (side == "SELL" and poc < price)):
+                    target_price = poc
+
             order = self._runtime.order_book.place_order(
                 symbol=symbol,
                 action=str(row.get("signal")),
@@ -2826,6 +2860,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 peak_price=fill_price,
                 entry_style=str(row.get("entry_style") or "mp_signal"),
                 last_reviewed_bar_time=bar_time,
+                trade_mode=str(row.get("trade_mode") or "ride"),
+                regime_htf=str(row.get("regime_htf") or ""),
             )
             self._runtime.processed_signals[f"commodity_futures:{symbol}"] = bar_time
             self._append_commentary(

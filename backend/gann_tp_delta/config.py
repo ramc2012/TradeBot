@@ -137,7 +137,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "option_premium_budget": 50000.0,    # ₹ premium outlay target per index option
         "futures_notional_target": 1500000.0,  # ₹ notional per commodity futures (matches commodity desk)
         "daily_loss_cap": 0.0,               # [DAILY-LOSS DISABLED 2026-06-08 — restore 25000.0 for production] 0 disables (agent.py guards `> 0`)
-        "max_portfolio_positions": 12,
+        "max_portfolio_positions": 1000,    # cap lifted 2026-06-09 (exploration); restore 12 for prod
         "breakeven_at_r": 1.0,               # move stop→entry after +1R (on the underlying)
         "trail_start_r": 1.5,                # start trailing after +1.5R
         "trail_atr_mult": 2.0,               # trail this many ATR behind the underlying
@@ -162,7 +162,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "h_mode": "median_tpd",
         "live_refresh": False,
         "lots": 1,
-        "max_positions": 20,
+        "max_positions": 1000,  # cap lifted 2026-06-09 (exploration); restore 20 for prod
         "max_days_to_expiry": 45,
         # Memory guard: each scanned underlying loads a deep 1-min frame (~20-30k
         # bars) and builds features. Six concurrently OOM-kills the memory-limited
