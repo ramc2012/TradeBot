@@ -154,6 +154,11 @@ class DataRouter:
                 f"[DataRouter] Subscription already active for {len(full_set)} symbols; skipping resubscribe"
             )
             return
+        if self._ws_client is not None:
+            logger.info(
+                f"[DataRouter] Resubscribing: replacing live WS client "
+                f"(old={len(self._subscribed_symbols)} new={len(full_set)} symbols)"
+            )
         await self.stop_mock_feed()
         await self.unsubscribe()
         self._loop = asyncio.get_running_loop()
@@ -350,10 +355,28 @@ class DataRouter:
 
     async def unsubscribe(self):
         if self._ws_client:
-            try:
-                self._ws_client.close()
-            except Exception:
-                pass
+            # FyersDataSocket exposes close_connection() and has NO .close();
+            # the old bare .close() raised AttributeError into the swallow-all
+            # below, so every torn-down socket stayed alive with the lib's
+            # reconnect=True thread and fought its replacement for the broker
+            # WS slot (server kicks one ~every 80s → permanent flap).
+            for method_name in ("close_connection", "disconnect", "close", "stop"):
+                close_fn = getattr(self._ws_client, method_name, None)
+                if callable(close_fn):
+                    try:
+                        close_fn()
+                        logger.info(
+                            f"[DataRouter] Closed previous WS client via {method_name}()"
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            f"[DataRouter] WS {method_name}() during teardown failed: {exc}"
+                        )
+                    break
+            else:
+                logger.warning(
+                    "[DataRouter] WS client has no known close method — socket may leak"
+                )
         self._ws_client = None
         self._ws_broker = None
 
