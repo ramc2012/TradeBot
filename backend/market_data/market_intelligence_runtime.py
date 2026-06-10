@@ -205,12 +205,16 @@ class MarketIntelligenceRuntime:
             result = await session.execute(
                 text(
                     """
-                    SELECT time, open, high, low, close, volume
+                    SELECT DISTINCT ON (time) time, open, high, low, close, volume
                     FROM underlying_spot_candles
                     WHERE underlying = :underlying
                       AND interval = '1minute'
                       AND time >= :from_time
-                    ORDER BY time ASC
+                    -- DISTINCT ON + synced_at DESC = keep the freshest write per
+                    -- timestamp. CRUDEOIL carries ~27% duplicate timestamps
+                    -- (multiple instrument_keys feed one underlying), which
+                    -- inflated its TPO/volume profile before this dedup.
+                    ORDER BY time ASC, synced_at DESC NULLS LAST
                     """
                 ),
                 {"underlying": symbol_code.upper(), "from_time": from_time},

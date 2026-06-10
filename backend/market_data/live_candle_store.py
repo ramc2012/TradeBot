@@ -5,7 +5,7 @@ import asyncio
 import math
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from statistics import median
 from typing import Any, Optional
 
@@ -22,6 +22,9 @@ try:  # WS-0.1a — reject counter; must never block ingest
 except Exception:  # pragma: no cover
     def _record_reject(*_a, **_k) -> None:  # type: ignore[misc]
         ...
+
+
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 
 @dataclass
@@ -44,14 +47,20 @@ class LiveCandleStore:
     BATCH_SIZE = 250
     # WS-0.1a ingest validation — magnitude guard for index spot (where the
     # documented cross-symbol contamination lands, e.g. NIFTY prints at 53k/75k vs
-    # ~23k spot). The reference is a rolling median (robust to a minority of bad
-    # prints); ±50% is far outside any legit index intraday move yet catches the
-    # documented 2.3-3.3x contamination with margin. Options are exempt (premiums
-    # legitimately move multiples). Conservative by design — watch
-    # nomad_ingest_rejected_total{reason} before tightening.
-    SPOT_DEVIATION_THRESHOLD = 0.5
+    # ~23k spot). The reference is a rolling median of ACCEPTED ticks only.
+    # ±20% (was ±50%): the 2026-06-09 audit found MIDCPNIFTY-priced NIFTY rows
+    # at −43% deviation sailing through the 50% band; 20% is still far beyond
+    # any legit single-tick index move against a 30-tick median. Options are
+    # exempt (premiums legitimately move multiples). Watch
+    # nomad_ingest_rejected_total{reason} for false drops.
+    SPOT_DEVIATION_THRESHOLD = 0.2
     SPOT_REF_WINDOW = 30
     SPOT_REF_WARMUP = 5
+    # Index spot trades 09:15–15:30 IST (plus 09:00 pre-open); ticks outside
+    # this window are feed junk (observed at 22:41 IST) that poison session
+    # high/low/ATR and the research-sync coverage queue.
+    SPOT_RTH_START_MINUTES = 9 * 60       # 09:00 IST
+    SPOT_RTH_END_MINUTES = 15 * 60 + 40   # 15:40 IST
 
     def __init__(self) -> None:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -104,17 +113,31 @@ class LiveCandleStore:
             _record_reject("non_numeric_volume")
             return False
 
-        # Magnitude guard — index spot only (options legitimately move multiples).
+        # Index-spot-only guards (options legitimately move multiples; MCX
+        # commodities persist via commodity_runtime_history, not this path).
         if tick.symbol in DISPLAY_NAMES:
+            # RTH guard — non-RTH ticks (observed 22:41 IST) are feed junk.
+            ts = tick.timestamp
+            if ts is not None:
+                ist = ts.astimezone(_IST)
+                minutes = ist.hour * 60 + ist.minute
+                if not (self.SPOT_RTH_START_MINUTES <= minutes <= self.SPOT_RTH_END_MINUTES):
+                    _record_reject("spot_non_rth")
+                    return False
+
+            # Magnitude guard. The reference window must only contain ACCEPTED
+            # ticks — the old code appended before validating, so a burst of
+            # cross-symbol prints shifted the median to the bad level, which
+            # then accepted the junk and rejected the real feed.
             window = self._spot_window.setdefault(
                 tick.symbol, deque(maxlen=self.SPOT_REF_WINDOW)
             )
-            window.append(ltp)
             if len(window) >= self.SPOT_REF_WARMUP:
                 ref = median(window)
                 if ref > 0 and abs(ltp - ref) / ref > self.SPOT_DEVIATION_THRESHOLD:
                     _record_reject("spot_magnitude")
                     return False
+            window.append(ltp)
         return True
 
     def on_tick(self, tick: Tick) -> None:
