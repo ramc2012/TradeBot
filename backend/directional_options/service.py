@@ -57,6 +57,15 @@ class DirectionalOptionsService:
             one_position_per_symbol=bool(
                 self.config["paper_trading"].get("one_position_per_symbol", True)
             ),
+            signal_persistence_cycles=int(
+                self.config["paper_trading"].get("signal_persistence_cycles", 0)
+            ),
+            # Live risk-exit ladder consumes the same risk knobs the
+            # backtester always honoured (they never executed live before).
+            planned_stop_pct=float(self.config["risk"].get("planned_stop_pct", 0.0)),
+            profit_target_pct=float(self.config["risk"].get("profit_target_pct", 0.0)),
+            trail_giveback_pct=float(self.config["risk"].get("trail_giveback_pct", 0.0)),
+            expiry_guard_days=float(self.config["risk"].get("expiry_guard_days", 0.0)),
             policy=self.policy,
         )
         self.backtester = DirectionalOptionsBacktester(
@@ -308,7 +317,15 @@ class DirectionalOptionsService:
                 # on 2026-06-04). Fall back to the option-chain cache, which
                 # carries every strike's LTP (~30s fresh), so positions are
                 # marked-to-market and closes realize real P&L.
-                from directional_options.chain_analytics import chain_strike_mark
+                from directional_options.chain_analytics import (
+                    chain_strike_mark,
+                    ensure_chain_tracked,
+                )
+                # Without ensure_chain_tracked an UNTRACKED expiry returns
+                # None from the cache and the mark silently drops — the close
+                # path then froze at the entry premium (91/112 phantom-mark
+                # closes, 2026-06-10 audit). Track first, like the display path.
+                await ensure_chain_tracked(row_underlying, row_expiry)
                 chain_mark = await chain_strike_mark(row_underlying, row_expiry, row_strike, row_otype)
                 if chain_mark is not None and chain_mark > 0:
                     premium = chain_mark

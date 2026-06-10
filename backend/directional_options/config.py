@@ -171,6 +171,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # bled the book (16 closes / 3 symbols on 2026-06-08, all whipsaw).
         "reentry_cooldown_bars": 3,
         "reentry_cooldown_floor_seconds": 600.0,
+        # Anti-churn dead band in time (2026-06-10 audit): entries and true
+        # CE<->PE flip-exits require this many CONSECUTIVE same-direction
+        # actionable ~60s cycles. The signal is a knife-edge argmax and the
+        # policy act/skip is a fresh Thompson draw vs 0 each cycle — without
+        # persistence a single noisy cycle could open or reverse a position.
+        # 5 cycles ≈ one full 5-minute bar of agreement. 0/1 disables.
+        "signal_persistence_cycles": 5,
         # One open position per underlying. New signals on a symbol that
         # already has an open position are journaled but do NOT open a
         # second position. (Refresh / signal-flip on the SAME symbol is

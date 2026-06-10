@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -145,6 +145,11 @@ class DirectionalOptionsPaperStore:
         reentry_cooldown_bars: int = 0,
         reentry_cooldown_floor_seconds: float = 0.0,
         one_position_per_symbol: bool = True,
+        signal_persistence_cycles: int = 0,
+        planned_stop_pct: float = 0.0,
+        profit_target_pct: float = 0.0,
+        trail_giveback_pct: float = 0.0,
+        expiry_guard_days: float = 0.0,
         policy: DirectionalPolicy | None = None,
     ):
         self.root = Path(root)
@@ -162,7 +167,23 @@ class DirectionalOptionsPaperStore:
         self.reentry_cooldown_bars = int(reentry_cooldown_bars)
         self.reentry_cooldown_floor_seconds = float(reentry_cooldown_floor_seconds)
         self.one_position_per_symbol = bool(one_position_per_symbol)
+        # Anti-churn dead band in TIME (2026-06-10 audit): the signal is a
+        # knife-edge argmax and the policy act/skip is a fresh Thompson draw
+        # vs exactly 0 each ~60s cycle — one noisy cycle could open a
+        # position or flip it. Entries and true direction-flip exits now
+        # require this many CONSECUTIVE same-direction actionable cycles.
+        # 0/1 disables (old behavior, used by legacy tests).
+        self.signal_persistence_cycles = int(signal_persistence_cycles)
+        # Live risk-exit ladder (previously backtest-only — the live book's
+        # only exits were flat_signal/signal_flip, so the configured 35%
+        # stop never executed and losers rode for hours on the signal).
+        self.planned_stop_pct = float(planned_stop_pct)
+        self.profit_target_pct = float(profit_target_pct)
+        self.trail_giveback_pct = float(trail_giveback_pct)
+        self.expiry_guard_days = float(expiry_guard_days)
         self.policy = policy
+        # underlying -> (direction, consecutive actionable cycles agreeing)
+        self._direction_streaks: dict[str, tuple[str, int]] = {}
 
     def _in_reentry_cooldown(
         self,
@@ -271,6 +292,55 @@ class DirectionalOptionsPaperStore:
             "closed_positions": closed_positions[:limit],
         }
 
+    async def _inject_chain_marks(
+        self,
+        rows: list[dict[str, Any]],
+        marks: dict[str, dict[str, Any]],
+        recorded_at: str,
+    ) -> None:
+        """Best-effort chain-cache mark for held contracts the caller couldn't mark.
+
+        91 of 112 closes (06-03..06-10) recorded exit_premium == entry_premium
+        because the held contract was off the WS premium feed and the chain
+        overlay only ran in the DISPLAY path (and the service fallback skipped
+        ensure_chain_tracked, so untracked expiries returned None) — the close
+        path then fell back to the entry premium. Realized P&L degenerated to
+        -charges and the RL policy trained on those phantom rewards. Injecting
+        the chain mark here puts a real premium in front of the manage, risk-
+        exit, and close paths.
+        """
+        if not rows:
+            return
+        try:
+            from directional_options.chain_analytics import (
+                chain_strike_mark,
+                ensure_chain_tracked,
+            )
+        except Exception:  # noqa: BLE001
+            return
+        for row in rows:
+            pid = str(row.get("position_id") or "")
+            if not pid or pid in marks:
+                continue
+            try:
+                und = str(row.get("underlying") or "")
+                exp = str(row.get("expiry") or "")
+                strike = float(row.get("strike") or 0.0)
+                otype = str(row.get("option_type") or "")
+                if not (und and exp and strike and otype):
+                    continue
+                await ensure_chain_tracked(und, exp)
+                mark = await chain_strike_mark(und, exp, strike, otype)
+                if mark is not None and mark > 0:
+                    marks[pid] = {
+                        "premium": round(float(mark), 2),
+                        "spot": None,
+                        "mark_time": recorded_at,
+                        "price_source": "chain_cache_live",
+                    }
+            except Exception:  # noqa: BLE001
+                continue
+
     async def sync_snapshot(
         self,
         snapshot_payload: dict[str, Any],
@@ -296,6 +366,23 @@ class DirectionalOptionsPaperStore:
         actionable = bool(signal and contract and risk.get("approved") and execution_ready)
         latest_spot = float(snapshot.get("spot_price") or 0.0)
         latest_mark = float(contract.get("option_price") or 0.0) if contract else 0.0
+
+        # Signal-persistence streak: consecutive actionable cycles agreeing on
+        # one direction for this underlying. Entries and true direction-flip
+        # exits gate on it (see __init__ rationale) — one noisy cycle can then
+        # neither open nor reverse a position.
+        direction_now = str(signal.get("direction") or "")
+        if actionable and direction_now:
+            prev_dir, prev_n = self._direction_streaks.get(underlying, ("", 0))
+            streak_n = prev_n + 1 if prev_dir == direction_now else 1
+            self._direction_streaks[underlying] = (direction_now, streak_n)
+        else:
+            streak_n = 0
+            self._direction_streaks[underlying] = ("", 0)
+        persistence_ok = (
+            self.signal_persistence_cycles <= 1
+            or streak_n >= self.signal_persistence_cycles
+        )
 
         journal_entry = {
             "recorded_at": recorded_at,
@@ -327,7 +414,8 @@ class DirectionalOptionsPaperStore:
             open_positions = list(state.get("open_positions", []))
             closed_positions = list(state.get("closed_positions", []))
             matching = [row for row in open_positions if _normalize_symbol(row.get("underlying")) == underlying]
-            marks = position_marks or {}
+            marks = dict(position_marks or {})
+            await self._inject_chain_marks(matching, marks, recorded_at)
 
             for row in matching:
                 mark = marks.get(str(row.get("position_id") or "")) or {}
@@ -342,6 +430,59 @@ class DirectionalOptionsPaperStore:
                     entry_premium = float(row.get("entry_premium") or latest_value or 0.0)
                     quantity = int(row.get("quantity_units") or 0)
                     row["unrealized_pnl"] = round((latest_value - entry_premium) * quantity, 2)
+
+            # Risk-exit ladder (stop / target / trail / expiry) — mirrors
+            # backtest._exit_reason, which was the ONLY place these config
+            # knobs executed; the live book's exits were 100% signal-driven
+            # for 6 sessions (66 flat_signal + 46 signal_flip, zero risk
+            # exits). Evaluated ONLY on a real mark delivered THIS cycle
+            # (no phantom stops off entry-frozen premiums), and deliberately
+            # ignores min-hold: risk exits are time-critical. Runs before the
+            # execution_ready early-return so a held position is still
+            # protected when entries are blocked.
+            if self.planned_stop_pct > 0 or self.profit_target_pct > 0 or self.expiry_guard_days > 0:
+                today_ist = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
+                for row in list(matching):
+                    mark = marks.get(str(row.get("position_id") or "")) or {}
+                    premium = float(mark.get("premium") or 0.0)
+                    entry_premium = float(row.get("entry_premium") or 0.0)
+                    reason: str | None = None
+                    if premium > 0 and entry_premium > 0:
+                        peak = max(float(row.get("peak_premium") or entry_premium), premium)
+                        row["peak_premium"] = round(peak, 2)
+                        if self.planned_stop_pct > 0 and premium <= entry_premium * (1.0 - self.planned_stop_pct):
+                            reason = "premium_stop"
+                        elif (
+                            self.profit_target_pct > 0
+                            and self.trail_giveback_pct > 0
+                            and peak >= entry_premium * (1.0 + self.profit_target_pct)
+                            and premium <= peak * (1.0 - self.trail_giveback_pct)
+                        ):
+                            # Trail-only on winners (no immediate close AT the
+                            # target): once the peak clears +profit_target_pct
+                            # the position rides until it gives back
+                            # trail_giveback_pct from the peak. The backtest's
+                            # separate target_hit existed only because fill
+                            # and mark prices diverge there; with one entry
+                            # premium it would fire before any trail could.
+                            reason = "trail_take_profit"
+                    if reason is None and self.expiry_guard_days > 0:
+                        try:
+                            expiry_date = date.fromisoformat(str(row.get("expiry") or "")[:10])
+                            if max((expiry_date - today_ist).days, 0) <= self.expiry_guard_days:
+                                reason = "expiry_guard"
+                        except ValueError:
+                            pass
+                    if reason is not None:
+                        self._close_position(
+                            row,
+                            mark=mark,
+                            close_time=recorded_at,
+                            close_reason=reason,
+                        )
+                        open_positions.remove(row)
+                        closed_positions.append(row)
+                        matching.remove(row)
 
             if not execution_ready:
                 await self._save_positions(
@@ -402,22 +543,40 @@ class DirectionalOptionsPaperStore:
             refreshed = False
             position_timeframe = str(selection.get("timeframe") or "")
             for row in list(matching):
-                if _same_contract(row, contract) and str(row.get("direction") or "") == str(signal.get("direction") or ""):
+                if str(row.get("direction") or "") == str(signal.get("direction") or ""):
+                    # Same DIRECTION refreshes the position regardless of the
+                    # candidate contract: 25 of 46 "signal_flip" closes
+                    # (06-03..06-10) were the Thompson-sampled strike picker
+                    # wandering one strike and force-closing the held contract
+                    # within 60s — paying the full round-trip charge stack to
+                    # move sideways. We keep holding the ORIGINAL contract;
+                    # only adopt the candidate's premium when it IS the same
+                    # contract (a different strike's premium is meaningless
+                    # for this position — the chain-mark injection above
+                    # already marked it).
+                    same = _same_contract(row, contract)
                     row["updated_at"] = recorded_at
                     # Mark this cycle as green-lit so the flat-signal
                     # confirmation timer above resets every time we get a
-                    # fresh actionable=True for the same contract.
+                    # fresh actionable=True for the same direction.
                     row["last_actionable_at"] = recorded_at
-                    row["latest_premium"] = latest_mark
-                    row["latest_spot"] = latest_spot
                     row["confidence"] = float(signal.get("confidence") or row.get("confidence") or 0.0)
                     row["expected_move"] = float(signal.get("expected_move") or row.get("expected_move") or 0.0)
                     row["regime"] = (snapshot.get("regime") or {}).get("label") or row.get("regime")
                     row["selection_reason"] = snapshot.get("selection_reason") or row.get("selection_reason")
-                    entry_premium = float(row.get("entry_premium") or latest_mark or 0.0)
                     quantity = int(row.get("quantity_units") or 0)
-                    row["unrealized_pnl"] = round((latest_mark - entry_premium) * quantity, 2)
+                    entry_premium = float(row.get("entry_premium") or 0.0)
+                    if same and latest_mark > 0:
+                        row["latest_premium"] = latest_mark
+                        row["latest_spot"] = latest_spot
+                        row["unrealized_pnl"] = round((latest_mark - (entry_premium or latest_mark)) * quantity, 2)
                     refreshed = True
+                    continue
+                # TRUE direction flip (CE<->PE). Require the new direction to
+                # have persisted signal_persistence_cycles before reversing a
+                # held position — the flip side of the entry gate; a single
+                # noisy cycle can no longer self-reverse the book.
+                if not persistence_ok:
                     continue
                 if not _has_satisfied_min_hold(
                     row,
@@ -462,7 +621,7 @@ class DirectionalOptionsPaperStore:
                 closed_positions,
                 timeframe=selection.get("timeframe"),
             )
-            if not refreshed and allow_entries and not cooldown_active:
+            if not refreshed and allow_entries and not cooldown_active and persistence_ok:
                 new_position_id = uuid4().hex
                 try:
                     await paper_trade_recorder.record_event(
