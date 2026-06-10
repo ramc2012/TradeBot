@@ -504,9 +504,12 @@ class FyersAdapter(BrokerAdapter):
                 litemode=False,
                 write_to_file=False,
                 reconnect=True,
-                on_connect=lambda: logger.info("Fyers WS connected"),
-                on_close=lambda: logger.warning("Fyers WS closed"),
-                on_error=lambda e: logger.error(f"Fyers WS error: {e}"),
+                # *a: the lib invokes these with 0 or 1 args depending on the
+                # event path; a fixed 0-arg lambda raised TypeError into
+                # on_error on every close, so "Fyers WS closed" never logged.
+                on_connect=lambda *a: logger.info("Fyers WS connected"),
+                on_close=lambda *a: logger.warning(f"Fyers WS closed: {a[0] if a else ''}"),
+                on_error=lambda *a: logger.error(f"Fyers WS error: {a[0] if a else ''}"),
                 on_message=lambda msg: self._handle_message(msg, on_tick_callback),
             )
             client.connect()
