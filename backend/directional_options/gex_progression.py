@@ -105,22 +105,66 @@ def _nearest_spot(spot_map: dict[datetime, float], keys: list[datetime], dt: dat
     return None
 
 
-async def _strike_series(
-    root: str, exp_date: date, strike: float, *, interval: str, limit: int
-) -> dict[str, dict[str, Any]]:
-    """Return {iso_ts: {"ce_close","ce_oi","pe_close","pe_oi","spot"}} for one strike."""
-    async def one(opt: str) -> list[dict[str, Any]]:
+def _looks_like_snapshot_rows(rows: list[dict[str, Any]]) -> bool:
+    """LTP pseudo-candle signature: open == high == low == close on ~every row.
+
+    option_history_service.load_candles silently falls back to
+    atm_option_watchlist_snapshots when the table has no real candles for the
+    contract; those fabricated rows carry a single LTP in all four fields.
+    Real exchange candles virtually never do across a whole series."""
+    if not rows:
+        return False
+    flat = sum(
+        1 for r in rows
+        if r.get("open") == r.get("high") == r.get("low") == r.get("close")
+    )
+    return flat >= max(1, int(0.9 * len(rows)))
+
+
+async def _leg_candles(
+    root: str, exp_date: date, strike: float, opt: str, *, interval: str, limit: int
+) -> tuple[list[dict[str, Any]], str]:
+    """(rows, source) for one option leg.
+
+    Prefers the dense 3-minute feed resampled to 30 minutes: the front weekly
+    often has ZERO native 30m rows (the chain-candle builder ingests 3m), so a
+    direct 30m load silently degrades to LTP snapshot pseudo-candles presented
+    as spec-grade history (2026-06-10 audit — the whole front-weekly
+    progression was snapshot-derived)."""
+    async def load(iv: str, lim: int) -> list[dict[str, Any]]:
         try:
             return await option_history_service.load_candles(
                 underlying=root, expiry=exp_date, strike=float(strike),
-                option_type=opt, interval=interval, limit=limit,
+                option_type=opt, interval=iv, limit=lim,
                 allow_broker_refresh=False,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.debug(f"[gex-prog] load_candles {root} {strike}{opt}: {exc}")
+            logger.debug(f"[gex-prog] load_candles {root} {strike}{opt} {iv}: {exc}")
             return []
 
-    ce, pe = await asyncio.gather(one("CE"), one("PE"))
+    if interval == "30minute":
+        rows3 = await load("3minute", 800)
+        if len(rows3) >= 30 and not _looks_like_snapshot_rows(rows3):
+            try:
+                rows = option_history_service._aggregate_rows(list(rows3), 30)
+            except Exception:  # noqa: BLE001
+                rows = []
+            if len(rows) >= 3:
+                return rows, "resampled_3m"
+    rows = await load(interval, limit)
+    if rows and _looks_like_snapshot_rows(rows):
+        return rows, "snapshot_ltp"
+    return rows, f"candles_{interval}"
+
+
+async def _strike_series(
+    root: str, exp_date: date, strike: float, *, interval: str, limit: int
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """({iso_ts: {"ce_close","ce_oi","pe_close","pe_oi","spot"}}, leg sources)."""
+    (ce, ce_src), (pe, pe_src) = await asyncio.gather(
+        _leg_candles(root, exp_date, strike, "CE", interval=interval, limit=limit),
+        _leg_candles(root, exp_date, strike, "PE", interval=interval, limit=limit),
+    )
     out: dict[str, dict[str, Any]] = {}
     for row in ce:
         out.setdefault(str(row.get("time")), {})["ce_close"] = row.get("close")
@@ -132,7 +176,12 @@ async def _strike_series(
         out[str(row.get("time"))]["pe_oi"] = row.get("oi")
         if row.get("underlying_price") is not None:
             out[str(row.get("time"))].setdefault("spot", row.get("underlying_price"))
-    return out
+    sources = {}
+    if ce:
+        sources["CE"] = ce_src
+    if pe:
+        sources["PE"] = pe_src
+    return out, sources
 
 
 async def fetch_gex_progression(
@@ -178,10 +227,15 @@ async def fetch_gex_progression(
     band_strikes = strikes[max(0, idx - band): idx + band + 1]
 
     root = underlying.upper()
-    series = await asyncio.gather(
+    results = await asyncio.gather(
         *(_strike_series(root, exp_date, k, interval=interval, limit=limit) for k in band_strikes)
     )
-    per_strike = dict(zip(band_strikes, series))
+    per_strike: dict[float, dict[str, dict[str, Any]]] = {}
+    source_counts: dict[str, int] = {}
+    for k, (s, leg_sources) in zip(band_strikes, results):
+        per_strike[k] = s
+        for src in leg_sources.values():
+            source_counts[src] = source_counts.get(src, 0) + 1
 
     # Common time grid = union of all timestamps that carry data, last `limit` buckets.
     all_ts: set[str] = set()
@@ -191,6 +245,11 @@ async def fetch_gex_progression(
         ((_parse_dt(ts), ts) for ts in all_ts if _parse_dt(ts) is not None),
         key=lambda kv: kv[0],
     )
+    # RTH-only (09:15–15:30 IST): the snapshot fallback writes rows from 05:40
+    # pre-market through 18:05 post-close; off-hours buckets repeat a frozen
+    # LTP, flattening the GEX tail and distorting the bucket spacing
+    # (2026-06-10 audit).
+    parsed = [(dt, ts) for dt, ts in parsed if dtime(9, 15) <= dt.time() <= dtime(15, 30)]
     parsed = parsed[-limit:]
     if len(parsed) < 2:
         return {"available": False, "underlying": underlying, "expiry": expiry, "reason": "thin_history"}
@@ -240,11 +299,18 @@ async def fetch_gex_progression(
 
     prog = compute_progression(series_by_strike, times, underlying_px, T_by_bucket)
     has_gex = any(g is not None for g in prog.get("gex", []))
+    snapshot_legs = source_counts.get("snapshot_ltp", 0)
+    total_legs = sum(source_counts.values())
     return {
         "available": bool(has_gex),
         "underlying": underlying,
         "expiry": str(expiry),
         "interval": interval,
         "atm": atm,
+        # Per-leg candle provenance (resampled_3m / candles_30minute /
+        # snapshot_ltp) — the spec expects real 30-min history; "degraded"
+        # tells the client most of this grid is LTP pseudo-candles.
+        "data_sources": source_counts,
+        "degraded": bool(total_legs and snapshot_legs / total_legs > 0.5),
         "progression": prog,
     }

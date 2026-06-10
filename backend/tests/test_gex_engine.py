@@ -154,3 +154,86 @@ def test_progression_tolerates_missing_buckets():
                       "pe_close": [115, None], "pe_oi": [480000, None]}}
     prog = compute_progression(series, times, [23400.0, None], [0.025, None])
     assert prog["gex"][1] is None and prog["regime"][1] is None
+
+
+def test_progression_emits_none_not_zero_for_empty_strikes():
+    """Regression (2026-06-10): strikes with NO data in a bucket rendered as
+    gdens 0.0 — the heatmap painted no-data as zero gamma (5 of 7 band strikes
+    were empty)."""
+    times = ["09:30", "10:00"]
+    series = {
+        23400: {"ce_close": [120, 110], "ce_oi": [500000, 510000],
+                "pe_close": [115, 125], "pe_oi": [480000, 470000]},
+        23500: {"ce_close": [None, None], "ce_oi": [None, None],
+                "pe_close": [None, None], "pe_oi": [None, None]},
+    }
+    prog = compute_progression(series, times, [23400.0, 23410.0], [0.025, 0.024])
+    empty_idx = prog["strikes"].index(23500)
+    data_idx = prog["strikes"].index(23400)
+    assert all(v is None for v in prog["gdens"][empty_idx])
+    assert all(v is None for v in prog["netgex"][empty_idx])
+    assert all(v is not None for v in prog["gdens"][data_idx])
+
+
+def test_progression_signed_netgex_matrix_and_oi_change():
+    """The spec's Net-GEX strike×time heatmap needs SIGNED per-strike GEX
+    (call gamma +, put gamma −) and a bucket-over-bucket ΔOI series."""
+    times = ["09:30", "10:00"]
+    put_heavy = {
+        23400: {"ce_close": [None, None], "ce_oi": [None, None],
+                "pe_close": [115, 125], "pe_oi": [480000, 500000]},
+    }
+    prog = compute_progression(put_heavy, times, [23400.0, 23410.0], [0.025, 0.024])
+    # Put-only strike → signed GEX strictly negative wherever computed.
+    assert all(v < 0 for v in prog["netgex"][0] if v is not None)
+    # Band OI 480k → 500k → ΔOI[0] None, ΔOI[1] = +20000.
+    assert prog["oi_change"][0] is None
+    assert prog["oi_change"][1] == 20000
+
+
+def test_snapshot_pseudo_candle_detection():
+    from directional_options.gex_progression import _looks_like_snapshot_rows
+
+    flat = [{"open": 5.0, "high": 5.0, "low": 5.0, "close": 5.0} for _ in range(20)]
+    real = [{"open": 5.0, "high": 5.4, "low": 4.8, "close": 5.2} for _ in range(20)]
+    assert _looks_like_snapshot_rows(flat) is True
+    assert _looks_like_snapshot_rows(real) is False
+    assert _looks_like_snapshot_rows([]) is False
+
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_leg_candles_prefers_resampled_3m_over_snapshot_30m(monkeypatch):
+    """Regression (2026-06-10): the front weekly had ZERO native 30m candles,
+    so the 30m load silently degraded to LTP pseudo-candles while dense REAL
+    3-minute candles existed. The leg loader must resample 3m → 30m first."""
+    import directional_options.gex_progression as prog_mod
+    from datetime import date as _date
+
+    async def fake_load_candles(*, interval, limit, **_kw):
+        if interval == "3minute":
+            from datetime import datetime, timedelta
+            t0 = datetime(2026, 6, 10, 9, 15)
+            return [
+                {
+                    "time": (t0 + timedelta(minutes=3 * i)).isoformat() + "+05:30",
+                    "open": 10.0 + i * 0.1, "high": 10.5 + i * 0.1,
+                    "low": 9.8 + i * 0.1, "close": 10.2 + i * 0.1,
+                    "volume": 100, "oi": 1000 + i,
+                }
+                for i in range(45)
+            ]
+        # Native 30m: only flat snapshot pseudo-candles.
+        return [{"time": "2026-06-10T10:00:00+05:30", "open": 5.0, "high": 5.0,
+                 "low": 5.0, "close": 5.0, "oi": 10} for _ in range(5)]
+
+    monkeypatch.setattr(prog_mod.option_history_service, "load_candles", fake_load_candles)
+    rows, source = await prog_mod._leg_candles(
+        "NIFTY", _date(2026, 6, 16), 23400.0, "CE", interval="30minute", limit=80
+    )
+    assert source == "resampled_3m"
+    assert len(rows) >= 2
+    # Aggregated buckets must carry real OHLC variation, not flat LTP.
+    assert any(r["high"] != r["low"] for r in rows)

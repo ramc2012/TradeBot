@@ -93,6 +93,11 @@ async def _expiry_chain(
         by_strike, spot, T, totals=totals, expiry_label=str(cached.get("expiry") or expiry)
     )
     out["meta"]["expiry"] = str(cached.get("expiry") or expiry)
+    # Cache provenance: the chain poll keeps re-stamping the Redis cache every
+    # ~30s after market close, so without an as_of in the payload a client
+    # cannot tell live data from an EOD-frozen chain.
+    out["meta"]["as_of"] = cached.get("timestamp") or cached.get("ts")
+    out["meta"]["chain_source"] = cached.get("source")
     return out
 
 
@@ -141,10 +146,12 @@ async def fetch_gex_analytics(
 
     per_expiry.sort(key=lambda o: _parse_expiry(o["meta"].get("expiry")) or date.max)
     term = build_term_structure([o["meta"] for o in per_expiry])
+    as_of_values = [o["meta"].get("as_of") for o in per_expiry if o["meta"].get("as_of")]
     return {
         "available": True,
         "underlying": underlying,
         "spot": per_expiry[0]["meta"].get("spot"),
+        "as_of": max(as_of_values) if as_of_values else None,
         "expiries": [o["meta"].get("expiry") for o in per_expiry],
         "per_expiry": per_expiry,
         "term": term,

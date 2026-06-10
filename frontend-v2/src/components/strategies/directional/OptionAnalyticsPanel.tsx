@@ -80,6 +80,7 @@ type GexPayload = {
   available?: boolean;
   underlying?: string;
   spot?: number | null;
+  as_of?: string | null;
   per_expiry?: PerExpiry[];
   term?: Term | null;
 };
@@ -88,13 +89,22 @@ type Progression = {
   strikes: number[];
   idx: (number | null)[];
   gdens: (number | null)[][];
+  netgex?: (number | null)[][];
   oi_call: (number | null)[][];
   oi_put: (number | null)[][];
   gex: (number | null)[];
+  oi_change?: (number | null)[];
   regime: (string | null)[];
   atm: number | null;
 };
-type ProgPayload = { available?: boolean; expiry?: string; atm?: number | null; progression?: Progression };
+type ProgPayload = {
+  available?: boolean;
+  expiry?: string;
+  atm?: number | null;
+  degraded?: boolean;
+  data_sources?: Record<string, number>;
+  progression?: Progression;
+};
 
 function compact(n: number | null | undefined, unit = ""): string {
   if (n == null || Number.isNaN(n)) return "—";
@@ -106,6 +116,30 @@ function compact(n: number | null | undefined, unit = ""): string {
   else s = n.toFixed(abs < 10 && abs > 0 ? 2 : 0);
   return unit ? `${s}${unit}` : s;
 }
+function AsOfBadge({ asOf }: { asOf: string }) {
+  // The chain cache is re-stamped every ~30s even after market close, so the
+  // timestamp alone always looks fresh — combine age with the NSE session
+  // window to honestly label EOD-frozen data.
+  const ts = new Date(asOf);
+  if (Number.isNaN(ts.getTime())) return null;
+  const ageMin = (Date.now() - ts.getTime()) / 60000;
+  const ist = new Date(Date.now() + (330 + new Date().getTimezoneOffset()) * 60000);
+  const mins = ist.getHours() * 60 + ist.getMinutes();
+  const inSession = ist.getDay() >= 1 && ist.getDay() <= 5 && mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+  const stale = ageMin > 5 || !inSession;
+  return (
+    <span
+      className={clsx(
+        "ml-2 rounded-full border px-2 py-0.5 text-[10px]",
+        stale ? "border-amber-500/40 text-amber-300" : "border-emerald-500/30 text-emerald-300",
+      )}
+    >
+      {stale ? "EOD" : "live"} ·{" "}
+      {ts.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" })}
+    </span>
+  );
+}
+
 function pcrTone(p?: number | null): string {
   if (p == null) return "text-text-muted";
   if (p > 1.2) return "text-accent-green";
@@ -171,6 +205,9 @@ export default function OptionAnalyticsPanel({ underlying, expiry }: { underlyin
         ))}
         <span className="ml-auto text-[11px] text-text-muted">
           spot {formatNumber(m.spot, 1)} · fwd {formatNumber(m.fp, 1)} · {m.days != null ? `${m.days}d` : "—"}
+          {data?.as_of ? (
+            <AsOfBadge asOf={data.as_of} />
+          ) : null}
         </span>
       </div>
 
@@ -371,6 +408,12 @@ function ProgressionSection({ underlying, expiry }: { underlying: string; expiry
         </div>
       ) : (
         <div className="space-y-4">
+          {data?.degraded ? (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-2 text-[11px] text-amber-300">
+              Most of this grid is snapshot-derived (LTP pseudo-candles) — real 30-min candles are missing for the
+              strike band. Treat levels as approximate.
+            </div>
+          ) : null}
           <div className="h-56">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={gexSeries} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
@@ -387,7 +430,10 @@ function ProgressionSection({ underlying, expiry }: { underlying: string; expiry
             </ResponsiveContainer>
           </div>
           <div className="grid gap-4 lg:grid-cols-2">
-            <GexHeatmap title="Gamma density (strike × time)" strikes={prog.strikes} times={prog.times} matrix={prog.gdens} atm={prog.atm} diverging />
+            {prog.netgex?.length ? (
+              <GexHeatmap title="Net GEX (strike × time)" strikes={prog.strikes} times={prog.times} matrix={prog.netgex} atm={prog.atm} diverging />
+            ) : null}
+            <GexHeatmap title="Gamma density (strike × time)" strikes={prog.strikes} times={prog.times} matrix={prog.gdens} atm={prog.atm} />
             <GexHeatmap title="Call OI (strike × time)" strikes={prog.strikes} times={prog.times} matrix={prog.oi_call} atm={prog.atm} />
           </div>
         </div>

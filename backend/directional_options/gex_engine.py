@@ -340,30 +340,48 @@ def compute_progression(
     n = len(times)
     if not strikes or n == 0:
         return {"times": times, "strikes": [], "idx": underlying_px, "gdens": [],
-                "oi_call": [], "oi_put": [], "gex": [], "regime": [], "atm": None}
+                "netgex": [], "oi_call": [], "oi_put": [], "oi_change": [],
+                "gex": [], "regime": [], "atm": None}
 
     gdens_mat: list[list[Optional[float]]] = []
+    netgex_mat: list[list[Optional[float]]] = []
     oi_call_mat: list[list[Optional[float]]] = []
     oi_put_mat: list[list[Optional[float]]] = []
     for K in strikes:
         s = series_by_strike[K]
         g_row: list[Optional[float]] = []
+        ng_row: list[Optional[float]] = []
         for j in range(n):
             S = _f(underlying_px[j]) if j < len(underlying_px) else None
             T = T_by_bucket[j] if j < len(T_by_bucket) else None
             cl = _f((s.get("ce_close") or [None] * n)[j])
             pl = _f((s.get("pe_close") or [None] * n)[j])
-            co = _f((s.get("ce_oi") or [None] * n)[j]) or 0.0
-            po = _f((s.get("pe_oi") or [None] * n)[j]) or 0.0
+            co_raw = _f((s.get("ce_oi") or [None] * n)[j])
+            po_raw = _f((s.get("pe_oi") or [None] * n)[j])
+            co = co_raw or 0.0
+            po = po_raw or 0.0
             if S is None or T is None or S <= 0 or T <= 0:
                 g_row.append(None)
+                ng_row.append(None)
+                continue
+            if cl is None and pl is None and co_raw is None and po_raw is None:
+                # No data for this strike in this bucket — None, not a false
+                # 0.0 (5 of 7 band strikes had no candles at all and the
+                # heatmap painted them as zero gamma; 2026-06-10 audit).
+                g_row.append(None)
+                ng_row.append(None)
                 continue
             ic = implied_vol(cl, S, K, T, r, "C") if cl is not None else float("nan")
             ip = implied_vol(pl, S, K, T, r, "P") if pl is not None else float("nan")
             gc = greeks(S, K, T, ic, r, "C")[1]
             gp = greeks(S, K, T, ip, r, "P")[1]
             g_row.append(round((gc * co + gp * po) / 1e6, 3))
+            # Signed per-strike GEX (₹Cr per 1% move), same convention as the
+            # snapshot rows[].gex (call gamma +, put gamma −) — the spec's
+            # Net-GEX strike×time heatmap input; gdens above is unsigned.
+            ng_row.append(round((gc * co - gp * po) * S * S * 0.01 / 1e7, 3))
         gdens_mat.append(g_row)
+        netgex_mat.append(ng_row)
         oi_call_mat.append([_f((s.get("ce_oi") or [None] * n)[j]) for j in range(n)])
         oi_put_mat.append([_f((s.get("pe_oi") or [None] * n)[j]) for j in range(n)])
 
@@ -387,12 +405,28 @@ def compute_progression(
             g += greeks(S, K, T, ic, r, "C")[1] * co * SC - greeks(S, K, T, ip, r, "P")[1] * po * SC
         gex_series.append(round(g, 2))
 
+    # Bucket-over-bucket ΔOI across the band (spec: progression OI change).
+    oi_totals: list[Optional[float]] = []
+    for j in range(n):
+        vals = [
+            v
+            for K in strikes
+            for v in (oi_call_mat[strikes.index(K)][j], oi_put_mat[strikes.index(K)][j])
+            if v is not None
+        ]
+        oi_totals.append(sum(vals) if vals else None)
+    oi_change: list[Optional[float]] = [None]
+    for j in range(1, n):
+        cur, prev = oi_totals[j], oi_totals[j - 1]
+        oi_change.append(round(cur - prev, 1) if cur is not None and prev is not None else None)
+
     regime = [("pos" if (g is not None and g >= 0) else ("neg" if g is not None else None)) for g in gex_series]
     last_spot = next((_f(s) for s in reversed(underlying_px) if _f(s)), None)
     atm = min(strikes, key=lambda K: abs(K - last_spot)) if last_spot else None
     return {
         "times": times, "strikes": strikes, "idx": underlying_px,
-        "gdens": gdens_mat, "oi_call": oi_call_mat, "oi_put": oi_put_mat,
+        "gdens": gdens_mat, "netgex": netgex_mat,
+        "oi_call": oi_call_mat, "oi_put": oi_put_mat, "oi_change": oi_change,
         "gex": gex_series, "regime": regime, "atm": atm,
     }
 
