@@ -90,3 +90,55 @@ async def test_stream_snapshot_exits_cleanly_when_socket_is_already_closing(monk
         interval_seconds=0.01,
         payload_factory=payload_factory,
     )
+
+
+@pytest.mark.asyncio
+async def test_desk_snapshot_payload_passes_plain_values_not_query_sentinels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the WS wrapper calls the desk route shims directly, so any
+    parameter it leaves unfilled keeps its ``fastapi.Query(...)`` SENTINEL as
+    the value (FastAPI only resolves defaults through dependency injection).
+    ``lookback_sessions`` leaked this way and crashed the directional stream on
+    every refresh ("'>' not supported between instances of 'Query' and 'int'").
+    Every route parameter must arrive as a plain python value."""
+    import fastapi.params
+
+    import api.routers.directional_options as directional_router
+    import api.routers.gann_tp_delta as gann_router
+
+    captured: dict[str, dict] = {}
+
+    async def fake_directional(**kwargs):
+        captured["directional"] = kwargs
+        return {"ok": True}
+
+    async def fake_gann(**kwargs):
+        captured["gann"] = kwargs
+        return {"ok": True}
+
+    monkeypatch.setattr(directional_router, "live_snapshot", fake_directional)
+    monkeypatch.setattr(gann_router, "live_snapshot", fake_gann)
+
+    await ticks._desk_snapshot_payload("directional", "NIFTY", None)
+    await ticks._desk_snapshot_payload("gann", "BANKNIFTY", None)
+
+    for desk, kwargs in captured.items():
+        for name, value in kwargs.items():
+            assert not isinstance(value, fastapi.params.Param), (
+                f"{desk}.{name} leaked a FastAPI Query sentinel into the service call"
+            )
+
+    assert captured["directional"]["lookback_sessions"] == 16
+    assert isinstance(captured["directional"]["lookback_sessions"], int)
+    assert captured["directional"]["timeframe"] == "5minute"
+    assert captured["gann"]["lookback_sessions"] == 60
+    assert captured["gann"]["anchor_mode"] == "auto_pivot"
+    assert captured["gann"]["h_mode"] == "median_tpd"
+    assert captured["gann"]["manual_h"] is None
+
+
+@pytest.mark.asyncio
+async def test_desk_snapshot_payload_unknown_desk() -> None:
+    payload = await ticks._desk_snapshot_payload("nope", "NIFTY", None)
+    assert payload == {"error": "unknown desk: nope"}

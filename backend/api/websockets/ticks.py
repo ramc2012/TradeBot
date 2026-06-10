@@ -722,6 +722,48 @@ async def ws_fractal_market_profile(websocket: WebSocket, symbol: str):
     )
 
 
+async def _desk_snapshot_payload(desk: str, symbol: str, timeframe: str | None) -> dict:
+    """Resolve one desk's live snapshot for the WS stream.
+
+    The desk routers are FastAPI route shims whose defaults are
+    ``fastapi.Query(...)`` sentinels. Calling them directly (bypassing
+    FastAPI's dependency resolution) leaves any unfilled parameter holding the
+    sentinel OBJECT, not its default value — ``lookback_sessions`` stayed a
+    ``Query`` and crashed the directional stream on every refresh with
+    "'>' not supported between instances of 'Query' and 'int'". Every route
+    parameter must therefore be passed explicitly here, mirroring each
+    route's declared defaults.
+    """
+    if desk == "directional":
+        from api.routers.directional_options import live_snapshot
+
+        return await live_snapshot(
+            underlying=symbol,
+            timeframe=timeframe or "5minute",
+            lookback_sessions=16,
+        )
+    if desk == "gann":
+        from api.routers.gann_tp_delta import live_snapshot
+
+        return await live_snapshot(
+            underlying=symbol,
+            timeframe=timeframe or "15minute",
+            lookback_sessions=60,
+            anchor_mode="auto_pivot",
+            h_mode="median_tpd",
+            manual_h=None,
+        )
+    if desk == "auction":
+        from api.routers.auction_intelligence import live_snapshot
+
+        return await live_snapshot(symbol=symbol)
+    if desk == "fractal":
+        from api.routers.fractal_market_profile import fractal_market_profile_live_snapshot
+
+        return await fractal_market_profile_live_snapshot(symbol=symbol, symbol_code=None)
+    return {"error": f"unknown desk: {desk}"}
+
+
 async def ws_strategy_snapshot(websocket: WebSocket):
     """Generic per-desk live-snapshot stream (watchlist + analytics).
 
@@ -736,19 +778,7 @@ async def ws_strategy_snapshot(websocket: WebSocket):
     timeframe = str(websocket.query_params.get("timeframe") or "").strip() or None
 
     async def payload_factory():
-        if desk == "directional":
-            from api.routers.directional_options import live_snapshot
-            return await live_snapshot(underlying=symbol, timeframe=timeframe or "5minute")
-        if desk == "gann":
-            from api.routers.gann_tp_delta import live_snapshot
-            return await live_snapshot(underlying=symbol, timeframe=timeframe or "15minute")
-        if desk == "auction":
-            from api.routers.auction_intelligence import live_snapshot
-            return await live_snapshot(symbol=symbol)
-        if desk == "fractal":
-            from api.routers.fractal_market_profile import fractal_market_profile_live_snapshot
-            return await fractal_market_profile_live_snapshot(symbol=symbol)
-        return {"error": f"unknown desk: {desk}"}
+        return await _desk_snapshot_payload(desk, symbol, timeframe)
 
     await _stream_snapshot(
         websocket,
