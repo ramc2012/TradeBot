@@ -16,3 +16,6 @@ reports/
 *.sqlite
 *.db
 *.jsonl
+*.log
+logs/
+.DS_Store

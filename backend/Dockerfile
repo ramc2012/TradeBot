@@ -15,5 +15,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 RUN chmod +x scripts/start_backend.sh
 
-EXPOSE 8080
+EXPOSE 8000
 CMD ["scripts/start_backend.sh"]

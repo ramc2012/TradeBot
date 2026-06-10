@@ -500,7 +500,11 @@ class FyersAdapter(BrokerAdapter):
             from fyers_apiv3.FyersWebsocket import data_ws
             client = data_ws.FyersDataSocket(
                 access_token=f"{settings.FYERS_APP_ID}:{self._access_token}",
-                log_path="",
+                # /tmp, not cwd: with log_path="" the lib appends to
+                # ./fyersDataSocket.log in the bind-mounted /app — it grew to
+                # 577MB of token-bearing WS frames and was getting baked into
+                # the image before *.log joined .dockerignore.
+                log_path="/tmp/",
                 litemode=False,
                 write_to_file=False,
                 reconnect=True,
@@ -542,7 +546,7 @@ class FyersAdapter(BrokerAdapter):
         client = tbt_ws.FyersTbtSocket(
             access_token=f"{settings.FYERS_APP_ID}:{self._access_token}",
             write_to_file=False,
-            log_path="",
+            log_path="/tmp/",
             reconnect=True,
             on_depth_update=_on_depth,
             on_error=lambda e: logger.error(f"Fyers TBT WS error: {e}"),

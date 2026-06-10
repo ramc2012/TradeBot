@@ -1,0 +1,15 @@
+# Thin sidecar image for the sniper shadow lane.
+# Reuses the prod backend image (pandas/numpy/asyncpg already present) and only adds the ML deps.
+# The sniper code + model + JSONL log live on a host-mounted volume (/sniper), so this image is
+# stable and the running code/artifacts are updated without rebuilds.
+FROM tradebot-backend:latest
+
+# lightgbm pulls scipy; joblib loads the estimator artifact; tqdm is imported by the pipeline.
+RUN pip install --no-cache-dir lightgbm joblib tqdm
+
+# Code and model are bind-mounted at /sniper at run time; PYTHONPATH lets `import nomad_sniper`
+# resolve there while auction_intelligence (unused by the sidecar) stays available from /app.
+ENV PYTHONPATH=/sniper:/app
+WORKDIR /sniper
+ENTRYPOINT ["python"]
+CMD ["sniper_sidecar.py", "ALL"]
