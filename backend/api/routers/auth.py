@@ -757,7 +757,21 @@ def _has_saved_fyers_refresh_material() -> bool:
     )
 
 
+# Failed-refresh cooldown. The Fyers access token EXPIRES ~03:30 IST but the
+# broker only ISSUES fresh tokens from ~06:30 IST — between those, every
+# ensure_fyers_session call (many per minute from the watchlist/MI pollers)
+# would fire a doomed refresh grant: thousands of failed hits on the Fyers
+# auth API plus a force DB credential reload each time. Retry every 10 min
+# instead; the 06:30 window is then picked up within minutes, well before the
+# 09:15 open.
+_fyers_refresh_failed_at: float = 0.0
+_FYERS_REFRESH_RETRY_SECONDS = 600.0
+
+
 async def _refresh_fyers_session_from_saved_credentials() -> bool:
+    global _fyers_refresh_failed_at
+    if monotonic() - _fyers_refresh_failed_at < _FYERS_REFRESH_RETRY_SECONDS:
+        return False
     await refresh_persistent_credentials_async(force=True)
     fyers_creds = _broker_credentials.get("fyers", {})
     refresh_token = str(fyers_creds.get("refresh_token") or "").strip()
@@ -780,10 +794,16 @@ async def _refresh_fyers_session_from_saved_credentials() -> bool:
             }
         _persist_broker_session("fyers", token)
         await _sync_market_data_feed()
+        _fyers_refresh_failed_at = 0.0
         logger.info("✓ Fyers refreshed from saved refresh token")
         return True
     except Exception as exc:
-        logger.warning(f"Fyers refresh-token restore failed: {exc}")
+        _fyers_refresh_failed_at = monotonic()
+        logger.warning(
+            f"Fyers refresh-token restore failed (next retry in "
+            f"{int(_FYERS_REFRESH_RETRY_SECONDS)}s — expected between token "
+            f"expiry ~03:30 IST and the broker's ~06:30 IST issue window): {exc}"
+        )
         return False
 
 
