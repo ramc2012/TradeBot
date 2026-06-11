@@ -799,11 +799,22 @@ async def _refresh_fyers_session_from_saved_credentials() -> bool:
         return True
     except Exception as exc:
         _fyers_refresh_failed_at = monotonic()
-        logger.warning(
-            f"Fyers refresh-token restore failed (next retry in "
-            f"{int(_FYERS_REFRESH_RETRY_SECONDS)}s — expected between token "
-            f"expiry ~03:30 IST and the broker's ~06:30 IST issue window): {exc}"
-        )
+        if "currently disabled" in str(exc).lower():
+            # Observed 2026-06-11: "Refresh token API is currently disabled to
+            # comply with SEBI regulations." — Fyers switched the grant off
+            # broker-side, so retrying cannot succeed. Back off hard and say
+            # what actually fixes it (the daily manual login).
+            _fyers_refresh_failed_at = monotonic() + 6 * 3600 - _FYERS_REFRESH_RETRY_SECONDS
+            logger.warning(
+                "Fyers refresh-token API is DISABLED broker-side (SEBI daily "
+                "re-auth mandate) — auto-refresh cannot succeed; a manual "
+                f"Fyers login is required each morning. Backing off 6h. ({exc})"
+            )
+        else:
+            logger.warning(
+                f"Fyers refresh-token restore failed (next retry in "
+                f"{int(_FYERS_REFRESH_RETRY_SECONDS)}s): {exc}"
+            )
         return False
 
 
