@@ -1,45 +1,71 @@
 "use client";
 
 /**
- * Dealer-positioning analytics panel for the long-premium (directional) desk.
+ * Options Analytics Dashboard — implements the approved HTML prototype
+ * (2026-06-11) for the long-premium desk on top of the Black-76 GEX engine.
  *
- * Black-76 GEX engine ported from the fyers-webapp options-analytics module:
- * per-expiry GEX-by-strike profile, Net GEX (₹Cr), gamma flip (zero-gamma spot),
- * gamma density, DEX, max-pain, call/put walls, IV smile — plus a term structure
- * across the nearest expiries and a 30-min net-GEX / OI progression with
- * strike×time heatmaps.
+ * Sections (matching the prototype): expiry selector + spot/VIX header, 8-KPI
+ * dealer-positioning strip, OI by strike, OI change (gradient build/unwind),
+ * IV smile (OTM composite + per-side), Greeks profile (Δ sweep + Γ), GEX and
+ * DEX by strike with spot/flip markers, market-read narrative, enhanced
+ * option chain (OI bars + gradient OIΔ + ATM highlight), term structure
+ * (ATM IV / PCR / Net GEX / Total OI), and the intraday progression suite
+ * (single-strike CE+PE OI with Δ-colored markers, regime-shaded Net-GEX,
+ * gamma-density + OI-change strike×time heat grids).
  *
- * Data: GET /api/directional-options/gex (per-expiry + term) and
- *       GET /api/directional-options/gex-progression (lazy, per expiry).
- * Additive to /chain-analytics (which still feeds the RL policy).
+ * Data: GET /api/directional-options/gex (per-expiry rows carry ltp/oi/oiΔ/
+ * IV/Δ/Γ/θ per side + gex/dex/gdens) and GET /gex-progression (lazy).
  */
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { clsx } from "clsx";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Area,
-  AreaChart,
   Bar,
   BarChart,
-  Cell,
+  ComposedChart,
   Line,
   LineChart,
+  Cell,
+  ReferenceArea,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
-import { Activity, ChevronDown, Layers, Sigma, TrendingUp } from "lucide-react";
+import { ChevronDown, Crosshair, Flame, Gauge, Layers, ListTree, Magnet, Sigma, TrendingUp, Activity } from "lucide-react";
 
-import { MetricTile, REFRESH_MS, Section, formatNumber, tone } from "@/components/desk-ui";
+import { REFRESH_MS, Section, formatNumber } from "@/components/desk-ui";
 import { api as apiClient } from "@/lib/api";
-import GexHeatmap from "./GexHeatmap";
 
-const POS = "#00d4a3";
-const NEG = "#ff4757";
+const POS = "#27c08a";
+const NEG = "#ff5470";
+const CALL = "#3b82f6";
+const PUT = "#f59e0b";
+const ACCENT = "#7c5cff";
 const CHART_TT = { background: "#0f1724", border: "1px solid #1e2d45", borderRadius: 8, fontSize: 12 } as const;
+const TICK = { fill: "#8a97ad", fontSize: 10 } as const;
 
+type Row = {
+  strike: number;
+  ce_ltp: number | null;
+  pe_ltp: number | null;
+  ce_oi: number;
+  pe_oi: number;
+  ce_oich: number | null;
+  pe_oich: number | null;
+  ce_iv: number | null;
+  pe_iv: number | null;
+  ce_delta: number | null;
+  pe_delta: number | null;
+  ce_gamma: number | null;
+  pe_gamma: number | null;
+  ce_theta: number | null;
+  pe_theta: number | null;
+  gex: number;
+  dex: number;
+  gdens: number;
+};
 type Meta = {
   expiry: string;
   days: number | null;
@@ -55,16 +81,7 @@ type Meta = {
   net_gex: number | null;
   net_dex: number | null;
   gamma_flip: number | null;
-};
-type Row = {
-  strike: number;
-  ce_iv: number | null;
-  pe_iv: number | null;
-  ce_oi: number;
-  pe_oi: number;
-  gex: number;
-  dex: number;
-  gdens: number;
+  as_of?: string | null;
 };
 type PerExpiry = { meta: Meta; rows: Row[] };
 type Term = {
@@ -80,6 +97,7 @@ type GexPayload = {
   available?: boolean;
   underlying?: string;
   spot?: number | null;
+  vix?: number | null;
   as_of?: string | null;
   per_expiry?: PerExpiry[];
   term?: Term | null;
@@ -92,8 +110,8 @@ type Progression = {
   netgex?: (number | null)[][];
   oi_call: (number | null)[][];
   oi_put: (number | null)[][];
-  gex: (number | null)[];
   oi_change?: (number | null)[];
+  gex: (number | null)[];
   regime: (string | null)[];
   atm: number | null;
 };
@@ -106,21 +124,25 @@ type ProgPayload = {
   progression?: Progression;
 };
 
-function compact(n: number | null | undefined, unit = ""): string {
-  if (n == null || Number.isNaN(n)) return "—";
-  const abs = Math.abs(n);
-  let s: string;
-  if (abs >= 1e7) s = `${(n / 1e7).toFixed(2)}Cr`;
-  else if (abs >= 1e5) s = `${(n / 1e5).toFixed(2)}L`;
-  else if (abs >= 1e3) s = `${(n / 1e3).toFixed(1)}K`;
-  else s = n.toFixed(abs < 10 && abs > 0 ? 2 : 0);
-  return unit ? `${s}${unit}` : s;
+const lakh = (n: number | null | undefined) =>
+  n == null || Number.isNaN(n) ? "—" : `${(n / 100000).toFixed(1)}L`;
+const fmtCr = (v: number | null | undefined) =>
+  v == null || Number.isNaN(v) ? "—" : `${v >= 0 ? "+" : ""}${Math.round(v).toLocaleString("en-IN")}`;
+const inr = (v: number | null | undefined, d = 0) =>
+  v == null || Number.isNaN(v) ? "—" : v.toLocaleString("en-IN", { maximumFractionDigits: d });
+
+function nearestIdx(values: number[], target: number): number {
+  return values.reduce((b, v, i) => (Math.abs(v - target) < Math.abs(values[b] - target) ? i : b), 0);
 }
+
 function AsOfBadge({ asOf }: { asOf: string }) {
   // The chain cache is re-stamped every ~30s even after market close, so the
   // timestamp alone always looks fresh — combine age with the NSE session
   // window to honestly label EOD-frozen data.
-  const ts = new Date(asOf);
+  // The chain cache stamps a NAIVE UTC timestamp (no offset) — parse it as
+  // UTC, not browser-local, or the badge reads 5.5h stale all session in IST.
+  const normalized = /[zZ]|[+-]\d{2}:?\d{2}$/.test(asOf) ? asOf : `${asOf}Z`;
+  const ts = new Date(normalized);
   if (Number.isNaN(ts.getTime())) return null;
   const ageMin = (Date.now() - ts.getTime()) / 60000;
   const ist = new Date(Date.now() + (330 + new Date().getTimezoneOffset()) * 60000);
@@ -140,11 +162,21 @@ function AsOfBadge({ asOf }: { asOf: string }) {
   );
 }
 
-function pcrTone(p?: number | null): string {
-  if (p == null) return "text-text-muted";
-  if (p > 1.2) return "text-accent-green";
-  if (p < 0.8) return "text-accent-red";
-  return "text-text-secondary";
+function Kpi({ label, value, meta, toneClass }: { label: string; value: string; meta?: string; toneClass?: string }) {
+  return (
+    <div className="rounded-xl border border-bg-border bg-bg-secondary/40 px-3 py-2.5">
+      <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-text-muted">{label}</div>
+      <div className={clsx("mt-1 font-mono text-[17px] font-bold tabular-nums", toneClass ?? "text-text-primary")}>{value}</div>
+      {meta ? <div className="mt-0.5 text-[10px] text-text-muted">{meta}</div> : null}
+    </div>
+  );
+}
+
+/** Gradient cell color for OIΔ: green build / red unwind, alpha ∝ |Δ|/max. */
+function oichColor(v: number | null | undefined, maxAbs: number): string | undefined {
+  if (v == null || Number.isNaN(v) || maxAbs <= 0) return undefined;
+  const a = 0.18 + 0.72 * Math.min(1, Math.abs(v) / maxAbs);
+  return v >= 0 ? `rgba(39,192,138,${a})` : `rgba(255,84,112,${a})`;
 }
 
 export default function OptionAnalyticsPanel({ underlying, expiry }: { underlying: string; expiry?: string | null }) {
@@ -163,213 +195,539 @@ export default function OptionAnalyticsPanel({ underlying, expiry }: { underlyin
 
   if (isLoading) {
     return (
-      <Section title="Dealer positioning · GEX" icon={<Sigma size={16} />}>
+      <Section title="Options analytics" icon={<Sigma size={16} />}>
         <div className="text-sm text-text-muted">Loading option chain…</div>
       </Section>
     );
   }
   if (!data?.available || !current) {
     return (
-      <Section title="Dealer positioning · GEX" icon={<Sigma size={16} />}>
-        <div className="rounded-xl border border-bg-border bg-bg-primary/15 p-3 text-sm text-text-muted">
-          No chain cached for <span className="font-mono">{underlying}</span>. GEX analytics populate once the broker
-          websocket fills the option chain. Open Market → Option Chain once for this underlying to prime it.
+      <Section title="Options analytics" icon={<Sigma size={16} />}>
+        <div className="rounded-xl border border-bg-border bg-bg-primary/15 p-3 text-[12px] text-text-muted">
+          No cached option chain yet for {underlying}. The chain poller warms up within ~1 min of the desk opening.
         </div>
       </Section>
     );
   }
 
   const m = current.meta;
-  const gexData = current.rows.map((r) => ({ strike: r.strike, gex: r.gex, gdens: r.gdens }));
-  const smileData = current.rows
-    .map((r) => ({ strike: r.strike, ce_iv: r.ce_iv, pe_iv: r.pe_iv }))
-    .filter((r) => r.ce_iv != null || r.pe_iv != null);
+  const rows = current.rows;
+  const spot = data.spot ?? m.spot ?? 0;
+  const strikes = rows.map((r) => r.strike);
+  const spotIdx = nearestIdx(strikes, spot);
+  const flipIdx = m.gamma_flip != null ? nearestIdx(strikes, m.gamma_flip) : null;
+
+  const maxOich = Math.max(1, ...rows.flatMap((r) => [Math.abs(r.ce_oich ?? 0), Math.abs(r.pe_oich ?? 0)]));
+  const hasOich = rows.some((r) => r.ce_oich != null || r.pe_oich != null);
+
+  const chartRows = rows.map((r, i) => ({
+    ...r,
+    label: String(r.strike),
+    otm_iv: r.strike < spot ? r.pe_iv : r.ce_iv,
+    gamma_any: r.ce_gamma ?? r.pe_gamma,
+    isSpot: i === spotIdx,
+  }));
+
+  const sentiment = (m.pcr ?? 0) > 1 ? "put-heavy" : (m.pcr ?? 0) > 0.8 ? "balanced" : "call-heavy";
+  const flipText =
+    m.gamma_flip != null
+      ? `gamma flip at ${inr(m.gamma_flip)} (spot ${spot > m.gamma_flip ? "above — stabilizing" : "below — unstable"})`
+      : "no gamma flip inside the band";
+
+  const spotRef = (
+    <ReferenceLine
+      x={String(strikes[spotIdx])}
+      stroke="rgba(255,255,255,0.6)"
+      strokeDasharray="4 4"
+      label={{ value: "Spot", fill: "#cbd5e1", fontSize: 10, position: "insideTopRight" }}
+    />
+  );
+  const flipRef =
+    flipIdx != null ? (
+      <ReferenceLine
+        x={String(strikes[flipIdx])}
+        stroke="#ffd591"
+        strokeDasharray="2 2"
+        label={{ value: "Flip", fill: "#ffd591", fontSize: 10, position: "insideTopLeft" }}
+      />
+    ) : null;
 
   return (
     <div className="space-y-4">
-      {/* Expiry tabs */}
+      {/* Header: expiry pills + spot / fwd / VIX / freshness */}
       <div className="flex flex-wrap items-center gap-2">
-        {expiries.map((e) => (
-          <button
-            key={e}
-            onClick={() => setSelected(e)}
-            className={clsx(
-              "rounded-full border px-3 py-1 text-xs font-medium transition",
-              e === activeExpiry
-                ? "border-accent-blue/60 bg-accent-blue/15 text-text-primary"
-                : "border-bg-border bg-bg-secondary/30 text-text-muted hover:text-text-secondary",
-            )}
-          >
-            {e}
-          </button>
-        ))}
+        {expiries.map((e) => {
+          const days = data?.per_expiry?.find((p) => p.meta.expiry === e)?.meta.days;
+          return (
+            <button
+              key={e}
+              onClick={() => setSelected(e)}
+              className={clsx(
+                "rounded-full border px-3 py-1 text-xs font-medium transition",
+                e === activeExpiry
+                  ? "border-accent-blue/60 bg-accent-blue/15 text-text-primary"
+                  : "border-bg-border bg-bg-secondary/30 text-text-muted hover:text-text-secondary",
+              )}
+            >
+              {e}
+              {days != null ? <span className="ml-1 text-[10px] text-text-muted">({formatNumber(days, 1)}d)</span> : null}
+            </button>
+          );
+        })}
         <span className="ml-auto text-[11px] text-text-muted">
-          spot {formatNumber(m.spot, 1)} · fwd {formatNumber(m.fp, 1)} · {m.days != null ? `${m.days}d` : "—"}
-          {data?.as_of ? (
-            <AsOfBadge asOf={data.as_of} />
+          spot <b className="text-text-primary">{inr(spot, 1)}</b> · fwd {inr(m.fp, 1)}
+          {data?.vix != null ? (
+            <>
+              {" "}
+              · VIX <b className="text-text-primary">{formatNumber(data.vix, 2)}</b>
+            </>
           ) : null}
+          {data?.as_of ? <AsOfBadge asOf={data.as_of} /> : null}
         </span>
       </div>
 
-      {/* KPI row */}
-      <Section title={`Dealer positioning · ${underlying} ${activeExpiry ?? ""}`} icon={<Sigma size={16} />}>
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
-          <MetricTile
-            label="Net GEX"
-            value={`${m.net_gex != null && m.net_gex >= 0 ? "+" : ""}${compact(m.net_gex)} Cr`}
-            color={tone(m.net_gex)}
-            detail={m.net_gex != null ? (m.net_gex >= 0 ? "long-gamma · stabilizing" : "short-gamma · trending") : ""}
-          />
-          <MetricTile
-            label="Gamma flip"
-            value={m.gamma_flip != null ? formatNumber(m.gamma_flip, 0) : "—"}
-            color={m.gamma_flip != null && m.spot != null ? (m.spot >= m.gamma_flip ? "text-accent-green" : "text-accent-red") : undefined}
-            detail={m.gamma_flip != null && m.spot != null ? `${m.spot >= m.gamma_flip ? "above" : "below"} flip` : "no crossing"}
-          />
-          <MetricTile label="ATM IV" value={m.atm_iv != null ? `${m.atm_iv.toFixed(2)}%` : "—"} />
-          <MetricTile label="PCR (OI)" value={m.pcr != null ? m.pcr.toFixed(3) : "—"} color={pcrTone(m.pcr)} />
-          <MetricTile
-            label="Max pain"
-            value={formatNumber(m.max_pain, 0)}
-            detail={m.spot != null && m.max_pain != null ? `${(((m.max_pain - m.spot) / m.spot) * 100).toFixed(2)}% vs spot` : ""}
-          />
-          <MetricTile
-            label="Net DEX"
-            value={`${m.net_dex != null && m.net_dex >= 0 ? "+" : ""}${compact(m.net_dex)} Cr`}
-            color={tone(m.net_dex)}
-            detail={`walls C${formatNumber(m.call_wall, 0)} / P${formatNumber(m.put_wall, 0)}`}
-          />
-        </div>
-      </Section>
-
-      {/* GEX-by-strike profile */}
-      <Section title="GEX by strike · ₹Cr per 1% move" icon={<Layers size={16} />}>
-        <div className="h-72">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={gexData} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
-              <XAxis dataKey="strike" type="number" domain={["dataMin", "dataMax"]} tick={{ fill: "#94a3b8", fontSize: 11 }} />
-              <YAxis tick={{ fill: "#94a3b8", fontSize: 11 }} tickFormatter={(v) => compact(v)} />
-              <Tooltip formatter={(v: number) => [`${compact(v)} Cr`, "GEX"]} labelFormatter={(s) => `Strike ${s}`} contentStyle={CHART_TT} />
-              <ReferenceLine y={0} stroke="#1e2d45" />
-              {m.spot != null ? (
-                <ReferenceLine x={m.spot} stroke="#3b82f6" strokeDasharray="3 3" label={{ value: "spot", fill: "#3b82f6", fontSize: 10, position: "top" }} />
-              ) : null}
-              {m.gamma_flip != null ? (
-                <ReferenceLine x={m.gamma_flip} stroke="#f5c842" strokeDasharray="4 2" label={{ value: "flip", fill: "#f5c842", fontSize: 10, position: "top" }} />
-              ) : null}
-              <Bar dataKey="gex">
-                {gexData.map((d) => (
-                  <Cell key={d.strike} fill={d.gex >= 0 ? POS : NEG} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-        <p className="mt-2 text-[11px] text-text-muted">
-          Positive (green) = dealers long gamma at that strike (mean-reverting / pin); negative (red) = short gamma
-          (move-amplifying). The yellow line is the zero-gamma flip — spot above it is the stabilizing regime.
-        </p>
-      </Section>
+      {/* KPI strip — the prototype's 8 tiles */}
+      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 xl:grid-cols-8">
+        <Kpi label="ATM IV" value={m.atm_iv != null ? `${m.atm_iv}%` : "—"} meta={`strike ${inr(m.atm)}`} />
+        <Kpi
+          label="PCR (OI)"
+          value={formatNumber(m.pcr, 3)}
+          meta={sentiment}
+          toneClass={(m.pcr ?? 0) > 1.2 ? "text-accent-green" : (m.pcr ?? 1) < 0.8 ? "text-accent-red" : undefined}
+        />
+        <Kpi label="Max Pain" value={inr(m.max_pain)} meta="expiry magnet" />
+        <Kpi label="Call Wall" value={inr(m.call_wall)} meta="resistance" />
+        <Kpi label="Put Wall" value={inr(m.put_wall)} meta="support" />
+        <Kpi
+          label="Net GEX"
+          value={fmtCr(m.net_gex)}
+          meta={`₹Cr/1% · ${(m.net_gex ?? 0) >= 0 ? "long γ" : "short γ"}`}
+          toneClass={(m.net_gex ?? 0) >= 0 ? "text-accent-green" : "text-accent-red"}
+        />
+        <Kpi label="Net DEX" value={fmtCr(m.net_dex)} meta="₹Cr delta" />
+        <Kpi
+          label="Gamma Flip"
+          value={m.gamma_flip != null ? inr(m.gamma_flip) : "—"}
+          meta={m.gamma_flip != null ? (spot > m.gamma_flip ? "spot above" : "spot below") : "no cross"}
+          toneClass={m.gamma_flip != null && spot > m.gamma_flip ? "text-accent-green" : undefined}
+        />
+      </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        {/* Gamma density */}
-        <Section title="Gamma density · γ·OI concentration" icon={<Activity size={16} />}>
-          <div className="h-56">
+        {/* OI by strike */}
+        <Section title="Open interest by strike" icon={<Layers size={16} />} description="Tall call bars above spot = resistance; tall put bars below = support.">
+          <div className="h-64">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={gexData} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
-                <defs>
-                  <linearGradient id="gd" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.55} />
-                    <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.04} />
-                  </linearGradient>
-                </defs>
-                <XAxis dataKey="strike" type="number" domain={["dataMin", "dataMax"]} tick={{ fill: "#94a3b8", fontSize: 11 }} />
-                <YAxis tick={{ fill: "#94a3b8", fontSize: 11 }} />
-                <Tooltip formatter={(v: number) => [v.toFixed(2), "γ·OI (M)"]} labelFormatter={(s) => `Strike ${s}`} contentStyle={CHART_TT} />
-                {m.atm != null ? <ReferenceLine x={m.atm} stroke="#3b82f6" strokeDasharray="3 3" /> : null}
-                <Area type="monotone" dataKey="gdens" stroke="#3b82f6" fill="url(#gd)" />
-              </AreaChart>
+              <BarChart data={chartRows} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
+                <XAxis dataKey="label" tick={TICK} minTickGap={24} />
+                <YAxis tick={{ ...TICK, fontSize: 11 }} tickFormatter={(v) => lakh(v)} />
+                <Tooltip contentStyle={CHART_TT} formatter={(v: number, name: string) => [lakh(v), name]} />
+                <Bar dataKey="ce_oi" name="Call OI" fill="rgba(59,130,246,0.75)" />
+                <Bar dataKey="pe_oi" name="Put OI" fill="rgba(245,158,11,0.75)" />
+                {spotRef}
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </Section>
+
+        {/* OI change by strike (gradient) */}
+        <Section
+          title="OI change by strike"
+          icon={<TrendingUp size={16} />}
+          description="Day's OI change, gradient-shaded by magnitude. Green = build, red = unwind."
+          rightSlot={!hasOich ? <span className="text-[10.5px] text-text-muted">(near-expiry only)</span> : undefined}
+        >
+          <div className="h-64">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartRows} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
+                <XAxis dataKey="label" tick={TICK} minTickGap={24} />
+                <YAxis tick={{ ...TICK, fontSize: 11 }} tickFormatter={(v) => lakh(v)} />
+                <Tooltip contentStyle={CHART_TT} formatter={(v: number, name: string) => [`${v >= 0 ? "+" : ""}${lakh(v)}`, name]} />
+                <ReferenceLine y={0} stroke="#1e2d45" />
+                <Bar dataKey="ce_oich" name="Call OIΔ">
+                  {chartRows.map((r, i) => (
+                    <Cell key={i} fill={oichColor(r.ce_oich, maxOich) ?? "rgba(148,163,184,0.15)"} />
+                  ))}
+                </Bar>
+                <Bar dataKey="pe_oich" name="Put OIΔ">
+                  {chartRows.map((r, i) => (
+                    <Cell key={i} fill={oichColor(r.pe_oich, maxOich) ?? "rgba(148,163,184,0.15)"} />
+                  ))}
+                </Bar>
+                {spotRef}
+              </BarChart>
             </ResponsiveContainer>
           </div>
         </Section>
 
         {/* IV smile */}
-        <Section title="IV smile / skew" icon={<TrendingUp size={16} />}>
-          <div className="h-56">
+        <Section title="Volatility smile / skew" icon={<Activity size={16} />} description="OTM composite IV with per-side detail. Left-up tilt = put skew.">
+          <div className="h-64">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={smileData} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
-                <XAxis dataKey="strike" type="number" domain={["dataMin", "dataMax"]} tick={{ fill: "#94a3b8", fontSize: 11 }} />
-                <YAxis tick={{ fill: "#94a3b8", fontSize: 11 }} tickFormatter={(v) => `${v}%`} />
-                <Tooltip formatter={(v: number, n: string) => [`${v?.toFixed?.(2)}%`, n === "ce_iv" ? "Call IV" : "Put IV"]} labelFormatter={(s) => `Strike ${s}`} contentStyle={CHART_TT} />
-                {m.atm != null ? <ReferenceLine x={m.atm} stroke="#3b82f6" strokeDasharray="3 3" /> : null}
-                <Line type="monotone" dataKey="ce_iv" stroke={POS} dot={false} connectNulls />
-                <Line type="monotone" dataKey="pe_iv" stroke={NEG} dot={false} connectNulls />
+              <LineChart data={chartRows} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
+                <XAxis dataKey="label" tick={TICK} minTickGap={24} />
+                <YAxis tick={{ ...TICK, fontSize: 11 }} domain={["auto", "auto"]} unit="%" />
+                <Tooltip contentStyle={CHART_TT} formatter={(v: number, name: string) => [v != null ? `${v}%` : "—", name]} />
+                <Line type="monotone" dataKey="otm_iv" name="OTM IV" stroke={ACCENT} strokeWidth={2.5} dot={false} connectNulls />
+                <Line type="monotone" dataKey="ce_iv" name="Call IV" stroke="rgba(59,130,246,0.5)" strokeWidth={1} strokeDasharray="4 3" dot={false} connectNulls />
+                <Line type="monotone" dataKey="pe_iv" name="Put IV" stroke="rgba(245,158,11,0.5)" strokeWidth={1} strokeDasharray="4 3" dot={false} connectNulls />
+                {spotRef}
               </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </Section>
+
+        {/* Greeks profile */}
+        <Section title="Greeks profile — delta & gamma" icon={<Gauge size={16} />} description="Delta sweep 0→±1 and ATM-peaked gamma for the selected expiry.">
+          <div className="h-64">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={chartRows} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
+                <XAxis dataKey="label" tick={TICK} minTickGap={24} />
+                <YAxis yAxisId="d" domain={[-1, 1]} tick={{ ...TICK, fontSize: 11 }} />
+                <YAxis yAxisId="g" orientation="right" tick={{ ...TICK, fontSize: 11 }} tickFormatter={(v) => (v ? v.toExponential(0) : "0")} />
+                <Tooltip contentStyle={CHART_TT} />
+                <Bar yAxisId="g" dataKey="gamma_any" name="Gamma" fill="rgba(124,92,255,0.45)" />
+                <Line yAxisId="d" type="monotone" dataKey="ce_delta" name="Call Δ" stroke={CALL} strokeWidth={2} dot={false} connectNulls />
+                <Line yAxisId="d" type="monotone" dataKey="pe_delta" name="Put Δ" stroke={PUT} strokeWidth={2} dot={false} connectNulls />
+                {/* This chart uses explicit axis ids, so the shared spotRef
+                    (default yAxisId "0") would crash recharts' axis lookup. */}
+                <ReferenceLine
+                  yAxisId="d"
+                  x={String(strikes[spotIdx])}
+                  stroke="rgba(255,255,255,0.6)"
+                  strokeDasharray="4 4"
+                  label={{ value: "Spot", fill: "#cbd5e1", fontSize: 10, position: "insideTopRight" }}
+                />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        </Section>
+
+        {/* GEX by strike */}
+        <Section title="GEX by strike" icon={<Magnet size={16} />} description="Dealer gamma per strike (₹Cr / 1%). Green walls dampen; spot & flip marked.">
+          <div className="h-64">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartRows} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
+                <XAxis dataKey="label" tick={TICK} minTickGap={24} />
+                <YAxis tick={{ ...TICK, fontSize: 11 }} />
+                <Tooltip contentStyle={CHART_TT} formatter={(v: number) => [`${fmtCr(v)} Cr`, "GEX"]} />
+                <ReferenceLine y={0} stroke="#1e2d45" />
+                <Bar dataKey="gex" name="GEX">
+                  {chartRows.map((r, i) => (
+                    <Cell key={i} fill={r.gex >= 0 ? "rgba(39,192,138,0.8)" : "rgba(255,84,112,0.8)"} />
+                  ))}
+                </Bar>
+                {spotRef}
+                {flipRef}
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </Section>
+
+        {/* DEX by strike */}
+        <Section title="DEX by strike" icon={<Crosshair size={16} />} description="Delta-weighted OI notional (₹Cr) — directional hedging pressure by strike.">
+          <div className="h-64">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartRows} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
+                <XAxis dataKey="label" tick={TICK} minTickGap={24} />
+                <YAxis tick={{ ...TICK, fontSize: 11 }} />
+                <Tooltip contentStyle={CHART_TT} formatter={(v: number) => [`${fmtCr(v)} Cr`, "DEX"]} />
+                <ReferenceLine y={0} stroke="#1e2d45" />
+                <Bar dataKey="dex" name="DEX">
+                  {chartRows.map((r, i) => (
+                    <Cell key={i} fill={r.dex >= 0 ? "rgba(59,130,246,0.8)" : "rgba(245,158,11,0.8)"} />
+                  ))}
+                </Bar>
+                {spotRef}
+              </BarChart>
             </ResponsiveContainer>
           </div>
         </Section>
       </div>
 
-      {/* Term structure */}
-      {data.term && data.term.labels.length > 1 ? <TermStructure term={data.term} /> : null}
+      {/* Market read */}
+      <Section title={`Market read · ${activeExpiry ?? ""}`} icon={<ListTree size={16} />}>
+        <p className="text-[12.5px] leading-relaxed text-text-secondary">
+          For <b className="text-text-primary">{activeExpiry}</b> ({formatNumber(m.days, 1)}d): PCR{" "}
+          <b className="text-text-primary">{formatNumber(m.pcr, 3)}</b> ({sentiment}), ATM IV{" "}
+          <b className="text-text-primary">{m.atm_iv}%</b>. Max pain <b className="text-text-primary">{inr(m.max_pain)}</b>;
+          heaviest call OI at <b className="text-text-primary">{inr(m.call_wall)}</b> (resistance), put OI at{" "}
+          <b className="text-text-primary">{inr(m.put_wall)}</b> (support). Net GEX{" "}
+          <b className={clsx((m.net_gex ?? 0) >= 0 ? "text-accent-green" : "text-accent-red")}>{fmtCr(m.net_gex)} Cr/1%</b> — dealers{" "}
+          {(m.net_gex ?? 0) >= 0 ? "net long gamma (move-dampening)" : "net short gamma (move-amplifying)"}, {flipText}.
+        </p>
+      </Section>
 
-      {/* Progression (lazy) */}
+      {/* Enhanced option chain */}
+      <Section
+        title={`Enhanced option chain · ${activeExpiry ?? ""}`}
+        icon={<Sigma size={16} />}
+        description="Calls · Strike · Puts. OIΔ cells gradient-shaded green (build) / red (unwind); ATM row highlighted."
+      >
+        <ChainTable rows={rows} spotIdx={spotIdx} maxOich={maxOich} />
+      </Section>
+
+      {/* Term structure */}
+      {data?.term && (data.term.labels?.length ?? 0) > 1 ? <TermSection term={data.term} /> : null}
+
+      {/* Intraday progression */}
       <ProgressionSection underlying={underlying} expiry={activeExpiry} />
+
+      <p className="text-[10.5px] leading-relaxed text-text-muted">
+        IV solved by Black-76 inversion per premium; Greeks, GEX (dealer convention: long calls +, short puts −, ₹Cr/1%),
+        DEX (₹Cr delta-notional), gamma density (γ·OI) and the zero-gamma flip derived from it. Term PCR uses full-chain
+        OI. Progression uses real 30-min (3m-resampled) candles for the ATM band; deep-ITM IV shows “—” near expiry.
+      </p>
     </div>
   );
 }
 
-function TermStructure({ term }: { term: Term }) {
-  const rows = term.labels.map((label, i) => ({
-    label: label ?? "—",
-    days: term.days[i],
-    pcr: term.pcr[i],
-    atm_iv: term.atm_iv[i],
-    net_gex: term.net_gex[i],
-    max_pain: term.max_pain[i],
+function ChainTable({ rows, spotIdx, maxOich }: { rows: Row[]; spotIdx: number; maxOich: number }) {
+  const maxCE = Math.max(1, ...rows.map((x) => x.ce_oi));
+  const maxPE = Math.max(1, ...rows.map((x) => x.pe_oi));
+  const chCell = (v: number | null, key: string) => (
+    <td key={key} className="px-2 py-1" style={{ background: oichColor(v, maxOich) }}>
+      {v == null ? "—" : `${v >= 0 ? "+" : ""}${lakh(v)}`}
+    </td>
+  );
+  return (
+    <div className="max-h-[430px] overflow-auto rounded-lg border border-bg-border">
+      <table className="w-full min-w-[980px] border-collapse text-right font-mono text-[11.5px] tabular-nums">
+        <thead className="sticky top-0 z-10 bg-bg-secondary text-[10px] uppercase tracking-wide text-text-muted">
+          <tr>
+            <th className="px-2 py-1.5">Call OI</th>
+            <th className="px-2 py-1.5">OIΔ</th>
+            <th className="px-2 py-1.5">IV</th>
+            <th className="px-2 py-1.5">Δ</th>
+            <th className="px-2 py-1.5">θ</th>
+            <th className="px-2 py-1.5">LTP</th>
+            <th className="px-2 py-1.5 text-center">Strike</th>
+            <th className="px-2 py-1.5">LTP</th>
+            <th className="px-2 py-1.5">θ</th>
+            <th className="px-2 py-1.5">Δ</th>
+            <th className="px-2 py-1.5">IV</th>
+            <th className="px-2 py-1.5">OIΔ</th>
+            <th className="px-2 py-1.5">Put OI</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => {
+            const isAtm = i === spotIdx;
+            return (
+              <tr key={r.strike} className={clsx("border-b border-bg-border/30", isAtm && "bg-accent-blue/10")}>
+                <td className="relative px-2 py-1 text-sky-300">
+                  <span
+                    className="pointer-events-none absolute inset-y-0.5 right-0 rounded-sm opacity-20"
+                    style={{ width: `${((r.ce_oi / maxCE) * 100).toFixed(0)}%`, background: CALL }}
+                  />
+                  {lakh(r.ce_oi)}
+                </td>
+                {chCell(r.ce_oich, "ce")}
+                <td className="px-2 py-1 text-sky-300">{r.ce_iv ?? "—"}</td>
+                <td className="px-2 py-1 text-sky-300">{r.ce_delta ?? "—"}</td>
+                <td className="px-2 py-1 text-sky-300">{r.ce_theta ?? "—"}</td>
+                <td className="px-2 py-1 font-bold text-sky-200">{r.ce_ltp ?? "—"}</td>
+                <td className={clsx("px-2 py-1 text-center font-bold", isAtm ? "bg-accent-blue/25 text-white" : "bg-bg-primary/40 text-text-primary")}>
+                  {inr(r.strike)}
+                </td>
+                <td className="px-2 py-1 font-bold text-amber-200">{r.pe_ltp ?? "—"}</td>
+                <td className="px-2 py-1 text-amber-300">{r.pe_theta ?? "—"}</td>
+                <td className="px-2 py-1 text-amber-300">{r.pe_delta ?? "—"}</td>
+                <td className="px-2 py-1 text-amber-300">{r.pe_iv ?? "—"}</td>
+                {chCell(r.pe_oich, "pe")}
+                <td className="relative px-2 py-1 text-amber-300">
+                  <span
+                    className="pointer-events-none absolute inset-y-0.5 right-0 rounded-sm opacity-20"
+                    style={{ width: `${((r.pe_oi / maxPE) * 100).toFixed(0)}%`, background: PUT }}
+                  />
+                  {lakh(r.pe_oi)}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function TermSection({ term }: { term: Term }) {
+  const data = (term.labels ?? []).map((l, i) => ({
+    label: `${l ?? "—"} (${formatNumber(term.days?.[i], 1)}d)`,
+    pcr: term.pcr?.[i],
+    atm_iv: term.atm_iv?.[i],
+    net_gex: term.net_gex?.[i],
+    tot_oi: term.tot_oi?.[i],
   }));
   return (
-    <Section title="Term structure" icon={<Layers size={16} />}>
-      <div className="grid gap-4 lg:grid-cols-[1.1fr,1fr]">
-        <table className="w-full text-[12px]">
-          <thead className="text-[10px] uppercase tracking-wide text-text-muted">
-            <tr className="border-b border-bg-border/40">
-              <th className="px-2 py-1.5 text-left">Expiry</th>
-              <th className="px-2 py-1.5 text-right">Days</th>
-              <th className="px-2 py-1.5 text-right">ATM IV</th>
-              <th className="px-2 py-1.5 text-right">PCR</th>
-              <th className="px-2 py-1.5 text-right">Net GEX</th>
-              <th className="px-2 py-1.5 text-right">Max pain</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.label} className="border-b border-bg-border/20">
-                <td className="px-2 py-1.5 font-mono">{r.label}</td>
-                <td className="px-2 py-1.5 text-right font-mono">{r.days ?? "—"}</td>
-                <td className="px-2 py-1.5 text-right font-mono">{r.atm_iv != null ? `${r.atm_iv}%` : "—"}</td>
-                <td className={clsx("px-2 py-1.5 text-right font-mono", pcrTone(r.pcr))}>{r.pcr ?? "—"}</td>
-                <td className={clsx("px-2 py-1.5 text-right font-mono", tone(r.net_gex))}>{compact(r.net_gex)}</td>
-                <td className="px-2 py-1.5 text-right font-mono">{formatNumber(r.max_pain, 0)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <div className="h-48">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={rows} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
-              <XAxis dataKey="label" tick={{ fill: "#94a3b8", fontSize: 11 }} />
-              <YAxis yAxisId="l" tick={{ fill: "#94a3b8", fontSize: 11 }} />
-              <YAxis yAxisId="r" orientation="right" tick={{ fill: "#94a3b8", fontSize: 11 }} tickFormatter={(v) => `${v}%`} />
-              <Tooltip contentStyle={CHART_TT} />
-              <ReferenceLine yAxisId="l" y={0} stroke="#1e2d45" />
-              <Line yAxisId="l" type="monotone" dataKey="net_gex" name="Net GEX" stroke="#f5c842" dot />
-              <Line yAxisId="r" type="monotone" dataKey="atm_iv" name="ATM IV" stroke="#3b82f6" dot />
-            </LineChart>
-          </ResponsiveContainer>
+    <Section title="Term structure" icon={<Layers size={16} />} description="How positioning & vol vary across the expiry curve.">
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div>
+          <div className="mb-1 text-[10.5px] uppercase tracking-[0.16em] text-text-muted">ATM IV</div>
+          <div className="h-48">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={data} margin={{ top: 6, right: 8, bottom: 4, left: 0 }}>
+                <XAxis dataKey="label" tick={TICK} interval={0} angle={-15} height={36} />
+                <YAxis tick={{ ...TICK, fontSize: 11 }} unit="%" domain={["auto", "auto"]} />
+                <Tooltip contentStyle={CHART_TT} />
+                <Line type="monotone" dataKey="atm_iv" stroke={ACCENT} strokeWidth={2.5} dot={{ r: 4 }} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+        <div>
+          <div className="mb-1 text-[10.5px] uppercase tracking-[0.16em] text-text-muted">PCR by expiry</div>
+          <div className="h-48">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={data} margin={{ top: 6, right: 8, bottom: 4, left: 0 }}>
+                <XAxis dataKey="label" tick={TICK} interval={0} angle={-15} height={36} />
+                <YAxis tick={{ ...TICK, fontSize: 11 }} />
+                <Tooltip contentStyle={CHART_TT} />
+                <ReferenceLine y={1} stroke="#8a97ad" strokeDasharray="4 4" />
+                <Bar dataKey="pcr">
+                  {data.map((d, i) => (
+                    <Cell key={i} fill={(d.pcr ?? 0) >= 1 ? "rgba(245,158,11,0.8)" : "rgba(59,130,246,0.8)"} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+        <div>
+          <div className="mb-1 text-[10.5px] uppercase tracking-[0.16em] text-text-muted">Net GEX by expiry</div>
+          <div className="h-48">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={data} margin={{ top: 6, right: 8, bottom: 4, left: 0 }}>
+                <XAxis dataKey="label" tick={TICK} interval={0} angle={-15} height={36} />
+                <YAxis tick={{ ...TICK, fontSize: 11 }} />
+                <Tooltip contentStyle={CHART_TT} formatter={(v: number) => [`${fmtCr(v)} Cr`, "Net GEX"]} />
+                <ReferenceLine y={0} stroke="#1e2d45" />
+                <Bar dataKey="net_gex">
+                  {data.map((d, i) => (
+                    <Cell key={i} fill={(d.net_gex ?? 0) >= 0 ? "rgba(39,192,138,0.8)" : "rgba(255,84,112,0.8)"} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+        <div>
+          <div className="mb-1 text-[10.5px] uppercase tracking-[0.16em] text-text-muted">Total OI by expiry</div>
+          <div className="h-48">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={data} margin={{ top: 6, right: 8, bottom: 4, left: 0 }}>
+                <XAxis dataKey="label" tick={TICK} interval={0} angle={-15} height={36} />
+                <YAxis tick={{ ...TICK, fontSize: 11 }} />
+                <Tooltip contentStyle={CHART_TT} formatter={(v: number) => [`${formatNumber(v, 2)} Cr`, "Total OI"]} />
+                <Bar dataKey="tot_oi" fill="rgba(124,92,255,0.75)" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
         </div>
       </div>
     </Section>
+  );
+}
+
+/** Δ-colored point for OI progression lines (green = OI added vs prior bucket). */
+function deltaDot(series: (number | null)[], stroke: string) {
+  const DotComponent = (props: { cx?: number; cy?: number; index?: number }) => {
+    const { cx, cy, index } = props;
+    if (cx == null || cy == null || index == null) return <g />;
+    const prev = index > 0 ? series[index - 1] : null;
+    const cur = series[index];
+    const fill = prev == null || cur == null ? "#888" : cur - prev >= 0 ? POS : NEG;
+    return <circle cx={cx} cy={cy} r={4} fill={fill} stroke={stroke} strokeWidth={1.5} />;
+  };
+  DotComponent.displayName = "DeltaDot";
+  return DotComponent;
+}
+
+function HeatGrid({
+  title,
+  strikes,
+  times,
+  matrix,
+  mode,
+  regime,
+  fmtCell,
+}: {
+  title?: string;
+  strikes: number[];
+  times: string[];
+  matrix: (number | null)[][];
+  mode: "sequential" | "diverging";
+  regime?: (string | null)[];
+  fmtCell: (v: number | null) => string;
+}) {
+  const flat = matrix.flat().filter((v): v is number => v != null && !Number.isNaN(v));
+  const mx = flat.length ? Math.max(...flat) : 1;
+  const mn = flat.length ? Math.min(...flat) : 0;
+  const maxAbs = Math.max(1e-9, ...flat.map(Math.abs));
+  const cellBg = (v: number | null): string => {
+    if (v == null || Number.isNaN(v)) return "rgba(148,163,184,0.06)";
+    if (mode === "diverging") {
+      const a = 0.12 + 0.88 * Math.min(1, Math.abs(v) / maxAbs);
+      return v >= 0 ? `rgba(39,192,138,${a})` : `rgba(255,84,112,${a})`;
+    }
+    const t = mx > mn ? (v - mn) / (mx - mn) : 0.5;
+    return `rgb(${Math.round(20 + t * 104)},${Math.round(24 + t * 68)},${Math.round(40 + t * 215)})`;
+  };
+  const ordered = strikes.map((s, i) => ({ s, i })).sort((a, b) => b.s - a.s);
+  const cols = `60px repeat(${times.length}, 1fr)`;
+  return (
+    <div>
+      {title ? <div className="mb-1 text-[10.5px] uppercase tracking-[0.16em] text-text-muted">{title}</div> : null}
+      <div className="space-y-0.5">
+        {regime ? (
+          <div className="grid items-center gap-0.5" style={{ gridTemplateColumns: cols }}>
+            <div className="pr-1.5 text-right text-[9.5px] text-text-muted">regime</div>
+            {regime.map((r, j) => (
+              <div
+                key={j}
+                className="flex h-3.5 items-center justify-center rounded-sm text-[8.5px] font-bold text-bg-primary"
+                style={{ background: r === "pos" ? "rgba(39,192,138,0.7)" : r === "neg" ? "rgba(255,84,112,0.7)" : "rgba(148,163,184,0.2)" }}
+              >
+                {r === "pos" ? "S" : r === "neg" ? "T" : "·"}
+              </div>
+            ))}
+          </div>
+        ) : null}
+        <div className="grid items-center gap-0.5" style={{ gridTemplateColumns: cols }}>
+          <div />
+          {times.map((t) => (
+            <div key={t} className="text-center text-[9.5px] text-text-muted">
+              {t}
+            </div>
+          ))}
+        </div>
+        {ordered.map(({ s, i }) => (
+          <div key={s} className="grid items-center gap-0.5" style={{ gridTemplateColumns: cols }}>
+            <div className="pr-1.5 text-right font-mono text-[9.5px] text-text-muted">{s.toLocaleString("en-IN")}</div>
+            {times.map((_, j) => {
+              const v = matrix[i]?.[j] ?? null;
+              return (
+                <div
+                  key={j}
+                  title={`${s} @ ${times[j]}: ${fmtCell(v)}`}
+                  className="flex h-6 items-center justify-center rounded-sm text-[8.5px] font-semibold text-text-primary/80"
+                  style={{ background: cellBg(v) }}
+                >
+                  {fmtCell(v)}
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Bucket-over-bucket Δ of an OI matrix (first column = null). */
+function toDelta(matrix: (number | null)[][]): (number | null)[][] {
+  return matrix.map((row) =>
+    row.map((v, j) => (j === 0 || v == null || row[j - 1] == null ? null : v - (row[j - 1] as number))),
   );
 }
 
@@ -384,12 +742,27 @@ function ProgressionSection({ underlying, expiry }: { underlying: string; expiry
     refetchOnWindowFocus: false,
   });
   const prog = data?.progression;
-  const gexSeries = prog?.times.map((t, i) => ({ t, gex: prog.gex[i], regime: prog.regime[i] })) ?? [];
+  const [strikeSel, setStrikeSel] = useState<number | null>(null);
+  const activeStrike = strikeSel ?? prog?.atm ?? prog?.strikes?.[0] ?? null;
+
+  const gexSeries = useMemo(
+    () => prog?.times.map((t, i) => ({ t, gex: prog.gex[i], regime: prog.regime[i] })) ?? [],
+    [prog],
+  );
+  const singleSeries = useMemo(() => {
+    if (!prog || activeStrike == null) {
+      return { rows: [] as { t: string; ce: number | null; pe: number | null }[], ce: [] as (number | null)[], pe: [] as (number | null)[] };
+    }
+    const ki = prog.strikes.indexOf(activeStrike);
+    const ce = prog.oi_call[ki] ?? [];
+    const pe = prog.oi_put[ki] ?? [];
+    return { rows: prog.times.map((t, i) => ({ t, ce: ce[i], pe: pe[i] })), ce, pe };
+  }, [prog, activeStrike]);
 
   return (
     <Section
-      title="Intraday GEX progression · 30-min"
-      icon={<Activity size={16} />}
+      title="Intraday progression · 30-min"
+      icon={<Flame size={16} />}
       rightSlot={
         <button onClick={() => setOpen((v) => !v)} className="flex items-center gap-1 text-[11px] text-text-muted hover:text-text-secondary">
           {open ? "hide" : "load"}
@@ -398,43 +771,129 @@ function ProgressionSection({ underlying, expiry }: { underlying: string; expiry
       }
     >
       {!open ? (
-        <div className="text-[11px] text-text-muted">Net-GEX / OI over the day + strike×time heatmaps (history fetch — click load).</div>
+        <div className="text-[11px] text-text-muted">
+          Single-strike CE/PE OI, regime-shaded Net-GEX, gamma-density and OI-change heatmaps (history fetch — click load).
+        </div>
       ) : isLoading ? (
         <div className="text-sm text-text-muted">Loading 30-min history…</div>
       ) : !data?.available || !prog ? (
         <div className="rounded-xl border border-bg-border bg-bg-primary/15 p-3 text-[12px] text-text-muted">
-          Not enough 30-min option history for {expiry}. The progression needs option_premium_candles coverage across
-          the strike band (ingest is episodic).
+          Not enough 30-min option history for {expiry}. The progression needs option_premium_candles coverage across the strike band.
         </div>
       ) : (
-        <div className="space-y-4">
+        <div className="space-y-5">
           {data?.degraded ? (
             <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-2 text-[11px] text-amber-300">
-              Most of this grid is snapshot-derived (LTP pseudo-candles) — real 30-min candles are missing for the
-              strike band. Treat levels as approximate.
+              Most of this grid is snapshot-derived (LTP pseudo-candles) — real 30-min candles are missing for the strike band. Treat levels as approximate.
             </div>
           ) : null}
-          <div className="h-56">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={gexSeries} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
-                <XAxis dataKey="t" tick={{ fill: "#94a3b8", fontSize: 10 }} />
-                <YAxis tick={{ fill: "#94a3b8", fontSize: 11 }} tickFormatter={(v) => compact(v)} />
-                <Tooltip formatter={(v: number) => [`${compact(v)} Cr`, "Net GEX"]} contentStyle={CHART_TT} />
-                <ReferenceLine y={0} stroke="#1e2d45" />
-                <Bar dataKey="gex">
-                  {gexSeries.map((d, i) => (
-                    <Cell key={i} fill={(d.gex ?? 0) >= 0 ? POS : NEG} />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+
           <div className="grid gap-4 lg:grid-cols-2">
-            {prog.netgex?.length ? (
-              <GexHeatmap title="Net GEX (strike × time)" strikes={prog.strikes} times={prog.times} matrix={prog.netgex} atm={prog.atm} diverging />
-            ) : null}
-            <GexHeatmap title="Gamma density (strike × time)" strikes={prog.strikes} times={prog.times} matrix={prog.gdens} atm={prog.atm} />
-            <GexHeatmap title="Call OI (strike × time)" strikes={prog.strikes} times={prog.times} matrix={prog.oi_call} atm={prog.atm} />
+            {/* Single-strike CE+PE OI */}
+            <div>
+              <div className="mb-1 flex flex-wrap items-center gap-2 text-[10.5px] uppercase tracking-[0.16em] text-text-muted">
+                CE &amp; PE OI — single strike
+                <select
+                  value={activeStrike ?? undefined}
+                  onChange={(e) => setStrikeSel(Number(e.target.value))}
+                  className="rounded-md border border-bg-border bg-bg-secondary px-2 py-0.5 font-mono text-[11px] text-text-primary"
+                >
+                  {prog.strikes.map((s) => (
+                    <option key={s} value={s}>
+                      {s.toLocaleString("en-IN")}
+                    </option>
+                  ))}
+                </select>
+                <span className="normal-case tracking-normal">markers colored by Δ vs prior bucket</span>
+              </div>
+              <div className="h-56">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={singleSeries.rows} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
+                    <XAxis dataKey="t" tick={TICK} minTickGap={24} />
+                    <YAxis tick={{ ...TICK, fontSize: 11 }} tickFormatter={(v) => lakh(v)} />
+                    <Tooltip contentStyle={CHART_TT} formatter={(v: number, name: string) => [lakh(v), name]} />
+                    <Line type="monotone" dataKey="ce" name="Call OI" stroke={CALL} strokeWidth={2.5} dot={deltaDot(singleSeries.ce, CALL)} connectNulls />
+                    <Line type="monotone" dataKey="pe" name="Put OI" stroke={PUT} strokeWidth={2.5} dot={deltaDot(singleSeries.pe, PUT)} connectNulls />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            {/* Net GEX progression, regime-shaded */}
+            <div>
+              <div className="mb-1 text-[10.5px] uppercase tracking-[0.16em] text-text-muted">
+                Net GEX progression <span className="normal-case tracking-normal">— green band stabilizing · red trending</span>
+              </div>
+              <div className="h-56">
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={gexSeries} margin={{ top: 6, right: 8, bottom: 4, left: 4 }}>
+                    <XAxis dataKey="t" tick={TICK} minTickGap={24} />
+                    <YAxis tick={{ ...TICK, fontSize: 11 }} tickFormatter={(v) => fmtCr(v)} />
+                    <Tooltip contentStyle={CHART_TT} formatter={(v: number) => [`${fmtCr(v)} Cr`, "Net GEX"]} />
+                    {gexSeries.map((d, i) =>
+                      d.regime ? (
+                        <ReferenceArea
+                          key={i}
+                          x1={d.t}
+                          x2={gexSeries[Math.min(i + 1, gexSeries.length - 1)].t}
+                          fill={d.regime === "pos" ? "rgba(39,192,138,0.10)" : "rgba(255,84,112,0.10)"}
+                          strokeOpacity={0}
+                        />
+                      ) : null,
+                    )}
+                    <ReferenceLine y={0} stroke="rgba(138,151,173,0.6)" strokeDasharray="5 4" />
+                    <Line type="monotone" dataKey="gex" stroke="#e6edf7" strokeWidth={2.5} dot={deltaDot(gexSeries.map((d) => d.gex), "#e6edf7")} connectNulls />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+
+          {/* Gamma density heat with regime row */}
+          <HeatGrid
+            title="Gamma density progression (strike × time, regime-marked)"
+            strikes={prog.strikes}
+            times={prog.times}
+            matrix={prog.gdens}
+            mode="sequential"
+            regime={prog.regime}
+            fmtCell={(v) => (v == null ? "·" : v.toFixed(2))}
+          />
+
+          {/* Signed Net-GEX heat (spec L71) */}
+          {prog.netgex?.length ? (
+            <HeatGrid
+              title="Net GEX (strike × time, signed)"
+              strikes={prog.strikes}
+              times={prog.times}
+              matrix={prog.netgex}
+              mode="diverging"
+              fmtCell={(v) => (v == null ? "·" : Math.round(v).toString())}
+            />
+          ) : null}
+
+          {/* OI change progression heatmaps */}
+          <div className="flex flex-wrap gap-5">
+            <div className="min-w-[340px] flex-1">
+              <HeatGrid
+                title="Call OI Δ (bucket-over-bucket)"
+                strikes={prog.strikes}
+                times={prog.times}
+                matrix={toDelta(prog.oi_call)}
+                mode="diverging"
+                fmtCell={(v) => (v == null ? "·" : `${v >= 0 ? "+" : ""}${Math.abs(v) >= 100000 ? lakh(v) : `${Math.round(v / 1000)}k`}`)}
+              />
+            </div>
+            <div className="min-w-[340px] flex-1">
+              <HeatGrid
+                title="Put OI Δ (bucket-over-bucket)"
+                strikes={prog.strikes}
+                times={prog.times}
+                matrix={toDelta(prog.oi_put)}
+                mode="diverging"
+                fmtCell={(v) => (v == null ? "·" : `${v >= 0 ? "+" : ""}${Math.abs(v) >= 100000 ? lakh(v) : `${Math.round(v / 1000)}k`}`)}
+              />
+            </div>
           </div>
         </div>
       )}

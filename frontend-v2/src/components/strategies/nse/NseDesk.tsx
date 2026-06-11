@@ -36,6 +36,7 @@ import {
   Radio,
   TrendingUp,
   Wallet,
+  Search,
 } from "lucide-react";
 import {
   CartesianGrid,
@@ -529,6 +530,16 @@ function OverviewTab({
 function WatchlistTab({ rows }: { rows: WatchRow[] }) {
   const [sortKey, setSortKey] = useState<string>("priority_score");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [search, setSearch] = useState("");
+  const visible = useMemo(() => {
+    const q = search.trim().toUpperCase();
+    if (!q) return rows;
+    return rows.filter((r) =>
+      [r.underlying, r.direction, r.status, r.instruction, r.expiry]
+        .filter(Boolean)
+        .some((f) => String(f).toUpperCase().includes(q)),
+    );
+  }, [rows, search]);
 
   const onSort = (key: string) => {
     if (key === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -552,7 +563,7 @@ function WatchlistTab({ rows }: { rows: WatchRow[] }) {
         default: return r.priority_score ?? -Infinity;
       }
     };
-    return [...rows].sort((a, b) => {
+    return [...visible].sort((a, b) => {
       const va = getVal(a);
       const vb = getVal(b);
       const cmp = typeof va === "string" || typeof vb === "string"
@@ -560,14 +571,31 @@ function WatchlistTab({ rows }: { rows: WatchRow[] }) {
         : (va as number) - (vb as number);
       return sortDir === "asc" ? cmp : -cmp;
     });
-  }, [rows, sortKey, sortDir]);
+  }, [visible, sortKey, sortDir]);
 
   if (!rows.length) {
     return <EmptyState message="No watchlist rows. The desk publishes one row per index+side once 30m ATM premium history is available." />;
   }
 
   return (
-    <Section title="ATM MACD watchlist" icon={<ListChecks size={16} className="text-accent-blue" />} rightSlot={<span className="text-[11px] text-text-muted">Click a column to sort · {sorted.length} rows</span>}>
+    <Section
+      title="ATM MACD watchlist"
+      icon={<ListChecks size={16} className="text-accent-blue" />}
+      rightSlot={
+        <span className="inline-flex items-center gap-2 text-[11px] text-text-muted">
+          <span className="relative">
+            <Search size={11} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-text-muted" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="filter underlying / status / instruction"
+              className="w-56 rounded-md border border-bg-border bg-bg-secondary py-1 pl-6 pr-2 text-[11px] text-text-primary placeholder:text-text-muted focus:outline-none"
+            />
+          </span>
+          Click a column to sort · {sorted.length} rows
+        </span>
+      }
+    >
       <div className="-mx-2 overflow-x-auto">
         <table className="w-full min-w-[1000px] border-collapse text-left">
           <thead>
