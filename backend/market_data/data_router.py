@@ -360,13 +360,26 @@ class DataRouter:
             # below, so every torn-down socket stayed alive with the lib's
             # reconnect=True thread and fought its replacement for the broker
             # WS slot (server kicks one ~every 80s → permanent flap).
+            #
+            # The close MUST NOT run on the event loop: close_connection joins
+            # the lib's socket thread, and when broker connectivity dies that
+            # thread can wedge in a TCP call with no timeout — a synchronous
+            # call then froze the ENTIRE process for 1h50m on 2026-06-11
+            # (logs stopped 14:00 IST, CPU 0%, /health dead until a manual
+            # restart). Run it in a worker thread with a hard deadline; on
+            # timeout we abandon the thread (it leaks, the loop survives).
             for method_name in ("close_connection", "disconnect", "close", "stop"):
                 close_fn = getattr(self._ws_client, method_name, None)
                 if callable(close_fn):
                     try:
-                        close_fn()
+                        await asyncio.wait_for(asyncio.to_thread(close_fn), timeout=5.0)
                         logger.info(
                             f"[DataRouter] Closed previous WS client via {method_name}()"
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            f"[DataRouter] WS {method_name}() blocked >5s during teardown — "
+                            f"abandoning the close (socket thread may linger)"
                         )
                     except Exception as exc:
                         logger.warning(
