@@ -158,16 +158,39 @@ class StrategyExitMixin:
 
             # ── #5 target_50pct partial — half off at +50%, runner stays ──
             if pos.phase == self.PHASE_1 and return_pct >= EXIT.target_pct:
-                exit_qty = max(1, int(pos.qty * EXIT.target_exit_fraction))
-                await self._close_position(runtime, pos, latest_close, "target_50pct", qty=exit_qty, partial=True)
-                pos.qty -= exit_qty
-                pos.phase = self.PHASE_2
-                self._append_commentary(
-                    runtime.label,
-                    f"TARGET HIT {pos.underlying} {pos.option_type} +{return_pct:.0f}%. "
-                    f"Exited {exit_qty}, holding {pos.qty} as runner.",
-                    tone="trade",
+                # Quantize the partial to whole LOTS (config intent: "exit 50%
+                # of lots"). The raw unit split left fractional-lot books on
+                # every odd lot count — 2026-06-11: CDSL 1188 = 2.5 × 475-lot,
+                # SBILIFE 938 = 2.5 × 375, INDIANB 1500 = 1.5 × 1000. NSE F&O
+                # quantities must be lot multiples on BOTH the exited part and
+                # the runner; odd lot counts exit the larger half. A 1-lot
+                # position cannot take a partial — it advances to the runner
+                # phase intact and exits via trail / hard stop / reversal.
+                lot = max(1, int(pos.lot_size or 0) or 1)
+                total_lots = pos.qty // lot
+                exit_lots = (
+                    min(max(int(total_lots * EXIT.target_exit_fraction + 0.5), 1), total_lots - 1)
+                    if total_lots > 1
+                    else 0
                 )
+                exit_qty = exit_lots * lot
+                if exit_qty > 0:
+                    await self._close_position(runtime, pos, latest_close, "target_50pct", qty=exit_qty, partial=True)
+                    pos.qty -= exit_qty
+                    self._append_commentary(
+                        runtime.label,
+                        f"TARGET HIT {pos.underlying} {pos.option_type} +{return_pct:.0f}%. "
+                        f"Exited {exit_qty} ({exit_lots} lots), holding {pos.qty} as runner.",
+                        tone="trade",
+                    )
+                else:
+                    self._append_commentary(
+                        runtime.label,
+                        f"TARGET HIT {pos.underlying} {pos.option_type} +{return_pct:.0f}%. "
+                        f"Single lot — riding the full position as runner.",
+                        tone="trade",
+                    )
+                pos.phase = self.PHASE_2
                 continue
 
             # ── #6 trail activation @ +60% — computes pos.trailing_stop for

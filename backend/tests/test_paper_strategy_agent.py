@@ -1610,3 +1610,83 @@ def test_load_candles_appends_newer_atm_watchlist_snapshot(monkeypatch) -> None:
     )
     assert rows[-1]["close"] == 943.75
     assert rows[-1]["source"] == "atm_watchlist_snapshot"
+
+
+def _partial_exit_position(qty: int, lot_size: int) -> StrategyPosition:
+    return StrategyPosition(
+        symbol="OPT:CDSL:2026-06-30:1220:PE",
+        underlying="CDSL",
+        expiry="2026-06-30",
+        strike=1220.0,
+        option_type="PE",
+        instrument_key="NSE_FO|999",
+        trading_symbol="CDSL 1220 PE",
+        qty=qty,
+        initial_qty=qty,
+        entry_price=27.0,
+        current_price=27.0,
+        peak_price=27.0,
+        entry_bar_time="2026-06-11T09:15:00+05:30",
+        entered_at="2026-06-11T09:15:00+05:30",
+        signal_reason="macd_zero_cross",
+        phase="phase1",
+        lot_size=lot_size,
+    )
+
+
+def _run_partial_exit(monkeypatch, position: StrategyPosition) -> list[dict]:
+    """Drive _manage_exits over a +50%-return mark and capture partial closes.
+
+    Regression (2026-06-11): the target_50pct partial split raw UNITS in half,
+    leaving fractional-lot books on every odd lot count (CDSL 1188 = 2.5 ×
+    475-lot, SBILIFE 938 = 2.5 × 375, INDIANB 1500 = 1.5 × 1000). Both the
+    exited part and the runner must be whole-lot multiples.
+    """
+    agent = PaperStrategyAgent()
+    runtime = agent._strategy1
+    runtime.positions.clear()
+    runtime.positions[position.symbol] = position
+
+    start = datetime(2026, 6, 11, 3, 45, tzinfo=timezone.utc)
+    candles = [
+        {"time": (start + timedelta(minutes=30 * i)).isoformat(), "close": 41.0}
+        for i in range(20)
+    ]  # 27 → 41 ≈ +52% → target_50pct fires
+
+    async def fake_load_candles(**_kwargs):
+        return candles
+
+    async def fake_latest_quotes(_positions):
+        return {}
+
+    closes: list[dict] = []
+
+    async def fake_close_position(_runtime, _position, exit_price, reason, qty=None, partial=False, **_kw):
+        closes.append({"reason": reason, "qty": qty, "partial": partial})
+
+    monkeypatch.setattr(strategy_agent_module.option_history_service, "load_candles", fake_load_candles)
+    monkeypatch.setattr(agent, "_latest_position_quote_map", fake_latest_quotes)
+    monkeypatch.setattr(agent, "_close_position", fake_close_position)
+    asyncio.run(agent._manage_exits(runtime))
+    return closes
+
+
+def test_partial_exit_quantizes_to_whole_lots(monkeypatch) -> None:
+    # 5 lots of 475 = 2375: exit the larger half (3 lots = 1425), keep 2 lots.
+    pos = _partial_exit_position(qty=2375, lot_size=475)
+    closes = _run_partial_exit(monkeypatch, pos)
+    partials = [c for c in closes if c["reason"] == "target_50pct"]
+    assert len(partials) == 1
+    assert partials[0]["qty"] == 1425
+    assert partials[0]["qty"] % 475 == 0
+    assert pos.qty == 950 and pos.qty % 475 == 0
+    assert pos.phase == "phase2"
+
+
+def test_partial_exit_single_lot_rides_as_runner(monkeypatch) -> None:
+    # 1 lot cannot take a partial — no close, phase still advances.
+    pos = _partial_exit_position(qty=475, lot_size=475)
+    closes = _run_partial_exit(monkeypatch, pos)
+    assert [c for c in closes if c["reason"] == "target_50pct"] == []
+    assert pos.qty == 475
+    assert pos.phase == "phase2"
