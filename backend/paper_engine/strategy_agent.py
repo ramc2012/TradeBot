@@ -3122,6 +3122,23 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 latest_close = closes[-1] if closes else live_ltp
             if latest_close <= 0:
                 continue
+            # No-arbitrage mark guard: a put can never be worth more than its
+            # strike. Fyers serves zombie post-corporate-action strikes with
+            # garbage LTPs (INDIANB 820 PE quoted 1298.8 on 2026-06-11 — the
+            # active ladder had moved to ×××.75 adjusted strikes); one such
+            # mark armed a phantom trailing stop and booked a ₹19L phantom
+            # partial exit. The chain ingest now drops these rows at source;
+            # this guard protects the book from any residual bad mark.
+            if (
+                pos.option_type == "PE"
+                and float(pos.strike or 0) > 0
+                and latest_close > float(pos.strike) * 1.02
+            ):
+                logger.warning(
+                    f"[Strategy] rejecting no-arb PE mark {pos.symbol}: "
+                    f"{latest_close} > strike {pos.strike}"
+                )
+                continue
 
             pos.current_price = latest_close
             pos.peak_price = max(pos.peak_price, latest_close)

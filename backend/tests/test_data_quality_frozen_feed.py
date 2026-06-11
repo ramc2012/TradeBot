@@ -143,3 +143,38 @@ def test_frozen_index_still_critical_alongside_static_options():
     snap = agent.snapshot(now=now)
     assert snap["frozen_count"] == 1  # the index, not the option
     assert snap["overall"] == "critical"
+
+
+def test_fyers_chain_drops_no_arb_zombie_strike_rows():
+    """Regression (2026-06-11, INDIANB): post-corporate-action zombie strikes
+    come back from Fyers with garbage LTPs (PE 820 @ 1298.8 — a put can never
+    exceed its strike; a call can never exceed spot). One row marked an S1
+    position 49× and booked a ₹19L phantom exit. get_option_chain must drop
+    no-arb rows at ingest."""
+    import asyncio
+
+    from brokers.fyers import FyersAdapter
+
+    adapter = FyersAdapter.__new__(FyersAdapter)  # no auth needed for parsing
+
+    async def fake_get_data_json(_path, _params):
+        return {
+            "data": {
+                "expiryData": [{"expiry": "1782819000"}],  # 2026-06-30 epoch-ish
+                "optionsChain": [
+                    {"option_type": "", "strike_price": -1, "ltp": 821.8, "fp": 821.8},
+                    {"option_type": "PE", "strike_price": 820, "ltp": 1298.8, "oi": 0, "symbol": "NSE:X820PE"},
+                    {"option_type": "CE", "strike_price": 820, "ltp": 900.0, "oi": 0, "symbol": "NSE:X820CE"},
+                    {"option_type": "PE", "strike_price": 821.75, "ltp": 26.25, "oi": 1000, "symbol": "NSE:X821.75PE"},
+                    {"option_type": "CE", "strike_price": 821.75, "ltp": 25.0, "oi": 1000, "symbol": "NSE:X821.75CE"},
+                ],
+            }
+        }
+
+    adapter._get_data_json = fake_get_data_json  # type: ignore[attr-defined]
+    chain = asyncio.run(FyersAdapter.get_option_chain(adapter, "NSE:INDIANB-EQ", ""))
+    pairs = {(e.strike, e.option_type): e.ltp for e in chain.entries}
+    assert (820.0, "PE") not in pairs  # 1298.8 > strike — dropped
+    assert (820.0, "CE") not in pairs  # 900 > spot 821.8×1.05 — dropped
+    assert pairs[(821.75, "PE")] == 26.25
+    assert pairs[(821.75, "CE")] == 25.0

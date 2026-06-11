@@ -745,6 +745,25 @@ class FyersAdapter(BrokerAdapter):
                 continue
             strike = float(opt.get("strike_price", 0) or 0)
             ltp = float(opt.get("ltp", 0) or 0)
+            # No-arbitrage sanity: Fyers serves zombie post-corporate-action
+            # strikes verbatim with garbage LTPs (2026-06-11: INDIANB's active
+            # ladder moved to ×××.75 adjusted strikes; the leftover round
+            # strikes quoted PE 820 @ 1298.8 — a put can NEVER exceed its
+            # strike, and an American call can never exceed spot). One such
+            # row marked an S1 position 49× and booked a ₹19L phantom exit.
+            # Small tolerances absorb stale-spot skew; OI/volume are NOT used
+            # (legit illiquid rows have zero OI too).
+            if strike > 0 and ltp > 0:
+                if option_type == "PE" and ltp > strike * 1.02:
+                    logger.debug(
+                        f"[fyers-chain] dropping no-arb PE {symbol} {strike} ltp={ltp} (> strike)"
+                    )
+                    continue
+                if option_type == "CE" and spot_price > 0 and ltp > spot_price * 1.05:
+                    logger.debug(
+                        f"[fyers-chain] dropping no-arb CE {symbol} {strike} ltp={ltp} (> spot {spot_price})"
+                    )
+                    continue
             prev_close = None
             if opt.get("ltpch") is not None:
                 prev_close = round(ltp - float(opt.get("ltpch") or 0), 2)
