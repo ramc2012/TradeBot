@@ -892,6 +892,14 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     entry_iv_pct=_round_or_none(row.get("entry_iv_pct"), 1),
                     entry_style=str(row.get("entry_style") or "") or None,
                     last_reviewed_bar_time=str(row.get("last_reviewed_bar_time") or row.get("entry_bar_time") or "") or None,
+                    # Exit semantics from the 30m-regime redesign. asdict()
+                    # persists them, but this explicit reconstruction dropped
+                    # them to the dataclass None defaults — every restart
+                    # downgraded carried rides/scalps to legacy generic exits
+                    # (observed 2026-06-11 pre-open: 4 carried positions all
+                    # trade_mode=None).
+                    trade_mode=str(row.get("trade_mode") or "") or None,
+                    regime_htf=str(row.get("regime_htf") or "") or None,
                 )
             except (TypeError, ValueError):
                 continue

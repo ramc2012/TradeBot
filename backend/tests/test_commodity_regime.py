@@ -56,3 +56,69 @@ def test_trigger_categories_partition_the_five_triggers():
     assert (_DIRECTIONAL_TRIGGERS | _MEAN_REVERT_TRIGGERS) == {
         "open_drive", "ib_break", "va_migration", "failed_auction", "lvn_fade",
     }
+
+
+def test_position_trade_mode_survives_runtime_state_round_trip():
+    """Regression (2026-06-11): asdict() persisted trade_mode/regime_htf but
+    _restore_runtime_state's explicit reconstruction dropped them to the
+    dataclass None defaults — every backend restart downgraded carried
+    rides/scalps to legacy generic exits (all 4 carried positions showed
+    trade_mode=None at the 06-11 pre-open)."""
+    from dataclasses import asdict
+
+    import paper_engine.commodity_strategy_agent as cm
+
+    position = cm.CommodityPositionState(
+        position_key="MCX:ZINCMINI26JUNFUT:commodity_futures",
+        symbol="MCX:ZINCMINI26JUNFUT",
+        live_symbol="MCX:ZINCMINI26JUNFUT",
+        underlying="ZINCMINI",
+        strategy_key="commodity_futures",
+        strategy_title="Zinc Mini futures",
+        instrument_type="FUTURES",
+        action="SELL",
+        qty=10,
+        lots=1,
+        lot_size=10,
+        entry_price=255.0,
+        current_price=252.0,
+        stop_price=258.0,
+        target_price=246.0,
+        regime="bear",
+        signal_reason="ib_break_down",
+        atr=2.1,
+        macd_value=None,
+        mp_poc=254.0,
+        mp_vah=256.0,
+        mp_val=251.0,
+        entered_at="2026-06-10T11:30:00+00:00",
+        entry_bar_time="2026-06-10T11:30:00+00:00",
+        contract_unit_label="kg",
+        quote_unit_label="₹/kg",
+        display_name="Zinc Mini",
+        initial_qty=10,
+        peak_price=255.0,
+        trade_mode="ride",
+        regime_htf="TREND_DOWN",
+    )
+
+    from paper_engine.order_book import PaperOrderBook
+    from paper_engine.portfolio import PaperPortfolio
+
+    class _StubAgent:
+        _runtime = None
+        _commentary: list = []
+
+    stub = _StubAgent()
+    stub._runtime = cm.CommodityRuntime(
+        portfolio=PaperPortfolio(initial_capital=5_000_000.0),
+        order_book=PaperOrderBook(),
+    )
+    stub._commentary = []
+
+    payload = {"positions": [asdict(position)]}
+    cm.CommodityStrategyAgent._restore_runtime_state(stub, payload)
+
+    restored = stub._runtime.positions[position.position_key]
+    assert restored.trade_mode == "ride"
+    assert restored.regime_htf == "TREND_DOWN"
