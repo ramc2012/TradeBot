@@ -757,7 +757,21 @@ def _has_saved_fyers_refresh_material() -> bool:
     )
 
 
+# Failed-refresh cooldown. The Fyers access token EXPIRES ~03:30 IST but the
+# broker only ISSUES fresh tokens from ~06:30 IST — between those, every
+# ensure_fyers_session call (many per minute from the watchlist/MI pollers)
+# would fire a doomed refresh grant: thousands of failed hits on the Fyers
+# auth API plus a force DB credential reload each time. Retry every 10 min
+# instead; the 06:30 window is then picked up within minutes, well before the
+# 09:15 open.
+_fyers_refresh_failed_at: float = 0.0
+_FYERS_REFRESH_RETRY_SECONDS = 600.0
+
+
 async def _refresh_fyers_session_from_saved_credentials() -> bool:
+    global _fyers_refresh_failed_at
+    if monotonic() - _fyers_refresh_failed_at < _FYERS_REFRESH_RETRY_SECONDS:
+        return False
     await refresh_persistent_credentials_async(force=True)
     fyers_creds = _broker_credentials.get("fyers", {})
     refresh_token = str(fyers_creds.get("refresh_token") or "").strip()
@@ -780,10 +794,27 @@ async def _refresh_fyers_session_from_saved_credentials() -> bool:
             }
         _persist_broker_session("fyers", token)
         await _sync_market_data_feed()
+        _fyers_refresh_failed_at = 0.0
         logger.info("✓ Fyers refreshed from saved refresh token")
         return True
     except Exception as exc:
-        logger.warning(f"Fyers refresh-token restore failed: {exc}")
+        _fyers_refresh_failed_at = monotonic()
+        if "currently disabled" in str(exc).lower():
+            # Observed 2026-06-11: "Refresh token API is currently disabled to
+            # comply with SEBI regulations." — Fyers switched the grant off
+            # broker-side, so retrying cannot succeed. Back off hard and say
+            # what actually fixes it (the daily manual login).
+            _fyers_refresh_failed_at = monotonic() + 6 * 3600 - _FYERS_REFRESH_RETRY_SECONDS
+            logger.warning(
+                "Fyers refresh-token API is DISABLED broker-side (SEBI daily "
+                "re-auth mandate) — auto-refresh cannot succeed; a manual "
+                f"Fyers login is required each morning. Backing off 6h. ({exc})"
+            )
+        else:
+            logger.warning(
+                f"Fyers refresh-token restore failed (next retry in "
+                f"{int(_FYERS_REFRESH_RETRY_SECONDS)}s): {exc}"
+            )
         return False
 
 
@@ -1128,15 +1159,20 @@ async def ensure_upstox_session(force_validate: bool = False) -> bool:
 
     saved_token = str(_broker_credentials.get("upstox", {}).get("access_token", "")).strip()
     if not saved_token:
+        await _resync_feed_after_session_loss("upstox")
         return False
 
     # Don't try to restore an already-expired saved token
     if _token_is_expired(saved_token, expires_at=_broker_credentials.get("upstox", {}).get("expires_at")):
-        logger.info("[Upstox] Saved token is expired — re-authentication required")
+        _log_token_expired_throttled(
+            "upstox", "[Upstox] Saved token is expired — re-authentication required"
+        )
+        await _resync_feed_after_session_loss("upstox")
         return False
 
     if force_validate and not await _validate_upstox_access_token(saved_token):
         logger.warning("Saved Upstox token is invalid during on-demand restore")
+        await _resync_feed_after_session_loss("upstox")
         return False
 
     try:
@@ -1172,6 +1208,40 @@ async def ensure_upstox_session(force_validate: bool = False) -> bool:
     except Exception as exc:
         logger.warning(f"On-demand Upstox restore failed: {exc}")
         return False
+
+
+_token_expired_log_at: dict[str, float] = {}
+_feed_resync_at: dict[str, float] = {}
+
+
+def _log_token_expired_throttled(broker: str, message: str) -> None:
+    """The expired-token notice fires on every ensure_* call — many times per
+    minute overnight. Keep INFO to once per 10 minutes per broker."""
+    now = monotonic()
+    if now - _token_expired_log_at.get(broker, 0.0) >= 600.0:
+        _token_expired_log_at[broker] = now
+        logger.info(message)
+    else:
+        logger.debug(message)
+
+
+async def _resync_feed_after_session_loss(broker: str) -> None:
+    """Re-run feed sync when a broker session expires or fails to restore.
+
+    ensure_* only synced the data router on SUCCESS paths, so after a token
+    expired the router kept its dead websocket client reconnecting forever.
+    Re-running the sync routes the feed to a surviving broker, or tears it
+    down (watchdog + WS close) when none are left. Time-gated per broker
+    because the expired path fires many times per minute.
+    """
+    now = monotonic()
+    if now - _feed_resync_at.get(broker, 0.0) < 60.0:
+        return
+    _feed_resync_at[broker] = now
+    try:
+        await _sync_market_data_feed()
+    except Exception as exc:
+        logger.debug(f"[{broker}] feed resync after session loss failed: {exc}")
 
 
 async def ensure_fyers_session(force_validate: bool = False) -> bool:
@@ -1210,16 +1280,27 @@ async def ensure_fyers_session(force_validate: bool = False) -> bool:
 
     saved_token = str(_broker_credentials.get("fyers", {}).get("access_token", "")).strip()
     if not saved_token:
-        return await _refresh_fyers_session_from_saved_credentials()
+        restored = await _refresh_fyers_session_from_saved_credentials()
+        if not restored:
+            await _resync_feed_after_session_loss("fyers")
+        return restored
 
     # Don't try to restore an already-expired saved token
     if _token_is_expired(saved_token, expires_at=_broker_credentials.get("fyers", {}).get("expires_at")):
-        logger.info("[Fyers] Saved token is expired — re-authentication required")
-        return await _refresh_fyers_session_from_saved_credentials()
+        _log_token_expired_throttled(
+            "fyers", "[Fyers] Saved token is expired — re-authentication required"
+        )
+        restored = await _refresh_fyers_session_from_saved_credentials()
+        if not restored:
+            await _resync_feed_after_session_loss("fyers")
+        return restored
 
     if force_validate and not await _validate_fyers_access_token(saved_token):
         logger.warning("Saved Fyers token is invalid during on-demand restore")
-        return await _refresh_fyers_session_from_saved_credentials()
+        restored = await _refresh_fyers_session_from_saved_credentials()
+        if not restored:
+            await _resync_feed_after_session_loss("fyers")
+        return restored
 
     try:
         from brokers.fyers import FyersAdapter
@@ -1249,6 +1330,7 @@ async def ensure_fyers_session(force_validate: bool = False) -> bool:
         return True
     except Exception as exc:
         logger.warning(f"On-demand Fyers restore failed: {exc}")
+        await _resync_feed_after_session_loss("fyers")
         return False
 
 

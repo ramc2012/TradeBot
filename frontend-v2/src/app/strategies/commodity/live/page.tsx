@@ -41,6 +41,7 @@ import {
   createCommodityWatchlistSocket,
   createTickSocket,
 } from "@/lib/websocket";
+import { IndexTickerStrip } from "@/components/desk-ui/IndexTickerStrip";
 
 // ─── Polling cadence ───────────────────────────────────────────────────────
 // The sockets push immediately on bar close / position change. Polls are a
@@ -738,12 +739,28 @@ function useCommodityTickStreams(symbols: string[]): Record<string, LatestTickSn
   return ticks;
 }
 
+// A tick socket that dies (or serves a stale snapshot) must NOT freeze the LTP
+// column at its last print — the watchlist row price (agent-marked) keeps
+// flowing via the overview socket, so a stale overlay is strictly worse.
+const TICK_OVERLAY_MAX_AGE_MS = 120_000;
+
+function tickIsFresh(tick: LatestTickSnapshot): boolean {
+  if (tick.stale) return false;
+  const staleSec = Number(tick.stale_seconds ?? 0);
+  if (Number.isFinite(staleSec) && staleSec > 90) return false;
+  const ts = String(tick.timestamp || "");
+  const normalized = /[zZ]|[+-]\d{2}:\d{2}$/.test(ts) ? ts : `${ts}Z`;
+  const ms = new Date(normalized).getTime();
+  return !Number.isFinite(ms) || Date.now() - ms <= TICK_OVERLAY_MAX_AGE_MS;
+}
+
 function overlayTicks(rows: WatchRow[], ticks: Record<string, LatestTickSnapshot>): WatchRow[] {
   if (!Object.keys(ticks).length) return rows;
   return rows.map((row) => {
     const sym = String(row.symbol || row.configured_symbol || row.active_lookup_symbol || "").toUpperCase();
     const tick = ticks[sym];
     if (!tick || !Number.isFinite(Number(tick.ltp))) return row;
+    if (!tickIsFresh(tick)) return row;
     const price = Number(tick.ltp);
     const prev = Number(row.previous_close || 0);
     return {
@@ -3108,6 +3125,9 @@ export default function CommodityLivePage() {
             {statusLabel}
           </span>
         </div>
+
+        {/* Index tape — same strip as the DeskShell desks (hidden on small screens) */}
+        <IndexTickerStrip className="hidden xl:flex" />
 
         {/* Middle: portfolio values */}
         <div className="ml-auto flex items-baseline gap-4 font-mono">

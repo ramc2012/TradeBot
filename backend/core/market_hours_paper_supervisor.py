@@ -412,6 +412,9 @@ class MarketHoursPaperSupervisor:
                 interval_seconds=settings.MARKET_INTELLIGENCE_REFRESH_INTERVAL_SECONDS,
                 callback=_market_intelligence_runner,
                 enabled=settings.MARKET_INTELLIGENCE_AUTO_ENABLED,
+                # Higher cap than the global 300s — the full-universe refresh was
+                # being killed mid-sweep, collapsing snapshot coverage 217->5 midday.
+                timeout_seconds=settings.MARKET_INTELLIGENCE_RUNNER_TIMEOUT_SECONDS,
             ),
             RunnerConfig(
                 key="auction_intelligence",

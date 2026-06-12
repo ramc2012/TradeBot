@@ -2332,6 +2332,38 @@ class ATMWatchlistService:
         option_type: str,
         instrument_key: Optional[str],
     ) -> list[float]:
+        # Compute the 30-minute premium series by RESAMPLING the dense 3-minute
+        # feed the chain-candle builder already ingests into
+        # option_premium_candles — rather than re-fetching the chain to build the
+        # thin on-demand 30m candles. The on-demand 30m table is empty/thin for
+        # most names, so the old `load_closes(interval="30minute")` (broker-refresh
+        # ON by default) triggered a per-contract broker RE-FETCH — redundant (the
+        # data is already in the 3m feed) and the dominant cost that timed out the
+        # full-universe refresh (collapsing snapshot coverage 217→5 midday).
+        try:
+            three_min = await option_history_service.load_candles(
+                underlying=underlying,
+                expiry=expiry,
+                strike=strike,
+                option_type=option_type,
+                instrument_key=instrument_key,
+                interval="3minute",
+                limit=800,
+                allow_broker_refresh=False,
+            )
+        except Exception:  # noqa: BLE001
+            three_min = []
+        if three_min:
+            try:
+                bars_30m = option_history_service._aggregate_rows(list(three_min), 30)
+                resampled = [float(b["close"]) for b in bars_30m if b.get("close") is not None]
+                if len(resampled) >= 2:
+                    return resampled
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Fallbacks (no broker re-fetch): the on-demand 30m table, then the
+        # snapshot ltp history.
         premium_closes = await option_history_service.load_closes(
             underlying=underlying,
             expiry=expiry,
@@ -2340,11 +2372,17 @@ class ATMWatchlistService:
             instrument_key=instrument_key,
             interval="30minute",
             limit=80,
+            allow_broker_refresh=False,
         )
         if premium_closes:
             return premium_closes
 
         async with AsyncSessionLocal() as session:
+            # RTH-only (09:15–15:30 IST): pre-/post-market snapshot rows carry a
+            # FROZEN ltp (no trading), which decays the MACD toward 0 and then
+            # false-crosses on the first open tick (HAL 4250 CE / ASIANPAINT 2700
+            # CE fired at 09:16 this way). The dense 3m feed above is already
+            # RTH-only; this guards the fallback.
             snapshot_rows = await session.execute(
                 text("""
                     SELECT ltp
@@ -2353,6 +2391,7 @@ class ATMWatchlistService:
                       AND expiry = :expiry
                       AND strike = :strike
                       AND option_type = :option_type
+                      AND timezone('Asia/Kolkata', time)::time BETWEEN '09:15:00' AND '15:30:00'
                     ORDER BY time DESC
                     LIMIT 60
                 """),

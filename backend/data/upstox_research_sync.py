@@ -835,6 +835,16 @@ class UpstoxResearchSync:
                             MAX(timezone('Asia/Kolkata', time)::date) AS actual_range_end
                         FROM underlying_spot_candles
                         WHERE interval = :interval
+                          -- RTH-only: the live tick path leaks non-RTH junk rows
+                          -- (e.g. a 22:41 IST print dated "today"). One such row
+                          -- makes the symbol look synced-through-today, the
+                          -- repair pass writes that into the catalog, and the
+                          -- name silently drops out of the sync queue — this is
+                          -- how universe coverage collapsed 211→34 underlyings
+                          -- (2026-06-05→09). NSE F&O catalog only, so the
+                          -- 09:15–15:30 IST window is correct for every row.
+                          AND timezone('Asia/Kolkata', time)::time
+                              BETWEEN TIME '09:15' AND TIME '15:30'
                         GROUP BY underlying
                     )
                     SELECT

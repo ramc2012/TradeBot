@@ -83,12 +83,14 @@ class DirectionalOptionsRiskEngine:
         # across trades regardless of the policy's chosen multiplier.
         daily_cap_R = float(self.config.get("daily_loss_cap_r", 4.0))
         weekly_cap_R = float(self.config.get("weekly_loss_cap_r", 10.0))
-        if daily_realized <= -(base_risk_budget * daily_cap_R):
+        # daily_cap_R <= 0 disables the daily loss cap (fine-tuning, 2026-06-08).
+        if daily_cap_R > 0 and daily_realized <= -(base_risk_budget * daily_cap_R):
             reasons.append(
                 f"Daily loss cap breached (realized {daily_realized:.0f} ≤ "
                 f"-{base_risk_budget * daily_cap_R:.0f}); trading paused for the session."
             )
-        if weekly_realized <= -(base_risk_budget * weekly_cap_R):
+        # weekly_cap_R <= 0 disables the weekly loss cap (exploration, 2026-06-09).
+        if weekly_cap_R > 0 and weekly_realized <= -(base_risk_budget * weekly_cap_R):
             reasons.append(
                 f"Weekly loss cap breached (realized {weekly_realized:.0f} ≤ "
                 f"-{base_risk_budget * weekly_cap_R:.0f}); trading paused for the week."

@@ -141,8 +141,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Capital safety caps — these are NOT edge gates. They prevent
         # blowups on bad days but never block individual trades from
         # firing based on signal quality.
-        "daily_loss_cap_r": 4.0,
-        "weekly_loss_cap_r": 10.0,
+        # [DAILY-LOSS DISABLED 2026-06-08 — fine-tuning; restore 4.0 for production.]
+        # 0.0 disables the daily loss cap (gate in risk.py guarded with `> 0`).
+        "daily_loss_cap_r": 0.0,
+        "weekly_loss_cap_r": 0.0,
     },
     "execution": {
         "entry_slippage_pct": 0.0075,
@@ -162,6 +164,23 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # honouring a signal-flip or flat-signal close. Stop / target
         # exits still fire immediately.
         "min_hold_bars": 3,
+        # Wall-clock floor on the min-hold (on top of min_hold_bars). Fast
+        # timeframes (1m -> 3 bars = 3 min) otherwise let a position flatten
+        # within minutes; 8 min stops sub-bar noise churning the book.
+        "min_hold_floor_minutes": 8.0,
+        # Anti-churn re-entry cooldown: after a flat_signal / signal_flip
+        # exit on a symbol, suppress NEW opens on that symbol for max(bars *
+        # tf, floor_seconds). Stops the open->fade->close->reopen cycle that
+        # bled the book (16 closes / 3 symbols on 2026-06-08, all whipsaw).
+        "reentry_cooldown_bars": 3,
+        "reentry_cooldown_floor_seconds": 600.0,
+        # Anti-churn dead band in time (2026-06-10 audit): entries and true
+        # CE<->PE flip-exits require this many CONSECUTIVE same-direction
+        # actionable ~60s cycles. The signal is a knife-edge argmax and the
+        # policy act/skip is a fresh Thompson draw vs 0 each cycle — without
+        # persistence a single noisy cycle could open or reverse a position.
+        # 5 cycles ≈ one full 5-minute bar of agreement. 0/1 disables.
+        "signal_persistence_cycles": 5,
         # One open position per underlying. New signals on a symbol that
         # already has an open position are journaled but do NOT open a
         # second position. (Refresh / signal-flip on the SAME symbol is

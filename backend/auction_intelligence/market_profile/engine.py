@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime
-from math import floor
+from math import ceil, floor
 from typing import Any, Optional
 
 from auction_intelligence.schemas import MarketBar, MarketProfileSnapshot
@@ -35,10 +35,39 @@ class MarketProfileEngine:
         self.config = config
         self.period_minutes = int(config.get("period_minutes", 30))
         self.tick_size = float(config.get("tick_size", 0.5))
+        # Profile bracket (TPO row height) decoupled from the exchange tick so the
+        # profile keeps a sane number of rows regardless of the instrument's price
+        # scale. target_rows<=0 (default) preserves the legacy row==tick behaviour,
+        # so existing index callers are unaffected unless they opt in.
+        self.target_rows = int(config.get("target_rows", 0) or 0)
+        self.max_rows = int(config.get("max_rows", 0) or 0)
+        _row_override = config.get("row_size")
+        self.row_size_override = float(_row_override) if _row_override else None
         self.value_area_pct = float(config.get("value_area_pct", 0.70))
         self.initial_balance_periods = int(config.get("initial_balance_periods", 2))
         self.min_tail_tpos = int(config.get("min_tail_tpos", 2))
         self.balance_overlap_min = float(config.get("balance_overlap_min", 0.65))
+
+    def _resolve_row_size(self, low: float, high: float) -> float:
+        """TPO row height (price bracket) for the profile.
+
+        Defaults to the exchange tick (legacy) unless ``target_rows`` (or an
+        explicit ``row_size``) is configured, in which case the bracket is sized
+        so the day's range spans ~``target_rows`` rows — snapped UP to a whole
+        multiple of the tick so prices stay on the exchange grid, and floored at
+        one tick. This stops high-priced instruments (e.g. SILVERM ~Rs 2.6L,
+        tick Rs 1 -> ~13.5k one-tick rows) from producing degenerate profiles.
+        """
+        tick = self.tick_size if self.tick_size > 0 else 0.5
+        if self.row_size_override is not None:
+            return round(max(self.row_size_override, tick), 6)
+        if self.target_rows <= 0:
+            return tick
+        span = max(high - low, tick)
+        row = ceil((span / self.target_rows) / tick) * tick
+        if self.max_rows > 0 and span / row > self.max_rows:
+            row = ceil((span / self.max_rows) / tick) * tick
+        return round(max(row, tick), 6)
 
     def build_profile(
         self,
@@ -50,6 +79,10 @@ class MarketProfileEngine:
             raise ValueError("MarketProfileEngine requires at least one bar")
 
         ordered_bars = sorted(bars, key=lambda item: item.timestamp)
+        row_size = self._resolve_row_size(
+            min(item.low for item in ordered_bars),
+            max(item.high for item in ordered_bars),
+        )
         period_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
         period_map: dict[int, list[MarketBar]] = defaultdict(list)
 
@@ -80,7 +113,7 @@ class MarketProfileEngine:
             lows.append(period_low)
             total_volume += sum(item.volume for item in bucket_bars)
 
-            for price in _price_ladder(period_low, period_high, self.tick_size):
+            for price in _price_ladder(period_low, period_high, row_size):
                 tpo_letters[price].append(letter)
 
         tpo_counts = {price: len(letters) for price, letters in tpo_letters.items()}
@@ -98,7 +131,7 @@ class MarketProfileEngine:
         low_price = min(item.low for item in ordered_bars)
         close_price = ordered_bars[-1].close
         open_price = ordered_bars[0].open
-        day_range = max(high_price - low_price, self.tick_size)
+        day_range = max(high_price - low_price, row_size)
 
         single_prints = [price for price, count in tpo_counts.items() if count == 1]
         buying_tail = self._tail_from_extreme(prices, tpo_counts, reverse=False)
@@ -122,7 +155,7 @@ class MarketProfileEngine:
             symbol=symbol,
             session_date=ordered_bars[-1].timestamp.date().isoformat(),
             period_minutes=self.period_minutes,
-            tick_size=self.tick_size,
+            tick_size=row_size,
             open_price=open_price,
             high_price=high_price,
             low_price=low_price,
@@ -135,7 +168,7 @@ class MarketProfileEngine:
             val=val,
             initial_balance_high=ib_high,
             initial_balance_low=ib_low,
-            initial_balance_range=max(ib_high - ib_low, self.tick_size),
+            initial_balance_range=max(ib_high - ib_low, row_size),
             day_range=day_range,
             range_extension_up=max(0.0, high_price - ib_high),
             range_extension_down=max(0.0, ib_low - low_price),
@@ -144,8 +177,8 @@ class MarketProfileEngine:
             selling_tail=selling_tail,
             poor_high=poor_high,
             poor_low=poor_low,
-            excess_high=len(selling_tail) * self.tick_size,
-            excess_low=len(buying_tail) * self.tick_size,
+            excess_high=len(selling_tail) * row_size,
+            excess_low=len(buying_tail) * row_size,
             spike_direction=spike_direction,
             spike_price=spike_price,
             period_count=period_count,

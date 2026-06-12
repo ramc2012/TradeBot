@@ -126,6 +126,62 @@ async def chain_analytics(
     return {"available": True, **payload}
 
 
+@router.get("/gex")
+async def gex_analytics(
+    underlying: str = Query("NIFTY"),
+    expiries: str | None = Query(None, description="comma-separated; default = nearest available"),
+    max_expiries: int = Query(3, ge=1, le=6),
+) -> dict[str, object]:
+    """Black-76 dealer-positioning analytics for the long-premium panel:
+    per-expiry GEX-by-strike profile, Net GEX (₹Cr), gamma flip (zero-gamma
+    spot), gamma density, DEX, max-pain, call/put walls, IV smile — plus the
+    term structure across the nearest expiries. Additive: does not touch the
+    legacy /chain-analytics payload the RL policy consumes."""
+    from directional_options.gex_service import fetch_gex_analytics
+
+    exp_list: list[str] | None = None
+    if expiries:
+        exp_list = [e.strip() for e in expiries.split(",") if e.strip()]
+    else:
+        try:
+            from api.routers.market import _local_option_expiries
+            from market_data.symbols import to_app_symbol
+
+            app_symbol = to_app_symbol(underlying) or underlying
+            exp_list = (await _local_option_expiries(app_symbol))[:max_expiries] or None
+        except Exception:  # noqa: BLE001
+            exp_list = None
+    try:
+        return await asyncio.wait_for(
+            fetch_gex_analytics(underlying, exp_list, max_expiries=max_expiries),
+            timeout=8.0,
+        )
+    except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+        return {"available": False, "underlying": underlying,
+                "expiries": exp_list or [], "per_expiry": [], "term": None}
+
+
+@router.get("/gex-progression")
+async def gex_progression_endpoint(
+    underlying: str = Query("NIFTY"),
+    expiry: str = Query(...),
+    band: int = Query(3, ge=1, le=8),
+    interval: str = Query("30minute"),
+) -> dict[str, object]:
+    """30-minute net-GEX / OI progression (regime-shaded) + strike×time
+    gamma-density / OI heatmap matrices for one expiry. Heavy (history fetch);
+    bounded and degrades to available=False when ingest is thin."""
+    from directional_options.gex_progression import fetch_gex_progression
+
+    try:
+        return await asyncio.wait_for(
+            fetch_gex_progression(underlying, expiry, band=band, interval=interval),
+            timeout=20.0,
+        )
+    except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+        return {"available": False, "underlying": underlying, "expiry": expiry}
+
+
 @router.get("/policy")
 async def policy_state() -> dict[str, object]:
     """Global RL policy state — n_seen, per-size-bucket Mean R, pending positions.

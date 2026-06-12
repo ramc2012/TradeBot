@@ -205,12 +205,16 @@ class MarketIntelligenceRuntime:
             result = await session.execute(
                 text(
                     """
-                    SELECT time, open, high, low, close, volume
+                    SELECT DISTINCT ON (time) time, open, high, low, close, volume
                     FROM underlying_spot_candles
                     WHERE underlying = :underlying
                       AND interval = '1minute'
                       AND time >= :from_time
-                    ORDER BY time ASC
+                    -- DISTINCT ON + synced_at DESC = keep the freshest write per
+                    -- timestamp. CRUDEOIL carries ~27% duplicate timestamps
+                    -- (multiple instrument_keys feed one underlying), which
+                    -- inflated its TPO/volume profile before this dedup.
+                    ORDER BY time ASC, synced_at DESC NULLS LAST
                     """
                 ),
                 {"underlying": symbol_code.upper(), "from_time": from_time},
@@ -675,7 +679,29 @@ class MarketIntelligenceRuntime:
             for bucket in self._session_atm_seen.values()
             for contract in bucket.values()
         ]
+        # Time-budget the sweep. _session_atm_seen accumulates all session as
+        # ATMs roll (~4k contracts by afternoon); at 0.1s pause per contract
+        # the unbounded loop alone is ~400s, which blew the supervisor's 600s
+        # runner timeout on 23/31 runs (2026-06-09) and killed the learning/
+        # sector/macro steps that run after it. A rotating cursor resumes
+        # where the previous cycle stopped, so full coverage still completes
+        # across 2-3 cycles instead of re-walking the same prefix and dying.
+        from time import monotonic as _monotonic
+
+        budget_seconds = 240.0
+        sweep_started = _monotonic()
+        budget_exhausted = False
+        total_targets = len(refresh_targets)
+        cursor = int(getattr(self, "_premium_refresh_cursor", 0) or 0)
+        if total_targets:
+            cursor %= total_targets
+            refresh_targets = refresh_targets[cursor:] + refresh_targets[:cursor]
+        attempted = 0
         for contract in refresh_targets:
+            if _monotonic() - sweep_started >= budget_seconds:
+                budget_exhausted = True
+                break
+            attempted += 1
             try:
                 # 3-minute granularity. The service aggregates from
                 # Upstox 1-min source and persists at `interval='3minute'`.
@@ -703,6 +729,14 @@ class MarketIntelligenceRuntime:
                 )
             await asyncio.sleep(per_call_pause)
 
+        self._premium_refresh_cursor = (cursor + attempted) % total_targets if total_targets else 0
+        if budget_exhausted:
+            logger.info(
+                f"[MarketIntelligence] premium refresh budget hit "
+                f"({int(budget_seconds)}s): {attempted}/{total_targets} contracts "
+                f"this cycle; cursor resumes at {self._premium_refresh_cursor}"
+            )
+
         self._last_premium_refresh_at = datetime.now(IST)
         session_strike_count = sum(
             len(bucket) for bucket in self._session_atm_seen.values()
@@ -716,6 +750,9 @@ class MarketIntelligenceRuntime:
             "refreshed": ok,
             "skipped": skipped,
             "errors": errors,
+            "budget_exhausted": budget_exhausted,
+            "targets_attempted": attempted,
+            "targets_total": total_targets,
             "elapsed_seconds": round(
                 (self._last_premium_refresh_at - now).total_seconds(), 2
             ),

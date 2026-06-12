@@ -102,9 +102,12 @@ BIG_MOVE_THRESHOLD_PCT = 10.0 # annualized spot vol threshold for OTM switch
 KELLY_FRACTION = 0.25         # 0.25× Kelly ≈ 22% capital per trade
 KELLY_PREMIUM_FRACTION = 0.50 # 0.50× Kelly for premium setup signals
 KELLY_CAUTIOUS_FRACTION = 0.10  # 0.10× Kelly for high-IV or uncertain
-MAX_SIMULTANEOUS_POSITIONS = 5
+# Caps lifted 2026-06-09 — signal/infra exploration phase; margin/capital is the
+# only real limit. Restore (5 / 3) for production. MAX_PER_UNDERLYING stays 1 so
+# the full universe can each trade once without stacking the same name.
+MAX_SIMULTANEOUS_POSITIONS = 1000
 MAX_PER_UNDERLYING = 1        # CE or PE per underlying, not both
-MAX_SECTOR_CONCENTRATION = 3
+MAX_SECTOR_CONCENTRATION = 1000
 CASH_RESERVE_PCT = 0.20       # keep ≥20% cash for new signals
 
 

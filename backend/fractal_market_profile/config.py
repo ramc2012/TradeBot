@@ -65,9 +65,28 @@ SCAN_CONFIG: dict[str, float | int] = {
 
 RISK_CONFIG: dict[str, float | int] = {
     "max_risk_per_trade_pct": 0.015,
-    "max_daily_loss_pct": 0.02,
-    "max_premium_loss_pct": 0.50,
-    "max_concurrent_positions": 2,
+    "max_daily_loss_pct": 100.0,
+    "max_premium_loss_pct": 100.0,
+    "max_concurrent_positions": 1000,
+}
+# Caps lifted 2026-06-09 (signal/infra exploration) — loss thresholds set huge so
+# they never trigger; restore 0.02 / 0.50 / 2 for prod.
+
+AI_MODEL_CONFIG: dict[str, float | int] = {
+    "min_rule_score": 46.0,
+    "min_rule_confidence": 0.50,
+    "min_option_premium": 1.0,
+    "min_dte_for_long_options": 1,
+    "max_iv_rank_for_buying": 55.0,
+    "high_vix_threshold": 24.0,
+    "late_entry_progress": 0.88,
+}
+
+POLICY_CONFIG: dict[str, float | int] = {
+    "warmup_trades": 12,
+    "min_sampled_r": 0.0,
+    "reward_clip_low": -3.0,
+    "reward_clip_high": 5.0,
 }
 
 AI_MODEL_CONFIG: dict[str, float | int] = {

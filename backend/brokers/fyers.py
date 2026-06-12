@@ -500,13 +500,20 @@ class FyersAdapter(BrokerAdapter):
             from fyers_apiv3.FyersWebsocket import data_ws
             client = data_ws.FyersDataSocket(
                 access_token=f"{settings.FYERS_APP_ID}:{self._access_token}",
-                log_path="",
+                # /tmp, not cwd: with log_path="" the lib appends to
+                # ./fyersDataSocket.log in the bind-mounted /app — it grew to
+                # 577MB of token-bearing WS frames and was getting baked into
+                # the image before *.log joined .dockerignore.
+                log_path="/tmp/",
                 litemode=False,
                 write_to_file=False,
                 reconnect=True,
-                on_connect=lambda: logger.info("Fyers WS connected"),
-                on_close=lambda: logger.warning("Fyers WS closed"),
-                on_error=lambda e: logger.error(f"Fyers WS error: {e}"),
+                # *a: the lib invokes these with 0 or 1 args depending on the
+                # event path; a fixed 0-arg lambda raised TypeError into
+                # on_error on every close, so "Fyers WS closed" never logged.
+                on_connect=lambda *a: logger.info("Fyers WS connected"),
+                on_close=lambda *a: logger.warning(f"Fyers WS closed: {a[0] if a else ''}"),
+                on_error=lambda *a: logger.error(f"Fyers WS error: {a[0] if a else ''}"),
                 on_message=lambda msg: self._handle_message(msg, on_tick_callback),
             )
             client.connect()
@@ -539,7 +546,7 @@ class FyersAdapter(BrokerAdapter):
         client = tbt_ws.FyersTbtSocket(
             access_token=f"{settings.FYERS_APP_ID}:{self._access_token}",
             write_to_file=False,
-            log_path="",
+            log_path="/tmp/",
             reconnect=True,
             on_depth_update=_on_depth,
             on_error=lambda e: logger.error(f"Fyers TBT WS error: {e}"),
@@ -738,6 +745,25 @@ class FyersAdapter(BrokerAdapter):
                 continue
             strike = float(opt.get("strike_price", 0) or 0)
             ltp = float(opt.get("ltp", 0) or 0)
+            # No-arbitrage sanity: Fyers serves zombie post-corporate-action
+            # strikes verbatim with garbage LTPs (2026-06-11: INDIANB's active
+            # ladder moved to ×××.75 adjusted strikes; the leftover round
+            # strikes quoted PE 820 @ 1298.8 — a put can NEVER exceed its
+            # strike, and an American call can never exceed spot). One such
+            # row marked an S1 position 49× and booked a ₹19L phantom exit.
+            # Small tolerances absorb stale-spot skew; OI/volume are NOT used
+            # (legit illiquid rows have zero OI too).
+            if strike > 0 and ltp > 0:
+                if option_type == "PE" and ltp > strike * 1.02:
+                    logger.debug(
+                        f"[fyers-chain] dropping no-arb PE {symbol} {strike} ltp={ltp} (> strike)"
+                    )
+                    continue
+                if option_type == "CE" and spot_price > 0 and ltp > spot_price * 1.05:
+                    logger.debug(
+                        f"[fyers-chain] dropping no-arb CE {symbol} {strike} ltp={ltp} (> spot {spot_price})"
+                    )
+                    continue
             prev_close = None
             if opt.get("ltpch") is not None:
                 prev_close = round(ltp - float(opt.get("ltpch") or 0), 2)

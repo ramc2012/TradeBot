@@ -41,6 +41,25 @@ def _is_nse_realtime_symbol(symbol: str) -> bool:
     return text.startswith("NSE:") or text.startswith("BSE:")
 
 
+def _is_index_spot_symbol(symbol: str) -> bool:
+    """Frozen-LTP detection applies ONLY to index spot feeds.
+
+    The frozen-check rationale ("an index recomputes continuously from its
+    constituents and never holds the same LTP for long") is true for
+    NSE:NIFTY50-INDEX et al — and FALSE for option contracts, which also match
+    the broad NSE:/BSE: prefix. Deep-OTM premiums legitimately sit byte-
+    identical at 0.05–5 rupees for minutes while ticks keep arriving. On
+    2026-06-10 six such static option feeds counted as "frozen", rolled the
+    aggregate to critical, and the gate blocked every S1 scan from 14:27 IST
+    to the close (~63 min) with 8 freshly opened positions unmanaged. (The
+    same-morning WS-stability fix exposed this: a flapping socket made quiet
+    feeds look DEAD — age beyond budget skips the frozen check — while a
+    stable one finally delivered the ticks-arriving/value-stuck signature.)
+    """
+    text = str(symbol or "").upper()
+    return (text.startswith("NSE:") or text.startswith("BSE:")) and text.endswith("-INDEX")
+
+
 @dataclass
 class _SymbolHealth:
     symbol: str
@@ -128,7 +147,7 @@ class DataQualityAgent:
         """
         if health.value_changed_at is None or health.last_value is None:
             return None
-        if not _is_nse_realtime_symbol(health.symbol) or not _is_nse_market_hours(when):
+        if not _is_index_spot_symbol(health.symbol) or not _is_nse_market_hours(when):
             return None
         age = (when - health.last_seen_at).total_seconds()
         if age > self._budget_for(health.source):

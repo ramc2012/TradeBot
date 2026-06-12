@@ -338,7 +338,11 @@ def test_risk_engine_caps_size_on_daily_loss_breach() -> None:
     capital-safety caps (daily/weekly loss budget, sane lot count). This
     test now verifies that the daily loss cap blocks new opens after the
     desk's loss budget is exhausted."""
-    engine = DirectionalOptionsRiskEngine(clone_default_config()["risk"])
+    # daily_loss_cap_r default is now 0 (cap disabled for fine-tuning,
+    # 2026-06-08); exercise the cap mechanism here with it explicitly enabled.
+    risk_config = clone_default_config()["risk"]
+    risk_config["daily_loss_cap_r"] = 4.0
+    engine = DirectionalOptionsRiskEngine(risk_config)
     candidate = ContractCandidate(
         trading_symbol="NIFTY TEST CE",
         file_path="contracts/test.csv.gz",
@@ -386,8 +390,8 @@ def test_risk_engine_caps_size_on_daily_loss_breach() -> None:
 
     # Daily realized P&L deep in the red — should trip the cap.
     equity = 1_000_000.0
-    risk_pct = clone_default_config()["risk"]["risk_pct"]
-    daily_cap_R = clone_default_config()["risk"]["daily_loss_cap_r"]
+    risk_pct = risk_config["risk_pct"]
+    daily_cap_R = risk_config["daily_loss_cap_r"]
     daily_realized = -(equity * risk_pct * daily_cap_R) - 1.0
     decision = engine.approve(
         candidate=candidate,

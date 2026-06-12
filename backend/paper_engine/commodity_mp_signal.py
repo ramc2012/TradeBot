@@ -617,6 +617,90 @@ def _trigger_lvn_fade(
 # ─── Public evaluator ─────────────────────────────────────────────────────
 
 
+# ── Higher-timeframe (30-min) regime — pure MP/structure + Order-Flow ─────────
+# Triggers split by what regime they belong to: directional breakouts ride a
+# trend; mean-revert fades scalp a balance. The 30-min regime gates which set is
+# even eligible, so the lane stops taking counter-trend breakouts (churn) and
+# only fades inside genuine balance.
+_DIRECTIONAL_TRIGGERS = frozenset({"open_drive", "ib_break", "va_migration"})
+_MEAN_REVERT_TRIGGERS = frozenset({"failed_auction", "lvn_fade"})
+_HTF_PERIOD_MINUTES = 30
+_HTF_TREND_STRENGTH = 0.4      # net 30m displacement ≥ 40% of the 30m range
+_HTF_EFFICIENCY_MIN = 0.35     # Kaufman efficiency ≥ 0.35 = directional (vs chop)
+_HTF_LOOKBACK_PERIODS = 8      # ~4 hours of 30-min structure
+
+
+def _resample_30m(closed_1m: list[dict[str, Any]], minutes: int = _HTF_PERIOD_MINUTES) -> list[dict[str, float]]:
+    """Aggregate closed 1-min bars into 30-min OHLC buckets (time-bucketed, so
+    session gaps don't smear). Returns time-ordered {open,high,low,close}."""
+    from datetime import datetime
+
+    buckets: dict[Any, dict[str, float]] = {}
+    order: list[Any] = []
+    for bar in closed_1m:
+        c = _safe_float(bar.get("close"))
+        if c is None:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(bar.get("time") or "").replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        key = dt.replace(minute=(dt.minute // minutes) * minutes, second=0, microsecond=0)
+        h = _safe_float(bar.get("high"))
+        low = _safe_float(bar.get("low"))
+        o = _safe_float(bar.get("open"))
+        if key not in buckets:
+            buckets[key] = {"open": o if o is not None else c, "high": h if h is not None else c,
+                            "low": low if low is not None else c, "close": c}
+            order.append(key)
+        else:
+            b = buckets[key]
+            if h is not None:
+                b["high"] = max(b["high"], h)
+            if low is not None:
+                b["low"] = min(b["low"], low)
+            b["close"] = c
+    return [buckets[k] for k in sorted(order)]
+
+
+def classify_htf_regime(
+    closed_1m: list[dict[str, Any]],
+    *,
+    cvd_session: Optional[float] = None,
+    lookback: int = _HTF_LOOKBACK_PERIODS,
+) -> tuple[str, dict[str, Any]]:
+    """30-min regime: TREND_UP / TREND_DOWN / BALANCE.
+
+    Pure price-structure + order-flow (no MACD/EMA): over the last `lookback`
+    30-min bars, a net displacement ≥ 50% of the range *and* a session-CVD that
+    agrees = a directional trend; otherwise the market is rotating = balance.
+    """
+    bars = _resample_30m(closed_1m)
+    if len(bars) < 3:
+        # Not enough 30-min structure yet (early session) — regime UNKNOWN, so
+        # the gate stays permissive rather than blocking trend-initiation breakouts.
+        return "UNKNOWN", {"reason": "insufficient_30m_bars", "bars_30m": len(bars)}
+    window = bars[-lookback:]
+    closes = [b["close"] for b in window]
+    rng = max(b["high"] for b in window) - min(b["low"] for b in window)
+    net = closes[-1] - closes[0]
+    strength = (net / rng) if rng > 0 else 0.0
+    # Kaufman efficiency ratio: net move / total path. ~1 = clean directional
+    # trend; near 0 = price oscillating (balance) even if the endpoints drifted.
+    path = sum(abs(closes[i] - closes[i - 1]) for i in range(1, len(closes)))
+    efficiency = (abs(net) / path) if path > 0 else 0.0
+    cvd = float(cvd_session or 0.0)
+    detail = {"strength": round(strength, 3), "efficiency": round(efficiency, 3),
+              "net": round(net, 2), "range": round(rng, 2), "bars_30m": len(bars),
+              "cvd_session": round(cvd, 1)}
+    trending = efficiency >= _HTF_EFFICIENCY_MIN and abs(strength) >= _HTF_TREND_STRENGTH
+    if trending and net > 0 and cvd > 0:
+        return "TREND_UP", detail
+    if trending and net < 0 and cvd < 0:
+        return "TREND_DOWN", detail
+    return "BALANCE", detail
+
+
 def evaluate_commodity_mp_signal(
     closed_1m: list[dict[str, Any]],
     *,
@@ -644,6 +728,9 @@ def evaluate_commodity_mp_signal(
         "entry_style": None,
         "signal_validation_detail": "Insufficient 1-min history for MP+OF evaluation.",
         "regime": "unknown",
+        "regime_htf": "BALANCE",   # 30-min regime: TREND_UP / TREND_DOWN / BALANCE
+        "trade_mode": None,        # "ride" (trend) | "scalp" (balance) when a trigger fires
+        "regime_htf_detail": {},
         "macd": None,  # legacy keys preserved as null for any downstream consumer
         "macd_signal": None,
         "macd_histogram": None,
@@ -712,6 +799,11 @@ def evaluate_commodity_mp_signal(
     vwap_lower_last = bands["lower"][-1] if bands["lower"] else None
     cvd_anchored_last = cvd_anc[-1] if cvd_anc else None
     cvd_latest = cvd_total[-1] if cvd_total else None
+
+    # 30-min higher-timeframe regime — gates which triggers are eligible.
+    regime_htf, regime_htf_detail = classify_htf_regime(closed_1m, cvd_session=cvd_anchored_last)
+    base["regime_htf"] = regime_htf
+    base["regime_htf_detail"] = regime_htf_detail
 
     # IB extension snapshot.
     today_ext = _make_ext_dict(today_profile)
@@ -819,11 +911,31 @@ def evaluate_commodity_mp_signal(
     if lvn_fade is not None:
         candidates["lvn_fade"] = lvn_fade
 
+    # ── Regime gate (core anti-churn) ────────────────────────────────────────
+    # TREND → directional breakouts WITH the trend (ride to the max move);
+    # BALANCE → mean-revert fades only (scalp back to POC). Counter-trend
+    # breakouts and in-trend fades are dropped here, so the lane stops the
+    # 1-min flip-flop churn.
+    trade_mode: Optional[str] = None
+    if regime_htf == "TREND_UP":
+        candidates = {k: v for k, v in candidates.items() if k in _DIRECTIONAL_TRIGGERS and v.signal == "BUY"}
+        trade_mode = "ride"
+    elif regime_htf == "TREND_DOWN":
+        candidates = {k: v for k, v in candidates.items() if k in _DIRECTIONAL_TRIGGERS and v.signal == "SELL"}
+        trade_mode = "ride"
+    elif regime_htf == "BALANCE":
+        candidates = {k: v for k, v in candidates.items() if k in _MEAN_REVERT_TRIGGERS}
+        trade_mode = "scalp"
+    # UNKNOWN (warming up): leave candidates ungated; trade_mode set by the
+    # chosen trigger's type below.
+
     chosen: Optional[TriggerResult] = None
     for name in _TRIGGER_PRIORITY:
         if name in candidates:
             chosen = candidates[name]
             break
+    if chosen is not None and trade_mode is None:
+        trade_mode = "scalp" if chosen.entry_style in _MEAN_REVERT_TRIGGERS else "ride"
 
     if chosen is None:
         base["reason"] = "no_trigger"
@@ -844,6 +956,7 @@ def evaluate_commodity_mp_signal(
 
     # Trigger fired
     base["signal"] = chosen.signal
+    base["trade_mode"] = trade_mode
     base["candidate_signal"] = chosen.signal
     base["candidate_reason"] = chosen.reason
     base["raw_signal"] = chosen.signal

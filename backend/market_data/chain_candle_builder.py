@@ -153,6 +153,13 @@ class ChainBarAccumulator:
                 del self._cur[key]
         return out
 
+    def flush_all(self) -> list[tuple[ContractKey, _Bar]]:
+        """Force-close EVERY open bar regardless of bucket — the session-close
+        sweep, so the final (in-progress) 3m bar + the close are persisted."""
+        out = list(self._cur.items())
+        self._cur.clear()
+        return out
+
     def instrument_key_for(self, key: ContractKey) -> Optional[str]:
         return self._instrument_key.get(key)
 
@@ -184,8 +191,13 @@ class ChainCandleBuilder:
         return adapter
 
     # ── one poll cycle ─────────────────────────────────────────────────────────
-    async def poll_once(self, *, now_mono: Optional[float] = None) -> dict[str, int]:
-        """Poll every underlying that is due, accumulate, and persist closed bars."""
+    async def poll_once(self, *, now_mono: Optional[float] = None, force: bool = False) -> dict[str, int]:
+        """Poll every underlying that is due, accumulate, and persist closed bars.
+
+        ``force=True`` ignores the per-symbol cadence and polls the whole universe
+        once — used for the session-close sweep so the final tick lands on every
+        name's last bar.
+        """
         import time
 
         now_mono = time.monotonic() if now_mono is None else now_mono
@@ -200,7 +212,7 @@ class ChainCandleBuilder:
         for meta in universe:
             interval = TIER_INTERVAL_SECONDS.get(getattr(meta, "kind", ""), DEFAULT_INTERVAL_SECONDS)
             due_at = self._next_due.get(meta.symbol, 0.0)
-            if now_mono < due_at:
+            if not force and now_mono < due_at:
                 skipped += 1
                 continue
             self._next_due[meta.symbol] = now_mono + interval
@@ -275,6 +287,7 @@ class ChainCandleBuilder:
     # ── lifecycle ────────────────────────────────────────────────────────────
     async def _run_loop(self, *, cycle_seconds: float = 15.0) -> None:
         self._running = True
+        was_open = False
         logger.info("[chain-builder] started full-universe 3m chain → option_premium_candles")
         try:
             while self._running:
@@ -283,6 +296,19 @@ class ChainCandleBuilder:
                 # instead of polling the full option universe every 15s round the
                 # clock — this is the dominant off-hours Fyers REST saver.
                 if not trading_calendar.is_exchange_open("NSE"):
+                    if was_open:
+                        # Market JUST closed. Without this, the final 3m bar
+                        # (15:27–15:30) and the close are dropped — it never
+                        # reaches a later bucket before the gate idles the loop,
+                        # so the feed stops at ~15:24. Take one forced final tick
+                        # and force-close every open bar.
+                        try:
+                            await self.poll_once(force=True)
+                            n = await self._persist(self._acc.flush_all())
+                            logger.info(f"[chain-builder] session-close flush persisted {n} closing bars")
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(f"[chain-builder] session-close flush failed: {exc}")
+                        was_open = False
                     try:
                         nxt = trading_calendar.next_exchange_open("NSE")
                         now = datetime.now(nxt.tzinfo) if nxt.tzinfo else datetime.now()
@@ -291,6 +317,7 @@ class ChainCandleBuilder:
                         idle = 300.0
                     await asyncio.sleep(idle)
                     continue
+                was_open = True
                 try:
                     stats = await self.poll_once()
                     if stats["persisted"]:

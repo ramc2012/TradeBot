@@ -17,6 +17,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback } from "react";
 import { Activity } from "lucide-react";
 
+import { IndexTickerStrip } from "./IndexTickerStrip";
 import { StatusBadge } from "./StatusBadge";
 import { formatIST } from "./formatters";
 
@@ -58,6 +59,7 @@ export function DeskShell({
   return (
     <div className="space-y-4">
       <header className="rounded-2xl border border-bg-border bg-bg-secondary/22 px-5 py-4">
+        <IndexTickerStrip className="mb-2.5 border-b border-bg-border/40 pb-2" />
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2">

@@ -92,7 +92,13 @@ async def _prewarm_market_intelligence_runtime() -> None:
 async def _prewarm_commodity_watchlists(*, commodity_strategy_agent, commodity_atm_watchlist_service) -> None:
     try:
         symbols = commodity_strategy_agent.get_symbols()
-        await asyncio.wait_for(commodity_strategy_agent.ensure_selected_option_setup_locks(), timeout=30)
+        # The 2026-06-09 futures-only redesign removed option setup locks from
+        # the commodity agent. Treat the hook as optional so the catalog/
+        # watchlist warm-up below still runs (it died here on every boot since
+        # the redesign, silently skipping the whole prewarm).
+        setup_locks = getattr(commodity_strategy_agent, "ensure_selected_option_setup_locks", None)
+        if callable(setup_locks):
+            await asyncio.wait_for(setup_locks(), timeout=30)
         await asyncio.wait_for(
             commodity_atm_watchlist_service.get_contract_catalog(
                 symbols,
