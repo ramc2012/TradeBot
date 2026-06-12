@@ -456,10 +456,11 @@ async def ws_positions_overview(websocket: WebSocket):
     """
     await _accept_authenticated_socket(websocket, "positions_overview")
 
-    def _encode(payload: dict) -> str:
-        return json.dumps(jsonable_encoder(payload), separators=(",", ":"))
-
-    def _dedup_key(payload: dict) -> str:
+    def _encode_core(payload: dict) -> str:
+        # ONE jsonable_encoder pass over everything except the fetchedAt clock —
+        # this string is both the dedup key and the wire-frame body. The payload
+        # spans all 8 lanes (S1 status alone carries the trade book), so this
+        # encode costs hundreds of ms at book scale.
         core = {k: v for k, v in payload.items() if k != "fetchedAt"}
         return json.dumps(jsonable_encoder(core), separators=(",", ":"))
 
@@ -468,17 +469,29 @@ async def ws_positions_overview(websocket: WebSocket):
     structure: dict | None = None
     last_build = 0.0
     last_dedup: str | None = None
+    last_emit_attempt = 0.0
 
     async def _emit_if_changed() -> bool:
-        nonlocal last_dedup
+        nonlocal last_dedup, last_emit_attempt
         if structure is None:
             return True
+        # Throttle: during RTH the quotes:bus delivers a frame every ~150ms, and
+        # encoding the full payload per frame SYNCHRONOUSLY pegged the core and
+        # starved the event loop (2026-06-12: S1 scans stalled 47 min, MI killed
+        # at 300s, commodity scans timing out — all one positions client).
+        now = monotonic()
+        if (now - last_emit_attempt) < 1.0:
+            return True
+        last_emit_attempt = now
         payload = await _overlay_positions_overview(structure)
-        key = _dedup_key(payload)
+        fetched_at = str(payload.get("fetchedAt") or datetime.now(timezone.utc).isoformat())
+        # Encode off-loop: GIL timeslicing keeps tick fan-out and strategy loops
+        # breathing even while a big frame is being serialized.
+        key = await asyncio.to_thread(_encode_core, payload)
         if key != last_dedup:
             if not _socket_is_connected(websocket):
                 return False
-            await websocket.send_text(_encode(payload))
+            await websocket.send_text(f'{key[:-1]},"fetchedAt":{json.dumps(fetched_at)}}}')
             last_dedup = key
         return True
 
