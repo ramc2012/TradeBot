@@ -406,12 +406,87 @@ async def _build_positions_overview_structure() -> dict:
         settle("fractal", fractal_market_profile_paper_positions(symbol=None, status="all", limit=100)),
         settle("cbe", cbe_paper_positions(status="all", limit=100)),
     )
-    return {
+    return _slim_positions_overview_structure({
         "manual": manual_positions, "nse": nse_status, "commodity": commodity_status,
         "directional": directional_positions, "gann": gann_status,
         "auction": auction_positions, "fractal": fractal_positions,
         "cbe": cbe_positions, "errors": errors,
-    }
+    })
+
+
+# The combined stream is re-encoded once per second per client, so payload size
+# IS the CPU bill (2026-06-12: an unslimmed 5-10MB frame pegged the core). The
+# positions/analytics pages and the desk bridges read only positions, summaries
+# and a recent-trades tail from this socket — every desk's full detail rides its
+# own per-desk socket, so the heavy fields below are dead weight HERE.
+_POSITIONS_OVERVIEW_TRADE_TAIL = 40
+_POSITIONS_OVERVIEW_CLOSED_CAP = 30
+_POSITIONS_OVERVIEW_NSE_STRATEGY_STRIP = (
+    "meta", "audit_lanes", "signals", "historical_trades", "recent_events", "today_trades",
+)
+_POSITIONS_OVERVIEW_COMMODITY_STRIP = (
+    "watchlist", "futures_watchlist", "signal_audit", "data_health",
+    "historical_trades", "profile_history",
+)
+
+
+def _scalar_row(row):
+    """Keep every scalar field of a position row, drop nested containers."""
+    if not isinstance(row, dict):
+        return row
+    return {k: v for k, v in row.items() if not isinstance(v, (dict, list))}
+
+
+def _cap_recent(rows: list, cap: int) -> list:
+    """Cap a trade/position list to its most-recent entries regardless of order."""
+    if len(rows) <= cap:
+        return rows
+    first = rows[0] if isinstance(rows[0], dict) else {}
+    last = rows[-1] if isinstance(rows[-1], dict) else {}
+    first_ts = str(first.get("closed_at") or first.get("exit_time") or first.get("entered_at") or "")
+    last_ts = str(last.get("closed_at") or last.get("exit_time") or last.get("entered_at") or "")
+    return rows[:cap] if first_ts >= last_ts else rows[-cap:]
+
+
+def _slim_positions_overview_structure(structure: dict) -> dict:
+    nse = structure.get("nse")
+    if isinstance(nse, dict):
+        nse = {**nse}  # shallow-copy before mutating — router payloads may be shared
+        nse.pop("data_health", None)
+        slim_strats = []
+        for strat in nse.get("strategies") or []:
+            if not isinstance(strat, dict):
+                slim_strats.append(strat)
+                continue
+            strat = {k: v for k, v in strat.items() if k not in _POSITIONS_OVERVIEW_NSE_STRATEGY_STRIP}
+            th = strat.get("trade_history")
+            if isinstance(th, list):
+                strat["trade_history"] = _cap_recent(th, _POSITIONS_OVERVIEW_TRADE_TAIL)
+            slim_strats.append(strat)
+        nse["strategies"] = slim_strats
+        structure["nse"] = nse
+
+    commodity = structure.get("commodity")
+    if isinstance(commodity, dict):
+        commodity = {k: v for k, v in commodity.items() if k not in _POSITIONS_OVERVIEW_COMMODITY_STRIP}
+        th = commodity.get("trade_history")
+        if isinstance(th, list):
+            commodity["trade_history"] = _cap_recent(th, _POSITIONS_OVERVIEW_TRADE_TAIL)
+        structure["commodity"] = commodity
+
+    for lane in ("directional", "gann", "auction", "fractal", "cbe"):
+        payload = structure.get(lane)
+        if not isinstance(payload, dict):
+            continue
+        payload = {**payload}
+        closed = payload.get("closed_positions")
+        if isinstance(closed, list):
+            payload["closed_positions"] = [_scalar_row(r) for r in _cap_recent(closed, _POSITIONS_OVERVIEW_CLOSED_CAP)]
+        opened = payload.get("open_positions")
+        if isinstance(opened, list):
+            payload["open_positions"] = [_scalar_row(r) for r in opened]
+        structure[lane] = payload
+    return structure
 
 
 async def _overlay_positions_overview(structure: dict) -> dict:
@@ -433,7 +508,9 @@ async def _overlay_positions_overview(structure: dict) -> dict:
 
     return {
         "manual": structure.get("manual"),
-        "nse": nse_status, "strategy": nse_status,
+        # NB: the old "strategy" alias duplicated the full nse status in every
+        # frame; all consumers read payload.nse first, so the alias is dropped.
+        "nse": nse_status,
         "commodity": commodity_status,
         "directional": structure.get("directional"),
         "gann": structure.get("gann"),
