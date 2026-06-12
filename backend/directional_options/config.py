@@ -37,9 +37,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "ema_slow": 21,
         "adx_period": 14,
         "atr_period": 14,
+        "rsi_period": 14,
         "breakout_lookback": 12,
         "rv_window": 20,
         "range_window": 20,
+        "volume_z_window": 20,
+        "opening_range_minutes": 30,
         "warmup_bars": 32,
     },
     "signal_engine": {
@@ -172,6 +175,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # posterior. If False, the engine falls back to a permissive
         # always-act path (used by tests that want deterministic flow).
         "enabled": True,
+    },
+    "ai_model": {
+        "min_rule_score": 38.0,
+        "min_liquidity_score": 0.08,
+        "max_spread_pct": 0.28,
+        "min_delta_abs": 0.12,
+        "max_delta_abs": 0.92,
+        "min_days_to_expiry": 0.20,
+        "late_session_cutoff": 0.92,
+        "late_session_min_days_to_expiry": 1.0,
     },
 }
 

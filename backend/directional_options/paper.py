@@ -435,6 +435,7 @@ class DirectionalOptionsPaperStore:
                 # chain state at close time.
                 policy_payload = dict(snapshot.get("policy") or {})
                 size_multiplier = float(policy_payload.get("size_multiplier") or 1.0)
+                ai_model_payload = dict(contract.get("ai_model") or {})
                 if self.policy is not None:
                     try:
                         self.policy.register_open(
@@ -490,6 +491,9 @@ class DirectionalOptionsPaperStore:
                         "policy_size_multiplier": size_multiplier,
                         "policy_sampled_value": policy_payload.get("sampled_value"),
                         "policy_n_seen_at_open": policy_payload.get("n_seen"),
+                        "ai_rule_score": ai_model_payload.get("score"),
+                        "ai_rule_setup": ai_model_payload.get("setup"),
+                        "ai_rule_blockers": ai_model_payload.get("blockers") or [],
                     }
                 )
 

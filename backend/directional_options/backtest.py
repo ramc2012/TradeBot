@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import asdict
 from typing import Any, Optional
 
 import pandas as pd
 
 from directional_options.analytics import build_trade_analytics
+from directional_options.ai_model import HybridDirectionalOptionsModel
 from directional_options.data import DirectionalOptionsDataStore
 from directional_options.features import FeatureEngine, timeframe_minutes
 from directional_options.regime import RegimeClassifier
@@ -29,6 +31,7 @@ class DirectionalOptionsBacktester:
         selector: OptionSelectionEngine,
         risk: DirectionalOptionsRiskEngine,
         config: dict[str, Any],
+        ai_model: HybridDirectionalOptionsModel | None = None,
     ) -> None:
         self.store = store
         self.feature_engine = feature_engine
@@ -37,6 +40,7 @@ class DirectionalOptionsBacktester:
         self.selector = selector
         self.risk = risk
         self.config = config
+        self.ai_model = ai_model
 
     def run(
         self,
@@ -163,6 +167,15 @@ class DirectionalOptionsBacktester:
             candidate = selection["best"]
             if candidate is None:
                 continue
+            if self.ai_model is not None:
+                rule_eval = self.ai_model.evaluate(
+                    row=row,
+                    signal=asdict(signal),
+                    regime=asdict(regime),
+                    candidate=asdict(candidate),
+                )
+                if not rule_eval.allowed:
+                    continue
 
             risk = self.risk.approve(
                 candidate=candidate,

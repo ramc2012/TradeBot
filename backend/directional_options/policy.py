@@ -213,8 +213,54 @@ def _featurize(
         _safe_tanh(atm_put_ltp_chg_pct, 5.0),                         # [v2, idx 35]
     ])
 
-    # One-hot encodings (positions unchanged from v1 — they remain at
-    # the tail; the v1→v2 padder maps them to the same indices).
+    # ───────── v3 additions: hybrid rule model + spot indicators ─────
+    # The service injects `candidate["ai_model"]` before calling the
+    # policy. Missing payloads use neutral defaults so older paper
+    # positions can still be closed and learned without schema failures.
+    ai_model = candidate.get("ai_model") if isinstance(candidate.get("ai_model"), dict) else {}
+    components = ai_model.get("components") if isinstance(ai_model.get("components"), dict) else {}
+    spot_features = ai_model.get("spot_features") if isinstance(ai_model.get("spot_features"), dict) else {}
+
+    def _component(key: str, default: float = 0.5) -> float:
+        try:
+            return float(components.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _spot(key: str, default: float = 0.0) -> float:
+        try:
+            return float(spot_features.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        rule_score = float(ai_model.get("score", 50.0)) / 100.0
+    except (TypeError, ValueError):
+        rule_score = 0.5
+    rule_allowed = 1.0 if bool(ai_model.get("allowed", True)) else 0.0
+    cont.extend([
+        float(np.clip(rule_score, 0.0, 1.0)),                         # [v3, idx 36]
+        rule_allowed,                                                  # [v3, idx 37]
+        _component("spot_trend"),                                      # [v3, idx 38]
+        _component("breakout_quality"),                                # [v3, idx 39]
+        _component("volatility_state"),                                # [v3, idx 40]
+        _component("option_quality"),                                  # [v3, idx 41]
+        _component("chain_confirmation"),                              # [v3, idx 42]
+        _component("execution_timing"),                                # [v3, idx 43]
+        _component("model_edge"),                                      # [v3, idx 44]
+        float(np.clip(_spot("directional_ema_spread"), -1.0, 1.0)),    # [v3, idx 45]
+        float(np.clip(_spot("directional_ema_slope"), -1.0, 1.0)),     # [v3, idx 46]
+        float(np.clip(_spot("directional_macd_hist"), -1.0, 1.0)),     # [v3, idx 47]
+        float(np.clip(_spot("directional_vwap_deviation"), -1.0, 1.0)),# [v3, idx 48]
+        float(np.clip(_spot("directional_rsi"), -1.0, 1.0)),           # [v3, idx 49]
+        float(np.clip(_spot("trend_quality"), 0.0, 1.0)),              # [v3, idx 50]
+        float(np.clip(_spot("volume_zscore"), -1.0, 1.0)),             # [v3, idx 51]
+        _safe_tanh(_spot("atr_pct"), 0.006),                           # [v3, idx 52]
+        _safe_tanh(_spot("range_expansion", 1.0) - 1.0, 0.75),         # [v3, idx 53]
+    ])
+
+    # One-hot encodings stay at the tail; legacy migration moves them
+    # from the old tail to the current tail.
     regime_label = str(regime.get("label") or "").lower()
     regime_oh = [1.0 if regime_label == lbl else 0.0 for lbl in KNOWN_REGIMES]
     delta_bucket = str(candidate.get("delta_bucket") or "").lower()
@@ -231,65 +277,59 @@ def _featurize(
 # Number of continuous features (including bias) in each version.
 CONT_DIM_V1 = 20
 CONT_DIM_V2 = 36  # 20 v1 + 6 candidate greeks + 10 chain features
+CONT_DIM_V3 = 54  # v2 + 18 hybrid rule / spot-indicator features
 ONE_HOT_DIM = len(KNOWN_REGIMES) + len(KNOWN_DELTA_BUCKETS) + len(KNOWN_EXPIRY_KINDS) + len(KNOWN_DIRECTIONS)
 
-# Feature version. v1 = 35 dims (the original deployment). v2 adds
-# greeks + chain analytics. Bump this any time the feature layout
-# changes; `_load()` will detect the version mismatch and pad the
-# persisted posterior into the new basis (block-diagonal extension).
-FEATURE_VERSION = 2
-EXPECTED_FEATURE_DIM = CONT_DIM_V2 + ONE_HOT_DIM  # = 51
+# Feature version. v1 = 35 dims (original deployment), v2 adds greeks +
+# chain analytics, v3 adds the hybrid rule model + spot indicators.
+FEATURE_VERSION = 3
+EXPECTED_FEATURE_DIM = CONT_DIM_V3 + ONE_HOT_DIM  # = 69
 LEGACY_FEATURE_DIMS = {
     1: CONT_DIM_V1 + ONE_HOT_DIM,  # = 35
+    2: CONT_DIM_V2 + ONE_HOT_DIM,  # = 51
+}
+LEGACY_CONT_DIMS = {
+    1: CONT_DIM_V1,
+    2: CONT_DIM_V2,
 }
 
 
-def _extend_v1_to_current(state_v1: dict[str, Any]) -> dict[str, Any]:
-    """Block-diagonal embed a v1 posterior (35-D) inside the current
-    basis. Old continuous features keep their indices [0..19]; new
-    continuous features get prior-only (alpha I) blocks. The one-hot
-    tail moves from indices [20..34] to [36..50]; we copy that block
-    into its new home.
+def _extend_legacy_to_current(state: dict[str, Any], *, old_version: int) -> dict[str, Any]:
+    """Block-diagonal embed a legacy posterior into the current basis.
 
-    This preserves every closed-trade update so we don't lose the 32
-    trades of learning from the v1 deployment.
+    Continuous features keep their original indices. The one-hot tail is
+    copied from the legacy tail to the current tail. New continuous
+    features stay on the prior block so older learning is preserved.
     """
-    alpha = float(state_v1.get("alpha", 1.0))
-    S_inv_old = np.asarray(state_v1["S_inv"], dtype=np.float64)
-    b_old = np.asarray(state_v1["b"], dtype=np.float64)
-    if S_inv_old.shape != (LEGACY_FEATURE_DIMS[1], LEGACY_FEATURE_DIMS[1]):
-        # Shape doesn't match — bail and let the caller fall back to a
+    alpha = float(state.get("alpha", 1.0))
+    S_inv_old = np.asarray(state["S_inv"], dtype=np.float64)
+    b_old = np.asarray(state["b"], dtype=np.float64)
+    old_dim = LEGACY_FEATURE_DIMS.get(old_version)
+    old_cont_dim = LEGACY_CONT_DIMS.get(old_version)
+    if old_dim is None or old_cont_dim is None or S_inv_old.shape != (old_dim, old_dim):
+        # Shape doesn't match; bail and let the caller fall back to a
         # fresh prior. Better to lose history than corrupt the math.
-        return state_v1
+        return state
     new_dim = EXPECTED_FEATURE_DIM
-    n_new_cont = CONT_DIM_V2 - CONT_DIM_V1  # = 16
     S_inv_new = alpha * np.eye(new_dim, dtype=np.float64)
     b_new = np.zeros(new_dim, dtype=np.float64)
-    # Map v1 indices into v2 indices:
-    #   v1 [0..19]          (cont) → v2 [0..19]
-    #   v1 [20..34]         (oh)   → v2 [36..50]
-    # v2 [20..35] (new cont) stays at the alpha-I prior.
-    v1_cont = slice(0, CONT_DIM_V1)
-    v1_oh   = slice(CONT_DIM_V1, LEGACY_FEATURE_DIMS[1])
-    v2_cont = slice(0, CONT_DIM_V1)
-    v2_oh   = slice(CONT_DIM_V2, EXPECTED_FEATURE_DIM)
-    # Copy continuous-continuous block.
-    S_inv_new[v2_cont, v2_cont] = S_inv_old[v1_cont, v1_cont]
-    # Copy one-hot-one-hot block.
-    S_inv_new[v2_oh, v2_oh] = S_inv_old[v1_oh, v1_oh]
-    # Copy off-diagonal cont↔oh cross-terms.
-    S_inv_new[v2_cont, v2_oh] = S_inv_old[v1_cont, v1_oh]
-    S_inv_new[v2_oh, v2_cont] = S_inv_old[v1_oh, v1_cont]
-    # b vector.
-    b_new[v2_cont] = b_old[v1_cont]
-    b_new[v2_oh] = b_old[v1_oh]
+    old_cont = slice(0, old_cont_dim)
+    old_oh = slice(old_cont_dim, old_dim)
+    new_cont = slice(0, old_cont_dim)
+    new_oh = slice(CONT_DIM_V3, EXPECTED_FEATURE_DIM)
+    S_inv_new[new_cont, new_cont] = S_inv_old[old_cont, old_cont]
+    S_inv_new[new_oh, new_oh] = S_inv_old[old_oh, old_oh]
+    S_inv_new[new_cont, new_oh] = S_inv_old[old_cont, old_oh]
+    S_inv_new[new_oh, new_cont] = S_inv_old[old_oh, old_cont]
+    b_new[new_cont] = b_old[old_cont]
+    b_new[new_oh] = b_old[old_oh]
     return {
         "dim": new_dim,
         "alpha": alpha,
-        "beta": float(state_v1.get("beta", 1.0)),
+        "beta": float(state.get("beta", 1.0)),
         "S_inv": S_inv_new.tolist(),
         "b": b_new.tolist(),
-        "n_seen": int(state_v1.get("n_seen", 0)),
+        "n_seen": int(state.get("n_seen", 0)),
     }
 
 
@@ -307,7 +347,7 @@ class BayesianRidge:
 
     Prior tuning rationale: alpha=10 + beta=4 gives a cold-start
     predictive variance of roughly (||x||^2 / 10) + 0.25 ≈ 1.5 for the
-    typical 51-D feature vector (||x||^2 ~ 12), so Thompson samples
+    typical feature vector (||x||^2 ~ 12), so Thompson samples
     cluster in [-2σ, +2σ] = [-2.5, +2.5] — natural R-multiple range.
 
     The earlier alpha=beta=1 prior gave a cold-start σ of ~5-15 (we saw
@@ -329,14 +369,29 @@ class BayesianRidge:
             self.b = np.zeros(self.dim, dtype=np.float64)
 
     def _posterior(self) -> tuple[np.ndarray, np.ndarray]:
-        Sigma = np.linalg.inv(self.S_inv)
-        mu = Sigma @ self.b
+        try:
+            Sigma = np.linalg.inv(self.S_inv)
+            mu = np.dot(Sigma, self.b)
+        except Exception:
+            self.S_inv = self.alpha * np.eye(self.dim, dtype=np.float64)
+            self.b = np.zeros(self.dim, dtype=np.float64)
+            Sigma = np.linalg.inv(self.S_inv)
+            mu = np.dot(Sigma, self.b)
+        if not np.all(np.isfinite(Sigma)) or not np.all(np.isfinite(mu)):
+            self.S_inv = self.alpha * np.eye(self.dim, dtype=np.float64)
+            self.b = np.zeros(self.dim, dtype=np.float64)
+            Sigma = np.linalg.inv(self.S_inv)
+            mu = np.dot(Sigma, self.b)
         return mu, Sigma
 
     def predict_mean_var(self, x: np.ndarray) -> tuple[float, float]:
         mu, Sigma = self._posterior()
-        mean = float(mu @ x)
-        var = float(x @ Sigma @ x + 1.0 / self.beta)
+        mean = float(np.dot(mu, x))
+        var = float(np.dot(x, np.dot(Sigma, x)) + 1.0 / self.beta)
+        if not math.isfinite(mean):
+            mean = 0.0
+        if not math.isfinite(var):
+            var = 1.0 / max(self.beta, 1e-9)
         return mean, max(var, 1e-6)
 
     def sample(self, x: np.ndarray, rng: np.random.Generator) -> float:
@@ -371,12 +426,25 @@ class BayesianRidge:
 
     @classmethod
     def from_state(cls, state: dict[str, Any]) -> "BayesianRidge":
+        dim = int(state["dim"])
+        S_inv = np.asarray(state["S_inv"], dtype=np.float64)
+        b = np.asarray(state["b"], dtype=np.float64)
+        if S_inv.shape != (dim, dim) or b.shape != (dim,):
+            raise ValueError("BayesianRidge state has invalid shape")
+        if not np.all(np.isfinite(S_inv)) or not np.all(np.isfinite(b)):
+            raise ValueError("BayesianRidge state contains non-finite values")
+        alpha = float(state.get("alpha", 1.0))
+        beta = float(state.get("beta", 1.0))
+        if not math.isfinite(alpha) or alpha <= 0.0:
+            alpha = 10.0
+        if not math.isfinite(beta) or beta <= 0.0:
+            beta = 4.0
         return cls(
-            dim=int(state["dim"]),
-            alpha=float(state.get("alpha", 1.0)),
-            beta=float(state.get("beta", 1.0)),
-            S_inv=np.asarray(state["S_inv"], dtype=np.float64),
-            b=np.asarray(state["b"], dtype=np.float64),
+            dim=dim,
+            alpha=alpha,
+            beta=beta,
+            S_inv=S_inv,
+            b=b,
             n_seen=int(state.get("n_seen", 0)),
         )
 
@@ -471,11 +539,17 @@ class DirectionalPolicy:
         try:
             if old_dim == EXPECTED_FEATURE_DIM:
                 self._value_model = BayesianRidge.from_state(value_state)
-            elif old_dim == LEGACY_FEATURE_DIMS.get(1) and persisted_version <= 1:
-                # v1 → current basis (block-diagonal pad). Preserves the
-                # n_seen counter + the learning on the original 35-D
-                # features; new feature dims start with the prior.
-                extended = _extend_v1_to_current(value_state)
+            elif old_dim == LEGACY_FEATURE_DIMS.get(persisted_version):
+                # Legacy -> current basis (block-diagonal pad). Preserves
+                # n_seen plus the learning on old features; new feature
+                # dims start on the prior.
+                extended = _extend_legacy_to_current(value_state, old_version=persisted_version)
+                self._value_model = BayesianRidge.from_state(extended)
+            elif old_dim == LEGACY_FEATURE_DIMS.get(1):
+                extended = _extend_legacy_to_current(value_state, old_version=1)
+                self._value_model = BayesianRidge.from_state(extended)
+            elif old_dim == LEGACY_FEATURE_DIMS.get(2):
+                extended = _extend_legacy_to_current(value_state, old_version=2)
                 self._value_model = BayesianRidge.from_state(extended)
             # else: unknown schema — silently start fresh.
         except Exception:

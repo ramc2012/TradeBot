@@ -45,6 +45,20 @@ class FeatureSnapshot:
     session_progress: float
     momentum_3: float
     momentum_8: float
+    atr_pct: float = 0.0
+    ema_fast_slope_pct: float = 0.0
+    macd: float = 0.0
+    macd_signal: float = 0.0
+    macd_hist: float = 0.0
+    macd_hist_pct: float = 0.0
+    rsi_14: float = 50.0
+    vwap: float = 0.0
+    vwap_deviation_pct: float = 0.0
+    volume_zscore: float = 0.0
+    body_pct: float = 0.0
+    close_location: float = 0.0
+    opening_range_position: float = 0.5
+    trend_quality: float = 0.0
 
 
 @dataclass(frozen=True)

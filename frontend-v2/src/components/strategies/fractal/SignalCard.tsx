@@ -51,6 +51,30 @@ export type CurrentSignal = {
     order_flow_direction?: string | null;
     order_flow_alignment?: number | null;
     advisories?: string[] | null;
+    ai_rule_score?: number | null;
+    ai_rule_setup?: string | null;
+    policy_expected_r?: number | null;
+    policy_sampled_r?: number | null;
+    policy_seen?: number | null;
+  } | null;
+  ai_model?: {
+    allowed?: boolean;
+    score?: number | null;
+    setup?: string | null;
+    blockers?: string[] | null;
+    reasons?: string[] | null;
+    components?: Record<string, number> | null;
+    features?: Record<string, number | string | boolean> | null;
+  } | null;
+  policy?: {
+    act?: boolean;
+    sampled_value?: number | null;
+    posterior_mean?: number | null;
+    posterior_var?: number | null;
+    reason?: string | null;
+    feature_dim?: number | null;
+    n_seen?: number | null;
+    warmup?: boolean | null;
   } | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   [k: string]: any;
@@ -90,6 +114,12 @@ export function SignalCard({ signal, lastPrice }: { signal?: CurrentSignal; last
   const rr = risk && reward && risk > 1e-9 ? reward / risk : null;
   const vms = s.value_migration_score;
   const align = s.metadata?.order_flow_alignment;
+  const ai = s.ai_model;
+  const policy = s.policy;
+  const aiGateActs = Boolean(policy?.act ?? ai?.allowed ?? false);
+  const aiGateLabel = ai ? `${formatNumber(ai.score, 0)} · ${aiGateActs ? "ACT" : "SKIP"}` : "—";
+  const policyMean = policy?.posterior_mean;
+  const policySample = policy?.sampled_value;
 
   return (
     <div className="space-y-4">
@@ -163,6 +193,27 @@ export function SignalCard({ signal, lastPrice }: { signal?: CurrentSignal; last
                 <span>·</span>
                 <span>flow {s.metadata?.order_flow_direction || "—"}</span>
               </div>
+            </div>
+            <div className="rounded-lg border border-bg-border bg-bg-primary/15 px-3 py-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[10.5px] uppercase tracking-[0.14em] text-text-muted">AI / RL gate</span>
+                <StatusBadge label={aiGateLabel} variant={aiGateActs ? "success" : "warn"} />
+              </div>
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-text-muted">
+                <span>{ai?.setup ? prettySetup(ai.setup) : "No rule packet"}</span>
+                {policy ? (
+                  <>
+                    <span>·</span>
+                    <span className="font-mono">E[R] {formatSignedNumber(policyMean, 2)}</span>
+                    <span className="font-mono">sample {formatSignedNumber(policySample, 2)}</span>
+                  </>
+                ) : null}
+              </div>
+              {policy?.reason ? (
+                <div className="mt-1.5 line-clamp-2 text-[10.5px] text-text-muted">{policy.reason}</div>
+              ) : ai?.blockers?.length ? (
+                <div className="mt-1.5 line-clamp-2 text-[10.5px] text-accent-amber">{ai.blockers.join(", ")}</div>
+              ) : null}
             </div>
             {lastPrice != null ? (
               <div className="text-[11px] text-text-muted">

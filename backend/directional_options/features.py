@@ -7,8 +7,8 @@ from typing import Any
 
 import pandas as pd
 
-from analysis.macd_engine import compute_ema
-from analytics.technicals import compute_adx
+from analysis.macd_engine import compute_ema, compute_macd
+from analytics.technicals import compute_adx, compute_rsi
 from directional_options.schemas import FeatureSnapshot
 
 
@@ -81,6 +81,12 @@ def _session_progress(timestamp: pd.Timestamp) -> float:
     return float(min(max(progress, 0.0), 1.0))
 
 
+def _bounded_zscore(series: pd.Series, window: int) -> pd.Series:
+    mean = series.rolling(window).mean()
+    stdev = series.rolling(window).std().replace(0.0, float("nan"))
+    return ((series - mean) / stdev).clip(-5.0, 5.0).fillna(0.0)
+
+
 class FeatureEngine:
     """Resample spot history and compute regime/signal features."""
 
@@ -112,6 +118,33 @@ class FeatureEngine:
         frame["minus_di"] = pd.Series(minus_di, dtype="float64")
         frame["atr"] = _compute_atr(frame, int(period_cfg["atr_period"]))
         frame["ema_spread_pct"] = ((frame["ema_fast"] - frame["ema_slow"]) / frame["close"]).fillna(0.0)
+        frame["atr_pct"] = (frame["atr"] / frame["close"].replace(0.0, float("nan"))).fillna(0.0)
+        frame["ema_fast_slope_pct"] = (
+            (frame["ema_fast"] - frame["ema_fast"].shift(3))
+            / frame["close"].replace(0.0, float("nan"))
+        ).fillna(0.0)
+        macd, macd_signal, macd_hist = compute_macd(closes)
+        frame["macd"] = pd.Series(macd, dtype="float64")
+        frame["macd_signal"] = pd.Series(macd_signal, dtype="float64")
+        frame["macd_hist"] = pd.Series(macd_hist, dtype="float64")
+        frame["macd_hist_pct"] = (frame["macd_hist"] / frame["close"].replace(0.0, float("nan"))).fillna(0.0)
+        frame["rsi_14"] = pd.Series(
+            compute_rsi(closes, int(period_cfg.get("rsi_period", 14))),
+            dtype="float64",
+        )
+        typical_price = (frame["high"] + frame["low"] + frame["close"]) / 3.0
+        session_key = frame["time"].dt.date
+        volume = frame["volume"].astype(float).clip(lower=0.0)
+        cumulative_volume = volume.groupby(session_key).cumsum().replace(0.0, float("nan"))
+        cumulative_pv = (typical_price * volume).groupby(session_key).cumsum()
+        frame["vwap"] = (cumulative_pv / cumulative_volume).fillna(frame["close"])
+        frame["vwap_deviation_pct"] = (
+            (frame["close"] - frame["vwap"]) / frame["close"].replace(0.0, float("nan"))
+        ).fillna(0.0)
+        frame["volume_zscore"] = _bounded_zscore(volume, int(period_cfg.get("volume_z_window", 20)))
+        frame["body_pct"] = ((frame["close"] - frame["open"]) / frame["close"].replace(0.0, float("nan"))).fillna(0.0)
+        bar_range = (frame["high"] - frame["low"]).replace(0.0, float("nan"))
+        frame["close_location"] = (((frame["close"] - frame["low"]) / bar_range) * 2.0 - 1.0).clip(-1.0, 1.0).fillna(0.0)
         frame["range_pct"] = ((frame["high"] - frame["low"]) / frame["close"]).fillna(0.0)
         high_roll = frame["high"].rolling(int(period_cfg["breakout_lookback"])).max().shift(1)
         low_roll = frame["low"].rolling(int(period_cfg["breakout_lookback"])).min().shift(1)
@@ -134,6 +167,28 @@ class FeatureEngine:
         frame["momentum_3"] = frame["close"].pct_change(3).fillna(0.0)
         frame["momentum_8"] = frame["close"].pct_change(8).fillna(0.0)
         frame["session_progress"] = frame["time"].map(_session_progress)
+        opening_bars = max(
+            1,
+            int(math.ceil(float(period_cfg.get("opening_range_minutes", 30)) / max(timeframe_minutes(timeframe), 1))),
+        )
+        session_bar = frame.groupby(session_key).cumcount()
+        opening_mask = session_bar < opening_bars
+        opening_high = frame.loc[opening_mask].groupby(session_key[opening_mask])["high"].max()
+        opening_low = frame.loc[opening_mask].groupby(session_key[opening_mask])["low"].min()
+        frame["_opening_high"] = session_key.map(opening_high)
+        frame["_opening_low"] = session_key.map(opening_low)
+        opening_range = (frame["_opening_high"] - frame["_opening_low"]).replace(0.0, float("nan"))
+        frame["opening_range_position"] = (
+            (frame["close"] - frame["_opening_low"]) / opening_range
+        ).clip(-1.0, 2.0).fillna(0.5)
+        frame = frame.drop(columns=["_opening_high", "_opening_low"])
+        di_total = (frame["plus_di"].abs() + frame["minus_di"].abs()).replace(0.0, float("nan"))
+        di_separation = ((frame["plus_di"] - frame["minus_di"]).abs() / di_total).fillna(0.0)
+        frame["trend_quality"] = (
+            (frame["adx"] / 50.0).clip(0.0, 1.0) * 0.45
+            + (frame["ema_spread_pct"].abs() / 0.01).clip(0.0, 1.0) * 0.30
+            + di_separation.clip(0.0, 1.0) * 0.25
+        ).clip(0.0, 1.0)
 
         warmup = int(self.config["warmup_bars"])
         if len(frame.index) > warmup:
@@ -166,4 +221,18 @@ class FeatureEngine:
             session_progress=float(row.get("session_progress", 0.0)),
             momentum_3=float(row.get("momentum_3", 0.0)),
             momentum_8=float(row.get("momentum_8", 0.0)),
+            atr_pct=float(row.get("atr_pct", 0.0)),
+            ema_fast_slope_pct=float(row.get("ema_fast_slope_pct", 0.0)),
+            macd=float(row.get("macd", 0.0)),
+            macd_signal=float(row.get("macd_signal", 0.0)),
+            macd_hist=float(row.get("macd_hist", 0.0)),
+            macd_hist_pct=float(row.get("macd_hist_pct", 0.0)),
+            rsi_14=float(row.get("rsi_14", 50.0)),
+            vwap=float(row.get("vwap", 0.0)),
+            vwap_deviation_pct=float(row.get("vwap_deviation_pct", 0.0)),
+            volume_zscore=float(row.get("volume_zscore", 0.0)),
+            body_pct=float(row.get("body_pct", 0.0)),
+            close_location=float(row.get("close_location", 0.0)),
+            opening_range_position=float(row.get("opening_range_position", 0.5)),
+            trend_quality=float(row.get("trend_quality", 0.0)),
         )

@@ -70,6 +70,23 @@ RISK_CONFIG: dict[str, float | int] = {
     "max_concurrent_positions": 2,
 }
 
+AI_MODEL_CONFIG: dict[str, float | int] = {
+    "min_rule_score": 46.0,
+    "min_rule_confidence": 0.50,
+    "min_option_premium": 1.0,
+    "min_dte_for_long_options": 1,
+    "max_iv_rank_for_buying": 55.0,
+    "high_vix_threshold": 24.0,
+    "late_entry_progress": 0.88,
+}
+
+POLICY_CONFIG: dict[str, float | int] = {
+    "warmup_trades": 12,
+    "min_sampled_r": 0.0,
+    "reward_clip_low": -3.0,
+    "reward_clip_high": 5.0,
+}
+
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 PAPER_ROOT = BACKEND_ROOT / "runtime" / "fractal_market_profile"
 REPLAY_ROOT = PAPER_ROOT / "replays"

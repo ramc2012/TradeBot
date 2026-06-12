@@ -11,8 +11,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from auction_intelligence import live as auction_live
 import api.routers.fractal_market_profile as fmp_router_module
+from fractal_market_profile.ai_model import FMPHybridTradingModel
 from fractal_market_profile.config import SUPPORTED_SYMBOLS
 from fractal_market_profile.paper import FMPPaperStore
+from fractal_market_profile.policy import FMPPolicy
 import fractal_market_profile.service as fmp_service_module
 from fractal_market_profile.service import FractalMarketProfileService
 
@@ -762,6 +764,206 @@ def test_build_signal_detects_balance_extreme_reversion_from_d_shape() -> None:
     assert signal["actionable"] is True
 
 
+def test_fmp_ai_model_scores_aligned_option_packet() -> None:
+    model = FMPHybridTradingModel()
+    signal = {
+        "setup_name": "hourly_ib_breakout_call",
+        "action": "LONG",
+        "confidence": 0.78,
+        "horizon": "swing",
+        "entry_trigger": 22540.0,
+        "stop_level": 22505.0,
+        "target_level": 22620.0,
+        "hourly_shape": "Elongated",
+        "daily_shape": "Elongated",
+        "hourly_number": 3,
+        "value_migration_score": 2,
+        "daily_context": "TREND_UP",
+        "filters": [],
+        "options": {
+            "option_type": "CE",
+            "premium": 186.5,
+            "days_to_expiry": 6,
+            "oi_change": 125000.0,
+            "volume": 450000.0,
+            "pcr_oi": 1.42,
+            "iv_rank": 28.0,
+        },
+        "metadata": {
+            "daily_direction": "bullish",
+            "order_flow_direction": "bullish",
+            "order_flow_alignment": 0.72,
+            "india_vix": 15.0,
+        },
+    }
+    analysis = {
+        "data_status": {
+            "execution_ready": True,
+            "minute_history_ready": True,
+            "order_flow_ready": True,
+            "order_flow_source": "market_ticks",
+        }
+    }
+    order_flow = {
+        "delta": 900.0,
+        "trade_imbalance": 0.24,
+        "book_pressure": 0.18,
+        "toxicity_score": 0.14,
+    }
+
+    evaluation = model.evaluate(signal=signal, analysis=analysis, order_flow=order_flow)
+
+    assert evaluation.allowed is True
+    assert evaluation.score >= 60.0
+    assert evaluation.setup == "profile_breakout_with_flow"
+    assert evaluation.components["profile_alignment"] > 0.6
+
+
+def test_fmp_ai_model_blocks_broken_option_context() -> None:
+    model = FMPHybridTradingModel()
+    signal = {
+        "setup_name": "hourly_ib_breakout_call",
+        "action": "LONG",
+        "confidence": 0.78,
+        "horizon": "swing",
+        "entry_trigger": 22540.0,
+        "stop_level": 22505.0,
+        "target_level": 22620.0,
+        "hourly_shape": "Elongated",
+        "daily_shape": "Elongated",
+        "hourly_number": 3,
+        "value_migration_score": 2,
+        "daily_context": "TREND_UP",
+        "filters": [],
+        "options": {"option_type": "PE", "premium": 0.0, "days_to_expiry": 0},
+        "metadata": {"daily_direction": "bullish", "order_flow_direction": "bullish"},
+    }
+
+    evaluation = model.evaluate(
+        signal=signal,
+        analysis={"data_status": {"execution_ready": True}},
+        order_flow={"delta": 100.0},
+    )
+
+    assert evaluation.allowed is False
+    assert "instrument_premium_invalid" in evaluation.blockers
+    assert "option_direction_mismatch" in evaluation.blockers
+
+
+@pytest.mark.asyncio
+async def test_live_signal_attaches_fmp_ai_policy_payload(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    service = FractalMarketProfileService()
+    service.policy = FMPPolicy(tmp_path / "policy.json", seed=7, config={"warmup_trades": 99})
+
+    async def _fake_option_selection(*_args, **_kwargs):
+        return {
+            "option_type": "CE",
+            "premium": 210.0,
+            "strike": 22500.0,
+            "expiry": "2026-06-28",
+            "pcr_oi": 1.4,
+            "oi_change": 125000.0,
+            "volume": 320000.0,
+            "iv_rank": 28.0,
+            "days_to_expiry": 8,
+            "lot_size": 65,
+        }
+
+    monkeypatch.setattr(service, "_live_option_selection", _fake_option_selection)
+    monkeypatch.setattr(
+        fmp_service_module.sector_tracker,
+        "_get_india_vix",
+        lambda: asyncio.sleep(0, result={"price": 15.0}),
+    )
+    analysis = {
+        "daily_profile": {
+            "shape": "Elongated",
+            "direction_bias": "bullish",
+            "day_type": "TREND_UP",
+            "tick_size": 5.0,
+            "initial_balance_range": 70.0,
+            "daily_ib_ratio": 1.1,
+            "vah": 22590.0,
+            "val": 22480.0,
+            "poc": 22520.0,
+            "single_prints": [22570.0],
+            "high_price": 22630.0,
+            "low_price": 22420.0,
+        },
+        "prior_daily_profile": {
+            "vah": 22490.0,
+            "val": 22420.0,
+            "high_price": 22510.0,
+            "low_price": 22380.0,
+            "single_prints": [22470.0],
+        },
+        "current_hour_profile": _profile(
+            hour_number=2,
+            shape="Elongated",
+            direction_bias="bullish",
+            close_price=22605.0,
+            vah=22595.0,
+            val=22530.0,
+            poc=22570.0,
+            ib_high=22540.0,
+            ib_low=22500.0,
+            score=2,
+            step=1,
+        ),
+        "hourly_profiles": [
+            _profile(
+                hour_number=1,
+                shape="D-shape",
+                direction_bias="bullish",
+                close_price=22532.0,
+                vah=22528.0,
+                val=22488.0,
+                poc=22498.0,
+                ib_high=22520.0,
+                ib_low=22480.0,
+                score=0,
+                step=0,
+            ),
+            _profile(
+                hour_number=2,
+                shape="Elongated",
+                direction_bias="bullish",
+                close_price=22605.0,
+                vah=22595.0,
+                val=22530.0,
+                poc=22570.0,
+                ib_high=22540.0,
+                ib_low=22500.0,
+                score=2,
+                step=1,
+            ),
+        ],
+        "data_status": {
+            "execution_ready": True,
+            "minute_history_ready": True,
+            "order_flow_ready": True,
+            "order_flow_source": "market_ticks",
+        },
+    }
+    order_flow = {
+        "delta": 900.0,
+        "timing_confidence": 0.72,
+        "execution_aggression": "PASSIVE",
+        "source": "market_ticks",
+        "trade_imbalance": 0.24,
+        "book_pressure": 0.18,
+        "toxicity_score": 0.14,
+    }
+
+    signal = await service._build_live_signal("NIFTY", analysis, order_flow)
+
+    assert signal["actionable"] is True
+    assert signal["ai_model"]["allowed"] is True
+    assert signal["ai_model"]["score"] >= 60.0
+    assert signal["policy"]["act"] is True
+    assert signal["policy"]["warmup"] is True
+
+
 @pytest.mark.asyncio
 async def test_paper_store_tracks_open_and_closed_positions(tmp_path: Path) -> None:
     store = FMPPaperStore(tmp_path)
@@ -833,6 +1035,45 @@ async def test_paper_store_tracks_open_and_closed_positions(tmp_path: Path) -> N
     assert summary["closed_positions"] == 1
     assert positions["summary"]["closed_positions"] == 1
     assert positions["closed_positions"][0]["close_reason"] == "flat_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_paper_store_trains_fmp_policy_on_closed_position(tmp_path: Path) -> None:
+    policy = FMPPolicy(tmp_path / "policy.json", seed=11)
+    store = FMPPaperStore(tmp_path / "paper", policy=policy)
+    open_snapshot = _option_open_snapshot(premium=186.5)
+    open_snapshot["current_signal"]["ai_model"] = {
+        "allowed": True,
+        "score": 76.0,
+        "setup": "profile_breakout_with_flow",
+        "blockers": [],
+        "components": {
+            "profile_alignment": 0.8,
+            "auction_structure": 0.74,
+            "order_flow_confirmation": 0.72,
+            "instrument_quality": 0.7,
+            "volatility_risk": 0.8,
+            "execution_timing": 0.9,
+            "data_quality": 1.0,
+        },
+        "features": {"execution_ready": True},
+    }
+    open_snapshot["current_signal"]["policy"] = {
+        "act": True,
+        "sampled_value": 0.2,
+        "posterior_mean": 0.0,
+        "warmup": True,
+    }
+
+    await store.record_signal(open_snapshot)
+    _backdate_open(store, minutes=10)
+    _bump_latest_premium(store, delta=0.5)
+    await store.record_signal(_flat_followup_snapshot())
+
+    positions = await store.list_positions(symbol="NIFTY", status="closed", limit=10)
+    assert policy.snapshot()["n_seen"] == 1
+    assert positions["closed_positions"][0]["policy_reward_r"] > 0.0
+    assert positions["closed_positions"][0]["ai_rule_score"] == 76.0
 
 
 # ── Auto-exit + sticky-level tests for the upgraded FMP paper engine ────────
