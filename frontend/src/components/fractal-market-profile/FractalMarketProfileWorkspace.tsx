@@ -113,6 +113,27 @@ type FMPOptionSelection = {
   days_to_expiry?: number | null;
 };
 
+type FMPAIModel = {
+  allowed?: boolean;
+  score?: number;
+  setup?: string;
+  blockers?: string[];
+  reasons?: string[];
+  components?: Record<string, number>;
+  features?: Record<string, number | string | boolean>;
+};
+
+type FMPPolicy = {
+  act?: boolean;
+  sampled_value?: number;
+  posterior_mean?: number;
+  posterior_var?: number;
+  reason?: string;
+  feature_dim?: number;
+  n_seen?: number;
+  warmup?: boolean;
+};
+
 type FMPSignal = {
   signal_time?: string;
   setup_name: string;
@@ -132,10 +153,17 @@ type FMPSignal = {
   rationale: string[];
   filters: string[];
   options?: FMPOptionSelection | null;
+  ai_model?: FMPAIModel | null;
+  policy?: FMPPolicy | null;
   metadata?: {
     daily_direction?: string;
     order_flow_direction?: string;
     order_flow_alignment?: number;
+    ai_rule_score?: number;
+    ai_rule_setup?: string;
+    policy_expected_r?: number;
+    policy_sampled_r?: number;
+    policy_seen?: number;
   };
 };
 
@@ -222,6 +250,14 @@ type FMPPaperPosition = {
   daily_shape: string;
   hourly_shape: string;
   close_reason?: string | null;
+  ai_rule_score?: number | null;
+  ai_rule_setup?: string | null;
+  ai_rule_blockers?: string[];
+  policy_act?: boolean | null;
+  policy_sampled_r?: number | null;
+  policy_expected_r?: number | null;
+  policy_warmup?: boolean | null;
+  policy_reward_r?: number | null;
 };
 
 type FMPJournalRecord = {
@@ -241,6 +277,8 @@ type FMPJournalRecord = {
   filters?: string[];
   rationale?: string[];
   options?: FMPOptionSelection | null;
+  ai_model?: FMPAIModel | null;
+  policy?: FMPPolicy | null;
   actionable?: boolean;
 };
 
@@ -1597,6 +1635,8 @@ const TerminalTelemetryPanel = memo(function TerminalTelemetryPanel({
     { label: "POOR EXTREMES", value: `${profile?.poor_high ? "PH" : "—"} / ${profile?.poor_low ? "PL" : "—"}`, hot: Boolean(profile?.poor_high || profile?.poor_low) },
     { label: "MIGRATION", value: formatSignedNumber(signal?.value_migration_score, 0), hot: Math.abs(signal?.value_migration_score ?? 0) >= 2 },
     { label: "FLOW ALIGN", value: formatPercent(signal?.metadata?.order_flow_alignment, 0), hot: (signal?.metadata?.order_flow_alignment ?? 0) >= 0.6 },
+    { label: "AI RULE", value: signal?.ai_model ? `${formatPrice(signal.ai_model.score, 0)} / ${signal.ai_model.allowed ? "PASS" : "BLOCK"}` : "—", hot: Boolean(signal?.ai_model?.allowed) },
+    { label: "RL GATE", value: signal?.policy ? `${signal.policy.act ? "ACT" : "SKIP"} · ${formatSignedNumber(signal.policy.posterior_mean, 2)}R` : "—", hot: Boolean(signal?.policy?.act) },
     { label: "QUEUE PRESS", value: formatSignedNumber(orderFlow?.queue_pressure, 2), hot: Math.abs(orderFlow?.queue_pressure ?? 0) > 0.35 },
     { label: "TOXICITY", value: formatPercent(orderFlow?.toxicity_score, 0), hot: (orderFlow?.toxicity_score ?? 0) >= 0.55 },
   ];
@@ -1646,6 +1686,10 @@ const AgentFeatureTape = memo(function AgentFeatureTape({
     { key: "signal_action", value: signal?.action ?? "FLAT", source: "signal" },
     { key: "signal_confidence", value: formatPercent(signal?.confidence, 0), source: "signal" },
     { key: "flow_alignment", value: formatPercent(signal?.metadata?.order_flow_alignment, 0), source: "signal" },
+    { key: "ai_rule_score", value: signal?.ai_model ? formatPrice(signal.ai_model.score, 1) : "—", source: "ai_model" },
+    { key: "ai_rule_setup", value: signal?.ai_model?.setup ?? "—", source: "ai_model" },
+    { key: "policy_action", value: signal?.policy ? (signal.policy.act ? "ACT" : "SKIP") : "—", source: "policy" },
+    { key: "policy_expected_r", value: signal?.policy ? formatSignedNumber(signal.policy.posterior_mean, 3) : "—", source: "policy" },
     { key: "book_pressure", value: formatSignedNumber(orderFlow?.book_pressure, 2), source: "order_flow" },
     { key: "trade_imbalance", value: formatRawPercent((orderFlow?.trade_imbalance ?? 0) * 100, 1), source: "order_flow" },
     { key: "option_contract", value: signal?.options?.trading_symbol ?? "—", source: "options" },
@@ -2089,6 +2133,10 @@ export default function FractalMarketProfileWorkspace() {
   );
 
   const profileContext = live?.current_signal;
+  const aiGateActs = Boolean(profileContext?.policy?.act ?? profileContext?.ai_model?.allowed ?? false);
+  const aiGateValue = profileContext?.ai_model
+    ? `${formatPrice(profileContext.ai_model.score, 0)} · ${aiGateActs ? "ACT" : "SKIP"}`
+    : "—";
   const replayCards = useMemo(
     () => replaySuite?.reports ?? summaryQuery.data?.replay_reports ?? [],
     [replaySuite?.reports, summaryQuery.data?.replay_reports],
@@ -2187,7 +2235,7 @@ export default function FractalMarketProfileWorkspace() {
         </div>
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-6">
+      <section className="grid gap-4 xl:grid-cols-7">
         <MetricTile
           label="Current setup"
           value={(profileContext?.setup_name ?? "waiting").replaceAll("_", " ")}
@@ -2216,6 +2264,12 @@ export default function FractalMarketProfileWorkspace() {
           value={activeReplay ? `${activeReplay.metrics.profit_factor?.toFixed(2) ?? "—"} PF` : "—"}
           detail={activeReplay ? `${activeReplay.metrics.trade_count} trades · net ${formatSignedCurrency(activeReplay.metrics.net_pnl)}` : "Replay suite not loaded yet."}
           tone={activeReplay && (activeReplay.metrics.profit_factor ?? 0) >= 1.4 ? "text-emerald-200" : "text-slate-100"}
+        />
+        <MetricTile
+          label="AI gate"
+          value={aiGateValue}
+          detail={profileContext?.policy?.reason ?? profileContext?.ai_model?.setup?.replaceAll("_", " ") ?? "No AI gate payload on this packet."}
+          tone={aiGateActs ? "text-emerald-200" : "text-amber-200"}
         />
         <MetricTile
           label="Options mapping"
@@ -2271,6 +2325,11 @@ export default function FractalMarketProfileWorkspace() {
                 label="Order-flow alignment"
                 value={formatPercent(profileContext?.metadata?.order_flow_alignment, 0)}
                 hint={`${profileContext?.metadata?.order_flow_direction ?? "neutral"} flow vs ${profileContext?.metadata?.daily_direction ?? "neutral"} daily bias`}
+              />
+              <MetricRow
+                label="AI / RL gate"
+                value={aiGateValue}
+                hint={profileContext?.policy?.reason ?? profileContext?.ai_model?.blockers?.join(", ") ?? "No learned policy decision on this packet."}
               />
             </div>
 

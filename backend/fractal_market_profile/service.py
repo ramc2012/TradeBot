@@ -27,6 +27,7 @@ from brokers.base import Tick
 from core.config import settings
 from db.database import AsyncSessionLocal
 from fractal_market_profile.config import (
+    AI_MODEL_CONFIG,
     FORCE_EXIT_TIME,
     INDEX_APP_SYMBOLS,
     IST,
@@ -46,7 +47,9 @@ from fractal_market_profile.config import (
     SUPPORTED_SYMBOLS,
     analytics_root,
 )
+from fractal_market_profile.ai_model import FMPHybridTradingModel
 from fractal_market_profile.paper import FMPPaperStore
+from fractal_market_profile.policy import get_policy
 from fractal_market_profile.schemas import FMPOptionSelection, FMPReplayTrade
 from market_data import atm_watchlist_service, data_router as market_data_router, market_intelligence_runtime, option_chain_service
 
@@ -555,7 +558,9 @@ class HistoricalOptionRepository:
 
 class FractalMarketProfileService:
     def __init__(self) -> None:
-        self.paper = FMPPaperStore(PAPER_ROOT)
+        self.ai_model = FMPHybridTradingModel(AI_MODEL_CONFIG)
+        self.policy = get_policy(PAPER_ROOT / "policy_state.json")
+        self.paper = FMPPaperStore(PAPER_ROOT, policy=self.policy)
         self.option_repo = HistoricalOptionRepository(analytics_root())
         self.order_flow = OrderFlowEngine(
             {
@@ -913,6 +918,7 @@ class FractalMarketProfileService:
             "auto_started": bool(automation.get("enabled") and automation.get("loop_active")),
             "automation": automation,
             "paper_summary": positions["summary"],
+            "policy": self.policy.snapshot(),
             "replay_reports": replay_reports,
         }
         encoded_payload = jsonable_encoder(payload)
@@ -1293,7 +1299,71 @@ class FractalMarketProfileService:
             and not filters
             and float(signal["confidence"]) >= float(SCAN_CONFIG["actionable_confidence_min"])
         )
+        self._apply_ai_trade_model(signal, analysis=analysis, order_flow=order_flow)
         return signal
+
+    def _apply_ai_trade_model(
+        self,
+        signal: dict[str, Any],
+        *,
+        analysis: dict[str, Any],
+        order_flow: dict[str, Any],
+    ) -> None:
+        if str(signal.get("action") or "").upper() == "FLAT":
+            return
+        metadata = dict(signal.get("metadata") or {})
+        filters = list(signal.get("filters") or [])
+        rationale = list(signal.get("rationale") or [])
+        evaluation = self.ai_model.evaluate(
+            signal=signal,
+            analysis=analysis,
+            order_flow=order_flow,
+        )
+        ai_payload = evaluation.to_payload()
+        signal["ai_model"] = ai_payload
+        metadata["ai_rule_score"] = ai_payload["score"]
+        metadata["ai_rule_setup"] = ai_payload["setup"]
+        if evaluation.reasons:
+            for reason in evaluation.reasons:
+                message = f"AI rule model: {reason}."
+                if message not in rationale:
+                    rationale.append(message)
+
+        if not evaluation.allowed:
+            signal["actionable"] = False
+            blocker_text = ", ".join(evaluation.blockers[:3]) or "rule_gate"
+            filter_message = f"AI rule gate blocked this FMP packet ({blocker_text})."
+            if filter_message not in filters:
+                filters.append(filter_message)
+            signal["filters"] = filters
+            signal["rationale"] = rationale
+            signal["metadata"] = metadata
+            return
+
+        if not bool(signal.get("actionable")):
+            signal["filters"] = filters
+            signal["rationale"] = rationale
+            signal["metadata"] = metadata
+            return
+
+        decision = self.policy.decide(signal=signal)
+        policy_payload = decision.to_payload()
+        signal["policy"] = policy_payload
+        metadata["policy_expected_r"] = policy_payload["posterior_mean"]
+        metadata["policy_sampled_r"] = policy_payload["sampled_value"]
+        metadata["policy_seen"] = policy_payload["n_seen"]
+        if not decision.act:
+            signal["actionable"] = False
+            filter_message = "RL policy skipped this FMP packet."
+            if filter_message not in filters:
+                filters.append(filter_message)
+        else:
+            message = f"RL policy: {decision.reason}."
+            if message not in rationale:
+                rationale.append(message)
+        signal["filters"] = filters
+        signal["rationale"] = rationale
+        signal["metadata"] = metadata
 
     async def _live_futures_selection(
         self,

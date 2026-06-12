@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 import asyncio
-import json
 import sys
 import types
 
@@ -11,14 +10,68 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from directional_options.ai_model import HybridDirectionalOptionsModel
 from directional_options.config import clone_default_config
 from directional_options.dashboard import mount_directional_options_dashboard
+from directional_options.features import FeatureEngine
 from directional_options.paper import DirectionalOptionsPaperStore
+from directional_options.policy import EXPECTED_FEATURE_DIM, reset_policy_for_tests
 from directional_options.regime import RegimeClassifier
 from directional_options.risk import DirectionalOptionsRiskEngine
 from directional_options.schemas import ContractCandidate, DashboardMountState, DirectionalSignal, RegimeSnapshot
 from directional_options.service import DirectionalOptionsService
 from directional_options.signals import DirectionalSignalEngine
+
+
+def _isolate_directional_paper_store(
+    store: DirectionalOptionsPaperStore,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    initial_state: dict[str, list] | None = None,
+) -> dict[str, list]:
+    state: dict[str, list] = {
+        "open_positions": [dict(row) for row in (initial_state or {}).get("open_positions", [])],
+        "closed_positions": [dict(row) for row in (initial_state or {}).get("closed_positions", [])],
+    }
+
+    async def _load_positions() -> dict[str, list]:
+        return {
+            "open_positions": [dict(row) for row in state["open_positions"]],
+            "closed_positions": [dict(row) for row in state["closed_positions"]],
+        }
+
+    async def _save_positions(payload: dict) -> None:
+        state["open_positions"] = [dict(row) for row in payload.get("open_positions", [])]
+        state["closed_positions"] = [dict(row) for row in payload.get("closed_positions", [])]
+
+    async def _load_journal() -> list[dict]:
+        return []
+
+    async def _append_journal(_payload: dict) -> None:
+        return None
+
+    async def _summary(open_positions: list[dict], closed_positions: list[dict]) -> dict:
+        realized = sum(float(row.get("realized_pnl") or 0.0) for row in closed_positions)
+        unrealized = sum(float(row.get("unrealized_pnl") or 0.0) for row in open_positions)
+        return {
+            "open_positions": len(open_positions),
+            "closed_positions": len(closed_positions),
+            "realized_pnl": round(realized, 2),
+            "unrealized_pnl": round(unrealized, 2),
+        }
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(store, "_load_positions", _load_positions)
+    monkeypatch.setattr(store, "_save_positions", _save_positions)
+    monkeypatch.setattr(store, "_load_journal", _load_journal)
+    monkeypatch.setattr(store, "_append_journal", _append_journal)
+    monkeypatch.setattr(store, "_summary", _summary)
+    monkeypatch.setattr("directional_options.paper.paper_trade_recorder.record_event", _noop)
+    monkeypatch.setattr("directional_options.chain_analytics.ensure_chain_tracked", _noop)
+    monkeypatch.setattr("directional_options.chain_analytics.chain_strike_mark", _noop)
+    return state
 
 
 def test_regime_classifier_marks_chop_as_no_trade() -> None:
@@ -78,6 +131,206 @@ def test_signal_engine_generates_bullish_signal_in_trend_regime() -> None:
     # capped at the engine's MAX_SIGNAL_CONFIDENCE ceiling.
     from directional_options.signals import MAX_SIGNAL_CONFIDENCE
     assert 0.0 < signal.confidence <= MAX_SIGNAL_CONFIDENCE
+
+
+def test_feature_engine_adds_ai_model_spot_indicators() -> None:
+    engine = FeatureEngine(clone_default_config()["feature_engine"])
+    times = pd.date_range("2026-04-21T09:15:00+05:30", periods=120, freq="1min")
+    rows = []
+    for idx, ts in enumerate(times):
+        close = 24_000.0 + idx * 2.0 + (idx % 5) * 0.4
+        rows.append(
+            {
+                "time": ts,
+                "open": close - 1.5,
+                "high": close + 4.0,
+                "low": close - 4.0,
+                "close": close,
+                "volume": 10_000 + idx * 25,
+                "oi": 100_000,
+            }
+        )
+    frame = engine.build_frame(pd.DataFrame(rows), "1minute")
+    snapshot = engine.snapshot(frame.iloc[-1])
+
+    assert "macd_hist_pct" in frame.columns
+    assert "vwap_deviation_pct" in frame.columns
+    assert "trend_quality" in frame.columns
+    assert snapshot.rsi_14 > 50.0
+    assert snapshot.trend_quality >= 0.0
+
+
+def test_hybrid_ai_model_scores_rules_for_directional_option_candidate() -> None:
+    model = HybridDirectionalOptionsModel(clone_default_config()["ai_model"])
+    row = {
+        "ema_spread_pct": 0.004,
+        "ema_fast_slope_pct": 0.0018,
+        "plus_di": 32.0,
+        "minus_di": 14.0,
+        "momentum_3": 0.005,
+        "momentum_8": 0.009,
+        "macd_hist_pct": 0.001,
+        "rsi_14": 64.0,
+        "vwap_deviation_pct": 0.002,
+        "trend_quality": 0.74,
+        "breakout_up": 0.8,
+        "breakout_down": 0.0,
+        "range_expansion": 1.35,
+        "close_location": 0.72,
+        "opening_range_position": 1.18,
+        "body_pct": 0.003,
+        "rv_percentile": 0.48,
+        "atr_pct": 0.004,
+        "volume_zscore": 1.1,
+        "session_progress": 0.35,
+    }
+    signal = {
+        "direction": "CE",
+        "confidence": 0.76,
+        "expected_move_pct": 0.004,
+    }
+    candidate = {
+        "option_type": "CE",
+        "option_price": 120.0,
+        "spread_pct": 0.03,
+        "liquidity_score": 0.88,
+        "delta": 0.48,
+        "days_to_expiry": 4.0,
+        "theta_penalty": 0.04,
+        "timing_fit": 0.72,
+        "probability_of_profit": 0.56,
+        "p_trading_edge": 24.0,
+        "p_terminal_edge": 14.0,
+        "p_minus_q_tail": 0.08,
+        "expected_return_on_premium": 0.18,
+    }
+
+    allowed = model.evaluate(row=row, signal=signal, regime={"label": "trend"}, candidate=candidate)
+    blocked = model.evaluate(
+        row=row,
+        signal=signal,
+        regime={"label": "trend"},
+        candidate={**candidate, "option_type": "PE", "spread_pct": 0.45},
+    )
+
+    assert allowed.allowed is True
+    assert allowed.score > 50.0
+    assert allowed.components["spot_trend"] > 0.6
+    assert blocked.allowed is False
+    assert "direction_mismatch" in blocked.blockers
+
+
+def test_service_policy_pick_exposes_hybrid_model_payload(tmp_path) -> None:
+    reset_policy_for_tests()
+    config = clone_default_config()
+    config["data_root"] = tmp_path / "runtime-data"
+    config["paper_trading"]["journal_root"] = tmp_path / "paper"
+    config["rl_policy"]["state_path"] = tmp_path / "policy_state.json"
+    service = DirectionalOptionsService(config)
+    regime = RegimeSnapshot(
+        label="trend",
+        trade_allowed=True,
+        confidence=0.74,
+        reasons=["trend"],
+        preferred_expiry_kind="weekly",
+        delta_target_min=0.35,
+        delta_target_max=0.55,
+        exit_profile="balanced",
+    )
+    signal = DirectionalSignal(
+        direction="CE",
+        confidence=0.76,
+        expected_move=95.0,
+        expected_horizon_bars=6,
+        expected_horizon_hours=0.5,
+        direction_score=0.9,
+        expected_iv_change=0.002,
+        sleeve="swing_trend",
+        thesis="test",
+        regime="trend",
+        expected_move_pct=0.004,
+        p_up=0.76,
+        jump_score=0.35,
+        timing_precision=0.70,
+        tail_probability=0.40,
+        model_uncertainty=0.12,
+    )
+    candidate = ContractCandidate(
+        trading_symbol="NIFTY TEST CE",
+        file_path="contracts/test.csv.gz",
+        option_type="CE",
+        expiry="2026-04-30",
+        expiry_kind="weekly",
+        strike=25000.0,
+        lot_size=75,
+        tick_size=5.0,
+        option_price=120.0,
+        volume=2_500.0,
+        oi=25_000.0,
+        days_to_expiry=4.0,
+        moneyness_pct=0.002,
+        implied_vol=0.22,
+        delta=0.48,
+        gamma=0.0005,
+        theta=-18.0,
+        vega=10.0,
+        delta_bucket="core",
+        liquidity_score=0.92,
+        iv_value_score=0.64,
+        theta_penalty=0.02,
+        spread_pct=0.03,
+        slippage_pct=0.01,
+        spread_cost=3.6,
+        slippage_cost=1.2,
+        fees=0.9,
+        expected_pnl=18.0,
+        contract_score=47.0,
+        selection_reason="synthetic candidate",
+        p_trading_edge=20.0,
+        p_terminal_edge=12.0,
+        p_minus_q_tail=0.07,
+        probability_of_profit=0.55,
+        timing_fit=0.7,
+        expected_return_on_premium=0.16,
+    )
+    row = {
+        "ema_spread_pct": 0.004,
+        "ema_fast_slope_pct": 0.0018,
+        "plus_di": 32.0,
+        "minus_di": 14.0,
+        "momentum_3": 0.005,
+        "momentum_8": 0.009,
+        "macd_hist_pct": 0.001,
+        "rsi_14": 64.0,
+        "vwap_deviation_pct": 0.002,
+        "trend_quality": 0.74,
+        "breakout_up": 0.8,
+        "range_expansion": 1.35,
+        "close_location": 0.72,
+        "opening_range_position": 1.18,
+        "body_pct": 0.003,
+        "rv_percentile": 0.48,
+        "atr_pct": 0.004,
+        "volume_zscore": 1.1,
+        "session_progress": 0.35,
+    }
+
+    try:
+        chosen, payload = service._policy_pick(
+            signal=signal,
+            regime=regime,
+            row=row,
+            candidates=[candidate],
+            default=candidate,
+        )
+
+        assert chosen is candidate
+        assert payload is not None
+        assert payload["feature_dim"] == EXPECTED_FEATURE_DIM
+        assert payload["model"]["type"] == "hybrid_rules_bayesian_bandit"
+        assert payload["candidate_rules"][0]["allowed"] is True
+    finally:
+        reset_policy_for_tests()
 
 
 def test_risk_engine_caps_size_on_daily_loss_breach() -> None:
@@ -466,8 +719,12 @@ def test_live_snapshot_selector_uses_front_expiry_when_monthly_is_nearest() -> N
 
 
 @pytest.mark.asyncio
-async def test_directional_options_paper_store_tracks_open_and_closed_positions(tmp_path: Path) -> None:
+async def test_directional_options_paper_store_tracks_open_and_closed_positions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     store = DirectionalOptionsPaperStore(tmp_path / "directional-paper")
+    _isolate_directional_paper_store(store, monkeypatch)
     open_payload = {
         "selection": {
             "underlying": "NIFTY",
@@ -546,37 +803,43 @@ async def test_directional_options_paper_store_tracks_open_and_closed_positions(
 
     assert closed_summary["open_positions"] == 0
     assert closed_summary["closed_positions"] == 1
-    assert closed_positions["closed_positions"][0]["realized_pnl"] == pytest.approx((146.0 - 132.0) * 75)
+    assert closed_positions["closed_positions"][0]["realized_pnl_gross"] == pytest.approx((146.0 - 132.0) * 75)
+    assert closed_positions["closed_positions"][0]["realized_pnl"] < closed_positions["closed_positions"][0]["realized_pnl_gross"]
 
 
 @pytest.mark.asyncio
-async def test_directional_options_paper_store_reports_current_nifty_monthly_expiry(tmp_path: Path) -> None:
+async def test_directional_options_paper_store_reports_current_nifty_monthly_expiry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     store = DirectionalOptionsPaperStore(tmp_path / "directional-paper")
-    store.positions_path.parent.mkdir(parents=True, exist_ok=True)
-    store.positions_path.write_text(json.dumps({
-        "last_synced_at": "2026-05-19T09:35:00+00:00",
-        "open_positions": [
-            {
-                "position_id": "stale-nifty-expiry",
-                "status": "open",
-                "opened_at": "2026-05-19T09:30:00+00:00",
-                "updated_at": "2026-05-19T09:35:00+00:00",
-                "underlying": "NIFTY",
-                "trading_symbol": "NSE:NIFTY2651923700PE",
-                "instrument_key": "NSE:NIFTY2651923700PE",
-                "option_type": "PE",
-                "expiry": "2026-05-28",
-                "expiry_kind": "weekly",
-                "strike": 23700.0,
-                "quantity_units": 75,
-                "entry_premium": 132.0,
-                "latest_premium": 144.0,
-                "unrealized_pnl": 900.0,
-                "realized_pnl": 0.0,
-            }
-        ],
-        "closed_positions": [],
-    }))
+    _isolate_directional_paper_store(
+        store,
+        monkeypatch,
+        initial_state={
+            "open_positions": [
+                {
+                    "position_id": "stale-nifty-expiry",
+                    "status": "open",
+                    "opened_at": "2026-05-19T09:30:00+00:00",
+                    "updated_at": "2026-05-19T09:35:00+00:00",
+                    "underlying": "NIFTY",
+                    "trading_symbol": "NSE:NIFTY2651923700PE",
+                    "instrument_key": "NSE:NIFTY2651923700PE",
+                    "option_type": "PE",
+                    "expiry": "2026-05-28",
+                    "expiry_kind": "weekly",
+                    "strike": 23700.0,
+                    "quantity_units": 75,
+                    "entry_premium": 132.0,
+                    "latest_premium": 144.0,
+                    "unrealized_pnl": 900.0,
+                    "realized_pnl": 0.0,
+                }
+            ],
+            "closed_positions": [],
+        },
+    )
 
     positions = await store.list_positions(symbol="NIFTY", status="open", limit=10)
     row = positions["open_positions"][0]

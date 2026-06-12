@@ -46,12 +46,13 @@ def _parse_iso_date(value: Any) -> Optional[date]:
 
 
 class FMPPaperStore:
-    def __init__(self, root: Path | str = PAPER_ROOT):
+    def __init__(self, root: Path | str = PAPER_ROOT, *, policy: Any | None = None):
         self.root = Path(root)
         if not self.root.is_absolute():
             self.root = Path(__file__).resolve().parent.parent / self.root
         self.journal_path = self.root / "paper_journal.jsonl"
         self.positions_path = self.root / "paper_positions.json"
+        self.policy = policy
         self._lock = asyncio.Lock()
 
     async def list_journal(self, symbol: str | None = None, limit: int = 50) -> dict[str, Any]:
@@ -120,6 +121,8 @@ class FMPPaperStore:
             "options": signal.get("options"),
             "order_flow_bias": signal.get("order_flow_bias"),
             "actionable": bool(signal.get("actionable")),
+            "ai_model": signal.get("ai_model"),
+            "policy": signal.get("policy"),
         }
         self._append_journal(entry)
 
@@ -327,10 +330,30 @@ class FMPPaperStore:
                         hourly_shape=str(signal.get("hourly_shape") or ""),
                     )
                 )
+                ai_model = signal.get("ai_model") if isinstance(signal.get("ai_model"), dict) else {}
+                policy_payload = signal.get("policy") if isinstance(signal.get("policy"), dict) else {}
+                if ai_model:
+                    new_position["ai_rule_score"] = ai_model.get("score")
+                    new_position["ai_rule_setup"] = ai_model.get("setup")
+                    new_position["ai_rule_blockers"] = list(ai_model.get("blockers") or [])
+                if policy_payload:
+                    new_position["policy_act"] = bool(policy_payload.get("act"))
+                    new_position["policy_sampled_r"] = policy_payload.get("sampled_value")
+                    new_position["policy_expected_r"] = policy_payload.get("posterior_mean")
+                    new_position["policy_warmup"] = bool(policy_payload.get("warmup"))
                 if spot_price is not None:
                     new_position["latest_spot_price"] = spot_price
                     new_position["entry_spot_price"] = spot_price
                 open_positions.append(new_position)
+                if self.policy is not None:
+                    try:
+                        self.policy.register_open(
+                            position_id=str(new_position.get("position_id") or ""),
+                            signal=signal,
+                            risk_basis=self._risk_basis(new_position),
+                        )
+                    except Exception:
+                        pass
                 try:
                     await paper_trade_recorder.record_event(
                         strategy="fractal_market_profile",
@@ -492,6 +515,16 @@ class FMPPaperStore:
             row["exit_premium"] = exit_premium
         row["realized_pnl"] = self._pnl(row, row.get("exit_premium"))
         row["unrealized_pnl"] = 0.0
+        if self.policy is not None:
+            try:
+                reward = self.policy.record_close(
+                    position_id=str(row.get("position_id") or ""),
+                    realized_pnl=float(row.get("realized_pnl") or 0.0),
+                )
+                if reward is not None:
+                    row["policy_reward_r"] = round(float(reward), 6)
+            except Exception:
+                pass
         try:
             await paper_trade_recorder.record_event(
                 strategy="fractal_market_profile",
@@ -566,6 +599,19 @@ class FMPPaperStore:
         if str(row.get("instrument_type") or row.get("option_type") or "").upper() == "FUT" and str(row.get("action") or "").upper() == "SHORT":
             return round((entry - latest) * quantity, 2)
         return round((latest - entry) * quantity, 2)
+
+    def _risk_basis(self, row: dict[str, Any]) -> float:
+        try:
+            entry = float(row.get("entry_premium") or 0.0)
+            quantity = int(row.get("quantity") or 0)
+        except (TypeError, ValueError):
+            return 1.0
+        if str(row.get("instrument_type") or row.get("option_type") or "").upper() == "FUT":
+            stop = _as_float(row.get("stop_level"))
+            if stop is not None and stop > 0 and entry > 0:
+                return max(abs(entry - stop) * quantity, 1.0)
+            return max(entry * quantity * 0.01, 1.0)
+        return max(entry * quantity, 1.0)
 
     def _summary(self, open_positions: list[dict[str, Any]], closed_positions: list[dict[str, Any]]) -> dict[str, Any]:
         realized = round(sum(float(row.get("realized_pnl") or 0.0) for row in closed_positions), 2)

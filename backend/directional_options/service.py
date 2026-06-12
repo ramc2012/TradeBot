@@ -13,6 +13,7 @@ import pandas as pd
 from agentic_rag import ContextGateRequest, rag_service
 from analysis.signal_classifier import classify_status_bucket
 from core.config import settings
+from directional_options.ai_model import HybridDirectionalOptionsModel
 from directional_options.backtest import DirectionalOptionsBacktester
 from directional_options.chain_analytics import ensure_chain_tracked, fetch_chain_analytics
 from directional_options.config import clone_default_config
@@ -36,6 +37,7 @@ class DirectionalOptionsService:
         self.feature_engine = FeatureEngine(self.config["feature_engine"])
         self.regime = RegimeClassifier()
         self.signals = DirectionalSignalEngine(self.config["signal_engine"])
+        self.ai_model = HybridDirectionalOptionsModel(self.config.get("ai_model") or {})
         self.selector = OptionSelectionEngine(self.store, self.config["selector"])
         self.risk = DirectionalOptionsRiskEngine(self.config["risk"])
         rl_cfg = self.config.get("rl_policy") or {}
@@ -76,6 +78,7 @@ class DirectionalOptionsService:
             selector=self.selector,
             risk=self.risk,
             config=self.config,
+            ai_model=self.ai_model,
         )
         self._summary_cache: dict[str, Any] = {"payload": None, "expires_at": 0.0}
         self._live_cache_ttl_seconds = 30.0
@@ -415,17 +418,19 @@ class DirectionalOptionsService:
                 timeframe=timeframe,
             )
             selection_reason = selection["reason"]
-            candidates_payload = [asdict(item) for item in selection["candidates"]]
             chosen, policy_payload = self._policy_pick(
                 signal=signal,
                 regime=regime,
+                row=row,
                 candidates=selection["candidates"] or ([selection["best"]] if selection["best"] is not None else []),
                 default=selection["best"],
             )
+            candidates_payload = self._candidate_payloads(selection["candidates"], policy_payload)
             size_mult = float((policy_payload or {}).get("size_multiplier", 1.0))
             policy_act = bool((policy_payload or {}).get("act", True))
             if chosen is not None:
                 candidate_payload = asdict(chosen)
+                self._attach_selected_candidate_model(candidate_payload, policy_payload)
                 risk_payload = asdict(
                     self.risk.approve(
                         candidate=chosen,
@@ -626,7 +631,6 @@ class DirectionalOptionsService:
             )
             if not option_snapshot_lookup_failed:
                 selection_reason = selection["reason"]
-            candidates_payload = [asdict(item) for item in selection["candidates"]]
             # Pull chain analytics for the selected expiry. Fire-and-
             # tolerate-failure: a missing chain payload just means the
             # policy gets sentinel zeros for chain features and falls
@@ -670,15 +674,18 @@ class DirectionalOptionsService:
                     self._policy_pick,
                     signal=signal,
                     regime=regime,
+                    row=row,
                     candidates=selection["candidates"] or ([selection["best"]] if selection["best"] is not None else []),
                     default=selection["best"],
                     chain=chain_payload,
                 )
             )
+            candidates_payload = self._candidate_payloads(selection["candidates"], policy_payload)
             size_mult = float((policy_payload or {}).get("size_multiplier", 1.0))
             policy_act = bool((policy_payload or {}).get("act", True))
             if chosen is not None:
                 candidate_payload = asdict(chosen)
+                self._attach_selected_candidate_model(candidate_payload, policy_payload)
                 risk_payload = asdict(
                     self.risk.approve(
                         candidate=chosen,
@@ -736,6 +743,7 @@ class DirectionalOptionsService:
         *,
         signal,
         regime,
+        row,
         candidates: list,
         default,
         chain: dict[str, Any] | None = None,
@@ -751,7 +759,18 @@ class DirectionalOptionsService:
             return default, None
         signal_dict = asdict(signal)
         regime_dict = asdict(regime)
-        candidates_dicts = [asdict(c) for c in candidates]
+        candidates_dicts: list[dict[str, Any]] = []
+        for candidate in candidates:
+            candidate_dict = asdict(candidate)
+            rule_payload = self.ai_model.evaluate(
+                row=row,
+                signal=signal_dict,
+                regime=regime_dict,
+                candidate=candidate_dict,
+                chain=chain,
+            ).to_payload()
+            candidate_dict["ai_model"] = rule_payload
+            candidates_dicts.append(candidate_dict)
         best_idx, samples = self.policy.rank_candidates(
             signal=signal_dict,
             candidates=candidates_dicts,
@@ -760,6 +779,13 @@ class DirectionalOptionsService:
         )
         if best_idx is None:
             return default, None
+        eligible = [
+            idx
+            for idx, candidate in enumerate(candidates_dicts)
+            if bool((candidate.get("ai_model") or {}).get("allowed"))
+        ]
+        if eligible and not bool((candidates_dicts[best_idx].get("ai_model") or {}).get("allowed")):
+            best_idx = max(eligible, key=lambda idx: samples[idx] if idx < len(samples) else float("-inf"))
         chosen = candidates[best_idx]
         decision = self.policy.decide(
             signal=signal_dict,
@@ -767,20 +793,64 @@ class DirectionalOptionsService:
             regime=regime_dict,
             chain=chain,
         )
+        rule_payload = dict(candidates_dicts[best_idx].get("ai_model") or {})
+        rule_allowed = bool(rule_payload.get("allowed", True))
+        act = bool(decision.act) and rule_allowed
+        reason = decision.reason
+        if not rule_allowed:
+            blockers = ", ".join(str(item) for item in (rule_payload.get("blockers") or []))
+            reason = f"rules blocked candidate ({blockers or 'rule gate'}); {decision.reason}"
         payload = {
-            "act": bool(decision.act),
+            "act": act,
             "size_multiplier": float(decision.size_multiplier),
             "sampled_value": float(decision.sampled_value),
             "posterior_mean": float(decision.posterior_mean),
             "posterior_var": float(decision.posterior_var),
-            "reason": decision.reason,
+            "reason": reason,
             "n_seen": int(decision.n_seen),
             "feature_dim": int(decision.feature_dim),
             "candidate_index": int(best_idx),
             "candidate_samples": [float(s) for s in samples],
             "size_samples": {f"{m:.2f}": float(v) for m, v in decision.size_samples.items()},
+            "model": {
+                "type": "hybrid_rules_bayesian_bandit",
+                "rule_allowed": rule_allowed,
+                "rule_score": rule_payload.get("score"),
+                "rule_setup": rule_payload.get("setup"),
+                "rule_blockers": rule_payload.get("blockers") or [],
+                "rule_components": rule_payload.get("components") or {},
+            },
+            "candidate_rules": [dict(item.get("ai_model") or {}) for item in candidates_dicts],
         }
         return chosen, payload
+
+    @staticmethod
+    def _candidate_payloads(candidates: list, policy_payload: dict[str, Any] | None) -> list[dict[str, object]]:
+        payloads = [asdict(item) for item in candidates]
+        if not policy_payload:
+            return payloads
+        rules = list(policy_payload.get("candidate_rules") or [])
+        samples = list(policy_payload.get("candidate_samples") or [])
+        selected_idx = policy_payload.get("candidate_index")
+        for idx, payload in enumerate(payloads):
+            if idx < len(rules):
+                payload["ai_model"] = rules[idx]
+            if idx < len(samples):
+                payload["policy_sample"] = float(samples[idx])
+            payload["policy_selected"] = idx == selected_idx
+        return payloads
+
+    @staticmethod
+    def _attach_selected_candidate_model(
+        candidate_payload: dict[str, object],
+        policy_payload: dict[str, Any] | None,
+    ) -> None:
+        if not policy_payload:
+            return
+        selected_idx = policy_payload.get("candidate_index")
+        rules = list(policy_payload.get("candidate_rules") or [])
+        if isinstance(selected_idx, int) and 0 <= selected_idx < len(rules):
+            candidate_payload["ai_model"] = rules[selected_idx]
 
     def _build_rag_context(
         self,
@@ -844,6 +914,7 @@ class DirectionalOptionsService:
         risk_payload: dict[str, Any] | None,
         data_context: dict[str, Any],
     ) -> ContextGateRequest:
+        ai_model = candidate.get("ai_model") if isinstance(candidate.get("ai_model"), dict) else {}
         numeric_context = {
             **data_context,
             "confidence": getattr(signal, "confidence", None),
@@ -867,6 +938,8 @@ class DirectionalOptionsService:
             "timing_fit": candidate.get("timing_fit"),
             "expected_return_on_premium": candidate.get("expected_return_on_premium"),
             "liquidity_score": candidate.get("liquidity_score"),
+            "ai_rule_score": ai_model.get("score"),
+            "ai_rule_allowed": ai_model.get("allowed"),
             "risk_approved": bool((risk_payload or {}).get("approved")),
         }
         query = (

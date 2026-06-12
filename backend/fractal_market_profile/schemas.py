@@ -48,6 +48,8 @@ class FMPSignal:
     filters: list[str] = field(default_factory=list)
     order_flow_bias: dict[str, float | str] = field(default_factory=dict)
     options: Optional[FMPOptionSelection] = None
+    ai_model: dict[str, Any] = field(default_factory=dict)
+    policy: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -78,6 +80,14 @@ class FMPReplayTrade:
     confidence: float
     daily_shape: str
     hourly_shape: str
+    ai_rule_score: Optional[float] = None
+    ai_rule_setup: Optional[str] = None
+    ai_rule_blockers: list[str] = field(default_factory=list)
+    policy_act: Optional[bool] = None
+    policy_sampled_r: Optional[float] = None
+    policy_expected_r: Optional[float] = None
+    policy_warmup: Optional[bool] = None
+    policy_reward_r: Optional[float] = None
 
 
 @dataclass
