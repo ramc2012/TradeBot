@@ -83,7 +83,10 @@ function IndexChip({
 }) {
   const quote = useQuote(symbol);
 
-  const tapeMs = quote?.rxAt ?? 0;
+  // Compare by the tick's OWN exchange timestamp (not receive-time) so a
+  // connect-time snapshot replay of yesterday's close doesn't masquerade
+  // as a live print after hours.
+  const tapeMs = quote?.ts ?? 0;
   const restMs = toEpochMs(rest?.timestamp);
   const useTape = quote?.ltp != null && tapeMs >= restMs;
 
