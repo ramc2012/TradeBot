@@ -420,6 +420,59 @@ def test_fmp_crude_keeps_mcx_evening_session_live(monkeypatch: pytest.MonkeyPatc
     assert status["paper_record_ready"] is True
 
 
+def test_fmp_ai_model_uses_mcx_session_for_crude_execution_timing() -> None:
+    model = FMPHybridTradingModel()
+    signal = {
+        "setup_name": "trend_pullback_call",
+        "action": "LONG",
+        "confidence": 0.72,
+        "horizon": "swing",
+        "entry_trigger": 10020.0,
+        "stop_level": 9980.0,
+        "target_level": 10120.0,
+        "hourly_shape": "Elongated",
+        "daily_shape": "Elongated",
+        "hourly_number": 11,
+        "value_migration_score": 2,
+        "daily_context": "TREND_UP",
+        "filters": [],
+        "options": {
+            "instrument_type": "FUT",
+            "option_type": "FUT",
+            "premium": 10025.0,
+            "days_to_expiry": 25,
+        },
+        "metadata": {
+            "daily_direction": "bullish",
+            "order_flow_direction": "bullish",
+            "order_flow_alignment": 0.7,
+            "india_vix": 15.0,
+        },
+    }
+    data_status = {
+        "execution_ready": True,
+        "minute_history_ready": True,
+        "order_flow_ready": True,
+        "order_flow_source": "bar_proxy",
+        "latest_row_time_ist": "2026-05-19T20:00:00+05:30",
+    }
+    order_flow = {"delta": 800.0, "trade_imbalance": 0.18, "book_pressure": 0.12, "toxicity_score": 0.10}
+
+    crude_evaluation = model.evaluate(
+        signal=signal,
+        analysis={"symbol_code": "CRUDEOIL", "data_status": {**data_status, "symbol_code": "CRUDEOIL"}},
+        order_flow=order_flow,
+    )
+    index_evaluation = model.evaluate(
+        signal=signal,
+        analysis={"symbol_code": "NIFTY", "data_status": {**data_status, "symbol_code": "NIFTY"}},
+        order_flow=order_flow,
+    )
+
+    assert crude_evaluation.components["execution_timing"] > 0.95
+    assert index_evaluation.components["execution_timing"] < 0.60
+
+
 @pytest.mark.asyncio
 async def test_live_crude_selection_maps_to_futures_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     service = FractalMarketProfileService()

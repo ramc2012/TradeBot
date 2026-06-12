@@ -220,6 +220,80 @@ def test_hybrid_ai_model_scores_rules_for_directional_option_candidate() -> None
     assert "direction_mismatch" in blocked.blockers
 
 
+def test_hybrid_ai_model_pcr_confirmation_matches_option_direction() -> None:
+    model = HybridDirectionalOptionsModel(clone_default_config()["ai_model"])
+    row = {
+        "ema_spread_pct": 0.004,
+        "ema_fast_slope_pct": 0.0018,
+        "plus_di": 32.0,
+        "minus_di": 14.0,
+        "momentum_3": 0.005,
+        "momentum_8": 0.009,
+        "macd_hist_pct": 0.001,
+        "rsi_14": 64.0,
+        "vwap_deviation_pct": 0.002,
+        "trend_quality": 0.74,
+        "breakout_up": 0.8,
+        "breakout_down": 0.0,
+        "range_expansion": 1.35,
+        "close_location": 0.72,
+        "opening_range_position": 1.18,
+        "body_pct": 0.003,
+        "rv_percentile": 0.48,
+        "atr_pct": 0.004,
+        "volume_zscore": 1.1,
+        "session_progress": 0.35,
+    }
+    candidate = {
+        "option_price": 120.0,
+        "spread_pct": 0.03,
+        "liquidity_score": 0.88,
+        "delta": 0.48,
+        "days_to_expiry": 4.0,
+        "theta_penalty": 0.04,
+        "timing_fit": 0.72,
+        "probability_of_profit": 0.56,
+        "p_trading_edge": 24.0,
+        "p_terminal_edge": 14.0,
+        "p_minus_q_tail": 0.08,
+        "expected_return_on_premium": 0.18,
+    }
+    high_pcr_chain = {"pcr_oi": 1.45, "pcr_oi_change": 0.0}
+    low_pcr_chain = {"pcr_oi": 0.65, "pcr_oi_change": 0.0}
+
+    bullish_high_pcr = model.evaluate(
+        row=row,
+        signal={"direction": "CE", "confidence": 0.76, "expected_move_pct": 0.004},
+        regime={"label": "trend"},
+        candidate={**candidate, "option_type": "CE"},
+        chain=high_pcr_chain,
+    )
+    bullish_low_pcr = model.evaluate(
+        row=row,
+        signal={"direction": "CE", "confidence": 0.76, "expected_move_pct": 0.004},
+        regime={"label": "trend"},
+        candidate={**candidate, "option_type": "CE"},
+        chain=low_pcr_chain,
+    )
+    bearish_high_pcr = model.evaluate(
+        row=row,
+        signal={"direction": "PE", "confidence": 0.76, "expected_move_pct": 0.004},
+        regime={"label": "trend"},
+        candidate={**candidate, "option_type": "PE"},
+        chain=high_pcr_chain,
+    )
+    bearish_low_pcr = model.evaluate(
+        row=row,
+        signal={"direction": "PE", "confidence": 0.76, "expected_move_pct": 0.004},
+        regime={"label": "trend"},
+        candidate={**candidate, "option_type": "PE"},
+        chain=low_pcr_chain,
+    )
+
+    assert bullish_high_pcr.components["chain_confirmation"] > bullish_low_pcr.components["chain_confirmation"]
+    assert bearish_low_pcr.components["chain_confirmation"] > bearish_high_pcr.components["chain_confirmation"]
+
+
 def test_service_policy_pick_exposes_hybrid_model_payload(tmp_path) -> None:
     reset_policy_for_tests()
     config = clone_default_config()

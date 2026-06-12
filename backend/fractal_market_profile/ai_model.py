@@ -11,6 +11,35 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from fractal_market_profile.config import MCX_SESSION_CLOSE, MCX_SESSION_OPEN, SESSION_CLOSE, SESSION_OPEN
+
+
+def _minute_of_day(value: Any) -> int | None:
+    if value is None:
+        return None
+    text = str(value)
+    timestamp = text.split("T", 1)[1] if "T" in text else text
+    try:
+        hh, mm = timestamp[:5].split(":")
+        return int(hh) * 60 + int(mm)
+    except Exception:
+        return None
+
+
+def _time_to_minute(value: Any) -> int:
+    return int(value.hour) * 60 + int(value.minute)
+
+
+def _is_mcx_symbol(symbol_code: Any) -> bool:
+    normalized = str(symbol_code or "").upper().strip()
+    return normalized == "CRUDEOIL" or normalized.startswith("MCX:CRUDEOIL") or normalized.startswith("CRUDEOIL")
+
+
+def _session_window_minutes(symbol_code: Any) -> tuple[int, int]:
+    if _is_mcx_symbol(symbol_code):
+        return _time_to_minute(MCX_SESSION_OPEN), _time_to_minute(MCX_SESSION_CLOSE)
+    return _time_to_minute(SESSION_OPEN), _time_to_minute(SESSION_CLOSE)
+
 
 def _get(source: Any, key: str, default: Any = None) -> Any:
     if isinstance(source, dict):
@@ -83,6 +112,12 @@ class FMPHybridTradingModel:
         metadata = signal.get("metadata") if isinstance(signal.get("metadata"), dict) else {}
         options = signal.get("options") if isinstance(signal.get("options"), dict) else {}
         data_status = analysis.get("data_status") if isinstance(analysis.get("data_status"), dict) else {}
+        symbol_code = (
+            analysis.get("symbol_code")
+            or data_status.get("symbol_code")
+            or metadata.get("symbol_code")
+            or signal.get("symbol_code")
+        )
 
         action = str(signal.get("action") or "FLAT").upper()
         filters = [str(item) for item in signal.get("filters") or [] if item]
@@ -121,7 +156,7 @@ class FMPHybridTradingModel:
             "order_flow_confirmation": self._order_flow_confirmation(signal, metadata, order_flow),
             "instrument_quality": self._instrument_quality(signal, options),
             "volatility_risk": self._volatility_risk(signal, metadata),
-            "execution_timing": self._execution_timing(signal, data_status),
+            "execution_timing": self._execution_timing(signal, data_status, symbol_code),
             "data_quality": self._data_quality(data_status),
         }
         score = 100.0 * (
@@ -268,17 +303,13 @@ class FMPHybridTradingModel:
         horizon_bonus = 0.10 if str(signal.get("horizon") or "") == "scalp" else 0.0
         return _clip(0.42 + horizon_bonus - min((india_vix - high_vix) / 40.0, 0.25))
 
-    def _execution_timing(self, signal: dict[str, Any], data_status: dict[str, Any]) -> float:
-        latest_ist = str(data_status.get("latest_row_time_ist") or "")
+    def _execution_timing(self, signal: dict[str, Any], data_status: dict[str, Any], symbol_code: Any = None) -> float:
+        latest_ist = data_status.get("latest_row_time_ist")
         progress = None
-        if "T" in latest_ist:
-            try:
-                timestamp = latest_ist.split("T", 1)[1]
-                hh, mm = timestamp[:5].split(":")
-                minute = int(hh) * 60 + int(mm)
-                progress = (minute - (9 * 60 + 15)) / max((15 * 60 + 30) - (9 * 60 + 15), 1)
-            except Exception:
-                progress = None
+        minute = _minute_of_day(latest_ist)
+        if minute is not None:
+            session_open, session_close = _session_window_minutes(symbol_code)
+            progress = (minute - session_open) / max(session_close - session_open, 1)
         if progress is None:
             hour_number = max(_float(signal, "hourly_number"), 1.0)
             progress = hour_number / 6.5

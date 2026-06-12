@@ -233,7 +233,7 @@ class HybridDirectionalOptionsModel:
 
         pcr = _float(chain, "pcr_oi")
         pcr_change = _float(chain, "pcr_oi_change")
-        pcr_edge = (1.0 - pcr) if sign > 0 else (pcr - 1.0)
+        pcr_edge = (pcr - 1.0) if sign > 0 else (1.0 - pcr)
         pcr_score = _tanh_score(pcr_edge + (sign * -pcr_change * 0.5), 0.55)
 
         dex_calls = abs(_float(chain, "dex_calls"))
