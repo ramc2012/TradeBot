@@ -41,6 +41,17 @@ def _is_nse_realtime_symbol(symbol: str) -> bool:
     return text.startswith("NSE:") or text.startswith("BSE:")
 
 
+def _is_index_spot_symbol(symbol: str) -> bool:
+    """Index spot feeds (NIFTY/BANKNIFTY/SENSEX) tick continuously during RTH,
+    so a stuck value there means a wedged WS session. Single-name OPTION
+    contracts routinely repeat the same LTP for minutes (no trades) — applying
+    the frozen-value detector to them flips the whole verdict to critical and
+    blocks S1 scans on normal market microstructure (2026-06-12: one illiquid
+    TIINDIA PE froze the entire NSE lane for an hour)."""
+    text = str(symbol or "").upper()
+    return (text.startswith("NSE:") or text.startswith("BSE:")) and text.endswith("-INDEX")
+
+
 @dataclass
 class _SymbolHealth:
     symbol: str
@@ -128,7 +139,7 @@ class DataQualityAgent:
         """
         if health.value_changed_at is None or health.last_value is None:
             return None
-        if not _is_nse_realtime_symbol(health.symbol) or not _is_nse_market_hours(when):
+        if not _is_index_spot_symbol(health.symbol) or not _is_nse_market_hours(when):
             return None
         age = (when - health.last_seen_at).total_seconds()
         if age > self._budget_for(health.source):
