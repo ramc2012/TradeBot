@@ -827,11 +827,18 @@ async def ws_strategy_snapshot(websocket: WebSocket):
 
     async def payload_factory():
         if desk == "directional":
-            from api.routers.directional_options import live_snapshot
-            return await live_snapshot(underlying=symbol, timeframe=timeframe or "5minute")
+            from directional_options.service import directional_options_service
+            return await directional_options_service.live_snapshot(symbol, timeframe or "5minute", 16)
         if desk == "gann":
-            from api.routers.gann_tp_delta import live_snapshot
-            return await live_snapshot(underlying=symbol, timeframe=timeframe or "15minute")
+            from gann_tp_delta.service import gann_tp_delta_service
+            return await gann_tp_delta_service.live_snapshot(
+                symbol,
+                timeframe or "15minute",
+                60,
+                "auto_pivot",
+                "median_tpd",
+                None,
+            )
         if desk == "auction":
             from api.routers.auction_intelligence import live_snapshot
             return await live_snapshot(symbol=symbol)
