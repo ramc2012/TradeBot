@@ -123,7 +123,10 @@ def guard_option_ohlc(
         return df
     out = df.copy()
     out["time"] = pd.to_datetime(out["time"], utc=tz_aware_utc)
-    out = out.sort_values("time").drop_duplicates("time", keep="last").reset_index(drop=True)
+    # Dedup on the CONTRACT key, not time alone — a frame may carry many strikes
+    # per timestamp, and deduping on time would collapse them to one strike.
+    dedup_keys = [c for c in ("strike", "option_type", "expiry") if c in out.columns] + ["time"]
+    out = out.sort_values("time").drop_duplicates(dedup_keys, keep="last").reset_index(drop=True)
 
     if rth:
         ist = out["time"].dt.tz_convert(IST) if tz_aware_utc else out["time"]
