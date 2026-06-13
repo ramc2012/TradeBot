@@ -11,7 +11,7 @@ so this module stays lane-agnostic. Pure pandas/numpy + the metrics module.
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional, Sequence
 
 import numpy as np
@@ -22,6 +22,38 @@ from analysis import validation_metrics as vm
 RunFn = Callable[[pd.DataFrame, dict], Any]
 Extract = Callable[[Any], Sequence[float]]
 ExtractTimes = Callable[[Any], Sequence]
+
+# ── SACRED held-out OOS block ───────────────────────────────────────────────
+# With 5 lanes x many parameter grids all hitting the same ~2yr of NSE data,
+# family-wise overfit risk is high (this codebase has a 32/32-OOS-negative
+# history). Reserve ONE terminal block that NO tuning / selection / sweep may
+# read; evaluate a chosen config against it EXACTLY ONCE — that single number is
+# the only defensible cross-lane go/no-go. Everything strictly before this date
+# is the development set; everything on/after it is frozen.
+HELD_OUT_START = pd.Timestamp("2026-04-01", tz="UTC")
+
+
+def assert_tuning_window_safe(end_time, *, label: str = "tuning window") -> None:
+    """Raise if a tuning/selection window reaches into the sacred held-out block.
+    Call this with the latest timestamp any sweep/walk-forward is allowed to read."""
+    t = pd.Timestamp(end_time)
+    if t.tzinfo is None:
+        t = t.tz_localize("UTC")
+    if t >= HELD_OUT_START:
+        raise AssertionError(
+            f"{label} ends at {t.isoformat()} which is on/after the sacred held-out "
+            f"block start {HELD_OUT_START.date()} — tuning may not read held-out data."
+        )
+
+
+def split_development_heldout(frame: pd.DataFrame, *, time_col: str = "time"):
+    """Split a frame into (development, held_out) at HELD_OUT_START. Tuning uses
+    development only; the final verdict evaluates ONCE on held_out."""
+    t = pd.to_datetime(frame[time_col], utc=True)
+    return (
+        frame[t < HELD_OUT_START].reset_index(drop=True),
+        frame[t >= HELD_OUT_START].reset_index(drop=True),
+    )
 
 
 def _frame_between(frame: pd.DataFrame, t0, t1, time_col: str) -> pd.DataFrame:
