@@ -155,7 +155,7 @@
     "fees_per_order": 20.0
   },
   "sniper_overlay": {
-    "enabled": true,
+    "enabled": false,
     "apply_to_agents": ["positional", "swing"],
     "aligned_confidence_boost": 0.08,
     "conflict_confidence_penalty": 0.1,
