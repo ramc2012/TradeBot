@@ -1411,3 +1411,35 @@ async def test_flat_close_blocked_when_premium_refresh_stalls(tmp_path: Path) ->
     summary = await store.record_signal(_flat_followup_snapshot())
     assert summary["open_positions"] == 1, "stalled refresh should not lock in fake PnL"
     assert summary["closed_positions"] == 0
+
+
+def _gate_trades(net_pnl: float = 50_000.0) -> list[dict[str, object]]:
+    """Two trades whose pnl sums to a LARGE net_pnl, so the old buggy gate
+    (abs(dd) <= 18 * abs(net_pnl)) would pass trivially — letting us prove the
+    fix flips the verdict on real drawdown alone."""
+    return [
+        {"pnl": net_pnl + 10_000.0, "max_favorable_pct": 2.0, "max_adverse_pct": 1.0, "setup_name": "x"},
+        {"pnl": -10_000.0, "max_favorable_pct": 0.0, "max_adverse_pct": 1.0, "setup_name": "x"},
+    ]
+
+
+def test_max_drawdown_gate_fails_when_drawdown_exceeds_cap():
+    """A 20% equity drawdown must FAIL the max_drawdown gate (cap = 18% of
+    FMP_INITIAL_CAPITAL), even though net_pnl is large enough that the old
+    rupee-vs-18x-rupee comparison would have passed it."""
+    svc = FractalMarketProfileService.__new__(FractalMarketProfileService)  # no heavy bootstrap
+    # peak 1,000,000 -> trough 800,000 = -200,000 = 20% of 1,000,000 capital
+    equity_curve = [{"equity": 1_000_000.0}, {"equity": 800_000.0}]
+    report = svc._build_report("NIFTY", _gate_trades(), equity_curve)
+    assert report["metrics"]["max_drawdown"] == -200_000.0
+    assert report["metrics"]["max_drawdown_pct"] == 20.0
+    assert report["gate_status"]["max_drawdown"] is False
+
+
+def test_max_drawdown_gate_passes_when_drawdown_within_cap():
+    """A 10% drawdown is within the 18% cap -> gate True."""
+    svc = FractalMarketProfileService.__new__(FractalMarketProfileService)
+    equity_curve = [{"equity": 1_000_000.0}, {"equity": 900_000.0}]  # -100,000 = 10%
+    report = svc._build_report("NIFTY", _gate_trades(), equity_curve)
+    assert report["metrics"]["max_drawdown_pct"] == 10.0
+    assert report["gate_status"]["max_drawdown"] is True

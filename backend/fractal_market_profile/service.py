@@ -28,6 +28,7 @@ from core.config import settings
 from db.database import AsyncSessionLocal
 from fractal_market_profile.config import (
     AI_MODEL_CONFIG,
+    FMP_INITIAL_CAPITAL,
     FORCE_EXIT_TIME,
     INDEX_APP_SYMBOLS,
     IST,
@@ -973,13 +974,20 @@ class FractalMarketProfileService:
             "win_rate_target": 55.0,
             "avg_risk_reward_min": 1.8,
             "profit_factor_min": 1.4,
-            "max_drawdown_max": 18.0,
+            "max_drawdown_max": 18.0,  # percent of FMP_INITIAL_CAPITAL
         }
+        # max_drawdown is an ABSOLUTE rupee figure (from _max_drawdown over the
+        # equity curve); the threshold is a PERCENT of capital. Compare
+        # like-for-like: drawdown as a % of initial capital vs the percent cap.
+        # (The old gate multiplied the percent threshold by abs(net_pnl), a
+        # rupee quantity, so it passed trivially regardless of real drawdown.)
+        max_drawdown_pct = abs(metrics["max_drawdown"]) / FMP_INITIAL_CAPITAL * 100.0 if FMP_INITIAL_CAPITAL else 0.0
+        metrics["max_drawdown_pct"] = round(max_drawdown_pct, 2)
         status = {
             "win_rate": metrics["win_rate"] >= thresholds["win_rate_min"],
             "avg_risk_reward": metrics["avg_risk_reward"] >= thresholds["avg_risk_reward_min"],
             "profit_factor": (metrics["profit_factor"] or 0.0) >= thresholds["profit_factor_min"],
-            "max_drawdown": abs(metrics["max_drawdown"]) <= thresholds["max_drawdown_max"] * max(abs(metrics["net_pnl"]) or 1.0, 1.0),
+            "max_drawdown": max_drawdown_pct <= thresholds["max_drawdown_max"],
         }
         return {
             "symbol": symbol,

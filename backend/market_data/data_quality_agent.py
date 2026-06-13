@@ -159,6 +159,14 @@ class DataQualityAgent:
         source = str(source or "").strip() or "default"
         if not symbol:
             return
+        # Reject non-symbols: a bare number ("22190", "2245", "23390.5") is a
+        # strike price or Fyers token that leaked into the symbol field from the
+        # tick feed (to_app_symbol passes unmapped values through unchanged). A
+        # real app symbol always carries a letter (NIFTY, NSE:..., MCX:...). These
+        # bloated the ledger with ~1,900 junk "stale" entries that surfaced in the
+        # strategy-agent data_health payload without ever gating anything.
+        if not any(c.isalpha() for c in symbol):
+            return
         when = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
         key = (symbol, source)
         with self._lock:
