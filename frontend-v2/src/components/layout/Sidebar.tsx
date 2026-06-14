@@ -66,6 +66,7 @@ const NAV_GROUPS: NavGroup[] = [
     title: "Strategy desks",
     icon: Target,
     items: [
+      { href: "/strategies/overview", label: "Overview", icon: LayoutDashboard },
       { href: "/strategies/nse/live", label: "NSE Index", icon: Crosshair, matchers: ["/strategies/nse"] },
       { href: "/strategies/directional", label: "Long Premium", icon: Target },
       { href: "/strategies/auction", label: "Auction IQ", icon: Layers3 },
