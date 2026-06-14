@@ -1443,3 +1443,39 @@ def test_max_drawdown_gate_passes_when_drawdown_within_cap():
     report = svc._build_report("NIFTY", _gate_trades(), equity_curve)
     assert report["metrics"]["max_drawdown_pct"] == 10.0
     assert report["gate_status"]["max_drawdown"] is True
+
+
+def test_daily_profile_compute_once_is_identical_to_build_profile():
+    """The 'compute once' refactor in _analyze_session_sync must yield a daily
+    profile BYTE-IDENTICAL to the old _build_profile(...) path it replaced.
+    _build_profile(raw...) == _profile_payload(raw, shape=_shape(raw),
+    direction_bias=_direction(raw)) — this asserts the substitution holds."""
+    from fractal_market_profile.service import (
+        FractalMarketProfileService,
+        _aggregate_rows,
+        _profile_payload,
+        _shape_from_snapshot,
+        _direction_from_snapshot,
+    )
+
+    svc = FractalMarketProfileService.__new__(FractalMarketProfileService)  # no heavy bootstrap
+    start = datetime(2026, 6, 12, 9, 15, tzinfo=timezone.utc)
+    rows = _aggregate_rows(_minute_rows(start, count=150, base=22500.0, drift=3.0), 30, "NIFTY")
+    assert len(rows) >= 3
+    tick_size = 5.0
+
+    # OLD path: _build_profile builds its own raw snapshot internally.
+    old = svc._build_profile(
+        "NIFTY", rows=rows, tick_size=tick_size, period_minutes=30,
+        initial_balance_periods=2, prior_snapshot=None, scope="daily",
+    )
+    # NEW path: build the raw snapshot ONCE, derive the payload from it.
+    raw = svc._raw_profile_snapshot("NIFTY", rows, tick_size, 30, 2)
+    new = _profile_payload(
+        raw, scope="daily",
+        shape=_shape_from_snapshot(raw),
+        direction_bias=_direction_from_snapshot(raw),
+        completed=True,
+    )
+    assert new == old, "compute-once refactor changed the daily profile payload"
+    assert old.get("poc") is not None and old.get("vah") is not None, "profile is trivial"
