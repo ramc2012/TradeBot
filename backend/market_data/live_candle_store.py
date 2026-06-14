@@ -24,6 +24,31 @@ except Exception:  # pragma: no cover
         ...
 
 
+def _option_row_passes_no_arb(row: dict[str, Any]) -> bool:
+    """Ingest-time no-arbitrage guard for option candles. Rejects impossible
+    prices at the SOURCE: a put can never be worth more than its strike, a call
+    never more than spot. Fyers serves these for post-corporate-action zombie
+    strikes — the INDIANB 820 PE @ 1298.8 (2026-06-11, > strike) that booked a
+    +Rs19L phantom entered through exactly this live-candle path. The existing
+    analysis/safe_candles guard is downstream (backtest load); this stops the bad
+    row before it is ever persisted (and thus before any live mark reads it).
+    Returns True (keep) on any parse ambiguity — never drops a legitimate row."""
+    try:
+        px = max(float(row.get("close") or 0.0), float(row.get("high") or 0.0))
+        strike = float(row.get("strike") or 0.0)
+        spot = float(row.get("underlying_price") or 0.0)
+    except (TypeError, ValueError):
+        return True
+    otype = str(row.get("option_type") or "").upper()
+    if px <= 0:
+        return True  # zero/empty is a different validation concern, not no-arb
+    if otype.startswith("P") and strike > 0 and px > strike * 1.02:
+        return False
+    if otype.startswith("C") and spot > 0 and px > spot * 1.05:
+        return False
+    return True
+
+
 @dataclass
 class _CandleBucket:
     symbol: str
@@ -351,6 +376,16 @@ class LiveCandleStore:
                     ),
                     spot_rows,
                 )
+
+            if option_rows:
+                # Drop no-arbitrage-violating rows before they are ever persisted.
+                _kept = [r for r in option_rows if _option_row_passes_no_arb(r)]
+                if len(_kept) != len(option_rows):
+                    logger.warning(
+                        "[live_candle_store] dropped {n} no-arb option rows at ingest",
+                        n=len(option_rows) - len(_kept),
+                    )
+                option_rows = _kept
 
             if option_rows:
                 await session.execute(

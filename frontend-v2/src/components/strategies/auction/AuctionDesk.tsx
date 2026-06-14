@@ -12,7 +12,7 @@
  */
 import { useMemo, useState, useTransition } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Brain, Compass, Gauge, ListChecks, Map as MapIcon, Radio, ShieldAlert, TrendingUp } from "lucide-react";
+import { Activity, Brain, Compass, Gauge, ListChecks, Map as MapIcon, Radio, ShieldAlert, TrendingUp, Waves } from "lucide-react";
 
 import {
   DeskShell,
@@ -38,10 +38,12 @@ import { api as apiClient } from "@/lib/api";
 import { AgentDecisions } from "./AgentDecisions";
 import { GatesPanel } from "./GatesPanel";
 import { RagMemory } from "./RagMemory";
+import { MotionTab } from "./motion/MotionTab";
 import type { ExecutionStep, NtmVolx, Regime, Risk, Snapshot } from "./types";
 
 const TABS = [
   { key: "auction", label: "Auction", icon: MapIcon },
+  { key: "motion", label: "In Motion", icon: Waves },
   { key: "terminal", label: "Terminal", icon: Radio },
   { key: "gates", label: "Gates", icon: ListChecks },
   { key: "performance", label: "Performance", icon: TrendingUp },
@@ -155,6 +157,8 @@ export default function AuctionDesk() {
       {activeTab === "auction" ? (
         <AuctionTab snap={snap} spot={spot} regime={regime} mp={mp} of={of} />
       ) : null}
+
+      {activeTab === "motion" ? <MotionTab snap={snap} /> : null}
 
       {activeTab === "terminal" ? <TerminalPanel /> : null}
 
