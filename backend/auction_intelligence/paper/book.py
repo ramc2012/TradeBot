@@ -130,6 +130,19 @@ class PaperPositionBook:
             )
             now = _utc_now()
 
+            # Unconditional expiry sweep BEFORE the per-symbol sync. The
+            # decision-driven exit (_maybe_exit -> "expired_contract") only ever
+            # touches THIS cycle's bundle underlying, so a position in an
+            # underlying we stopped scanning never gets closed — the SENSEX 76000
+            # CE zombie (expired 2026-06-11) sat open for days. Sweep the whole
+            # book each cycle so an expired contract can never linger.
+            await self._sweep_expired_positions(
+                bundle=bundle,
+                open_positions=open_positions,
+                closed_positions=closed_positions,
+                now=now,
+            )
+
             if bool(self.limits.get("one_position_per_symbol", True)):
                 await self._sync_one_per_symbol(
                     bundle=bundle,
@@ -282,6 +295,35 @@ class PaperPositionBook:
                 underlying=underlying,
             )
         )
+
+    async def _sweep_expired_positions(
+        self,
+        *,
+        bundle: AnalysisBundle,
+        open_positions: list[dict[str, Any]],
+        closed_positions: list[dict[str, Any]],
+        now: str,
+    ) -> None:
+        """Force-close EVERY open position whose contract has expired, regardless
+        of whether this cycle's bundle is for that underlying. Reuses the same
+        _close_position path as the decision-driven "expired_contract" exit (which
+        prices the exit off the contract's own last candle, not the cross-symbol
+        bundle). This is the safety net that stops an expired option from ever
+        lingering as "open" once the lane stops scanning its underlying."""
+        session_date = self._session_date(bundle)
+        if session_date is None:
+            return
+        for position in list(open_positions):
+            if str(position.get("status") or "") != "open":
+                continue
+            expiry = self._position_expiry(position)
+            if expiry is not None and expiry < session_date:
+                await self._close_position(
+                    position=position, bundle=bundle, now=now, reason="expired_contract", execution=None
+                )
+                if position in open_positions:
+                    open_positions.remove(position)
+                closed_positions.append(position)
 
     async def _maybe_exit(
         self,
