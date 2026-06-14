@@ -429,6 +429,10 @@ def test_swing_agent_trend_pullback_long_is_actionable() -> None:
 
 def test_swing_agent_options_buy_proxy_sizing_keeps_one_lot_with_small_paper_book() -> None:
     config = clone_default_config()
+    # Pin the sleeve this sizing-MATH test was written against. Production policy
+    # uses a much smaller sleeve (disciplined per-trade risk) — a separate policy
+    # choice, not validated by this proxy-sizing math test.
+    config["agents"]["swing"]["sleeve_fraction"] = 0.35
     agent = SwingAgent(config["agents"]["swing"])
     context = AgentContext(
         session=SessionContext(
@@ -1343,6 +1347,9 @@ def test_swing_agent_uses_contract_aware_margin_sizing() -> None:
     config = clone_default_config()
     config["agents"]["swing"]["enable_acceptance_continuation_long"] = True
     config["mvp_scope"]["instrument_type"] = "futures"
+    # Pin the sleeve this contract-aware-margin math test was written against
+    # (production policy uses a smaller, disciplined sleeve — tested separately).
+    config["agents"]["swing"]["sleeve_fraction"] = 0.35
     agent = SwingAgent(config["agents"]["swing"])
 
     decision = agent.evaluate(
@@ -1666,6 +1673,43 @@ def test_risk_governor_blocks_stale_and_loss_breach() -> None:
     assert blocked.kill_switch is True
     assert "Market data is stale." in blocked.reasons
     assert "Daily loss limit breached." in blocked.reasons
+
+
+def test_risk_governor_daily_loss_halts_entries_in_paper_mode() -> None:
+    """The daily-loss circuit breaker MUST block new entries in PAPER mode too.
+    The old `and not paper_mode` guard bypassed it in the mode actually running,
+    which let the auction book bleed ~Rs35L (a bad day never stopped new entries).
+    Paper pauses entries for the day but does NOT trip the hard kill_switch."""
+    config = clone_default_config()
+    governor = RiskGovernor({**config["risk"], "paper_mode": True})
+    decision = AgentDecision(
+        agent_name="positional",
+        action="LONG",
+        confidence=0.9,
+        entry_price=100.0,
+        stop_price=95.0,
+        target_price=115.0,
+        quantity=25,
+        sleeve_fraction=0.04,
+        rationale=["test"],
+    )
+    blocked = governor.evaluate(
+        session=SessionContext(
+            symbol="NIFTY",
+            session_date=date(2026, 4, 1),
+            last_price=23000.0,
+            stale_data_seconds=0.0,
+            minutes_to_close=180,
+        ),
+        portfolio=PortfolioSnapshot(
+            daily_realized_pnl=-abs(float(config["risk"]["max_daily_loss"])) - 1.0,
+            net_liquidation=5_000_000.0,
+        ),
+        decisions=[decision],
+    )
+    assert blocked.allowed is False
+    assert "Daily loss limit breached." in blocked.reasons
+    assert blocked.kill_switch is False  # paper: pause entries for the day, no hard kill
 
 
 def test_risk_governor_uses_margin_ratio_for_projected_futures_exposure() -> None:

@@ -44,7 +44,14 @@ class RiskGovernor:
             reasons.append("Broker connectivity unavailable.")
         if session.stale_data_seconds > self.stale_data_seconds and not self.paper_mode:
             reasons.append("Market data is stale.")
-        if portfolio.daily_realized_pnl <= -abs(self.max_daily_loss) and not self.paper_mode:
+        # The daily-loss circuit breaker is a STRATEGY risk rule (unlike the
+        # broker-connectivity / stale-data checks above, which are infra and may
+        # be skipped in paper). It MUST halt new entries in paper mode too — that
+        # is the mode actually running, and bypassing it here is what let the
+        # auction book bleed ~Rs35L (one day's losses never stopped new entries).
+        # We still gate the hard kill_switch (below) on live mode so paper just
+        # pauses entries for the day rather than requiring a manual reset.
+        if portfolio.daily_realized_pnl <= -abs(self.max_daily_loss):
             reasons.append("Daily loss limit breached.")
         if portfolio.open_positions >= self.max_concurrent_positions and any(
             decision.action != "FLAT" for decision in decisions
