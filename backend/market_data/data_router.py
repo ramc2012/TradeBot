@@ -349,13 +349,37 @@ class DataRouter:
             pass
 
     async def unsubscribe(self):
-        if self._ws_client:
-            try:
-                self._ws_client.close()
-            except Exception:
-                pass
+        client = self._ws_client
         self._ws_client = None
         self._ws_broker = None
+        if client is None:
+            return
+        # The Fyers SDK socket method is close_connection() — there is NO .close()
+        # (the old self._ws_client.close() raised AttributeError that the bare
+        # except swallowed, so the socket was NEVER torn down and its
+        # reconnect=True loop lived on as a ZOMBIE firing on_error on every drop —
+        # this is the 1,683-error WS "flap" storm, multiple sockets accumulating
+        # one-per-resubscribe). close_connection() sets restart_flag=False (the
+        # reconnect loop is guarded by `if self.restart_flag`) then joins the
+        # socket threads — those joins can BLOCK on a wedged socket (the
+        # 2026-06-11 process freeze), so run it OFF the event loop with a deadline.
+        def _teardown() -> None:
+            try:
+                # Stop the SDK reconnect loop FIRST, so even if the close hangs and
+                # we abandon the thread, it can never reconnect (no zombie).
+                setattr(client, "restart_flag", False)
+            except Exception:
+                pass
+            close_fn = getattr(client, "close_connection", None) or getattr(client, "close", None)
+            if close_fn is not None:
+                close_fn()
+
+        try:
+            await asyncio.wait_for(asyncio.to_thread(_teardown), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("[DataRouter] ws close_connection exceeded 5s; abandoned (reconnect already stopped)")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[DataRouter] ws teardown error (ignored): {exc}")
 
     async def stop_mock_feed(self):
         if self._mock_task and not self._mock_task.done():
