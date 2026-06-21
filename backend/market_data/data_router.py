@@ -511,6 +511,11 @@ class DataRouter:
                 sub = getattr(self._ws_client, "subscribe", None)
                 if callable(sub):
                     sub(symbols=[broker_symbol], data_type="DepthUpdate")
+                    # Record so the adapter replays depth subs on reconnect.
+                    if self._is_fyers_broker():
+                        depth_set = getattr(self._broker, "_ws_depth_symbols", None)
+                        if isinstance(depth_set, set):
+                            depth_set.add(broker_symbol)
                     logger.info(f"[DataRouter] depth subscribed (5-level): {broker_symbol}")
             except Exception as e:
                 logger.debug(f"[DataRouter] depth subscribe failed for {broker_symbol}: {e}")
@@ -531,6 +536,10 @@ class DataRouter:
                     unsub = getattr(self._ws_client, "unsubscribe", None)
                     if callable(unsub):
                         unsub(symbols=[broker_symbol], data_type="DepthUpdate")
+                    if self._is_fyers_broker():
+                        depth_set = getattr(self._broker, "_ws_depth_symbols", None)
+                        if isinstance(depth_set, set):
+                            depth_set.discard(broker_symbol)
                 except Exception as e:
                     logger.debug(f"[DataRouter] depth unsubscribe failed for {broker_symbol}: {e}")
         else:

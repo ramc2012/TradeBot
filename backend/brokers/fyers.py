@@ -161,6 +161,21 @@ class FyersAdapter(BrokerAdapter):
                 return parsed
         return 0.0
 
+    @staticmethod
+    def _coerce_optional_float(*values: Any) -> Optional[float]:
+        """Like _coerce_float but returns None when no usable value is present —
+        lets callers distinguish 'broker streamed 0/absent' from 'broker streamed a
+        real value', so greeks compute is a true fallback for only the missing fields."""
+        for value in values:
+            if value is None or value == "":
+                continue
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                continue
+            return parsed
+        return None
+
     async def get_historical_candles(
         self,
         symbol: str,
@@ -496,21 +511,45 @@ class FyersAdapter(BrokerAdapter):
         only for the focused symbols, so the base feed stays lean.
         """
         self._on_depth_callback = on_depth_callback
+        # Track the live subscription set so we can REPLAY it on every (re)connect.
+        # Fyers' DataSocket drops the connection roughly every ~3 min ("Connection
+        # to remote host was lost") and auto-reconnects (reconnect=True), but the SDK
+        # does NOT restore subscriptions — so without resubscribing inside on_connect
+        # the tick feed silently dies after the first flap. Depth subs (added
+        # incrementally per focused symbol) are tracked here too and replayed.
+        self._ws_symbols = list(symbols)
+        self._ws_depth_symbols = set(getattr(self, "_ws_depth_symbols", set()))
         try:
             from fyers_apiv3.FyersWebsocket import data_ws
+
+            def _on_connect() -> None:
+                logger.info("Fyers WS connected")
+                try:
+                    if self._ws_symbols:
+                        client.subscribe(symbols=self._ws_symbols, data_type="SymbolUpdate")
+                    if self._ws_depth_symbols:
+                        client.subscribe(symbols=list(self._ws_depth_symbols),
+                                         data_type="DepthUpdate")
+                    logger.info(
+                        f"Fyers WS (re)subscribed {len(self._ws_symbols)} symbols"
+                        f" + {len(self._ws_depth_symbols)} depth"
+                    )
+                except Exception as exc:
+                    logger.error(f"Fyers WS resubscribe failed: {exc}")
+
             client = data_ws.FyersDataSocket(
                 access_token=f"{settings.FYERS_APP_ID}:{self._access_token}",
                 log_path="",
                 litemode=False,
                 write_to_file=False,
                 reconnect=True,
-                on_connect=lambda: logger.info("Fyers WS connected"),
+                on_connect=_on_connect,           # subscribe HERE → survives reconnects
                 on_close=lambda: logger.warning("Fyers WS closed"),
                 on_error=lambda e: logger.error(f"Fyers WS error: {e}"),
                 on_message=lambda msg: self._handle_message(msg, on_tick_callback),
             )
+            self._ws_client = client
             client.connect()
-            client.subscribe(symbols=symbols, data_type="SymbolUpdate")
             return client
         except Exception as e:
             logger.error(f"Failed to start Fyers WebSocket: {e}")
@@ -741,32 +780,39 @@ class FyersAdapter(BrokerAdapter):
             prev_close = None
             if opt.get("ltpch") is not None:
                 prev_close = round(ltp - float(opt.get("ltpch") or 0), 2)
-            iv = delta = gamma = theta = vega = None
-            if strike > 0 and ltp > 0 and spot_price > 0:
+            # PREFER broker-streamed greeks/IV; compute (Black-Scholes) only as a
+            # FALLBACK for whatever Fyers does not provide. Fyers' /options-chain-v3
+            # may carry per-option iv (and sometimes greeks) under varying key names;
+            # read them first so we don't recompute what the exchange already gives.
+            iv = self._coerce_optional_float(
+                opt.get("iv"), opt.get("impliedVolatility"), opt.get("implied_volatility"))
+            if iv is not None and iv > 3.0:
+                iv = iv / 100.0  # Fyers reports IV in %, our greeks use decimal
+            delta = self._coerce_optional_float(opt.get("delta"))
+            gamma = self._coerce_optional_float(opt.get("gamma"))
+            theta = self._coerce_optional_float(opt.get("theta"))
+            vega = self._coerce_optional_float(opt.get("vega"))
+
+            need_compute = any(v is None for v in (iv, delta, gamma, theta, vega))
+            if need_compute and strike > 0 and ltp > 0 and spot_price > 0:
                 try:
-                    iv_value = implied_volatility(
-                        market_price=ltp,
-                        S=spot_price,
-                        K=strike,
-                        T=T,
-                        r=0.065,
+                    # Use the broker IV if present (skips the costly Newton-Raphson
+                    # solve); only solve for IV when Fyers didn't stream it.
+                    iv_value = iv if iv is not None and iv > 0 else implied_volatility(
+                        market_price=ltp, S=spot_price, K=strike, T=T, r=0.065,
                         option_type=option_type,
                     )
-                    if iv_value > 0:
+                    if iv_value and iv_value > 0:
                         greeks = bs_greeks(
-                            S=spot_price,
-                            K=strike,
-                            T=T,
-                            r=0.065,
-                            sigma=iv_value,
-                            option_type=option_type,
-                            iv=iv_value,
+                            S=spot_price, K=strike, T=T, r=0.065, sigma=iv_value,
+                            option_type=option_type, iv=iv_value,
                         )
-                        iv = greeks.iv
-                        delta = greeks.delta
-                        gamma = greeks.gamma
-                        theta = greeks.theta
-                        vega = greeks.vega
+                        # Fill ONLY the gaps — keep any broker-provided value.
+                        if iv is None: iv = greeks.iv
+                        if delta is None: delta = greeks.delta
+                        if gamma is None: gamma = greeks.gamma
+                        if theta is None: theta = greeks.theta
+                        if vega is None: vega = greeks.vega
                 except Exception as exc:
                     logger.debug(f"Fyers Greek enrichment failed for {symbol} {strike} {option_type}: {exc}")
             entries.append(OptionChainEntry(

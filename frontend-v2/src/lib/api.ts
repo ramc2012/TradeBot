@@ -393,6 +393,9 @@ export const getStrategyPortfolio = (underlying = "SENSEX") =>
   api.get("/api/strategy/portfolio", { params: { underlying } });
 export const getStrategyOpenSignals = (underlying = "SENSEX") =>
   api.get("/api/strategy/open-signals", { params: { underlying } });
+// MACD diffusion — hourly CE/PE-above-zero breadth (market sentiment).
+export const getMacdDiffusion = (days = 30, market = "NSE") =>
+  api.get("/api/strategy/diffusion", { params: { days, market } });
 
 // ── CBE Scanner ───────────────────────────────────────────────────────────
 export const getCBEConfig = () => api.get("/api/cbe/config");
@@ -647,6 +650,30 @@ export const getChartOHLC = (
 ) =>
   api.get("/api/charts/ohlc", {
     params: { underlying, timeframe, lookback_sessions: lookbackSessions },
+    timeout: 30_000,
+  });
+
+// Per-ATM-strike option-premium OHLC + indicators (MACD, RSI, BB, KAMA) —
+// powers the pop-up chart on the NSE signal desk.
+export const getOptionOHLC = (params: {
+  underlying: string;
+  expiry: string;
+  strike: number;
+  optionType: string;
+  interval?: "5minute" | "15minute" | "30minute";
+  limit?: number;
+  instrumentKey?: string | null;
+}) =>
+  api.get("/api/charts/option-ohlc", {
+    params: {
+      underlying: params.underlying,
+      expiry: params.expiry,
+      strike: params.strike,
+      option_type: params.optionType,
+      interval: params.interval ?? "30minute",
+      limit: params.limit ?? 200,
+      ...(params.instrumentKey ? { instrument_key: params.instrumentKey } : {}),
+    },
     timeout: 30_000,
   });
 

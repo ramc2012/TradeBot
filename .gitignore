@@ -94,3 +94,6 @@ build/
 /sniper-paper/src/sniper_paper/ingest/broker_creds.py
 /sniper-paper/src/sniper_paper/model/
 /sniper-paper/src/sniper_paper/runner.py
+
+# Generated directional-options research datasets (parquet/csv data dumps)
+backend/runtime/**/research/

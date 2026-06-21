@@ -25,12 +25,27 @@ This package adds an isolated long-premium engine to Nomad Curie without reusing
 - `dashboard.py`: optional Dash mount at `/directional-options/dashboard/`
 - `service.py`: orchestration for the API/router layer
 
+## Agent Learning System
+
+The directional agent is designed as a closed learning loop, not a fixed CE/PE ruleset:
+
+1. **Observe:** spot features, regime, contract candidates, live option-chain analytics, and execution health are snapshotted at decision time.
+2. **Explain relationships:** `chain_analytics.py` converts raw chain rows into relation features: PCR, IV skew/risk reversal, DEX/GEX, dealer gamma flip, call/put walls, straddle-implied range, sigma bands, NTM VolX/VXR, writer-cash proxy, spectrum wall pressure, gamma-density skew, TRACE-style second-order exposures, and unusual activity.
+3. **Score safely:** `ai_model.py` blocks broken liquidity/spread/expiry cases and produces dense component scores. It does not decide profit; it only prevents malformed trades from reaching the bandit.
+4. **Act and explore:** `policy.py` uses a Bayesian contextual bandit. The v4 feature vector appends the option-relation features so the agent can learn when a relation helps directional long-premium trades and when it is noise.
+5. **Attribute reward:** `paper.py` records the entry-time feature vector with the paper position. On close, realized P&L is converted to an R-multiple and credited back to the same feature vector, preserving causal context.
+6. **Constrain risk:** `risk.py` caps quantity, loss budget, and premium exposure after the policy chooses direction, strike, and size. The agent can maximize expected R, but cannot bypass capital safety.
+
+The goal is directional long-option profit under uncertainty: learn which combinations of spot trend, option pricing, dealer positioning, writer behavior, liquidity, volatility, and time-to-expiry actually pay after costs. The policy should be judged by walk-forward R, drawdown, hit rate by setup, and feature attribution stability, not by any single chain metric.
+
 ## API
 
 - `GET /api/directional-options/summary`
+- `GET /api/directional-options/universe`
 - `GET /api/directional-options/workspace`
 - `GET /api/directional-options/backtest`
 - `GET /api/directional-options/live-snapshot`
+- `GET /api/directional-options/chain-analytics`
 - `POST /api/directional-options/paper-proposal`
 - `GET /api/directional-options/paper-journal`
 - `GET /api/directional-options/paper-positions`

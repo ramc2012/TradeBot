@@ -1167,6 +1167,24 @@ class MarketIntelligenceRuntime:
                 "detail": "unknown app symbol",
             }
 
+        # ONE-DATA-ONE-COMPUTE: the canonical OptionChainService poll (Upstox-sourced,
+        # greeks) is the single writer of oc:{symbol}:{expiry}. Track this pair so the
+        # poll keeps it fresh and READ the shared cache instead of re-fetching +
+        # re-running _calculate_analytics here. Only fall back to a direct fetch on a
+        # genuine cache miss (cold start / poll not yet running).
+        try:
+            option_chain_service.track(app_symbol, expiry_iso)
+            cached = await option_chain_service.get_cached(app_symbol, expiry_iso)
+            if cached and cached.get("entries"):
+                return {
+                    "symbol_code": symbol_code,
+                    "expiry": expiry_iso,
+                    "status": "refreshed",
+                    "source": cached.get("source", "shared_cache"),
+                }
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[MI] shared chain cache read failed for {app_symbol}: {exc}")
+
         errors: list[str] = []
         for source, adapter, lookup_symbol in (
             ("upstox", upstox_adapter, to_broker_symbol(app_symbol)),

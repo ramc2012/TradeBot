@@ -1,6 +1,7 @@
 """Market data routes."""
 from __future__ import annotations
 import asyncio
+import json
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, List, Optional
@@ -19,6 +20,7 @@ from market_data import (
     option_chain_service,
 )
 from db.database import AsyncSessionLocal
+from db.redis_client import get_redis
 from market_data.market_intelligence_runtime import APP_SYMBOLS
 from market_data.symbols import to_app_symbol, to_broker_symbol, to_fyers_symbol
 from analytics.greeks import bs_greeks, implied_volatility
@@ -36,6 +38,51 @@ from api.routers.auth import (
 )
 
 router = APIRouter(prefix="/api/market", tags=["market"])
+
+
+@router.get("/backfill-coverage")
+async def backfill_coverage() -> dict:
+    """Historical-data coverage vs the desk's targets, with missing windows per
+    instrument. Read-only; powers the auto-backfill status view."""
+    from data.historical_backfill import coverage_report
+
+    try:
+        return await coverage_report()
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(500, f"coverage report failed: {exc}")
+
+
+@router.post("/backfill-run")
+async def backfill_run(max_option_contracts: int = Query(40, ge=0, le=500)) -> dict:
+    """Trigger one bounded, idempotent backfill pass on demand."""
+    from data.historical_backfill import run_auto_backfill_once
+
+    try:
+        return await run_auto_backfill_once(max_option_contracts=max_option_contracts)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(500, f"backfill run failed: {exc}")
+
+
+@router.post("/populate-active-options-fyers")
+async def populate_active_options_fyers(
+    expiry: str = Query("2026-06-30"),
+    underlying: str = Query("", description="optional: chain-discover a single index, e.g. SENSEX"),
+) -> dict:
+    """Populate ACTIVE option-contract history (current month) from Fyers — fills the
+    gap the Upstox expired-instruments backfill leaves. Runs IN-PROCESS (uses the live
+    Fyers adapter, no slow per-process session creation) as a background task.
+    Pass underlying=SENSEX (with its own expiry) to chain-discover a BSE index."""
+    from datetime import date as _date
+    from tools.populate_active_options_fyers import main as _populate
+
+    try:
+        exp = _date.fromisoformat(expiry)
+    except ValueError:
+        raise HTTPException(400, f"bad expiry: {expiry}")
+    asyncio.create_task(_populate(exp, underlying or None))
+    return {"status": "started", "expiry": expiry, "underlying": underlying or "(all captured)",
+            "note": "runs in background; watch option_premium_candles source='fyers' for this expiry"}
+
 
 _PROFILE_TIMEFRAMES = {"day", "week", "month", "daily", "hourly"}
 _INDEX_UNDERLYING_BY_APP_SYMBOL = {app_symbol: symbol_code for symbol_code, app_symbol in APP_SYMBOLS.items()}
@@ -169,6 +216,32 @@ def _empty_fno_360_payload(
 
 
 async def _fno_360_statistics(limit: int = 10) -> dict:
+    """Redis-cached wrapper over the heavy F&O-360 aggregation.
+
+    The underlying snapshots only update every ~2-5 min, but this is called by both
+    the fno-analytics and intelligence-context endpoints — recomputing the full
+    DISTINCT-ON aggregation per call was a needless DB+CPU hit. 30s TTL keeps it
+    fresh enough while collapsing duplicate work."""
+    cache_key = f"fno360:{limit}"
+    try:
+        redis = await get_redis()
+        cached = await redis.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    except Exception:
+        redis = None
+    result = await _fno_360_statistics_compute(limit)
+    # Don't cache transient empty/unavailable states for long.
+    ttl = 30 if result.get("status") not in ("missing", "unavailable") else 5
+    try:
+        if redis is not None:
+            await redis.set(cache_key, json.dumps(result, default=str), ex=ttl)
+    except Exception:
+        pass
+    return result
+
+
+async def _fno_360_statistics_compute(limit: int = 10) -> dict:
     """Build persisted F&O breadth, PCR, IV, OI and buildup statistics."""
     now_utc = datetime.now(timezone.utc)
     try:
@@ -529,9 +602,26 @@ async def market_intelligence_context() -> dict:
 
 @router.get("/fno-analytics")
 async def fno_analytics(limit: int = Query(20, ge=1, le=100)) -> dict:
-    """Contract-first NSE + MCX F&O analytics and data-quality context."""
+    """Contract-first NSE + MCX F&O analytics and data-quality context.
+
+    Full response is Redis-cached (15s) — it's a heavy aggregation polled by the UI
+    over data that only refreshes every few minutes."""
+    cache_key = f"fno_analytics:{limit}"
+    try:
+        redis = await get_redis()
+        cached = await redis.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    except Exception:
+        redis = None
     fno_360 = await _fno_360_statistics(limit=limit)
-    return await build_fno_analytics(fno_360=fno_360, limit=limit)
+    payload = await build_fno_analytics(fno_360=fno_360, limit=limit)
+    try:
+        if redis is not None:
+            await redis.set(cache_key, json.dumps(payload, default=str), ex=15)
+    except Exception:
+        pass
+    return payload
 
 
 @router.post("/fo-risk/refresh")
@@ -617,7 +707,7 @@ async def _resolve_option_expiry(adapter, broker_symbol: str, requested_expiry: 
 
 
 async def _local_option_expiries(app_symbol: str) -> list[str]:
-    underlying = _INDEX_UNDERLYING_BY_APP_SYMBOL.get(app_symbol)
+    underlying = _INDEX_UNDERLYING_BY_APP_SYMBOL.get(app_symbol) or str(app_symbol or "").strip().upper()
     if not underlying:
         return []
     async with AsyncSessionLocal() as session:
@@ -1010,7 +1100,14 @@ async def get_option_chain(symbol: str, expiry: Optional[str] = Query(None)):
             return cached
 
     adapter, source = await _get_market_adapter()
-    adapter_symbol = _market_symbol_for_adapter(adapter, market_symbol) if adapter else market_symbol.broker_symbol
+    if adapter:
+        from market_data.option_chain import _chain_lookup_symbol
+        adapter_symbol = await _chain_lookup_symbol(
+            market_symbol.app_symbol,
+            getattr(adapter, "broker_name", ""),
+        )
+    else:
+        adapter_symbol = market_symbol.broker_symbol
     expiry = await _resolve_option_expiry(adapter, adapter_symbol, expiry) if adapter else expiry
     if not expiry:
         from agent.trading_agent import TradingAgent

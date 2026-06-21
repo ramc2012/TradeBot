@@ -9,6 +9,6 @@ export { PerformanceCharts } from "./PerformanceCharts";
 export { PaperPerformance } from "./PaperPerformance";
 export { MarketProfileChart, normalizeTpo, type TpoLevel } from "./MarketProfileChart";
 export { OrderFlowPanel, type OrderFlow } from "./OrderFlowPanel";
-export { CandleChart, type CandleBar, type ChartPriceLine } from "./CandleChart";
+export { CandleChart, type CandleBar, type ChartPriceLine, type ChartLineSeries } from "./CandleChart";
 export { GammaDensity } from "./GammaDensity";
 export { CHART, pnlColor } from "./chartTheme";

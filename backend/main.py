@@ -277,6 +277,47 @@ async def lifespan(app: FastAPI):
         )
         logger.info("✓ Embedded research sync daemon started")
 
+    # Automatic historical-data backfill: detect missing coverage vs the desk's
+    # targets and pull only the gaps. Idempotent + resumable; gated OFF by default.
+    auto_backfill_task = None
+    if settings.AUTO_BACKFILL_ENABLED:
+        async def _auto_backfill_worker() -> None:
+            try:
+                from data.run_auto_backfill import run_daemon_from_env
+
+                if not settings.AUTO_BACKFILL_ON_STARTUP:
+                    await asyncio.sleep(settings.AUTO_BACKFILL_POLL_MINUTES * 60)
+                await run_daemon_from_env()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception(f"Auto-backfill daemon stopped: {exc}")
+
+        auto_backfill_task = asyncio.create_task(
+            _auto_backfill_worker(), name="auto-backfill")
+        logger.info("✓ Auto historical backfill daemon started")
+
+    # MACD diffusion: hourly CE/PE-above-zero breadth snapshot (market sentiment),
+    # seeded from option_premium_candles at startup. Lightweight; gated ON.
+    macd_diffusion_task = None
+    if settings.MACD_DIFFUSION_ENABLED:
+        async def _macd_diffusion_worker() -> None:
+            try:
+                from market_data.macd_diffusion import run_daemon
+
+                await run_daemon(
+                    poll_minutes=settings.MACD_DIFFUSION_POLL_MINUTES,
+                    backfill_days=settings.MACD_DIFFUSION_BACKFILL_DAYS,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception(f"MACD diffusion daemon stopped: {exc}")
+
+        macd_diffusion_task = asyncio.create_task(
+            _macd_diffusion_worker(), name="macd-diffusion")
+        logger.info("✓ MACD diffusion daemon started")
+
     # F1 feed: full-universe option-chain → 3m CE+PE OHLC (S1's headline feed).
     # Gated OFF by default; the poll self-staggers through FYERS_DATA_LIMITER.
     if settings.CHAIN_CANDLE_BUILDER_ENABLED:
@@ -296,6 +337,18 @@ async def lifespan(app: FastAPI):
             await research_sync_task
         except asyncio.CancelledError:
             logger.info("Embedded research sync daemon stopped")
+    if auto_backfill_task is not None:
+        auto_backfill_task.cancel()
+        try:
+            await auto_backfill_task
+        except asyncio.CancelledError:
+            logger.info("Auto-backfill daemon stopped")
+    if macd_diffusion_task is not None:
+        macd_diffusion_task.cancel()
+        try:
+            await macd_diffusion_task
+        except asyncio.CancelledError:
+            logger.info("MACD diffusion daemon stopped")
     if loop_lag_task is not None:
         loop_lag_task.cancel()
         try:

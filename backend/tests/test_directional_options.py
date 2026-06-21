@@ -15,7 +15,7 @@ from directional_options.config import clone_default_config
 from directional_options.dashboard import mount_directional_options_dashboard
 from directional_options.features import FeatureEngine
 from directional_options.paper import DirectionalOptionsPaperStore
-from directional_options.policy import EXPECTED_FEATURE_DIM, reset_policy_for_tests
+from directional_options.policy import EXPECTED_FEATURE_DIM, FEATURE_VERSION, _featurize, reset_policy_for_tests
 from directional_options.regime import RegimeClassifier
 from directional_options.risk import DirectionalOptionsRiskEngine
 from directional_options.schemas import ContractCandidate, DashboardMountState, DirectionalSignal, RegimeSnapshot
@@ -405,6 +405,63 @@ def test_service_policy_pick_exposes_hybrid_model_payload(tmp_path) -> None:
         assert payload["candidate_rules"][0]["allowed"] is True
     finally:
         reset_policy_for_tests()
+
+
+def test_policy_v4_featurizer_appends_option_relation_features() -> None:
+    signal = {
+        "direction": "CE",
+        "confidence": 0.72,
+        "expected_move_pct": 0.006,
+        "expected_horizon_bars": 4,
+        "p_up": 0.64,
+    }
+    candidate = {
+        "option_price": 120.0,
+        "delta": 0.48,
+        "gamma": 0.0005,
+        "theta": -18.0,
+        "vega": 10.0,
+        "implied_vol": 0.22,
+        "liquidity_score": 0.92,
+        "contract_score": 47.0,
+        "delta_bucket": "core",
+        "expiry_kind": "weekly",
+        "ai_model": {
+            "score": 68.0,
+            "allowed": True,
+            "components": {"chain_confirmation": 0.72},
+            "spot_features": {"trend_quality": 0.74},
+        },
+    }
+    regime = {"label": "trend", "confidence": 0.77}
+    chain = {
+        "spot": 25000.0,
+        "risk_reversal_25d": 0.03,
+        "dealer_gex_total": -32_000_000.0,
+        "key_levels": {
+            "zero_gamma": 25120.0,
+            "gamma_regime": "negative_gamma_trend_amplifying",
+            "call_wall": {"strike": 25200.0, "distance_pct": 0.008, "net_gamma_exposure": 40_000_000.0},
+            "put_wall": {"strike": 24800.0, "distance_pct": -0.008, "net_gamma_exposure": -36_000_000.0},
+            "abs_gamma": {"strike": 25200.0, "net_gamma_exposure": 40_000_000.0},
+        },
+        "ntm_volx": {"volume_imbalance": 0.32, "oi_imbalance": 0.18, "vxr": 0.32},
+        "writer_cash_proxy": {"net_writer_cash": 22_000_000.0},
+        "straddle": {"expected_move_pct": 0.012},
+        "gamma_density": {"skew": 0.24},
+        "spectrum": {"pressure_side": "put_writing_building"},
+        "unusual_activity": [{"option_type": "CE", "score": 5.0}],
+        "expiry_state": {"theta_clock_pct": 0.33},
+    }
+
+    vec = _featurize(signal, candidate, regime, chain)
+
+    assert FEATURE_VERSION == 4
+    assert len(vec) == EXPECTED_FEATURE_DIM
+    assert vec[54] == 1.0
+    assert vec[60] > 0.0
+    assert vec[66] > 0.0
+    assert vec[70] == 1.0
 
 
 def test_risk_engine_caps_size_on_daily_loss_breach() -> None:

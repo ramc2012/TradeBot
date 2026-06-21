@@ -42,7 +42,11 @@ type ChainAnalytics = {
   pcr_oi_change?: number | null;
   iv_skew_25d?: number | null;
   iv_skew_25d_norm?: number | null;
+  risk_reversal_25d?: number | null;
+  iv_25d_call?: number | null;
+  iv_25d_put?: number | null;
   gex_total?: number | null;
+  dealer_gex_total?: number | null;
   dex_calls?: number | null;
   dex_puts?: number | null;
   dex_net?: number | null;
@@ -66,6 +70,39 @@ type ChainAnalytics = {
     pe_gamma_oi: number;
     total_gamma_oi: number;
   }>;
+  key_levels?: {
+    call_wall?: { strike: number; distance_pct: number; net_gamma_exposure: number } | null;
+    put_wall?: { strike: number; distance_pct: number; net_gamma_exposure: number } | null;
+    abs_gamma?: { strike: number; distance_pct: number; net_gamma_exposure: number } | null;
+    zero_gamma?: number | null;
+    dealer_gex_total?: number | null;
+    gamma_regime?: string | null;
+  };
+  trace_exposures?: Array<{
+    strike: number;
+    moneyness_pct: number;
+    net_delta_exposure: number;
+    net_gamma_exposure: number;
+    net_vanna_exposure: number;
+    net_charm_exposure: number;
+    net_volga_exposure: number;
+  }>;
+  unusual_activity?: Array<{
+    strike: number;
+    option_type: string;
+    oi_change: number;
+    oi_change_pct?: number | null;
+    ltp_change_pct?: number | null;
+    volume_to_oi: number;
+    score: number;
+    flags: string[];
+  }>;
+  expiry_state?: {
+    days_to_expiry?: number | null;
+    is_expiry_day?: boolean;
+    expiry_mode?: string;
+    theta_clock_pct?: number | null;
+  };
 };
 
 function fmtNumber(value?: number | null, digits = 2): string {
@@ -100,6 +137,20 @@ function pcrTone(pcr: number | null | undefined): string {
   if (pcr > 1.2) return "text-accent-green";
   if (pcr < 0.8) return "text-accent-red";
   return "text-text-secondary";
+}
+
+function formatStrike(value?: number | null): string {
+  return value == null || Number.isNaN(value) ? "—" : fmtNumber(value, 0);
+}
+
+function fmtPctFromPercent(value?: number | null, digits = 1): string {
+  if (value == null || Number.isNaN(value)) return "—";
+  return `${value.toFixed(digits)}%`;
+}
+
+function levelDetail(level?: { distance_pct?: number | null; net_gamma_exposure?: number | null } | null): string | undefined {
+  if (!level) return undefined;
+  return `${fmtPct(level.distance_pct, 2)} · ${compact(level.net_gamma_exposure)}`;
 }
 
 function MetricTile({
@@ -193,6 +244,12 @@ export default function OptionAnalyticsPanel({
   const dexRatio = (data.dex_net ?? 0) / dexDenom;
   const totalCeOiChg = data.total_ce_oi_change ?? 0;
   const totalPeOiChg = data.total_pe_oi_change ?? 0;
+  const keyLevels = data.key_levels || {};
+  const traceRows = [...(data.trace_exposures || [])]
+    .sort((a, b) => Math.abs(a.moneyness_pct) - Math.abs(b.moneyness_pct))
+    .slice(0, 9);
+  const unusualRows = data.unusual_activity || [];
+  const dealerGex = data.dealer_gex_total ?? keyLevels.dealer_gex_total ?? null;
 
   return (
     <div className="space-y-5">
@@ -247,6 +304,40 @@ export default function OptionAnalyticsPanel({
             }
           />
           <MetricTile label="GEX" value={compact(data.gex_total)} color={tone(data.gex_total)} detail="γ × OI × side" />
+        </div>
+      </Section>
+
+      <Section
+        title="Key levels"
+        icon={<TrendingDown size={16} />}
+        rightSlot={
+          <span className={clsx("text-[11px] uppercase tracking-[0.14em]", tone(dealerGex))}>
+            {(keyLevels.gamma_regime || "unknown").replaceAll("_", " ")}
+            {data.expiry_state?.expiry_mode ? ` · ${data.expiry_state.expiry_mode.replaceAll("_", " ")}` : ""}
+          </span>
+        }
+      >
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+          <MetricTile
+            label="Dealer GEX"
+            value={compact(dealerGex)}
+            color={tone(dealerGex)}
+            detail={dealerGex != null && dealerGex >= 0 ? "pinning" : dealerGex != null ? "trend amp" : undefined}
+          />
+          <MetricTile
+            label="Gamma flip"
+            value={formatStrike(keyLevels.zero_gamma)}
+            detail={keyLevels.zero_gamma && data.spot ? `${fmtPct((keyLevels.zero_gamma - data.spot) / data.spot, 2)} from spot` : undefined}
+          />
+          <MetricTile label="Call wall" value={formatStrike(keyLevels.call_wall?.strike)} detail={levelDetail(keyLevels.call_wall)} color="text-accent-green" />
+          <MetricTile label="Put wall" value={formatStrike(keyLevels.put_wall?.strike)} detail={levelDetail(keyLevels.put_wall)} color="text-accent-red" />
+          <MetricTile label="Abs gamma" value={formatStrike(keyLevels.abs_gamma?.strike)} detail={levelDetail(keyLevels.abs_gamma)} />
+          <MetricTile
+            label="Theta clock"
+            value={data.expiry_state?.theta_clock_pct != null ? fmtPct(data.expiry_state.theta_clock_pct, 0) : "—"}
+            detail={data.expiry_state?.days_to_expiry != null ? `${data.expiry_state.days_to_expiry} DTE` : undefined}
+            color={data.expiry_state?.is_expiry_day ? "text-accent-amber" : undefined}
+          />
         </div>
       </Section>
 
@@ -367,6 +458,75 @@ export default function OptionAnalyticsPanel({
                 <Bar dataKey="pe_gamma_oi" stackId="g" fill="#ff4757" />
               </BarChart>
             </ResponsiveContainer>
+          </div>
+        </Section>
+      )}
+
+      {traceRows.length > 0 && (
+        <Section title="TRACE exposures" icon={<Activity size={16} />}>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-[11.5px]">
+              <thead className="text-[10px] uppercase tracking-wide text-text-muted">
+                <tr className="border-b border-bg-border/40">
+                  <th className="px-2 py-1.5 text-left">Strike</th>
+                  <th className="px-2 py-1.5 text-right">Δ exp</th>
+                  <th className="px-2 py-1.5 text-right">Γ exp</th>
+                  <th className="px-2 py-1.5 text-right">Vanna</th>
+                  <th className="px-2 py-1.5 text-right">Charm</th>
+                  <th className="px-2 py-1.5 text-right">Volga</th>
+                  <th className="px-2 py-1.5 text-right">% spot</th>
+                </tr>
+              </thead>
+              <tbody>
+                {traceRows.map((r) => (
+                  <tr key={`trace-${r.strike}`} className="border-b border-bg-border/20">
+                    <td className="px-2 py-1.5 font-mono text-text-primary">{formatStrike(r.strike)}</td>
+                    <td className={clsx("px-2 py-1.5 text-right font-mono", tone(r.net_delta_exposure))}>{compact(r.net_delta_exposure)}</td>
+                    <td className={clsx("px-2 py-1.5 text-right font-mono", tone(r.net_gamma_exposure))}>{compact(r.net_gamma_exposure)}</td>
+                    <td className={clsx("px-2 py-1.5 text-right font-mono", tone(r.net_vanna_exposure))}>{compact(r.net_vanna_exposure)}</td>
+                    <td className={clsx("px-2 py-1.5 text-right font-mono", tone(r.net_charm_exposure))}>{compact(r.net_charm_exposure)}</td>
+                    <td className={clsx("px-2 py-1.5 text-right font-mono", tone(r.net_volga_exposure))}>{compact(r.net_volga_exposure)}</td>
+                    <td className={clsx("px-2 py-1.5 text-right font-mono", tone(r.moneyness_pct))}>{fmtPct(r.moneyness_pct, 2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Section>
+      )}
+
+      {unusualRows.length > 0 && (
+        <Section title="Unusual activity" icon={<TrendingUp size={16} />}>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-[11.5px]">
+              <thead className="text-[10px] uppercase tracking-wide text-text-muted">
+                <tr className="border-b border-bg-border/40">
+                  <th className="px-2 py-1.5 text-left">Strike</th>
+                  <th className="px-2 py-1.5 text-left">Side</th>
+                  <th className="px-2 py-1.5 text-right">Vol/OI</th>
+                  <th className="px-2 py-1.5 text-right">ΔOI</th>
+                  <th className="px-2 py-1.5 text-right">ΔLTP</th>
+                  <th className="px-2 py-1.5 text-left">Flags</th>
+                </tr>
+              </thead>
+              <tbody>
+                {unusualRows.map((r) => (
+                  <tr key={`ua-${r.option_type}-${r.strike}`} className="border-b border-bg-border/20">
+                    <td className="px-2 py-1.5 font-mono text-text-primary">{formatStrike(r.strike)}</td>
+                    <td className={clsx("px-2 py-1.5 font-semibold", r.option_type === "CE" ? "text-accent-green" : "text-accent-red")}>{r.option_type}</td>
+                    <td className="px-2 py-1.5 text-right font-mono">{fmtNumber(r.volume_to_oi, 2)}</td>
+                    <td className={clsx("px-2 py-1.5 text-right font-mono", tone(r.oi_change))}>
+                      {compact(r.oi_change)}
+                      {r.oi_change_pct != null ? ` (${fmtPctFromPercent(r.oi_change_pct, 1)})` : ""}
+                    </td>
+                    <td className={clsx("px-2 py-1.5 text-right font-mono", tone(r.ltp_change_pct))}>
+                      {r.ltp_change_pct != null ? fmtPctFromPercent(r.ltp_change_pct, 1) : "—"}
+                    </td>
+                    <td className="px-2 py-1.5 text-text-muted">{r.flags.join(" · ") || fmtNumber(r.score, 1)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </Section>
       )}

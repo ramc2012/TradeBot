@@ -11,6 +11,15 @@ import { useEffect, useRef } from "react";
 
 export type CandleBar = { time: number | string; open: number; high: number; low: number; close: number; volume?: number };
 export type ChartPriceLine = { price: number; color: string; title: string; dashed?: boolean };
+/** A line series drawn over the candles (e.g. Bollinger band, KAMA). Null values are gaps. */
+export type ChartLineSeries = {
+  id: string;
+  data: { time: number | string; value: number | null | undefined }[];
+  color: string;
+  lineWidth?: number;
+  dashed?: boolean;
+  title?: string;
+};
 
 function toUnix(t: number | string): number {
   if (typeof t === "number") return t > 1e12 ? Math.floor(t / 1000) : t;
@@ -21,17 +30,19 @@ function toUnix(t: number | string): number {
 export function CandleChart({
   bars,
   priceLines = [],
+  overlays = [],
   height = 420,
   showVolume = true,
 }: {
   bars: CandleBar[];
   priceLines?: ChartPriceLine[];
+  overlays?: ChartLineSeries[];
   height?: number;
   showVolume?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const refs = useRef<{ chart?: any; candle?: any; vol?: any; lines: any[] }>({ lines: [] });
+  const refs = useRef<{ chart?: any; candle?: any; vol?: any; lines: any[]; overlays: any[] }>({ lines: [], overlays: [] });
 
   // create chart once
   useEffect(() => {
@@ -41,7 +52,13 @@ export function CandleChart({
       const lw = await import("lightweight-charts");
       if (disposed || !containerRef.current) return;
       const cs = getComputedStyle(document.documentElement);
-      const col = (v: string) => `rgb(${cs.getPropertyValue(v).trim() || "148 163 184"})`;
+      // The app's CSS vars hold space-separated RGB channels (Tailwind
+      // `rgb(var(--x))` convention, e.g. `--text-secondary: 148 163 184`).
+      // lightweight-charts' color parser rejects the CSS Color-4 space form
+      // (`rgb(148 163 184)`) and throws inside createChart, which aborts the
+      // whole chart — so normalise the triplet to comma-separated rgb().
+      const col = (v: string) =>
+        `rgb(${(cs.getPropertyValue(v).trim() || "148 163 184").replace(/\s+/g, ", ")})`;
       const chart = lw.createChart(containerRef.current, {
         height,
         layout: { background: { type: lw.ColorType.Solid, color: "transparent" }, textColor: col("--text-secondary"), fontSize: 10 },
@@ -75,20 +92,43 @@ export function CandleChart({
       disposed = true;
       ro?.disconnect();
       refs.current.chart?.remove();
-      refs.current = { lines: [] };
+      refs.current = { lines: [], overlays: [] };
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function pushData() {
     const { candle, vol, chart } = refs.current;
-    if (!candle) return;
+    if (!candle || !chart) return;
     const seen = new Set<number>();
     const data = [...bars]
       .map((b) => ({ time: toUnix(b.time), open: +b.open, high: +b.high, low: +b.low, close: +b.close }))
       .sort((a, b) => a.time - b.time)
       .filter((d) => (seen.has(d.time) ? false : seen.add(d.time)));
     candle.setData(data);
+
+    // Line overlays (Bollinger bands, KAMA, …) — recreated from props each
+    // push so add/remove of an overlay is reflected without re-mounting.
+    refs.current.overlays.forEach((s) => chart.removeSeries(s));
+    refs.current.overlays = overlays.map((ov) => {
+      const series = chart.addLineSeries({
+        color: ov.color,
+        lineWidth: ov.lineWidth ?? 1,
+        lineStyle: ov.dashed ? 2 : 0,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      });
+      const oseen = new Set<number>();
+      series.setData(
+        ov.data
+          .filter((p) => p.value != null && Number.isFinite(Number(p.value)))
+          .map((p) => ({ time: toUnix(p.time), value: Number(p.value) }))
+          .sort((a, b) => a.time - b.time)
+          .filter((d) => (oseen.has(d.time) ? false : oseen.add(d.time))),
+      );
+      return series;
+    });
     if (vol) {
       const vseen = new Set<number>();
       vol.setData(
@@ -109,14 +149,20 @@ export function CandleChart({
   useEffect(() => {
     pushData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bars, priceLines]);
+  }, [bars, priceLines, overlays]);
 
-  if (!bars?.length) {
-    return (
-      <div className="flex items-center justify-center rounded-xl border border-dashed border-bg-border/60 text-sm text-text-muted" style={{ height }}>
-        No price bars available.
-      </div>
-    );
-  }
-  return <div ref={containerRef} className="w-full" style={{ height }} />;
+  // The container div must always render so the create-once effect can attach
+  // the chart even when the first render has no bars yet (async data). When
+  // empty we overlay the message instead of swapping the ref'd node out —
+  // otherwise the chart would never initialise once data arrives.
+  return (
+    <div className="relative w-full" style={{ height }}>
+      <div ref={containerRef} className="h-full w-full" />
+      {!bars?.length ? (
+        <div className="absolute inset-0 flex items-center justify-center rounded-xl border border-dashed border-bg-border/60 text-sm text-text-muted">
+          No price bars available.
+        </div>
+      ) : null}
+    </div>
+  );
 }

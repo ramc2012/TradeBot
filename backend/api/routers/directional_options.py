@@ -23,6 +23,11 @@ async def summary() -> dict[str, object]:
     return await asyncio.to_thread(_service.summary)
 
 
+@router.get("/universe")
+async def universe() -> dict[str, object]:
+    return await _service.universe()
+
+
 @router.get("/workspace")
 async def workspace(
     underlying: str = Query("NIFTY"),
@@ -100,6 +105,7 @@ async def backtest(
 async def chain_analytics(
     underlying: str = Query("NIFTY"),
     expiry: str | None = Query(None),
+    refresh: bool = Query(False),
 ) -> dict[str, object]:
     """Option-chain analytics for the directional engine.
 
@@ -109,7 +115,7 @@ async def chain_analytics(
     `{"available": false}` when no chain is cached for the symbol or
     when the lookup times out (e.g. weekend / broker WS down).
     """
-    from directional_options.chain_analytics import fetch_chain_analytics
+    from directional_options.chain_analytics import chain_cache_status, fetch_chain_analytics, warm_chain_cache
     try:
         # Outer wait_for is a safety belt — fetch_chain_analytics already
         # bounds its Redis call with its own 2s timeout, but a 5s wall
@@ -121,9 +127,29 @@ async def chain_analytics(
         )
     except (asyncio.TimeoutError, Exception):
         payload = None
+    refresh_status = None
+    if not payload and refresh:
+        try:
+            refresh_status = await asyncio.wait_for(
+                warm_chain_cache(underlying, expiry=expiry),
+                timeout=12.0,
+            )
+            payload = await asyncio.wait_for(
+                fetch_chain_analytics(underlying, expiry=expiry),
+                timeout=5.0,
+            )
+        except (asyncio.TimeoutError, Exception) as exc:
+            refresh_status = {"warmed": False, "reason": str(exc)}
     if not payload:
-        return {"available": False, "underlying": underlying, "expiry": expiry}
-    return {"available": True, **payload}
+        status = await chain_cache_status(underlying, expiry)
+        return {
+            "available": False,
+            "underlying": underlying,
+            "expiry": expiry,
+            "cache_status": status,
+            "refresh_status": refresh_status,
+        }
+    return {"available": True, **payload, "refresh_status": refresh_status}
 
 
 @router.get("/policy")

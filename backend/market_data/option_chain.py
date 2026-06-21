@@ -24,6 +24,47 @@ OC_TTL = 60          # Redis TTL for option chain
 PERSIST_INTERVAL = 120
 
 
+async def _catalog_underlying_key(symbol: str) -> Optional[str]:
+    normalized = str(symbol or "").strip().upper()
+    if not normalized or "|" in normalized or ":" in normalized:
+        return None
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT underlying_key
+                    FROM fo_underlying_catalog
+                    WHERE symbol = :symbol
+                      AND underlying_key IS NOT NULL
+                    LIMIT 1
+                    """
+                ),
+                {"symbol": normalized},
+            )
+            row = result.first()
+            value = str(row.underlying_key or "").strip() if row else ""
+            return value or None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[OC] catalog underlying-key lookup failed for {normalized}: {exc}")
+        return None
+
+
+async def _chain_lookup_symbol(symbol: str, broker_name: str) -> str:
+    """Return the broker-specific option-chain lookup key for indices/stocks."""
+    if broker_name == "fyers":
+        lookup = to_fyers_symbol(symbol)
+        if lookup == symbol and "|" not in lookup and ":" not in lookup:
+            # Fyers option-chain stock symbols use the cash-market ticker form.
+            return f"NSE:{lookup.upper()}-EQ"
+        return lookup
+
+    lookup = to_broker_symbol(symbol)
+    if lookup == symbol and "|" not in lookup and ":" not in lookup:
+        return await _catalog_underlying_key(symbol) or lookup
+    return lookup
+
+
 class OptionChainService:
     """Periodically polls option chain, calculates analytics, stores in Redis."""
 
@@ -74,9 +115,54 @@ class OptionChainService:
         raw = await redis.get(f"oc:{symbol}:{expiry}")
         return json.loads(raw) if raw else None
 
+    async def cached_expiries(self, symbol: str) -> list[str]:
+        """Return expiries currently present in Redis for one app symbol."""
+        redis = await get_redis()
+        prefix = f"oc:{symbol}:"
+        expiries: set[str] = set()
+        try:
+            async for key in redis.scan_iter(match=f"{prefix}*"):
+                raw = str(key)
+                if raw.startswith(prefix):
+                    expiry = raw[len(prefix):]
+                    if expiry:
+                        expiries.add(expiry)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[OC] cached-expiry scan failed for {symbol}: {exc}")
+        return sorted(expiries)
+
+    async def known_expiries(self, symbol: str) -> list[str]:
+        """Return tracked + cached expiries, nearest first."""
+        tracked = {
+            expiry
+            for tracked_symbol, expiry in self._tracked
+            if tracked_symbol == symbol and expiry
+        }
+        cached = set(await self.cached_expiries(symbol))
+        return sorted(tracked | cached)
+
     async def _poll_loop(self):
         while True:
             try:
+                # ONE-DATA-ONE-COMPUTE: pin the canonical chain writer to the
+                # option_chain-routed adapter (Upstox-first → streamed greeks) on
+                # every cycle. This defeats last-writer-wins set_broker() flipping
+                # the source to a non-greeks broker, and keeps this the SOLE writer
+                # of oc:{symbol}:{expiry} that all consumers read via get_cached().
+                # NON-BLOCKING: only consider already-connected adapters — never call
+                # ensure_*_session() here (it can hang ~30s on a degraded session and
+                # would stall the whole poll loop, staling every tracked chain).
+                try:
+                    from api.routers.auth import get_active_adapter
+                    from market_data.source_policy import route_order
+                    for _src in route_order("option_chain"):
+                        if _src in ("upstox", "fyers"):
+                            _a = get_active_adapter(_src)
+                            if _a is not None:
+                                self._broker = _a
+                                break
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[OC] poll routing resolve failed: {exc}")
                 for symbol, expiry in self._tracked:
                     await self._refresh(symbol, expiry)
             except asyncio.CancelledError:
@@ -90,7 +176,7 @@ class OptionChainService:
             return
         try:
             broker_name = getattr(self._broker, "broker_name", "")
-            lookup_symbol = to_fyers_symbol(symbol) if broker_name == "fyers" else to_broker_symbol(symbol)
+            lookup_symbol = await _chain_lookup_symbol(symbol, broker_name)
             chain: OptionChain = await self._broker.get_option_chain(lookup_symbol, expiry)
             analytics = self._calculate_analytics(chain)
             payload = {

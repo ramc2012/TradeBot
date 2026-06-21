@@ -10,6 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from analysis.instruments import ALL_FO_INDICES, STRIKE_STEPS
+
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 RUNTIME_ROOT = PACKAGE_ROOT.parent / "runtime" / "directional_options"
@@ -18,17 +20,22 @@ DATA_ROOT = PACKAGE_ROOT.parent / "runtime" / "index_analytics_data"
 # Funded equity anchor for paper-trading capital accounting.
 DIRECTIONAL_INITIAL_CAPITAL: float = 3_000_000.0
 
+FNO_STOCK_FALLBACK: list[str] = sorted(
+    symbol for symbol in STRIKE_STEPS if symbol not in set(ALL_FO_INDICES)
+)
+DIRECTIONAL_DEFAULT_UNIVERSE: list[str] = list(ALL_FO_INDICES) + FNO_STOCK_FALLBACK
+
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "label": "Directional Long Options",
     "description": (
-        "Long-premium research and execution sandbox for NSE index options "
-        "(NIFTY / BANKNIFTY / SENSEX). Trade/skip, strike choice, and sizing "
+        "Long-premium research and execution sandbox for index and F&O stock options. "
+        "Trade/skip, strike choice, and sizing "
         "are learned online by a contextual bandit instead of hand-tuned hurdles."
     ),
     "data_root": DATA_ROOT,
     "runtime_root": RUNTIME_ROOT,
-    "universe": ["NIFTY", "BANKNIFTY", "SENSEX"],
+    "universe": DIRECTIONAL_DEFAULT_UNIVERSE,
     "timeframes": ["5minute", "15minute"],
     "default_underlying": "NIFTY",
     "default_timeframe": "5minute",

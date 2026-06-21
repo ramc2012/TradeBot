@@ -9,14 +9,17 @@ from time import monotonic
 from typing import Any, Optional
 
 import pandas as pd
+from sqlalchemy import text
 
 from agentic_rag import ContextGateRequest, rag_service
+from analysis.instruments import ALL_FO_INDICES
 from analysis.signal_classifier import classify_status_bucket
 from core.config import settings
+from db.database import AsyncSessionLocal
 from directional_options.ai_model import HybridDirectionalOptionsModel
 from directional_options.backtest import DirectionalOptionsBacktester
 from directional_options.chain_analytics import ensure_chain_tracked, fetch_chain_analytics
-from directional_options.config import clone_default_config
+from directional_options.config import FNO_STOCK_FALLBACK, clone_default_config
 from directional_options.data import DirectionalOptionsDataStore
 from directional_options.features import FeatureEngine
 from directional_options.paper import DirectionalOptionsPaperStore
@@ -99,6 +102,55 @@ class DirectionalOptionsService:
             "expires_at": monotonic() + self._summary_cache_ttl_seconds,
         }
         return payload
+
+    async def universe(self) -> dict[str, object]:
+        """Grouped index + stock F&O universe for the Directional desk."""
+        index_order = {symbol: idx for idx, symbol in enumerate(ALL_FO_INDICES)}
+        rows: list[dict[str, Any]] = []
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT symbol, kind, lot_size, spot_instrument_key, underlying_key
+                        FROM fo_underlying_catalog
+                        WHERE symbol IS NOT NULL
+                        ORDER BY CASE WHEN kind = 'INDEX' THEN 0 ELSE 1 END, symbol
+                        """
+                    )
+                )
+                rows = [dict(row) for row in result.mappings().all()]
+        except Exception:
+            rows = []
+
+        indices = sorted(
+            {
+                str(row.get("symbol") or "").upper()
+                for row in rows
+                if str(row.get("kind") or "").upper() == "INDEX" and str(row.get("symbol") or "").strip()
+            }
+            or set(ALL_FO_INDICES),
+            key=lambda symbol: index_order.get(symbol, 999),
+        )
+        stocks = sorted(
+            {
+                str(row.get("symbol") or "").upper()
+                for row in rows
+                if str(row.get("kind") or "").upper() == "STOCK" and str(row.get("symbol") or "").strip()
+            }
+        )
+        source = "fo_underlying_catalog"
+        if not stocks:
+            stocks = list(FNO_STOCK_FALLBACK)
+            source = "fallback"
+        symbols = list(dict.fromkeys([*indices, *stocks]))
+        return {
+            "source": source,
+            "indices": indices,
+            "stocks": stocks,
+            "symbols": symbols,
+            "total": len(symbols),
+        }
 
     @staticmethod
     def _is_supported_commodity(underlying: str) -> bool:
@@ -381,6 +433,7 @@ class DirectionalOptionsService:
         risk_payload: dict[str, object] | None = None
         rag_context: dict[str, Any] | None = None
         policy_payload: dict[str, Any] | None = None
+        chain_payload: dict[str, Any] | None = None
         if signal is not None:
             selection = self.selector.select(
                 underlying=underlying,
@@ -609,7 +662,6 @@ class DirectionalOptionsService:
             # tolerate-failure: a missing chain payload just means the
             # policy gets sentinel zeros for chain features and falls
             # back to signal+candidate context alone.
-            chain_payload: dict[str, Any] | None = None
             try:
                 chain_expiry = None
                 best_cand = selection.get("best")

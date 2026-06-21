@@ -759,6 +759,37 @@ class DirectionalOptionsPaperStore:
             "payload": json.dumps(payload, default=str),
         }
 
+    def _load_positions_file(self) -> dict[str, Any]:
+        if not self.positions_path.exists():
+            return {"open_positions": [], "closed_positions": [], "last_synced_at": _utc_now()}
+        try:
+            state = json.loads(self.positions_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[DirPaper] legacy position read failed: {exc}")
+            state = {}
+        return {
+            "open_positions": list(state.get("open_positions") or []),
+            "closed_positions": list(state.get("closed_positions") or []),
+            "last_synced_at": state.get("last_synced_at") or _utc_now(),
+        }
+
+    def _load_journal_file(self) -> list[dict[str, Any]]:
+        if not self.journal_path.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        try:
+            for line in self.journal_path.read_text(encoding="utf-8").splitlines()[-1000:]:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[DirPaper] legacy journal read failed: {exc}")
+        return rows
+
     async def _maybe_seed_from_file(self) -> None:
         """One-time import of the legacy JSON book into the DB (only when the
         DB is empty and a file exists). Idempotent + best-effort."""
@@ -818,32 +849,40 @@ class DirectionalOptionsPaperStore:
 
     async def _load_journal(self) -> list[dict[str, Any]]:
         await self._maybe_seed_from_file()
-        async with AsyncSessionLocal() as session:
-            rows = (await session.execute(
-                text(
-                    "SELECT payload FROM directional_paper_journal "
-                    "ORDER BY recorded_at DESC NULLS LAST, id DESC LIMIT 1000"
-                )
-            )).mappings().all()
-        return [_as_dict(r["payload"]) for r in rows]
+        try:
+            async with AsyncSessionLocal() as session:
+                rows = (await session.execute(
+                    text(
+                        "SELECT payload FROM directional_paper_journal "
+                        "ORDER BY recorded_at DESC NULLS LAST, id DESC LIMIT 1000"
+                    )
+                )).mappings().all()
+            return [_as_dict(r["payload"]) for r in rows]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[DirPaper] DB journal read failed; using legacy file fallback: {exc}")
+            return self._load_journal_file()
 
     async def _load_positions(self) -> dict[str, Any]:
         await self._maybe_seed_from_file()
-        async with AsyncSessionLocal() as session:
-            open_rows = (await session.execute(
-                text("SELECT payload FROM directional_paper_positions WHERE status = 'open'")
-            )).mappings().all()
-            closed_rows = (await session.execute(
-                text(
-                    "SELECT payload FROM directional_paper_positions WHERE status = 'closed' "
-                    "ORDER BY closed_at DESC NULLS LAST LIMIT 500"
-                )
-            )).mappings().all()
-        return {
-            "open_positions": [_as_dict(r["payload"]) for r in open_rows],
-            "closed_positions": [_as_dict(r["payload"]) for r in closed_rows],
-            "last_synced_at": _utc_now(),
-        }
+        try:
+            async with AsyncSessionLocal() as session:
+                open_rows = (await session.execute(
+                    text("SELECT payload FROM directional_paper_positions WHERE status = 'open'")
+                )).mappings().all()
+                closed_rows = (await session.execute(
+                    text(
+                        "SELECT payload FROM directional_paper_positions WHERE status = 'closed' "
+                        "ORDER BY closed_at DESC NULLS LAST LIMIT 500"
+                    )
+                )).mappings().all()
+            return {
+                "open_positions": [_as_dict(r["payload"]) for r in open_rows],
+                "closed_positions": [_as_dict(r["payload"]) for r in closed_rows],
+                "last_synced_at": _utc_now(),
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[DirPaper] DB position read failed; using legacy file fallback: {exc}")
+            return self._load_positions_file()
 
     async def _save_positions(self, state: dict[str, Any]) -> None:
         """Upsert the open + closed positions by position_id. Closed positions

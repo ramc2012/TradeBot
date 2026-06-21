@@ -32,6 +32,7 @@ import {
   ArrowUpDown,
   BarChart3,
   CandlestickChart,
+  Gauge,
   ListChecks,
   Radio,
   TrendingUp,
@@ -63,6 +64,7 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { PaperPerformance } from "@/components/strategies/shared";
+import { OptionChartModal, type OptionChartContract } from "@/components/strategies/nse/OptionChartModal";
 import { useStrategyPositionsStream } from "@/hooks/useStrategyPositionsStream";
 import { TerminalPanel } from "@/components/terminal/TerminalPanel";
 import type { PaperPosition, PaperSummary, PositionsPayload } from "@/lib/strategy-stats";
@@ -72,6 +74,7 @@ import {
   getStrategyAgentStatus,
   getStrategyEquityHistory,
   getStrategyOpenSignals,
+  getMacdDiffusion,
   getTradingKillSwitchStatus,
 } from "@/lib/api";
 
@@ -96,6 +99,8 @@ type WatchRow = {
   rsi?: number | null;
   priority_score?: number | null;
   bucket?: string | null;
+  instrument_key?: string | null;
+  trading_symbol?: string | null;
 };
 
 type PositionRow = {
@@ -197,11 +202,25 @@ type EquityLane = { key?: string; label?: string; equity_curve?: Array<{ time?: 
 
 type AuditEvent = { id?: string; time?: string; severity?: string; level?: string; scope?: string; message?: string; market?: string };
 
+type DiffusionPoint = {
+  time: string;
+  ce_total: number;
+  ce_above_zero: number;
+  pe_total: number;
+  pe_above_zero: number;
+  ce_pct?: number | null;
+  pe_pct?: number | null;
+  net_diffusion?: number | null;
+  source?: string;
+};
+type DiffusionPayload = { market?: string; days?: number; count?: number; series?: DiffusionPoint[]; latest?: DiffusionPoint | null };
+
 const TABS = [
   { key: "positions", label: "Positions", icon: Wallet },
   { key: "terminal", label: "Terminal", icon: Radio },
   { key: "overview", label: "Overview", icon: TrendingUp },
   { key: "signals", label: "Signals", icon: ListChecks },
+  { key: "sentiment", label: "Sentiment", icon: Gauge },
   { key: "performance", label: "Performance", icon: BarChart3 },
   { key: "activity", label: "Activity", icon: Activity },
 ];
@@ -291,6 +310,14 @@ export default function NseDesk() {
     queryKey: ["nse", "comments"],
     queryFn: async () => (await getStrategyAgentComments(40)).data as Commentary[] | { comments?: Commentary[] },
     enabled: activeTab === "activity",
+    refetchInterval: REFRESH_MS.summary,
+    refetchOnWindowFocus: false,
+  });
+
+  const diffusionQuery = useQuery({
+    queryKey: ["nse", "diffusion"],
+    queryFn: async () => (await getMacdDiffusion(30)).data as DiffusionPayload,
+    enabled: activeTab === "sentiment",
     refetchInterval: REFRESH_MS.summary,
     refetchOnWindowFocus: false,
   });
@@ -388,6 +415,7 @@ export default function NseDesk() {
       ) : null}
 
       {activeTab === "signals" ? <WatchlistTab rows={watchlist} /> : null}
+      {activeTab === "sentiment" ? <SentimentTab data={diffusionQuery.data} loading={diffusionQuery.isFetching} /> : null}
       {activeTab === "terminal" ? <TerminalPanel /> : null}
       {activeTab === "positions" ? <PositionsTab rows={positions} /> : null}
       {activeTab === "performance" ? (
@@ -526,9 +554,83 @@ function OverviewTab({
 
 // ── Signals tab — sortable watchlist ────────────────────────────────────────
 
+// Map a watchlist row to a chartable option contract. Returns null when the
+// row is a regime-only placeholder with no resolved strike/expiry (the chart
+// needs a concrete contract to pull premium candles).
+function rowToContract(r: WatchRow): OptionChartContract | null {
+  const strike = r.strike ?? r.atm_strike;
+  const expiry = (r.expiry || "").slice(0, 10);
+  const direction = (r.direction || "").toUpperCase();
+  if (strike == null || !expiry || (direction !== "CE" && direction !== "PE")) return null;
+  return {
+    underlying: r.underlying || "",
+    direction,
+    strike,
+    expiry,
+    instrumentKey: r.instrument_key ?? null,
+    ltp: r.ltp ?? null,
+  };
+}
+
+// Sort fields surfaced in the toolbar — indicators first, then name. Clicking
+// the active field flips its direction (handled by onSort).
+const WATCH_SORT_FIELDS: { key: string; label: string }[] = [
+  { key: "macd", label: "MACD" },
+  { key: "rsi", label: "RSI" },
+  { key: "priority_score", label: "Score" },
+  { key: "ltp", label: "LTP" },
+  { key: "iv", label: "IV" },
+  { key: "underlying", label: "Name" },
+];
+
+// A row is "insufficient data" when the desk could not compute its primary
+// indicator (no MACD yet) — these are parked in a separate group at the bottom
+// so they never dilute the actionable CE/PE lists.
+function isInsufficientRow(r: WatchRow): boolean {
+  return r.macd == null || String(r.status || "").toLowerCase().includes("missing");
+}
+
+// Build a comparator for the watchlist. Indicator/numeric fields compare
+// numerically (nulls sink to the bottom); name/status compare lexically.
+// Indicator ties fall back to RSI then priority score so the order is stable
+// and still meaningful when, say, two legs share a MACD value.
+function makeWatchSorter(sortKey: string, sortDir: SortDir): (a: WatchRow, b: WatchRow) => number {
+  const valueOf = (r: WatchRow): number | string => {
+    switch (sortKey) {
+      case "underlying": return (r.underlying || "").toUpperCase();
+      case "direction": return r.direction || "";
+      case "strike": return r.strike ?? r.atm_strike ?? -Infinity;
+      case "ltp": return r.ltp ?? -Infinity;
+      case "iv": return r.iv_pct ?? -Infinity;
+      case "rsi": return r.rsi ?? -Infinity;
+      case "macd": return r.macd ?? -Infinity;
+      case "status": return r.status || "";
+      default: return r.priority_score ?? -Infinity;
+    }
+  };
+  return (a, b) => {
+    const va = valueOf(a);
+    const vb = valueOf(b);
+    let cmp =
+      typeof va === "string" || typeof vb === "string"
+        ? String(va).localeCompare(String(vb))
+        : (va as number) - (vb as number);
+    if (cmp === 0 && sortKey !== "rsi") cmp = (a.rsi ?? -Infinity) - (b.rsi ?? -Infinity);
+    if (cmp === 0) cmp = (a.priority_score ?? -Infinity) - (b.priority_score ?? -Infinity);
+    return sortDir === "asc" ? cmp : -cmp;
+  };
+}
+
+type WatchSide = "CE" | "PE" | "INS";
+
 function WatchlistTab({ rows }: { rows: WatchRow[] }) {
-  const [sortKey, setSortKey] = useState<string>("priority_score");
+  // Default to MACD descending — the strongest-momentum legs first.
+  const [sortKey, setSortKey] = useState<string>("macd");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  // CE / PE live in tabs (not stacked) so the trader isn't scrolling 200+ rows
+  // to reach the other side.
+  const [side, setSide] = useState<WatchSide>("CE");
+  const [chartContract, setChartContract] = useState<OptionChartContract | null>(null);
 
   const onSort = (key: string) => {
     if (key === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -538,74 +640,251 @@ function WatchlistTab({ rows }: { rows: WatchRow[] }) {
     }
   };
 
-  const sorted = useMemo(() => {
-    const getVal = (r: WatchRow): number | string => {
-      switch (sortKey) {
-        case "underlying": return r.underlying || "";
-        case "direction": return r.direction || "";
-        case "strike": return r.strike ?? r.atm_strike ?? 0;
-        case "ltp": return r.ltp ?? -Infinity;
-        case "iv": return r.iv_pct ?? -Infinity;
-        case "rsi": return r.rsi ?? -Infinity;
-        case "macd": return r.macd ?? -Infinity;
-        case "status": return r.status || "";
-        default: return r.priority_score ?? -Infinity;
-      }
-    };
-    return [...rows].sort((a, b) => {
-      const va = getVal(a);
-      const vb = getVal(b);
-      const cmp = typeof va === "string" || typeof vb === "string"
-        ? String(va).localeCompare(String(vb))
-        : (va as number) - (vb as number);
-      return sortDir === "asc" ? cmp : -cmp;
-    });
+  const groups = useMemo(() => {
+    const sorter = makeWatchSorter(sortKey, sortDir);
+    const side = (r: WatchRow) => (r.direction || "").toUpperCase();
+    const ce = rows.filter((r) => side(r) === "CE" && !isInsufficientRow(r)).sort(sorter);
+    const pe = rows.filter((r) => side(r) === "PE" && !isInsufficientRow(r)).sort(sorter);
+    // Bottom bucket: anything with no computable indicator, name-sorted.
+    const insufficient = rows.filter(isInsufficientRow).sort(makeWatchSorter("underlying", "asc"));
+    return { ce, pe, insufficient };
   }, [rows, sortKey, sortDir]);
 
   if (!rows.length) {
     return <EmptyState message="No watchlist rows. The desk publishes one row per index+side once 30m ATM premium history is available." />;
   }
 
+  const open = (r: WatchRow) => {
+    const c = rowToContract(r);
+    if (c) setChartContract(c);
+  };
+
+  const activeSide: WatchSide = side === "INS" && !groups.insufficient.length ? "CE" : side;
+  const activeRows = activeSide === "CE" ? groups.ce : activeSide === "PE" ? groups.pe : groups.insufficient;
+  const isPending = activeSide === "INS";
+
   return (
-    <Section title="ATM MACD watchlist" icon={<ListChecks size={16} className="text-accent-blue" />} rightSlot={<span className="text-[11px] text-text-muted">Click a column to sort · {sorted.length} rows</span>}>
+    <Section
+      title="ATM MACD watchlist"
+      icon={<ListChecks size={16} className="text-accent-blue" />}
+      description="CE / PE in tabs · click a row for its OHLC chart (BB · KAMA · MACD · RSI)"
+      rightSlot={<WatchSortToolbar sortKey={sortKey} sortDir={sortDir} onSort={onSort} />}
+    >
+      {/* CE / PE / Pending side tabs */}
+      <div className="mb-3 flex flex-wrap items-center gap-1.5">
+        <SideTab label="CE" tone="ce" count={groups.ce.length} active={activeSide === "CE"} onClick={() => setSide("CE")} />
+        <SideTab label="PE" tone="pe" count={groups.pe.length} active={activeSide === "PE"} onClick={() => setSide("PE")} />
+        {groups.insufficient.length ? (
+          <SideTab label="Pending" tone="muted" count={groups.insufficient.length} active={activeSide === "INS"} onClick={() => setSide("INS")} />
+        ) : null}
+        {isPending ? (
+          <span className="ml-1 text-[11px] text-text-muted">— awaiting enough 30m premium history for MACD</span>
+        ) : null}
+      </div>
+
       <div className="-mx-2 overflow-x-auto">
-        <table className="w-full min-w-[1000px] border-collapse text-left">
+        <table className="w-full min-w-[1040px] border-collapse text-left">
           <thead>
             <tr className="border-b border-bg-border/60">
+              <th className="w-8 px-2.5 py-1.5" aria-label="Chart" />
               <SortHead label="Underlying" k="underlying" sk={sortKey} dir={sortDir} onSort={onSort} />
-              <SortHead label="Dir" k="direction" sk={sortKey} dir={sortDir} onSort={onSort} />
+              <th className="px-2.5 py-1.5 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">Dir</th>
               <SortHead label="Strike" k="strike" sk={sortKey} dir={sortDir} onSort={onSort} align="right" />
               <SortHead label="LTP" k="ltp" sk={sortKey} dir={sortDir} onSort={onSort} align="right" />
               <SortHead label="IV%" k="iv" sk={sortKey} dir={sortDir} onSort={onSort} align="right" />
               <SortHead label="RSI" k="rsi" sk={sortKey} dir={sortDir} onSort={onSort} align="right" />
-              <th className="px-2.5 py-1.5 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">MACD · trend</th>
+              <SortHead label="MACD · trend" k="macd" sk={sortKey} dir={sortDir} onSort={onSort} />
               <SortHead label="Status" k="status" sk={sortKey} dir={sortDir} onSort={onSort} />
               <SortHead label="Score" k="priority_score" sk={sortKey} dir={sortDir} onSort={onSort} align="right" />
               <th className="px-2.5 py-1.5 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">Instruction</th>
             </tr>
           </thead>
           <tbody>
-            {sorted.map((r, idx) => (
-              <tr key={`${r.underlying}-${r.direction}-${idx}`} className="border-b border-bg-border/25 align-top hover:bg-bg-primary/20">
-                <td className="px-2.5 py-2 text-text-primary">
-                  <div className="font-semibold">{r.underlying || "—"}</div>
-                  <div className="text-[10px] text-text-muted">{r.expiry || "—"}</div>
-                </td>
-                <td className="px-2.5 py-2"><DirBadge direction={r.direction} /></td>
-                <td className="px-2.5 py-2 text-right font-mono text-text-secondary">{formatNumber(r.strike ?? r.atm_strike, 0)}</td>
-                <td className="px-2.5 py-2 text-right font-mono text-text-primary">{formatNumber(r.ltp, 1)}</td>
-                <td className="px-2.5 py-2 text-right font-mono text-text-secondary">{formatNumber(r.iv_pct, 1)}</td>
-                <td className="px-2.5 py-2 text-right font-mono text-text-secondary">{formatNumber(r.rsi, 1)}</td>
-                <td className="px-2.5 py-2"><MacdTrend macd={r.macd} prev={r.previous_macd} hist={r.macd_histogram} /></td>
-                <td className="px-2.5 py-2"><StatusBadge label={prettify(r.status)} variant={statusVariant(r.status)} /></td>
-                <td className="px-2.5 py-2 text-right font-mono text-text-secondary">{formatNumber(r.priority_score, 2)}</td>
-                <td className="max-w-[320px] px-2.5 py-2 text-[11px] text-text-secondary" title={r.instruction || ""}>{r.instruction || "—"}</td>
+            {activeRows.length ? (
+              activeRows.map((r, idx) => (
+                <WatchRowItem key={`${activeSide}-${r.underlying}-${r.strike ?? r.atm_strike}-${idx}`} r={r} onOpen={open} dim={isPending} />
+              ))
+            ) : (
+              <tr>
+                <td colSpan={11} className="px-2.5 py-8 text-center text-sm text-text-muted">No {activeSide === "CE" ? "CE" : activeSide === "PE" ? "PE" : "pending"} legs right now.</td>
               </tr>
-            ))}
+            )}
           </tbody>
         </table>
       </div>
+
+      {chartContract ? <OptionChartModal contract={chartContract} onClose={() => setChartContract(null)} /> : null}
     </Section>
+  );
+}
+
+// CE / PE / Pending side tab pill.
+function SideTab({ label, tone: t, count, active, onClick }: { label: string; tone: "ce" | "pe" | "muted"; count: number; active: boolean; onClick: () => void }) {
+  const accent = t === "ce" ? "text-accent-green" : t === "pe" ? "text-accent-red" : "text-text-muted";
+  const dot = t === "ce" ? "bg-accent-green" : t === "pe" ? "bg-accent-red" : "bg-text-muted";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={clsx(
+        "inline-flex items-center gap-2 rounded-lg border px-3 py-1 text-[12px] font-semibold transition-colors",
+        active ? "border-accent-blue/50 bg-accent-blue/10" : "border-bg-border bg-bg-primary/20 hover:border-bg-active",
+      )}
+    >
+      <span className={clsx("inline-block h-2 w-2 rounded-sm", dot)} aria-hidden />
+      <span className={active ? accent : "text-text-secondary"}>{label}</span>
+      <span className="rounded bg-bg-primary/50 px-1.5 py-0.5 text-[10px] font-mono text-text-muted">{count}</span>
+    </button>
+  );
+}
+
+// Sort toolbar — indicator + name shortcuts. Clicking the active field flips
+// direction; the per-column header sorts (SortHead) stay in sync via the same
+// onSort/sortKey/sortDir state.
+function WatchSortToolbar({ sortKey, sortDir, onSort }: { sortKey: string; sortDir: SortDir; onSort: (k: string) => void }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-[10px] uppercase tracking-[0.12em] text-text-muted">Sort</span>
+      <div className="flex rounded-lg border border-bg-border bg-bg-primary/30 p-0.5">
+        {WATCH_SORT_FIELDS.map((f) => {
+          const active = sortKey === f.key;
+          return (
+            <button
+              key={f.key}
+              type="button"
+              onClick={() => onSort(f.key)}
+              className={clsx(
+                "inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors",
+                active ? "bg-accent-blue/20 text-accent-blue" : "text-text-muted hover:text-text-secondary",
+              )}
+            >
+              {f.label}
+              {active ? (sortDir === "asc" ? <ArrowUp size={11} /> : <ArrowDown size={11} />) : null}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function WatchRowItem({ r, onOpen, dim }: { r: WatchRow; onOpen: (r: WatchRow) => void; dim?: boolean }) {
+  const contract = rowToContract(r);
+  return (
+    <tr
+      className={clsx(
+        "border-b border-bg-border/25 align-top",
+        contract ? "cursor-pointer hover:bg-bg-primary/30" : "hover:bg-bg-primary/20",
+        dim && "opacity-75",
+      )}
+      onClick={() => onOpen(r)}
+      title={contract ? "Open OHLC chart (BB · KAMA · MACD · RSI)" : "No resolved contract for this row yet"}
+    >
+      <td className="px-2.5 py-2">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpen(r);
+          }}
+          disabled={!contract}
+          aria-label="Open OHLC chart"
+          className={clsx(
+            "rounded-md border p-1 transition-colors",
+            contract
+              ? "border-bg-border text-text-muted hover:border-accent-blue/60 hover:text-accent-blue"
+              : "cursor-not-allowed border-bg-border/40 text-text-muted/30",
+          )}
+        >
+          <CandlestickChart size={14} />
+        </button>
+      </td>
+      <td className="px-2.5 py-2 text-text-primary">
+        <div className="font-semibold">{r.underlying || "—"}</div>
+        <div className="text-[10px] text-text-muted">{r.expiry || "—"}</div>
+      </td>
+      <td className="px-2.5 py-2"><DirBadge direction={r.direction} /></td>
+      <td className="px-2.5 py-2 text-right font-mono text-text-secondary">{formatNumber(r.strike ?? r.atm_strike, 0)}</td>
+      <td className="px-2.5 py-2 text-right font-mono text-text-primary">{formatNumber(r.ltp, 1)}</td>
+      <td className="px-2.5 py-2 text-right font-mono text-text-secondary">{formatNumber(r.iv_pct, 1)}</td>
+      <td className="px-2.5 py-2 text-right font-mono text-text-secondary">{formatNumber(r.rsi, 1)}</td>
+      <td className="px-2.5 py-2"><MacdTrend macd={r.macd} prev={r.previous_macd} hist={r.macd_histogram} /></td>
+      <td className="px-2.5 py-2"><StatusBadge label={prettify(r.status)} variant={statusVariant(r.status)} /></td>
+      <td className="px-2.5 py-2 text-right font-mono text-text-secondary">{formatNumber(r.priority_score, 2)}</td>
+      <td className="max-w-[320px] px-2.5 py-2 text-[11px] text-text-secondary" title={r.instruction || ""}>{r.instruction || "—"}</td>
+    </tr>
+  );
+}
+
+// ── Sentiment tab — MACD diffusion (CE/PE above zero over time) ──────────────
+
+function SentimentTab({ data, loading }: { data?: DiffusionPayload; loading: boolean }) {
+  const series = useMemo(
+    () =>
+      (data?.series ?? []).map((p) => ({
+        t: p.time,
+        ce: p.ce_above_zero,
+        pe: p.pe_above_zero,
+        net: p.net_diffusion != null ? p.net_diffusion * 100 : null, // percent, -100..100
+      })),
+    [data?.series],
+  );
+  const latest = data?.latest ?? null;
+  const net = latest?.net_diffusion ?? null;
+  const sentiment = net == null ? "—" : net > 0.05 ? "Bullish" : net < -0.05 ? "Bearish" : "Neutral";
+
+  return (
+    <div className="space-y-4">
+      <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <MetricTile label="CE > 0" value={latest ? `${latest.ce_above_zero} / ${latest.ce_total}` : "—"} detail={latest?.ce_pct != null ? `${formatNumber(latest.ce_pct * 100, 0)}% breadth` : ""} color="text-accent-green" />
+        <MetricTile label="PE > 0" value={latest ? `${latest.pe_above_zero} / ${latest.pe_total}` : "—"} detail={latest?.pe_pct != null ? `${formatNumber(latest.pe_pct * 100, 0)}% breadth` : ""} color="text-accent-red" />
+        <MetricTile label="Net diffusion" value={net != null ? `${net > 0 ? "+" : ""}${formatNumber(net * 100, 1)}%` : "—"} color={tone(net)} detail="CE% − PE%" />
+        <MetricTile label="Sentiment" value={sentiment} color={net == null ? undefined : net > 0.05 ? "text-accent-green" : net < -0.05 ? "text-accent-red" : "text-accent-amber"} detail={latest ? formatIST(latest.time) : ""} />
+      </section>
+
+      <Section
+        title="MACD diffusion · CE vs PE above zero"
+        icon={<Gauge size={16} className="text-accent-blue" />}
+        description="Hourly breadth across the tracked ATM F&O universe — how many CE / PE legs have 30m premium MACD above zero. Net = CE% − PE% (＞0 bullish tape)."
+      >
+        {series.length >= 2 ? (
+          <ResponsiveContainer width="100%" height={340}>
+            <LineChart data={series} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.12)" />
+              <XAxis dataKey="t" tick={{ fontSize: 10, fill: "rgb(var(--text-muted))" }} tickFormatter={(v: string) => formatIST(v)} minTickGap={56} />
+              <YAxis yAxisId="cnt" tick={{ fontSize: 10, fill: "rgb(var(--text-muted))" }} width={36} allowDecimals={false} />
+              <YAxis yAxisId="net" orientation="right" domain={[-100, 100]} ticks={[-100, -50, 0, 50, 100]} tick={{ fontSize: 10, fill: "rgb(var(--text-muted))" }} width={40} tickFormatter={(v: number) => `${v}%`} />
+              <Tooltip
+                contentStyle={{ background: "rgb(var(--bg-card))", border: "1px solid rgb(var(--bg-border))", borderRadius: 8, fontSize: 11 }}
+                labelFormatter={(l) => formatIST(String(l))}
+                formatter={(v: number, name: string) => [name === "Net %" ? `${formatNumber(v, 1)}%` : String(v), name]}
+              />
+              <ReferenceLine yAxisId="net" y={0} stroke="rgb(var(--text-muted))" strokeDasharray="3 3" />
+              <Line yAxisId="cnt" type="monotone" dataKey="ce" name="CE > 0" stroke="rgb(var(--accent-green))" strokeWidth={1.6} dot={false} isAnimationActive={false} connectNulls />
+              <Line yAxisId="cnt" type="monotone" dataKey="pe" name="PE > 0" stroke="rgb(var(--accent-red))" strokeWidth={1.6} dot={false} isAnimationActive={false} connectNulls />
+              <Line yAxisId="net" type="monotone" dataKey="net" name="Net %" stroke="rgb(var(--accent-blue))" strokeWidth={1.2} strokeDasharray="4 2" dot={false} isAnimationActive={false} connectNulls />
+            </LineChart>
+          </ResponsiveContainer>
+        ) : (
+          <EmptyState message={loading ? "Loading diffusion history…" : "Diffusion needs at least two hourly points — the snapshot accrues each hour during market hours."} />
+        )}
+        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] uppercase tracking-[0.12em] text-text-muted">
+          <SentLegend color="rgb(var(--accent-green))" label="CE > 0 (count)" />
+          <SentLegend color="rgb(var(--accent-red))" label="PE > 0 (count)" />
+          <SentLegend color="rgb(var(--accent-blue))" label="Net diffusion %" />
+          <span>{series.length} hourly points</span>
+        </div>
+      </Section>
+    </div>
+  );
+}
+
+function SentLegend({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="inline-block h-2 w-2.5 rounded-sm" style={{ backgroundColor: color }} aria-hidden />
+      {label}
+    </span>
   );
 }
 

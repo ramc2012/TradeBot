@@ -78,6 +78,14 @@ type ModuleSummary = {
   automation?: { loop_active?: boolean };
 };
 
+type DirectionalUniverse = {
+  source?: string;
+  indices?: string[];
+  stocks?: string[];
+  symbols?: string[];
+  total?: number;
+};
+
 type Snapshot = {
   as_of?: string | null;
   underlying?: string;
@@ -109,6 +117,14 @@ export default function DirectionalDesk() {
     refetchOnWindowFocus: false,
   });
 
+  const universeQuery = useQuery({
+    queryKey: ["directional", "universe"],
+    queryFn: async () => (await apiClient.get("/api/directional-options/universe")).data as DirectionalUniverse,
+    staleTime: 10 * 60 * 1000,
+    refetchInterval: 10 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
   // Live watchlist + analytics: 8s WS push (real index spot) with a polling
   // fallback. Reuses the generic /ws/strategy-snapshot channel.
   const liveQuery = useLiveSnapshotQuery<{ snapshot?: Snapshot }>({
@@ -133,8 +149,14 @@ export default function DirectionalDesk() {
   const snapshot = liveQuery.data?.snapshot;
   const summary = summaryQuery.data;
   const universe = useMemo(
-    () => summary?.underlyings || ["NIFTY", "BANKNIFTY", "SENSEX"],
-    [summary?.underlyings],
+    () => universeQuery.data?.symbols?.length ? universeQuery.data.symbols : summary?.underlyings || ["NIFTY", "BANKNIFTY", "SENSEX"],
+    [summary?.underlyings, universeQuery.data?.symbols],
+  );
+  const universeIndices = universeQuery.data?.indices?.length ? universeQuery.data.indices : universe.filter((symbol) => ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "SENSEX", "BANKEX"].includes(symbol));
+  const universeStocks = universeQuery.data?.stocks?.length ? universeQuery.data.stocks : universe.filter((symbol) => !universeIndices.includes(symbol));
+  const watchlistUniverse = useMemo(
+    () => Array.from(new Set([...universeIndices, ...universeStocks.slice(0, 24), underlying])),
+    [underlying, universeIndices, universeStocks],
   );
 
   // Paper queries shared with the Paper tab via the canonical hook.
@@ -196,11 +218,24 @@ export default function DirectionalDesk() {
               value={underlying}
               onChange={(e) => startTransition(() => setUnderlying(e.target.value))}
             >
-              {universe.map((u) => (
-                <option key={u} value={u} className="bg-bg-card text-text-primary">
-                  {u}
-                </option>
-              ))}
+              {universeIndices.length ? (
+                <optgroup label="Indices" className="bg-bg-card text-text-muted">
+                  {universeIndices.map((u) => (
+                    <option key={u} value={u} className="bg-bg-card text-text-primary">
+                      {u}
+                    </option>
+                  ))}
+                </optgroup>
+              ) : null}
+              {universeStocks.length ? (
+                <optgroup label="F&O stocks" className="bg-bg-card text-text-muted">
+                  {universeStocks.map((u) => (
+                    <option key={u} value={u} className="bg-bg-card text-text-primary">
+                      {u}
+                    </option>
+                  ))}
+                </optgroup>
+              ) : null}
             </select>
           </label>
         </div>
@@ -210,7 +245,7 @@ export default function DirectionalDesk() {
         <div className="space-y-4">
           {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
           <UniverseWatchlist
-            symbols={universe}
+            symbols={watchlistUniverse}
             timeframe={timeframe}
             lookback={lookback}
             selected={underlying}

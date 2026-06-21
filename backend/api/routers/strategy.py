@@ -1291,6 +1291,84 @@ async def get_open_signals(underlying: str = "SENSEX") -> dict:
     }
 
 
+@router.get("/diffusion")
+async def get_macd_diffusion(
+    market: str = "NSE",
+    days: int = Query(30, ge=1, le=180),
+) -> dict:
+    """Hourly CE/PE MACD-above-zero breadth — a diffusion index for sentiment.
+
+    Each point is the count (and %) of tracked ATM CE / PE legs whose 30m
+    premium MACD is above zero at that hour. `net_diffusion = ce_pct - pe_pct`
+    (> 0 bullish tape, < 0 bearish). Series is persisted hourly by the diffusion
+    daemon and seeded historically from option_premium_candles.
+    """
+    from db.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as session:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT bucket_time, ce_total, ce_above_zero, pe_total, pe_above_zero,
+                           ce_pct, pe_pct, net_diffusion, source
+                    FROM macd_diffusion_snapshots
+                    WHERE market = :market
+                      AND bucket_time >= now() - make_interval(days => :days)
+                    ORDER BY bucket_time ASC
+                    """
+                ),
+                {"market": market, "days": days},
+            )
+        ).mappings().all()
+
+        # Lazy seed: if nothing is stored yet, compute the current bucket now so
+        # the chart isn't empty before the daemon's first hourly run.
+        if not rows:
+            try:
+                from market_data.macd_diffusion import compute_and_store
+
+                await compute_and_store(market=market)
+                rows = (
+                    await session.execute(
+                        text(
+                            """
+                            SELECT bucket_time, ce_total, ce_above_zero, pe_total, pe_above_zero,
+                                   ce_pct, pe_pct, net_diffusion, source
+                            FROM macd_diffusion_snapshots
+                            WHERE market = :market
+                            ORDER BY bucket_time ASC
+                            """
+                        ),
+                        {"market": market},
+                    )
+                ).mappings().all()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[diffusion] lazy seed skipped: {exc}")
+
+    series = [
+        {
+            "time": r["bucket_time"].isoformat(),
+            "ce_total": int(r["ce_total"] or 0),
+            "ce_above_zero": int(r["ce_above_zero"] or 0),
+            "pe_total": int(r["pe_total"] or 0),
+            "pe_above_zero": int(r["pe_above_zero"] or 0),
+            "ce_pct": r["ce_pct"],
+            "pe_pct": r["pe_pct"],
+            "net_diffusion": r["net_diffusion"],
+            "source": r["source"],
+        }
+        for r in rows
+    ]
+    return {
+        "market": market,
+        "days": days,
+        "count": len(series),
+        "series": series,
+        "latest": series[-1] if series else None,
+    }
+
+
 @router.get("/learning-summary")
 async def get_learning_summary(
     refresh: bool = Query(False, description="Refresh persisted learning scores before returning the summary"),

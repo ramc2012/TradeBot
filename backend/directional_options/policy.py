@@ -90,6 +90,35 @@ def _safe_tanh(value: Any, scale: float) -> float:
         return 0.0
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            return default
+        return numeric
+    except (TypeError, ValueError):
+        return default
+
+
+def _nested_float(source: Any, *path: str, default: float = 0.0) -> float:
+    cur = source
+    for key in path:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(key)
+    return _safe_float(cur, default)
+
+
+def _direction_sign(direction: str) -> float:
+    if direction == "CE":
+        return 1.0
+    if direction == "PE":
+        return -1.0
+    return 0.0
+
+
 def _featurize(
     signal: dict[str, Any],
     candidate: dict[str, Any],
@@ -259,6 +288,78 @@ def _featurize(
         _safe_tanh(_spot("range_expansion", 1.0) - 1.0, 0.75),         # [v3, idx 53]
     ])
 
+    # ───────── v4 additions: relation/influence chain microstructure ──
+    # These features let the bandit learn how option-price outcomes react
+    # to walls, gamma flip, writer cash, straddle-implied range, NTM volume
+    # control, and unusual activity. Every value is bounded so one noisy
+    # chain snapshot cannot dominate the posterior.
+    direction = str(signal.get("direction") or "").upper()
+    direction_sign = _direction_sign(direction)
+    spot = _safe_float(chain.get("spot"))
+    key_levels = chain.get("key_levels") if isinstance(chain.get("key_levels"), dict) else {}
+    ntm_volx = chain.get("ntm_volx") if isinstance(chain.get("ntm_volx"), dict) else {}
+    straddle = chain.get("straddle") if isinstance(chain.get("straddle"), dict) else {}
+    gamma_density = chain.get("gamma_density") if isinstance(chain.get("gamma_density"), dict) else {}
+    writer_cash = chain.get("writer_cash_proxy") if isinstance(chain.get("writer_cash_proxy"), dict) else {}
+    expiry_state = chain.get("expiry_state") if isinstance(chain.get("expiry_state"), dict) else {}
+    spectrum = chain.get("spectrum") if isinstance(chain.get("spectrum"), dict) else {}
+
+    def _distance(level: dict[str, Any] | None) -> float:
+        if not isinstance(level, dict) or spot <= 0:
+            return 0.0
+        return _safe_float(level.get("distance_pct"))
+
+    call_wall_dist = _distance(key_levels.get("call_wall"))
+    put_wall_dist = _distance(key_levels.get("put_wall"))
+    zero_gamma_dist = ((_safe_float(key_levels.get("zero_gamma")) - spot) / spot) if spot > 0 and key_levels.get("zero_gamma") is not None else 0.0
+    expected_move_pct = _safe_float(straddle.get("expected_move_pct"))
+    writer_cash_bias = _safe_tanh(writer_cash.get("net_writer_cash"), 5e7)
+    volume_imbalance = _safe_float(ntm_volx.get("volume_imbalance"))
+    oi_imbalance = _safe_float(ntm_volx.get("oi_imbalance"))
+    gamma_skew = _safe_float(gamma_density.get("skew"))
+    dealer_gex = chain.get("dealer_gex_total", key_levels.get("dealer_gex_total"))
+    risk_reversal = _safe_float(chain.get("risk_reversal_25d"))
+    theta_clock = _safe_float(expiry_state.get("theta_clock_pct"))
+
+    pressure_side = str(spectrum.get("pressure_side") or "")
+    pressure_bias = 0.0
+    if pressure_side == "put_writing_building":
+        pressure_bias = 1.0
+    elif pressure_side == "call_writing_building":
+        pressure_bias = -1.0
+
+    unusual_rows = chain.get("unusual_activity") if isinstance(chain.get("unusual_activity"), list) else []
+    unusual_score = 0.0
+    unusual_side_bias = 0.0
+    for row_item in unusual_rows[:8]:
+        if not isinstance(row_item, dict):
+            continue
+        score = min(_safe_float(row_item.get("score")), 8.0)
+        unusual_score = max(unusual_score, score)
+        side = str(row_item.get("option_type") or "").upper()
+        unusual_side_bias += score if side == "CE" else -score if side == "PE" else 0.0
+
+    cont.extend([
+        1.0 if chain else 0.0,                                           # [v4, idx 54] chain available
+        _safe_tanh(direction_sign * risk_reversal, 0.08),                # [v4, idx 55] directional skew edge
+        _safe_tanh(dealer_gex, 5e7),                                     # [v4, idx 56] dealer GEX magnitude/sign
+        _safe_tanh(direction_sign * zero_gamma_dist, 0.025),             # [v4, idx 57] gamma flip ahead/behind
+        _safe_tanh(call_wall_dist, 0.025),                               # [v4, idx 58] call wall distance
+        _safe_tanh(-put_wall_dist, 0.025),                               # [v4, idx 59] put wall distance
+        _safe_tanh(direction_sign * volume_imbalance, 0.35),             # [v4, idx 60] NTM call/put volume control
+        _safe_tanh(direction_sign * oi_imbalance, 0.35),                 # [v4, idx 61] NTM OI wall lean
+        _safe_tanh(_safe_float(ntm_volx.get("vxr")), 0.35),             # [v4, idx 62] volume expansion ratio
+        _safe_tanh(direction_sign * writer_cash_bias, 0.75),             # [v4, idx 63] writer cash alignment
+        _safe_tanh(expected_move_pct, 0.025),                            # [v4, idx 64] straddle-implied range
+        _safe_tanh(direction_sign * gamma_skew, 0.35),                   # [v4, idx 65] gamma density tail lean
+        _safe_tanh(direction_sign * pressure_bias, 1.0),                 # [v4, idx 66] spectrum writing pressure
+        _safe_tanh(unusual_score, 4.0),                                  # [v4, idx 67] unusual activity intensity
+        _safe_tanh(direction_sign * unusual_side_bias, 6.0),             # [v4, idx 68] unusual activity alignment
+        float(np.clip(theta_clock, 0.0, 1.0)),                           # [v4, idx 69] expiry/theta clock
+        1.0 if str(key_levels.get("gamma_regime") or "").startswith("negative") else 0.0,  # [v4, idx 70]
+        _safe_tanh(_nested_float(key_levels, "abs_gamma", "net_gamma_exposure"), 5e7),     # [v4, idx 71]
+    ])
+
     # One-hot encodings stay at the tail; legacy migration moves them
     # from the old tail to the current tail.
     regime_label = str(regime.get("label") or "").lower()
@@ -267,7 +368,6 @@ def _featurize(
     delta_oh = [1.0 if delta_bucket == lbl else 0.0 for lbl in KNOWN_DELTA_BUCKETS]
     expiry_kind = str(candidate.get("expiry_kind") or "").lower()
     expiry_oh = [1.0 if expiry_kind == lbl else 0.0 for lbl in KNOWN_EXPIRY_KINDS]
-    direction = str(signal.get("direction") or "").upper()
     dir_oh = [1.0 if direction == lbl else 0.0 for lbl in KNOWN_DIRECTIONS]
 
     vec = cont + regime_oh + delta_oh + expiry_oh + dir_oh
@@ -278,19 +378,24 @@ def _featurize(
 CONT_DIM_V1 = 20
 CONT_DIM_V2 = 36  # 20 v1 + 6 candidate greeks + 10 chain features
 CONT_DIM_V3 = 54  # v2 + 18 hybrid rule / spot-indicator features
+CONT_DIM_V4 = 72  # v3 + 18 relation/influence chain microstructure features
 ONE_HOT_DIM = len(KNOWN_REGIMES) + len(KNOWN_DELTA_BUCKETS) + len(KNOWN_EXPIRY_KINDS) + len(KNOWN_DIRECTIONS)
 
 # Feature version. v1 = 35 dims (original deployment), v2 adds greeks +
-# chain analytics, v3 adds the hybrid rule model + spot indicators.
-FEATURE_VERSION = 3
-EXPECTED_FEATURE_DIM = CONT_DIM_V3 + ONE_HOT_DIM  # = 69
+# chain analytics, v3 adds the hybrid rule model + spot indicators,
+# v4 adds wall/gamma/flow relation features for directional option pricing.
+FEATURE_VERSION = 4
+CURRENT_CONT_DIM = CONT_DIM_V4
+EXPECTED_FEATURE_DIM = CURRENT_CONT_DIM + ONE_HOT_DIM  # = 87
 LEGACY_FEATURE_DIMS = {
     1: CONT_DIM_V1 + ONE_HOT_DIM,  # = 35
     2: CONT_DIM_V2 + ONE_HOT_DIM,  # = 51
+    3: CONT_DIM_V3 + ONE_HOT_DIM,  # = 69
 }
 LEGACY_CONT_DIMS = {
     1: CONT_DIM_V1,
     2: CONT_DIM_V2,
+    3: CONT_DIM_V3,
 }
 
 
@@ -316,7 +421,7 @@ def _extend_legacy_to_current(state: dict[str, Any], *, old_version: int) -> dic
     old_cont = slice(0, old_cont_dim)
     old_oh = slice(old_cont_dim, old_dim)
     new_cont = slice(0, old_cont_dim)
-    new_oh = slice(CONT_DIM_V3, EXPECTED_FEATURE_DIM)
+    new_oh = slice(CURRENT_CONT_DIM, EXPECTED_FEATURE_DIM)
     S_inv_new[new_cont, new_cont] = S_inv_old[old_cont, old_cont]
     S_inv_new[new_oh, new_oh] = S_inv_old[old_oh, old_oh]
     S_inv_new[new_cont, new_oh] = S_inv_old[old_cont, old_oh]
@@ -550,6 +655,9 @@ class DirectionalPolicy:
                 self._value_model = BayesianRidge.from_state(extended)
             elif old_dim == LEGACY_FEATURE_DIMS.get(2):
                 extended = _extend_legacy_to_current(value_state, old_version=2)
+                self._value_model = BayesianRidge.from_state(extended)
+            elif old_dim == LEGACY_FEATURE_DIMS.get(3):
+                extended = _extend_legacy_to_current(value_state, old_version=3)
                 self._value_model = BayesianRidge.from_state(extended)
             # else: unknown schema — silently start fresh.
         except Exception:

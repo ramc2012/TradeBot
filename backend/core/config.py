@@ -61,6 +61,24 @@ class Settings(BaseSettings):
     REDIS_MAX_CONNECTIONS: int = 1000
     RESEARCH_SYNC_AUTO_ENABLED: bool = False
     RESEARCH_SYNC_EMBEDDED_ENABLED: bool = False
+    # Automatic historical-data backfill (data.historical_backfill). When enabled,
+    # a background loop detects missing coverage vs DEFAULT_TARGETS (spot 5Y/30m +
+    # 1Y/1m, options ATM-band 5Y/30m + 1Y/1m, commodity 5Y/30m + 2Y/1m) and pulls
+    # only the gaps. Idempotent + resumable. OFF by default; enable on the runtime box.
+    AUTO_BACKFILL_ENABLED: bool = False
+    AUTO_BACKFILL_ON_STARTUP: bool = True
+    AUTO_BACKFILL_POLL_MINUTES: int = 60
+    # Option contracts processed per pass (bounded + resumable across passes).
+    AUTO_BACKFILL_MAX_OPTION_CONTRACTS: int = 300
+    # How many recent expiries per index to backfill options for. Small = "current
+    # contract" scope (fast); raise for deeper expired-options history (slow — the
+    # full multi-year sweep is broker-latency-bound under live-app contention).
+    AUTO_BACKFILL_OPTION_MAX_EXPIRIES: int = 2
+    # MACD diffusion — hourly CE/PE-above-zero breadth snapshot (market sentiment).
+    # Reads the live watchlist's per-leg MACD; seeds history from option_premium_candles.
+    MACD_DIFFUSION_ENABLED: bool = True
+    MACD_DIFFUSION_POLL_MINUTES: int = 60
+    MACD_DIFFUSION_BACKFILL_DAYS: int = 21
     STRATEGY_SPOT_SYNC_ENABLED: bool = False
     # F1 feed — full-universe option-chain → 3m CE+PE OHLC builder (chain_candle_builder).
     # OFF by default: scales Fyers REST (~30k calls/day, governed by FYERS_DATA_LIMITER);
