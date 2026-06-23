@@ -16,8 +16,9 @@ Mechanics:
   - For each such symbol, OPEN a position if not already held:
         LONG  for bullish bias
         SHORT for bearish bias
-    quantity sized so that notional = position_notional_cap (default ₹1L,
-    or whatever fits in available_capital). The unit count rounds down.
+    quantity sized so that notional fits the hedge mandate: cash-only gross
+    exposure, max net exposure, max single-name weight, max sector weight, and
+    available capital. The unit count rounds down.
   - For each currently-open position:
       * If still on the watchlist with the same bias: refresh latest_close +
         unrealized_pnl.
@@ -30,7 +31,8 @@ Mechanics:
 
 Capital accounting mirrors AI/FMP/S1/S2 — `_summary()` returns initial_capital
 / available_capital / reserved_margin / total_equity / sharpe / max_drawdown /
-win_rate, so the frontend portfolio panel renders uniformly.
+win_rate plus hedge-book exposure diagnostics, so the frontend portfolio panel
+renders uniformly.
 """
 from __future__ import annotations
 
@@ -44,9 +46,9 @@ from uuid import uuid4
 
 CBE_INITIAL_CAPITAL: float = 1_000_000.0
 
-# Notional cap per individual cash-equity position. With ₹1L per stock the
-# book can carry ~10 simultaneous concurrent bets at 100% capital deployed,
-# matching the spec's "Top 10 Stocks" output. Sizing rounds DOWN to integer
+# Notional cap per individual cash-equity position. With ₹1L per stock, a
+# balanced long/short book can use the full cash gross budget while one-sided
+# scans are constrained by the hedge mandate. Sizing rounds DOWN to integer
 # shares so reserved margin <= the cap.
 DEFAULT_POSITION_NOTIONAL_CAP: float = 100_000.0
 
@@ -55,6 +57,14 @@ DEFAULT_POSITION_NOTIONAL_CAP: float = 100_000.0
 # days have elapsed unless a hard stop fires. Replaces the old "drop after
 # 3 missed scans" rule which conflicted with weekly cadence.
 MIN_HOLD_TRADING_DAYS: int = 5
+
+# Hedge-fund style portfolio construction guardrails. These are deliberately
+# simple cash-book limits: no leverage, constrained net beta, capped single-name
+# and sector concentration. The UI reads the same values from each summary.
+HEDGE_MAX_GROSS_EXPOSURE_RATIO: float = 1.0
+HEDGE_MAX_NET_EXPOSURE_RATIO: float = 0.40
+HEDGE_MAX_SINGLE_NAME_RATIO: float = 0.10
+HEDGE_MAX_SECTOR_EXPOSURE_RATIO: float = 0.30
 
 
 def _utc_now() -> str:
@@ -82,6 +92,25 @@ def _min_hold_satisfied(position: dict[str, Any]) -> bool:
     elapsed_days = (datetime.now(timezone.utc) - opened_dt).total_seconds() / 86400.0
     # 5 trading days ≈ 7 calendar days (covers a weekend).
     return elapsed_days >= (MIN_HOLD_TRADING_DAYS * 7.0 / 5.0)
+
+
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return default
+    if out != out:  # NaN
+        return default
+    return out
+
+
+def _position_notional(position: dict[str, Any]) -> float:
+    notional = _coerce_float(position.get("notional"))
+    if notional > 0:
+        return abs(notional)
+    entry = _coerce_float(position.get("entry_price"))
+    qty = _coerce_float(position.get("quantity"))
+    return abs(entry * qty)
 
 
 class CBEPaperBook:
@@ -196,6 +225,16 @@ class CBEPaperBook:
                     pos["unrealized_pnl"] = round((latest_close - entry) * qty * sign, 2)
                 pos["latest_composite_score"] = float(row.get("composite_score") or 0.0)
                 pos["latest_bias_conviction"] = float(row.get("bias_conviction") or 0.0)
+                pos["latest_alpha_score"] = _coerce_float(
+                    row.get("composite_alpha_score"),
+                    _coerce_float(row.get("composite_score")) * 10.0,
+                )
+                pos["sector_code"] = row.get("sector_code") or pos.get("sector_code")
+                pos["sector_quadrant"] = row.get("sector_quadrant") or pos.get("sector_quadrant")
+                pos["stock_quadrant"] = row.get("stock_quadrant") or pos.get("stock_quadrant")
+                pos["stock_rs_pct"] = row.get("stock_rs_pct") if row.get("stock_rs_pct") is not None else pos.get("stock_rs_pct")
+                pos["rank_overall"] = row.get("rank_overall") or pos.get("rank_overall")
+                pos["rank_actionable"] = row.get("rank_actionable") or pos.get("rank_actionable")
                 surviving.append(pos)
 
             open_positions = surviving
@@ -205,8 +244,26 @@ class CBEPaperBook:
             available_capital = self._available_capital(tmp_state)
 
             # Pass 2 — open new positions for watchlist rows not yet held.
+            # Hedge-fund mandate: stay cash-only, but run the CBE book as a
+            # constrained long/short sleeve. That means each new name has to
+            # fit the gross, net, single-name, and sector budgets before it is
+            # admitted. When a one-sided scan floods the book, only the first
+            # tranche gets capital until offsetting signals arrive.
             open_symbols = {_norm_symbol(pos.get("instrument")) for pos in open_positions}
-            for symbol, row in watchlist_by_symbol.items():
+            sorted_watchlist = sorted(
+                watchlist_by_symbol.items(),
+                key=lambda item: _coerce_float(
+                    item[1].get("composite_alpha_score"),
+                    _coerce_float(item[1].get("composite_score")) * 10.0,
+                ),
+                reverse=True,
+            )
+            equity_budget = self.initial_capital * max(0.0, min(exposure_pct, 100.0)) / 100.0
+            max_gross = equity_budget * HEDGE_MAX_GROSS_EXPOSURE_RATIO
+            max_net = equity_budget * HEDGE_MAX_NET_EXPOSURE_RATIO
+            max_single_name = min(sized_cap, self.initial_capital * HEDGE_MAX_SINGLE_NAME_RATIO)
+            max_sector = equity_budget * HEDGE_MAX_SECTOR_EXPOSURE_RATIO
+            for symbol, row in sorted_watchlist:
                 if symbol in open_symbols:
                     continue
                 bias = str(row.get("directional_bias") or "neutral").lower()
@@ -216,8 +273,24 @@ class CBEPaperBook:
                 if latest_close is None or latest_close <= 0.0:
                     continue
 
-                # Size: integer quantity such that notional <= min(cap, available).
-                notional_budget = min(sized_cap, max(0.0, available_capital))
+                direction = "long" if bias == "bullish" else "short"
+                sector_code = str(row.get("sector_code") or "unclassified").strip() or "unclassified"
+                exposure = self._portfolio_exposure(open_positions)
+                gross_room = max(0.0, max_gross - exposure["gross"])
+                if direction == "long":
+                    net_room = max(0.0, max_net - exposure["net"])
+                else:
+                    net_room = max(0.0, max_net + exposure["net"])
+                sector_room = max(0.0, max_sector - exposure["sectors"].get(sector_code, {}).get("gross", 0.0))
+
+                # Size: integer quantity such that notional fits every budget.
+                notional_budget = min(
+                    max_single_name,
+                    max(0.0, available_capital),
+                    gross_room,
+                    net_room,
+                    sector_room,
+                )
                 if notional_budget < latest_close:
                     # Can't afford even one share at current price.
                     continue
@@ -227,7 +300,10 @@ class CBEPaperBook:
                 notional = round(latest_close * quantity, 2)
                 available_capital = round(available_capital - notional, 2)
 
-                direction = "long" if bias == "bullish" else "short"
+                alpha_score = _coerce_float(
+                    row.get("composite_alpha_score"),
+                    _coerce_float(row.get("composite_score")) * 10.0,
+                )
                 journal_row = {
                     "recorded_at": recorded_at,
                     "scan_date": scan_date,
@@ -236,7 +312,15 @@ class CBEPaperBook:
                     "direction": direction,
                     "bias": bias,
                     "composite_score": float(row.get("composite_score") or 0.0),
+                    "alpha_score": alpha_score,
                     "bias_conviction": float(row.get("bias_conviction") or 0.0),
+                    "sector_code": sector_code,
+                    "risk_budget": {
+                        "max_gross": round(max_gross, 2),
+                        "max_net": round(max_net, 2),
+                        "max_single_name": round(max_single_name, 2),
+                        "max_sector": round(max_sector, 2),
+                    },
                     "entry_price": latest_close,
                     "quantity": quantity,
                     "notional": notional,
@@ -256,9 +340,21 @@ class CBEPaperBook:
                         "direction": direction,
                         "bias": bias,
                         "composite_score": float(row.get("composite_score") or 0.0),
+                        "alpha_score": alpha_score,
                         "bias_conviction": float(row.get("bias_conviction") or 0.0),
                         "latest_composite_score": float(row.get("composite_score") or 0.0),
+                        "latest_alpha_score": alpha_score,
                         "latest_bias_conviction": float(row.get("bias_conviction") or 0.0),
+                        "sector_code": sector_code,
+                        "sector_quadrant": row.get("sector_quadrant"),
+                        "stock_quadrant": row.get("stock_quadrant"),
+                        "stock_rs_pct": row.get("stock_rs_pct"),
+                        "rank_overall": row.get("rank_overall"),
+                        "rank_actionable": row.get("rank_actionable"),
+                        "risk_budget_gross": round(max_gross, 2),
+                        "risk_budget_net": round(max_net, 2),
+                        "risk_budget_single_name": round(max_single_name, 2),
+                        "risk_budget_sector": round(max_sector, 2),
                         "entry_price": latest_close,
                         "latest_close": latest_close,
                         "exit_price": None,
@@ -434,6 +530,45 @@ class CBEPaperBook:
         )
         return round(self.initial_capital + realized - reserved, 2)
 
+    def _portfolio_exposure(self, open_positions: list[dict[str, Any]]) -> dict[str, Any]:
+        long_exposure = 0.0
+        short_exposure = 0.0
+        sectors: dict[str, dict[str, Any]] = {}
+        names: list[float] = []
+
+        for pos in open_positions:
+            notional = _position_notional(pos)
+            if notional <= 0:
+                continue
+            direction = str(pos.get("direction") or "").lower()
+            sector = str(pos.get("sector_code") or "unclassified").strip() or "unclassified"
+            sector_row = sectors.setdefault(
+                sector,
+                {"sector": sector, "long": 0.0, "short": 0.0, "gross": 0.0, "names": 0},
+            )
+            if direction == "short":
+                short_exposure += notional
+                sector_row["short"] += notional
+            else:
+                long_exposure += notional
+                sector_row["long"] += notional
+            sector_row["gross"] += notional
+            sector_row["names"] += 1
+            names.append(notional)
+
+        gross = long_exposure + short_exposure
+        net = long_exposure - short_exposure
+        names.sort(reverse=True)
+        return {
+            "long": round(long_exposure, 2),
+            "short": round(short_exposure, 2),
+            "gross": round(gross, 2),
+            "net": round(net, 2),
+            "largest": round(names[0], 2) if names else 0.0,
+            "top3": round(sum(names[:3]), 2),
+            "sectors": sectors,
+        }
+
     def _summary(
         self,
         open_positions: list[dict[str, Any]],
@@ -454,6 +589,52 @@ class CBEPaperBook:
         total_return_pct = round(
             ((total_equity - initial_capital) / initial_capital) * 100.0, 4
         ) if initial_capital else 0.0
+        exposure = self._portfolio_exposure(open_positions)
+        equity_base = total_equity if total_equity > 0 else initial_capital
+        gross_ratio = (exposure["gross"] / equity_base) if equity_base else 0.0
+        net_ratio = (exposure["net"] / equity_base) if equity_base else 0.0
+        largest_ratio = (exposure["largest"] / equity_base) if equity_base else 0.0
+        concentration_top3_ratio = (exposure["top3"] / equity_base) if equity_base else 0.0
+        long_count = sum(1 for p in open_positions if str(p.get("direction") or "").lower() == "long")
+        short_count = sum(1 for p in open_positions if str(p.get("direction") or "").lower() == "short")
+
+        sector_exposures: list[dict[str, Any]] = []
+        for sector, row in exposure["sectors"].items():
+            gross = float(row.get("gross") or 0.0)
+            long_val = float(row.get("long") or 0.0)
+            short_val = float(row.get("short") or 0.0)
+            sector_exposures.append(
+                {
+                    "sector": sector,
+                    "long_exposure": round(long_val, 2),
+                    "short_exposure": round(short_val, 2),
+                    "gross_exposure": round(gross, 2),
+                    "net_exposure": round(long_val - short_val, 2),
+                    "gross_exposure_ratio": round((gross / equity_base) if equity_base else 0.0, 4),
+                    "names": int(row.get("names") or 0),
+                }
+            )
+        sector_exposures.sort(key=lambda r: float(r.get("gross_exposure") or 0.0), reverse=True)
+
+        top_sector_ratio = float(sector_exposures[0]["gross_exposure_ratio"]) if sector_exposures else 0.0
+        risk_flags: list[str] = []
+        if gross_ratio > HEDGE_MAX_GROSS_EXPOSURE_RATIO:
+            risk_flags.append("gross_exposure_over_mandate")
+        if abs(net_ratio) > HEDGE_MAX_NET_EXPOSURE_RATIO:
+            risk_flags.append("net_exposure_over_mandate")
+        if largest_ratio > HEDGE_MAX_SINGLE_NAME_RATIO:
+            risk_flags.append("single_name_over_mandate")
+        if top_sector_ratio > HEDGE_MAX_SECTOR_EXPOSURE_RATIO:
+            risk_flags.append("sector_concentration_over_mandate")
+        if not risk_flags and open_positions:
+            risk_flags.append("inside_hedge_mandate")
+
+        if abs(net_ratio) < 0.05:
+            book_bias = "balanced"
+        elif net_ratio > 0:
+            book_bias = "net_long"
+        else:
+            book_bias = "net_short"
 
         closed_sorted = sorted(
             closed_positions,
@@ -502,6 +683,33 @@ class CBEPaperBook:
             "reserved_margin": reserved_margin,
             "total_equity": total_equity,
             "total_return_pct": total_return_pct,
+            "long_positions": long_count,
+            "short_positions": short_count,
+            "long_exposure": exposure["long"],
+            "short_exposure": exposure["short"],
+            "gross_exposure": exposure["gross"],
+            "net_exposure": exposure["net"],
+            "gross_exposure_ratio": round(gross_ratio, 4),
+            "net_exposure_ratio": round(net_ratio, 4),
+            "largest_position_exposure": exposure["largest"],
+            "largest_position_ratio": round(largest_ratio, 4),
+            "concentration_top3_ratio": round(concentration_top3_ratio, 4),
+            "risk_budget_usage_ratio": round(
+                min(1.0, gross_ratio / HEDGE_MAX_GROSS_EXPOSURE_RATIO),
+                4,
+            ),
+            "book_bias": book_bias,
+            "sector_exposures": sector_exposures,
+            "risk_flags": risk_flags,
+            "mandate": {
+                "strategy": "cbe_long_short_hedge_fund",
+                "max_gross_exposure_ratio": HEDGE_MAX_GROSS_EXPOSURE_RATIO,
+                "max_net_exposure_ratio": HEDGE_MAX_NET_EXPOSURE_RATIO,
+                "max_single_name_ratio": HEDGE_MAX_SINGLE_NAME_RATIO,
+                "max_sector_exposure_ratio": HEDGE_MAX_SECTOR_EXPOSURE_RATIO,
+                "rebalance": "weekly",
+                "min_hold_trading_days": MIN_HOLD_TRADING_DAYS,
+            },
             "max_drawdown": round(max_dd, 4),
             "sharpe_ratio": sharpe,
             "total_trades": wins + losses,

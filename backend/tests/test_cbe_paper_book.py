@@ -8,7 +8,14 @@ from typing import Any
 
 import pytest
 
-from cbe_scanner.paper import CBEPaperBook, CBE_INITIAL_CAPITAL, MIN_HOLD_TRADING_DAYS
+from cbe_scanner.paper import (
+    CBEPaperBook,
+    CBE_INITIAL_CAPITAL,
+    HEDGE_MAX_GROSS_EXPOSURE_RATIO,
+    HEDGE_MAX_NET_EXPOSURE_RATIO,
+    HEDGE_MAX_SECTOR_EXPOSURE_RATIO,
+    MIN_HOLD_TRADING_DAYS,
+)
 
 
 def _scan_payload(rows: list[dict[str, Any]], *, scan_date: str = "2026-05-29") -> dict[str, Any]:
@@ -23,13 +30,22 @@ def _scan_payload(rows: list[dict[str, Any]], *, scan_date: str = "2026-05-29") 
     }
 
 
-def _row(symbol: str, bias: str, score: float, close: float, conviction: float = 0.6) -> dict[str, Any]:
+def _row(
+    symbol: str,
+    bias: str,
+    score: float,
+    close: float,
+    conviction: float = 0.6,
+    sector: str | None = None,
+) -> dict[str, Any]:
     return {
         "instrument": symbol,
         "composite_score": score,
+        "composite_alpha_score": score * 10.0,
         "directional_bias": bias,
         "bias_conviction": conviction,
         "latest_close": close,
+        "sector_code": sector,
     }
 
 
@@ -179,12 +195,41 @@ def test_reset_archives_and_zeroes_book(book: CBEPaperBook):
     assert archives, "Expected at least one archive directory"
 
 
-def test_capital_capped_when_too_many_signals(book: CBEPaperBook):
-    """Eleven ₹100k positions exceed the ₹1L initial; the 11th must be skipped."""
-    rows = [_row(f"SYM{i}", "bullish", 6.5, 1000.0) for i in range(11)]
+def test_one_sided_book_is_capped_by_net_exposure(book: CBEPaperBook):
+    """A hedge-fund book cannot spend all capital on one directional sleeve."""
+    rows = [_row(f"SYM{i}", "bullish", 6.5, 1000.0, sector=f"SECTOR{i}") for i in range(11)]
     summary = _run(book.sync_from_scan(_scan_payload(rows)))
-    # 10 positions × ₹100k = ₹1M = entire initial capital
+    # 4 positions x 100k = 40% net-long exposure, the configured max.
+    assert summary["open_positions"] == 4
+    assert summary["long_positions"] == 4
+    assert summary["short_positions"] == 0
+    assert summary["net_exposure"] == 400_000.0
+    assert summary["net_exposure_ratio"] == HEDGE_MAX_NET_EXPOSURE_RATIO
+    assert summary["available_capital"] == 600_000.0
+
+
+def test_sector_concentration_caps_same_sector(book: CBEPaperBook):
+    rows = [_row(f"SYM{i}", "bullish", 6.5, 1000.0, sector="BANKS") for i in range(11)]
+    summary = _run(book.sync_from_scan(_scan_payload(rows)))
+    # Sector cap is 30% of equity budget, so the fourth 100k BANKS name is skipped.
+    assert summary["open_positions"] == 3
+    assert summary["sector_exposures"][0]["sector"] == "BANKS"
+    assert summary["sector_exposures"][0]["gross_exposure_ratio"] == HEDGE_MAX_SECTOR_EXPOSURE_RATIO
+
+
+def test_balanced_long_short_book_can_use_full_gross_budget(book: CBEPaperBook):
+    rows = [
+        _row(f"L{i}", "bullish", 6.5, 1000.0, sector=f"LONG{i}")
+        if i % 2 == 0
+        else _row(f"S{i}", "bearish", 6.5, 1000.0, sector=f"SHORT{i}")
+        for i in range(12)
+    ]
+    summary = _run(book.sync_from_scan(_scan_payload(rows)))
     assert summary["open_positions"] == 10
+    assert summary["long_positions"] == 5
+    assert summary["short_positions"] == 5
+    assert summary["gross_exposure_ratio"] == HEDGE_MAX_GROSS_EXPOSURE_RATIO
+    assert summary["net_exposure_ratio"] == 0.0
     assert summary["available_capital"] == 0.0
 
 
