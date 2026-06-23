@@ -18,6 +18,14 @@ class DirectionalResetRequest(BaseModel):
     actor: str | None = None
 
 
+class DirectionalPositionCloseRequest(BaseModel):
+    position_id: str = Field(..., description="Open directional paper position id to close.")
+    premium: float | None = Field(None, gt=0, description="Optional operator mark. Uses live/stored mark when omitted.")
+    spot: float | None = Field(None, gt=0, description="Optional underlying spot mark.")
+    reason: str = Field("operator_close", description="Close reason recorded in the paper journal.")
+    actor: str | None = None
+
+
 @router.get("/summary")
 async def summary() -> dict[str, object]:
     return await asyncio.to_thread(_service.summary)
@@ -76,6 +84,20 @@ async def paper_positions(
 async def paper_summary() -> dict[str, object]:
     """Capital + P&L snapshot for the portfolio panel."""
     return await _service.paper_summary()
+
+
+@router.post("/paper-positions/close")
+async def close_paper_position(body: DirectionalPositionCloseRequest) -> dict[str, object]:
+    try:
+        return await _service.close_paper_position(
+            body.position_id,
+            premium=body.premium,
+            spot=body.spot,
+            reason=body.reason,
+            actor=body.actor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/reset-paper")
@@ -168,6 +190,28 @@ async def policy_state() -> dict[str, object]:
     snap = _service.policy.snapshot()
     risk_cfg = _service.config.get("risk", {}) or {}
     paper_cfg = _service.config.get("paper_trading", {}) or {}
+    size_buckets = snap.get("size_buckets") or {}
+    bucket_rows: list[dict[str, object]] = []
+    total_bucket_trades = 0
+    weighted_r = 0.0
+    for multiplier, bucket in size_buckets.items():
+        if not isinstance(bucket, dict):
+            continue
+        n = int(bucket.get("n") or 0)
+        mean_r = bucket.get("mean_R")
+        total_bucket_trades += n
+        if mean_r is not None:
+            weighted_r += float(mean_r) * n
+        bucket_rows.append(
+            {
+                "multiplier": multiplier,
+                "n": n,
+                "mean_R": mean_r,
+            }
+        )
+    trained_rows = [row for row in bucket_rows if int(row["n"] or 0) > 0 and row.get("mean_R") is not None]
+    best_bucket = max(trained_rows, key=lambda row: float(row.get("mean_R") or 0.0), default=None)
+    worst_bucket = min(trained_rows, key=lambda row: float(row.get("mean_R") or 0.0), default=None)
     # Mirror the strategy knobs the UI needs to render — these are the
     # things the user (and the agent) need to see at a glance.
     snap["strategy_params"] = {
@@ -183,5 +227,16 @@ async def policy_state() -> dict[str, object]:
         "min_hold_bars": paper_cfg.get("min_hold_bars"),
         "one_position_per_symbol": paper_cfg.get("one_position_per_symbol"),
     }
+    snap["learning_summary"] = {
+        "bucket_trades": total_bucket_trades,
+        "mean_R": (weighted_r / total_bucket_trades) if total_bucket_trades else None,
+        "best_multiplier": best_bucket.get("multiplier") if best_bucket else None,
+        "best_mean_R": best_bucket.get("mean_R") if best_bucket else None,
+        "worst_multiplier": worst_bucket.get("multiplier") if worst_bucket else None,
+        "worst_mean_R": worst_bucket.get("mean_R") if worst_bucket else None,
+        "pending_rewards": len(snap.get("pending_positions") or []),
+        "untrained_buckets": sum(1 for row in bucket_rows if int(row["n"] or 0) == 0),
+    }
+    snap["paper"] = await _service.paper_summary()
     snap["enabled"] = True
     return snap

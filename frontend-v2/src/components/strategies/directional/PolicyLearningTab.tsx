@@ -6,9 +6,9 @@
  */
 import { clsx } from "clsx";
 import { useQuery } from "@tanstack/react-query";
-import { Brain, GitBranch, ShieldCheck } from "lucide-react";
+import { Activity, Brain, GitBranch, ShieldCheck, Target } from "lucide-react";
 
-import { MetricTile, REFRESH_MS, Section, formatNumber, tone } from "@/components/desk-ui";
+import { MetricTile, REFRESH_MS, Section, formatMoney, formatNumber, formatSignedMoney, tone } from "@/components/desk-ui";
 import { api as apiClient } from "@/lib/api";
 
 type StrategyParams = {
@@ -30,9 +30,21 @@ type PolicySnap = {
   reason?: string;
   n_seen?: number;
   feature_dim?: number;
+  feature_version?: number;
   size_buckets?: Record<string, { mean_R?: number | null; n?: number }>;
   pending_positions?: string[];
   strategy_params?: StrategyParams;
+  learning_summary?: {
+    bucket_trades?: number;
+    mean_R?: number | null;
+    best_multiplier?: string | null;
+    best_mean_R?: number | null;
+    worst_multiplier?: string | null;
+    worst_mean_R?: number | null;
+    pending_rewards?: number;
+    untrained_buckets?: number;
+  };
+  paper?: Record<string, number>;
 };
 
 function fmtPct(v: number | null | undefined, digits = 2): string {
@@ -68,19 +80,23 @@ export default function PolicyLearningTab() {
   const totalTrades = Object.values(buckets).reduce((a, b) => a + (b?.n || 0), 0);
   const orderedKeys = Object.keys(buckets).sort((a, b) => parseFloat(a) - parseFloat(b));
   const params = data.strategy_params || {};
+  const learning = data.learning_summary || {};
+  const paper = data.paper || {};
 
   return (
     <div className="space-y-4">
-      <Section title="Contextual bandit · global state" icon={<Brain size={16} />}>
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          <MetricTile label="Trades fed to model" value={String(data.n_seen ?? 0)} detail={`${totalTrades} across size buckets`} />
-          <MetricTile label="Feature dimension" value={String(data.feature_dim ?? 0)} detail="Continuous + one-hot" />
-          <MetricTile label="Pending positions" value={String((data.pending_positions || []).length)} detail="Awaiting close → reward" />
-          <MetricTile label="Status" value="learning" detail="Posterior updates on close" color="text-accent-green" />
+      <Section title="RL control tower" icon={<Brain size={16} />}>
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
+          <MetricTile label="Trades learned" value={String(data.n_seen ?? 0)} detail={`${totalTrades} size outcomes`} />
+          <MetricTile label="Mean learned R" value={learning.mean_R != null ? formatNumber(learning.mean_R, 3) : "—"} detail={`${learning.bucket_trades ?? 0} bucket closes`} color={tone(learning.mean_R)} />
+          <MetricTile label="Best multiplier" value={learning.best_multiplier ? `${parseFloat(learning.best_multiplier).toFixed(1)}×` : "—"} detail={learning.best_mean_R != null ? `${formatNumber(learning.best_mean_R, 3)}R mean` : "needs closes"} color={tone(learning.best_mean_R)} />
+          <MetricTile label="Pending reward" value={String(learning.pending_rewards ?? (data.pending_positions || []).length)} detail="Open positions not closed" />
+          <MetricTile label="Feature set" value={`v${data.feature_version ?? "—"}`} detail={`${data.feature_dim ?? 0} signals`} />
+          <MetricTile label="Paper equity" value={formatMoney(paper.total_equity)} detail={`Open ${formatSignedMoney(paper.unrealized_pnl)}`} color={tone(paper.total_pnl)} />
         </div>
       </Section>
 
-      <Section title="Size-multiplier posterior" description="Mean R per bucket — higher = the policy will Thompson-sample that bucket more often.">
+      <Section title="Size-multiplier posterior" icon={<Target size={16} />}>
         <table className="w-full text-[12px]">
           <thead className="text-[10.5px] uppercase tracking-wide text-text-muted">
             <tr className="border-b border-bg-border/60">
@@ -88,15 +104,18 @@ export default function PolicyLearningTab() {
               <th className="px-2 py-2 text-right">Trades closed</th>
               <th className="px-2 py-2 text-right">Mean R</th>
               <th className="px-2 py-2 text-left">Share</th>
+              <th className="px-2 py-2 text-left">State</th>
             </tr>
           </thead>
           <tbody>
             {orderedKeys.length === 0 ? (
-              <tr><td colSpan={4} className="py-4 text-center text-text-muted">No size buckets registered.</td></tr>
+              <tr><td colSpan={5} className="py-4 text-center text-text-muted">No size buckets registered.</td></tr>
             ) : (
               orderedKeys.map((k) => {
                 const b = buckets[k] || {};
                 const share = totalTrades > 0 ? (b.n || 0) / totalTrades : 0;
+                const isBest = learning.best_multiplier === k && (b.n || 0) > 0;
+                const isWorst = learning.worst_multiplier === k && (b.n || 0) > 0;
                 return (
                   <tr key={k} className="border-b border-bg-border/30">
                     <td className="px-2 py-2 font-mono text-text-primary">{parseFloat(k).toFixed(1)}×</td>
@@ -110,12 +129,35 @@ export default function PolicyLearningTab() {
                       </div>
                       <div className="mt-0.5 text-[10.5px] text-text-muted">{(share * 100).toFixed(1)}%</div>
                     </td>
+                    <td className="px-2 py-2">
+                      {isBest ? <StatusPill label="favored" color="green" /> : isWorst ? <StatusPill label="lagging" color="amber" /> : (b.n || 0) === 0 ? <StatusPill label="explore" color="blue" /> : <StatusPill label="trained" />}
+                    </td>
                   </tr>
                 );
               })
             )}
           </tbody>
         </table>
+      </Section>
+
+      <Section title="Paper feedback loop" icon={<Activity size={16} />}>
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
+          <MetricTile size="sm" label="Open positions" value={String(paper.open_positions ?? 0)} detail={`Exposure ${formatMoney(paper.open_premium_value)}`} />
+          <MetricTile size="sm" label="Closed trades" value={String(paper.total_trades ?? 0)} detail={`Policy ${paper.policy_trades ?? 0}`} />
+          <MetricTile size="sm" label="Realized R" value={formatNumber(paper.realized_r_total, 2)} detail={`Avg ${formatNumber(paper.avg_r_multiple, 3)}R`} color={tone(paper.realized_r_total)} />
+          <MetricTile size="sm" label="Profit factor" value={formatNumber(paper.profit_factor, 2)} detail={`Win ${paper.win_rate != null ? (paper.win_rate * 100).toFixed(1) + "%" : "—"}`} />
+          <MetricTile size="sm" label="Open risk" value={formatMoney(paper.open_risk_budget)} detail={`${formatNumber(paper.open_risk_R, 2)}R live`} color={tone(paper.open_risk_R)} />
+          <MetricTile size="sm" label="Drawdown" value={paper.max_drawdown != null ? `${(paper.max_drawdown * 100).toFixed(2)}%` : "—"} detail={`Worst ${formatSignedMoney(paper.worst_trade)}`} color={tone((paper.max_drawdown || 0) * -1)} />
+        </div>
+        {(data.pending_positions || []).length ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {(data.pending_positions || []).slice(0, 12).map((id) => (
+              <span key={id} className="rounded border border-bg-border bg-bg-primary/20 px-2 py-1 font-mono text-[10.5px] text-text-secondary">
+                {id.slice(0, 10)}
+              </span>
+            ))}
+          </div>
+        ) : null}
       </Section>
 
       <Section title="Strategy parameters" icon={<ShieldCheck size={16} />}>
@@ -142,6 +184,23 @@ export default function PolicyLearningTab() {
         </div>
       </Section>
     </div>
+  );
+}
+
+function StatusPill({ label, color }: { label: string; color?: "green" | "amber" | "blue" }) {
+  return (
+    <span className={clsx(
+      "inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em]",
+      color === "green"
+        ? "border-accent-green/30 bg-accent-green/8 text-accent-green"
+        : color === "amber"
+          ? "border-accent-amber/30 bg-accent-amber/8 text-accent-amber"
+          : color === "blue"
+            ? "border-accent-blue/30 bg-accent-blue/8 text-accent-blue"
+            : "border-bg-border bg-bg-primary/20 text-text-secondary",
+    )}>
+      {label}
+    </span>
   );
 }
 

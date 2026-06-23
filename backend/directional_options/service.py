@@ -407,6 +407,31 @@ class DirectionalOptionsService:
         self._summary_cache = {"payload": None, "expires_at": 0.0}
         return result
 
+    async def close_paper_position(
+        self,
+        position_id: str,
+        *,
+        premium: float | None = None,
+        spot: float | None = None,
+        reason: str = "operator_close",
+        actor: str | None = None,
+    ) -> dict[str, object]:
+        """Operator close for the directional paper book.
+
+        Delegates to the store so manual exits, signal exits, costs, and RL
+        reward attribution remain one consistent path.
+        """
+        result = await self.paper.close_position(
+            position_id,
+            premium=premium,
+            spot=spot,
+            reason=reason,
+            actor=actor,
+        )
+        self._summary_cache = {"payload": None, "expires_at": 0.0}
+        self._live_cache.clear()
+        return result
+
     def _snapshot(
         self,
         *,

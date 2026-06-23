@@ -9,7 +9,7 @@
  */
 import { clsx } from "clsx";
 import { useState } from "react";
-import { Banknote, BookOpen, History, Layers3 } from "lucide-react";
+import { Banknote, BookOpen, History, Layers3, RefreshCw, ShieldCheck, Target, XCircle } from "lucide-react";
 
 import {
   MetricTile,
@@ -17,11 +17,14 @@ import {
   StatusBadge,
   decisionTone,
   formatIST,
+  formatMoney,
   formatNumber,
+  formatPct,
   formatSignedMoney,
   tone,
 } from "@/components/desk-ui";
 import type { usePaperDeskQueries } from "@/hooks/usePaperDeskQueries";
+import { api as apiClient, describeApiError } from "@/lib/api";
 
 type Paper = ReturnType<typeof usePaperDeskQueries>;
 
@@ -35,11 +38,21 @@ type OpenPos = {
   expiry_kind?: string;
   quantity_lots?: number;
   quantity_units?: number;
+  risk_budget?: number;
+  max_loss?: number;
+  premium_at_risk?: number;
   entry_premium?: number;
   latest_premium?: number;
+  latest_spot?: number;
   unrealized_pnl?: number;
   opened_at?: string;
   policy_size_multiplier?: number;
+  policy_sampled_value?: number;
+  ai_rule_score?: number;
+  ai_rule_setup?: string;
+  ai_rule_blockers?: string[];
+  price_source?: string;
+  selection_reason?: string;
 };
 
 type ClosedPos = OpenPos & {
@@ -62,6 +75,8 @@ type JournalEntry = {
 
 export default function PaperTradingTab({ symbol, paper }: { symbol?: string; paper: Paper }) {
   const [view, setView] = useState<"open" | "closed" | "journal">("open");
+  const [busyCloseId, setBusyCloseId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const cap = (paper.summary.data as Record<string, number> | undefined) || {};
   const pos = paper.positions.data as { open_positions?: OpenPos[]; closed_positions?: ClosedPos[] } | undefined;
@@ -73,6 +88,29 @@ export default function PaperTradingTab({ symbol, paper }: { symbol?: string; pa
     if (!paper.resetAccount) return;
     if (typeof window !== "undefined" && window.confirm("Reset the directional paper book?")) {
       await paper.resetAccount("user");
+    }
+  };
+
+  const closePosition = async (position: OpenPos) => {
+    if (!position.position_id || busyCloseId) return;
+    const label = `${position.underlying ?? "position"} ${position.option_type ?? ""} ${position.strike ?? ""}`;
+    if (typeof window !== "undefined" && !window.confirm(`Close ${label} in the directional paper book?`)) {
+      return;
+    }
+    setBusyCloseId(position.position_id);
+    setActionError(null);
+    try {
+      await apiClient.post("/api/directional-options/paper-positions/close", {
+        position_id: position.position_id,
+        reason: "operator_close",
+        actor: "ui",
+      });
+      await paper.refreshAll();
+      setView("closed");
+    } catch (error) {
+      setActionError(describeApiError(error, "Could not close directional paper position."));
+    } finally {
+      setBusyCloseId(null);
     }
   };
 
@@ -94,8 +132,8 @@ export default function PaperTradingTab({ symbol, paper }: { symbol?: string; pa
         }
       >
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
-          <MetricTile label="Equity" value={`₹${(cap.total_equity ?? 0).toLocaleString("en-IN")}`} detail={`Init ₹${(cap.initial_capital ?? 0).toLocaleString("en-IN")}`} />
-          <MetricTile label="Available" value={`₹${(cap.available_capital ?? 0).toLocaleString("en-IN")}`} detail={`Reserved ₹${(cap.reserved_margin ?? 0).toLocaleString("en-IN")}`} />
+          <MetricTile label="Equity" value={formatMoney(cap.total_equity)} detail={`Init ${formatMoney(cap.initial_capital)}`} />
+          <MetricTile label="Available" value={formatMoney(cap.available_capital)} detail={`Reserved ${formatMoney(cap.reserved_margin)}`} />
           <MetricTile label="Realized" value={formatSignedMoney(cap.realized_pnl)} color={tone(cap.realized_pnl)} detail={`${cap.total_trades ?? 0} closed`} />
           <MetricTile label="Unrealized" value={formatSignedMoney(cap.unrealized_pnl)} color={tone(cap.unrealized_pnl)} detail={`${cap.open_positions ?? 0} open`} />
           <MetricTile label="Return %" value={cap.total_return_pct != null ? `${cap.total_return_pct.toFixed(3)}%` : "—"} color={tone(cap.total_pnl)} detail={`Sharpe ${formatNumber(cap.sharpe_ratio, 2)}`} />
@@ -103,29 +141,55 @@ export default function PaperTradingTab({ symbol, paper }: { symbol?: string; pa
         </div>
       </Section>
 
-      <Section title={`Trades${symbol ? " · " + symbol : ""}`}>
-        <div className="mb-3 flex items-center gap-1.5">
-          {([
-            { k: "open", label: `Open (${opens.length})`, icon: Layers3 },
-            { k: "closed", label: `Closed (${closes.length})`, icon: History },
-            { k: "journal", label: `Journal (${records.length})`, icon: BookOpen },
-          ] as const).map(({ k, label, icon: Icon }) => (
-            <button
-              key={k}
-              type="button"
-              onClick={() => setView(k)}
-              className={clsx(
-                "inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11.5px] font-semibold uppercase tracking-[0.12em] transition-colors",
-                view === k
-                  ? "border-accent-blue/40 bg-accent-blue/10 text-accent-blue"
-                  : "border-bg-border bg-bg-primary/12 text-text-secondary hover:text-text-primary",
-              )}
-            >
-              <Icon size={13} />
-              {label}
-            </button>
-          ))}
+      <Section title="RL paper controls" icon={<ShieldCheck size={16} />}>
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
+          <MetricTile size="sm" label="Open value" value={formatMoney(cap.open_premium_value)} detail={`${formatPct(cap.open_exposure_pct, 2, { asPercent: true })} of equity`} />
+          <MetricTile size="sm" label="Risk budget" value={formatMoney(cap.open_risk_budget)} detail={`${formatNumber(cap.open_risk_R, 2)}R open`} color={tone(cap.open_risk_R)} />
+          <MetricTile size="sm" label="Deployed" value={formatPct(cap.capital_deployed_pct, 2, { asPercent: true })} detail={`Entry ${formatMoney(cap.entry_premium_value)}`} />
+          <MetricTile size="sm" label="Largest line" value={formatMoney(cap.largest_position_value)} detail={`${formatPct(cap.largest_position_pct, 2, { asPercent: true })} concentration`} />
+          <MetricTile size="sm" label="Avg learned R" value={formatNumber(cap.avg_r_multiple, 3)} detail={`${cap.policy_trades ?? 0} RL closes`} color={tone(cap.avg_r_multiple)} />
+          <MetricTile size="sm" label="Profit factor" value={formatNumber(cap.profit_factor, 2)} detail={`Best ${formatSignedMoney(cap.best_trade)} · worst ${formatSignedMoney(cap.worst_trade)}`} />
         </div>
+      </Section>
+
+      <Section title={`Trades${symbol ? " · " + symbol : ""}`}>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5">
+            {([
+              { k: "open", label: `Open (${opens.length})`, icon: Layers3 },
+              { k: "closed", label: `Closed (${closes.length})`, icon: History },
+              { k: "journal", label: `Journal (${records.length})`, icon: BookOpen },
+            ] as const).map(({ k, label, icon: Icon }) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() => setView(k)}
+                className={clsx(
+                  "inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11.5px] font-semibold uppercase tracking-[0.12em] transition-colors",
+                  view === k
+                    ? "border-accent-blue/40 bg-accent-blue/10 text-accent-blue"
+                    : "border-bg-border bg-bg-primary/12 text-text-secondary hover:text-text-primary",
+                )}
+              >
+                <Icon size={13} />
+                {label}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={() => paper.refreshAll()}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-bg-border bg-bg-primary/12 px-3 py-1.5 text-[11.5px] font-semibold uppercase tracking-[0.12em] text-text-secondary hover:text-text-primary"
+          >
+            <RefreshCw size={13} />
+            Refresh
+          </button>
+        </div>
+        {actionError ? (
+          <div className="mb-3 rounded-lg border border-accent-red/30 bg-accent-red/8 px-3 py-2 text-[11.5px] text-accent-red">
+            {actionError}
+          </div>
+        ) : null}
 
         {view === "open" ? (
           <Table
@@ -137,9 +201,22 @@ export default function PaperTradingTab({ symbol, paper }: { symbol?: string; pa
               { th: "Regime", render: (p: OpenPos) => p.regime ?? "—" },
               { th: "Lots", render: (p: OpenPos) => p.quantity_lots ?? 0, align: "right" },
               { th: "Entry → Mark", render: (p: OpenPos) => `${formatNumber(p.entry_premium, 2)} → ${formatNumber(p.latest_premium, 2)}`, align: "right" },
-              { th: "Unrealized", render: (p: OpenPos) => formatSignedMoney(p.unrealized_pnl), align: "right", tone: (p: OpenPos) => tone(p.unrealized_pnl) },
-              { th: "Size mult", render: (p: OpenPos) => p.policy_size_multiplier != null ? `${p.policy_size_multiplier.toFixed(2)}×` : "—", align: "right" },
+              { th: "Value", render: (p: OpenPos) => formatMoney(positionValue(p)), align: "right" },
+              { th: "Unrealized / R", render: (p: OpenPos) => <div><div>{formatSignedMoney(p.unrealized_pnl)}</div><div className="text-[10px] text-text-muted">{formatNumber(openR(p), 2)}R</div></div>, align: "right", tone: (p: OpenPos) => tone(p.unrealized_pnl) },
+              { th: "Policy", render: (p: OpenPos) => <PolicyCell p={p} />, align: "right" },
+              { th: "Mark", render: (p: OpenPos) => <span title={p.selection_reason || ""}>{p.price_source || "—"}</span> },
               { th: "Opened", render: (p: OpenPos) => formatIST(p.opened_at), align: "right" },
+              { th: "", render: (p: OpenPos) => (
+                <button
+                  type="button"
+                  disabled={busyCloseId === p.position_id}
+                  onClick={() => closePosition(p)}
+                  className="inline-flex items-center gap-1 rounded-lg border border-accent-red/30 bg-accent-red/8 px-2 py-1 text-[10.5px] font-semibold uppercase tracking-[0.12em] text-accent-red disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <XCircle size={12} />
+                  {busyCloseId === p.position_id ? "Closing" : "Close"}
+                </button>
+              ) },
             ]}
           />
         ) : null}
@@ -154,6 +231,7 @@ export default function PaperTradingTab({ symbol, paper }: { symbol?: string; pa
               { th: "Entry → Exit", render: (p: ClosedPos) => `${formatNumber(p.entry_premium, 2)} → ${formatNumber(p.exit_premium, 2)}`, align: "right" },
               { th: "Realized", render: (p: ClosedPos) => formatSignedMoney(p.realized_pnl), align: "right", tone: (p: ClosedPos) => tone(p.realized_pnl) },
               { th: "R-multiple", render: (p: ClosedPos) => p.policy_r_multiple != null ? `${p.policy_r_multiple >= 0 ? "+" : ""}${p.policy_r_multiple.toFixed(2)}R` : "—", align: "right", tone: (p: ClosedPos) => tone(p.policy_r_multiple) },
+              { th: "Policy", render: (p: ClosedPos) => <PolicyCell p={p} />, align: "right" },
               { th: "Reason", render: (p: ClosedPos) => p.close_reason ?? "—" },
               { th: "Closed", render: (p: ClosedPos) => formatIST(p.closed_at), align: "right" },
             ]}
@@ -176,6 +254,34 @@ export default function PaperTradingTab({ symbol, paper }: { symbol?: string; pa
           />
         ) : null}
       </Section>
+    </div>
+  );
+}
+
+function positionValue(p: OpenPos): number {
+  return Number(p.latest_premium ?? p.entry_premium ?? 0) * Number(p.quantity_units ?? 0);
+}
+
+function openR(p: OpenPos): number | null {
+  const denom = Number(p.max_loss || p.risk_budget || 0);
+  if (!denom) return null;
+  return Number(p.unrealized_pnl || 0) / denom;
+}
+
+function PolicyCell({ p }: { p: OpenPos }) {
+  const blockers = p.ai_rule_blockers || [];
+  return (
+    <div className="space-y-0.5">
+      <div className="inline-flex items-center gap-1 text-text-primary">
+        <Target size={11} />
+        {p.policy_size_multiplier != null ? `${p.policy_size_multiplier.toFixed(2)}×` : "—"}
+      </div>
+      <div className="text-[10px] text-text-muted">
+        {p.ai_rule_setup || (p.ai_rule_score != null ? `rule ${formatNumber(p.ai_rule_score, 0)}` : "bandit")}
+      </div>
+      {blockers.length ? (
+        <div className="text-[10px] text-accent-amber">{blockers.slice(0, 2).join(", ")}</div>
+      ) : null}
     </div>
   );
 }

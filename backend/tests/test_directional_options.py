@@ -935,6 +935,118 @@ async def test_directional_options_paper_store_tracks_open_and_closed_positions(
 
 
 @pytest.mark.asyncio
+async def test_directional_options_operator_close_trains_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakePolicy:
+        def __init__(self) -> None:
+            self.closed: list[tuple[str, float]] = []
+
+        def record_close(self, *, position_id: str, realized_pnl: float) -> float:
+            self.closed.append((position_id, realized_pnl))
+            return 0.42
+
+    policy = _FakePolicy()
+    store = DirectionalOptionsPaperStore(tmp_path / "directional-paper", policy=policy)
+    _isolate_directional_paper_store(
+        store,
+        monkeypatch,
+        initial_state={
+            "open_positions": [
+                {
+                    "position_id": "dir-open-1",
+                    "status": "open",
+                    "opened_at": "2026-04-21T09:45:00+00:00",
+                    "updated_at": "2026-04-21T09:45:00+00:00",
+                    "underlying": "NIFTY",
+                    "timeframe": "5minute",
+                    "direction": "CE",
+                    "regime": "trend",
+                    "trading_symbol": "NIFTY 22500 CE",
+                    "instrument_key": "NSE_FO|NIFTY22500CE",
+                    "option_type": "CE",
+                    "expiry": "2026-04-30",
+                    "strike": 22500.0,
+                    "quantity_units": 75,
+                    "entry_premium": 132.0,
+                    "latest_premium": 134.0,
+                    "entry_spot": 22512.5,
+                    "latest_spot": 22528.0,
+                    "risk_budget": 15_000.0,
+                    "max_loss": 3_600.0,
+                    "unrealized_pnl": 150.0,
+                    "realized_pnl": 0.0,
+                }
+            ],
+            "closed_positions": [],
+        },
+    )
+
+    result = await store.close_position(
+        "dir-open-1",
+        premium=146.0,
+        spot=22586.0,
+        reason="operator_take_profit",
+        actor="pytest",
+    )
+    positions = await store.list_positions(symbol="NIFTY", status="all", limit=10)
+
+    assert result["closed"] is True
+    assert positions["open_positions"] == []
+    closed = positions["closed_positions"][0]
+    assert closed["close_reason"] == "operator_take_profit"
+    assert closed["operator_actor"] == "pytest"
+    assert closed["policy_r_multiple"] == pytest.approx(0.42)
+    assert policy.closed and policy.closed[0][0] == "dir-open-1"
+    assert policy.closed[0][1] == pytest.approx(closed["realized_pnl"])
+
+
+@pytest.mark.asyncio
+async def test_directional_options_summary_exposes_paper_risk_metrics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom():
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("directional_options.paper.AsyncSessionLocal", _boom)
+    store = DirectionalOptionsPaperStore(tmp_path / "directional-paper")
+    summary = await store._summary(
+        [
+            {
+                "entry_premium": 100.0,
+                "latest_premium": 120.0,
+                "quantity_units": 75,
+                "unrealized_pnl": 1500.0,
+                "risk_budget": 10_000.0,
+                "max_loss": 4_000.0,
+            },
+            {
+                "entry_premium": 80.0,
+                "latest_premium": 70.0,
+                "quantity_units": 50,
+                "unrealized_pnl": -500.0,
+                "risk_budget": 8_000.0,
+                "max_loss": 2_000.0,
+            },
+        ],
+        [
+            {"realized_pnl": 2_000.0, "policy_r_multiple": 0.5, "closed_at": "2026-04-21T10:00:00+00:00"},
+            {"realized_pnl": -1_000.0, "policy_r_multiple": -0.25, "closed_at": "2026-04-21T11:00:00+00:00"},
+        ],
+    )
+
+    assert summary["entry_premium_value"] == pytest.approx(11_500.0)
+    assert summary["open_premium_value"] == pytest.approx(12_500.0)
+    assert summary["open_risk_budget"] == pytest.approx(6_000.0)
+    assert summary["open_risk_R"] == pytest.approx(1000.0 / 6000.0, rel=1e-3)
+    assert summary["profit_factor"] == pytest.approx(2.0)
+    assert summary["avg_r_multiple"] == pytest.approx(0.125)
+    assert summary["policy_trades"] == 2
+
+
+@pytest.mark.asyncio
 async def test_directional_options_paper_store_reports_current_nifty_monthly_expiry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

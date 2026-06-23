@@ -475,6 +475,10 @@ class DirectionalOptionsPaperStore:
                         "strike": float(contract.get("strike") or 0.0),
                         "quantity_lots": int(risk.get("quantity_lots") or 0),
                         "quantity_units": int(risk.get("quantity_units") or 0),
+                        "risk_budget": float(risk.get("risk_budget") or 0.0),
+                        "max_loss": float(risk.get("max_loss") or 0.0),
+                        "premium_at_risk": float(risk.get("premium_at_risk") or 0.0),
+                        "premium_cap": risk.get("premium_cap"),
                         "entry_premium": latest_mark,
                         "latest_premium": latest_mark,
                         "exit_premium": None,
@@ -505,6 +509,130 @@ class DirectionalOptionsPaperStore:
                 }
             )
             return await self._summary(open_positions, closed_positions)
+
+    async def close_position(
+        self,
+        position_id: str,
+        *,
+        premium: float | None = None,
+        spot: float | None = None,
+        reason: str = "operator_close",
+        actor: str | None = None,
+    ) -> dict[str, Any]:
+        """Manually close one open paper position and feed RL reward.
+
+        The store remains the single close path so operator exits, signal
+        flips, and flat-signal exits all book costs and train the policy in
+        the same way.
+        """
+        normalized_id = str(position_id or "").strip()
+        if not normalized_id:
+            raise ValueError("position_id is required")
+
+        close_time = _utc_now()
+        async with self._lock:
+            state = await self._load_positions()
+            open_positions = list(state.get("open_positions", []))
+            closed_positions = list(state.get("closed_positions", []))
+            position = next(
+                (
+                    row for row in open_positions
+                    if str(row.get("position_id") or "") == normalized_id
+                    and str(row.get("status") or "open") == "open"
+                ),
+                None,
+            )
+            if position is None:
+                raise ValueError(f"Open directional paper position not found: {normalized_id}")
+
+            mark_premium = premium
+            price_source = "operator_mark"
+            if mark_premium is None:
+                try:
+                    from directional_options.chain_analytics import chain_strike_mark, ensure_chain_tracked
+
+                    underlying = str(position.get("underlying") or "")
+                    expiry = str(position.get("expiry") or "")
+                    strike = float(position.get("strike") or 0.0)
+                    option_type = str(position.get("option_type") or "")
+                    if underlying and expiry and strike and option_type:
+                        await ensure_chain_tracked(underlying, expiry)
+                        chain_mark = await chain_strike_mark(underlying, expiry, strike, option_type)
+                        if chain_mark is not None and chain_mark > 0:
+                            mark_premium = float(chain_mark)
+                            price_source = "chain_cache_live"
+                except Exception:  # noqa: BLE001
+                    mark_premium = None
+
+            if mark_premium is None:
+                mark_premium = float(
+                    position.get("latest_premium")
+                    or position.get("entry_premium")
+                    or 0.0
+                )
+                price_source = str(position.get("price_source") or "stored_mark")
+
+            mark = {
+                "premium": float(mark_premium),
+                "spot": float(
+                    spot
+                    if spot is not None
+                    else position.get("latest_spot")
+                    or position.get("entry_spot")
+                    or 0.0
+                ),
+                "mark_time": close_time,
+                "price_source": price_source,
+            }
+            close_reason = (reason or "operator_close").strip() or "operator_close"
+            self._close_position(
+                position,
+                mark=mark,
+                close_time=close_time,
+                close_reason=close_reason,
+            )
+            position["operator_actor"] = actor
+            position["operator_closed"] = True
+            open_positions.remove(position)
+            closed_positions.append(position)
+
+            await self._append_journal(
+                {
+                    "recorded_at": close_time,
+                    "underlying": position.get("underlying"),
+                    "timeframe": position.get("timeframe"),
+                    "direction": position.get("direction"),
+                    "approved": False,
+                    "execution_ready": True,
+                    "trading_symbol": position.get("trading_symbol"),
+                    "instrument_key": position.get("instrument_key"),
+                    "option_type": position.get("option_type"),
+                    "expiry": position.get("expiry"),
+                    "strike": position.get("strike"),
+                    "latest_premium": mark["premium"],
+                    "latest_spot": mark["spot"],
+                    "selection_reason": close_reason,
+                    "operator_actor": actor,
+                    "event": "manual_close",
+                    "position_id": normalized_id,
+                    "realized_pnl": position.get("realized_pnl"),
+                    "policy_r_multiple": position.get("policy_r_multiple"),
+                }
+            )
+            await self._save_positions(
+                {
+                    "last_synced_at": close_time,
+                    "open_positions": open_positions,
+                    "closed_positions": closed_positions[-250:],
+                }
+            )
+            summary = await self._summary(open_positions, closed_positions)
+
+        return {
+            "closed": True,
+            "position": position,
+            "summary": summary,
+        }
 
     def _close_position(
         self,
@@ -633,6 +761,29 @@ class DirectionalOptionsPaperStore:
             ),
             2,
         )
+        open_premium_value = round(
+            sum(
+                float(p.get("latest_premium") or p.get("entry_premium") or 0.0)
+                * float(p.get("quantity_units") or 0)
+                for p in open_positions
+            ),
+            2,
+        )
+        open_risk_budget = round(
+            sum(
+                float(p.get("max_loss") or p.get("risk_budget") or 0.0)
+                for p in open_positions
+            ),
+            2,
+        )
+        largest_position_value = 0.0
+        if open_positions:
+            largest_position_value = max(
+                float(p.get("latest_premium") or p.get("entry_premium") or 0.0)
+                * float(p.get("quantity_units") or 0)
+                for p in open_positions
+            )
+        largest_position_value = round(largest_position_value, 2)
         total_equity = round(initial_capital + realized + unrealized, 2)
         available_capital = round(initial_capital + realized - reserved_margin, 2)
         total_return_pct = round(
@@ -647,10 +798,17 @@ class DirectionalOptionsPaperStore:
         peak = initial_capital
         max_dd = 0.0
         trade_returns_pct: list[float] = []
+        r_multiples: list[float] = []
+        gross_profit = 0.0
+        gross_loss = 0.0
+        best_trade = 0.0
+        worst_trade = 0.0
         wins = 0
         losses = 0
         for row in closed_sorted:
             pnl = float(row.get("realized_pnl") or 0.0)
+            best_trade = max(best_trade, pnl)
+            worst_trade = min(worst_trade, pnl)
             pre_equity = running_equity if running_equity > 0 else initial_capital
             running_equity = max(0.0, running_equity + pnl)
             if running_equity > peak:
@@ -662,8 +820,13 @@ class DirectionalOptionsPaperStore:
                 trade_returns_pct.append((pnl / pre_equity) * 100.0)
             if pnl > 0:
                 wins += 1
+                gross_profit += pnl
             elif pnl < 0:
                 losses += 1
+                gross_loss += abs(pnl)
+            r_multiple = _safe_float_or_none(row.get("policy_r_multiple"))
+            if r_multiple is not None:
+                r_multiples.append(float(r_multiple))
 
         sharpe = 0.0
         if len(trade_returns_pct) >= 2:
@@ -674,6 +837,12 @@ class DirectionalOptionsPaperStore:
                 sharpe = round(mean / stdev, 4)
 
         win_rate = (wins / (wins + losses)) if (wins + losses) else 0.0
+        total_trades = wins + losses
+        avg_win = (gross_profit / wins) if wins else 0.0
+        avg_loss = -(gross_loss / losses) if losses else 0.0
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
+        avg_r_multiple = (sum(r_multiples) / len(r_multiples)) if r_multiples else 0.0
+        realized_r_total = sum(r_multiples) if r_multiples else 0.0
 
         return {
             "open_positions": len(open_positions),
@@ -684,12 +853,31 @@ class DirectionalOptionsPaperStore:
             "initial_capital": initial_capital,
             "available_capital": available_capital,
             "reserved_margin": reserved_margin,
+            "entry_premium_value": reserved_margin,
+            "open_premium_value": open_premium_value,
+            "open_risk_budget": open_risk_budget,
+            "open_risk_R": round(unrealized / open_risk_budget, 4) if open_risk_budget else 0.0,
+            "unrealized_return_pct": round((unrealized / reserved_margin) * 100.0, 4) if reserved_margin else 0.0,
+            "capital_deployed_pct": round((reserved_margin / initial_capital) * 100.0, 4) if initial_capital else 0.0,
+            "open_exposure_pct": round((open_premium_value / total_equity) * 100.0, 4) if total_equity else 0.0,
+            "largest_position_value": largest_position_value,
+            "largest_position_pct": round((largest_position_value / total_equity) * 100.0, 4) if total_equity else 0.0,
             "total_equity": total_equity,
             "total_return_pct": total_return_pct,
             "max_drawdown": round(max_dd, 4),
             "sharpe_ratio": sharpe,
-            "total_trades": wins + losses,
+            "total_trades": total_trades,
             "win_rate": round(win_rate, 4),
+            "gross_profit": round(gross_profit, 2),
+            "gross_loss": round(gross_loss, 2),
+            "profit_factor": round(profit_factor, 4),
+            "avg_win": round(avg_win, 2),
+            "avg_loss": round(avg_loss, 2),
+            "best_trade": round(best_trade, 2),
+            "worst_trade": round(worst_trade, 2),
+            "policy_trades": len(r_multiples),
+            "avg_r_multiple": round(avg_r_multiple, 4),
+            "realized_r_total": round(realized_r_total, 4),
         }
 
     async def reset_account(self, *, actor: str | None = None) -> dict[str, Any]:
