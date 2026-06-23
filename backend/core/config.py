@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     MACD_DIFFUSION_ENABLED: bool = True
     MACD_DIFFUSION_POLL_MINUTES: int = 60
     MACD_DIFFUSION_BACKFILL_DAYS: int = 21
+    # MCX auto-rollover — keep the MP+OF agent's configured futures on their
+    # current front-month so the watchlist never tracks an expired contract.
+    MCX_ROLLOVER_ENABLED: bool = True
+    MCX_ROLLOVER_POLL_HOURS: int = 6
     STRATEGY_SPOT_SYNC_ENABLED: bool = False
     # F1 feed — full-universe option-chain → 3m CE+PE OHLC builder (chain_candle_builder).
     # OFF by default: scales Fyers REST (~30k calls/day, governed by FYERS_DATA_LIMITER);
@@ -196,9 +200,34 @@ class Settings(BaseSettings):
     # decides position changes for the next session.
     CBE_SCANNER_AUTO_ENABLED: bool = True
     CBE_SCANNER_AUTO_INTERVAL_SECONDS: int = 3600
+    # MACD Refined — premium-MACD entry, low-IV gated, volume-led long-premium
+    # book (separate CE/PE). The auto-runner fetches current + next monthly
+    # expiry chains, persists per-contract volume/turnover, and syncs the
+    # paper book. 30-min strategy → 60s cadence catches each fresh bar close.
+    MACD_REFINED_AUTO_ENABLED: bool = True
+    # Full F&O universe (~217 names) × current+next expiry chains per cycle is
+    # broker-intensive; 300s keeps load sane and still catches every 30-min bar.
+    MACD_REFINED_AUTO_INTERVAL_SECONDS: int = 300
     COMMODITY_FYERS_RATE_LIMIT_BACKOFF_SECONDS: int = 90
     COMMODITY_KILL_LOCK: bool = False
     SECTOR_INTERACTION_DURABLE_STATE_ENABLED: bool = False
+
+    # ── Higher-timeframe (weekly/monthly) alignment gate ───────────────────
+    # When enabled, a futures entry whose direction OPPOSES the weekly+monthly
+    # value-area bias (long while HTF is weak, short while HTF is strong) is
+    # downgraded to a "scalp": smaller size + a tighter ~1R target + a quick
+    # time-stop, instead of the normal positional 2R + runner trail. Aligned
+    # and neutral-bias trades stay positional. Default OFF so live behaviour is
+    # unchanged until validated on a paper walk-forward.
+    COMMODITY_HTF_GATE_ENABLED: bool = False
+    # Counter-bias scalp sizing as a fraction of the normal equal-notional lots.
+    COMMODITY_HTF_SCALP_SIZE_FRACTION: float = 0.5
+    # Target R-multiple for scalps vs positionals (positional default = today's 2R).
+    COMMODITY_HTF_SCALP_TARGET_R: float = 1.0
+    COMMODITY_HTF_POSITIONAL_TARGET_R: float = 2.0
+    # Quick time-stop: close a scalp that hasn't hit its 1R target within this
+    # many 1-min bars so a counter-trend probe never becomes a positional bag.
+    COMMODITY_HTF_SCALP_MAX_HOLD_BARS: int = 6
 
     # Security
     SECRET_KEY: str = "change-me-to-a-random-secret-key"

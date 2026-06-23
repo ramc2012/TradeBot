@@ -24,12 +24,24 @@
 
 import { Fragment, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { CirclePlay, RefreshCcw, Settings, X } from "lucide-react";
+import { BarChart3, CalendarClock, CirclePlay, History, LineChart, ListChecks, Radio, RefreshCcw, ScrollText, Settings, Wallet, Waves, X } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
+import {
+  DeskShell,
+  MetricTile,
+  REFRESH_MS,
+  formatMoney,
+  formatSignedMoney,
+  tone,
+  useUrlTab,
+} from "@/components/desk-ui";
+import { IndexMpOfView } from "@/components/strategies/commodity/IndexMpOfView";
 
 import {
   api as apiClient,
+  getChartUniverse,
+  getCommodityIndexMonitor,
   getCommodityOverview,
   getCommodityProfileHistory,
   getCommodityWatchlistSnapshot,
@@ -161,6 +173,11 @@ type WatchRow = {
   live_tick_source?: string | null;
   live_tick_time?: string | null;
   live_tick_stale_seconds?: number | null;
+  // Monitor-only index rows (NIFTY/BANKNIFTY): shown for MP+OF context, never
+  // traded by this lane.
+  monitor_only?: boolean | null;
+  tradeable?: boolean | null;
+  kind?: string | null;
 };
 
 type CommoditySnapshotContract = {
@@ -198,6 +215,10 @@ type CommodityPosition = {
   regime?: string | null;
   strategy_key?: string | null;
   entry_style?: string | null;
+  // Higher-timeframe alignment, set when the HTF gate is enabled.
+  trade_horizon?: string | null;
+  htf_bias?: string | null;
+  htf_detail?: string | null;
 };
 
 type AuditEvent = {
@@ -790,8 +811,8 @@ function InstrumentRow({
     <tr
       onClick={onClick}
       className={`cursor-pointer transition-colors ${
-        zebra ? "bg-bg-secondary/[0.07]" : "bg-transparent"
-      } hover:bg-bg-secondary/25`}
+        zebra ? "bg-bg-secondary/25" : "bg-transparent"
+      } hover:bg-sky-500/15`}
     >
       <td className="py-2 pl-3 pr-2 align-middle">
         <div className="flex items-center gap-2">
@@ -803,6 +824,14 @@ function InstrumentRow({
           <span className="font-mono text-[13px] font-semibold tracking-wide text-text-primary">
             {symbol}
           </span>
+          {row.monitor_only ? (
+            <span
+              className="rounded bg-sky-500/15 px-1 py-[1px] text-[8.5px] font-semibold uppercase tracking-[0.12em] text-sky-300"
+              title="Index spot — MP+OF shown for context only; this lane does not trade it."
+            >
+              monitor
+            </span>
+          ) : null}
         </div>
       </td>
       <td className="px-2 text-right align-middle font-mono text-[13px] font-medium text-text-primary">
@@ -947,43 +976,46 @@ function RiskGauge({
   if (!entry || !current || !stop) {
     return <span className="text-text-muted">—</span>;
   }
-  // Normalise so 0 = stop, 1 = entry, 2 = target (for BUY); flip for SELL.
-  const toPct = (p: number) => {
-    if (side === "BUY") {
-      const span = (target || entry * 1.01) - stop;
-      return Math.max(0, Math.min(1, (p - stop) / (span || 1)));
-    } else {
-      const span = stop - (target || entry * 0.99);
-      return Math.max(0, Math.min(1, (stop - p) / (span || 1)));
-    }
-  };
+  const isBuy = side === "BUY";
+  // Axis: 0 = stop (max loss) … 1 = target (max gain); entry is breakeven and
+  // sits wherever the R-multiple puts it (≈0.33 for a 2R trade), NOT the middle.
+  // Synthesise a 2R target if the position has none so the axis still resolves.
+  const tgt = target > 0 ? target : isBuy ? entry + (entry - stop) * 2 : entry - (stop - entry) * 2;
+  const span = (isBuy ? tgt - stop : stop - tgt) || 1;
+  const toPct = (p: number) =>
+    Math.max(0, Math.min(1, isBuy ? (p - stop) / span : (stop - p) / span));
   const entryPct = toPct(entry);
   const currentPct = toPct(current);
-  // Tone the marker by where current sits relative to entry.
-  const tone =
-    currentPct >= entryPct + 0.15
-      ? "fill-emerald-400"
-      : currentPct >= entryPct - 0.05
-        ? "fill-amber-300"
-        : "fill-rose-400";
+  // Congruent with the row's P&L sign: green once price is on the target side
+  // of entry (in profit), deep red once it has reached/breached the stop, red
+  // otherwise. No amber "holding" band — that's what made the gauge disagree
+  // with a position showing a red unrealised P&L.
+  const inProfit = isBuy ? current >= entry : current <= entry;
+  const atStop = isBuy ? current <= stop : current >= stop;
+  const markerTone = atStop ? "fill-rose-500" : inProfit ? "fill-emerald-400" : "fill-rose-400";
   return (
     <div
-      className="relative h-3 w-full rounded bg-gradient-to-r from-rose-500/25 via-bg-secondary/40 to-emerald-500/25 ring-1 ring-bg-secondary/40"
-      title={`Stop @ ${formatNumber(stop, 2)} → entry @ ${formatNumber(entry, 2)} → target @ ${target ? formatNumber(target, 2) : "—"} · now @ ${formatNumber(current, 2)}`}
+      className="relative h-3 w-full overflow-hidden rounded ring-1 ring-bg-secondary/40"
+      title={`Stop @ ${formatNumber(stop, 2)} → entry @ ${formatNumber(entry, 2)} → target @ ${target ? formatNumber(target, 2) : "—"} · now @ ${formatNumber(current, 2)} · ${inProfit ? "in profit" : "at risk"}`}
     >
+      {/* Loss zone (stop → entry) and profit zone (entry → target), split at the
+          real breakeven so the colour under the marker always matches whether
+          the trade is winning or losing. */}
+      <div className="absolute inset-y-0 left-0 bg-rose-500/25" style={{ width: `${entryPct * 100}%` }} />
+      <div className="absolute inset-y-0 right-0 bg-emerald-500/20" style={{ left: `${entryPct * 100}%` }} />
       <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 12" preserveAspectRatio="none">
-        {/* entry tick */}
+        {/* entry / breakeven tick */}
         <line
           x1={entryPct * 100}
           x2={entryPct * 100}
           y1={1}
           y2={11}
-          className="stroke-text-muted/60"
-          strokeWidth={0.6}
-          strokeDasharray="1 1"
+          className="stroke-text-muted/70"
+          strokeWidth={0.8}
+          strokeDasharray="1.5 1.5"
         />
-        {/* current marker */}
-        <circle cx={currentPct * 100} cy={6} r={2.4} className={tone} />
+        {/* current price marker */}
+        <circle cx={currentPct * 100} cy={6} r={2.6} className={markerTone} />
       </svg>
     </div>
   );
@@ -1028,10 +1060,10 @@ function PositionsTab({
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto">
-          <table className="w-full text-[11px]">
-            <thead className="sticky top-0 bg-bg-primary text-[9.5px] uppercase tracking-[0.14em] text-text-muted">
+          <table className="w-full text-[12.5px]">
+            <thead className="sticky top-0 bg-bg-primary text-[10px] uppercase tracking-[0.14em] text-text-muted">
               <tr>
-                <th className="py-1.5 pl-2 pr-2 text-left">Symbol</th>
+                <th className="py-2 pl-2 pr-2 text-left">Symbol</th>
                 <th className="px-2 text-left">Side · Lots</th>
                 <th className="px-2 text-right">Entry</th>
                 <th className="px-2 text-right">Current</th>
@@ -1064,10 +1096,10 @@ function PositionsTab({
                   <tr
                     key={p.position_key || `${p.symbol}-${idx}`}
                     onClick={() => p.symbol && onSelect(p.symbol)}
-                    className={`cursor-pointer border-t border-bg-secondary/15 ${idx % 2 ? "bg-bg-secondary/[0.06]" : ""} hover:bg-bg-secondary/20`}
+                    className={`cursor-pointer border-t border-bg-secondary/15 ${idx % 2 ? "bg-bg-secondary/25" : ""} hover:bg-sky-500/15`}
                   >
-                    <td className="py-1.5 pl-2 pr-2 align-middle">
-                      <span className="font-mono text-[12px] font-semibold text-text-primary">{sym}</span>
+                    <td className="py-2.5 pl-2 pr-2 align-middle">
+                      <span className="font-mono text-[13px] font-semibold text-text-primary">{sym}</span>
                     </td>
                     <td className="px-2 align-middle">
                       <span className={`text-[10.5px] uppercase ${side === "BUY" ? "text-emerald-300" : "text-rose-300"}`}>
@@ -1109,7 +1141,22 @@ function PositionsTab({
                       {formatPct(ret, 1)}
                     </td>
                     <td className="px-2 align-middle text-[10.5px] text-text-muted">
-                      {triggerLabel(p.entry_style)}
+                      <div>{triggerLabel(p.entry_style)}</div>
+                      {p.trade_horizon === "scalp" ? (
+                        <span
+                          title={p.htf_detail || "counter-HTF scalp — reduced size, 1R target, time-stop"}
+                          className="mt-0.5 inline-block rounded bg-amber-500/15 px-1 py-[1px] text-[8.5px] font-semibold uppercase tracking-[0.12em] text-amber-300"
+                        >
+                          scalp{p.htf_bias ? ` · ${p.htf_bias}` : ""}
+                        </span>
+                      ) : p.htf_bias ? (
+                        <span
+                          title={p.htf_detail || ""}
+                          className="mt-0.5 inline-block rounded bg-bg-secondary/40 px-1 py-[1px] text-[8.5px] font-semibold uppercase tracking-[0.12em] text-text-muted"
+                        >
+                          pos · {p.htf_bias}
+                        </span>
+                      ) : null}
                     </td>
                     <td className="px-2 text-right align-middle font-mono text-text-muted">
                       {hoursBetween(now, p.entered_at)}
@@ -1206,10 +1253,10 @@ function OrdersTab({ orders, onSelect }: { orders: Order[]; onSelect: (sym: stri
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto">
-          <table className="w-full text-[10.5px]">
-            <thead className="sticky top-0 bg-bg-primary text-[9.5px] uppercase tracking-wider text-text-muted">
+          <table className="w-full text-[12.5px]">
+            <thead className="sticky top-0 bg-bg-primary text-[10px] uppercase tracking-wider text-text-muted">
               <tr>
-                <th className="px-2 py-1 text-left">Time</th>
+                <th className="px-2 py-2 text-left">Time</th>
                 <th className="px-2 text-left">Symbol</th>
                 <th className="px-2 text-left">Flow</th>
                 <th className="px-2 text-left">Action</th>
@@ -1222,10 +1269,10 @@ function OrdersTab({ orders, onSelect }: { orders: Order[]; onSelect: (sym: stri
               {filtered.slice(0, 80).map((o, idx) => (
                 <tr
                   key={`${o.time}-${idx}`}
-                  className="cursor-pointer border-t border-bg-secondary/15 hover:bg-bg-secondary/20"
+                  className={`cursor-pointer border-t border-bg-secondary/15 ${idx % 2 ? "bg-bg-secondary/25" : ""} hover:bg-sky-500/15`}
                   onClick={() => o.symbol && onSelect(o.symbol)}
                 >
-                  <td className="px-2 py-0.5 font-mono text-text-muted">{formatTime(o.time)}</td>
+                  <td className="px-2 py-2 font-mono text-text-muted">{formatTime(o.time)}</td>
                   <td className="px-2 font-mono">{o.symbol}</td>
                   <td className="px-2">{o.flow}</td>
                   <td className={`px-2 ${o.action === "BUY" ? "text-emerald-300" : "text-rose-300"}`}>{o.action}</td>
@@ -1331,10 +1378,10 @@ function TradesTab({ trades, onSelect }: { trades: TradeRow[]; onSelect: (sym: s
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto">
-          <table className="w-full text-[10.5px]">
-            <thead className="sticky top-0 bg-bg-primary text-[9.5px] uppercase tracking-wider text-text-muted">
+          <table className="w-full text-[12.5px]">
+            <thead className="sticky top-0 bg-bg-primary text-[10px] uppercase tracking-wider text-text-muted">
               <tr>
-                <th className="px-2 py-1 text-left">Exited</th>
+                <th className="px-2 py-2 text-left">Exited</th>
                 <th className="px-2 text-left">Symbol</th>
                 <th className="px-2 text-left">Side</th>
                 <th className="px-2 text-right">Entry</th>
@@ -1347,10 +1394,10 @@ function TradesTab({ trades, onSelect }: { trades: TradeRow[]; onSelect: (sym: s
               {filtered.slice(0, 100).map((t, idx) => (
                 <tr
                   key={`${t.exit_time}-${idx}`}
-                  className="cursor-pointer border-t border-bg-secondary/15 hover:bg-bg-secondary/20"
+                  className={`cursor-pointer border-t border-bg-secondary/15 ${idx % 2 ? "bg-bg-secondary/25" : ""} hover:bg-sky-500/15`}
                   onClick={() => t.symbol && onSelect(t.symbol)}
                 >
-                  <td className="px-2 py-0.5 font-mono text-text-muted">{formatIST(t.exit_time)}</td>
+                  <td className="px-2 py-2 font-mono text-text-muted">{formatIST(t.exit_time)}</td>
                   <td className="px-2 font-mono">{t.symbol}</td>
                   <td className={`px-2 ${t.action === "BUY" ? "text-emerald-300" : "text-rose-300"}`}>{t.action}</td>
                   <td className="px-2 text-right font-mono">{formatNumber(t.entry_price, 2)}</td>
@@ -1425,10 +1472,10 @@ function ExpiryTab({ rows }: { rows: WatchRow[] }) {
         <FilterCount n={filtered.length} total={rows.length} />
       </FilterBar>
       <div className="flex-1 overflow-y-auto">
-        <table className="w-full text-[10.5px]">
-          <thead className="sticky top-0 bg-bg-primary text-[9.5px] uppercase tracking-wider text-text-muted">
+        <table className="w-full text-[12.5px]">
+          <thead className="sticky top-0 bg-bg-primary text-[10px] uppercase tracking-wider text-text-muted">
             <tr>
-              <th className="px-2 py-1 text-left">Underlying</th>
+              <th className="px-2 py-2 text-left">Underlying</th>
               <th className="px-2 text-left">Active contract</th>
               <th className="px-2 text-left">Expiry</th>
               <th className="px-2 text-right">DTE</th>
@@ -1450,9 +1497,9 @@ function ExpiryTab({ rows }: { rows: WatchRow[] }) {
               return (
                 <tr
                   key={String(row.symbol || row.underlying)}
-                  className={`border-t border-bg-secondary/15 ${idx % 2 ? "bg-bg-secondary/[0.06]" : ""}`}
+                  className={`border-t border-bg-secondary/15 ${idx % 2 ? "bg-bg-secondary/25" : ""} hover:bg-sky-500/15`}
                 >
-                  <td className="px-2 py-0.5 font-medium">{row.display_name || row.underlying}</td>
+                  <td className="px-2 py-2 font-medium">{row.display_name || row.underlying}</td>
                   <td className="px-2 font-mono">{row.symbol}</td>
                   <td className="px-2 font-mono">
                     {exp ? exp.toISOString().slice(0, 10) : "—"}
@@ -1516,47 +1563,70 @@ function StatsTab({
 
   // Equity / Day P&L are already in the page header — Stats deliberately
   // surfaces the *aggregate* performance numbers that the header has no room
-  // for (win rate, profit factor, drawdown, distribution).
+  // for (win rate, profit factor, drawdown, distribution). Two labelled
+  // groups — Performance and P&L — each a clean fixed grid so the tiles
+  // line up in even rows instead of relying on dynamic col-spans (which
+  // Tailwind's JIT does not generate, so they silently collapsed before).
   return (
-    <div className="overflow-y-auto" style={{ maxHeight: 160 }}>
-      <div className="grid grid-cols-12 gap-2 text-[11px]">
-        <StatTile k="Trades" v={String(trades.length)} cols={2} />
-        <StatTile k="Win rate" v={`${(winRate * 100).toFixed(0)}%`} cols={2} />
-        <StatTile
-          k="Profit factor"
-          v={Number.isFinite(profitFactor) ? profitFactor.toFixed(2) : "∞"}
-          cols={2}
-        />
-        <StatTile k="Max drawdown" v={`${(maxDD * 100).toFixed(1)}%`} cols={2} tone={maxDD > 0.1 ? "text-amber-300" : ""} />
-        <StatTile k="W / L" v={`${wins.length} / ${losses.length}`} cols={2} />
-        <StatTile k="Open" v={String(positions.length)} cols={2} />
-        <StatTile k="Avg win" v={formatINR(avgWin)} cols={3} tone="text-emerald-300" />
-        <StatTile k="Avg loss" v={formatINR(-avgLoss)} cols={3} tone="text-rose-300" />
-        <StatTile k="Gross win" v={formatINR(grossProfit)} cols={3} tone="text-emerald-300" />
-        <StatTile k="Gross loss" v={formatINR(-grossLoss)} cols={3} tone="text-rose-300" />
-        <StatTile k="Realized" v={formatINR(realized)} cols={6} tone={realized >= 0 ? "text-emerald-300" : "text-rose-300"} />
-        <StatTile k="Unrealized" v={formatINR(openPnl)} cols={6} tone={openPnl >= 0 ? "text-emerald-300" : "text-rose-300"} />
-      </div>
+    <div className="h-full space-y-4 overflow-y-auto pr-1">
+      <StatGroup label="Performance">
+        <StatTile k="Trades" v={String(trades.length)} />
+        <StatTile k="Win rate" v={`${(winRate * 100).toFixed(0)}%`} />
+        <StatTile k="Profit factor" v={Number.isFinite(profitFactor) ? profitFactor.toFixed(2) : "∞"} />
+        <StatTile k="Max drawdown" v={`${(maxDD * 100).toFixed(1)}%`} tone={maxDD > 0.1 ? "text-amber-300" : ""} />
+        <StatTile k="W / L" v={`${wins.length} / ${losses.length}`} />
+        <StatTile k="Open" v={String(positions.length)} />
+      </StatGroup>
+
+      <StatGroup label="Profit & loss">
+        <StatTile k="Avg win" v={formatINR(avgWin)} tone="text-emerald-300" />
+        <StatTile k="Avg loss" v={formatINR(-avgLoss)} tone="text-rose-300" />
+        <StatTile k="Gross win" v={formatINR(grossProfit)} tone="text-emerald-300" />
+        <StatTile k="Gross loss" v={formatINR(-grossLoss)} tone="text-rose-300" />
+        <StatTile k="Realized" v={formatINR(realized)} tone={realized >= 0 ? "text-emerald-300" : "text-rose-300"} />
+        <StatTile k="Unrealized" v={formatINR(openPnl)} tone={openPnl >= 0 ? "text-emerald-300" : "text-rose-300"} />
+      </StatGroup>
+
       {byUnderlying.length > 0 ? (
-        <div className="mt-2 rounded bg-bg-secondary/15 px-2 py-1.5">
-          <div className="mb-1 text-[9.5px] uppercase tracking-wider text-text-muted">
+        <div>
+          <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-text-muted">
             Per-underlying P&L
           </div>
-          <table className="w-full text-[10.5px]">
-            <tbody>
-              {byUnderlying.map((u) => (
-                <tr key={u.underlying}>
-                  <td className="py-0.5">{u.underlying}</td>
-                  <td className="text-right font-mono text-text-muted">{u.trades} tr</td>
-                  <td className={`text-right font-mono ${u.pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                    {formatSigned(u.pnl)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="overflow-hidden rounded-lg border border-bg-secondary/30">
+            <table className="w-full text-[12.5px]">
+              <tbody>
+                {byUnderlying.map((u, idx) => (
+                  <tr
+                    key={u.underlying}
+                    className={`border-t border-bg-secondary/15 first:border-t-0 ${idx % 2 ? "bg-bg-secondary/25" : ""}`}
+                  >
+                    <td className="px-3 py-2 font-medium">{u.underlying}</td>
+                    <td className="px-3 py-2 text-right font-mono text-text-muted">{u.trades} tr</td>
+                    <td className={`px-3 py-2 text-right font-mono ${u.pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                      {formatSigned(u.pnl)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/** Labelled section wrapper for a row of stat tiles. The grid is fixed
+ *  (2 → 3 → 6 columns by breakpoint) so tiles always align in even rows. */
+function StatGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-text-muted">
+        {label}
+      </div>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+        {children}
+      </div>
     </div>
   );
 }
@@ -1564,19 +1634,16 @@ function StatsTab({
 function StatTile({
   k,
   v,
-  cols = 2,
   tone,
 }: {
   k: string;
   v: string;
-  cols?: number;
   tone?: string;
 }) {
-  const span = `col-span-${cols}`;
   return (
-    <div className={`${span} rounded bg-bg-secondary/15 px-2 py-1`}>
-      <div className="text-[9px] uppercase tracking-wider text-text-muted">{k}</div>
-      <div className={`mt-0.5 font-mono text-[12px] ${tone || "text-text-primary"}`}>{v}</div>
+    <div className="rounded-lg border border-bg-secondary/25 bg-bg-secondary/15 px-3 py-2.5">
+      <div className="text-[10px] uppercase tracking-[0.12em] text-text-muted">{k}</div>
+      <div className={`mt-1 font-mono text-[16px] font-semibold ${tone || "text-text-primary"}`}>{v}</div>
     </div>
   );
 }
@@ -2748,7 +2815,7 @@ function Row({ k, v, cols }: { k: string; v: string; cols?: number }) {
 
 // ─── Page ──────────────────────────────────────────────────────────────────
 
-export default function CommodityLivePage() {
+function CommodityMcxDesk({ section }: { section?: BottomTabKey | "watchlist" }) {
   const queryClient = useQueryClient();
 
   // Socket-primary streams. Falls back to the heartbeat poll if the socket
@@ -2876,6 +2943,22 @@ export default function CommodityLivePage() {
   const ticks = useCommodityTickStreams(tickSymbols);
   const rows = useMemo(() => overlayTicks(baseRows, ticks), [baseRows, ticks]);
 
+  // Monitor-only NIFTY/BANKNIFTY MP+OF rows. They share the watchlist table but
+  // NOT the trading logic (armed queue, entries) — this lane never trades them.
+  const indexMonitorQuery = useQuery({
+    queryKey: ["commodity", "index-monitor"],
+    queryFn: async () => (await getCommodityIndexMonitor()).data as { rows?: WatchRow[] },
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: false,
+  });
+  const indexRows = useMemo(
+    () => (indexMonitorQuery.data?.rows ?? []).map((r) => ({ ...r, monitor_only: true })),
+    [indexMonitorQuery.data?.rows],
+  );
+  // The watchlist table shows commodities + index monitors; everything else
+  // (armed queue, expiry, tick subs) stays on the tradeable commodity rows.
+  const watchlistRows = useMemo(() => [...rows, ...indexRows], [rows, indexRows]);
+
   // Audit events.
   const auditEvents = useMemo(
     () => (auditQuery.data?.events ?? []) as AuditEvent[],
@@ -2953,6 +3036,10 @@ export default function CommodityLivePage() {
   // ── Selection + UI state ───────────────────────────────────────────
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const [bottomTab, setBottomTab] = useState<BottomTabKey>("positions");
+  // When the parent (MpOfDesk) drives the section via full-page tabs, that
+  // wins; otherwise fall back to the internal bottom-tab state.
+  const activeSection: BottomTabKey | "watchlist" = section ?? bottomTab;
+  const embedded = section != null;
   // Auto-flip to a sensible default only on first load: positions when the
   // desk has exposure, queue when flat. User clicks override and stick.
   const [hasInteractedWithTabs, setHasInteractedWithTabs] = useState(false);
@@ -2995,8 +3082,8 @@ export default function CommodityLivePage() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
   const selectedRow = useMemo(
-    () => rows.find((r) => r.symbol === selectedSymbol) || null,
-    [rows, selectedSymbol],
+    () => watchlistRows.find((r) => r.symbol === selectedSymbol) || null,
+    [watchlistRows, selectedSymbol],
   );
 
   // ── Header / status tiles ──────────────────────────────────────────
@@ -3075,7 +3162,7 @@ export default function CommodityLivePage() {
   const upstoxValid = Boolean(dataHealth.upstox_token_health?.valid);
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-bg-primary text-text-primary">
+    <div className="flex h-full flex-col overflow-hidden bg-bg-primary text-text-primary">
       {/* ── Header (single dense line) ──────────────────────────────
           Left: liveness dot · market status · title
           Middle: account values (equity, day P&L, open/armed)
@@ -3090,26 +3177,31 @@ export default function CommodityLivePage() {
           <span className={`hidden text-[9.5px] font-semibold uppercase tracking-[0.14em] sm:inline ${marketTone}`}>
             {marketLabel}
           </span>
-          <h1 className="text-[14px] font-semibold tracking-tight">Commodities</h1>
-          <span
-            className={`rounded px-1.5 py-[1.5px] text-[9.5px] font-medium uppercase tracking-[0.14em] ${
-              killActive
-                ? "bg-rose-500/15 text-rose-300"
-                : running
-                  ? "bg-emerald-500/15 text-emerald-300"
-                  : loopActive
-                    ? "bg-sky-500/15 text-sky-300"
-                    : startRequired
-                      ? "bg-amber-500/15 text-amber-200"
-                      : "bg-bg-secondary/40 text-text-muted"
-            }`}
-            title={status.last_message || ""}
-          >
-            {statusLabel}
-          </span>
+          {!embedded ? <h1 className="text-[14px] font-semibold tracking-tight">MP + Order Flow</h1> : null}
+          {/* Status badge is a duplicate of the DeskShell status pill when
+              embedded — only show it on the standalone desk. */}
+          {!embedded ? (
+            <span
+              className={`rounded px-1.5 py-[1.5px] text-[9.5px] font-medium uppercase tracking-[0.14em] ${
+                killActive
+                  ? "bg-rose-500/15 text-rose-300"
+                  : running
+                    ? "bg-emerald-500/15 text-emerald-300"
+                    : loopActive
+                      ? "bg-sky-500/15 text-sky-300"
+                      : startRequired
+                        ? "bg-amber-500/15 text-amber-200"
+                        : "bg-bg-secondary/40 text-text-muted"
+              }`}
+              title={status.last_message || ""}
+            >
+              {statusLabel}
+            </span>
+          ) : null}
         </div>
 
-        {/* Middle: portfolio values */}
+        {/* Middle: portfolio values (hidden when embedded — DeskShell shows the KPI strip) */}
+        {!embedded ? (
         <div className="ml-auto flex items-baseline gap-4 font-mono">
           <HeaderStat
             k="EQUITY"
@@ -3135,15 +3227,19 @@ export default function CommodityLivePage() {
             sub={`${rows.length} tracked`}
           />
         </div>
+        ) : null}
 
         {/* Right: PAPER · broker status · actions */}
-        <div className="flex items-center gap-1.5">
-          <span
-            className="rounded bg-amber-500/15 px-1.5 py-[1.5px] text-[9.5px] font-medium uppercase tracking-[0.14em] text-amber-200"
-            title="paper trading book"
-          >
-            PAPER
-          </span>
+        <div className={`flex items-center gap-1.5 ${embedded ? "ml-auto" : ""}`}>
+          {/* PAPER badge duplicates the DeskShell "paper" chip when embedded. */}
+          {!embedded ? (
+            <span
+              className="rounded bg-amber-500/15 px-1.5 py-[1.5px] text-[9.5px] font-medium uppercase tracking-[0.14em] text-amber-200"
+              title="paper trading book"
+            >
+              PAPER
+            </span>
+          ) : null}
           <BrokerDot label="FY" ok={fyersValid} title="Fyers broker session" />
           <BrokerDot label="UP" ok={upstoxValid} title="Upstox broker session" />
           <div className="mx-1 h-4 w-px bg-bg-secondary/40" aria-hidden />
@@ -3186,9 +3282,10 @@ export default function CommodityLivePage() {
       </header>
 
       {/* ── 50/50 split: top half watchlist · bottom half tabs ─────────── */}
-      <main className="grid flex-1 min-h-0 grid-rows-2 gap-2 px-3 py-2">
-        {/* TOP HALF — watchlist with CE/PE-style spacing */}
-        <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-bg-secondary/30">
+      <main className="flex flex-1 min-h-0 flex-col overflow-hidden px-3 py-2">
+        {/* Full-page section, driven by the parent's tab (Watchlist | Positions | …) */}
+        {activeSection === "watchlist" ? (
+        <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-bg-secondary/30">
           {/* Watchlist title bar with expiry chip */}
           <div className="flex items-center gap-3 border-b border-bg-secondary/30 bg-bg-secondary/15 px-3 py-1.5">
             <h2 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-text-secondary">
@@ -3196,6 +3293,7 @@ export default function CommodityLivePage() {
             </h2>
             <span className="text-[10.5px] text-text-muted">
               {rows.length} symbols
+              {indexRows.length > 0 ? ` · ${indexRows.length} index (monitor)` : ""}
               {armedCount > 0 ? ` · ${armedCount} armed` : ""}
               {positions.length > 0 ? ` · ${positions.length} open` : ""}
             </span>
@@ -3235,14 +3333,14 @@ export default function CommodityLivePage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.length === 0 ? (
+                {watchlistRows.length === 0 ? (
                   <tr>
                     <td colSpan={9} className="py-10 text-center text-[11.5px] text-text-muted">
                       No instruments yet — waiting for the first scan.
                     </td>
                   </tr>
                 ) : (
-                  rows.map((row, idx) => (
+                  watchlistRows.map((row, idx) => (
                     <InstrumentRow
                       key={String(row.symbol || row.underlying)}
                       row={row}
@@ -3256,12 +3354,18 @@ export default function CommodityLivePage() {
             </table>
           </div>
         </section>
+        ) : null}
 
-        {/* BOTTOM HALF — browser-style tabs */}
-        <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-bg-secondary/30">
+        {activeSection !== "watchlist" ? (
+        <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-bg-secondary/30">
+          {/* Inner tab bar — duplicates the DeskShell tabs when embedded
+              (the parent drives `section`), so it's only rendered on the
+              standalone desk. NOTE: `hidden` alone does not hide a `.flex`
+              element (the utility wins on specificity), hence the guard. */}
+          {!embedded ? (
           <nav className="flex items-end gap-1 border-b-2 border-sky-500/70 bg-bg-secondary/30 px-1.5 pt-1.5">
             {BOTTOM_TABS.map((t, idx) => {
-              const isActive = bottomTab === t.key;
+              const isActive = activeSection ===t.key;
               const count =
                 t.key === "positions"
                   ? positions.length
@@ -3316,44 +3420,46 @@ export default function CommodityLivePage() {
               );
             })}
             <span className="ml-auto pb-1 text-[10px] text-text-muted">
-              {bottomTab === "positions"
+              {activeSection ==="positions"
                 ? "open book · click row → instrument modal"
-                : bottomTab === "queue"
+                : activeSection ==="queue"
                   ? "priority × confidence"
-                  : bottomTab === "orders"
+                  : activeSection ==="orders"
                     ? "newest first · click row → instrument"
-                    : bottomTab === "trades"
+                    : activeSection ==="trades"
                       ? "closed trades · newest first"
-                      : bottomTab === "expiry"
+                      : activeSection ==="expiry"
                         ? "MCX futures · roll window 10d"
-                        : bottomTab === "stats"
+                        : activeSection ==="stats"
                           ? "portfolio statistics"
                           : "mp_signal.* events"}
             </span>
           </nav>
+          ) : null}
           <div className="flex-1 min-h-0 overflow-hidden bg-bg-primary px-3 py-2">
-            {bottomTab === "positions" ? (
+            {activeSection ==="positions" ? (
               <PositionsTab
                 positions={positions}
                 onSelect={(sym) => setSelectedSymbol(sym)}
               />
             ) : null}
-            {bottomTab === "queue" ? (
+            {activeSection ==="queue" ? (
               <ActionQueue rows={rows} onSelect={(sym) => setSelectedSymbol(sym)} />
             ) : null}
-            {bottomTab === "orders" ? (
+            {activeSection ==="orders" ? (
               <OrdersTab orders={orders} onSelect={(sym) => setSelectedSymbol(sym)} />
             ) : null}
-            {bottomTab === "trades" ? (
+            {activeSection ==="trades" ? (
               <TradesTab trades={trades} onSelect={(sym) => setSelectedSymbol(sym)} />
             ) : null}
-            {bottomTab === "expiry" ? <ExpiryTab rows={rows} /> : null}
-            {bottomTab === "stats" ? (
+            {activeSection ==="expiry" ? <ExpiryTab rows={rows} /> : null}
+            {activeSection ==="stats" ? (
               <StatsTab summary={summary} trades={allTrades} positions={positions} />
             ) : null}
-            {bottomTab === "audit" ? <AuditFeed events={auditEvents} /> : null}
+            {activeSection ==="audit" ? <AuditFeed events={auditEvents} /> : null}
           </div>
         </section>
+        ) : null}
       </main>
 
       {/* ── Sticky live-status footer ─────────────────────────────────
@@ -3451,5 +3557,121 @@ function BrokerDot({
       <span className={`h-1.5 w-1.5 rounded-full ${ok ? "bg-emerald-400" : "bg-rose-400"}`} />
       {label}
     </span>
+  );
+}
+
+// ── MP + Order Flow desk: full-page tabbed views ────────────────────────────
+// MCX (the live single-viewport futures desk) and index MP views (NIFTY /
+// BANKNIFTY) live in tabs so each is a full-page surface rather than one
+// cramped viewport. The MCX desk only mounts (and opens its sockets) when its
+// tab is active.
+const MPOF_TABS = [
+  { key: "watchlist", label: "Watchlist", icon: Waves },
+  { key: "positions", label: "Positions", icon: Wallet },
+  { key: "queue", label: "Queue", icon: ListChecks },
+  { key: "orders", label: "Orders", icon: ScrollText },
+  { key: "trades", label: "Trades", icon: History },
+  { key: "expiry", label: "Expiry", icon: CalendarClock },
+  { key: "stats", label: "Stats", icon: BarChart3 },
+  { key: "audit", label: "Audit", icon: Radio },
+  { key: "instrument", label: "Instrument MP+OF", icon: LineChart },
+];
+
+export default function MpOfDesk() {
+  const [tab, setTab] = useUrlTab("watchlist");
+
+  // Light overview poll just for the KPI strip + header status (the MCX desk
+  // does its own socket-primary streaming when its tab is active).
+  const overviewQuery = useQuery({
+    queryKey: ["mpof", "kpi-overview"],
+    queryFn: async () => (await getCommodityOverview()).data as Record<string, unknown>,
+    refetchInterval: REFRESH_MS.summary,
+    refetchOnWindowFocus: false,
+  });
+  const status = (overviewQuery.data?.status ?? {}) as Record<string, unknown>;
+  const summary = (status.summary ?? {}) as Record<string, number | undefined>;
+  const killActive = Boolean(status.kill_switch_active);
+  const running = Boolean(status.running || status.loop_active) && !killActive;
+
+  return (
+    <DeskShell
+      title="MP + Order Flow"
+      asOf={status.last_run_at as string | undefined}
+      isFetching={overviewQuery.isFetching}
+      paperMode
+      tabs={MPOF_TABS}
+      activeTab={tab}
+      onTabChange={setTab}
+      rightSlot={
+        <span
+          className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] ${
+            killActive
+              ? "bg-accent-red/15 text-accent-red"
+              : running
+                ? "bg-accent-green/15 text-accent-green"
+                : "bg-bg-secondary/40 text-text-muted"
+          }`}
+        >
+          <span className={`h-1.5 w-1.5 rounded-full ${killActive ? "bg-accent-red" : running ? "bg-accent-green" : "bg-text-muted"}`} />
+          {killActive ? "kill switch" : running ? "running" : "idle"}
+        </span>
+      }
+      beforeTabs={
+        /* KPI readout strip — sits above the tabs, mirrors the MACD desk. */
+        <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+          <MetricTile label="Equity" value={formatMoney(summary.total_equity)} detail={`init ${formatMoney(summary.initial_capital)}`} />
+          <MetricTile label="Day P&L" value={formatSignedMoney(summary.day_pnl)} color={tone(summary.day_pnl)} detail={`realized ${formatSignedMoney(summary.day_realized_pnl)}`} />
+          <MetricTile label="Realized (life)" value={formatSignedMoney(summary.realized_pnl_lifetime ?? summary.realized_pnl)} color={tone(summary.realized_pnl_lifetime ?? summary.realized_pnl)} />
+          <MetricTile label="Open P&L" value={formatSignedMoney(summary.unrealized_pnl)} color={tone(summary.unrealized_pnl)} />
+          <MetricTile label="Open / Trades" value={`${summary.open_positions ?? 0} / ${summary.total_trades ?? 0}`} detail={`tracked ${summary.tracked_symbols ?? 0}`} />
+          <MetricTile label="Win rate" value={summary.win_rate != null ? formatPct(summary.win_rate) : "—"} detail={`PF ${formatNumber(summary.profit_factor, 2)}`} color={tone((summary.profit_factor ?? 0) - 1)} />
+        </section>
+      }
+    >
+      {tab === "instrument" ? (
+        <InstrumentMpOfTab />
+      ) : (
+        // Each MCX section renders full-page; the desk component stays mounted
+        // across these tabs so its sockets never churn (only the `section`
+        // prop changes). Fixed height so its internal layout resolves.
+        <div className="h-[calc(100vh-16rem)] min-h-[480px] overflow-hidden rounded-xl border border-bg-border">
+          <CommodityMcxDesk section={tab as BottomTabKey | "watchlist"} />
+        </div>
+      )}
+    </DeskShell>
+  );
+}
+
+// "Instrument MP+OF" tab — pick any tracked instrument and view its Market
+// Profile (+ order flow where the series has volume).
+function InstrumentMpOfTab() {
+  const [symbol, setSymbol] = useState("NIFTY");
+  const universeQuery = useQuery({
+    queryKey: ["mpof", "universe"],
+    queryFn: async () => (await getChartUniverse()).data as { instruments?: { underlying: string; kind: string }[] },
+    staleTime: REFRESH_MS.summary * 10,
+    refetchOnWindowFocus: false,
+  });
+  const instruments = universeQuery.data?.instruments ?? [];
+  const options = instruments.length
+    ? instruments.map((i) => i.underlying)
+    : ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY"];
+
+  return (
+    <div className="space-y-3">
+      <label className="flex w-fit items-center gap-2 rounded-lg border border-bg-border bg-bg-primary/30 px-3 py-1.5 text-[12px]">
+        <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">Instrument</span>
+        <select
+          value={symbol}
+          onChange={(e) => setSymbol(e.target.value)}
+          className="bg-transparent font-mono text-text-primary outline-none"
+        >
+          {options.map((o) => (
+            <option key={o} value={o} className="bg-bg-card text-text-primary">{o}</option>
+          ))}
+        </select>
+      </label>
+      <IndexMpOfView symbol={symbol} />
+    </div>
   );
 }

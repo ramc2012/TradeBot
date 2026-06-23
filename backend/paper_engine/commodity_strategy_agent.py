@@ -628,6 +628,13 @@ class CommodityPositionState:
     entry_iv_pct: Optional[float] = None
     entry_style: Optional[str] = None
     last_reviewed_bar_time: Optional[str] = None
+    # Higher-timeframe alignment (set at entry when COMMODITY_HTF_GATE_ENABLED).
+    # "positional" = aligned/neutral with the weekly+monthly value-area bias
+    # (full size, 2R + runner trail); "scalp" = counter-bias (reduced size,
+    # 1R target, quick time-stop). htf_bias ∈ {strong, weak, neutral}.
+    trade_horizon: str = "positional"
+    htf_bias: Optional[str] = None
+    htf_detail: Optional[str] = None
 
     @property
     def unrealized_pnl(self) -> float:
@@ -1170,6 +1177,60 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         target_value = COMMODITY_TARGET_POSITION_VALUE * base_lots
         lots = round(target_value / per_lot_notional)
         return max(1, int(lots))
+
+    def _htf_value_area_bias(self, root: str, price: float) -> tuple[str, Optional[str]]:
+        """Weekly+monthly value-area bias for an underlying.
+
+        Compares the live price to the composite value area of (a) this week's
+        and (b) this month's persisted daily profiles (the same
+        commodity_profile_store aggregates the dashboard timeline uses). Each
+        timeframe votes +1 when price trades above its VAH (accepted higher),
+        -1 below its VAL (accepted lower), 0 inside value. The summed score:
+
+            score >= +1 → "strong"   (price accepted above higher-TF value)
+            score <= -1 → "weak"     (price accepted below higher-TF value)
+            else        → "neutral"
+
+        Causal — aggregates are built only from persisted prior/current
+        sessions, never future data. Returns ("neutral", None) when there
+        isn't enough history to read a bias.
+        """
+        if price <= 0:
+            return "neutral", None
+        try:
+            from paper_engine import commodity_profile_store as profile_store
+
+            today = _now_ist().date()
+            week = profile_store.this_week(root, today)
+            month = profile_store.this_month(root, today)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[commodity] HTF bias load failed for {root}: {exc}")
+            return "neutral", None
+
+        def _vote(agg: Optional[dict[str, Any]]) -> Optional[int]:
+            if not agg:
+                return None
+            vah, val = agg.get("vah"), agg.get("val")
+            if vah is None or val is None:
+                return None
+            if price > float(vah):
+                return 1
+            if price < float(val):
+                return -1
+            return 0
+
+        votes = [v for v in (_vote(week), _vote(month)) if v is not None]
+        if not votes:
+            return "neutral", None
+        score = sum(votes)
+        bias = "strong" if score >= 1 else "weak" if score <= -1 else "neutral"
+        parts = []
+        if week:
+            parts.append(f"W {week.get('val')}–{week.get('vah')}")
+        if month:
+            parts.append(f"M {month.get('val')}–{month.get('vah')}")
+        detail = f"{bias} ({'; '.join(parts)})" if parts else bias
+        return bias, detail
 
     def _has_underlying_position(self, strategy_key: str, underlying: str) -> bool:
         return any(
@@ -2493,7 +2554,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 #            scale — knocks out the runner before structure
                 #            actually breaks. No analog in the S1 design.
                 trailing_label: Optional[str] = None
-                if risk_distance > 0:
+                # Scalps don't arm a runner trail — they exit at their 1R
+                # target or a quick time-stop (handled in the decision block
+                # below), so only positionals run the 2R-trail ratchet here.
+                if risk_distance > 0 and position.trade_horizon != "scalp":
                     if position.action == "BUY":
                         favorable_move = current_price - position.entry_price
                         if not position.target_reached and position.target_price is not None and current_price >= position.target_price:
@@ -2527,7 +2591,30 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                             position.stop_price = min(position.stop_price, round(position.peak_price + trail_buffer, 2))
                             trailing_label = "trail_stop"
 
-                if position.action == "BUY":
+                if position.trade_horizon == "scalp":
+                    # Counter-bias scalp: book the 1R target outright (no runner
+                    # trail), bail on the quick time-stop, or take the original
+                    # stop — whichever comes first.
+                    scalp_max_hold = int(settings.COMMODITY_HTF_SCALP_MAX_HOLD_BARS)
+                    if position.action == "BUY":
+                        if current_price <= position.stop_price:
+                            reason = "stop_loss"
+                        elif position.target_price is not None and current_price >= position.target_price:
+                            reason = "scalp_target"
+                        elif hold_bars >= scalp_max_hold:
+                            reason = "scalp_time_stop"
+                        elif hold_bars >= FUTURES_MIN_HOLD_BARS and row.get("raw_signal") == "SELL":
+                            reason = "macd_reversal"
+                    else:
+                        if current_price >= position.stop_price:
+                            reason = "stop_loss"
+                        elif position.target_price is not None and current_price <= position.target_price:
+                            reason = "scalp_target"
+                        elif hold_bars >= scalp_max_hold:
+                            reason = "scalp_time_stop"
+                        elif hold_bars >= FUTURES_MIN_HOLD_BARS and row.get("raw_signal") == "BUY":
+                            reason = "macd_reversal"
+                elif position.action == "BUY":
                     if current_price <= position.stop_price:
                         reason = trailing_label or "stop_loss"
                     elif hold_bars >= FUTURES_MIN_HOLD_BARS and row.get("raw_signal") == "SELL":
@@ -2716,9 +2803,35 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             atr = float(row.get("atr") or 0.0)
             if price <= 0 or atr <= 0:
                 continue
+
+            # ── Higher-timeframe alignment gate ──────────────────────────
+            # A trade whose direction OPPOSES the weekly+monthly value-area
+            # bias (long while HTF is weak, short while HTF is strong) is
+            # downgraded to a "scalp": smaller size + a tighter 1R target + a
+            # quick time-stop (enforced in the manage loop). Aligned/neutral
+            # trades stay positional (full size, 2R + runner trail). Flag-gated
+            # so default behaviour is byte-for-byte unchanged.
+            signal_dir = str(row.get("signal") or "").upper()
+            trade_horizon = "positional"
+            htf_bias: Optional[str] = None
+            htf_detail: Optional[str] = None
+            target_r = float(settings.COMMODITY_HTF_POSITIONAL_TARGET_R)
+            if settings.COMMODITY_HTF_GATE_ENABLED:
+                htf_bias, htf_detail = self._htf_value_area_bias(underlying, price)
+                opposed = (
+                    (signal_dir == "BUY" and htf_bias == "weak")
+                    or (signal_dir == "SELL" and htf_bias == "strong")
+                )
+                if opposed:
+                    trade_horizon = "scalp"
+                    target_r = float(settings.COMMODITY_HTF_SCALP_TARGET_R)
+
             # Equal-notional sizing: lots chosen so this position ≈ the
-            # target rupee value, the same for every contract.
+            # target rupee value, the same for every contract. Scalps trade a
+            # fraction of that so a counter-bias probe risks less.
             lots = self._target_lots_for_contract(spec, price)
+            if trade_horizon == "scalp":
+                lots = max(1, round(lots * float(settings.COMMODITY_HTF_SCALP_SIZE_FRACTION)))
             qty = spec.futures_lot_size * lots
             required_margin = self._estimate_futures_margin_required(price, qty)
             if required_margin > self._runtime.portfolio.available_capital:
@@ -2744,7 +2857,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                         if level_value < price and (price - level_value) >= min_stop_distance:
                             stop_candidates.append(level_value)
                 stop_price = max(stop_candidates)
-                target_price = price + ((price - stop_price) * 2.0)
+                target_price = price + ((price - stop_price) * target_r)
             else:
                 stop_candidates = [price + min_stop_distance]
                 if stop_hint_f is not None and stop_hint_f > price and (stop_hint_f - price) >= min_stop_distance:
@@ -2755,7 +2868,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                         if level_value > price and (level_value - price) >= min_stop_distance:
                             stop_candidates.append(level_value)
                 stop_price = min(stop_candidates)
-                target_price = price - ((stop_price - price) * 2.0)
+                target_price = price - ((stop_price - price) * target_r)
 
             order = self._runtime.order_book.place_order(
                 symbol=symbol,
@@ -2809,12 +2922,21 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 peak_price=fill_price,
                 entry_style=str(row.get("entry_style") or "mp_signal"),
                 last_reviewed_bar_time=bar_time,
+                trade_horizon=trade_horizon,
+                htf_bias=htf_bias,
+                htf_detail=htf_detail,
             )
             self._runtime.processed_signals[f"commodity_futures:{symbol}"] = bar_time
+            horizon_note = (
+                f" | {trade_horizon.upper()} (HTF {htf_bias})"
+                if settings.COMMODITY_HTF_GATE_ENABLED and htf_bias
+                else ""
+            )
             self._append_commentary(
                 "trade",
                 f"ENTRY {spec.display_name} {row.get('signal')} @{fill_price:.2f} | {lots} lot | "
-                f"{str(row.get('entry_style') or 'fresh_cross').replace('_', ' ')} | MP {row.get('mp_day_type')} | stop {stop_price:.2f}",
+                f"{str(row.get('entry_style') or 'fresh_cross').replace('_', ' ')} | MP {row.get('mp_day_type')} | "
+                f"stop {stop_price:.2f}{horizon_note}",
             )
             await record_audit_event(
                 market="commodity",

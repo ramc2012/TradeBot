@@ -215,6 +215,9 @@ export const updateRiskConfig = (config: object) => api.put("/api/trading/risk-c
 // ── Commodity ─────────────────────────────────────────────────────────────
 export const getCommodityStrategyStatus = () => api.get("/api/commodity/strategy-agent/status");
 export const getCommodityOverview = () => api.get("/api/commodity/overview");
+// Read-only NIFTY/BANKNIFTY MP+OF rows for the desk watchlist (monitor only —
+// this lane never trades them).
+export const getCommodityIndexMonitor = () => api.get("/api/commodity/index-monitor");
 export const startCommodityStrategyAgent = () => api.post("/api/commodity/strategy-agent/start");
 export const runCommodityStrategyOnce = (force = true) =>
   api.post("/api/commodity/strategy-agent/run-once", null, { params: { force } });
@@ -239,6 +242,13 @@ export const getCommodityWatchlistSnapshot = (expiry?: string) =>
   api.get("/api/commodity/watchlist-snapshot", { params: { expiry } });
 export const getCommodityProfileHistory = (root: string) =>
   api.get(`/api/commodity/profile-history/${encodeURIComponent(root)}`);
+// MP+OF for any instrument — Market Profile (+ order flow where volume exists)
+// from existing spot candles. Works for indices, commodities, and F&O stocks.
+export const getCommodityIndexMpof = (
+  symbol: string,
+  timeframe: "5minute" | "15minute" | "30minute" = "30minute",
+  sessions = 5,
+) => api.get("/api/commodity/index-mpof", { params: { symbol, timeframe, sessions } });
 // Legacy options-watchlist stubs — deprecated. The endpoints were removed
 // from the backend; these resolve immediately with an empty payload so any
 // page that still imports them keeps compiling.
@@ -460,6 +470,21 @@ export const getDirectionalOptionsPolicy = () =>
   api.get("/api/directional-options/policy");
 export const getDirectionalOptionsPaperSummary = () =>
   api.get("/api/directional-options/paper-summary");
+
+// ── MACD Refined ──────────────────────────────────────────────────────────
+export const getMacdRefinedSummary = () => api.get("/api/macd-refined/summary");
+export const getMacdRefinedBacktest = (source = "research", underlyings?: string, expiryCount = 8) =>
+  api.get("/api/macd-refined/backtest", { params: { source, underlyings, expiry_count: expiryCount } });
+export const getMacdRefinedBacktestCompare = (underlyings?: string, expiryCount = 8) =>
+  api.get("/api/macd-refined/backtest-compare", { params: { underlyings, expiry_count: expiryCount } });
+export const getMacdRefinedPositioning = () => api.get("/api/macd-refined/positioning");
+export const runMacdRefinedLiveCycle = (allowEntries = true) =>
+  api.post("/api/macd-refined/run-live-cycle", null, { params: { allow_entries: allowEntries } });
+export const getMacdRefinedPaperPositions = (symbol?: string, status = "all", limit = 50) =>
+  api.get("/api/macd-refined/paper-positions", { params: { symbol, status, limit } });
+export const getMacdRefinedPaperJournal = (symbol?: string, limit = 50) =>
+  api.get("/api/macd-refined/paper-journal", { params: { symbol, limit } });
+export const getMacdRefinedPaperSummary = () => api.get("/api/macd-refined/paper-summary");
 
 // ── Gann TP Delta Harmonic ────────────────────────────────────────────────
 export const getGannTPDeltaSummary = () => api.get("/api/gann-tp-delta/summary");

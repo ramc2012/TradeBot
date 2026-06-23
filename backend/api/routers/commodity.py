@@ -212,3 +212,270 @@ async def commodity_profile_history(root: str):
     from paper_engine.commodity_profile_store import historical_timeline
 
     return historical_timeline(str(root or "").strip().upper())
+
+
+# ── Index futures MP+OF (read-only; reuses existing index spot candles) ──────
+# NIFTY / BANKNIFTY have no dedicated index-futures feed yet, so we drive Market
+# Profile + (approximated) Order Flow off the underlying_spot_candles the app
+# already records. Pure read + compute — no change to the live commodity agent.
+# Note: index SPOT has little/no traded volume, so MP (time-based TPO) is always
+# meaningful while OF (CVD/VWAP, volume-weighted) is flagged when volume exists.
+
+# Explicit profile tick for the common indices; ANY other instrument gets an
+# auto-derived "nice" tick sized to its session range (≈30-50 TPO rows).
+_INDEX_MPOF_SPECS: dict[str, float] = {"NIFTY": 5.0, "BANKNIFTY": 10.0}
+_INDEX_MPOF_TF = ("5minute", "15minute", "30minute")
+
+
+def _nice_tick(day_range: float, price: float) -> float:
+    """A readable profile bucket: round range/40 to a 1/2/2.5/5 × 10ⁿ step."""
+    import math
+
+    raw = (day_range / 40.0) if day_range > 0 else max(price * 5e-5, 0.05)
+    if raw <= 0:
+        return 0.05
+    mag = 10 ** math.floor(math.log10(raw))
+    for m in (1.0, 2.0, 2.5, 5.0):
+        if raw <= m * mag:
+            return round(m * mag, 6)
+    return round(10 * mag, 6)
+
+
+@router.get("/index-mpof")
+async def commodity_index_mpof(
+    symbol: str = Query(..., description="Any instrument with spot candles — NIFTY, BANKNIFTY, RELIANCE, …"),
+    timeframe: str = Query("30minute"),
+    sessions: int = Query(5, ge=1, le=20),
+) -> dict:
+    """Market Profile + Order Flow for any instrument, computed from existing spot candles."""
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+    from sqlalchemy import text
+    from db.database import AsyncSessionLocal
+    from auction_intelligence.schemas import MarketBar
+    from auction_intelligence.market_profile.engine import MarketProfileEngine
+    from analytics.orderflow import anchored_cvd, vwap_bands
+
+    ist = ZoneInfo("Asia/Kolkata")
+    symbol = symbol.upper().strip()
+    timeframe = timeframe.lower().strip()
+    if not symbol:
+        raise HTTPException(400, "symbol is required")
+    if timeframe not in _INDEX_MPOF_TF:
+        raise HTTPException(400, f"Unsupported timeframe: {timeframe}. Supported: {', '.join(_INDEX_MPOF_TF)}")
+    explicit_tick = _INDEX_MPOF_SPECS.get(symbol)
+
+    days = sessions * 2 + 5
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT time, open, high, low, close, volume
+                FROM underlying_spot_candles
+                WHERE underlying = :u AND interval = :tf
+                  AND time >= now() - make_interval(days => :days)
+                ORDER BY time ASC
+                """
+            ),
+            {"u": symbol, "tf": timeframe, "days": days},
+        )
+        rows = [dict(r._mapping) for r in result.fetchall()]
+
+    if not rows:
+        return {"symbol": symbol, "timeframe": timeframe, "bars": [], "detail": f"No spot candle history for {symbol} ({timeframe})."}
+
+    bars = [
+        {
+            "time": (r["time"].isoformat() if hasattr(r["time"], "isoformat") else str(r["time"])),
+            "open": float(r["open"] or 0.0),
+            "high": float(r["high"] or 0.0),
+            "low": float(r["low"] or 0.0),
+            "close": float(r["close"] or 0.0),
+            "volume": float(r["volume"] or 0.0),
+        }
+        for r in rows
+        if r["close"] is not None
+    ]
+
+    def _ist_day(iso: str):
+        return _dt.fromisoformat(iso).astimezone(ist).date()
+
+    # Group by IST day and pick the latest REAL trading session — skip frozen
+    # weekend/after-hours days whose bars are all one flat price (range ≈ 0),
+    # which would otherwise yield a degenerate 1-row profile.
+    from collections import OrderedDict
+
+    days_map: "OrderedDict[object, list]" = OrderedDict()
+    for b in bars:
+        days_map.setdefault(_ist_day(b["time"]), []).append(b)
+    last_day = next(reversed(days_map))
+    session_bars = days_map[last_day]
+    for day in reversed(days_map):
+        db = days_map[day]
+        if len(db) >= 3:
+            rng = max(x["high"] for x in db) - min(x["low"] for x in db)
+            px = db[-1]["close"] or 1.0
+            if rng > px * 0.0005:  # skip frozen/flat (weekend) sessions
+                last_day, session_bars = day, db
+                break
+
+    # Profile tick: explicit for known indices, else auto-sized to the session.
+    sess_range = max(x["high"] for x in session_bars) - min(x["low"] for x in session_bars)
+    sess_price = session_bars[-1]["close"] or 1.0
+    tick_size = explicit_tick if explicit_tick else _nice_tick(sess_range, sess_price)
+
+    # Market Profile on the latest session.
+    mbars = [
+        MarketBar(
+            timestamp=_dt.fromisoformat(b["time"]),
+            open=b["open"], high=b["high"], low=b["low"], close=b["close"], volume=b["volume"],
+        )
+        for b in session_bars
+    ]
+    engine = MarketProfileEngine(
+        {"period_minutes": 30, "tick_size": tick_size, "value_area_pct": 0.70, "initial_balance_periods": 2}
+    )
+    snap = engine.build_profile(symbol, mbars)
+    tpo = sorted(
+        ({"price": float(p), "count": int(c)} for p, c in (snap.tpo_counts or {}).items()),
+        key=lambda x: x["price"],
+        reverse=True,
+    )
+
+    # Order flow on the session (anchored at the session open). Meaningful only
+    # when the series carries volume (index spot frequently doesn't).
+    session_volume = sum(b["volume"] for b in session_bars)
+    has_volume = session_volume > 0
+    cvd = anchored_cvd(session_bars, 0)
+    vb = vwap_bands(session_bars, 0)
+
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "tick_size": tick_size,
+        "session_date": last_day.isoformat(),
+        "last_price": session_bars[-1]["close"],
+        "profile": {
+            "poc": snap.poc,
+            "vah": snap.vah,
+            "val": snap.val,
+            "ib_high": snap.initial_balance_high,
+            "ib_low": snap.initial_balance_low,
+            "day_high": snap.high_price,
+            "day_low": snap.low_price,
+            "single_prints": snap.single_prints,
+            "poor_high": snap.poor_high,
+            "poor_low": snap.poor_low,
+            "tpo": tpo,
+        },
+        "orderflow": {
+            "available": has_volume,
+            "cvd": (cvd[-1] if cvd else None),
+            "cvd_series": cvd,
+            "vwap": (vb["vwap"][-1] if vb["vwap"] else None),
+            "vwap_series": vb["vwap"],
+            "vwap_upper": vb["upper"],
+            "vwap_lower": vb["lower"],
+        },
+        "session_bars": session_bars,
+        "bars": bars[-(sessions * 14):],
+    }
+
+
+# ── Index monitor rows (read-only watchlist context) ───────────────────────
+# NIFTY / BANKNIFTY shown alongside the MCX futures in the desk watchlist, as
+# MONITOR-ONLY rows: this lane never trades them (it places MCX futures orders).
+# Each row is the NSE Strategy-2 1-min MP+OF evaluation — the same engine the
+# index options lane runs — shaped like a commodity watchlist row and tagged
+# `monitor_only` / `tradeable=False` so the UI renders it without entry actions.
+_INDEX_MONITOR_SYMBOLS: tuple[str, ...] = ("NIFTY", "BANKNIFTY")
+
+
+async def _latest_index_spot(symbol: str) -> dict:
+    """Latest 1-min close (price) + the prior session's last close, for change."""
+    from sqlalchemy import text
+    from db.database import AsyncSessionLocal
+
+    price = prev_close = bar_time = None
+    try:
+        async with AsyncSessionLocal() as session:
+            latest = await session.execute(
+                text(
+                    """
+                    SELECT close, time FROM underlying_spot_candles
+                    WHERE underlying = :u AND interval = '1minute'
+                    ORDER BY time DESC LIMIT 1
+                    """
+                ),
+                {"u": symbol},
+            )
+            lr = latest.fetchone()
+            if lr is not None:
+                price = float(lr.close) if lr.close is not None else None
+                bar_time = lr.time.isoformat() if hasattr(lr.time, "isoformat") else str(lr.time)
+            prev = await session.execute(
+                text(
+                    """
+                    SELECT close FROM underlying_spot_candles
+                    WHERE underlying = :u AND interval = '1minute'
+                      AND time < (
+                        SELECT max(time)::date
+                        FROM underlying_spot_candles
+                        WHERE underlying = :u AND interval = '1minute'
+                      )
+                    ORDER BY time DESC LIMIT 1
+                    """
+                ),
+                {"u": symbol},
+            )
+            pr = prev.fetchone()
+            if pr is not None and pr.close is not None:
+                prev_close = float(pr.close)
+    except Exception:  # noqa: BLE001 — monitor rows are best-effort
+        pass
+    return {"price": price, "previous_close": prev_close, "bar_time": bar_time}
+
+
+@router.get("/index-monitor")
+async def commodity_index_monitor() -> dict:
+    """Read-only MP+OF rows for NIFTY / BANKNIFTY to surface in the desk watchlist.
+
+    Pure read + compute; does not touch the live commodity agent and never
+    places orders. Index execution lives in the NSE options lane — this is
+    monitoring context only.
+    """
+    from paper_engine.strategy2_mp_of import evaluate_strategy2_mp_of
+
+    rows: list[dict] = []
+    for underlying in _INDEX_MONITOR_SYMBOLS:
+        base = {
+            "symbol": underlying,
+            "underlying": underlying,
+            "display_name": underlying,
+            "indicator_timeframe": "1minute",
+            "monitor_only": True,
+            "tradeable": False,
+            "kind": "index",
+        }
+        try:
+            res = await evaluate_strategy2_mp_of(underlying=underlying, persist=False)
+        except Exception as exc:  # noqa: BLE001
+            rows.append({**base, "mp_status": "error", "reason": f"monitor_error:{exc}"})
+            continue
+        spot = await _latest_index_spot(underlying)
+        price = spot.get("price")
+        prev = spot.get("previous_close")
+        change = (price - prev) if (price is not None and prev) else None
+        change_pct = ((change / prev) * 100.0) if (change is not None and prev) else None
+        rows.append(
+            {
+                **res,
+                **base,
+                "price": price,
+                "previous_close": prev,
+                "change": change,
+                "change_pct": change_pct,
+                "bar_time": res.get("bar_time") or spot.get("bar_time"),
+            }
+        )
+    return {"rows": rows, "as_of": datetime.now(timezone.utc).isoformat()}
