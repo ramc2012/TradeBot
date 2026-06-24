@@ -41,9 +41,11 @@ type OpenPos = {
   risk_budget?: number;
   max_loss?: number;
   premium_at_risk?: number;
+  entry_spot?: number;
   entry_premium?: number;
   latest_premium?: number;
   latest_spot?: number;
+  mark_time?: string;
   unrealized_pnl?: number;
   opened_at?: string;
   policy_size_multiplier?: number;
@@ -59,6 +61,7 @@ type ClosedPos = OpenPos & {
   closed_at?: string;
   close_reason?: string;
   exit_premium?: number;
+  exit_spot?: number;
   realized_pnl?: number;
   policy_r_multiple?: number;
 };
@@ -201,10 +204,11 @@ export default function PaperTradingTab({ symbol, paper }: { symbol?: string; pa
               { th: "Regime", render: (p: OpenPos) => p.regime ?? "—" },
               { th: "Lots", render: (p: OpenPos) => p.quantity_lots ?? 0, align: "right" },
               { th: "Entry → Mark", render: (p: OpenPos) => `${formatNumber(p.entry_premium, 2)} → ${formatNumber(p.latest_premium, 2)}`, align: "right" },
+              { th: "Spot", render: (p: OpenPos) => <SpotCell p={p} />, align: "right", tone: (p: OpenPos) => tone(spotMovePct(p)) },
               { th: "Value", render: (p: OpenPos) => formatMoney(positionValue(p)), align: "right" },
               { th: "Unrealized / R", render: (p: OpenPos) => <div><div>{formatSignedMoney(p.unrealized_pnl)}</div><div className="text-[10px] text-text-muted">{formatNumber(openR(p), 2)}R</div></div>, align: "right", tone: (p: OpenPos) => tone(p.unrealized_pnl) },
               { th: "Policy", render: (p: OpenPos) => <PolicyCell p={p} />, align: "right" },
-              { th: "Mark", render: (p: OpenPos) => <span title={p.selection_reason || ""}>{p.price_source || "—"}</span> },
+              { th: "Mark", render: (p: OpenPos) => <MarkSourceCell p={p} /> },
               { th: "Opened", render: (p: OpenPos) => formatIST(p.opened_at), align: "right" },
               { th: "", render: (p: OpenPos) => (
                 <button
@@ -266,6 +270,34 @@ function openR(p: OpenPos): number | null {
   const denom = Number(p.max_loss || p.risk_budget || 0);
   if (!denom) return null;
   return Number(p.unrealized_pnl || 0) / denom;
+}
+
+function spotMovePct(p: OpenPos): number | null {
+  const entry = Number(p.entry_spot || 0);
+  const latest = Number(p.latest_spot || p.entry_spot || 0);
+  if (!entry || !latest) return null;
+  return ((latest - entry) / entry) * 100;
+}
+
+function SpotCell({ p }: { p: OpenPos }) {
+  const latest = p.latest_spot ?? p.entry_spot;
+  const move = spotMovePct(p);
+  return (
+    <div>
+      <div>{formatNumber(latest, 2)}</div>
+      <div className="text-[10px] text-text-muted">
+        {move != null ? `${move >= 0 ? "+" : ""}${move.toFixed(2)}%` : "from fetched spot"}
+      </div>
+    </div>
+  );
+}
+
+function MarkSourceCell({ p }: { p: OpenPos }) {
+  return (
+    <span title={[p.selection_reason, p.mark_time ? `Marked ${formatIST(p.mark_time)}` : ""].filter(Boolean).join(" · ")}>
+      {p.price_source || "—"}
+    </span>
+  );
 }
 
 function PolicyCell({ p }: { p: OpenPos }) {

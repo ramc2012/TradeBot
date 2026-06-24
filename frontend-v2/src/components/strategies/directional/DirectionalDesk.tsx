@@ -22,7 +22,7 @@
 import { useMemo, useState, useTransition } from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { Banknote, Brain, Gauge, Layers3, Radio, TrendingUp } from "lucide-react";
+import { Banknote, BarChart3, Brain, Gauge, Layers3, Radio, TrendingUp } from "lucide-react";
 
 import {
   DeskShell,
@@ -54,12 +54,14 @@ import PolicyDecisionPanel, { type PolicyBlock } from "./PolicyDecisionPanel";
 import PaperTradingTab from "./PaperTradingTab";
 import PolicyLearningTab from "./PolicyLearningTab";
 import OptionAnalyticsPanel from "./OptionAnalyticsPanel";
+import DirectionalVisualDashboard from "./DirectionalVisualDashboard";
 
 const DEFAULT_UNDERLYING = "NIFTY";
 const DEFAULT_TIMEFRAME = "5minute";
 const DEFAULT_LOOKBACK = 16;
 
 const TABS = [
+  { key: "visuals",   label: "Visual dashboard",  icon: BarChart3 },
   { key: "live",      label: "Live overview",      icon: Gauge },
   { key: "terminal",  label: "Terminal",           icon: Radio },
   { key: "analytics", label: "Option analytics",   icon: Layers3 },
@@ -103,8 +105,8 @@ type Snapshot = {
 };
 
 export default function DirectionalDesk() {
-  // Open positions / paper book is the headline view when the desk opens.
-  const [activeTab, setActiveTab] = useUrlTab("paper");
+  // Visual analytics are the headline view; paper/RL controls sit one tab over.
+  const [activeTab, setActiveTab] = useUrlTab("visuals");
   const [isPending, startTransition] = useTransition();
   const [underlying, setUnderlying] = useState(DEFAULT_UNDERLYING);
   const timeframe = DEFAULT_TIMEFRAME;
@@ -241,6 +243,15 @@ export default function DirectionalDesk() {
         </div>
       }
     >
+      {activeTab === "visuals" ? (
+        <DirectionalVisualDashboard
+          indices={universeIndices}
+          stocks={universeStocks}
+          selected={underlying}
+          onSelect={(s) => startTransition(() => setUnderlying(s))}
+        />
+      ) : null}
+
       {activeTab === "live" ? (
         <div className="space-y-4">
           {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}

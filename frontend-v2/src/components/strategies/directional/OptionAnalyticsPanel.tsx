@@ -283,6 +283,69 @@ function signedCompact(n: number | null | undefined): string {
   return `${n > 0 ? "+" : ""}${compact(n)}`;
 }
 
+function ladderMarkerClass(toneClass?: string): string {
+  if (toneClass === "text-accent-red") return "bg-accent-red";
+  if (toneClass === "text-accent-green") return "bg-accent-green";
+  if (toneClass === "text-accent-blue") return "bg-accent-blue";
+  if (toneClass === "text-accent-amber") return "bg-accent-amber";
+  return "bg-text-muted";
+}
+
+function LevelLadder({
+  spot,
+  levels,
+}: {
+  spot?: number | null;
+  levels: Array<{ key: string; label: string; value?: number | null; tone?: string }>;
+}) {
+  const points = [
+    ...levels,
+    spot != null ? { key: "spot", label: "Spot", value: spot, tone: "text-accent-blue" } : null,
+  ].filter((item): item is { key: string; label: string; value: number; tone?: string } => (
+    item != null && item.value != null && Number.isFinite(item.value)
+  ));
+  if (points.length < 2) return null;
+  const values = points.map((point) => point.value);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const pad = Math.max((max - min) * 0.08, Math.abs(spot || max || 1) * 0.002);
+  const lo = min - pad;
+  const hi = max + pad;
+  const span = Math.max(hi - lo, 1);
+  const sorted = [...points].sort((a, b) => a.value - b.value);
+
+  return (
+    <div className="mt-4 rounded-xl border border-bg-border bg-bg-primary/12 p-3">
+      <div className="mb-3 flex items-center justify-between gap-2 text-[10.5px] uppercase tracking-[0.16em] text-text-muted">
+        <span>Level ladder</span>
+        <span className="font-mono">{formatStrike(lo)} to {formatStrike(hi)}</span>
+      </div>
+      <div className="relative h-24">
+        <div className="absolute left-2 right-2 top-9 h-px bg-bg-border" />
+        {sorted.map((point, idx) => {
+          const left = ((point.value - lo) / span) * 100;
+          const above = idx % 2 === 0;
+          return (
+            <div
+              key={point.key}
+              className="absolute top-0 w-24 -translate-x-1/2"
+              style={{ left: `${Math.min(98, Math.max(2, left))}%` }}
+            >
+              <div className={clsx("text-center font-mono text-[10px]", point.tone || "text-text-secondary", above ? "mb-1" : "mt-12")}>
+                {formatStrike(point.value)}
+              </div>
+              <div className={clsx("mx-auto h-5 w-px", ladderMarkerClass(point.tone))} />
+              <div className={clsx("mt-1 truncate text-center text-[10px]", point.tone || "text-text-muted")}>
+                {point.label}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function OptionAnalyticsPanel({
   underlying,
   expiry,
@@ -486,6 +549,28 @@ export default function OptionAnalyticsPanel({
             detail={data.expiry_state?.days_to_expiry != null ? `${data.expiry_state.days_to_expiry} DTE` : ""}
             color={data.expiry_state?.is_expiry_day ? "text-accent-amber" : undefined}
           />
+        </div>
+        <LevelLadder
+          spot={data.spot}
+          levels={[
+            { key: "put-wall", label: "Put wall", value: keyLevels.put_wall?.strike, tone: "text-accent-red" },
+            { key: "zero-gamma", label: "Zero gamma", value: keyLevels.zero_gamma, tone: "text-accent-blue" },
+            { key: "vol-trigger", label: "Vol trigger", value: keyLevels.vol_trigger, tone: "text-accent-amber" },
+            { key: "max-pain", label: "Max pain", value: data.max_pain, tone: "text-text-secondary" },
+            { key: "call-wall", label: "Call wall", value: keyLevels.call_wall?.strike, tone: "text-accent-green" },
+          ]}
+        />
+        <div className="mt-3 grid gap-2 text-[11.5px] text-text-secondary md:grid-cols-2">
+          <div className="rounded-lg border border-bg-border bg-bg-primary/10 px-3 py-2">
+            Gamma regime: <span className={clsx("font-semibold", dealerGex != null && dealerGex >= 0 ? "text-accent-green" : "text-accent-amber")}>
+              {dealerGex != null && dealerGex >= 0 ? "pinning / mean-reverting" : dealerGex != null ? "trend-amplifying" : "unknown"}
+            </span>
+          </div>
+          <div className="rounded-lg border border-bg-border bg-bg-primary/10 px-3 py-2">
+            Spot vs flip: <span className={clsx("font-semibold", data.spot != null && keyLevels.zero_gamma != null && data.spot >= keyLevels.zero_gamma ? "text-accent-green" : "text-accent-red")}>
+              {data.spot != null && keyLevels.zero_gamma != null ? (data.spot >= keyLevels.zero_gamma ? "above zero gamma" : "below zero gamma") : "waiting for flip"}
+            </span>
+          </div>
         </div>
       </Section>
 
