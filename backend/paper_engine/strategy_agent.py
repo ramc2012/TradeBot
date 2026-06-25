@@ -1391,6 +1391,11 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
 
         if not rows:
             await self.ensure_recovered_state()
+            # Even with no fresh watchlist, re-mark the open book to the latest
+            # close available in the DB so held positions don't show a frozen
+            # mark from the last live scan.
+            for runtime in (self._strategy1, self._strategy2):
+                await self._mark_open_positions_to_latest(runtime)
             last_live_scan = self._last_run_at or self._strategy2.last_scan_at or self._strategy1.last_scan_at
             self._last_message = (
                 f"Market closed. Showing saved NSE strategy state from {last_live_scan}; "
@@ -1539,6 +1544,13 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
 
         await self._ensure_open_position_order_records(self._strategy1)
         await self._ensure_open_position_order_records(self._strategy2)
+
+        # Re-mark held positions to the latest available close. The live exit
+        # loop only marks during market hours, so without this the closed-market
+        # view (and a post-restart status) freezes the open book at the last
+        # live-scan price even though a newer close already exists in the DB.
+        for runtime in (self._strategy1, self._strategy2):
+            await self._mark_open_positions_to_latest(runtime)
 
         self._last_message = (
             f"Market closed. Strategy preparation is ready: {len(rows)} ATM rows, "

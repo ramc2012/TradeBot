@@ -343,6 +343,48 @@ class StrategyExitMixin:
             return quotes
         return quotes
 
+    async def _mark_open_positions_to_latest(
+        self: "PaperStrategyAgent",
+        runtime: StrategyRuntime,
+    ) -> None:
+        """Mark held positions to the freshest available premium — MARK ONLY.
+
+        The live exit loop (`_manage_exits`) only runs during market hours, so
+        a position held across a close or an agent restart kept showing the
+        last live-scan price even when a newer closing mark already existed in
+        the DB (the closed-market prep path prepared watchlists but never
+        re-marked the open book). This pulls the freshest mark from
+        `_latest_position_quote_map` (same candles/snapshots query) and updates
+        current_price WITHOUT running any exit/stop logic, so the closed-market
+        view and a post-restart status both reflect the latest known close.
+        Only advances a mark forward in time; never regresses to an older obs.
+        """
+        positions = list(runtime.positions.values())
+        if not positions:
+            return
+        quotes = await self._latest_position_quote_map(positions)
+        if not quotes:
+            return
+        now_str = _now_ist().isoformat()
+        for pos in positions:
+            quote = quotes.get(pos.symbol)
+            if not quote:
+                continue
+            ltp, observed = quote
+            if ltp <= 0:
+                continue
+            observed_at = _parse_iso_timestamp(observed)
+            current_at = _parse_iso_timestamp(pos.price_updated_at)
+            if current_at is not None and observed_at is not None and observed_at <= current_at:
+                continue
+            pos.current_price = ltp
+            pos.price_updated_at = observed if observed_at is not None else now_str
+            if ltp > pos.peak_price:
+                pos.peak_price = ltp
+        latest_prices = {sym: position.current_price for sym, position in runtime.positions.items()}
+        if latest_prices:
+            runtime.portfolio.update_prices(latest_prices)
+
     async def _close_position(
         self: "PaperStrategyAgent",
         runtime: StrategyRuntime,
