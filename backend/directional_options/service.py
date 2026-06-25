@@ -54,6 +54,8 @@ class DirectionalOptionsService:
                 self.config["paper_trading"].get("one_position_per_symbol", True)
             ),
             policy=self.policy,
+            exit_config=self.config.get("risk"),
+            cost_config=self.config.get("execution"),
         )
         self.backtester = DirectionalOptionsBacktester(
             store=self.store,
@@ -1096,19 +1098,32 @@ class DirectionalOptionsService:
             or 0
         )
         market_intelligence_ready = bool(strategy_health.get("ready", bool(watchlist_rows)))
-        using_latest_session = str(strategy_health.get("readiness_mode") or "") == "latest_session"
+        # 'latest_session' = no fresh data today, using last session's frozen
+        # tape. That is acceptable for after-hours marking/display, but NEVER for
+        # execution-readiness DURING a live session — otherwise the lane opens on
+        # hours-old spot. So the staleness bypass only applies when the market is
+        # CLOSED; while open, fresh spot/watchlist (≤ stale_limit) is required.
+        try:
+            from core.trading_calendar import trading_calendar
+            exchange = "BSE" if str(underlying).upper() in ("SENSEX", "BANKEX") else "NSE"
+            market_open = bool(trading_calendar.is_exchange_open(exchange))
+        except Exception:
+            market_open = False
+        stale_bypass = using_latest_session = str(strategy_health.get("readiness_mode") or "") == "latest_session"
+        if market_open:
+            stale_bypass = False  # no bypass intraday — demand fresh data
         execution_ready = bool(
             not feature_frame.empty
             and latest_spot_time
             and watchlist_rows
             and market_intelligence_ready
             and (
-                using_latest_session
+                stale_bypass
                 or watchlist_age_seconds is None
                 or float(watchlist_age_seconds) <= stale_limit
             )
             and (
-                using_latest_session
+                stale_bypass
                 or spot_age_seconds is None
                 or float(spot_age_seconds) <= stale_limit
             )
@@ -1122,9 +1137,9 @@ class DirectionalOptionsService:
             degraded_reason = "local_watchlist_empty"
         elif not market_intelligence_ready:
             degraded_reason = "market_intelligence_not_ready"
-        elif not using_latest_session and watchlist_age_seconds is not None and float(watchlist_age_seconds) > stale_limit:
+        elif not stale_bypass and watchlist_age_seconds is not None and float(watchlist_age_seconds) > stale_limit:
             degraded_reason = "local_watchlist_stale"
-        elif not using_latest_session and spot_age_seconds is not None and float(spot_age_seconds) > stale_limit:
+        elif not stale_bypass and spot_age_seconds is not None and float(spot_age_seconds) > stale_limit:
             degraded_reason = "shared_spot_store_stale"
         return {
             "history_source": history_source,

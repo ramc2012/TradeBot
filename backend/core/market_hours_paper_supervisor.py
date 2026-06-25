@@ -153,6 +153,7 @@ class MarketHoursPaperSupervisor:
         from fractal_market_profile.config import SUPPORTED_SYMBOLS
         from fractal_market_profile.service import fmp_service
         from gann_tp_delta.service import gann_tp_delta_service
+        from macd_refined.service import macd_refined_service
         from market_data.market_intelligence_runtime import market_intelligence_runtime
 
         directional_service = directional_options_service
@@ -311,6 +312,35 @@ class MarketHoursPaperSupervisor:
                 "results": results,
             }
 
+        async def _macd_refined_runner() -> dict[str, Any]:
+            """Fetch current + next monthly expiry chains, persist per-contract
+            volume/turnover, and sync the MACD Refined paper book. This runner
+            is registered with market_hours_fn=_in_nse_market_hours and
+            post_close_catchup=False, so the supervisor only fires it INSIDE the
+            NSE session — entries are therefore always session-gated by the
+            supervisor (no separate wall-clock check needed)."""
+            try:
+                # Full F&O universe × current+next expiry → allow a wide budget.
+                result = await asyncio.wait_for(
+                    macd_refined_service.run_live_cycle(allow_entries=True),
+                    timeout=540.0,
+                )
+            except asyncio.TimeoutError:
+                return {
+                    "status": "timeout", "result_count": 0, "failure_count": 1,
+                    "failures": {"macd_refined": "timed out after 540s"}, "results": [],
+                }
+            paper_summary = dict(result.get("paper_summary") or {})
+            return {
+                "status": "ok" if result.get("broker_ready") else "broker_not_ready",
+                "result_count": int(result.get("snapshots_persisted") or 0),
+                "actionable_count": int(result.get("proposals") or 0),
+                "failure_count": len(result.get("failures") or {}),
+                "broker_ready": bool(result.get("broker_ready")),
+                "paper_summary": paper_summary,
+                "fetched": result.get("fetched") or {},
+            }
+
         async def _cbe_runner() -> dict[str, Any]:
             """Run one CBE scan + sync the cash-equity paper book.
 
@@ -438,6 +468,22 @@ class MarketHoursPaperSupervisor:
                 # NSE index options only — trade during the session, never on the
                 # post-close frozen `live_tick` heartbeat (last price re-stamped
                 # with 0 volume after 15:30 IST). No after-hours catch-up either.
+                market_hours_fn=_in_nse_market_hours,
+                next_open_fn=_next_nse_market_open,
+                post_close_catchup=False,
+            ),
+            RunnerConfig(
+                key="macd_refined",
+                label="MACD Refined Paper Cycle",
+                interval_seconds=settings.MACD_REFINED_AUTO_INTERVAL_SECONDS,
+                callback=_macd_refined_runner,
+                enabled=settings.MACD_REFINED_AUTO_ENABLED,
+                # Full F&O universe × current+next expiry needs more than the
+                # 300s global ceiling for a cold-start cycle.
+                timeout_seconds=600.0,
+                # Long-premium stock + index book. Fetch current+next monthly
+                # expiry and trade during the NSE session; no after-hours
+                # frozen-heartbeat entries (post_close_catchup=False).
                 market_hours_fn=_in_nse_market_hours,
                 next_open_fn=_next_nse_market_open,
                 post_close_catchup=False,

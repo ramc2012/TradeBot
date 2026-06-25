@@ -176,9 +176,11 @@ def _symbol_matches_underlying(symbol: str, underlying: str) -> bool:
     normalized_underlying = extract_commodity_root(str(underlying or ""))
     if not normalized_underlying:
         return False
-    normalized_symbol = str(symbol or "").upper()
-    extracted = extract_commodity_root(normalized_symbol)
-    return extracted == normalized_underlying or normalized_underlying in normalized_symbol
+    extracted = extract_commodity_root(str(symbol or "").upper())
+    # Exact-root match only. The old `normalized_underlying in normalized_symbol`
+    # substring fallback mixed NIFTY with BANKNIFTY (and any root that is a
+    # substring of another), cross-contaminating loss-caps / cooldowns / dedup.
+    return extracted == normalized_underlying
 
 
 def _parse_datetime(value: Any) -> Optional[datetime]:
@@ -1219,16 +1221,27 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 return -1
             return 0
 
-        votes = [v for v in (_vote(week), _vote(month)) if v is not None]
-        if not votes:
-            return "neutral", None
+        wv, mv = _vote(week), _vote(month)
+        votes = [v for v in (wv, mv) if v is not None]
+        parts: list[str] = []
+        if votes:
+            if wv is not None:
+                parts.append(f"W {week.get('val')}–{week.get('vah')}")
+            if mv is not None:
+                parts.append(f"M {month.get('val')}–{month.get('vah')}")
+        else:
+            # Daily fallback: when neither the weekly nor monthly aggregate is
+            # available yet (start of a new week/month, or thin history), read
+            # the higher-timeframe bias off the prior DAILY profile so the desk
+            # still has a directional reference instead of going neutral/blind.
+            day = profile_store.previous_day(root, today)
+            dv = _vote(day)
+            if dv is None:
+                return "neutral", None
+            votes = [dv]
+            parts.append(f"D {day.get('val')}–{day.get('vah')}")
         score = sum(votes)
         bias = "strong" if score >= 1 else "weak" if score <= -1 else "neutral"
-        parts = []
-        if week:
-            parts.append(f"W {week.get('val')}–{week.get('vah')}")
-        if month:
-            parts.append(f"M {month.get('val')}–{month.get('vah')}")
         detail = f"{bias} ({'; '.join(parts)})" if parts else bias
         return bias, detail
 
@@ -1293,6 +1306,29 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 return f"recent stop-out on {extract_commodity_root(underlying)}; cooldown {remaining}m remaining"
         return None
 
+    def _recent_exit_cooldown_reason(self, underlying: str, now: Optional[datetime] = None) -> Optional[str]:
+        """Anti-churn cooldown after ANY exit on this underlying (not only
+        stop-outs). A positional desk should not re-enter the same name on the
+        very next bar after flattening; this enforces a quiet window so the MP
+        signal has to re-establish rather than flip-flop across POC."""
+        minutes = int(settings.COMMODITY_REENTRY_COOLDOWN_MINUTES)
+        if minutes <= 0:
+            return None
+        current = now or _now_ist()
+        for order in self._runtime.orders:
+            if str(order.get("flow") or "") != "exit":
+                continue
+            if not _symbol_matches_underlying(str(order.get("symbol") or ""), underlying):
+                continue
+            exit_time = _parse_datetime(order.get("time"))
+            if exit_time is None:
+                continue
+            minutes_since_exit = (current - exit_time.astimezone(IST)).total_seconds() / 60.0
+            if 0 <= minutes_since_exit < minutes:
+                remaining = max(1, int(minutes - minutes_since_exit))
+                return f"recent exit on {extract_commodity_root(underlying)}; re-entry cooldown {remaining}m remaining"
+        return None
+
     def _entry_risk_block(self, underlying: str, now: Optional[datetime] = None) -> Optional[dict[str, str]]:
         current = now or _now_ist()
         drawdown_pct = self._current_drawdown_pct()
@@ -1304,21 +1340,29 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     "new entries are blocked pending manual review."
                 ),
             }
-        daily_pnl = self._today_realized_pnl(current)
-        if daily_pnl <= -COMMODITY_DAILY_LOSS_LIMIT:
-            return {
-                "code": "daily_loss_limit",
-                "detail": f"Commodity desk daily loss is {daily_pnl:.0f}; new entries are blocked.",
-            }
-        underlying_pnl = self._underlying_today_realized_pnl(underlying, current)
-        if underlying_pnl <= -COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT:
-            return {
-                "code": "underlying_loss_limit",
-                "detail": f"{extract_commodity_root(underlying)} daily loss is {underlying_pnl:.0f}; new entries are blocked.",
-            }
+        # Daily + per-underlying realized-loss caps. Gated by
+        # COMMODITY_LOSS_CAPS_ENABLED (TEMP off for infra testing). The 15%
+        # catastrophe drawdown backstop above and the cooldowns below still apply.
+        if settings.COMMODITY_LOSS_CAPS_ENABLED:
+            daily_pnl = self._today_realized_pnl(current)
+            if daily_pnl <= -COMMODITY_DAILY_LOSS_LIMIT:
+                return {
+                    "code": "daily_loss_limit",
+                    "detail": f"Commodity desk daily loss is {daily_pnl:.0f}; new entries are blocked.",
+                }
+            underlying_pnl = self._underlying_today_realized_pnl(underlying, current)
+            if underlying_pnl <= -COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT:
+                return {
+                    "code": "underlying_loss_limit",
+                    "detail": f"{extract_commodity_root(underlying)} daily loss is {underlying_pnl:.0f}; new entries are blocked.",
+                }
         cooldown_reason = self._recent_stop_cooldown_reason(underlying, current)
         if cooldown_reason:
             return {"code": "stop_cooldown", "detail": cooldown_reason}
+        # Anti-churn: brief re-entry cooldown after ANY exit (not only stops).
+        reentry_reason = self._recent_exit_cooldown_reason(underlying, current)
+        if reentry_reason:
+            return {"code": "reentry_cooldown", "detail": reentry_reason}
         return None
 
     def _current_drawdown_pct(self) -> float:
@@ -2511,7 +2555,6 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     continue
                 current_price = float(row.get("price") or position.current_price)
                 position.current_price = current_price
-                position.macd_value = row.get("macd")
                 position.mp_poc = row.get("mp_poc")
                 position.mp_vah = row.get("mp_vah")
                 position.mp_val = row.get("mp_val")
@@ -2540,8 +2583,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 #            ratcheted before the +2R target hit)
                 #   KEEP   — target_reached marker at +2R + ATR-trail on the
                 #            runner (peak-trail with max(ATR×1.25, 1R) buffer)
-                #   KEEP   — macd_reversal on opposite signal after 4-bar
-                #            min hold (structural exit)
+                #   KEEP   — mp_reversal on an opposite MP+OF signal (only when
+                #            positional-hold is off; structural exit, NOT MACD)
                 #   REMOVE — BE move at +1R: it ratcheted the stop up to
                 #            entry on the first +1R move, then any normal
                 #            intra-move pullback knocked the trade out at
@@ -2604,7 +2647,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                         elif hold_bars >= scalp_max_hold:
                             reason = "scalp_time_stop"
                         elif hold_bars >= FUTURES_MIN_HOLD_BARS and row.get("raw_signal") == "SELL":
-                            reason = "macd_reversal"
+                            reason = "mp_reversal"
                     else:
                         if current_price >= position.stop_price:
                             reason = "stop_loss"
@@ -2613,20 +2656,33 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                         elif hold_bars >= scalp_max_hold:
                             reason = "scalp_time_stop"
                         elif hold_bars >= FUTURES_MIN_HOLD_BARS and row.get("raw_signal") == "BUY":
-                            reason = "macd_reversal"
+                            reason = "mp_reversal"
                 elif position.action == "BUY":
                     if current_price <= position.stop_price:
                         reason = trailing_label or "stop_loss"
-                    elif hold_bars >= FUTURES_MIN_HOLD_BARS and row.get("raw_signal") == "SELL":
-                        reason = "macd_reversal"
+                    elif (
+                        not settings.COMMODITY_POSITIONAL_HOLD_ENABLED
+                        and hold_bars >= FUTURES_MIN_HOLD_BARS
+                        and row.get("raw_signal") == "SELL"
+                    ):
+                        # Positional desk holds through 1-min MP-signal noise;
+                        # only a stop / target / runner-trail closes it. This is
+                        # an MP+OF signal-flip exit (raw_signal = the live MP+OF
+                        # trigger direction) — NOT MACD. Flag-gated off by
+                        # COMMODITY_POSITIONAL_HOLD_ENABLED.
+                        reason = "mp_reversal"
                 else:
                     if current_price >= position.stop_price:
                         reason = trailing_label or "stop_loss"
-                    elif hold_bars >= FUTURES_MIN_HOLD_BARS and row.get("raw_signal") == "BUY":
-                        reason = "macd_reversal"
+                    elif (
+                        not settings.COMMODITY_POSITIONAL_HOLD_ENABLED
+                        and hold_bars >= FUTURES_MIN_HOLD_BARS
+                        and row.get("raw_signal") == "BUY"
+                    ):
+                        reason = "mp_reversal"
 
                 if reason:
-                    # Unified close path: stop_loss / trail_stop / macd_reversal /
+                    # Unified close path: stop_loss / trail_stop / mp_reversal /
                     # target exits all route through _close_futures_position so the
                     # trade is BOOKED (on_fill or self-heal book_close), audited, and
                     # written to the durable DB ledger consistently. The old inline
@@ -2823,6 +2879,18 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     or (signal_dir == "SELL" and htf_bias == "strong")
                 )
                 if opposed:
+                    if settings.COMMODITY_HTF_REQUIRE_ALIGNMENT:
+                        # Directional/positional desk: never fight the higher
+                        # timeframe. Block the counter-bias entry outright
+                        # instead of taking a counter-trend scalp. Surfaced into
+                        # the signal-audit so the operator sees WHY it skipped.
+                        row["signal_validation"] = "htf_counter_bias"
+                        row["signal_validation_detail"] = (
+                            f"{signal_dir} opposes higher-timeframe bias "
+                            f"({htf_detail or htf_bias}); blocked (directional desk)."
+                        )
+                        self._audit_futures_watchlist([row])
+                        continue
                     trade_horizon = "scalp"
                     target_r = float(settings.COMMODITY_HTF_SCALP_TARGET_R)
 

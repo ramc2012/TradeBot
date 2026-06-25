@@ -10,6 +10,7 @@ import pandas as pd
 from directional_options.analytics import build_trade_analytics
 from directional_options.ai_model import HybridDirectionalOptionsModel
 from directional_options.data import DirectionalOptionsDataStore
+from directional_options.exits import evaluate_exit
 from directional_options.features import FeatureEngine, timeframe_minutes
 from directional_options.regime import RegimeClassifier
 from directional_options.risk import DirectionalOptionsRiskEngine
@@ -295,27 +296,23 @@ class DirectionalOptionsBacktester:
         current_mark: float,
         timestamp: pd.Timestamp,
     ) -> Optional[str]:
+        # Delegate to the shared exit ladder (directional_options.exits) so the
+        # backtest and the live paper book enforce one identical exit regime.
         risk_cfg = self.config["risk"]
-        trail_giveback_pct = float(risk_cfg["trail_giveback_pct"])
-        expiry_guard_days = float(risk_cfg["expiry_guard_days"])
-        current_return = (current_mark - position.entry_fill_price) / max(position.entry_fill_price, 1.0)
-        peak_return = (position.peak_mark_price - position.entry_mark_price) / max(position.entry_mark_price, 1.0)
         expiry_days_left = max((pd.Timestamp(position.contract.expiry).date() - timestamp.date()).days, 0)
-
-        if current_mark <= position.stop_price:
-            return "premium_stop"
-        if position.contract.option_type == "CE" and spot_price <= position.stop_underlying:
-            return "underlying_invalidation"
-        if position.contract.option_type == "PE" and spot_price >= position.stop_underlying:
-            return "underlying_invalidation"
-        if current_mark >= position.target_price:
-            return "target_hit"
-        if peak_return >= float(risk_cfg["profit_target_pct"]) and current_mark <= position.peak_mark_price * (1.0 - trail_giveback_pct):
-            return "trail_take_profit"
-        if expiry_days_left <= expiry_guard_days:
-            return "expiry_guard"
-        if position.held_bars >= position.max_horizon_bars and current_return <= 0.12:
-            return "time_stop"
-        if position.held_bars >= int(position.max_horizon_bars * 1.5):
-            return "horizon_expired"
-        return None
+        return evaluate_exit(
+            option_type=position.contract.option_type,
+            current_premium=current_mark,
+            entry_basis_premium=position.entry_mark_price,
+            return_basis_premium=position.entry_fill_price,
+            peak_premium=position.peak_mark_price,
+            current_spot=spot_price,
+            stop_underlying=position.stop_underlying,
+            expiry_days_left=expiry_days_left,
+            held_bars=position.held_bars,
+            max_horizon_bars=position.max_horizon_bars,
+            planned_stop_pct=float(risk_cfg["planned_stop_pct"]),
+            profit_target_pct=float(risk_cfg["profit_target_pct"]),
+            trail_giveback_pct=float(risk_cfg["trail_giveback_pct"]),
+            expiry_guard_days=float(risk_cfg["expiry_guard_days"]),
+        )

@@ -125,11 +125,29 @@ def normalize_underlyings(values: list[str] | tuple[str, ...] | None) -> list[st
 def month_code_for_front_contract(as_of: date, underlying: str) -> str:
     contract_month = as_of.replace(day=1)
     expiry = _approx_monthly_expiry(as_of.year, as_of.month, underlying)
-    if as_of > expiry:
+    # Roll ON expiry day (>=), not the day after: on its expiry date the current
+    # contract is a few hours from settlement — the next month is the tradeable
+    # front contract. Using `>` kept the dying contract live all expiry day.
+    if as_of >= expiry:
         year = as_of.year + int(as_of.month == 12)
         month = 1 if as_of.month == 12 else as_of.month + 1
         contract_month = date(year, month, 1)
     return contract_month.strftime("%y%b").upper()
+
+
+def front_month_expiry(as_of: date, underlying: str) -> date:
+    """Expiry date of the contract `month_code_for_front_contract` resolves to."""
+    expiry = _approx_monthly_expiry(as_of.year, as_of.month, underlying)
+    if as_of >= expiry:
+        year = as_of.year + int(as_of.month == 12)
+        month = 1 if as_of.month == 12 else as_of.month + 1
+        return _approx_monthly_expiry(year, month, underlying)
+    return expiry
+
+
+def front_month_days_to_expiry(as_of: date, underlying: str) -> int:
+    """Calendar days from `as_of` to the resolved front-month expiry (>=0)."""
+    return max((front_month_expiry(as_of, underlying) - as_of).days, 0)
 
 
 def fyers_front_month_symbol(underlying: str, as_of: date) -> str:

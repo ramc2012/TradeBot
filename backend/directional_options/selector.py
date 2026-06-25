@@ -14,6 +14,20 @@ from directional_options.features import timeframe_minutes
 from directional_options.schemas import ContractCandidate, ContractMeta, DirectionalSignal, RegimeSnapshot
 
 
+def _normalize_iv(value: Any) -> float:
+    """Broker IV → decimal. Some feeds (Upstox) report IV in PERCENT (e.g. 11.2)
+    and some (Fyers) as a decimal (0.112); a value > 3.0 is implausible as a
+    decimal vol (300%), so treat it as a percent and divide by 100. Prevents a
+    percent IV from being clamped to the sigma ceiling and corrupting greeks."""
+    try:
+        v = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if v <= 0.0:
+        return 0.0
+    return v / 100.0 if v > 3.0 else v
+
+
 def _norm_cdf(value: float) -> float:
     return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
 
@@ -592,8 +606,9 @@ class OptionSelectionEngine:
         expiry_kind = self._snapshot_expiry_kind(snapshot)
         days_to_expiry = max((expiry_date - timestamp.date()).days + (1.0 - float(timestamp.hour / 24.0)), 0.25)
         time_to_expiry_years = max(days_to_expiry / 365.0, 1.0 / 3650.0)
+        snap_iv = _normalize_iv(snapshot.get("iv"))
         sigma = min(
-            max(float(snapshot.get("iv") or default_sigma or 0.0), float(self.config["sigma_floor"])),
+            max(snap_iv or float(default_sigma or 0.0), float(self.config["sigma_floor"])),
             float(self.config["sigma_ceiling"]),
         )
         delta, gamma, theta, vega = _black_scholes_greeks(
@@ -762,9 +777,9 @@ class OptionSelectionEngine:
 
     def _estimate_snapshot_atm_iv(self, snapshot_rows: list[dict[str, Any]], spot_price: float, fallback: float) -> float:
         valid = [
-            (abs(float(row.get("strike") or 0.0) - spot_price), float(row.get("iv") or 0.0))
+            (abs(float(row.get("strike") or 0.0) - spot_price), _normalize_iv(row.get("iv")))
             for row in snapshot_rows
-            if float(row.get("iv") or 0.0) > 0.0 and float(row.get("strike") or 0.0) > 0.0
+            if _normalize_iv(row.get("iv")) > 0.0 and float(row.get("strike") or 0.0) > 0.0
         ]
         if not valid:
             return fallback

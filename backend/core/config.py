@@ -222,13 +222,38 @@ class Settings(BaseSettings):
     SECTOR_INTERACTION_DURABLE_STATE_ENABLED: bool = False
 
     # ── Higher-timeframe (weekly/monthly) alignment gate ───────────────────
-    # When enabled, a futures entry whose direction OPPOSES the weekly+monthly
-    # value-area bias (long while HTF is weak, short while HTF is strong) is
-    # downgraded to a "scalp": smaller size + a tighter ~1R target + a quick
-    # time-stop, instead of the normal positional 2R + runner trail. Aligned
-    # and neutral-bias trades stay positional. Default OFF so live behaviour is
-    # unchanged until validated on a paper walk-forward.
-    COMMODITY_HTF_GATE_ENABLED: bool = False
+    # The commodity MP+OF desk is DIRECTIONAL + POSITIONAL: it trades in the
+    # direction of the weekly+monthly value-area bias and holds for hours/days.
+    # ON by default now (2026-06-24 positional redesign).
+    COMMODITY_HTF_GATE_ENABLED: bool = True
+    # When True, a signal that OPPOSES the higher-timeframe bias is BLOCKED
+    # outright (directional desk) rather than downgraded to a counter-trend
+    # scalp. Set False to fall back to the old "downgrade to scalp" behaviour.
+    COMMODITY_HTF_REQUIRE_ALIGNMENT: bool = True
+    # When True, a positional trade does NOT flip on a single opposite 1-min
+    # MACD signal — it holds to its stop / target / runner-trail. This is the
+    # core anti-churn lever that lets winners run for hours/days instead of
+    # being scalped out after the 4-bar min-hold.
+    COMMODITY_POSITIONAL_HOLD_ENABLED: bool = True
+    # Re-entry cooldown (minutes) after ANY exit on an underlying — not just
+    # stop-outs — to stop same-/next-bar churn. 0 disables.
+    COMMODITY_REENTRY_COOLDOWN_MINUTES: int = 20
+    # ── Index-futures MP+OF sleeve ─────────────────────────────────────────
+    # When True, the commodity MP+OF agent also scans+trades NIFTY/BANKNIFTY
+    # index FUTURES (NSE) through the same positional/HTF/anti-churn path,
+    # branching only hours/data-source/specs on an is_index check. Default OFF:
+    # requires a populated `index_futures_candles` table + live intraday writer
+    # first, and must NOT be enabled around a monthly expiry roll. Blast radius
+    # when off = zero (index symbols never enter the scan universe).
+    COMMODITY_INDEX_FUTURES_ENABLED: bool = False
+    # Refuse index-futures entries when the front-month contract is within this
+    # many sessions of expiry (avoid trading the dying contract around the roll).
+    COMMODITY_INDEX_FUTURES_MIN_DAYS_TO_EXPIRY: int = 2
+    # Daily + per-underlying realized-loss caps. TEMPORARILY OFF (2026-06-24)
+    # to exercise the full trade pipeline during infra testing. The 15%
+    # catastrophe drawdown backstop and the stop/re-entry cooldowns still apply.
+    # Flip back to True to restore the loss caps.
+    COMMODITY_LOSS_CAPS_ENABLED: bool = False
     # Counter-bias scalp sizing as a fraction of the normal equal-notional lots.
     COMMODITY_HTF_SCALP_SIZE_FRACTION: float = 0.5
     # Target R-multiple for scalps vs positionals (positional default = today's 2R).

@@ -1500,6 +1500,23 @@ class ATMWatchlistService:
         if entry is None:
             return None
 
+        # Phantom-expiry gate (mirrors the option_premium_candles write guard).
+        # The authoritative expiry resolver (broker chain master) can offer a
+        # single date (e.g. 2026-06-25 Thu) that is real for SENSEX but a phantom
+        # for the NSE Tuesday-board indices, whose expired-instruments feed leaks a
+        # Thursday series that NSE never lists. Building a leg for it labels a real
+        # contract (the 06-23 weekly / 06-30 monthly) with the wrong expiry, so it
+        # shows as "insufficient data" and can never warm up its indicators. Drop it
+        # per-underlying: SENSEX/BANKEX keep their native weekday, stocks pass through.
+        if not is_valid_index_expiry(meta.symbol, expiry_date):
+            logger.debug(
+                "[ATM watchlist] skipping phantom expiry {} for {} (weekday {} not valid for its board)",
+                expiry_date,
+                meta.symbol,
+                expiry_date.weekday(),
+            )
+            return None
+
         catalog_instrument_key = str((contract or {}).get("instrument_key") or "").strip() or None
         live_instrument_key = str(entry.instrument_key or "").strip() or None
         instrument_key = catalog_instrument_key or live_instrument_key

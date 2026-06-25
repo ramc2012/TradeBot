@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -14,7 +14,8 @@ from sqlalchemy import text
 from analysis.instruments import normalize_index_contract_expiry
 from core.paper_trade_recorder import paper_trade_recorder
 from db.database import AsyncSessionLocal
-from directional_options.config import DIRECTIONAL_INITIAL_CAPITAL
+from directional_options.config import DEFAULT_CONFIG, DIRECTIONAL_INITIAL_CAPITAL
+from directional_options.exits import evaluate_exit
 from directional_options.policy import DirectionalPolicy
 
 
@@ -42,6 +43,11 @@ def _parse_iso(value: Any) -> datetime | None:
         return ts
     except Exception:
         return None
+
+
+def _parse_date_only(value: Any) -> date | None:
+    ts = _parse_iso(value)
+    return ts.date() if ts is not None else None
 
 
 def _safe_float_or_none(value: Any) -> float | None:
@@ -139,10 +145,18 @@ class DirectionalOptionsPaperStore:
         min_hold_bars: int = 3,
         one_position_per_symbol: bool = True,
         policy: DirectionalPolicy | None = None,
+        exit_config: dict[str, Any] | None = None,
+        cost_config: dict[str, Any] | None = None,
     ):
         self.root = Path(root)
         if not self.root.is_absolute():
             self.root = Path(__file__).resolve().parent.parent / self.root
+        # Exit thresholds (stop / target / trail / expiry-guard) and the
+        # spread+slippage cost model. Default to the package config so the live
+        # book and the backtest stay in lockstep, but allow the service to pass
+        # its own resolved config.
+        self.exit_config = dict(exit_config or DEFAULT_CONFIG["risk"])
+        self.cost_config = dict(cost_config or DEFAULT_CONFIG["execution"])
         # Legacy file paths — retained only to seed the DB once (one-time
         # import) and for reset_account archival. The book now lives in
         # directional_paper_positions / directional_paper_journal.
@@ -295,6 +309,37 @@ class DirectionalOptionsPaperStore:
                     entry_premium = float(row.get("entry_premium") or latest_value or 0.0)
                     quantity = int(row.get("quantity_units") or 0)
                     row["unrealized_pnl"] = round((latest_value - entry_premium) * quantity, 2)
+                    prev_peak = float(row.get("peak_premium") or row.get("entry_premium") or latest_value or 0.0)
+                    row["peak_premium"] = round(max(prev_peak, latest_value), 2)
+
+            # Protective exit ladder — premium stop / underlying invalidation /
+            # target / trailing take-profit / expiry guard / time stop — enforced
+            # on EVERY cycle that has a fresh mark, independent of whether a new
+            # actionable signal exists or entries are allowed. This is the same
+            # ladder the backtest runs (directional_options.exits). Without it a
+            # long option had no stop and could bleed to zero, held only until
+            # the signal went flat or flipped. Stops never fire on stale data:
+            # we require a fresh mark this cycle and never fabricate a price.
+            now_dt = _parse_iso(recorded_at) or datetime.now(timezone.utc)
+            exited_rows: list[dict[str, Any]] = []
+            for row in list(matching):
+                mark = marks.get(str(row.get("position_id") or "")) or {}
+                current_premium = _safe_float_or_none(mark.get("premium"))
+                if (current_premium is None or current_premium <= 0) and mark:
+                    current_premium = _safe_float_or_none(row.get("latest_premium"))
+                if not mark or current_premium is None or current_premium <= 0:
+                    continue
+                reason = self._evaluate_position_exit(row, current_premium=current_premium, now_dt=now_dt)
+                if reason and self._close_position(
+                    row, mark=mark, close_time=recorded_at, close_reason=reason
+                ):
+                    exited_rows.append(row)
+            for row in exited_rows:
+                if row in open_positions:
+                    open_positions.remove(row)
+                if row in matching:
+                    matching.remove(row)
+                closed_positions.append(row)
 
             if not execution_ready:
                 await self._save_positions(
@@ -334,14 +379,14 @@ class DirectionalOptionsPaperStore:
                             # Position recently green-lit; brief flat is
                             # noise. Don't churn the position.
                             continue
-                    self._close_position(
+                    if self._close_position(
                         row,
                         mark=marks.get(str(row.get("position_id") or "")) or {},
                         close_time=recorded_at,
                         close_reason="flat_signal",
-                    )
-                    open_positions.remove(row)
-                    closed_positions.append(row)
+                    ):
+                        open_positions.remove(row)
+                        closed_positions.append(row)
                 await self._save_positions(
                     {
                         "last_synced_at": recorded_at,
@@ -379,14 +424,14 @@ class DirectionalOptionsPaperStore:
                     # Held too briefly — keep position open through a single
                     # noisy regime flip. Will reassess on the next bar.
                     continue
-                self._close_position(
+                if self._close_position(
                     row,
                     mark=marks.get(str(row.get("position_id") or "")) or {},
                     close_time=recorded_at,
                     close_reason="signal_flip",
-                )
-                open_positions.remove(row)
-                closed_positions.append(row)
+                ):
+                    open_positions.remove(row)
+                    closed_positions.append(row)
 
             # Hard one-position-per-symbol guard. If the existing position
             # on this symbol was REFRESHED above (same contract+direction)
@@ -479,6 +524,20 @@ class DirectionalOptionsPaperStore:
                         "max_loss": float(risk.get("max_loss") or 0.0),
                         "premium_at_risk": float(risk.get("premium_at_risk") or 0.0),
                         "premium_cap": risk.get("premium_cap"),
+                        # Exit-ladder state (mirrors backtest PositionState) so
+                        # the shared exit rules (directional_options.exits) can
+                        # protect this position: trailing peak, expected horizon,
+                        # underlying-invalidation level, and the candidate's
+                        # liquidity for the spread/slippage cost model on close.
+                        "peak_premium": latest_mark,
+                        "expected_horizon_bars": int(signal.get("expected_horizon_bars") or 0),
+                        "stop_underlying": (
+                            (latest_spot - float(signal.get("expected_move") or 0.0) * 0.55)
+                            if str(signal.get("direction") or contract.get("option_type") or "CE") == "CE"
+                            else (latest_spot + float(signal.get("expected_move") or 0.0) * 0.55)
+                        ),
+                        "spread_pct": float(contract.get("spread_pct") or 0.0),
+                        "slippage_pct": float(contract.get("slippage_pct") or 0.0),
                         "entry_premium": latest_mark,
                         "latest_premium": latest_mark,
                         "exit_premium": None,
@@ -564,16 +623,11 @@ class DirectionalOptionsPaperStore:
                 except Exception:  # noqa: BLE001
                     mark_premium = None
 
-            if mark_premium is None:
-                mark_premium = float(
-                    position.get("latest_premium")
-                    or position.get("entry_premium")
-                    or 0.0
-                )
-                price_source = str(position.get("price_source") or "stored_mark")
-
-            mark = {
-                "premium": float(mark_premium),
+            # Do NOT fabricate a price from the entry premium here — that booked
+            # a ₹0 breakeven. When no live price is available, _close_position
+            # (force=True) settles at intrinsic if the option has expired, else
+            # at the last-known price flagged data_missing (excluded from RL).
+            mark: dict[str, Any] = {
                 "spot": float(
                     spot
                     if spot is not None
@@ -582,14 +636,18 @@ class DirectionalOptionsPaperStore:
                     or 0.0
                 ),
                 "mark_time": close_time,
-                "price_source": price_source,
             }
+            if mark_premium is not None and float(mark_premium) > 0:
+                mark["premium"] = float(mark_premium)
+                mark["price_source"] = price_source
+
             close_reason = (reason or "operator_close").strip() or "operator_close"
             self._close_position(
                 position,
                 mark=mark,
                 close_time=close_time,
                 close_reason=close_reason,
+                force=True,
             )
             position["operator_actor"] = actor
             position["operator_closed"] = True
@@ -634,6 +692,112 @@ class DirectionalOptionsPaperStore:
             "summary": summary,
         }
 
+    def _exit_thresholds(self) -> dict[str, float]:
+        ec = self.exit_config
+        _r = DEFAULT_CONFIG["risk"]
+        return {
+            "planned_stop_pct": float(ec.get("planned_stop_pct", _r["planned_stop_pct"])),
+            "profit_target_pct": float(ec.get("profit_target_pct", _r["profit_target_pct"])),
+            "trail_giveback_pct": float(ec.get("trail_giveback_pct", _r["trail_giveback_pct"])),
+            "expiry_guard_days": float(ec.get("expiry_guard_days", _r["expiry_guard_days"])),
+        }
+
+    def _per_side_cost_pct(self, position: dict[str, Any]) -> float:
+        """Per-side spread+slippage fraction of premium, mirroring the backtest
+        (spread_pct/2 + slippage_pct). Uses the candidate's liquidity-derived
+        figures stored at open; falls back to the execution config for legacy
+        positions that predate this field."""
+        spread_pct = _safe_float_or_none(position.get("spread_pct"))
+        slippage_pct = _safe_float_or_none(position.get("slippage_pct"))
+        if spread_pct is not None and spread_pct > 0:
+            sl = slippage_pct if (slippage_pct is not None and slippage_pct >= 0) else spread_pct * 0.28
+            return max(0.0, spread_pct / 2.0 + sl)
+        cc = self.cost_config
+        fb_spread = float(cc.get("fallback_spread_pct", 0.02))
+        fb_slip = (
+            float(cc.get("entry_slippage_pct", 0.0075)) + float(cc.get("exit_slippage_pct", 0.006))
+        ) / 2.0
+        return max(0.0, fb_spread / 2.0 + fb_slip)
+
+    def _evaluate_position_exit(
+        self, position: dict[str, Any], *, current_premium: float, now_dt: datetime
+    ) -> str | None:
+        """Run the shared exit ladder against a live position dict."""
+        entry_premium = _safe_float_or_none(position.get("entry_premium")) or 0.0
+        if entry_premium <= 0:
+            return None
+        peak = _safe_float_or_none(position.get("peak_premium")) or entry_premium
+        current_spot = (
+            _safe_float_or_none(position.get("latest_spot"))
+            or _safe_float_or_none(position.get("entry_spot"))
+            or 0.0
+        )
+        stop_underlying = _safe_float_or_none(position.get("stop_underlying"))
+        opened = _parse_iso(position.get("opened_at"))
+        tf_min = _TIMEFRAME_MINUTES.get(str(position.get("timeframe") or ""), 5)
+        held_bars = 0
+        if opened is not None:
+            held_bars = max(0, int((now_dt - opened).total_seconds() // 60 // max(tf_min, 1)))
+        max_horizon_bars = _safe_int_or_none(position.get("expected_horizon_bars")) or 0
+        expiry_d = _parse_date_only(position.get("expiry"))
+        expiry_days_left = max((expiry_d - now_dt.date()).days, 0) if expiry_d is not None else None
+        return evaluate_exit(
+            option_type=str(position.get("option_type") or "CE"),
+            current_premium=float(current_premium),
+            entry_basis_premium=entry_premium,
+            return_basis_premium=entry_premium,
+            peak_premium=peak,
+            current_spot=current_spot,
+            stop_underlying=stop_underlying,
+            expiry_days_left=expiry_days_left,
+            held_bars=held_bars,
+            max_horizon_bars=max_horizon_bars,
+            **self._exit_thresholds(),
+        )
+
+    def _resolve_close_price(
+        self, position: dict[str, Any], mark: dict[str, Any], *, force: bool
+    ) -> tuple[float, str, bool] | None:
+        """Resolve the exit premium for a close.
+
+        Returns (exit_premium, price_source, settled_economic) or None to signal
+        "no trustworthy price — keep the position open". `settled_economic` is
+        False only for a forced operator close with no real price (excluded from
+        RL training so it can't poison the policy with a fabricated reward).
+        """
+        m = _safe_float_or_none((mark or {}).get("premium"))
+        if m is not None and m > 0:
+            return m, str((mark or {}).get("price_source") or "live_mark"), True
+        latest = _safe_float_or_none(position.get("latest_premium"))
+        entry = _safe_float_or_none(position.get("entry_premium"))
+        src = str(position.get("price_source") or "")
+        # A stored latest_premium is only trustworthy if it came from a live
+        # source or has actually moved off the entry price — otherwise it is the
+        # frozen entry mark and closing at it fabricates a ₹0 breakeven.
+        if latest is not None and latest > 0 and (
+            src in {"chain_cache_live", "operator_mark", "live_mark"}
+            or (entry is not None and abs(latest - entry) > 1e-9)
+        ):
+            return latest, src or "stored_mark", True
+        # No live price. If the option is at/after expiry, settle at intrinsic.
+        expiry_d = _parse_date_only(position.get("expiry"))
+        today = datetime.now(timezone.utc).date()
+        if expiry_d is not None and expiry_d <= today:
+            spot = (
+                _safe_float_or_none(position.get("latest_spot"))
+                or _safe_float_or_none(position.get("entry_spot"))
+                or 0.0
+            )
+            strike = _safe_float_or_none(position.get("strike")) or 0.0
+            otype = str(position.get("option_type") or "CE")
+            intrinsic = max(0.0, spot - strike) if otype == "CE" else max(0.0, strike - spot)
+            return intrinsic, "expiry_intrinsic", True
+        if force:
+            # Operator explicitly closing with no live price — settle at last
+            # known, flagged so it is excluded from RL training.
+            return (latest or entry or 0.0), "stale_forced", False
+        return None
+
     def _close_position(
         self,
         position: dict[str, Any],
@@ -641,13 +805,20 @@ class DirectionalOptionsPaperStore:
         mark: dict[str, Any],
         close_time: str,
         close_reason: str,
-    ) -> None:
-        latest_premium = float(
-            mark.get("premium")
-            or position.get("latest_premium")
-            or position.get("entry_premium")
-            or 0.0
-        )
+        force: bool = False,
+    ) -> bool:
+        """Close one position, book costs, feed RL reward. Returns True if closed.
+
+        On the automatic (signal/stop) paths this returns False — leaving the
+        position OPEN — when no trustworthy live price exists, instead of
+        fabricating a ₹0 breakeven at the entry premium (which hid losses and
+        trained the policy on a fake r=0). `force=True` (operator close) always
+        closes, settling at intrinsic when expired.
+        """
+        resolved = self._resolve_close_price(position, mark, force=force)
+        if resolved is None:
+            return False
+        latest_premium, price_source, settled_economic = resolved
         latest_spot = float(
             mark.get("spot")
             or position.get("latest_spot")
@@ -664,9 +835,10 @@ class DirectionalOptionsPaperStore:
         position["latest_premium"] = latest_premium
         position["exit_spot"] = latest_spot
         position["latest_spot"] = latest_spot
-        position["price_source"] = mark.get("price_source") or position.get("price_source")
+        position["price_source"] = price_source or mark.get("price_source") or position.get("price_source")
         position["mark_time"] = mark.get("mark_time") or position.get("mark_time")
         position["unrealized_pnl"] = 0.0
+        position["data_missing"] = not settled_economic
         realized_gross = round((latest_premium - entry_premium) * quantity, 2)
         # Deduct real round-trip charges (brokerage + STT + exchange txn + SEBI
         # + GST + stamp) so paper P&L is NET, not gross — paper used to overstate
@@ -692,13 +864,24 @@ class DirectionalOptionsPaperStore:
             )
         except Exception:  # noqa: BLE001
             txn_cost = 0.0
-        realized = round(realized_gross - txn_cost, 2)
+        # Bid/ask spread + slippage on BOTH fills — the dominant cost on index
+        # options, previously ignored on the live book (only charges were taken,
+        # making paper P&L optimistic vs the backtest, which models fills). Only
+        # charged against a real tradeable mark; intrinsic/stale settlements
+        # carry no spread.
+        slippage_cost = 0.0
+        if settled_economic and price_source != "expiry_intrinsic":
+            per_side_pct = self._per_side_cost_pct(position)
+            slippage_cost = round((abs(entry_premium) + abs(latest_premium)) * per_side_pct * quantity, 2)
+        realized = round(realized_gross - txn_cost - slippage_cost, 2)
         position["realized_pnl"] = realized
         position["realized_pnl_gross"] = realized_gross
         position["transaction_cost"] = round(txn_cost, 2)
-        # Feed the realized PnL back to the RL policy so the value
-        # posterior tightens and the multiplier buckets converge.
-        if self.policy is not None:
+        position["slippage_cost"] = slippage_cost
+        # Feed realized PnL to the RL policy — but NOT for a fabricated/stale
+        # exit (data_missing), since a fake reward biases the value posterior.
+        # Genuine intrinsic settlements are real and DO train.
+        if self.policy is not None and settled_economic:
             try:
                 r_multiple = self.policy.record_close(
                     position_id=str(position.get("position_id") or ""),
@@ -729,6 +912,7 @@ class DirectionalOptionsPaperStore:
         except RuntimeError:
             # No running event loop (e.g. unit tests) — skip event logging.
             pass
+        return True
 
     async def _summary(self, open_positions: list[dict[str, Any]], closed_positions: list[dict[str, Any]]) -> dict[str, Any]:
         # Lifetime realized from the DB-wide SUM over ALL closed positions — not the

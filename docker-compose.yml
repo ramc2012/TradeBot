@@ -60,6 +60,10 @@ services:
       BACKEND_CORS_ORIGIN_REGEX: "${BACKEND_CORS_ORIGIN_REGEX:-^https?://[^/]+(:[0-9]+)?$}"
     volumes:
       - ./backend:/app
+      # Repo-root research dataset (30-min option/spot candles, catalogs with
+      # lot sizes, validated MACD signals) — consumed by the MACD Refined lane
+      # for backtests and live lot-size lookups. Read-only.
+      - ./data:/data:ro
     depends_on:
       db:
         condition: service_healthy

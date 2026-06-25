@@ -20,6 +20,7 @@ from api.routers import analysis as analysis_router
 from api.routers import strategy as strategy_router
 from api.routers import auction_intelligence as auction_intelligence_router
 from api.routers import directional_options as directional_options_router
+from api.routers import macd_refined as macd_refined_router
 from api.routers import gann_tp_delta as gann_tp_delta_router
 from api.routers import fractal_market_profile as fractal_market_profile_router
 from api.routers import orderflow as orderflow_router
@@ -318,6 +319,24 @@ async def lifespan(app: FastAPI):
             _macd_diffusion_worker(), name="macd-diffusion")
         logger.info("✓ MACD diffusion daemon started")
 
+    # MCX auto-rollover: keep the MP+OF agent's futures on their current
+    # front-month so the watchlist never tracks an expired contract.
+    mcx_rollover_task = None
+    if settings.MCX_ROLLOVER_ENABLED:
+        async def _mcx_rollover_worker() -> None:
+            try:
+                from market_data.mcx_rollover import run_daemon
+
+                await run_daemon(poll_hours=settings.MCX_ROLLOVER_POLL_HOURS)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception(f"MCX rollover daemon stopped: {exc}")
+
+        mcx_rollover_task = asyncio.create_task(
+            _mcx_rollover_worker(), name="mcx-rollover")
+        logger.info("✓ MCX rollover daemon started")
+
     # F1 feed: full-universe option-chain → 3m CE+PE OHLC (S1's headline feed).
     # Gated OFF by default; the poll self-staggers through FYERS_DATA_LIMITER.
     if settings.CHAIN_CANDLE_BUILDER_ENABLED:
@@ -349,6 +368,12 @@ async def lifespan(app: FastAPI):
             await macd_diffusion_task
         except asyncio.CancelledError:
             logger.info("MACD diffusion daemon stopped")
+    if mcx_rollover_task is not None:
+        mcx_rollover_task.cancel()
+        try:
+            await mcx_rollover_task
+        except asyncio.CancelledError:
+            logger.info("MCX rollover daemon stopped")
     if loop_lag_task is not None:
         loop_lag_task.cancel()
         try:
@@ -461,6 +486,7 @@ app.include_router(analysis_router.router)
 app.include_router(strategy_router.router)
 app.include_router(auction_intelligence_router.router)
 app.include_router(directional_options_router.router)
+app.include_router(macd_refined_router.router)
 app.include_router(gann_tp_delta_router.router)
 app.include_router(fractal_market_profile_router.router)
 app.include_router(orderflow_router.router)

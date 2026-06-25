@@ -46,6 +46,7 @@ function normalizePositionsOverview(payload: PositionsOverviewPayload): AppStrat
     nse: payload.nse ?? payload.strategy ?? null,
     commodity: payload.commodity ?? null,
     directional: payload.directional ?? null,
+    macd: payload.macd ?? null,
     gann: payload.gann ?? null,
     auction: payload.auction ?? null,
     fractal: payload.fractal ?? null,

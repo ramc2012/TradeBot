@@ -9,6 +9,7 @@ import {
   getDirectionalOptionsPaperPositions,
   getFractalMarketProfilePaperPositions,
   getGannTPDeltaPaperAgentStatus,
+  getMacdRefinedPaperPositions,
   getStrategyAgentStatus,
 } from "@/lib/api";
 
@@ -93,6 +94,7 @@ export type AppStrategyPortfolioSnapshot = {
   nse: StrategyAgentStatus | null;
   commodity: CommodityStrategyStatus | null;
   directional: PaperPositionsPayload | null;
+  macd: PaperPositionsPayload | null;
   gann: GannAgentStatus | null;
   auction: PaperPositionsPayload | null;
   fractal: PaperPositionsPayload | null;
@@ -135,10 +137,11 @@ async function settle<T>(key: string, task: Promise<T>, errors: Record<string, s
 
 export async function fetchAppStrategyPortfolioSnapshot(): Promise<AppStrategyPortfolioSnapshot> {
   const errors: Record<string, string> = {};
-  const [nse, commodity, directional, gann, auction, fractal, cbe] = await Promise.all([
+  const [nse, commodity, directional, macd, gann, auction, fractal, cbe] = await Promise.all([
     settle("nse", getStrategyAgentStatus().then((response) => response.data as StrategyAgentStatus), errors),
     settle("commodity", getCommodityStrategyStatus().then((response) => response.data as CommodityStrategyStatus), errors),
     settle("directional", getDirectionalOptionsPaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
+    settle("macd", getMacdRefinedPaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
     settle("gann", getGannTPDeltaPaperAgentStatus(100).then((response) => response.data as GannAgentStatus), errors),
     settle("auction", getAuctionIntelligencePaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
     settle("fractal", getFractalMarketProfilePaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
@@ -149,6 +152,7 @@ export async function fetchAppStrategyPortfolioSnapshot(): Promise<AppStrategyPo
     nse,
     commodity,
     directional,
+    macd,
     gann,
     auction,
     fractal,
@@ -348,6 +352,9 @@ export function buildOpenPositionRows(snapshot?: AppStrategyPortfolioSnapshot | 
   for (const position of snapshot.directional?.open_positions || []) {
     rows.push(genericOptionRow("directional", "Long Premium", "Directional Options", "NSE", position, "open"));
   }
+  for (const position of snapshot.macd?.open_positions || []) {
+    rows.push(genericOptionRow("macd", "MACD Refined", "MACD Refined", "NSE", position, "open"));
+  }
   for (const position of snapshot.gann?.open_positions || []) {
     rows.push(genericOptionRow("gann", "Gann TP Delta", "Gann TP Delta", "NSE", position, "open"));
   }
@@ -422,6 +429,9 @@ export function buildClosedTradeRows(snapshot?: AppStrategyPortfolioSnapshot | n
   for (const position of snapshot.directional?.closed_positions || []) {
     rows.push(genericOptionRow("directional", "Long Premium", "Directional Options", "NSE", position, "closed"));
   }
+  for (const position of snapshot.macd?.closed_positions || []) {
+    rows.push(genericOptionRow("macd", "MACD Refined", "MACD Refined", "NSE", position, "closed"));
+  }
   for (const position of snapshot.gann?.closed_positions || []) {
     rows.push(genericOptionRow("gann", "Gann TP Delta", "Gann TP Delta", "NSE", position, "closed"));
   }
@@ -479,6 +489,7 @@ export function buildStrategyBookSummaries(snapshot?: AppStrategyPortfolioSnapsh
 
   const generic = [
     ["directional", "Directional Options", "Long Premium", "NSE", snapshot.directional] as const,
+    ["macd", "MACD Refined", "MACD Refined", "NSE", snapshot.macd] as const,
     ["gann", "Gann TP Delta", "Gann TP Delta", "NSE", snapshot.gann] as const,
     ["auction", "Auction Intelligence", "Auction Intelligence", "NSE", snapshot.auction] as const,
     ["fractal", "Fractal Market Profile", "Fractal Profile", "NSE", snapshot.fractal] as const,

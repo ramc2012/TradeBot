@@ -805,9 +805,13 @@ class DirectionalPolicy:
             return None
         risk_budget = float(entry.get("risk_budget") or 1.0)
         size_mult = float(entry.get("size_multiplier") or 1.0)
-        # The position was sized at risk_budget × size_mult, so the
-        # natural R-multiple is realized / (risk_budget × size_mult).
-        denom = max(risk_budget * size_mult, 1.0)
+        # `risk_budget` ALREADY encodes the size multiplier — the risk engine
+        # returns `base_risk_budget × size_multiplier` (see risk.py). Multiplying
+        # by `size_mult` again double-counted it (denom = base × mult²), which
+        # halved every 2.0× reward and doubled every 0.5× reward, systematically
+        # biasing the size-bucket posterior. R = realized PnL / the rupee risk
+        # actually allocated to the trade = realized / risk_budget.
+        denom = max(risk_budget, 1.0)
         r = float(realized_pnl) / denom
         r_clipped = float(np.clip(r, REWARD_CLIP_LOW, REWARD_CLIP_HIGH))
         x = np.asarray(entry["features"], dtype=np.float64)

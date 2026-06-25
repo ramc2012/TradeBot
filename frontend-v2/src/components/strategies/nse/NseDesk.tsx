@@ -33,6 +33,7 @@ import {
   BarChart3,
   CandlestickChart,
   Gauge,
+  LayoutPanelLeft,
   ListChecks,
   Radio,
   TrendingUp,
@@ -65,6 +66,7 @@ import {
 } from "@/components/desk-ui";
 import { PaperPerformance } from "@/components/strategies/shared";
 import { OptionChartModal, type OptionChartContract } from "@/components/strategies/nse/OptionChartModal";
+import { MacdCockpit } from "@/components/strategies/nse/MacdCockpit";
 import { useStrategyPositionsStream } from "@/hooks/useStrategyPositionsStream";
 import { TerminalPanel } from "@/components/terminal/TerminalPanel";
 import type { PaperPosition, PaperSummary, PositionsPayload } from "@/lib/strategy-stats";
@@ -216,6 +218,7 @@ type DiffusionPoint = {
 type DiffusionPayload = { market?: string; days?: number; count?: number; series?: DiffusionPoint[]; latest?: DiffusionPoint | null };
 
 const TABS = [
+  { key: "cockpit", label: "Cockpit", icon: LayoutPanelLeft },
   { key: "positions", label: "Positions", icon: Wallet },
   { key: "terminal", label: "Terminal", icon: Radio },
   { key: "overview", label: "Overview", icon: TrendingUp },
@@ -274,7 +277,7 @@ function positionToPaperPosition(p: PositionRow): PaperPosition {
 
 export default function NseDesk() {
   // Open positions is the headline view when the desk opens.
-  const [activeTab, setActiveTab] = useUrlTab("positions");
+  const [activeTab, setActiveTab] = useUrlTab("cockpit");
 
   const statusQuery = useQuery({
     queryKey: ["nse", "status"],
@@ -336,7 +339,7 @@ export default function NseDesk() {
   // socket is down. The S1 signals watchlist stays on poll — those rows only
   // change at the 60s strategy scan, so streaming would add cadence not accuracy.
   const posStream = useStrategyPositionsStream({
-    enabled: activeTab === "positions" || activeTab === "performance" || activeTab === "overview",
+    enabled: activeTab === "cockpit" || activeTab === "positions" || activeTab === "performance" || activeTab === "overview",
   });
   const streamLive = posStream.isStreamConnected && Boolean(posStream.data?.nse);
   const status = (streamLive ? (posStream.data?.nse as unknown as AgentStatus) : statusQuery.data);
@@ -374,7 +377,7 @@ export default function NseDesk() {
 
   return (
     <DeskShell
-      title="NSE Index · Strategy 1 MACD"
+      title="MACD Strategy · 30m ATM"
       description="30m ATM option-premium MACD zero-cross across NSE F&O. Hard stop −25%, exit on opposite 30m cross, CE↔PE flips allowed."
       asOf={status?.last_run_at}
       isFetching={statusQuery.isFetching}
@@ -414,6 +417,7 @@ export default function NseDesk() {
         />
       ) : null}
 
+      {activeTab === "cockpit" ? <MacdCockpit positions={positions} watchlist={watchlist} /> : null}
       {activeTab === "signals" ? <WatchlistTab rows={watchlist} /> : null}
       {activeTab === "sentiment" ? <SentimentTab data={diffusionQuery.data} loading={diffusionQuery.isFetching} /> : null}
       {activeTab === "terminal" ? <TerminalPanel /> : null}
@@ -630,7 +634,9 @@ function WatchlistTab({ rows }: { rows: WatchRow[] }) {
   // CE / PE live in tabs (not stacked) so the trader isn't scrolling 200+ rows
   // to reach the other side.
   const [side, setSide] = useState<WatchSide>("CE");
-  const [chartContract, setChartContract] = useState<OptionChartContract | null>(null);
+  // Open chart holds the FROZEN ordered list (so live refetches don't shuffle
+  // it under the user) + the current index — prev/next steps through it.
+  const [chart, setChart] = useState<{ list: OptionChartContract[]; index: number } | null>(null);
 
   const onSort = (key: string) => {
     if (key === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -654,14 +660,19 @@ function WatchlistTab({ rows }: { rows: WatchRow[] }) {
     return <EmptyState message="No watchlist rows. The desk publishes one row per index+side once 30m ATM premium history is available." />;
   }
 
-  const open = (r: WatchRow) => {
-    const c = rowToContract(r);
-    if (c) setChartContract(c);
-  };
-
   const activeSide: WatchSide = side === "INS" && !groups.insufficient.length ? "CE" : side;
   const activeRows = activeSide === "CE" ? groups.ce : activeSide === "PE" ? groups.pe : groups.insufficient;
   const isPending = activeSide === "INS";
+
+  // Open the chart on the clicked row, freezing the current side's chartable
+  // legs (in sorted order) so prev/next can step through them.
+  const open = (r: WatchRow) => {
+    const target = rowToContract(r);
+    if (!target) return;
+    const list = activeRows.map(rowToContract).filter((c): c is OptionChartContract => c !== null);
+    const idx = list.findIndex((c) => c.underlying === target.underlying && c.strike === target.strike && c.direction === target.direction);
+    setChart({ list, index: idx >= 0 ? idx : 0 });
+  };
 
   return (
     <Section
@@ -713,7 +724,14 @@ function WatchlistTab({ rows }: { rows: WatchRow[] }) {
         </table>
       </div>
 
-      {chartContract ? <OptionChartModal contract={chartContract} onClose={() => setChartContract(null)} /> : null}
+      {chart && chart.list[chart.index] ? (
+        <OptionChartModal
+          contracts={chart.list}
+          index={chart.index}
+          onIndexChange={(i) => setChart((c) => (c ? { ...c, index: i } : c))}
+          onClose={() => setChart(null)}
+        />
+      ) : null}
     </Section>
   );
 }

@@ -157,10 +157,14 @@ class FeatureEngine:
         annualizer = math.sqrt(252.0 * bars_per_day)
         rv = returns.rolling(int(period_cfg["rv_window"])).std().fillna(0.0) * annualizer
         frame["rv_annualized"] = rv
-        rv_min = float(rv.min()) if not rv.empty else 0.0
-        rv_max = float(rv.max()) if not rv.empty else 0.0
-        denom = max(rv_max - rv_min, 1e-9)
-        frame["rv_percentile"] = ((rv - rv_min) / denom).clip(0.0, 1.0)
+        # CAUSAL percentile — each bar ranks realized vol against ONLY the bars up
+        # to and including itself (expanding rank), never the whole-window min/max.
+        # The old global min/max leaked future vol into every historical bar's
+        # regime/signal labels (lookahead). min_periods keeps early bars neutral.
+        rv_win = max(int(period_cfg["rv_window"]), 2)
+        frame["rv_percentile"] = (
+            rv.expanding(min_periods=rv_win).rank(pct=True).fillna(0.5).clip(0.0, 1.0)
+        )
         frame["range_expansion"] = (
             frame["range_pct"] / frame["range_pct"].rolling(int(period_cfg["range_window"])).mean().replace(0.0, pd.NA)
         ).fillna(1.0)
