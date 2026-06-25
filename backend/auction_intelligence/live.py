@@ -56,7 +56,8 @@ from auction_intelligence.schemas import (
     TradePrint,
 )
 from brokers.base import Tick
-from core.config import auction_of_book_symbols, settings
+from core.config import settings
+from market_data.auction_book import resolve_auction_book_symbols
 from db.database import AsyncSessionLocal
 from market_data import data_router as market_data_router
 from market_data.commodity_runtime_history import load_commodity_history_rows
@@ -208,6 +209,79 @@ async def _fetch_fyers_quote(symbol: str) -> dict[str, Any] | None:
         "ask_size": float(quote.get("ask_size") or quote.get("aq") or 0.0),
         "last_price": float(quote.get("lp") or 0.0),
     }
+
+
+async def _load_index_tick_profile(
+    *,
+    app_symbol: str,
+    symbol_code: str,
+    session_date: date,
+    tick_size: float,
+) -> dict[str, Any] | None:
+    """Build a tick/volume Market Profile from the session's index LTP ticks.
+
+    Aggregates the price histogram server-side (one row per price level rather
+    than streaming ~60k raw ticks) and runs the same POC / 70% value-area
+    expansion the bar TPO engine uses. Index-only — indices have a dense LTP
+    tape but no order book, so this gives a fine-grained intra-session auction
+    read that the 30-minute bar profile can't. Returns None on any failure so
+    it never breaks the analysis response.
+    """
+    from auction_intelligence.market_profile.tick_profile import profile_from_histogram
+
+    session_open, session_close = _session_bounds(symbol_code)
+    start_utc = datetime.combine(session_date, session_open, tzinfo=IST).astimezone(timezone.utc)
+    end_utc = datetime.combine(session_date, session_close, tzinfo=IST).astimezone(timezone.utc)
+    try:
+        async with AsyncSessionLocal() as session:
+            hist_rows = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT floor(ltp / :tick + 0.5) * :tick AS price_bucket, count(*) AS ticks
+                        FROM market_ticks
+                        WHERE symbol = :sym AND time >= :start AND time <= :end
+                          AND ltp IS NOT NULL AND ltp > 0
+                        GROUP BY price_bucket
+                        """
+                    ),
+                    {"sym": app_symbol, "tick": tick_size, "start": start_utc, "end": end_utc},
+                )
+            ).fetchall()
+            agg = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT min(ltp) AS lo, max(ltp) AS hi, count(*) AS n,
+                               (array_agg(ltp ORDER BY time DESC))[1] AS last_ltp,
+                               min(time) AS first_t, max(time) AS last_t
+                        FROM market_ticks
+                        WHERE symbol = :sym AND time >= :start AND time <= :end
+                          AND ltp IS NOT NULL AND ltp > 0
+                        """
+                    ),
+                    {"sym": app_symbol, "start": start_utc, "end": end_utc},
+                )
+            ).first()
+    except Exception as exc:  # noqa: BLE001 — never break the analysis response
+        logger.debug(f"[auction] tick profile load failed for {symbol_code}: {exc}")
+        return None
+
+    if not hist_rows or agg is None or agg.n is None:
+        return None
+    counts = {float(r.price_bucket): int(r.ticks) for r in hist_rows if r.price_bucket is not None}
+    profile = profile_from_histogram(
+        symbol=symbol_code,
+        tick_size=tick_size,
+        counts=counts,
+        high=float(agg.hi),
+        low=float(agg.lo),
+        last=float(agg.last_ltp if agg.last_ltp is not None else agg.hi),
+        total_ticks=int(agg.n),
+        first_time=agg.first_t.isoformat() if agg.first_t else None,
+        last_time=agg.last_t.isoformat() if agg.last_t else None,
+    )
+    return profile.to_dict() if profile else None
 
 
 async def build_live_analysis(symbol_code: str = "NIFTY") -> dict[str, Any]:
@@ -482,6 +556,17 @@ async def _build_analysis_from_session_rows(
         portfolio=PortfolioSnapshot(**request["portfolio"]),
         quote_history=[QuoteSnapshot(**_parse_quote(item)) for item in quote_history_payload],
     )
+    # Tick-based Market Profile from the index LTP tape — a finer, continuously
+    # developing auction read alongside the 30-minute bar TPO. Index-only (the
+    # futures/commodity sources already get their profile from real bars).
+    tick_market_profile = None
+    if not (is_futures_source or is_commodity_futures):
+        tick_market_profile = await _load_index_tick_profile(
+            app_symbol=app_symbol,
+            symbol_code=normalized_symbol,
+            session_date=session_date,
+            tick_size=tick_size,
+        )
     return {
         "mode": "live",
         "scenario": "live_snapshot",
@@ -492,6 +577,7 @@ async def _build_analysis_from_session_rows(
         "available_scenarios": [],
         "request": request,
         "data_status": data_status,
+        "tick_market_profile": tick_market_profile,
         "analysis": _decorate_bundle_for_client(jsonable_encoder(asdict(bundle))),
     }
 
@@ -1098,7 +1184,7 @@ async def _build_order_flow_inputs(
     # delivering enough sized ticks (after-hours, or no depth), fall back to
     # the index rows so behaviour degrades to the legacy path, never worse.
     snapshot_end = _row_time(current_rows[-1]).astimezone(timezone.utc)
-    book_symbol = auction_of_book_symbols().get(app_symbol)
+    book_symbol = resolve_auction_book_symbols().get(app_symbol)
     using_book = bool(book_symbol)
     recent_ticks = await _fetch_recent_tick_rows(
         book_symbol or app_symbol,

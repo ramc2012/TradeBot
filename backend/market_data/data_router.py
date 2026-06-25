@@ -9,8 +9,9 @@ from typing import Any, Callable, Dict, List, Optional
 from loguru import logger
 
 from brokers.base import BrokerAdapter, Tick
-from core.config import auction_of_book_symbols, settings
+from core.config import settings
 from db.redis_client import get_redis
+from market_data.auction_book import resolve_auction_book_symbols
 from market_data.symbols import (
     TICK_CAPTURE_APP_SYMBOLS,
     to_app_symbol,
@@ -60,7 +61,7 @@ class DataRouter:
             # market_ticks for the auction-intelligence order-flow path. Empty
             # unless AUCTION_OF_BOOK_SYMBOLS is configured → zero change to the
             # default index-only capture. (P1b, 2026-06-03.)
-            to_app_symbol(s) for s in auction_of_book_symbols().values()
+            to_app_symbol(s) for s in resolve_auction_book_symbols().values()
         ]
         self._callbacks: Dict[str, List[Callable[[Tick], None]]] = {}
         self._global_callbacks: List[Callable[[Tick], None]] = []

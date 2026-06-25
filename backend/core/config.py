@@ -184,6 +184,15 @@ class Settings(BaseSettings):
     # capture set so their ticks land in market_ticks. Flag-gated so it can be
     # enabled + verified during a live RTH session without risking the default.
     AUCTION_OF_BOOK_SYMBOLS: str = ""
+    # Auto-resolve the front-month index FUTURES as the order-flow book contract
+    # (futures carry real bid/ask depth + tape; the index spot does not), so the
+    # auction lane can stream genuine order flow instead of bar-inference. When
+    # ON, the resolved {index→front-month-future} map is pinned onto the tick-
+    # capture WS so depth lands in market_ticks. Default OFF → unchanged (index
+    # spot only); the contract rolls monthly so enabling needs a live session to
+    # confirm the broker delivers depth, and a restart picks up the next roll.
+    AUCTION_OF_AUTO_FUTURES_BOOK: bool = False
+    AUCTION_OF_FUTURES_INDICES: str = "NIFTY,BANKNIFTY"
     FRACTAL_MARKET_PROFILE_AUTO_ENABLED: bool = True
     FRACTAL_MARKET_PROFILE_AUTO_INTERVAL_SECONDS: int = 300
     DIRECTIONAL_OPTIONS_AUTO_ENABLED: bool = True

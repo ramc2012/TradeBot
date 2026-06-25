@@ -164,6 +164,25 @@ export type RagContext = {
   retrievals?: RagRetrieval[];
 } | null;
 
+export type TickProfile = {
+  kind?: string;
+  symbol?: string;
+  tick_size?: number;
+  value_area_pct?: number;
+  poc?: number;
+  vah?: number;
+  val?: number;
+  high_price?: number;
+  low_price?: number;
+  last_price?: number;
+  total_ticks?: number;
+  total_volume?: number;
+  first_time?: string | null;
+  last_time?: string | null;
+  // price (string) → { ticks, volume }
+  histogram?: Record<string, { ticks?: number; volume?: number }>;
+};
+
 export type Snapshot = {
   mode?: string;
   symbol_code?: string;
@@ -171,6 +190,7 @@ export type Snapshot = {
   available_symbols?: string[];
   data_status?: DataStatus;
   rag_context?: RagContext;
+  tick_market_profile?: TickProfile | null;
   request?: {
     session?: { last_price?: number; minutes_to_close?: number; broker_connected?: boolean };
     quote?: Record<string, unknown>;

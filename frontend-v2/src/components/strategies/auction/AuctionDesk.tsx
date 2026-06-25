@@ -12,7 +12,7 @@
  */
 import { useMemo, useState, useTransition } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Brain, Compass, Gauge, ListChecks, Map as MapIcon, Radio, ShieldAlert, TrendingUp } from "lucide-react";
+import { Activity, BarChart3, Brain, Compass, Gauge, ListChecks, Map as MapIcon, Radio, ShieldAlert, TrendingUp } from "lucide-react";
 
 import {
   DeskShell,
@@ -38,7 +38,7 @@ import { api as apiClient } from "@/lib/api";
 import { AgentDecisions } from "./AgentDecisions";
 import { GatesPanel } from "./GatesPanel";
 import { RagMemory } from "./RagMemory";
-import type { ExecutionStep, NtmVolx, Regime, Risk, Snapshot } from "./types";
+import type { ExecutionStep, NtmVolx, Regime, Risk, Snapshot, TickProfile } from "./types";
 
 const TABS = [
   { key: "auction", label: "Auction", icon: MapIcon },
@@ -213,6 +213,8 @@ function AuctionTab({
         <RegimeCard regime={regime} risk={analysis?.risk} />
       </div>
 
+      <TickProfileCard tick={snap?.tick_market_profile} spot={spot} />
+
       <OrderFlowPanel of={of} />
 
       <AgentDecisions decisions={analysis?.agent_decisions} />
@@ -222,6 +224,98 @@ function AuctionTab({
         <NtmVolxCard ntm={analysis?.ntm_volx} />
       </div>
     </div>
+  );
+}
+
+// Tick-based Market Profile — POC / value area + a price histogram built from
+// the index LTP tape (server-side `tick_market_profile`). Complements the
+// 30-minute bar TPO with a finer, continuously-developing auction read.
+function TickProfileCard({ tick, spot }: { tick?: TickProfile | null; spot: number | null }) {
+  if (!tick || !tick.histogram || !tick.total_ticks) {
+    return (
+      <Section
+        title="Market profile (tick)"
+        icon={<BarChart3 size={16} />}
+        description="Live tick / volume profile from the index tape"
+      >
+        <div className="py-6 text-center text-sm text-text-muted">
+          No tick profile yet — it accrues from the live index tape during the session.
+        </div>
+      </Section>
+    );
+  }
+
+  const lo = Number(tick.low_price ?? 0);
+  const hi = Number(tick.high_price ?? 0);
+  const poc = Number(tick.poc ?? 0);
+  const vah = Number(tick.vah ?? 0);
+  const val = Number(tick.val ?? 0);
+  const last = Number(tick.last_price ?? spot ?? 0);
+  const tickSize = Number(tick.tick_size ?? 0.5) || 0.5;
+
+  // Downsample the (often ~600) tick-ladder levels into ~48 display bins.
+  const BINS = 48;
+  const span = hi - lo;
+  const step = span > 0 ? span / BINS : tickSize;
+  const bins = Array.from({ length: BINS }, (_, i) => ({ lo: lo + i * step, hi: lo + (i + 1) * step, ticks: 0 }));
+  for (const [priceStr, cell] of Object.entries(tick.histogram)) {
+    const price = Number(priceStr);
+    let idx = step > 0 ? Math.floor((price - lo) / step) : 0;
+    if (idx < 0) idx = 0;
+    if (idx >= BINS) idx = BINS - 1;
+    bins[idx].ticks += Number(cell?.ticks ?? 0);
+  }
+  const maxTicks = Math.max(1, ...bins.map((b) => b.ticks));
+
+  return (
+    <Section
+      title="Market profile (tick)"
+      icon={<BarChart3 size={16} />}
+      description={`${tick.symbol || ""} · ${formatNumber(tick.total_ticks, 0)} ticks · POC ${formatNumber(poc, 1)} · VA ${formatNumber(val, 0)}–${formatNumber(vah, 0)}`}
+      rightSlot={<StatusBadge label="live tape" variant="info" />}
+    >
+      <div className="mb-3 grid grid-cols-2 gap-2.5 md:grid-cols-5">
+        <MetricTile size="sm" label="POC" value={formatNumber(poc, 1)} />
+        <MetricTile size="sm" label="VAH" value={formatNumber(vah, 1)} color="text-accent-blue" />
+        <MetricTile size="sm" label="VAL" value={formatNumber(val, 1)} color="text-accent-blue" />
+        <MetricTile size="sm" label="Last" value={formatNumber(last, 1)} color={tone(last - poc)} />
+        <MetricTile size="sm" label="Range" value={formatNumber(span, 0)} detail={`${formatNumber(lo, 0)}–${formatNumber(hi, 0)}`} />
+      </div>
+      {/* Histogram, high → low. Amber = POC, blue = value area, green ring = last. */}
+      <div className="space-y-[2px]">
+        {bins
+          .slice()
+          .reverse()
+          .map((b, i) => {
+            const mid = (b.lo + b.hi) / 2;
+            const pct = (b.ticks / maxTicks) * 100;
+            const isPoc = poc >= b.lo && poc < b.hi;
+            const inVA = mid >= val && mid <= vah;
+            const hasLast = last >= b.lo && last < b.hi;
+            const barColor = isPoc ? "bg-accent-amber" : inVA ? "bg-accent-blue/70" : "bg-bg-active/60";
+            return (
+              <div
+                key={i}
+                className={`flex items-center gap-2 ${hasLast ? "rounded-sm ring-1 ring-accent-green/50" : ""}`}
+              >
+                <span
+                  className={`w-14 shrink-0 text-right font-mono text-[10px] ${
+                    isPoc ? "text-accent-amber" : hasLast ? "text-accent-green" : "text-text-muted"
+                  }`}
+                >
+                  {formatNumber(mid, 0)}
+                </span>
+                <div className="h-3 flex-1 overflow-hidden rounded-sm bg-bg-secondary/20">
+                  <div className={`h-full rounded-sm ${barColor}`} style={{ width: `${pct}%` }} />
+                </div>
+                <span className="w-10 shrink-0 text-right font-mono text-[10px] text-text-muted">
+                  {b.ticks ? formatNumber(b.ticks, 0) : ""}
+                </span>
+              </div>
+            );
+          })}
+      </div>
+    </Section>
   );
 }
 
