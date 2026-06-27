@@ -5,6 +5,7 @@ import math
 from datetime import time
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from analysis.macd_engine import compute_ema, compute_macd
@@ -23,6 +24,35 @@ TIMEFRAME_TO_PANDAS = {
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
 SESSION_MINUTES = ((MARKET_CLOSE.hour * 60) + MARKET_CLOSE.minute) - ((MARKET_OPEN.hour * 60) + MARKET_OPEN.minute)
+
+
+def _trend_tstat(vals: np.ndarray) -> float:
+    """OLS t-statistic of log(price) ~ bar-index over a window.
+
+    A volatility-robust trend backbone for the multi-factor view: the slope is
+    scaled by its own standard error, so a clean persistent advance scores high
+    while a noisy/choppy one (same net move, more wiggle) scores low — unlike a
+    raw EMA spread. Bounded to +/-10 so one window can't dominate the tanh.
+    """
+    y = np.log(np.clip(np.asarray(vals, dtype=float), 1e-9, None))
+    n = y.size
+    if n < 4:
+        return 0.0
+    x = np.arange(n, dtype=float)
+    xbar = x.mean()
+    sxx = float(((x - xbar) ** 2).sum())
+    if sxx <= 0.0:
+        return 0.0
+    ybar = float(y.mean())
+    slope = float(((x - xbar) * (y - ybar)).sum() / sxx)
+    resid = y - (ybar + slope * (x - xbar))
+    sse = float((resid ** 2).sum())
+    if sse <= 0.0 or n <= 2:
+        return 0.0
+    se = math.sqrt(sse / (n - 2) / sxx)
+    if se <= 0.0:
+        return 0.0
+    return float(max(-10.0, min(10.0, slope / se)))
 
 
 def timeframe_minutes(timeframe: str) -> int:
@@ -193,6 +223,18 @@ class FeatureEngine:
             + (frame["ema_spread_pct"].abs() / 0.01).clip(0.0, 1.0) * 0.30
             + di_separation.clip(0.0, 1.0) * 0.25
         ).clip(0.0, 1.0)
+
+        # Multi-factor-view inputs (always computed; consumed only when the view
+        # flag is on). trend_tstat = vol-robust trend backbone; htf_trend_pct =
+        # long-window trend proxy on the decision frame for HTF alignment.
+        tstat_win = max(int(period_cfg.get("trend_tstat_window", 20)), 4)
+        frame["trend_tstat"] = (
+            frame["close"].rolling(tstat_win).apply(_trend_tstat, raw=True).fillna(0.0)
+        )
+        htf_win = max(int(period_cfg.get("htf_trend_window", 50)), 2)
+        frame["htf_trend_pct"] = (
+            (frame["close"] - frame["close"].shift(htf_win)) / frame["close"].replace(0.0, float("nan"))
+        ).fillna(0.0)
 
         warmup = int(self.config["warmup_bars"])
         if len(frame.index) > warmup:

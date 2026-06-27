@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from analysis.instruments import normalize_index_contract_expiry
 from core.paper_trade_recorder import paper_trade_recorder
+from core.trading_calendar import trading_calendar
 from db.database import AsyncSessionLocal
 from directional_options.config import DEFAULT_CONFIG, DIRECTIONAL_INITIAL_CAPITAL
 from directional_options.exits import evaluate_exit
@@ -147,6 +148,7 @@ class DirectionalOptionsPaperStore:
         policy: DirectionalPolicy | None = None,
         exit_config: dict[str, Any] | None = None,
         cost_config: dict[str, Any] | None = None,
+        positional: dict[str, Any] | None = None,
     ):
         self.root = Path(root)
         if not self.root.is_absolute():
@@ -167,6 +169,11 @@ class DirectionalOptionsPaperStore:
         self.min_hold_bars = int(min_hold_bars)
         self.one_position_per_symbol = bool(one_position_per_symbol)
         self.policy = policy
+        # 1-2 day positional tunables (None → legacy 5-min intraday behaviour).
+        # Set only when settings.DIRECTIONAL_POSITIONAL_MODE_ENABLED is on; the
+        # service passes config['positional'] in that case. Gates the
+        # session-clock held-time, confirmed-flip, and ATR adaptive exits.
+        self.positional = dict(positional) if positional else None
 
     async def list_journal(self, symbol: str | None = None, limit: int = 50) -> dict[str, Any]:
         records = await self._load_journal()
@@ -737,7 +744,15 @@ class DirectionalOptionsPaperStore:
         tf_min = _TIMEFRAME_MINUTES.get(str(position.get("timeframe") or ""), 5)
         held_bars = 0
         if opened is not None:
-            held_bars = max(0, int((now_dt - opened).total_seconds() // 60 // max(tf_min, 1)))
+            if self.positional:
+                # 1-2 day hold: count only TRADING-SESSION minutes so the
+                # overnight / weekend / holiday gap can't inflate the horizon and
+                # force a spurious close at the next session open. (now_dt is
+                # UTC; the calendar normalises both ends to IST.)
+                session_min = trading_calendar.trading_minutes_between("NSE", opened, now_dt)
+                held_bars = max(0, int(session_min // max(tf_min, 1)))
+            else:
+                held_bars = max(0, int((now_dt - opened).total_seconds() // 60 // max(tf_min, 1)))
         max_horizon_bars = _safe_int_or_none(position.get("expected_horizon_bars")) or 0
         expiry_d = _parse_date_only(position.get("expiry"))
         expiry_days_left = max((expiry_d - now_dt.date()).days, 0) if expiry_d is not None else None

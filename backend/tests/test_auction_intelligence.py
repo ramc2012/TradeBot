@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 import sys
 
@@ -26,6 +26,8 @@ from auction_intelligence.live import (
     _group_rows_by_session,
     _load_portfolio_snapshot,
     _normalize_portfolio_symbol,
+    _row_time,
+    _select_snapshot_rows,
     available_live_symbols,
 )
 from auction_intelligence.market_profile import MarketProfileEngine
@@ -3227,3 +3229,65 @@ def test_durable_mp_persist_spools_when_postgres_is_unavailable(monkeypatch, tmp
     assert persisted == 0
     assert spooled_rows[-1]["date"] == "2026-04-20"
     assert durable_rows[-1]["poc"] == row["poc"]
+
+
+# ── Session-state selection (closed-market = full completed session) ──────────
+# Regression cover for the removal of the hardcoded 12:20 IST "historical_replay"
+# freeze: when the market is closed the lane must present the FULL completed last
+# session (like a real paper/live system at rest), not a mid-session truncation.
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _make_full_session_rows(day: date) -> list[dict[str, object]]:
+    """1-minute rows spanning the full NSE RTH (09:15–15:30 IST) for `day`."""
+    rows: list[dict[str, object]] = []
+    cursor = datetime(day.year, day.month, day.day, 9, 15, tzinfo=_IST)
+    end = datetime(day.year, day.month, day.day, 15, 30, tzinfo=_IST)
+    price = 24000.0
+    while cursor <= end:
+        rows.append(
+            {
+                "time": cursor.isoformat(),
+                "open": price,
+                "high": price + 5,
+                "low": price - 5,
+                "close": price + 1,
+                "volume": 0,
+            }
+        )
+        cursor += timedelta(minutes=1)
+        price += 0.5
+    return rows
+
+
+def test_select_snapshot_rows_closed_market_returns_full_completed_session():
+    # A past trading day → market is closed relative to "now", so the closed
+    # branch fires. The old code truncated everything after 12:20 IST.
+    rows = _make_full_session_rows(date(2026, 3, 13))  # a Friday
+    selected, snap_time, mode = _select_snapshot_rows(rows, symbol_code="NIFTY")
+
+    assert mode == "completed_session"                       # not "historical_replay"
+    assert len(selected) == len(rows)                        # full session, no truncation
+    assert snap_time.astimezone(_IST).time() == time(15, 30)  # ends at the close, not 12:20
+    # The 12:20 freeze would have dropped these; confirm they survive.
+    assert any(_row_time(r).time() > time(12, 20) for r in selected)
+
+
+def test_select_snapshot_rows_explicit_cursor_is_historical_replay():
+    rows = _make_full_session_rows(date(2026, 3, 13))
+    selected, _snap, mode = _select_snapshot_rows(
+        rows, snapshot_cutoff=time(12, 0), symbol_code="NIFTY"
+    )
+    assert mode == "historical_replay"
+    assert selected and all(_row_time(r).time() <= time(12, 0) for r in selected)
+
+
+def test_select_snapshot_rows_observation_bars_replay_preserved():
+    # The legitimate shadow/backfill replay path (observation_bars) is unchanged.
+    rows = _make_full_session_rows(date(2026, 3, 13))
+    selected, _snap, mode = _select_snapshot_rows(
+        rows, observation_bars=4, symbol_code="NIFTY"
+    )
+    assert mode == "historical_replay"
+    assert 0 < len(selected) < len(rows)

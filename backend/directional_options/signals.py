@@ -10,8 +10,10 @@ those into the policy would just teach it that flat tape doesn't pay
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Optional
 
+from core.config import settings
 from directional_options.features import timeframe_minutes
 from directional_options.schemas import DirectionalSignal, RegimeSnapshot
 
@@ -22,13 +24,101 @@ from directional_options.schemas import DirectionalSignal, RegimeSnapshot
 MAX_SIGNAL_CONFIDENCE = 0.85
 
 
+def _sign(value: Any) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return 1.0 if v > 0.0 else (-1.0 if v < 0.0 else 0.0)
+
+
+def _safe(value: Any) -> float:
+    try:
+        return float(value) if value is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class DirectionalSignalEngine:
     """Generate directional expected-move forecasts on the underlying."""
 
-    def __init__(self, config: dict[str, Any]):
+    def __init__(self, config: dict[str, Any], view_config: dict[str, Any] | None = None):
         self.config = config
+        # Multi-factor-view weights/gates (DEFAULT_CONFIG['view']); consumed only
+        # when settings.DIRECTIONAL_MULTIFACTOR_VIEW_ENABLED. Empty → inline defaults.
+        self.view = dict(view_config or {})
 
-    def predict(self, row, regime: RegimeSnapshot, timeframe: str) -> Optional[DirectionalSignal]:
+    def _multifactor_view(self, *, row, regime: RegimeSnapshot, chain, close, atr):
+        """Form (direction, conviction, confidence) from a sign-constrained
+        confluence of orthogonal families. Each term is tanh-bounded so no single
+        input dominates; chain terms are RAW (no causal normalization yet). GEX is
+        a conviction damper, NOT a directional vote (its 1-2 day / NSE edge is
+        unproven). Returns (None, 0, 0) is never used — direction is always set."""
+        v = self.view
+        atr_v = max(float(atr), 1e-9)
+        atr_pct = max(float(row.get("atr_pct", 0.0)), 1e-6)
+        ema_slow = float(row.get("ema_slow", close) or close)
+        trend_tstat = float(row.get("trend_tstat", 0.0))
+        macd_hist_pct = float(row.get("macd_hist_pct", 0.0))
+        adx = float(row.get("adx", 0.0))
+        htf_trend = float(row.get("htf_trend_pct", 0.0))
+
+        # Price families (orthogonalized): vol-robust trend backbone, ATR-extension,
+        # ATR-normalized acceleration (MACD histogram 2nd-derivative).
+        trend_term = math.tanh(trend_tstat / 2.0)
+        ext_term = math.tanh((float(close) - ema_slow) / atr_v)
+        acc_term = math.tanh(macd_hist_pct / atr_pct)
+
+        # Chain tilt (live, raw-bounded): 25Δ risk reversal — calls richer than puts
+        # (RR>0) leans bullish; pick the cheaper wing downstream. Degrades to 0 if no
+        # chain / no ATM IV.
+        ch = chain or {}
+        atm_iv = float(ch.get("atm_iv") or 0.0)
+        skew_term = 0.0
+        rr = ch.get("risk_reversal_25d")
+        if rr is not None and atm_iv > 0.0:
+            skew_term = math.tanh((float(rr) / atm_iv) * float(v.get("skew_scale", 8.0)))
+        # Flow term wired but held at w_flow=0 by default: dex/OI sign convention is
+        # unvalidated for NSE and the adversarial review flagged flow as mostly noise.
+        flow_term = math.tanh(_sign(ch.get("dex_net")) * float(v.get("flow_scale", 1.0)))
+
+        score = (
+            float(v.get("w_trend", 1.0)) * trend_term
+            + float(v.get("w_extension", 0.35)) * ext_term
+            + float(v.get("w_acceleration", 0.30)) * acc_term
+            + float(v.get("w_skew", 0.45)) * skew_term
+            + float(v.get("w_flow", 0.0)) * flow_term
+        )
+        # Chop gate: attenuate when ADX is below the trend-strength floor.
+        if adx < float(v.get("adx_floor", 25.0)):
+            score *= float(v.get("adx_attenuation", 0.45))
+        # HTF alignment: penalize a view that opposes the longer-window trend.
+        if htf_trend != 0.0 and (score > 0.0) != (htf_trend > 0.0):
+            score *= float(v.get("htf_align_penalty", 0.55))
+
+        direction = "CE" if score >= 0.0 else "PE"
+        conviction = abs(score)
+        # Dealer-gamma regime damper on conviction (NOT direction): +GEX (pinning/
+        # mean-revert) shrinks; -GEX (trending/amplifying) lifts. Prefer dealer GEX.
+        gex = ch.get("dealer_gex_total")
+        if gex is None:
+            gex = ch.get("gex_total")
+        if gex is not None:
+            if float(gex) > 0.0:
+                conviction *= 1.0 - float(v.get("gex_damp_max", 0.40))
+            elif float(gex) < 0.0:
+                conviction *= 1.0 + float(v.get("gex_amplify_max", 0.30))
+
+        confidence = min(MAX_SIGNAL_CONFIDENCE, 0.42 + conviction * 0.45 + regime.confidence * 0.20)
+        return direction, conviction, confidence
+
+    def predict(
+        self,
+        row,
+        regime: RegimeSnapshot,
+        timeframe: str,
+        chain: dict[str, Any] | None = None,
+    ) -> Optional[DirectionalSignal]:
         # NOTE: the `regime.trade_allowed` gate was removed in the RL
         # refactor. Per the design directive, regimes are FEATURES (the
         # policy sees the label as a one-hot), not barriers. The bandit
@@ -48,32 +138,42 @@ class DirectionalSignalEngine:
         range_expansion = float(row.get("range_expansion", 1.0))
         rv_pct = float(row.get("rv_percentile", 0.0))
 
-        bull_score = (ema_spread * 180.0) + breakout_up + max(di_bias, 0.0) + max(momentum_3, 0.0) * 12.0 + max(momentum_8, 0.0) * 8.0
-        bear_score = (-ema_spread * 180.0) + breakout_down + max(-di_bias, 0.0) + max(-momentum_3, 0.0) * 12.0 + max(-momentum_8, 0.0) * 8.0
-
-        direction = "CE" if bull_score >= bear_score else "PE"
-        direction_score = bull_score if direction == "CE" else bear_score
-        # Floor lowered to ~0 so the policy sees ALL non-dead bars,
-        # including chop / risk_off. The bandit's one-hot regime feature
-        # captures the regime context; the value posterior will turn
-        # negative for chop and the policy will Thompson-skip those
-        # trades on its own. We only filter literal zero-momentum bars
-        # (where every momentum/breakout/DI input is exactly 0.0) to
-        # avoid feeding the model degenerate features.
         min_direction_score = float(self.config.get("min_direction_score_floor", 0.001))
-        if direction_score <= min_direction_score:
-            return None
 
-        confidence = min(
-            MAX_SIGNAL_CONFIDENCE,
-            0.42
-            + (direction_score * 0.18)
-            + regime.confidence * 0.28
-            + (self.config["breakout_confidence_bonus"] if regime.label == "breakout" else 0.0),
-        )
-        # NOTE: no hard min_confidence cutoff anymore. Low-confidence
-        # signals pass through to the policy, which decides act/skip from
-        # the learned R-multiple posterior.
+        if settings.DIRECTIONAL_MULTIFACTOR_VIEW_ENABLED:
+            # MULTI-FACTOR VIEW: direction is formed from a regime-gated,
+            # sign-constrained confluence of orthogonal families (trend backbone +
+            # ATR-extension + acceleration + LIVE 25Δ skew tilt), attenuated by an
+            # ADX/chop gate and HTF alignment, with conviction damped by the dealer
+            # gamma regime. Unlike the legacy momentum sum, the chain tilt can FLIP
+            # the side, not merely confirm it. Degrades to price-only if chain=None.
+            direction, direction_score, confidence = self._multifactor_view(
+                row=row, regime=regime, chain=chain, close=close, atr=atr
+            )
+            if direction is None or direction_score <= min_direction_score:
+                return None
+        else:
+            # LEGACY collinear price-momentum sum. Floor ~0 so the policy sees ALL
+            # non-dead bars; the bandit's regime one-hot captures context and the
+            # value posterior Thompson-skips chop on its own. Only literal
+            # zero-momentum bars are filtered.
+            bull_score = (ema_spread * 180.0) + breakout_up + max(di_bias, 0.0) + max(momentum_3, 0.0) * 12.0 + max(momentum_8, 0.0) * 8.0
+            bear_score = (-ema_spread * 180.0) + breakout_down + max(-di_bias, 0.0) + max(-momentum_3, 0.0) * 12.0 + max(-momentum_8, 0.0) * 8.0
+
+            direction = "CE" if bull_score >= bear_score else "PE"
+            direction_score = bull_score if direction == "CE" else bear_score
+            if direction_score <= min_direction_score:
+                return None
+
+            confidence = min(
+                MAX_SIGNAL_CONFIDENCE,
+                0.42
+                + (direction_score * 0.18)
+                + regime.confidence * 0.28
+                + (self.config["breakout_confidence_bonus"] if regime.label == "breakout" else 0.0),
+            )
+        # NOTE: no hard min_confidence cutoff in either path — low-confidence
+        # signals pass through to the policy/meta-model, which decides act/skip.
 
         if regime.label == "breakout":
             horizon_bars = int(self.config["short_horizon_bars"])

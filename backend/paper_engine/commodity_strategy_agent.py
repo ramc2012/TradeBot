@@ -121,11 +121,21 @@ FUTURES_BREAK_EVEN_R_MULTIPLIER = 1.0
 FUTURES_PARTIAL_LOCK_R_MULTIPLIER = 1.5
 FUTURES_TARGET_ARM_R_MULTIPLIER = 2.0
 FUTURES_MIN_STOP_PCT = 0.005
+# Wider, range-adaptive stop used only when settings.COMMODITY_STOP_WIDENING_ENABLED
+# is True (see config). floor 0.8% so quiet names aren't given absurd room, and a
+# 2.0× ATR term so volatile names get real breathing space above that floor.
+FUTURES_MIN_STOP_PCT_WIDE = 0.008
+FUTURES_ATR_STOP_MULT = 2.0
 COMMODITY_DAILY_LOSS_LIMIT = 25_000.0
 COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT = 15_000.0
 COMMODITY_STOP_COOLDOWN_MINUTES = 60
 COMMODITY_EVENT_BLOCK_MINUTES = 90
 COMMODITY_MAX_DRAWDOWN_PCT = 15.0
+# Exit reasons that count as a protective stop-out (vs a discretionary / flat
+# exit) for the longer post-stop cooldown.
+COMMODITY_STOP_EXIT_REASONS = frozenset(
+    {"stop_loss", "hard_stop", "trail_stop", "runner_trail_stop", "trailing_stoploss"}
+)
 
 # Options sleeve deprecated — constants intentionally removed. Historical option
 # trades remain in the persisted trade_history for audit only.
@@ -661,6 +671,16 @@ class CommodityRuntime:
     futures_watchlist: list[dict[str, Any]] = field(default_factory=list)
     processed_signals: dict[str, str] = field(default_factory=dict)
     signal_audit: list[dict[str, Any]] = field(default_factory=list)
+    # Eviction-proof cooldown timestamps (per canonical root). The `orders`
+    # buffer is capped at DEFAULT_COMMODITY_ORDERS_MAX (80) rows, so on a busy
+    # multi-symbol 1-min session an exit row can be evicted from the buffer while
+    # its re-entry / stop cooldown is still in force — silently failing the
+    # cooldown OPEN and letting the lane re-enter the same name immediately (a
+    # churn driver). These maps are never truncated within a session and back the
+    # cooldown checks so buffer eviction can't defeat them. Not persisted across
+    # restart (the restored `orders` buffer covers that window).
+    last_exit_at: dict[str, datetime] = field(default_factory=dict)
+    last_stop_at: dict[str, datetime] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1245,6 +1265,67 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         detail = f"{bias} ({'; '.join(parts)})" if parts else bias
         return bias, detail
 
+    def _naked_poc_target(
+        self,
+        underlying: str,
+        price: float,
+        target_price: Optional[float],
+        signal_dir: Optional[str],
+    ) -> Optional[float]:
+        """R4: structure-anchored exit target. If a prior-session POC (prev-day /
+        this-week / this-month) lies between entry and the blind R-multiple target
+        in the trade direction — and at least MIN_R_FRACTION of the way there —
+        return it (the nearest such POC) to use as the target. These prior POCs are
+        the "unfinished business" magnets price tends to revisit. Returns None when
+        no qualifying POC exists (caller keeps the R-multiple target)."""
+        if price <= 0 or target_price is None:
+            return None
+        try:
+            from paper_engine import commodity_profile_store as profile_store
+
+            today = _now_ist().date()
+            aggs = (
+                profile_store.previous_day(underlying, today),
+                profile_store.this_week(underlying, today),
+                profile_store.this_month(underlying, today),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[commodity] naked-POC target load failed for {underlying}: {exc}")
+            return None
+
+        pocs: list[float] = []
+        for agg in aggs:
+            if not agg:
+                continue
+            raw = agg.get("poc")
+            if raw is None:
+                continue
+            try:
+                pocs.append(float(raw))
+            except (TypeError, ValueError):
+                continue
+        if not pocs:
+            return None
+
+        full_dist = abs(float(target_price) - price)
+        if full_dist <= 0:
+            return None
+        min_dist = full_dist * float(settings.COMMODITY_NAKED_POC_MIN_R_FRACTION)
+        is_buy = str(signal_dir or "").upper() == "BUY"
+        tgt = float(target_price)
+        qualifying: list[float] = []
+        for poc in pocs:
+            if is_buy:
+                if price + min_dist <= poc <= tgt:
+                    qualifying.append(poc)
+            else:
+                if tgt <= poc <= price - min_dist:
+                    qualifying.append(poc)
+        if not qualifying:
+            return None
+        # Nearest magnet in the trade direction (first level price would reach).
+        return round(min(qualifying) if is_buy else max(qualifying), 2)
+
     def _has_underlying_position(self, strategy_key: str, underlying: str) -> bool:
         return any(
             position.strategy_key == strategy_key and position.underlying == underlying
@@ -1286,24 +1367,41 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 total += float(trade.pnl)
         return total
 
-    def _recent_stop_cooldown_reason(self, underlying: str, now: Optional[datetime] = None) -> Optional[str]:
-        current = now or _now_ist()
-        stop_reasons = {"stop_loss", "hard_stop", "trail_stop", "runner_trail_stop", "trailing_stoploss"}
+    def _most_recent_exit_dt(self, underlying: str, *, stop_only: bool) -> Optional[datetime]:
+        """Most recent exit time for an underlying, eviction-proof.
+
+        Combines the per-root timestamp maps (never truncated within a session)
+        with a scan of the bounded `orders` buffer (covers state restored from
+        disk after a restart, before any new exit re-stamps the map). Returns the
+        latest of the two so the cooldown can't be defeated by buffer eviction.
+        """
+        candidates: list[datetime] = []
+        root = extract_commodity_root(underlying)
+        stamped = (self._runtime.last_stop_at if stop_only else self._runtime.last_exit_at).get(root)
+        if stamped is not None:
+            candidates.append(stamped if stamped.tzinfo else stamped.replace(tzinfo=IST))
         for order in self._runtime.orders:
             if str(order.get("flow") or "") != "exit":
                 continue
-            reason = str(order.get("reason") or "")
-            if reason not in stop_reasons:
+            if stop_only and str(order.get("reason") or "") not in COMMODITY_STOP_EXIT_REASONS:
                 continue
             if not _symbol_matches_underlying(str(order.get("symbol") or ""), underlying):
                 continue
             exit_time = _parse_datetime(order.get("time"))
             if exit_time is None:
                 continue
-            minutes_since_stop = (current - exit_time.astimezone(IST)).total_seconds() / 60.0
-            if 0 <= minutes_since_stop < COMMODITY_STOP_COOLDOWN_MINUTES:
-                remaining = max(1, int(COMMODITY_STOP_COOLDOWN_MINUTES - minutes_since_stop))
-                return f"recent stop-out on {extract_commodity_root(underlying)}; cooldown {remaining}m remaining"
+            candidates.append(exit_time.astimezone(IST))
+        return max(candidates) if candidates else None
+
+    def _recent_stop_cooldown_reason(self, underlying: str, now: Optional[datetime] = None) -> Optional[str]:
+        current = now or _now_ist()
+        exit_dt = self._most_recent_exit_dt(underlying, stop_only=True)
+        if exit_dt is None:
+            return None
+        minutes_since_stop = (current - exit_dt).total_seconds() / 60.0
+        if 0 <= minutes_since_stop < COMMODITY_STOP_COOLDOWN_MINUTES:
+            remaining = max(1, int(COMMODITY_STOP_COOLDOWN_MINUTES - minutes_since_stop))
+            return f"recent stop-out on {extract_commodity_root(underlying)}; cooldown {remaining}m remaining"
         return None
 
     def _recent_exit_cooldown_reason(self, underlying: str, now: Optional[datetime] = None) -> Optional[str]:
@@ -1315,18 +1413,13 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         if minutes <= 0:
             return None
         current = now or _now_ist()
-        for order in self._runtime.orders:
-            if str(order.get("flow") or "") != "exit":
-                continue
-            if not _symbol_matches_underlying(str(order.get("symbol") or ""), underlying):
-                continue
-            exit_time = _parse_datetime(order.get("time"))
-            if exit_time is None:
-                continue
-            minutes_since_exit = (current - exit_time.astimezone(IST)).total_seconds() / 60.0
-            if 0 <= minutes_since_exit < minutes:
-                remaining = max(1, int(minutes - minutes_since_exit))
-                return f"recent exit on {extract_commodity_root(underlying)}; re-entry cooldown {remaining}m remaining"
+        exit_dt = self._most_recent_exit_dt(underlying, stop_only=False)
+        if exit_dt is None:
+            return None
+        minutes_since_exit = (current - exit_dt).total_seconds() / 60.0
+        if 0 <= minutes_since_exit < minutes:
+            remaining = max(1, int(minutes - minutes_since_exit))
+            return f"recent exit on {extract_commodity_root(underlying)}; re-entry cooldown {remaining}m remaining"
         return None
 
     def _entry_risk_block(self, underlying: str, now: Optional[datetime] = None) -> Optional[dict[str, str]]:
@@ -2909,7 +3002,12 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             # the FUTURES_MIN_STOP_PCT floor so we don't end up with absurdly
             # tight stops. Falls back to the ATR/MP-level rule for any signal
             # that didn't carry an explicit hint.
-            min_stop_distance = max(atr, price * FUTURES_MIN_STOP_PCT)
+            if settings.COMMODITY_STOP_WIDENING_ENABLED:
+                # Range-adaptive + wider: ATR multiple wins on volatile names,
+                # the 0.8% floor binds on quiet ones. Off by default.
+                min_stop_distance = max(atr * FUTURES_ATR_STOP_MULT, price * FUTURES_MIN_STOP_PCT_WIDE)
+            else:
+                min_stop_distance = max(atr, price * FUTURES_MIN_STOP_PCT)
             stop_hint = row.get("stop_hint")
             try:
                 stop_hint_f = float(stop_hint) if stop_hint is not None else None
@@ -2937,6 +3035,16 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                             stop_candidates.append(level_value)
                 stop_price = min(stop_candidates)
                 target_price = price - ((stop_price - price) * target_r)
+
+            # R4: anchor the target to a naked/virgin prior-session POC when one
+            # sits between entry and the R-multiple target (structure-anchored
+            # exit). Target-only — never changes entry/stop. Off by default.
+            if settings.COMMODITY_NAKED_POC_TARGET_ENABLED:
+                naked_target = self._naked_poc_target(
+                    underlying, price, target_price, row.get("signal")
+                )
+                if naked_target is not None:
+                    target_price = naked_target
 
             order = self._runtime.order_book.place_order(
                 symbol=symbol,
@@ -3070,6 +3178,13 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             },
         )
         del self._runtime.orders[DEFAULT_COMMODITY_ORDERS_MAX:]
+        # Eviction-proof cooldown stamps — see CommodityRuntime.last_exit_at.
+        if flow == "exit":
+            root = extract_commodity_root(order.symbol)
+            fill_dt = _order_fill_time_ist(order)
+            self._runtime.last_exit_at[root] = fill_dt
+            if reason in COMMODITY_STOP_EXIT_REASONS:
+                self._runtime.last_stop_at[root] = fill_dt
 
     def _append_commentary(self, tone: str, message: str) -> None:
         if not message:

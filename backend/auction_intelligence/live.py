@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import asdict
 from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic
@@ -19,6 +20,8 @@ from api.routers.auth import (
     get_active_adapter,
     get_broker_token,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _decorate_bundle_for_client(analysis: dict[str, Any]) -> dict[str, Any]:
@@ -473,6 +476,7 @@ async def _build_analysis_from_session_rows(
     quote_source = str(order_flow_inputs["quote_source"])
     order_flow_source = str(order_flow_inputs["order_flow_source"])
     stale_data_seconds = float(order_flow_inputs["stale_data_seconds"])
+    recent_tick_count = int(order_flow_inputs.get("recent_tick_count", 0))
     data_status = _build_live_data_status(
         current_rows=current_rows,
         snapshot_mode=snapshot_mode,
@@ -481,6 +485,7 @@ async def _build_analysis_from_session_rows(
         quote_history_payload=quote_history_payload,
         trades_payload=trades_payload,
         stale_data_seconds=stale_data_seconds,
+        recent_tick_count=recent_tick_count,
     )
     if snapshot_mode == "live_session" and not bool(data_status["execution_ready"]):
         stale_limit = float(DEFAULT_CONFIG.get("risk", {}).get("stale_data_seconds", 10))
@@ -1110,15 +1115,21 @@ def _select_snapshot_rows(
             if selected:
                 return selected, _row_time(selected[-1]), "historical_replay"
 
-    target_time = snapshot_cutoff or time(12, 20)
-    eligible = [row for row in rows if _row_time(row).time() <= target_time]
-    if eligible:
-        snapshot_time = _row_time(eligible[-1])
-        return eligible, snapshot_time, "historical_replay"
+    # An explicit replay cursor (snapshot_cutoff) is honoured as a step-through
+    # replay — the legitimate point-in-time path (the shadow/backfill caller
+    # pairs it with observation_bars, handled above).
+    if snapshot_cutoff is not None:
+        eligible = [row for row in rows if _row_time(row).time() <= snapshot_cutoff]
+        if eligible:
+            return eligible, _row_time(eligible[-1]), "historical_replay"
 
-    fallback_index = max(0, min(len(rows) - 1, int(len(rows) * 0.7)))
-    snapshot_rows = rows[: fallback_index + 1]
-    return snapshot_rows, _row_time(snapshot_rows[-1]), "historical_replay"
+    # Market closed, no replay cursor → present the FULL COMPLETED last session,
+    # the way a real paper/live system shows the last settled session at rest
+    # (IBKR frozen-data = last close; Market-Profile "completed vs developing").
+    # No wall-clock truncation — the whole settled session IS the as-of view.
+    # A hardcoded `time(12, 20)` demo cutoff used to freeze this mid-session;
+    # it had no replay semantics (a constant, not a cursor) — removed.
+    return rows, latest_time, "completed_session"
 
 
 def _aggregate_rows(
@@ -1203,13 +1214,19 @@ async def _build_order_flow_inputs(
                 snapshot_end=snapshot_end,
                 symbol_code=symbol_code,
             )
-    # Only fold the live index tick in when NOT on the book path — mixing the
-    # index's price/size into the futures/option tape would corrupt the flow.
-    if current_tick is not None and not using_book:
+    # Only fold the live index tick in during a LIVE session and when NOT on the
+    # book path. On a completed session there is no live tick — folding one in
+    # (stamped ~now) would fabricate freshness and corrupt the settled tape's age.
+    if current_tick is not None and not using_book and snapshot_mode == "live_session":
         recent_ticks = _append_live_tick_row(recent_ticks, current_tick)
 
     quote_history_payload = _build_quote_history_from_ticks(recent_ticks, tick_size=tick_size)
-    if snapshot_mode == "live_session" and len(quote_history_payload) >= 4:
+    # A COMPLETED session reconstructs order flow from its own persisted tape
+    # (point-in-time, backward-looking window) rather than degrading to
+    # bar_inference — the recorded ticks are real, so it is strictly more honest
+    # than synthesising flow from bars. (Live-only quote/tick gates elsewhere stay
+    # keyed on "live_session"; this is purely the persisted-tape reconstruction.)
+    if snapshot_mode in {"live_session", "completed_session"} and len(quote_history_payload) >= 4:
         latest_quote = quote_history_payload[-1]
         depth_payload = _build_depth_from_tick_history(
             quote_history_payload,
@@ -1238,6 +1255,7 @@ async def _build_order_flow_inputs(
             "quote_source": book_symbol if using_book else "market_ticks",
             "order_flow_source": "tick_reconstruction_book" if using_book else "tick_reconstruction",
             "stale_data_seconds": stale_data_seconds,
+            "recent_tick_count": len(recent_ticks),
         }
 
     quote_payload, quote_source, stale_data_seconds = _build_quote_from_snapshot(
@@ -1264,6 +1282,12 @@ async def _build_order_flow_inputs(
         "quote_source": quote_source,
         "order_flow_source": "bar_inference",
         "stale_data_seconds": stale_data_seconds,
+        # Real ticks were still fetched (and may be dense, e.g. 100k+ index
+        # ticks) even though OF degraded to bar_inference here — this fallback
+        # only fires when the tape can't reconstruct >= 4 quote events. Surface
+        # the actual fetched count so a snapshot is not mis-reported as
+        # "no ticks today".
+        "recent_tick_count": len(recent_ticks),
     }
 
 
@@ -1574,7 +1598,7 @@ def _build_quote_from_snapshot(
         max(
             0.0,
             (datetime.now(timezone.utc) - latest_time.astimezone(timezone.utc)).total_seconds(),
-        ) if snapshot_mode == "live_session" else 0.0,
+        ) if snapshot_mode in {"live_session", "completed_session"} else 0.0,
     )
 
 
@@ -1605,6 +1629,7 @@ def _build_live_data_status(
     quote_history_payload: list[dict[str, Any]],
     trades_payload: list[dict[str, Any]],
     stale_data_seconds: float,
+    recent_tick_count: int = 0,
 ) -> dict[str, Any]:
     live_mode = snapshot_mode == "live_session"
     latest_bar_time = _row_time(current_rows[-1]).astimezone(timezone.utc) if current_rows else None
@@ -1627,15 +1652,29 @@ def _build_live_data_status(
         "websocket_tick",
         "rest_quote",
     }
-    execution_ready = (
+    # Data adequacy (minute history + tick/quote freshness) is necessary but not
+    # sufficient for LIVE execution: a historical_replay snapshot (market closed)
+    # can be perfectly fresh against its own session yet must never be treated as
+    # live execution-ready, otherwise a closed-market replay is indistinguishable
+    # from a healthy live session (execution_ready=true / degraded_reason=null).
+    data_ready = (
         minute_history_ready
         and tick_ready
         and quote_ready
         and float(stale_data_seconds) <= stale_limit
     )
+    execution_ready = bool(data_ready and live_mode)
+    # Replay snapshots are still fine to RECORD as paper observations (entries
+    # are disabled, but the regime/agent logic is valid on bar data); paper
+    # readiness therefore only requires the underlying data to be adequate.
+    paper_record_ready = bool(data_ready if live_mode else minute_history_ready)
     degraded_reason = None
     if not minute_history_ready:
         degraded_reason = "minute_history_stale_or_missing"
+    elif not live_mode:
+        degraded_reason = (
+            "session_complete" if snapshot_mode == "completed_session" else "market_closed"
+        )
     elif not tick_ready:
         degraded_reason = "tick_order_flow_unavailable"
     elif not quote_ready:
@@ -1653,12 +1692,20 @@ def _build_live_data_status(
         ),
         "quote_source": quote_source,
         "order_flow_source": order_flow_source,
+        # OF-source-derived count: how many reconstructed quote events the engine
+        # actually consumed (0 unless OF ran the tick_reconstruction path).
         "tick_history_count": len(quote_history_payload) if order_flow_source == "tick_reconstruction" else 0,
+        # Raw count of recent ticks fetched from storage, independent of whether
+        # OF degraded to bar_inference. Stays non-zero when ticks exist but OF
+        # could not use them (e.g. market closed → tick_reconstruction is gated
+        # to live_session), so the snapshot reflects real tick density.
+        "recent_tick_count": int(recent_tick_count),
         "trade_print_count": len(trades_payload),
         "stale_data_seconds": round(float(stale_data_seconds), 3),
         "tick_ready": bool(tick_ready),
         "quote_ready": bool(quote_ready),
-        "execution_ready": bool(execution_ready),
+        "execution_ready": execution_ready,
+        "paper_record_ready": paper_record_ready,
         "degraded_reason": degraded_reason,
     }
 

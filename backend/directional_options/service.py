@@ -39,7 +39,9 @@ class DirectionalOptionsService:
         self.store = DirectionalOptionsDataStore(self.config["data_root"])
         self.feature_engine = FeatureEngine(self.config["feature_engine"])
         self.regime = RegimeClassifier()
-        self.signals = DirectionalSignalEngine(self.config["signal_engine"])
+        self.signals = DirectionalSignalEngine(
+            self.config["signal_engine"], view_config=self.config.get("view")
+        )
         self.ai_model = HybridDirectionalOptionsModel(self.config.get("ai_model") or {})
         self.selector = OptionSelectionEngine(self.store, self.config["selector"])
         self.risk = DirectionalOptionsRiskEngine(self.config["risk"])
@@ -56,6 +58,11 @@ class DirectionalOptionsService:
             policy=self.policy,
             exit_config=self.config.get("risk"),
             cost_config=self.config.get("execution"),
+            positional=(
+                self.config.get("positional")
+                if self.config.get("_positional_active")
+                else None
+            ),
         )
         self.backtester = DirectionalOptionsBacktester(
             store=self.store,
@@ -582,7 +589,19 @@ class DirectionalOptionsService:
         spot_price = float(row["close"])
         feature_snapshot = self.feature_engine.snapshot(row)
         regime = self.regime.classify(row, timeframe=timeframe)
-        signal = self.signals.predict(row, regime, timeframe)
+        # Multi-factor view needs the option chain to DECIDE direction (the later
+        # fetch at the selected-contract expiry happens after selection). Fetch the
+        # front-expiry chain up front, but ONLY when the view flag is on, so the
+        # legacy path adds no latency. Bounded + failure-tolerant → price-only view.
+        view_chain: dict[str, Any] | None = None
+        if settings.DIRECTIONAL_MULTIFACTOR_VIEW_ENABLED:
+            try:
+                view_chain = await asyncio.wait_for(
+                    fetch_chain_analytics(underlying, expiry=None), timeout=6.0
+                )
+            except Exception:
+                view_chain = None
+        signal = self.signals.predict(row, regime, timeframe, chain=view_chain)
         if signal is None and not int(
             strategy_health.get("watchlist_rows_today")
             or strategy_health.get("watchlist_rows_latest")

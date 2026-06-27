@@ -202,6 +202,31 @@ class Settings(BaseSettings):
     # within one cycle of its close, which the broker quote refresh rate
     # comfortably supports.
     DIRECTIONAL_OPTIONS_AUTO_INTERVAL_SECONDS: int = 60
+    # ── Directional 1-2 DAY POSITIONAL MODE (master switch) ────────────────
+    # When True, the directional_options lane is re-architected from a 5-min
+    # intraday scalper into a multi-day positional book: open/flip decisions on
+    # CLOSED 30-min bars, held-time counted in trading-SESSION bars (not
+    # wall-clock, so the overnight gap can't force a day-2 close), ATR-based
+    # adaptive target/stop, CONTINUOUS 1-min marking with immediate square-off on
+    # a large move, >= min-DTE expiry selection, and confirmed-flip discipline
+    # (the coordinated G1-G7 set from audit wf_d95b9a43-8d0). Tunables live in
+    # directional_options.config DEFAULT_CONFIG['positional']. Default OFF: the
+    # lane behaves exactly as the legacy 5-min engine. These changes are jointly
+    # necessary, so a single master switch avoids dangerous partial states.
+    # Requires a backend restart + paper walk-forward; do NOT enable mid-session.
+    DIRECTIONAL_POSITIONAL_MODE_ENABLED: bool = False
+    # ── Directional MULTI-FACTOR VIEW (independent of the hold-duration switch) ──
+    # When True, the CE/PE direction is formed from a regime-gated, sign-constrained
+    # confluence of orthogonal families — ATR-normalized trend backbone + ADX gate +
+    # HTF alignment + LIVE option-chain tilts (25Δ skew, GEX size-damper, DEX/OI flow)
+    # — instead of the legacy collinear 5-term price-momentum sum. The chain tilts can
+    # therefore FLIP the side, not just confirm it. Uses only live, raw-bounded chain
+    # values (no causal z-normalization or offline backtest validation yet — those need
+    # a chain-history store, deferred). Tunables in DEFAULT_CONFIG['view']. Default OFF:
+    # the lane uses the legacy momentum view. Validate by paper walk-forward before
+    # flag-on; needs a backend restart. Orthogonal to DIRECTIONAL_POSITIONAL_MODE_ENABLED
+    # (either can be on independently, but they're designed to run together).
+    DIRECTIONAL_MULTIFACTOR_VIEW_ENABLED: bool = False
     # CBE alpha engine runs at EOD. Cadence = 1 hour: during market hours
     # the daily MACD/RSI indicators don't move (they're computed off last-bar-
     # of-day closes), so re-running intra-day is cheap and idempotent. The
@@ -262,6 +287,46 @@ class Settings(BaseSettings):
     # Quick time-stop: close a scalp that hasn't hit its 1R target within this
     # many 1-min bars so a counter-trend probe never becomes a positional bag.
     COMMODITY_HTF_SCALP_MAX_HOLD_BARS: int = 6
+    # Anti-churn: widen the initial futures stop off the flat 0.5% noise band.
+    # Today the stop is max(atr, price*0.005); 14-bar 1-min ATR is ~0.01–0.35%
+    # of price so max() collapses to a thin 0.5% band on every contract, and
+    # adverse 1-min wicks knock positions out in minutes (the dominant commodity
+    # churn driver). When True the floor becomes max(atr*FUTURES_ATR_STOP_MULT,
+    # price*FUTURES_MIN_STOP_PCT_WIDE) — genuinely range-adaptive AND wider.
+    # Default OFF (no behaviour change). NOTE: wider stops with
+    # COMMODITY_LOSS_CAPS_ENABLED=False mean larger per-trade bleed is uncapped;
+    # consider re-enabling the loss caps when turning this on.
+    COMMODITY_STOP_WIDENING_ENABLED: bool = False
+    # ── MP+OF gap-fixes (audit wf_7473d93a-46d; each default OFF, paper-validate) ──
+    # R5: the lvn_fade "absorption" check is mis-defined (fires on SMALL flow +
+    # MOVING price, sigma on the cumulative CVD series). When True, use the
+    # textbook definition: LARGE per-bar flow that FAILS to move price, sigma on
+    # the per-bar delta series. OFF preserves the (buggy) legacy behaviour.
+    COMMODITY_LVN_ABSORPTION_FIX_ENABLED: bool = False
+    # R0: per-symbol order-flow QUALITY gate. MCX bar-OHLCV volume is sparse on
+    # illiquid names (NICKEL ~5% / GOLD ~25% of 1-min bars nonzero) so CVD reads
+    # are noise there. When True, if a symbol's MP-period volume coverage is below
+    # the floor, OF confirmations are DEMOTED to TPO/structure-only (breakouts/
+    # migrations fire on price+IB structure; the pure-OF lvn_fade is suppressed).
+    # Strictly subtractive. Coverage measured at the MP-period bar, not 1-min.
+    COMMODITY_OF_QUALITY_GATE_ENABLED: bool = False
+    COMMODITY_OF_MIN_VOL_COVERAGE: float = 0.70
+    # R1: day-type-conditioned trigger suppression (the missing "balance-vs-trend,
+    # then fade-or-follow" gate). When True, `assess_day_type` (price-vs-VA + IB
+    # extension + POC migration + session CVD) classifies the day; on a trend day
+    # counter-trend FADES (failed_auction/lvn_fade) are suppressed, in balance the
+    # breakout triggers (open_drive/ib_break) are suppressed. Pure filter (never
+    # creates entries). TPO-based, but IB/excess reads are noisy across the MCX
+    # evening-open on illiquid names, so EXCLUDE_SYMBOLS skips those roots.
+    COMMODITY_DAYTYPE_ENABLED: bool = False
+    COMMODITY_DAYTYPE_EXCLUDE_SYMBOLS: str = "GOLD,NICKEL"
+    # R4: anchor the exit target to a naked/virgin prior-session POC (week/month/
+    # prev-day) when one sits between entry and the blind R-multiple target in the
+    # trade direction (and >= MIN_R_FRACTION of the way there). Structure-anchored
+    # exits / better R:R. Target-only (never an entry) → zero churn. TPO POC =
+    # volume-free, safe on thin names.
+    COMMODITY_NAKED_POC_TARGET_ENABLED: bool = False
+    COMMODITY_NAKED_POC_MIN_R_FRACTION: float = 0.5
 
     # Security
     SECRET_KEY: str = "change-me-to-a-random-secret-key"
@@ -279,6 +344,19 @@ class Settings(BaseSettings):
     UPSTOX_SECRET: str = ""
     UPSTOX_REDIRECT_URI: str = UPSTOX_SANDBOX_REDIRECT_URI
     UPSTOX_ANALYTICS_TOKEN: str = ""
+
+    # ── US market data (Alpaca primary, Finnhub supplement) ───────────────
+    # Alpaca Market Data API (options + equities). Free key gives delayed
+    # ("indicative") option data + IEX equities; paid gives OPRA/SIP realtime.
+    ALPACA_API_KEY_ID: str = ""
+    ALPACA_API_SECRET_KEY: str = ""
+    ALPACA_OPTION_FEED: str = "indicative"   # indicative | opra
+    ALPACA_STOCK_FEED: str = "iex"           # iex | sip
+    # Finnhub — index/equity quotes + candles (option chain is premium-gated).
+    FINNHUB_API_KEY: str = ""
+    # US market module auto-runner (US RTH; paper).
+    US_MARKET_AUTO_ENABLED: bool = True
+    US_MARKET_AUTO_INTERVAL_SECONDS: int = 300
 
     # 5Paisa
     FIVEPAISA_APP_NAME: str = ""

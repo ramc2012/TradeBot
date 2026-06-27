@@ -242,6 +242,39 @@ class TradingCalendar:
         allowed = {str(item).lower() for item in exception.get("sessions") or []}
         return [session for session in sessions if str(session.get("key") or "").lower() in allowed]
 
+    def trading_minutes_between(self, exchange: str, start: datetime, end: datetime) -> float:
+        """Exchange-OPEN minutes between two instants.
+
+        Sums only the wall-clock that falls inside a trading session for
+        ``exchange``; the overnight gap, weekends, holidays and partial-session
+        closures all contribute zero (honoured via ``_sessions_for_date``). This
+        is the basis for counting a position's held-time in *trading-session
+        bars* rather than raw wall-clock — without it, the ~17h overnight gap
+        inflates an intraday horizon and force-closes a multi-day hold at the
+        next open. Returns 0.0 when ``end <= start``.
+        """
+        s = (start or datetime.now(IST)).astimezone(IST)
+        e = (end or datetime.now(IST)).astimezone(IST)
+        if e <= s:
+            return 0.0
+        total = 0.0
+        day = s.date()
+        last = e.date()
+        # A 1-2 day hold spans a handful of days; cap the walk so a stale/stuck
+        # position can't iterate unbounded.
+        guard = 0
+        while day <= last and guard <= 400:
+            guard += 1
+            for session in self._sessions_for_date(exchange, day):
+                open_dt = datetime.combine(day, _parse_time(session.get("open")), tzinfo=IST)
+                close_dt = datetime.combine(day, _parse_time(session.get("close")), tzinfo=IST)
+                lo = max(open_dt, s)
+                hi = min(close_dt, e)
+                if hi > lo:
+                    total += (hi - lo).total_seconds() / 60.0
+            day += timedelta(days=1)
+        return total
+
     def is_exchange_open(self, exchange: str, now: datetime | None = None) -> bool:
         current = (now or datetime.now(IST)).astimezone(IST)
         for session in self._sessions_for_date(exchange, current.date()):

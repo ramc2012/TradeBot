@@ -54,10 +54,29 @@ def ist_now() -> datetime:
     return datetime.now(timezone.utc).astimezone(IST)
 
 
+def _has_nse_session(now: datetime) -> bool | None:
+    """Whether NSE trades on `now`'s date per the trading calendar (holidays +
+    weekends). Returns None if the calendar isn't importable, so the caller can
+    fall back to a weekday-only gate. Without this, the watchdog false-alarms on
+    holidays (broker session legitimately absent / feed stale = no market)."""
+    try:
+        from core.trading_calendar import trading_calendar
+
+        return bool(trading_calendar.has_exchange_session("NSE", now.date()))
+    except Exception:
+        return None
+
+
 def market_is_open(now: datetime | None = None) -> tuple[bool, str]:
     now = now or ist_now()
-    if now.weekday() >= 5:  # Sat/Sun
-        return False, f"weekend ({now:%A})"
+    session = _has_nse_session(now)
+    if session is None:
+        # Calendar unavailable — fall back to a weekday-only gate.
+        if now.weekday() >= 5:  # Sat/Sun
+            return False, f"weekend ({now:%A})"
+    elif not session:
+        # Holiday or weekend per the calendar — markets closed all day.
+        return False, f"holiday/non-session ({now:%Y-%m-%d %a})"
     after_open = (now.hour, now.minute) >= MARKET_OPEN
     before_close = (now.hour, now.minute) <= MARKET_CLOSE
     if after_open and before_close:

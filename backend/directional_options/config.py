@@ -51,6 +51,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "volume_z_window": 20,
         "opening_range_minutes": 30,
         "warmup_bars": 32,
+        # Multi-factor-view inputs (always computed; consumed only when
+        # DIRECTIONAL_MULTIFACTOR_VIEW_ENABLED). trend_tstat = rolling OLS t-stat
+        # of log close (vol-robust trend backbone); htf_trend = long-window trend
+        # proxy on the decision frame for HTF alignment.
+        "trend_tstat_window": 20,
+        "htf_trend_window": 50,
     },
     "signal_engine": {
         # No hard confidence cutoff and no regime gate — the RL policy
@@ -67,6 +73,28 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "short_horizon_bars": 3,
         "medium_horizon_bars": 6,
         "long_horizon_bars": 9,
+    },
+    # ── MULTI-FACTOR DIRECTIONAL VIEW ──────────────────────────────────────
+    # Read ONLY when settings.DIRECTIONAL_MULTIFACTOR_VIEW_ENABLED is True. The
+    # signed view score is a sum of tanh-bounded, sign-constrained terms (one per
+    # orthogonal family), then attenuated by an ADX/chop gate and HTF alignment,
+    # then conviction is damped by the dealer-gamma regime. direction = sign(score);
+    # GEX is a SIZE/REGIME damper, NOT a directional vote (its 1-2 day / NSE edge is
+    # unproven — weight stays low and is paper-validated). Skew/flow ship raw-bounded
+    # (no causal normalization until a chain-history store exists).
+    "view": {
+        "adx_floor": 25.0,            # below this ADX, attenuate (chop)
+        "adx_attenuation": 0.45,      # multiplier applied to score when ADX < floor
+        "w_trend": 1.0,
+        "w_extension": 0.35,
+        "w_acceleration": 0.30,
+        "w_skew": 0.45,
+        "w_flow": 0.0,                 # flow (dex/OI) wired but INERT: sign convention unvalidated for NSE
+        "skew_scale": 8.0,            # scales (risk_reversal/atm_iv) into tanh
+        "flow_scale": 1.0,
+        "htf_align_penalty": 0.55,    # score multiplier when view opposes the HTF trend
+        "gex_damp_max": 0.40,         # +GEX (pinning) shrinks conviction by up to this
+        "gex_amplify_max": 0.30,      # -GEX (trending) lifts conviction by up to this
     },
     "selector": {
         # Surface up to this many candidates to the policy for ranking.
@@ -175,6 +203,43 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # handled by the existing _same_contract path.)
         "one_position_per_symbol": True,
     },
+    # ── 1-2 DAY POSITIONAL MODE ────────────────────────────────────────────
+    # Read ONLY when settings.DIRECTIONAL_POSITIONAL_MODE_ENABLED is True. When
+    # the master flag is OFF (default) none of these are consulted and the lane
+    # runs exactly as the legacy 5-min intraday engine. When ON, the lane:
+    #   - decides open/flip on CLOSED `decision_timeframe` bars (side stays
+    #     stable across a session instead of flipping every few minutes),
+    #   - holds for ~1-2 sessions, counting held-time in TRADING-SESSION bars
+    #     (the overnight gap no longer inflates the horizon → no day-2 auto-close),
+    #   - marks + checks exits CONTINUOUSLY on `monitor_timeframe` granular data
+    #     (market-intelligence feed) so a large move is squared off immediately,
+    #   - sizes target / stop / invalidation in ATR (adaptive to volatility),
+    #   - only buys options with >= `min_days_to_expiry` so the carry survives,
+    #   - requires `flip_confirm_bars` consecutive opposite bars before flipping.
+    # Horizons are in DECISION-TF bars; a 30-min session ≈ 12.5 bars, so
+    # 13/19/25 ≈ 1 / 1.5 / 2 sessions.
+    "positional": {
+        "decision_timeframe": "30minute",
+        "monitor_timeframe": "1minute",
+        "short_horizon_bars": 13,
+        "medium_horizon_bars": 19,
+        "long_horizon_bars": 25,
+        "min_days_to_expiry": 4,
+        "prefer_longer_expiry": True,
+        # ATR-based adaptive levels (underlying move basis). The premium-percent
+        # backstops below still apply as a hard floor on option-premium loss.
+        "atr_stop_mult": 1.2,        # underlying invalidation at entry ∓ 1.2×ATR
+        "atr_target_mult": 2.5,      # thesis-achieved take-profit at ± 2.5×ATR
+        "atr_trail_mult": 1.5,       # trail the underlying stop by 1.5×ATR in profit
+        "large_move_atr_mult": 3.0,  # ± 3×ATR favourable → bank immediately
+        # Premium backstops, widened for a multi-day swing (vs the 0.35/0.45
+        # scalp values used in intraday mode).
+        "planned_stop_pct": 0.45,
+        "profit_target_pct": 0.70,
+        "trail_giveback_pct": 0.22,
+        "expiry_guard_days": 1.0,
+        "flip_confirm_bars": 2,
+    },
     "rl_policy": {
         # Persistent posterior lives next to the paper book.
         "state_path": RUNTIME_ROOT / "policy_state.json",
@@ -197,7 +262,50 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 
 def clone_default_config() -> dict[str, Any]:
-    """Return a deep-copy safe configuration dictionary."""
+    """Return a deep-copy safe configuration dictionary.
+
+    When ``settings.DIRECTIONAL_POSITIONAL_MODE_ENABLED`` is set, the
+    ``positional`` tunables are overlaid so the whole lane runs in 1-2 day
+    positional mode: decision timeframe, hold horizons, premium backstops and
+    expiry selection all take their positional values from one place (the
+    supervisor and the service both read this merged config). Off by default →
+    the legacy 5-min intraday config is returned unchanged. The other half of
+    positional mode (session-clock held-time, decide-on-bar-close, min-DTE
+    enforcement, confirmed-flip, ATR adaptive exits) lives as code branches that
+    key off the ``_positional_active`` marker set here — do NOT enable the flag
+    until that full set has landed.
+    """
     import copy
 
-    return copy.deepcopy(DEFAULT_CONFIG)
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
+    try:
+        from core.config import settings
+
+        positional_on = bool(settings.DIRECTIONAL_POSITIONAL_MODE_ENABLED)
+    except Exception:
+        positional_on = False
+    if not positional_on:
+        return cfg
+
+    p = cfg.get("positional") or {}
+    cfg["default_timeframe"] = str(p.get("decision_timeframe", cfg["default_timeframe"]))
+    tfs = list(cfg.get("timeframes") or [])
+    if cfg["default_timeframe"] not in tfs:
+        tfs.insert(0, cfg["default_timeframe"])
+    cfg["timeframes"] = tfs
+    se = cfg.setdefault("signal_engine", {})
+    for key in ("short_horizon_bars", "medium_horizon_bars", "long_horizon_bars"):
+        if key in p:
+            se[key] = int(p[key])
+    rk = cfg.setdefault("risk", {})
+    for key in ("planned_stop_pct", "profit_target_pct", "trail_giveback_pct", "expiry_guard_days"):
+        if key in p:
+            rk[key] = float(p[key])
+    sel = cfg.setdefault("selector", {})
+    if "min_days_to_expiry" in p:
+        sel["min_days_to_expiry"] = int(p["min_days_to_expiry"])
+    sel["prefer_longer_expiry"] = bool(p.get("prefer_longer_expiry", True))
+    # Marker so downstream code branches (paper.py / selector.py) can detect
+    # positional mode from the config alone, without re-reading settings.
+    cfg["_positional_active"] = True
+    return cfg
