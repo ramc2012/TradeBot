@@ -247,6 +247,21 @@ class Settings(BaseSettings):
     # flag-on; needs a backend restart. Orthogonal to DIRECTIONAL_POSITIONAL_MODE_ENABLED
     # (either can be on independently, but they're designed to run together).
     DIRECTIONAL_MULTIFACTOR_VIEW_ENABLED: bool = False
+    # INTRADAY FADE entry (2026-06-28). Replaces the (measured anti-predictive)
+    # momentum side with the validated fade: BUY the wing pointing back to the
+    # session-open anchor (ext_atr>0 stretched up -> PE; <0 -> CE), only in the
+    # open window, only on a real extension, only when realized-vol percentile is
+    # low (long-premium gate, proxy for low IV). Entry edge is per-session-IC
+    # validated; the OPTION-level strategy FAILED adversarial backtest on
+    # execution lag + winner-concentration, so this is wired for a LIVE PAPER A/B
+    # ONLY (paper book fills at realistic marks = the execution test the backtest
+    # couldn't do). Default OFF; takes precedence over the momentum/multifactor
+    # view when on. Headline metric for the A/B = per-trade side accuracy + net-
+    # of-cost PnL EXCLUDING the top-3 winners. NIFTY has the most spread cushion.
+    DIRECTIONAL_FADE_ENTRY_ENABLED: bool = False
+    DIRECTIONAL_FADE_OPEN_WINDOW: float = 0.33   # session-progress cap (first ~third)
+    DIRECTIONAL_FADE_EXT_GATE: float = 1.0       # |ext_atr| >= this (fade real extensions, not chop)
+    DIRECTIONAL_FADE_MAX_RV_PCT: float = 0.60    # only enter when rv-percentile is low (long-premium gate)
     # CBE alpha engine runs at EOD. Cadence = 1 hour: during market hours
     # the daily MACD/RSI indicators don't move (they're computed off last-bar-
     # of-day closes), so re-running intra-day is cheap and idempotent. The

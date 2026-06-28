@@ -112,6 +112,26 @@ class DirectionalSignalEngine:
         confidence = min(MAX_SIGNAL_CONFIDENCE, 0.42 + conviction * 0.45 + regime.confidence * 0.20)
         return direction, conviction, confidence
 
+    def _fade_view(self, *, row):
+        """Intraday FADE entry — buy the wing pointing back toward the session-open
+        anchor. Side = sign(-ext_atr) (stretched UP -> PE, DOWN -> CE), the mirror
+        of the measured anti-predictive momentum. Fires ONLY on an eligible bar:
+        in the open window, on a real (>=ext_gate ATR) extension, with realized-vol
+        percentile low (long-premium gate). Returns (direction, conviction,
+        confidence, eligible)."""
+        ext = float(row.get("ext_atr", 0.0))
+        progress = float(row.get("session_progress", 1.0))
+        relvol = float(row.get("relvol", 1.0))
+        rv_pct = float(row.get("rv_percentile", 0.5))
+        open_window = float(getattr(settings, "DIRECTIONAL_FADE_OPEN_WINDOW", 0.33))
+        ext_gate = float(getattr(settings, "DIRECTIONAL_FADE_EXT_GATE", 1.0))
+        max_rv = float(getattr(settings, "DIRECTIONAL_FADE_MAX_RV_PCT", 0.60))
+        eligible = (progress <= open_window) and (abs(ext) >= ext_gate) and (rv_pct <= max_rv)
+        direction = "PE" if ext > 0.0 else "CE"
+        conviction = min(abs(ext) * max(relvol, 0.5) / 3.0, 1.5)
+        confidence = min(MAX_SIGNAL_CONFIDENCE, 0.45 + min(abs(ext), 3.0) * 0.07 + conviction * 0.10)
+        return direction, conviction, confidence, eligible
+
     def predict(
         self,
         row,
@@ -140,7 +160,15 @@ class DirectionalSignalEngine:
 
         min_direction_score = float(self.config.get("min_direction_score_floor", 0.001))
 
-        if settings.DIRECTIONAL_MULTIFACTOR_VIEW_ENABLED:
+        if settings.DIRECTIONAL_FADE_ENTRY_ENABLED:
+            # INTRADAY FADE: side = fade the open-window extension (the validated
+            # entry edge; the momentum side below is measured anti-predictive).
+            # Only an eligible open-window extension at low RV fires — otherwise no
+            # signal this cycle, so the lane stays flat until a real fade setup.
+            direction, direction_score, confidence, eligible = self._fade_view(row=row)
+            if not eligible or direction_score <= min_direction_score:
+                return None
+        elif settings.DIRECTIONAL_MULTIFACTOR_VIEW_ENABLED:
             # MULTI-FACTOR VIEW: direction is formed from a regime-gated,
             # sign-constrained confluence of orthogonal families (trend backbone +
             # ATR-extension + acceleration + LIVE 25Δ skew tilt), attenuated by an

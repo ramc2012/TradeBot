@@ -89,8 +89,19 @@ def _atr(spot_by_bar: pd.Series, win: int) -> pd.Series:
     return diff.rolling(win, min_periods=max(2, win // 2)).mean()
 
 
-def _backtest(df: pd.DataFrame, underlying: str) -> dict:
+def _backtest(
+    df: pd.DataFrame,
+    underlying: str,
+    *,
+    time_stop: int = TIME_STOP_BARS,
+    target: float = TARGET,
+    trail: float = TRAIL_GIVEBACK,
+    stop: float = STOP,
+    groups: dict | None = None,
+) -> dict:
     lot = LOT.get(underlying, 75)
+    if groups is None:
+        groups = {k: g for k, g in df.groupby(["date", "option_type"])}
     # Underlying path: one spot per (date,time).
     spot = df.groupby(["date", "time"])["spot"].first().reset_index().sort_values("time")
     spot["atr"] = _atr(spot["spot"], ATR_WIN)
@@ -115,7 +126,9 @@ def _backtest(df: pd.DataFrame, underlying: str) -> dict:
         mom_side = "CE" if row["ext"] > 0 else "PE"
 
         def _run(side: str) -> tuple[float, float] | None:
-            day_opt = df[(df["date"] == d) & (df["option_type"] == side)]
+            day_opt = groups.get((d, side))
+            if day_opt is None or day_opt.empty:
+                return None
             at_entry = day_opt[day_opt["time"] == entry_time]
             if at_entry.empty:
                 return None
@@ -134,13 +147,13 @@ def _backtest(df: pd.DataFrame, underlying: str) -> dict:
                 px = float(b["close"])
                 peak = max(peak, px)
                 exit_px = px
-                if px >= entry_px * (1 + TARGET):
+                if px >= entry_px * (1 + target):
                     break  # take the convex pop
-                if px <= entry_px * (1 - STOP):
+                if px <= entry_px * (1 - stop):
                     break  # hard stop
-                if peak >= entry_px * (1 + TRAIL_ARM) and px <= peak * (1 - TRAIL_GIVEBACK):
+                if peak >= entry_px * (1 + TRAIL_ARM) and px <= peak * (1 - trail):
                     break  # trail
-                if held >= TIME_STOP_BARS:
+                if held >= time_stop:
                     break  # fade is fast — don't bleed theta holding to EOD
             return entry_px, exit_px, entry_iv
 
@@ -216,5 +229,56 @@ async def main() -> None:
             print(f"  {k:20} {s}")
 
 
+async def walk_forward() -> None:
+    """Train/test split on the EXIT params: pick the best exit on the first 60%
+    of sessions, then report it on the held-out last 40%. Plus a robustness grid
+    (is the result a knife-edge?). De-risks the in-sample exit tuning before wiring.
+    """
+    import pandas as _pd
+    grid = [
+        (ts, tg, tr)
+        for ts in (1, 2, 3, 4)
+        for tg in (0.30, 0.40, 0.50)
+        for tr in (0.15, 0.20, 0.25)
+    ]
+    for u in ("NIFTY", "BANKNIFTY"):
+        df = await _load(u)
+        if df.empty:
+            continue
+        groups = {k: g for k, g in df.groupby(["date", "option_type"])}
+        dates = sorted(df["date"].unique())
+        split = dates[int(len(dates) * 0.6)]
+        rows = []
+        for ts, tg, tr in grid:
+            bt = _backtest(df, u, time_stop=ts, target=tg, trail=tr, groups=groups)
+            gated = [t for t in bt["fade"] if t["iv_pct"] <= IV_GATE_PCT]
+            train = [t for t in gated if _pd.Timestamp(t["date"]).date() < split]
+            test = [t for t in gated if _pd.Timestamp(t["date"]).date() >= split]
+            rows.append((ts, tg, tr, _stats(train), _stats(test)))
+        valid = [r for r in rows if r[3].get("n", 0) > 20 and r[4].get("n", 0) > 20]
+        best = max(valid, key=lambda r: r[3]["profit_factor"]) if valid else None
+        shown = next((r for r in rows if (r[0], r[1], r[2]) == (2, 0.40, 0.20)), None)
+        test_pfs = [r[4]["profit_factor"] for r in valid]
+        print(f"\n==== {u}  (split {split}, train {sum(1 for r in [rows[0]] )}…) ====")
+        print(f"  train/test split date = {split} | grid = {len(grid)} exit combos")
+        if best:
+            print(f"  BEST-ON-TRAIN exit (ts={best[0]} tgt={best[1]} trail={best[2]}):")
+            print(f"     train: {best[3]}")
+            print(f"     TEST : {best[4]}   <- out-of-sample")
+        if shown:
+            print(f"  SHOWN exit (ts=2 tgt=0.40 trail=0.20):")
+            print(f"     train: {shown[3]}")
+            print(f"     TEST : {shown[4]}   <- out-of-sample")
+        if test_pfs:
+            import numpy as _np
+            ge = sum(1 for p in test_pfs if p >= 0.9)
+            print(f"  ROBUSTNESS: {ge}/{len(test_pfs)} combos have TEST PF>=0.9; "
+                  f"median TEST PF={_np.median(test_pfs):.2f}, min={min(test_pfs):.2f}, max={max(test_pfs):.2f}")
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys
+    if "walkforward" in sys.argv:
+        asyncio.run(walk_forward())
+    else:
+        asyncio.run(main())

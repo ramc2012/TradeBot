@@ -201,6 +201,19 @@ class FeatureEngine:
         frame["momentum_3"] = frame["close"].pct_change(3).fillna(0.0)
         frame["momentum_8"] = frame["close"].pct_change(8).fillna(0.0)
         frame["session_progress"] = frame["time"].map(_session_progress)
+        # Intraday FADE inputs (consumed only when DIRECTIONAL_FADE_ENTRY_ENABLED).
+        # ext_atr = signed displacement from the session OPEN in ATR units (causal:
+        # session open is the first bar of the day); the fade view buys the wing
+        # pointing back toward the anchor. relvol scales conviction up when the
+        # extension pushes into expanding volatility (exhaustion snap-back).
+        session_open_px = frame.groupby(session_key)["open"].transform("first")
+        frame["ext_atr"] = (
+            (frame["close"] - session_open_px) / frame["atr"].replace(0.0, float("nan"))
+        ).fillna(0.0)
+        frame["relvol"] = (
+            frame["atr_pct"]
+            / frame["atr_pct"].rolling(50, min_periods=10).median().replace(0.0, float("nan"))
+        ).fillna(1.0)
         opening_bars = max(
             1,
             int(math.ceil(float(period_cfg.get("opening_range_minutes", 30)) / max(timeframe_minutes(timeframe), 1))),
