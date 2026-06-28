@@ -60,6 +60,11 @@ MACD_REFINED_LIVE_UNIVERSE: list[str] = [
 DEFAULT_CONFIG: dict[str, Any] = {
     "key": "macd_refined",
     "label": "MACD Refined",
+    # Market profile — drives broker adapter, underlying-symbol mapping, expiry
+    # calendar, and lot size. "india" = FYERS + NSE F&O (default); "us" = Alpaca
+    # + US equity/ETF options (see clone_us_config()).
+    "market": "india",
+    "lot_size_override": None,
     "description": (
         "Premium-MACD entry, low-IV gated, volume-led single-leg long options. "
         "Buys the ATM CE/PE whose option-premium MACD(12,26,9) just crossed zero "
@@ -216,3 +221,37 @@ DEFAULT_CONFIG: dict[str, Any] = {
 def clone_default_config() -> dict[str, Any]:
     """Return a deep-copy-safe configuration dictionary."""
     return copy.deepcopy(DEFAULT_CONFIG)
+
+
+# ── US market profile ─────────────────────────────────────────────────────
+US_RUNTIME_ROOT = BACKEND_ROOT / "runtime" / "us_macd_refined"
+MACD_REFINED_US_INITIAL_CAPITAL: float = 100_000.0  # USD paper capital
+
+# Index exposure via liquid ETFs (Alpaca options cover equity/ETF, not SPX/NDX
+# cash-index) + the most liquid single names.
+MACD_REFINED_US_UNIVERSE: list[str] = [
+    "SPY", "QQQ", "IWM", "DIA",                       # index ETFs
+    "AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "META", "AMD", "GOOGL", "NFLX", "AVGO",
+]
+
+
+def clone_us_config() -> dict[str, Any]:
+    """US market profile — Alpaca data, US tickers, 3rd-Friday monthly expiry,
+    100-share contract lot, USD capital. Reuses the SAME engine/exit/sizing
+    rules; only the market wiring differs."""
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
+    cfg["key"] = "us_macd_refined"
+    cfg["label"] = "US MACD Refined"
+    cfg["market"] = "us"
+    cfg["lot_size_override"] = 100              # standard US option contract multiplier
+    cfg["default_underlying"] = "SPY"
+    cfg["live_universe_mode"] = "list"          # curated US universe (not the F&O catalog)
+    cfg["live_universe"] = list(MACD_REFINED_US_UNIVERSE)
+    cfg["runtime_root"] = str(US_RUNTIME_ROOT)
+    cfg["risk"]["starting_equity"] = MACD_REFINED_US_INITIAL_CAPITAL
+    cfg["sizing"]["per_name_cap_rupees"] = 20_000.0   # USD per-name cap
+    cfg["sizing"]["min_ticket_rupees"] = 1_000.0      # USD min ticket
+    cfg["filters"]["min_daily_turnover_rupees"] = 50_000.0  # USD turnover floor
+    cfg["paper_trading"]["journal_root"] = str(US_RUNTIME_ROOT / "paper")
+    cfg["live"]["volume_store_root"] = str(US_RUNTIME_ROOT / "volume_tracking")
+    return cfg

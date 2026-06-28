@@ -25,6 +25,28 @@ class CommodityContractSpec:
     options_label: str
     futures_label: str
     notes: str
+    # Market-profile TPO bucket size. The exchange tick (`mp_tick_size`) is far
+    # too fine for a value-area profile on high-priced contracts (GOLD ~143000
+    # at tick 1.0 → thousands of one-rupee TPO levels → POC never concentrates,
+    # value area = half the day). `mp_value_tick` is the coarser bucket used to
+    # BUILD the profile so POC/VAH/VAL are meaningful. Defaults to 0.0 → fall
+    # back to mp_tick_size (see mp_profile_tick()).
+    mp_value_tick: float = 0.0
+    # Session-to-session POC gap fraction above which a daily profile is treated
+    # as belonging to a DIFFERENT (front-month) contract. The MCX continuous
+    # series is NOT back-adjusted — it re-levels at every roll (e.g. NATURALGAS
+    # ~-42%). Weekly/monthly aggregates must never blend two contract regimes, so
+    # the profile store clips each aggregate at the most recent gap exceeding
+    # this fraction. 0.0 → use a sane default (see roll_gap_threshold()).
+    roll_gap_frac: float = 0.0
+
+    def mp_profile_tick(self) -> float:
+        """Coarse TPO bucket for building the value-area profile."""
+        return self.mp_value_tick if self.mp_value_tick and self.mp_value_tick > 0 else self.mp_tick_size
+
+    def roll_gap_threshold(self) -> float:
+        """Fractional POC gap that marks a contract roll boundary."""
+        return self.roll_gap_frac if self.roll_gap_frac and self.roll_gap_frac > 0 else 0.06
 
 
 COMMODITY_CONTRACT_SPECS: dict[str, CommodityContractSpec] = {
@@ -38,6 +60,8 @@ COMMODITY_CONTRACT_SPECS: dict[str, CommodityContractSpec] = {
         options_label="Strategy 1 · Options",
         futures_label="MP+OF Futures",
         notes="Gold options are monitored off the saved expiry ladder; futures execution uses one 100 gm lot with prices quoted per 10 gm.",
+        mp_value_tick=20.0,
+        roll_gap_frac=0.06,
     ),
     "SILVERM": CommodityContractSpec(
         root="SILVERM",
@@ -49,6 +73,8 @@ COMMODITY_CONTRACT_SPECS: dict[str, CommodityContractSpec] = {
         options_label="Strategy 1 · Options",
         futures_label="MP+OF Futures",
         notes="Silver Mini options and futures share the same saved root; one futures lot is 5 kg.",
+        mp_value_tick=100.0,
+        roll_gap_frac=0.05,
     ),
     "CRUDEOIL": CommodityContractSpec(
         root="CRUDEOIL",
@@ -60,6 +86,8 @@ COMMODITY_CONTRACT_SPECS: dict[str, CommodityContractSpec] = {
         options_label="Strategy 1 · Options",
         futures_label="MP+OF Futures",
         notes="Crude Oil options align with the saved expiry ladder; one futures lot is 100 barrels.",
+        mp_value_tick=5.0,
+        roll_gap_frac=0.06,
     ),
     "NATURALGAS": CommodityContractSpec(
         root="NATURALGAS",
@@ -71,6 +99,8 @@ COMMODITY_CONTRACT_SPECS: dict[str, CommodityContractSpec] = {
         options_label="Strategy 1 · Options",
         futures_label="MP+OF Futures",
         notes="Natural Gas futures use the MP+OF entry engine; one lot is 1250 MMBtu.",
+        mp_value_tick=0.2,
+        roll_gap_frac=0.10,
     ),
     "COPPER": CommodityContractSpec(
         root="COPPER",
@@ -82,6 +112,8 @@ COMMODITY_CONTRACT_SPECS: dict[str, CommodityContractSpec] = {
         options_label="Strategy 1 · Options",
         futures_label="MP+OF Futures",
         notes="Most liquid MCX base metal; one futures lot is 2500 kg quoted per kg.",
+        mp_value_tick=0.25,
+        roll_gap_frac=0.05,
     ),
     "ALUMINI": CommodityContractSpec(
         root="ALUMINI",
@@ -93,6 +125,8 @@ COMMODITY_CONTRACT_SPECS: dict[str, CommodityContractSpec] = {
         options_label="Strategy 1 · Options",
         futures_label="MP+OF Futures",
         notes="1-ton mini contract for capital-efficient aluminium exposure; day session preferred.",
+        mp_value_tick=0.1,
+        roll_gap_frac=0.05,
     ),
     "ZINCMINI": CommodityContractSpec(
         root="ZINCMINI",
@@ -104,6 +138,8 @@ COMMODITY_CONTRACT_SPECS: dict[str, CommodityContractSpec] = {
         options_label="Strategy 1 · Options",
         futures_label="MP+OF Futures",
         notes="1-ton zinc mini; cleaner intraday flow than full ZINC (5 MT).",
+        mp_value_tick=0.1,
+        roll_gap_frac=0.05,
     ),
     "NICKEL": CommodityContractSpec(
         root="NICKEL",
@@ -115,6 +151,8 @@ COMMODITY_CONTRACT_SPECS: dict[str, CommodityContractSpec] = {
         options_label="Strategy 1 · Options",
         futures_label="MP+OF Futures",
         notes="LME-driven; expect wider spreads and occasional circuit halts.",
+        mp_value_tick=0.5,
+        roll_gap_frac=0.05,
     ),
 }
 

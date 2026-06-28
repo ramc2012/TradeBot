@@ -27,6 +27,43 @@ from loguru import logger
 _shadow_store = ShadowPersistenceService()
 
 
+def _paper_book_today_realized() -> float:
+    """Sum the auction paper book's realized P&L for today's IST session.
+
+    The risk governor's daily-loss kill-switch reads
+    PortfolioSnapshot.daily_realized_pnl, which the broker-funds path leaves ≈0
+    for the paper account. This feeds the breaker the PAPER book's real loss so
+    it can halt new entries after a drawdown.
+    """
+    try:
+        import json
+        from datetime import timedelta, timezone
+
+        from auction_intelligence.paper.journal import resolve_journal_root
+
+        ist = timezone(timedelta(hours=5, minutes=30))
+        cfg = clone_default_config().get("paper_trading", {})
+        path = resolve_journal_root(cfg.get("journal_root")) / "paper_positions.json"
+        if not path.exists():
+            return 0.0
+        data = json.loads(path.read_text())
+        today = datetime.now(ist).date()
+        total = 0.0
+        for pos in data.get("closed_positions", []) or []:
+            raw = str(pos.get("closed_at") or "")
+            try:
+                ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts.astimezone(ist).date() == today:
+                total += float(pos.get("realized_pnl") or 0.0)
+        return round(total, 2)
+    except Exception:  # noqa: BLE001 — risk plumbing must never break the cycle
+        return 0.0
+
+
 def auto_symbols() -> list[str]:
     config = clone_default_config()
     scope = config.get("mvp_scope", {})
@@ -206,6 +243,11 @@ async def capture_live_paper_cycle(
     )
     if not portfolio_payload.get("net_liquidation") or float(portfolio_payload["net_liquidation"]) < paper_capital:
         portfolio_payload["net_liquidation"] = paper_capital
+    # Wire the PAPER book's today realized P&L into the snapshot so the risk
+    # governor's daily-loss kill-switch actually triggers. _load_portfolio_snapshot
+    # reads daily_realized_pnl from the (near-empty) live broker funds → ≈0, so
+    # without this the breaker could never fire in paper mode.
+    portfolio_payload["daily_realized_pnl"] = _paper_book_today_realized()
     service = AuctionIntelligenceService(paper_mode=True)
     bundle, journal_paths, paper_positions = await service.analyze_and_record_option_paper(
         session=SessionContext(**session_payload),

@@ -1920,7 +1920,11 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         engine = MarketProfileEngine(
             {
                 "period_minutes": 15,
-                "tick_size": spec.mp_tick_size,
+                # Coarse value-area bucket (NOT the fine exchange tick) so POC/VA
+                # concentrate. Shared by live builds AND the write-once backfill
+                # so historical and live profiles have identical geometry — the
+                # store's aggregates never blend incompatible price grids.
+                "tick_size": spec.mp_profile_tick(),
                 "initial_balance_periods": 4,
                 "value_area_pct": 0.70,
                 "min_tail_tpos": 2,
@@ -3054,6 +3058,13 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 instrument_type="FUT",
                 session_id=self._runtime.portfolio.session_id,
                 ltp=price,
+                # Persist which MP trigger opened the trade (open_drive / ib_break
+                # / failed_auction / va_migration / lvn_fade) + the day-type so
+                # per-trigger expectancy can be attributed at close. Previously
+                # omitted → setup_type=None on every booked trade, making it
+                # impossible to identify or retire a losing trigger on evidence.
+                setup_type=str(row.get("entry_style") or row.get("reason") or "") or None,
+                regime=str(row.get("mp_day_type") or row.get("regime") or "") or None,
             )
             self._record_order(
                 order,

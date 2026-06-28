@@ -162,8 +162,18 @@ async def commodity_watchlist_snapshot(
     live_refresh: bool = Query(False),  # legacy arg, ignored
 ):
     symbols = commodity_strategy_agent.get_symbols()
+    status = commodity_strategy_agent.get_status() or {}
     return {
         "contract_catalog": _build_contract_catalog(symbols),
+        # Full watchlist rows INCLUDING the heavy display fields (mp_tpo_letters,
+        # mp_tpo_counts, prior_session_profile) that the 2s overview socket strips
+        # for frame size. The detail-modal TPO chart reads these from here. The
+        # 8s commodity_watchlist WS attaches the same; include it on REST too so
+        # the chart populates on the initial load / poll and when the socket
+        # isn't streaming (e.g. between scans / market closed).
+        "futures_watchlist": (
+            status.get("futures_watchlist") or status.get("watchlist") or []
+        ),
         # Field retained for frontend backwards-compat; always empty.
         "atm_watchlist": {
             "rows": [],

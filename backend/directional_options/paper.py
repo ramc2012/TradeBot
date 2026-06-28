@@ -770,6 +770,37 @@ class DirectionalOptionsPaperStore:
             **self._exit_thresholds(),
         )
 
+    def _mark_is_fresh_for_close(
+        self, position: dict[str, Any], mark: dict[str, Any], *, trust_live_source: bool
+    ) -> bool:
+        """Is this mark a genuinely tradeable post-entry price?
+
+        A nonzero premium is only a valid close if its mark is stamped AT OR
+        AFTER the position opened AND within the staleness window of now. A stale
+        watchlist LTP stamped *before* opened_at (the watchlist writer fell
+        behind) fabricates a P&L on a price that never traded after entry — which
+        booked ~₹59k of phantom slippage across 80/115 closes and, worse, trained
+        the RL value posterior on losses that never economically occurred.
+        Current-cycle live-cache / operator marks are fresh by construction.
+        """
+        if trust_live_source and str((mark or {}).get("price_source") or "") in {
+            "chain_cache_live", "operator_mark", "live_mark"
+        }:
+            return True
+        mark_time = _parse_iso((mark or {}).get("mark_time"))
+        if mark_time is None:
+            return False  # unknown age → not trustworthy for a tradeable close
+        opened = _parse_iso(position.get("opened_at"))
+        # The load-bearing invariant: a close price must be stamped AT OR AFTER
+        # entry. All 80/115 fabricated closes had mark_time strictly < opened_at
+        # (the watchlist writer had fallen behind, so the "latest" row predated
+        # the position). Freshness-vs-now is owned upstream by service.py, which
+        # swaps a stale/pre-entry watchlist mark for the live chain cache before
+        # it ever reaches here — so this gate only enforces the post-entry rule.
+        if opened is not None and mark_time < opened:
+            return False  # mark predates entry — cannot be a post-entry close
+        return True
+
     def _resolve_close_price(
         self, position: dict[str, Any], mark: dict[str, Any], *, force: bool
     ) -> tuple[float, str, bool] | None:
@@ -780,18 +811,22 @@ class DirectionalOptionsPaperStore:
         False only for a forced operator close with no real price (excluded from
         RL training so it can't poison the policy with a fabricated reward).
         """
+        # 1) Current-cycle mark — only if fresh & post-entry (closes the
+        #    stale-watchlist-LTP hole that fabricated 80/115 phantom losses).
         m = _safe_float_or_none((mark or {}).get("premium"))
-        if m is not None and m > 0:
+        if m is not None and m > 0 and self._mark_is_fresh_for_close(
+            position, mark, trust_live_source=True
+        ):
             return m, str((mark or {}).get("price_source") or "live_mark"), True
+        # 2) Stored prior-cycle mark — same freshness contract. A frozen
+        #    watchlist LTP that merely "moved off entry" is NOT a real post-entry
+        #    price; require a live source or a fresh post-entry mark_time.
         latest = _safe_float_or_none(position.get("latest_premium"))
-        entry = _safe_float_or_none(position.get("entry_premium"))
         src = str(position.get("price_source") or "")
-        # A stored latest_premium is only trustworthy if it came from a live
-        # source or has actually moved off the entry price — otherwise it is the
-        # frozen entry mark and closing at it fabricates a ₹0 breakeven.
-        if latest is not None and latest > 0 and (
-            src in {"chain_cache_live", "operator_mark", "live_mark"}
-            or (entry is not None and abs(latest - entry) > 1e-9)
+        if latest is not None and latest > 0 and self._mark_is_fresh_for_close(
+            position,
+            {"mark_time": position.get("mark_time"), "price_source": src},
+            trust_live_source=True,
         ):
             return latest, src or "stored_mark", True
         # No live price. If the option is at/after expiry, settle at intrinsic.
@@ -928,6 +963,43 @@ class DirectionalOptionsPaperStore:
             # No running event loop (e.g. unit tests) — skip event logging.
             pass
         return True
+
+    async def realized_windows(self) -> dict[str, float]:
+        """Realized P&L for the current IST day and ISO week from the closed book.
+
+        Feeds the lane-local daily/weekly loss-cap kill-switch in risk.approve —
+        the live entry path previously passed daily_realized=0, so the cap (₹60k/
+        day at default 4R) could never fire. Falls back to 0 on any DB error.
+        """
+        ist = timezone(timedelta(hours=5, minutes=30))
+        today = datetime.now(ist).date()
+        week_start = today - timedelta(days=today.weekday())
+        today_realized = 0.0
+        week_realized = 0.0
+        try:
+            async with AsyncSessionLocal() as session:
+                rows = (
+                    await session.execute(
+                        text(
+                            "SELECT (payload->>'realized_pnl')::float8 AS pnl, "
+                            "payload->>'closed_at' AS closed_at "
+                            "FROM directional_paper_positions "
+                            "WHERE status = 'closed' AND payload->>'closed_at' IS NOT NULL"
+                        )
+                    )
+                ).all()
+            for pnl, closed_at in rows:
+                ts = _parse_iso(closed_at)
+                if ts is None or pnl is None:
+                    continue
+                closed_date = ts.astimezone(ist).date()
+                if closed_date == today:
+                    today_realized += float(pnl)
+                if closed_date >= week_start:
+                    week_realized += float(pnl)
+        except Exception:  # noqa: BLE001 — kill-switch plumbing must never break the cycle
+            return {"today_realized": 0.0, "week_realized": 0.0}
+        return {"today_realized": round(today_realized, 2), "week_realized": round(week_realized, 2)}
 
     async def _summary(self, open_positions: list[dict[str, Any]], closed_positions: list[dict[str, Any]]) -> dict[str, Any]:
         # Lifetime realized from the DB-wide SUM over ALL closed positions — not the

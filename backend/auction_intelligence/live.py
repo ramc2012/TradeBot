@@ -48,6 +48,7 @@ def _decorate_bundle_for_client(analysis: dict[str, Any]) -> dict[str, Any]:
     analysis["agent_decisions"] = decisions
     return analysis
 from auction_intelligence.config import clone_default_config
+from auction_intelligence.mp_ticks import mp_tick_for
 from auction_intelligence.service import AuctionIntelligenceService
 from auction_intelligence.schemas import (
     DepthLevel,
@@ -570,7 +571,11 @@ async def _build_analysis_from_session_rows(
             app_symbol=app_symbol,
             symbol_code=normalized_symbol,
             session_date=session_date,
-            tick_size=tick_size,
+            # Per-symbol COARSE value tick for the TPO histogram (NOT the fine
+            # quote tick used above for the order-flow synthesis). A global 0.5
+            # over-fragments BANKNIFTY/SENSEX → POC/VA + poor-high/low carry no
+            # information.
+            tick_size=mp_tick_for(normalized_symbol, tick_size),
         )
     return {
         "mode": "live",

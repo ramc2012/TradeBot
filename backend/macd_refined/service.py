@@ -54,15 +54,18 @@ class MacdRefinedService:
         self._summary_cache = {"payload": payload, "expires_at": monotonic() + 60.0}
         return payload
 
-    @staticmethod
-    def _automation_status() -> dict[str, Any]:
+    def _automation_status(self) -> dict[str, Any]:
         from core.market_hours_paper_supervisor import market_hours_paper_supervisor
-        return market_hours_paper_supervisor.get_runner_status("macd_refined")
+        return market_hours_paper_supervisor.get_runner_status(self.config.get("key") or "macd_refined")
 
     # ── Backtest (research replay or causal engine) ───────────────────────
     def backtest(
         self, *, source: str = "research", underlyings: Optional[list[str]] = None, expiry_count: int = 8
     ) -> dict[str, Any]:
+        # The historical research dataset is India-only; US is live/paper-only.
+        if str(self.config.get("market") or "india").lower() == "us":
+            return {"source": source, "note": "No US historical dataset — US is live/paper only.",
+                    "signals": {"signal_level_metrics": {}}, "portfolio": {}}
         key = (source, ",".join(sorted(underlyings)) if underlyings else "", int(expiry_count))
         cached = self._backtest_cache.get(key)
         if cached is not None:
@@ -126,3 +129,7 @@ class MacdRefinedService:
 
 
 macd_refined_service = MacdRefinedService()
+
+# US market profile — same engine/exits/sizing, Alpaca data, US tickers.
+from macd_refined.config import clone_us_config  # noqa: E402
+us_macd_refined_service = MacdRefinedService(config=clone_us_config())

@@ -44,7 +44,13 @@ class RiskGovernor:
             reasons.append("Broker connectivity unavailable.")
         if session.stale_data_seconds > self.stale_data_seconds and not self.paper_mode:
             reasons.append("Market data is stale.")
-        if portfolio.daily_realized_pnl <= -abs(self.max_daily_loss) and not self.paper_mode:
+        # Daily-loss circuit breaker runs in PAPER mode too (it is the lane-local
+        # kill-switch). The broker-connectivity and stale-data checks keep their
+        # paper bypass (no broker / tight 10s tick window would false-halt the
+        # paper desk), but a real drawdown on the paper book must still halt new
+        # entries. Requires the paper book's realized P&L to be wired into
+        # PortfolioSnapshot.daily_realized_pnl (done in automation.py).
+        if portfolio.daily_realized_pnl <= -abs(self.max_daily_loss):
             reasons.append("Daily loss limit breached.")
         if portfolio.open_positions >= self.max_concurrent_positions and any(
             decision.action != "FLAT" for decision in decisions
@@ -95,14 +101,18 @@ class RiskGovernor:
             return RiskDecision(
                 allowed=False,
                 kill_switch=(
-                    not self.paper_mode
-                    and any(
-                        reason in {
-                            "Broker connectivity unavailable.",
-                            "Market data is stale.",
-                            "Daily loss limit breached.",
-                        }
-                        for reason in reasons
+                    # Daily-loss breach trips the kill-switch in paper AND live
+                    # (lane-local circuit breaker); broker/stale only in live.
+                    "Daily loss limit breached." in reasons
+                    or (
+                        not self.paper_mode
+                        and any(
+                            reason in {
+                                "Broker connectivity unavailable.",
+                                "Market data is stale.",
+                            }
+                            for reason in reasons
+                        )
                     )
                 ),
                 max_size_multiplier=0.0,

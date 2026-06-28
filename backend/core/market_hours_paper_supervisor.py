@@ -403,6 +403,107 @@ class MarketHoursPaperSupervisor:
                 "symbols": result.get("symbols") or [],
             }
 
+        async def _auction_mp_history_runner() -> dict[str, Any]:
+            """Write-once durable auction MP history.
+
+            Derives per-session daily profiles from the durable 1-minute spot
+            store and persists ONLY session dates not already in
+            ``market_profiles``. With ``post_close_catchup=True`` it appends the
+            just-closed session once after 15:30, and on startup (``is_due`` with
+            no prior run) it performs the one-time / gap backfill. Idempotent and
+            write-once: a stored session is never re-derived or re-fetched.
+            Scoped to NSE-index underlyings — the db-spot open-coverage gate is
+            NSE-session-specific, so CRUDEOIL is handled in the commodity track."""
+            from api.routers.auction_intelligence import backfill_durable_mp_history
+
+            targets = ("NIFTY", "BANKNIFTY", "SENSEX")
+            lookback = int(getattr(settings, "AUCTION_MP_HISTORY_BACKFILL_SESSIONS", 90))
+            results: list[dict[str, Any]] = []
+            failures: dict[str, str] = {}
+            persisted_total = 0
+            for underlying in targets:
+                try:
+                    report = await asyncio.wait_for(
+                        backfill_durable_mp_history(
+                            underlying,
+                            lookback_sessions=lookback,
+                            reason="supervisor",
+                        ),
+                        timeout=120.0,
+                    )
+                    results.append(report)
+                    persisted_total += int(report.get("missing_persisted") or 0)
+                except Exception as exc:
+                    failures[underlying] = str(exc)
+            return {
+                "status": "ok" if not failures else "partial",
+                "result_count": len(results),
+                "actionable_count": persisted_total,
+                "failure_count": len(failures),
+                "failures": failures,
+                "results": results,
+            }
+
+        async def _commodity_mp_history_runner() -> dict[str, Any]:
+            """Write-once durable commodity MP history (MCX).
+
+            Derives per-session daily profiles from the durable 1-minute MCX
+            spot store and persists ONLY session dates not already on disk, at
+            the per-instrument coarse value tick. With ``post_close_catchup=True``
+            it appends the just-closed MCX session once after ~23:30 IST; the
+            startup is-due fire performs the one-time / gap backfill. Idempotent
+            and write-once. Builds all 8 commodity roots (data-maintenance, so
+            full coverage regardless of which roots are actively traded)."""
+            from market_data.commodity_contract_specs import COMMODITY_CONTRACT_SPECS
+            from paper_engine.commodity_mp_history import backfill_commodity_mp_history
+
+            lookback = int(getattr(settings, "COMMODITY_MP_HISTORY_BACKFILL_SESSIONS", 90))
+            results: list[dict[str, Any]] = []
+            failures: dict[str, str] = {}
+            persisted_total = 0
+            for root in COMMODITY_CONTRACT_SPECS:
+                try:
+                    report = await asyncio.wait_for(
+                        backfill_commodity_mp_history(
+                            root,
+                            lookback_sessions=lookback,
+                            reason="supervisor",
+                        ),
+                        timeout=120.0,
+                    )
+                    results.append(report)
+                    persisted_total += int(report.get("missing_persisted") or 0)
+                except Exception as exc:
+                    failures[root] = str(exc)
+
+            # Per-instrument volume baselines (adaptive CVD) — built from the same
+            # durable 1-min history this runner just refreshed. Data-maintenance:
+            # build all roots so the baselines exist the moment the flag is flipped.
+            baseline_report: dict[str, Any] = {}
+            try:
+                from paper_engine.commodity_volume_baseline import backfill_all_baselines
+
+                baseline_report = await asyncio.wait_for(
+                    backfill_all_baselines(
+                        list(COMMODITY_CONTRACT_SPECS),
+                        lookback_sessions=lookback,
+                        reason="supervisor",
+                    ),
+                    timeout=120.0,
+                )
+            except Exception as exc:
+                failures["_volume_baselines"] = str(exc)
+
+            return {
+                "status": "ok" if not failures else "partial",
+                "result_count": len(results),
+                "actionable_count": persisted_total,
+                "failure_count": len(failures),
+                "failures": failures,
+                "results": results,
+                "volume_baselines": baseline_report,
+            }
+
         async def _gann_runner() -> dict[str, Any]:
             try:
                 result = await asyncio.wait_for(
@@ -449,6 +550,40 @@ class MarketHoursPaperSupervisor:
                 interval_seconds=settings.AUCTION_INTELLIGENCE_AUTO_INTERVAL_SECONDS,
                 callback=_auction_runner,
                 enabled=settings.AUCTION_INTELLIGENCE_AUTO_ENABLED,
+            ),
+            RunnerConfig(
+                key="auction_mp_history",
+                label="Auction MP Durable History",
+                interval_seconds=getattr(
+                    settings, "AUCTION_MP_HISTORY_AUTO_INTERVAL_SECONDS", 21600
+                ),
+                callback=_auction_mp_history_runner,
+                enabled=getattr(settings, "AUCTION_MP_HISTORY_AUTO_ENABLED", True),
+                timeout_seconds=420.0,
+                # Data-maintenance runner: builds from the durable spot store, not
+                # a live feed. post_close_catchup=True so the just-closed session
+                # is appended once after 15:30; the startup is-due fire performs
+                # the one-time / gap backfill. Write-once + idempotent.
+                market_hours_fn=_in_nse_market_hours,
+                next_open_fn=_next_nse_market_open,
+                post_close_catchup=True,
+            ),
+            RunnerConfig(
+                key="commodity_mp_history",
+                label="Commodity MP Durable History",
+                interval_seconds=getattr(
+                    settings, "COMMODITY_MP_HISTORY_AUTO_INTERVAL_SECONDS", 21600
+                ),
+                callback=_commodity_mp_history_runner,
+                enabled=getattr(settings, "COMMODITY_MP_HISTORY_AUTO_ENABLED", True),
+                timeout_seconds=420.0,
+                # Data-maintenance from the durable MCX spot store. MCX hours +
+                # post_close_catchup=True → just-closed session appended once
+                # after the ~23:30 close; startup is-due fire does the one-time /
+                # gap backfill. Write-once + idempotent.
+                market_hours_fn=_in_mcx_market_hours,
+                next_open_fn=_next_mcx_market_open,
+                post_close_catchup=True,
             ),
             RunnerConfig(
                 key="fractal_market_profile",

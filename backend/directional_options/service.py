@@ -355,20 +355,39 @@ class DirectionalOptionsService:
                 option_type=row_otype,
                 instrument_key=str(row.get("instrument_key") or "") or None,
             )
-            if premium is None:
-                # The held contract often isn't on the WS premium feed (e.g. a
-                # monthly strike), so latest_local_option_mark returns nothing
-                # and the position's mark FREEZES at entry — every trade then
-                # closes at exit==entry == ₹0 realized P&L (27 such ₹0 trades
-                # on 2026-06-04). Fall back to the option-chain cache, which
-                # carries every strike's LTP (~30s fresh), so positions are
-                # marked-to-market and closes realize real P&L.
+            # A watchlist mark is usable for marking-to-market ONLY if it is both
+            # fresh and stamped after the position opened. Three failure modes
+            # collapse to one fallback: (a) no mark at all (held strike off the WS
+            # feed); (b) STALE mark (the per-symbol writer fell behind — BANKNIFTY
+            # wrote 4 rows in a day); (c) PRE-ENTRY mark (latest available row
+            # predates opened_at). In every case a frozen/old LTP marks the
+            # position at a price that never traded after entry — which fabricated
+            # phantom P&L on close. Fall back to the ~30s-fresh option-chain cache.
+            stale_limit = float(self.config["paper_trading"]["stale_watchlist_seconds"])
+            mark_unusable = premium is None
+            if premium is not None:
+                mt = pd.Timestamp(mark_time) if mark_time else None
+                if mt is None:
+                    mark_unusable = True
+                else:
+                    if mt.tzinfo is None:
+                        mt = mt.tz_localize("UTC")
+                    opened_ts = pd.Timestamp(row.get("opened_at")) if row.get("opened_at") else None
+                    if opened_ts is not None and opened_ts.tzinfo is None:
+                        opened_ts = opened_ts.tz_localize("UTC")
+                    age_seconds = (pd.Timestamp.utcnow() - mt).total_seconds()
+                    if age_seconds > stale_limit or (opened_ts is not None and mt < opened_ts):
+                        mark_unusable = True
+            if mark_unusable:
                 from directional_options.chain_analytics import chain_strike_mark
                 chain_mark = await chain_strike_mark(row_underlying, row_expiry, row_strike, row_otype)
                 if chain_mark is not None and chain_mark > 0:
                     premium = chain_mark
                     mark_time = None
                     price_source = "chain_cache_live"
+                # else: keep the stale watchlist premium for DISPLAY only — its
+                # stale mark_time/source mean the paper book's freshness gate will
+                # refuse to close on it (position stays open, not fabricated).
             if premium is None:
                 continue
             position_marks[str(row.get("position_id") or "")] = {
@@ -758,12 +777,20 @@ class DirectionalOptionsService:
             if chosen is not None:
                 candidate_payload = asdict(chosen)
                 self._attach_selected_candidate_model(candidate_payload, policy_payload)
+                # Lane-local kill-switch: feed the actual day/week realized P&L so
+                # the daily/weekly loss caps in risk.approve can pause new entries
+                # after a drawdown. The live path previously omitted these →
+                # daily_realized defaulted to 0 and the cap never fired (a
+                # disabled circuit breaker).
+                _rw = await self.paper.realized_windows()
                 risk_payload = asdict(
                     self.risk.approve(
                         candidate=chosen,
                         signal=signal,
                         equity=float(self.config["risk"]["starting_equity"]),
                         size_multiplier=size_mult,
+                        daily_realized=_rw["today_realized"],
+                        weekly_realized=_rw["week_realized"],
                     )
                 )
                 if not policy_act:

@@ -432,11 +432,20 @@ class OptionSelectionEngine:
         )
         delta_abs = abs(delta)
         moneyness_pct = abs(meta.strike - spot_price) / max(spot_price, 1.0)
+        # Per-strike round-trip spread as a fraction of premium. The additive
+        # BASE was 0.04 — a flat 4% floor that hit even the most liquid ATM index
+        # weeklies (verified: observed min spread_pct 0.040-0.046 across all four
+        # indices on ATM strikes whose real spreads are ~0.1-0.5%). That synthetic
+        # floor produced ~6% round-trip cost of premium and turned a gross-positive
+        # book net-negative on fictitious drag. Base lowered to 0.004 (~0.4-1%
+        # round-trip) so the liquidity terms (1/volume, 1/oi, moneyness) — which
+        # correctly widen for genuinely thin / far-OTM strikes — drive the spread
+        # instead of a flat artifact.
         spread_pct = min(
             float(self.config["fallback_spread_pct"]),
             max(
-                0.01,
-                0.04 + (120.0 / max(volume, 120.0)) + (1_500.0 / max(oi, 1_500.0)) * 0.01 + moneyness_pct * 0.85,
+                0.003,
+                0.004 + (120.0 / max(volume, 120.0)) + (1_500.0 / max(oi, 1_500.0)) * 0.01 + moneyness_pct * 0.85,
             ),
         )
         slippage_pct = spread_pct * 0.28
@@ -621,11 +630,20 @@ class OptionSelectionEngine:
         )
         delta_abs = abs(delta)
         moneyness_pct = abs(strike - spot_price) / max(spot_price, 1.0)
+        # Per-strike round-trip spread as a fraction of premium. The additive
+        # BASE was 0.04 — a flat 4% floor that hit even the most liquid ATM index
+        # weeklies (verified: observed min spread_pct 0.040-0.046 across all four
+        # indices on ATM strikes whose real spreads are ~0.1-0.5%). That synthetic
+        # floor produced ~6% round-trip cost of premium and turned a gross-positive
+        # book net-negative on fictitious drag. Base lowered to 0.004 (~0.4-1%
+        # round-trip) so the liquidity terms (1/volume, 1/oi, moneyness) — which
+        # correctly widen for genuinely thin / far-OTM strikes — drive the spread
+        # instead of a flat artifact.
         spread_pct = min(
             float(self.config["fallback_spread_pct"]),
             max(
-                0.01,
-                0.04 + (120.0 / max(volume, 120.0)) + (1_500.0 / max(oi, 1_500.0)) * 0.01 + moneyness_pct * 0.85,
+                0.003,
+                0.004 + (120.0 / max(volume, 120.0)) + (1_500.0 / max(oi, 1_500.0)) * 0.01 + moneyness_pct * 0.85,
             ),
         )
         slippage_pct = spread_pct * 0.28

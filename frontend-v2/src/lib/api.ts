@@ -485,6 +485,20 @@ export const getMacdRefinedPaperPositions = (symbol?: string, status = "all", li
 export const getMacdRefinedPaperJournal = (symbol?: string, limit = 50) =>
   api.get("/api/macd-refined/paper-journal", { params: { symbol, limit } });
 export const getMacdRefinedPaperSummary = () => api.get("/api/macd-refined/paper-summary");
+export const getMacdRefinedSignals = (underlying?: string, limit = 100) =>
+  api.get("/api/macd-refined/signals", { params: { underlying, limit } });
+
+// ── US MACD Refined (Alpaca, paper) ───────────────────────────────────────
+export const getUsMacdSummary = () => api.get("/api/us/macd-refined/summary");
+export const getUsMacdDataHealth = () => api.get("/api/us/macd-refined/data-source-health");
+export const getUsMacdPositioning = () => api.get("/api/us/macd-refined/positioning");
+export const getUsMacdSignals = (underlying?: string, limit = 100) =>
+  api.get("/api/us/macd-refined/signals", { params: { underlying, limit } });
+export const runUsMacdLiveCycle = (allowEntries = true) =>
+  api.post("/api/us/macd-refined/run-live-cycle", null, { params: { allow_entries: allowEntries } });
+export const getUsMacdPaperPositions = (symbol?: string, status = "all", limit = 50) =>
+  api.get("/api/us/macd-refined/paper-positions", { params: { symbol, status, limit } });
+export const getUsMacdPaperSummary = () => api.get("/api/us/macd-refined/paper-summary");
 
 // ── Gann TP Delta Harmonic ────────────────────────────────────────────────
 export const getGannTPDeltaSummary = () => api.get("/api/gann-tp-delta/summary");

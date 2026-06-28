@@ -54,6 +54,25 @@ def fyers_symbol(underlying: str) -> str:
     return f"NSE:{sym}-EQ"
 
 
+def us_monthly_expiries(today: date, ahead: int = 2) -> list[date]:
+    """The next `ahead` US standard monthly option expiries (3rd Friday of the
+    month) on or after `today`."""
+    import calendar
+    out: list[date] = []
+    year, month = today.year, today.month
+    while len(out) < max(ahead, 1):
+        weeks = calendar.monthcalendar(year, month)
+        fridays = [w[calendar.FRIDAY] for w in weeks if w[calendar.FRIDAY] != 0]
+        third = date(year, month, fridays[2])
+        if third >= today:
+            out.append(third)
+        month = 1 if month == 12 else month + 1
+        year = year + 1 if month == 1 else year
+        if year > today.year + 2:
+            break
+    return out
+
+
 class MacdRefinedLiveEngine:
     def __init__(self, store, paper, config: dict[str, Any]):
         self.store = store
@@ -155,9 +174,28 @@ class MacdRefinedLiveEngine:
         self._universe_cache = list(dict.fromkeys(ordered))
         return self._universe_cache
 
+    # ── Market profile helpers ────────────────────────────────────────────
+    @property
+    def _market(self) -> str:
+        return str(self.config.get("market") or "india").lower()
+
+    def _underlying_symbol(self, underlying: str) -> str:
+        """Broker symbol for the underlying. US = bare ticker (Alpaca);
+        India = fyers index/equity symbol."""
+        if self._market == "us":
+            return str(underlying).upper()
+        return fyers_symbol(underlying)
+
+    def _lot_for(self, underlying: str, chain_lot: Any = None) -> int:
+        ov = self.config.get("lot_size_override")
+        if ov:
+            return int(ov)
+        return int(chain_lot or self.store.lot_size_for(underlying) or 1)
+
     # ── Broker adapter ────────────────────────────────────────────────────
     async def _adapter(self):
-        """Resolve the FYERS adapter SPECIFICALLY — the lane's symbols
+        """US → Alpaca; India → FYERS (specifically).
+        Resolve the FYERS adapter SPECIFICALLY for India — the lane's symbols
         (NSE:NIFTY50-INDEX, NSE:RELIANCE-EQ, NSE:…CE/PE) are fyers-format, so we
         must not fall back to another broker. Order: (1) the active fyers
         session, (2) ensure_fyers_session() restore, (3) build a fyers adapter
@@ -166,6 +204,12 @@ class MacdRefinedLiveEngine:
         401s for fyers while market-data endpoints (chain/history/quotes) return
         200 — so a 'disconnected' status must NOT block data access while the
         token is still valid."""
+        if self._market == "us":
+            try:
+                from brokers.alpaca import alpaca_adapter
+                return alpaca_adapter if alpaca_adapter.has_credentials else None
+            except Exception:
+                return None
         try:
             from api.routers.auth import get_active_adapter, ensure_fyers_session, get_broker_token
             ad = get_active_adapter("fyers")
@@ -195,6 +239,8 @@ class MacdRefinedLiveEngine:
     def resolve_expiries(self, underlying: str, today: Optional[date] = None) -> list[date]:
         today = today or datetime.now(timezone.utc).date()
         ahead = int(self.config["live"].get("expiries_ahead", 2))
+        if self._market == "us":
+            return us_monthly_expiries(today, ahead)
         return self.store.resolve_monthly_expiries(underlying, today, ahead=ahead)
 
     # ── Volume / turnover persistence ─────────────────────────────────────
@@ -261,7 +307,7 @@ class MacdRefinedLiveEngine:
         for underlying in universe:
             try:
                 expiries = self.resolve_expiries(underlying, today)
-                fy = fyers_symbol(underlying)
+                fy = self._underlying_symbol(underlying)
                 persisted_here = 0
                 snapshots_by_exp: dict[str, list[dict[str, Any]]] = {}
                 for kind, exp in zip(("current", "next"), expiries):
@@ -315,7 +361,7 @@ class MacdRefinedLiveEngine:
         strikes = sorted({float(e.strike) for e in entries if getattr(e, "strike", 0)})
         atm = min(strikes, key=lambda k: abs(k - spot)) if (strikes and spot > 0) else (strikes[len(strikes) // 2] if strikes else 0.0)
         keep = set(self._near_atm_strikes(strikes, atm, strikes_side))
-        lot = self.store.lot_size_for(underlying)
+        lot = self._lot_for(underlying)
         captured = _utc_now()
         for e in entries:
             strike = float(getattr(e, "strike", 0) or 0)
@@ -457,7 +503,7 @@ class MacdRefinedLiveEngine:
                 last = last.iloc[0]
                 iv = self._normalize_iv(float(last.get("iv") or 0.0))
                 ltp = float(last.get("ltp") or 0.0)
-                lot = int(last.get("lot_size") or self.store.lot_size_for(underlying))
+                lot = self._lot_for(underlying, last.get("lot_size"))
                 # IV-rank — MAPPING LABEL ONLY (never gates).
                 iv_hist = atm_rows["iv"].astype(float).map(self._normalize_iv).iloc[:-1]
                 ivr = iv_rank(iv, iv_hist.tail(iv_window))
@@ -601,7 +647,7 @@ class MacdRefinedLiveEngine:
                 kready = {"current": [0, 0], "next": [0, 0]}  # [ready, total]
                 persisted = 0
                 for kind, exp in zip(("current", "next"), expiries):
-                    chain = await adapter.get_option_chain(fyers_symbol(u), exp.isoformat())
+                    chain = await adapter.get_option_chain(self._underlying_symbol(u), exp.isoformat())
                     rows, _snaps = self._chain_to_rows(u, exp, kind, chain, strikes_side)
                     persisted += self._persist_snapshots(u, rows)
                     spot = float(getattr(chain, "spot_price", 0.0) or 0.0)

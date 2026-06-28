@@ -68,6 +68,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/strategies/nse/live", label: "MACD Strategy", icon: Crosshair, matchers: ["/strategies/nse"] },
       { href: "/strategies/macd-refined", label: "MACD Refined", icon: BarChart3, matchers: ["/strategies/macd-refined"] },
+      { href: "/strategies/us-macd-refined", label: "US MACD Refined", icon: Globe, matchers: ["/strategies/us-macd-refined"] },
       { href: "/strategies/directional", label: "Long Premium", icon: Target },
       { href: "/strategies/auction", label: "Auction IQ", icon: Layers3 },
       { href: "/strategies/fractal", label: "Fractal MP", icon: Fingerprint },

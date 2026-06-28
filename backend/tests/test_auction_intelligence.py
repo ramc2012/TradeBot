@@ -1254,7 +1254,9 @@ def test_paper_position_book_closes_open_position_on_flat_signal(tmp_path, monke
     assert close_summary["closed_count"] == 1
     assert state["open_positions"] == []
     assert state["closed_positions"][0]["close_reason"] == "flat_signal"
-    assert state["closed_positions"][0]["realized_pnl"] == 750.0
+    # Paper book is now NET of costs: gross unchanged, realized < gross.
+    assert state["closed_positions"][0]["realized_pnl_gross"] == 750.0
+    assert state["closed_positions"][0]["realized_pnl"] < 750.0
 
 
 def test_paper_position_book_closes_on_underlying_stop_without_reopening(tmp_path, monkeypatch) -> None:
@@ -1338,7 +1340,9 @@ def test_paper_position_book_closes_on_underlying_stop_without_reopening(tmp_pat
     assert close_summary["open_count"] == 0
     assert close_summary["closed_count"] == 1
     assert state["closed_positions"][0]["close_reason"] == "stop_loss"
-    assert state["closed_positions"][0]["realized_pnl"] == -1050.0
+    # Paper book is now NET of costs: gross unchanged, costs deepen the loss.
+    assert state["closed_positions"][0]["realized_pnl_gross"] == -1050.0
+    assert state["closed_positions"][0]["realized_pnl"] < -1050.0
 
 
 def test_swing_agent_uses_contract_aware_margin_sizing() -> None:

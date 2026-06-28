@@ -58,6 +58,16 @@ from analytics.orderflow import (
     vwap_bands,
 )
 from core.config import settings
+from market_data.commodity_contract_specs import extract_commodity_root
+from paper_engine.commodity_volume_baseline import (
+    is_large_volume as _vb_is_large_volume,
+    load_baseline as _vb_load_baseline,
+    pressure_ratio as _vb_pressure_ratio,
+)
+
+# 1-min bars per MP period (15-min TPO) — the granularity at which per-instrument
+# volume baselines and the OF quality reads are computed (1-min is too sparse).
+_MP_PERIOD_BARS = 15
 
 
 # Corrected `lvn_fade` absorption thresholds — used ONLY when
@@ -571,6 +581,8 @@ def _trigger_lvn_fade(
     cvd_total: list[float],
     atr_1m: Optional[float],
     of_degraded: bool = False,
+    baseline: Any = None,
+    current_mp_volume: float = 0.0,
 ) -> Optional[TriggerResult]:
     if not closed_1m:
         return None
@@ -624,7 +636,13 @@ def _trigger_lvn_fade(
             sigma = 0.0
         if sigma <= 0:
             return None
-        flow_strong = abs(cvd_delta_3) >= LVN_ABSORB_FLOW_MULT * sigma
+        # Per-instrument "large flow": prefer this instrument's learned baseline
+        # (its own p90 MP-bar volume) when available — the adaptive-CVD path that
+        # replaces R0's demote; else fall back to the rolling CVD-delta sigma.
+        if baseline is not None and getattr(baseline, "ready", False):
+            flow_strong = _vb_is_large_volume(current_mp_volume, baseline)
+        else:
+            flow_strong = abs(cvd_delta_3) >= LVN_ABSORB_FLOW_MULT * sigma
         stalled = abs(price_move_3) <= LVN_ABSORB_STALL_MULT * atr_1m
         if not (flow_strong and stalled):
             return None
@@ -889,11 +907,36 @@ def evaluate_commodity_mp_signal(
     # ── Evaluate triggers in priority order ─────────────────────────
     candidates: dict[str, TriggerResult] = {}
 
-    # R0 order-flow quality gate: on a symbol whose MP-period volume coverage is
-    # below the floor, demote CVD confirmations to TPO/structure-only and suppress
-    # the pure-OF lvn_fade. Off by default (byte-identical) — gated.
+    # ── Per-instrument ADAPTIVE order-flow context (supersedes R0 demote) ────
+    # Judge pressure / large-volume RELATIVE to THIS instrument's learned volume
+    # distribution (median/p90/p95 of its MP-period bars). CVD is normalized to the
+    # instrument's own scale, never turned off. Surfaced for the UI + fed to
+    # lvn_fade's absorption. Off by default.
+    vol_baseline = None
+    current_mp_volume = 0.0
+    current_mp_signed = 0.0
+    if settings.COMMODITY_VOL_BASELINE_ENABLED:
+        try:
+            root = extract_commodity_root(symbol) if ":" in str(symbol) else str(symbol or "").strip().upper()
+            vol_baseline = _vb_load_baseline(root)
+            mp_bucket = closed_1m[-_MP_PERIOD_BARS:]
+            current_mp_volume = sum(max(float(b.get("volume") or 0.0), 0.0) for b in mp_bucket)
+            if len(cvd_total) >= 2:
+                k = min(_MP_PERIOD_BARS, len(cvd_total) - 1)
+                current_mp_signed = cvd_total[-1] - cvd_total[-1 - k]
+            base["vol_baseline_ready"] = bool(vol_baseline and vol_baseline.ready)
+            base["vol_baseline_median"] = _round(getattr(vol_baseline, "median", None), 0) if vol_baseline else None
+            base["cvd_pressure_ratio"] = _round(_vb_pressure_ratio(current_mp_signed, vol_baseline), 3)
+            base["large_volume"] = bool(_vb_is_large_volume(current_mp_volume, vol_baseline))
+        except Exception:
+            vol_baseline = None
+
+    # R0 order-flow quality gate — SUPERSEDED by the per-instrument baseline above
+    # and FORCED OFF when that path is on (CVD must never be demoted). Retained
+    # only as a legacy fallback; default-off either way.
     of_degraded = (
-        settings.COMMODITY_OF_QUALITY_GATE_ENABLED
+        not settings.COMMODITY_VOL_BASELINE_ENABLED
+        and settings.COMMODITY_OF_QUALITY_GATE_ENABLED
         and _of_volume_coverage(closed_1m) < float(settings.COMMODITY_OF_MIN_VOL_COVERAGE)
     )
     base["of_degraded"] = bool(of_degraded)
@@ -945,6 +988,8 @@ def evaluate_commodity_mp_signal(
         cvd_total=cvd_total,
         atr_1m=atr_1m,
         of_degraded=of_degraded,
+        baseline=vol_baseline,
+        current_mp_volume=current_mp_volume,
     )
     if lvn_fade is not None:
         candidates["lvn_fade"] = lvn_fade

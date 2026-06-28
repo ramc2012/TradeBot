@@ -1486,6 +1486,13 @@ async def _build_db_spot_mp_rows(underlying: str, *, limit: int = 60) -> list[di
         timestamp = row.get("time")
         if not isinstance(timestamp, datetime):
             continue
+        # Clip to the NSE cash session (09:15–15:30 IST). Some sessions carry
+        # spurious overnight/extended rows (feed hiccups, duplicate backfills);
+        # building a profile over them yields an implausible value area that gets
+        # dropped. The open-coverage gate already evaluates only this window, so
+        # clip the build to match it.
+        if not (time(9, 15) <= timestamp.astimezone(_IST).time() <= time(15, 30)):
+            continue
         try:
             bars_by_session[session_date].append(
                 MarketBar(
@@ -1792,6 +1799,108 @@ async def _refresh_durable_mp_collection(underlying: str, *, reason: str) -> dic
         "candidate_rows": len(candidate_payloads),
         "durable_persisted": persisted,
         **live_status,
+    }
+
+
+async def _load_durable_mp_dates(underlying: str) -> set[date]:
+    """Session dates already persisted in the durable ``market_profiles`` store.
+
+    The set drives write-once persistence: a date already present is never
+    rebuilt or re-fetched.
+    """
+    normalized = underlying.upper()
+    try:
+        from sqlalchemy import text
+        from db.database import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT DISTINCT (tpo_data->>'date') AS session_date
+                    FROM market_profiles
+                    WHERE symbol = :symbol
+                      AND timeframe = :timeframe
+                      AND tpo_data ? 'date'
+                    """
+                ),
+                {"symbol": normalized, "timeframe": _DURABLE_DAILY_MP_TIMEFRAME},
+            )
+            return {
+                parsed
+                for row in result.all()
+                if (parsed := _parse_row_date(row[0])) is not None
+            }
+    except Exception as exc:
+        logger.debug(f"[Auction MP] Could not load durable dates for {normalized}: {exc}")
+        return set()
+
+
+async def backfill_durable_mp_history(
+    underlying: str,
+    *,
+    lookback_sessions: int = 90,
+    reason: str = "scheduled_repair",
+) -> dict[str, object]:
+    """Write-once durable daily MP history.
+
+    Builds per-session daily profiles from the durable 1-minute spot-candle
+    store (``underlying_spot_candles``) and persists ONLY the session dates that
+    are not already present in ``market_profiles``. The expensive/external fetch
+    (minute candles) happened once when the spot store was populated; this
+    derivation is local, so re-running never hits a broker and never rewrites a
+    session already stored. Idempotent — re-runs fill only genuine gaps (sessions
+    missed while the app was down) plus the just-closed session. Today's
+    still-forming session is included only after the NSE close (15:30 IST) so the
+    persisted profile is final.
+    """
+    from paper_engine.base_strategy_agent import _now_ist as _ist_now
+
+    normalized = underlying.upper()
+    now_ist = _ist_now()
+    today = now_ist.date()
+    after_close = now_ist.time() > time(15, 30)
+
+    existing = await _load_durable_mp_dates(normalized)
+    candidates = await _build_db_spot_mp_rows(normalized, limit=lookback_sessions)
+
+    missing: list[dict] = []
+    skipped_existing = 0
+    skipped_today_open = 0
+    for row in candidates:
+        row_date = _parse_row_date(row.get("date"))
+        if row_date is None:
+            continue
+        if row_date in existing:
+            skipped_existing += 1
+            continue
+        # Don't freeze a half-formed session: today is eligible only post-close.
+        if row_date >= today and not after_close:
+            skipped_today_open += 1
+            continue
+        missing.append(row)
+
+    persisted = await _persist_durable_mp_rows(normalized, missing) if missing else 0
+    filled = sorted(
+        parsed.isoformat()
+        for row in missing
+        if (parsed := _parse_row_date(row.get("date"))) is not None
+    )
+    if persisted:
+        logger.info(
+            f"[Auction MP] Durable history repair {normalized}: persisted {persisted} "
+            f"session(s) (existing={len(existing)}, reason={reason}); filled={filled}"
+        )
+    return {
+        "underlying": normalized,
+        "reason": reason,
+        "existing_dates": len(existing),
+        "candidate_sessions": len(candidates),
+        "missing_persisted": persisted,
+        "filled_dates": filled,
+        "skipped_existing": skipped_existing,
+        "skipped_today_open": skipped_today_open,
+        "after_close": after_close,
     }
 
 

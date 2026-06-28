@@ -563,7 +563,33 @@ class PaperPositionBook:
         position["latest_spot_price"] = exit_spot
         position["regime_last"] = str(bundle.regime.label)
         position["unrealized_pnl"] = 0.0
-        position["realized_pnl"] = round((exit_premium - entry_premium) * quantity, 2)
+        # Paper P&L must be NET of real costs — the book previously booked raw
+        # (exit-entry)*qty, so the go-live record was cost-blind and optimistic
+        # (the slippage/commission bps lived only in the offline gate_b on a
+        # different decision fn, so the live path was never cost-validated). Long-
+        # premium index option (BUY entry): deduct round-trip charges (STT +
+        # brokerage + exch txn + SEBI + GST + stamp) plus bid/ask spread +
+        # slippage on BOTH legs, mirroring the directional lane's cost model.
+        gross = round((exit_premium - entry_premium) * quantity, 2)
+        try:
+            from paper_engine.costs import round_trip_charges
+            txn_cost = round_trip_charges(
+                symbol=str(position.get("symbol") or position.get("underlying_symbol") or ""),
+                instrument_type=str(position.get("option_type") or "CE"),
+                entry_price=entry_premium,
+                exit_price=exit_premium,
+                qty=quantity,
+                entry_action="BUY",
+            )
+        except Exception:  # noqa: BLE001
+            txn_cost = 0.0
+        per_side_pct = float(getattr(settings, "AUCTION_PAPER_PER_SIDE_SPREAD_PCT", 0.005))
+        slippage_cost = round((abs(entry_premium) + abs(exit_premium)) * per_side_pct * quantity, 2)
+        realized = round(gross - txn_cost - slippage_cost, 2)
+        position["realized_pnl"] = realized
+        position["realized_pnl_gross"] = gross
+        position["transaction_cost"] = round(txn_cost, 2)
+        position["slippage_cost"] = slippage_cost
         try:
             await paper_trade_recorder.record_event(
                 strategy="auction_intelligence",

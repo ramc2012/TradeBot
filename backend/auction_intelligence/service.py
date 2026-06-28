@@ -10,6 +10,7 @@ from auction_intelligence.agents import PositionalAgent, ScalpAgent, SwingAgent
 from auction_intelligence.config import clone_default_config
 from auction_intelligence.execution import ExecutionPlanner
 from auction_intelligence.market_profile import MarketProfileEngine
+from auction_intelligence.mp_ticks import mp_tick_for
 from auction_intelligence.meta_controller import MetaController
 from auction_intelligence.options import OptionStrategyMapper
 from auction_intelligence.order_flow import OrderFlowEngine
@@ -36,6 +37,10 @@ class AuctionIntelligenceService:
         self.config = config or clone_default_config()
         self.paper_mode = paper_mode
         self.market_profile = MarketProfileEngine(self.config["market_profile"])
+        # Per-symbol bar-TPO engines: a global 0.5 tick over-fragments
+        # BANKNIFTY/SENSEX profiles (poor-high/low ~1-2%, tails ~96-98% = no
+        # info). Built lazily per resolved value tick and cached.
+        self._mp_engines: dict[float, MarketProfileEngine] = {}
         self.order_flow = OrderFlowEngine(self.config["order_flow"])
         self.regime = RegimeEngine(self.config["regime"])
         self.swing_agent = SwingAgent(self.config["agents"]["swing"])
@@ -58,6 +63,19 @@ class AuctionIntelligenceService:
         self.paper = PaperTradingService(self.config["paper_trading"]["journal_root"])
         self.validation = GateAValidator(self.config)
 
+    def _profile_engine_for(self, symbol: str) -> MarketProfileEngine:
+        """Bar-TPO engine for one symbol at its per-symbol value tick (cached).
+
+        Falls back to the global engine's tick for unmapped symbols.
+        """
+        base_tick = float(self.config["market_profile"].get("tick_size", 0.5))
+        tick = mp_tick_for(symbol, base_tick)
+        engine = self._mp_engines.get(tick)
+        if engine is None:
+            engine = MarketProfileEngine({**self.config["market_profile"], "tick_size": tick})
+            self._mp_engines[tick] = engine
+        return engine
+
     def analyze(
         self,
         session: SessionContext,
@@ -72,11 +90,12 @@ class AuctionIntelligenceService:
         ntm_volx: NTMVolXSnapshot | None = None,
     ) -> AnalysisBundle:
         portfolio = portfolio or PortfolioSnapshot()
+        mp_engine = self._profile_engine_for(session.symbol)
         prior_profile = None
         if prior_bars:
-            prior_profile = self.market_profile.build_profile(session.symbol, prior_bars)
+            prior_profile = mp_engine.build_profile(session.symbol, prior_bars)
 
-        current_profile = self.market_profile.build_profile(
+        current_profile = mp_engine.build_profile(
             session.symbol,
             bars,
             prior_profile=prior_profile,

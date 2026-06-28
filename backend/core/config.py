@@ -174,6 +174,26 @@ class Settings(BaseSettings):
     DATA_QUALITY_SCAN_GATE_ENABLED: bool = True
     AUCTION_INTELLIGENCE_AUTO_ENABLED: bool = True
     AUCTION_INTELLIGENCE_AUTO_INTERVAL_SECONDS: int = 180
+    # Durable auction MP history (write-once backfill + post-close/gap repair).
+    # A dedicated runner derives per-session daily profiles from the durable
+    # 1-minute spot store and persists ONLY session dates not already stored, so
+    # history is fetched once and persisted forever; daily after the close it
+    # appends the just-closed session and heals any gap left by downtime.
+    AUCTION_MP_HISTORY_AUTO_ENABLED: bool = True
+    AUCTION_MP_HISTORY_AUTO_INTERVAL_SECONDS: int = 21600  # 6h — boot + post-close
+    AUCTION_MP_HISTORY_BACKFILL_SESSIONS: int = 90
+    # Per-side bid/ask spread + slippage as a fraction of option premium applied
+    # to the auction paper book on BOTH legs (the book was cost-blind — raw
+    # premium P&L). ~0.5% per side is realistic for ATM/NTM index weeklies; STT/
+    # brokerage/etc. are added separately via paper_engine.costs.round_trip_charges.
+    AUCTION_PAPER_PER_SIDE_SPREAD_PCT: float = 0.005
+    # Durable commodity MP history (write-once backfill from the MCX 1-min spot
+    # store + post-close/gap repair). Same fetch-once/persist-forever model as
+    # the auction runner, MCX session-aware; profiles built at the per-instrument
+    # coarse value tick so the live HTF gate reads non-degenerate value areas.
+    COMMODITY_MP_HISTORY_AUTO_ENABLED: bool = True
+    COMMODITY_MP_HISTORY_AUTO_INTERVAL_SECONDS: int = 21600  # 6h — boot + post-close
+    COMMODITY_MP_HISTORY_BACKFILL_SESSIONS: int = 90
     # Real order-flow book source (2026-06-03). Maps an index app-symbol to the
     # market_ticks symbol whose REAL order book feeds auction-intelligence order
     # flow — a front-month futures or ATM option contract, which (unlike the
@@ -327,6 +347,14 @@ class Settings(BaseSettings):
     # volume-free, safe on thin names.
     COMMODITY_NAKED_POC_TARGET_ENABLED: bool = False
     COMMODITY_NAKED_POC_MIN_R_FRACTION: float = 0.5
+    # Per-instrument ADAPTIVE CVD/volume baselines (supersedes the R0 demote,
+    # which the user rejected — CVD must learn each instrument's own scale, not
+    # be turned off on thin names). When True, order-flow reads judge pressure /
+    # large-volume RELATIVE to each instrument's learned distribution (median /
+    # p90 / p95 of MP-period bar volume, persisted in
+    # runtime/commodity_vol_baselines/<ROOT>.json) instead of a global threshold.
+    # A 100-lot bar is "large" for NICKEL, trivial for CRUDEOIL. Default OFF.
+    COMMODITY_VOL_BASELINE_ENABLED: bool = False
 
     # Security
     SECRET_KEY: str = "change-me-to-a-random-secret-key"
