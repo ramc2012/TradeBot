@@ -215,11 +215,16 @@ def _extended_strike_window(
     atm_strike: float,
     option_type: str,
     chain_entries,
-    n_itm: int = 3,
-    n_otm: int = 6,
+    n_itm: int = 8,
+    n_otm: int = 8,
 ) -> list[dict[str, Any]]:
-    """Return up to 10 strikes around ATM (3 ITM + 1 ATM + 6 OTM) with
+    """Return up to 17 strikes around ATM (8 ITM + 1 ATM + 8 OTM) with
     their instrument_keys.
+
+    Widened 2026-06-29 from 3 ITM / 6 OTM: the narrower band left a contract
+    blind when the intraday/multi-day ATM drifted past ±6 strikes (the gap the
+    user saw in the option charts). ±8 absorbs normal drift in both directions
+    so a freshly-ATM strike already has pre-warmed history.
 
     The watchlist + trading pipeline still uses the ATM (or nearest-
     liquid) pick. This window is purely a *data-coverage* aid: the

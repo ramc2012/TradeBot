@@ -402,31 +402,86 @@ class MacdRefinedLiveEngine:
         return ordered[: (2 * n + 1)]
 
     # ── Causal evaluation from accumulated tracking ───────────────────────
-    async def _hist_close_series(self, adapter, instrument_key: str):
-        """Broker 30-min premium close series for an option symbol, cached
-        ~25 min. Returns a time-indexed pd.Series (forming last bar dropped) or
-        None. Lets the premium-MACD evaluate before live snapshots accumulate."""
+    @staticmethod
+    def _close_series_from_rows(rows):
+        """Time-indexed 30-min close Series from candle dicts (time/close),
+        dropping the still-forming last bar. None when unusable."""
+        if not rows:
+            return None
+        frame = pd.DataFrame(rows)
+        if "time" not in frame.columns or "close" not in frame.columns:
+            return None
+        frame["time"] = pd.to_datetime(frame["time"], errors="coerce")
+        ser = frame.dropna(subset=["time"]).sort_values("time").set_index("time")["close"].astype(float)
+        ser = ser[ser > 0]
+        if len(ser) >= 1:
+            ser = ser.iloc[:-1]  # drop the still-forming last bar
+        return ser if len(ser) else None
+
+    async def _hist_close_series(
+        self,
+        adapter,
+        instrument_key,
+        *,
+        underlying=None,
+        expiry=None,
+        strike=None,
+        option_type=None,
+    ):
+        """30-min premium close series for an option, cached ~25 min.
+
+        Resilient by design — a watchlist contract must NEVER be silently
+        dropped on a transient broker error. When the contract identity is
+        supplied, read through OptionHistoryService.load_candles (persisted DB
+        first + throttled broker top-up + persist + gap-backfill), so even if
+        the live broker call fails we still return the stored history. A raw
+        broker call with one retry is kept as the secondary path. A failed
+        fetch is NOT cached, so the next cycle retries instead of going blind.
+        """
         if not instrument_key:
             return None
         now = datetime.now(timezone.utc)
         cached = self._hist_cache.get(instrument_key)
         if cached and (now - cached[0]).total_seconds() < 1500:
             return cached[1]
-        rf = (now.date() - timedelta(days=30)).isoformat()
-        rt = now.date().isoformat()
-        try:
-            rows = await adapter.get_historical_candles(instrument_key, "30", rf, rt)
-        except Exception:
-            return None
+
         ser = None
-        if rows:
-            frame = pd.DataFrame(rows)
-            frame["time"] = pd.to_datetime(frame["time"], errors="coerce")
-            ser = frame.dropna(subset=["time"]).sort_values("time").set_index("time")["close"].astype(float)
-            ser = ser[ser > 0]
-            if len(ser) >= 1:
-                ser = ser.iloc[:-1]  # drop the still-forming last bar
-        self._hist_cache[instrument_key] = (now, ser)
+        # Preferred: resilient shared service (DB fallback + persist + gap-fill).
+        if underlying and expiry is not None and strike is not None and option_type:
+            try:
+                from market_data.option_history import option_history_service
+
+                candles = await option_history_service.load_candles(
+                    underlying=str(underlying),
+                    expiry=expiry,
+                    strike=float(strike),
+                    option_type=str(option_type),
+                    instrument_key=instrument_key,
+                    interval="30minute",
+                    limit=120,
+                    allow_broker_refresh=True,
+                )
+                ser = self._close_series_from_rows(candles)
+            except Exception:
+                ser = None
+
+        # Secondary: raw broker history with one retry (never fail on a hiccup).
+        if ser is None or len(ser) < 1:
+            rf = (now.date() - timedelta(days=30)).isoformat()
+            rt = now.date().isoformat()
+            for _attempt in range(2):
+                try:
+                    rows = await adapter.get_historical_candles(instrument_key, "30", rf, rt)
+                except Exception:
+                    rows = None
+                if rows:
+                    ser = self._close_series_from_rows(rows)
+                    break
+
+        # Cache only a usable series; a miss is left uncached so the next cycle
+        # re-attempts (watchlist contract must not be skipped for ~25 min).
+        if ser is not None and len(ser) >= 1:
+            self._hist_cache[instrument_key] = (now, ser)
         return ser
 
     async def _evaluate(self, adapter, underlying: str, expiries: list[date], diag: dict[str, int] | None = None) -> list[dict[str, Any]]:
@@ -475,7 +530,10 @@ class MacdRefinedLiveEngine:
                 if len(series) >= 1:
                     series = series.iloc[:-1]  # drop still-forming bar
                 if len(series) < min_bars + 2:
-                    series = await self._hist_close_series(adapter, atm_ik)
+                    series = await self._hist_close_series(
+                        adapter, atm_ik,
+                        underlying=underlying, expiry=exp, strike=atm, option_type=option_type,
+                    )
                     if series is None or len(series) < min_bars + 2:
                         continue
                 _bump("macd_series_ready")
@@ -665,7 +723,10 @@ class MacdRefinedLiveEngine:
                              and getattr(e, "instrument_key", None)),
                             "",
                         )
-                        ser = await self._hist_close_series(adapter, ik)
+                        ser = await self._hist_close_series(
+                            adapter, ik,
+                            underlying=u, expiry=exp, strike=atm, option_type=ot,
+                        )
                         if ser is not None and len(ser) >= min_bars + 2:
                             kready[kind][0] += 1
                 cur_ready, cur_total = kready["current"]
