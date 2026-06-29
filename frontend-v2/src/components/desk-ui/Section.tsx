@@ -14,7 +14,7 @@ export function Section({
   className,
   children,
 }: {
-  title?: string;
+  title?: React.ReactNode;
   icon?: React.ReactNode;
   description?: string;
   rightSlot?: React.ReactNode;

@@ -29,6 +29,8 @@ from api.routers import audit as audit_router
 from api.routers import data_quality as data_quality_router
 from api.routers import lane_health as lane_health_router
 from api.routers import notifications as notifications_router
+from api.routers import macd_refined as macd_refined_router
+from api.routers import us_macd as us_macd_router
 from directional_options import mount_directional_options_dashboard
 from directional_options.service import directional_options_service
 from api.websockets.ticks import (
@@ -277,6 +279,27 @@ async def lifespan(app: FastAPI):
         )
         logger.info("✓ Embedded research sync daemon started")
 
+    # MACD diffusion: hourly CE/PE-above-zero breadth snapshot (market sentiment),
+    # seeded from option_premium_candles at startup. Lightweight; gated ON.
+    macd_diffusion_task = None
+    if settings.MACD_DIFFUSION_ENABLED:
+        async def _macd_diffusion_worker() -> None:
+            try:
+                from market_data.macd_diffusion import run_daemon
+
+                await run_daemon(
+                    poll_minutes=settings.MACD_DIFFUSION_POLL_MINUTES,
+                    backfill_days=settings.MACD_DIFFUSION_BACKFILL_DAYS,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception(f"MACD diffusion daemon stopped: {exc}")
+
+        macd_diffusion_task = asyncio.create_task(
+            _macd_diffusion_worker(), name="macd-diffusion")
+        logger.info("✓ MACD diffusion daemon started")
+
     # F1 feed: full-universe option-chain → 3m CE+PE OHLC (S1's headline feed).
     # Gated OFF by default; the poll self-staggers through FYERS_DATA_LIMITER.
     if settings.CHAIN_CANDLE_BUILDER_ENABLED:
@@ -296,6 +319,12 @@ async def lifespan(app: FastAPI):
             await research_sync_task
         except asyncio.CancelledError:
             logger.info("Embedded research sync daemon stopped")
+    if macd_diffusion_task is not None:
+        macd_diffusion_task.cancel()
+        try:
+            await macd_diffusion_task
+        except asyncio.CancelledError:
+            logger.info("MACD diffusion daemon stopped")
     if loop_lag_task is not None:
         loop_lag_task.cancel()
         try:
@@ -417,6 +446,8 @@ app.include_router(audit_router.router)
 app.include_router(data_quality_router.router)
 app.include_router(lane_health_router.router)
 app.include_router(notifications_router.router)
+app.include_router(macd_refined_router.router)
+app.include_router(us_macd_router.router)
 
 
 # ── WebSocket Endpoints ───────────────────────────────────────────────────────

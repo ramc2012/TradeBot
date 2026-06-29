@@ -49,6 +49,7 @@ function normalizePositionsOverview(payload: PositionsOverviewPayload): AppStrat
     auction: payload.auction ?? null,
     fractal: payload.fractal ?? null,
     cbe: payload.cbe ?? null,
+    macd: payload.macd ?? null,
     errors: payload.errors ?? {},
     fetchedAt: payload.fetchedAt ?? new Date().toISOString(),
   };

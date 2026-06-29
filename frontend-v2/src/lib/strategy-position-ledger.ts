@@ -5,6 +5,7 @@ type StrategyAgentStatus = { strategies?: any[]; [k: string]: any };
 import {
   getAuctionIntelligencePaperPositions,
   getCBEPaperPositions,
+  getMacdRefinedPaperPositions,
   getCommodityStrategyStatus,
   getDirectionalOptionsPaperPositions,
   getFractalMarketProfilePaperPositions,
@@ -97,6 +98,7 @@ export type AppStrategyPortfolioSnapshot = {
   auction: PaperPositionsPayload | null;
   fractal: PaperPositionsPayload | null;
   cbe: PaperPositionsPayload | null;
+  macd: PaperPositionsPayload | null;
   errors: Record<string, string>;
   fetchedAt: string;
 };
@@ -135,7 +137,7 @@ async function settle<T>(key: string, task: Promise<T>, errors: Record<string, s
 
 export async function fetchAppStrategyPortfolioSnapshot(): Promise<AppStrategyPortfolioSnapshot> {
   const errors: Record<string, string> = {};
-  const [nse, commodity, directional, gann, auction, fractal, cbe] = await Promise.all([
+  const [nse, commodity, directional, gann, auction, fractal, cbe, macd] = await Promise.all([
     settle("nse", getStrategyAgentStatus().then((response) => response.data as StrategyAgentStatus), errors),
     settle("commodity", getCommodityStrategyStatus().then((response) => response.data as CommodityStrategyStatus), errors),
     settle("directional", getDirectionalOptionsPaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
@@ -143,6 +145,7 @@ export async function fetchAppStrategyPortfolioSnapshot(): Promise<AppStrategyPo
     settle("auction", getAuctionIntelligencePaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
     settle("fractal", getFractalMarketProfilePaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
     settle("cbe", getCBEPaperPositions("all", 100).then((response) => response.data as PaperPositionsPayload), errors),
+    settle("macd", getMacdRefinedPaperPositions(undefined, "all", 100).then((response) => response.data as PaperPositionsPayload), errors),
   ]);
 
   return {
@@ -153,6 +156,7 @@ export async function fetchAppStrategyPortfolioSnapshot(): Promise<AppStrategyPo
     auction,
     fractal,
     cbe,
+    macd,
     errors,
     fetchedAt: new Date().toISOString(),
   };
@@ -360,6 +364,9 @@ export function buildOpenPositionRows(snapshot?: AppStrategyPortfolioSnapshot | 
   for (const position of snapshot.cbe?.open_positions || []) {
     rows.push(cbeCashRow(position, "open"));
   }
+  for (const position of snapshot.macd?.open_positions || []) {
+    rows.push(genericOptionRow("macd", "MACD Refined", "MACD Refined", "NSE", position, "open"));
+  }
 
   return rows.sort((left, right) => Math.abs(right.unrealizedPnl || 0) - Math.abs(left.unrealizedPnl || 0));
 }
@@ -433,6 +440,9 @@ export function buildClosedTradeRows(snapshot?: AppStrategyPortfolioSnapshot | n
   }
   for (const position of snapshot.cbe?.closed_positions || []) {
     rows.push(cbeCashRow(position, "closed"));
+  }
+  for (const position of snapshot.macd?.closed_positions || []) {
+    rows.push(genericOptionRow("macd", "MACD Refined", "MACD Refined", "NSE", position, "closed"));
   }
 
   return rows.sort((left, right) => toEpoch(right.closedAt || right.updatedAt) - toEpoch(left.closedAt || left.updatedAt));

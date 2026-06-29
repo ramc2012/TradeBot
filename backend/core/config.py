@@ -62,6 +62,19 @@ class Settings(BaseSettings):
     RESEARCH_SYNC_AUTO_ENABLED: bool = False
     RESEARCH_SYNC_EMBEDDED_ENABLED: bool = False
     STRATEGY_SPOT_SYNC_ENABLED: bool = False
+    # MACD diffusion — hourly CE/PE-above-zero breadth snapshot (market sentiment).
+    # Reads the live watchlist's per-leg MACD; seeds history from option_premium_candles.
+    MACD_DIFFUSION_ENABLED: bool = True
+    MACD_DIFFUSION_POLL_MINUTES: int = 60
+    MACD_DIFFUSION_BACKFILL_DAYS: int = 21
+    # MACD Refined — premium-MACD entry, low-IV gated, volume-led long-premium
+    # book (separate CE/PE). The auto-runner fetches current + next monthly
+    # expiry chains, persists per-contract volume/turnover, and syncs the
+    # paper book. 30-min strategy → 60s cadence catches each fresh bar close.
+    MACD_REFINED_AUTO_ENABLED: bool = True
+    # Full F&O universe (~217 names) × current+next expiry chains per cycle is
+    # broker-intensive; 300s keeps load sane and still catches every 30-min bar.
+    MACD_REFINED_AUTO_INTERVAL_SECONDS: int = 300
     # F1 feed — full-universe option-chain → 3m CE+PE OHLC builder (chain_candle_builder).
     # OFF by default: scales Fyers REST (~30k calls/day, governed by FYERS_DATA_LIMITER);
     # enable deliberately in prod after sign-off + a market-open verification.

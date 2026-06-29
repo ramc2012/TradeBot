@@ -170,6 +170,41 @@ def _compute_bollinger(values: list[float], period: int = 20, num_std: float = 2
     return upper, middle, lower
 
 
+def _compute_kama(
+    values: list[float],
+    er_period: int = 10,
+    fast: int = 2,
+    slow: int = 30,
+) -> list[float | None]:
+    """Kaufman's Adaptive Moving Average.
+
+    KAMA hugs price in clean trends and flattens in chop by scaling its
+    smoothing constant with the efficiency ratio — directional change over
+    summed absolute change across ``er_period`` bars. Seeded with the SMA of
+    the first ``er_period`` closes; values before the warm-up are None so the
+    array stays index-aligned with the bars (same contract as the EMA / BB
+    helpers above).
+    """
+    n = len(values)
+    out: list[float | None] = [None] * n
+    if n <= er_period:
+        return out
+    fast_sc = 2.0 / (fast + 1)
+    slow_sc = 2.0 / (slow + 1)
+    prev = sum(values[:er_period]) / er_period
+    out[er_period - 1] = prev
+    for i in range(er_period, n):
+        change = abs(values[i] - values[i - er_period])
+        volatility = sum(
+            abs(values[j] - values[j - 1]) for j in range(i - er_period + 1, i + 1)
+        )
+        er = (change / volatility) if volatility > 0 else 0.0
+        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+        prev = prev + sc * (values[i] - prev)
+        out[i] = prev
+    return out
+
+
 def _is_in_market_session(ts_ist: datetime, market: str) -> bool:
     """Drop out-of-session bars before they make it into the chart.
 
@@ -482,4 +517,140 @@ async def chart_ohlc(
     if len(_OHLC_CACHE) > 50:
         oldest_key = min(_OHLC_CACHE.items(), key=lambda kv: kv[1][0])[0]
         _OHLC_CACHE.pop(oldest_key, None)
+    return response
+
+
+# ── Per-contract option-premium OHLC + indicators ────────────────────────────
+# Powers the per-ATM-strike pop-up chart on the NSE signal desk. The /ohlc
+# endpoint above renders the underlying spot/futures series; this one renders
+# the OPTION PREMIUM series for one logical contract (underlying + expiry +
+# strike + side) so a trader can verify the 30m ATM MACD lane against the same
+# bars it traded on.
+
+SUPPORTED_OPTION_TIMEFRAMES = ("5minute", "15minute", "30minute")
+
+_OPTION_OHLC_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+_OPTION_OHLC_CACHE_TTL = 20.0
+
+
+@router.get("/option-ohlc")
+async def option_chart_ohlc(
+    underlying: str = Query(..., description="Underlying — SENSEX, NIFTY, RELIANCE, …"),
+    expiry: str = Query(..., description="Contract expiry date (YYYY-MM-DD)"),
+    strike: float = Query(..., description="Strike price"),
+    option_type: str = Query(..., description="CE or PE"),
+    interval: str = Query("30minute"),
+    limit: int = Query(200, ge=20, le=500),
+    instrument_key: str | None = Query(None),
+) -> dict[str, Any]:
+    """Option-premium OHLC + the four signal-desk indicators.
+
+    Returns candles plus index-aligned MACD (12/26/9), RSI(14), Bollinger
+    Bands (20, 2σ) and Kaufman's adaptive MA (10/2/30) for one option
+    contract, read through OptionHistoryService (cross-broker deduped, with a
+    broker top-up when the local series is short). The indicator arrays mirror
+    the /ohlc shape so the frontend can reuse its rendering.
+    """
+    from market_data.option_history import option_history_service
+
+    underlying = underlying.upper().strip()
+    option_type = option_type.upper().strip()
+    interval = interval.lower().strip()
+    if option_type not in {"CE", "PE"}:
+        raise HTTPException(status_code=400, detail="option_type must be CE or PE")
+    if interval not in SUPPORTED_OPTION_TIMEFRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported interval: {interval}. Supported: {', '.join(SUPPORTED_OPTION_TIMEFRAMES)}",
+        )
+    try:
+        expiry_date = date.fromisoformat(expiry[:10])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid expiry: {expiry}") from exc
+
+    contract = {
+        "underlying": underlying,
+        "expiry": expiry_date.isoformat(),
+        "strike": float(strike),
+        "option_type": option_type,
+        "interval": interval,
+    }
+
+    cache_key = (underlying, expiry_date.isoformat(), float(strike), option_type, interval, limit)
+    now_mono = time.monotonic()
+    cached = _OPTION_OHLC_CACHE.get(cache_key)
+    if cached and (now_mono - cached[0]) < _OPTION_OHLC_CACHE_TTL:
+        return cached[1]
+
+    try:
+        candles = await option_history_service.load_candles(
+            underlying=underlying,
+            expiry=expiry_date,
+            strike=float(strike),
+            option_type=option_type,
+            instrument_key=(instrument_key or None),
+            interval=interval,
+            limit=limit,
+        )
+    except Exception as exc:  # noqa: BLE001 — surface a clean empty chart, never a 500
+        return {
+            **contract,
+            "bar_count": 0,
+            "bars": [],
+            "indicators": {},
+            "detail": f"Could not load premium history: {exc}",
+        }
+
+    bars: list[dict[str, Any]] = []
+    for c in candles:
+        close = c.get("close")
+        if close is None:
+            continue
+        close_f = float(close)
+        bars.append(
+            {
+                "time": str(c.get("time")),
+                "open": float(c.get("open")) if c.get("open") is not None else close_f,
+                "high": float(c.get("high")) if c.get("high") is not None else close_f,
+                "low": float(c.get("low")) if c.get("low") is not None else close_f,
+                "close": close_f,
+                "volume": float(c.get("volume") or 0.0),
+            }
+        )
+
+    if not bars:
+        strike_label = int(strike) if float(strike).is_integer() else strike
+        return {
+            **contract,
+            "bar_count": 0,
+            "bars": [],
+            "indicators": {},
+            "detail": f"No premium candle history for {underlying} {strike_label} {option_type} ({expiry_date.isoformat()}).",
+        }
+
+    closes = [b["close"] for b in bars]
+    macd_line, signal_line, hist = compute_macd(closes)
+    rsi_values = compute_rsi(closes, period=14)
+    upper, middle, lower = _compute_bollinger(closes, period=20, num_std=2.0)
+    kama = _compute_kama(closes, er_period=10, fast=2, slow=30)
+
+    response = {
+        **contract,
+        "bar_count": len(bars),
+        "bars": bars,
+        "indicators": {
+            "macd": macd_line,
+            "macd_signal": signal_line,
+            "macd_histogram": hist,
+            "rsi": rsi_values,
+            "bb_upper": upper,
+            "bb_middle": middle,
+            "bb_lower": lower,
+            "kama": kama,
+        },
+    }
+    _OPTION_OHLC_CACHE[cache_key] = (now_mono, response)
+    if len(_OPTION_OHLC_CACHE) > 80:
+        oldest_key = min(_OPTION_OHLC_CACHE.items(), key=lambda kv: kv[1][0])[0]
+        _OPTION_OHLC_CACHE.pop(oldest_key, None)
     return response

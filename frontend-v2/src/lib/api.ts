@@ -215,6 +215,9 @@ export const updateRiskConfig = (config: object) => api.put("/api/trading/risk-c
 // ── Commodity ─────────────────────────────────────────────────────────────
 export const getCommodityStrategyStatus = () => api.get("/api/commodity/strategy-agent/status");
 export const getCommodityOverview = () => api.get("/api/commodity/overview");
+// Read-only NIFTY/BANKNIFTY MP+OF rows for the desk watchlist (monitor only —
+// this lane never trades them).
+export const getCommodityIndexMonitor = () => api.get("/api/commodity/index-monitor");
 export const startCommodityStrategyAgent = () => api.post("/api/commodity/strategy-agent/start");
 export const runCommodityStrategyOnce = (force = true) =>
   api.post("/api/commodity/strategy-agent/run-once", null, { params: { force } });
@@ -239,6 +242,13 @@ export const getCommodityWatchlistSnapshot = (expiry?: string) =>
   api.get("/api/commodity/watchlist-snapshot", { params: { expiry } });
 export const getCommodityProfileHistory = (root: string) =>
   api.get(`/api/commodity/profile-history/${encodeURIComponent(root)}`);
+// MP+OF for any instrument — Market Profile (+ order flow where volume exists)
+// from existing spot candles. Works for indices, commodities, and F&O stocks.
+export const getCommodityIndexMpof = (
+  symbol: string,
+  timeframe: "5minute" | "15minute" | "30minute" = "30minute",
+  sessions = 5,
+) => api.get("/api/commodity/index-mpof", { params: { symbol, timeframe, sessions } });
 // Legacy options-watchlist stubs — deprecated. The endpoints were removed
 // from the backend; these resolve immediately with an empty payload so any
 // page that still imports them keeps compiling.
@@ -393,6 +403,9 @@ export const getStrategyPortfolio = (underlying = "SENSEX") =>
   api.get("/api/strategy/portfolio", { params: { underlying } });
 export const getStrategyOpenSignals = (underlying = "SENSEX") =>
   api.get("/api/strategy/open-signals", { params: { underlying } });
+// MACD diffusion — hourly CE/PE-above-zero breadth (market sentiment).
+export const getMacdDiffusion = (days = 30, market = "NSE") =>
+  api.get("/api/strategy/diffusion", { params: { days, market } });
 
 // ── CBE Scanner ───────────────────────────────────────────────────────────
 export const getCBEConfig = () => api.get("/api/cbe/config");
@@ -457,6 +470,35 @@ export const getDirectionalOptionsPolicy = () =>
   api.get("/api/directional-options/policy");
 export const getDirectionalOptionsPaperSummary = () =>
   api.get("/api/directional-options/paper-summary");
+
+// ── MACD Refined ──────────────────────────────────────────────────────────
+export const getMacdRefinedSummary = () => api.get("/api/macd-refined/summary");
+export const getMacdRefinedBacktest = (source = "research", underlyings?: string, expiryCount = 8) =>
+  api.get("/api/macd-refined/backtest", { params: { source, underlyings, expiry_count: expiryCount } });
+export const getMacdRefinedBacktestCompare = (underlyings?: string, expiryCount = 8) =>
+  api.get("/api/macd-refined/backtest-compare", { params: { underlyings, expiry_count: expiryCount } });
+export const getMacdRefinedPositioning = () => api.get("/api/macd-refined/positioning");
+export const runMacdRefinedLiveCycle = (allowEntries = true) =>
+  api.post("/api/macd-refined/run-live-cycle", null, { params: { allow_entries: allowEntries } });
+export const getMacdRefinedPaperPositions = (symbol?: string, status = "all", limit = 50) =>
+  api.get("/api/macd-refined/paper-positions", { params: { symbol, status, limit } });
+export const getMacdRefinedPaperJournal = (symbol?: string, limit = 50) =>
+  api.get("/api/macd-refined/paper-journal", { params: { symbol, limit } });
+export const getMacdRefinedPaperSummary = () => api.get("/api/macd-refined/paper-summary");
+export const getMacdRefinedSignals = (underlying?: string, limit = 100) =>
+  api.get("/api/macd-refined/signals", { params: { underlying, limit } });
+
+// ── US MACD Refined (Alpaca, paper) ───────────────────────────────────────
+export const getUsMacdSummary = () => api.get("/api/us/macd-refined/summary");
+export const getUsMacdDataHealth = () => api.get("/api/us/macd-refined/data-source-health");
+export const getUsMacdPositioning = () => api.get("/api/us/macd-refined/positioning");
+export const getUsMacdSignals = (underlying?: string, limit = 100) =>
+  api.get("/api/us/macd-refined/signals", { params: { underlying, limit } });
+export const runUsMacdLiveCycle = (allowEntries = true) =>
+  api.post("/api/us/macd-refined/run-live-cycle", null, { params: { allow_entries: allowEntries } });
+export const getUsMacdPaperPositions = (symbol?: string, status = "all", limit = 50) =>
+  api.get("/api/us/macd-refined/paper-positions", { params: { symbol, status, limit } });
+export const getUsMacdPaperSummary = () => api.get("/api/us/macd-refined/paper-summary");
 
 // ── Gann TP Delta Harmonic ────────────────────────────────────────────────
 export const getGannTPDeltaSummary = () => api.get("/api/gann-tp-delta/summary");
@@ -647,6 +689,30 @@ export const getChartOHLC = (
 ) =>
   api.get("/api/charts/ohlc", {
     params: { underlying, timeframe, lookback_sessions: lookbackSessions },
+    timeout: 30_000,
+  });
+
+// Per-ATM-strike option-premium OHLC + indicators (MACD, RSI, BB, KAMA) —
+// powers the pop-up chart on the NSE signal desk.
+export const getOptionOHLC = (params: {
+  underlying: string;
+  expiry: string;
+  strike: number;
+  optionType: string;
+  interval?: "5minute" | "15minute" | "30minute";
+  limit?: number;
+  instrumentKey?: string | null;
+}) =>
+  api.get("/api/charts/option-ohlc", {
+    params: {
+      underlying: params.underlying,
+      expiry: params.expiry,
+      strike: params.strike,
+      option_type: params.optionType,
+      interval: params.interval ?? "30minute",
+      limit: params.limit ?? 200,
+      ...(params.instrumentKey ? { instrument_key: params.instrumentKey } : {}),
+    },
     timeout: 30_000,
   });
 
