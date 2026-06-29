@@ -15,6 +15,12 @@ async def persist_scan_payload(payload: dict[str, Any]) -> str | None:
     """Persist one scan response. Fail closed to logging, not to the scanner."""
     results = list(payload.get("results") or [])
     watchlist_symbols = {str(row.get("instrument") or "") for row in payload.get("watchlist") or []}
+    source_status = dict(payload.get("source_status") or {})
+    for key in ("equity_exposure_pct", "signal_session_date"):
+        if payload.get(key) is not None:
+            source_status[key] = payload.get(key)
+    if payload.get("asset_layer") is not None:
+        source_status["asset_layer"] = payload.get("asset_layer")
     try:
         async with AsyncSessionLocal() as session:
             if not await _tables_ready(session):
@@ -41,7 +47,7 @@ async def persist_scan_payload(payload: dict[str, Any]) -> str | None:
                     "scored_count": int(payload.get("scored_count") or 0),
                     "watchlist_count": int(payload.get("watchlist_count") or 0),
                     "config": json.dumps(payload.get("config") or {}),
-                    "source_status": json.dumps(payload.get("source_status") or {}),
+                    "source_status": json.dumps(source_status),
                     "asset_winner": payload.get("asset_winner"),
                     "composite_gate": float((payload.get("config") or {}).get("composite_gate") or 0.0) or None,
                     "engine_version": payload.get("source"),
@@ -180,6 +186,7 @@ async def load_latest_scan_payload(source: str | None = None) -> dict[str, Any] 
                 {"run_id": run_id},
             )
             rows = [_result_row_to_payload(dict(row)) for row in result_rows.mappings().all()]
+            source_status = run_row["source_status"] or {}
             return {
                 "id": str(run_id),
                 "source": run_row["source"],
@@ -189,8 +196,11 @@ async def load_latest_scan_payload(source: str | None = None) -> dict[str, Any] 
                 "scored_count": run_row["scored_count"],
                 "watchlist_count": run_row["watchlist_count"],
                 "config": run_row["config"] or {},
-                "source_status": run_row["source_status"] or {},
+                "source_status": source_status,
                 "asset_winner": dict(run_row).get("asset_winner"),
+                "equity_exposure_pct": source_status.get("equity_exposure_pct"),
+                "signal_session_date": source_status.get("signal_session_date"),
+                "asset_layer": source_status.get("asset_layer"),
                 "results": rows,
                 "watchlist": [
                     row for row in rows

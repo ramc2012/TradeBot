@@ -56,8 +56,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from analytics.sector import SectorRotationTracker
 
@@ -65,6 +66,8 @@ logger = logging.getLogger(__name__)
 
 
 IST_NOW = lambda: datetime.now(timezone.utc).isoformat()
+IST = ZoneInfo("Asia/Kolkata")
+NSE_SIGNAL_CUTOFF = time(15, 35)
 
 
 # How many top-ranked candidates make the watchlist each cycle. Replaced
@@ -73,9 +76,8 @@ IST_NOW = lambda: datetime.now(timezone.utc).isoformat()
 # do. Either way the trader wants the top N by strength, not a binary
 # pass/fail vs a fixed threshold.
 TOP_N_WATCHLIST: int = 10
-# Kept as backstop only — a candidate whose composite is BELOW this gets
-# logged as a low-conviction pick. Does NOT exclude it from the
-# watchlist; the only filter is the top-N rank.
+# Hard eligibility floor. Relative ranking still decides which names make each
+# sleeve, but a weak market is allowed to produce fewer than N candidates.
 LOW_CONVICTION_FLOOR: float = 50.0
 
 
@@ -111,9 +113,7 @@ class AlphaEngineConfig:
     # Top N candidates by composite_alpha_score become the watchlist.
     # No absolute gate — strength is judged relative to peers each cycle.
     top_n_watchlist: int = TOP_N_WATCHLIST
-    # Soft hint only — flagged as low-conviction in details, not a hard
-    # filter. Kept so the frontend can call out top-N rows that are
-    # tradeable but weak (e.g. all-bear market scenario).
+    # Hard eligibility floor applied to the direction-aware opportunity score.
     low_conviction_floor: float = LOW_CONVICTION_FLOOR
     # Liquidity floors. A stock with extremely thin options is excluded
     # before scoring — there's no point ranking names you can't trade.
@@ -127,9 +127,8 @@ class AlphaEngineConfig:
 async def discover_fno_universe() -> list[str]:
     """List every underlying that has at least one option contract on file.
 
-    Any name with rows in option_premium_candles is by definition an F&O
-    stock — so this is the canonical whitelist without maintaining a
-    separate static list that drifts from exchange revisions.
+    Require a recent, non-expired option contract. Historical rows alone are
+    not sufficient because symbols enter and leave the exchange F&O universe.
     """
     from db.database import AsyncSessionLocal
     from sqlalchemy import text
@@ -141,6 +140,8 @@ async def discover_fno_universe() -> list[str]:
                 SELECT DISTINCT underlying
                 FROM option_premium_candles
                 WHERE underlying IS NOT NULL
+                  AND expiry >= CURRENT_DATE
+                  AND time >= NOW() - INTERVAL '45 days'
                 ORDER BY underlying
                 """
             )
@@ -336,17 +337,22 @@ async def score_option_candidates(
     # daily-close series, preserving candidate order. No CPU-bound indicator
     # math here — only the awaited DB reads stay on the loop.
     loaded: list[tuple[dict[str, Any], list[float]]] = []
+    symbols = [
+        str(row.get("instrument") or "").upper()
+        for row in candidates
+        if str(row.get("instrument") or "").strip()
+    ]
     async with AsyncSessionLocal() as session:
+        closes_by_symbol = await _fetch_daily_closes_bulk(
+            session,
+            symbols,
+            lookback_days=220,
+        )
         for row in candidates:
             symbol = str(row.get("instrument") or "").upper()
             if not symbol:
                 continue
-
-            # Pull 220 days of 30-min bars and resample to daily-closes.
-            # 220 days is enough for ~150 trading-day MACD warm-up + 30-week
-            # weekly trend reference.
-            daily_closes = await _fetch_daily_closes(session, symbol, lookback_days=220)
-            loaded.append((row, daily_closes))
+            loaded.append((row, closes_by_symbol.get(symbol, [])))
 
     # PHASE 2 (sync, offloaded): compute-all. Run the entire O(universe)
     # indicator grind on a worker thread so it cannot block the event loop
@@ -375,6 +381,8 @@ def _score_candidates_compute(
         weekly = compute_weekly_context(daily_closes)
         macd_score, macd_meta = score_macd(indicators)
         rsi_score, rsi_meta = score_rsi(indicators)
+        bearish_macd_score, bearish_macd_meta = score_bearish_macd(indicators)
+        bearish_rsi_score, bearish_rsi_meta = score_bearish_rsi(indicators)
         bias = _bias_from_signals(
             {**row, "macd": indicators, "weekly": weekly},
             trend_score=indicators.get("rsi_14") or 50.0,  # unused in new bias rule
@@ -390,9 +398,13 @@ def _score_candidates_compute(
                 "macd_bullish": indicators.get("macd_bullish"),
                 "macd_score": round(macd_score, 2),
                 "macd_meta": macd_meta,
+                "bearish_macd_score": round(bearish_macd_score, 2),
+                "bearish_macd_meta": bearish_macd_meta,
                 "rsi_14": indicators.get("rsi_14"),
                 "rsi_score": round(rsi_score, 2),
                 "rsi_meta": rsi_meta,
+                "bearish_rsi_score": round(bearish_rsi_score, 2),
+                "bearish_rsi_meta": bearish_rsi_meta,
                 "weekly_close_vs_ema20": weekly.get("close_vs_ema20"),
                 "weekly_trend": weekly.get("trend"),
                 "directional_bias": bias,
@@ -405,26 +417,97 @@ def _score_candidates_compute(
 
 
 async def _fetch_daily_closes(session, symbol: str, *, lookback_days: int = 220) -> list[float]:
-    """Resample 30-min bars to last-bar-of-day close for the given window."""
+    """Return closes from completed NSE sessions only.
+
+    Before 15:35 IST the current date is excluded. After the exchange-close
+    grace period it is included, allowing the supervisor's post-close catch-up
+    to produce the canonical signal for the next session.
+    """
     from sqlalchemy import text
+    completed_through = _completed_session_cutoff()
     result = await session.execute(
         text(
             """
             WITH daily AS (
-                SELECT DATE(time) AS d,
+                SELECT DATE(time AT TIME ZONE 'Asia/Kolkata') AS d,
                        (ARRAY_AGG(close ORDER BY time DESC))[1] AS close
                 FROM underlying_spot_candles
                 WHERE underlying = :underlying
                   AND interval = '30minute'
                   AND time >= NOW() - (:days || ' days')::interval
-                GROUP BY DATE(time)
+                  AND DATE(time AT TIME ZONE 'Asia/Kolkata') <= :completed_through
+                GROUP BY DATE(time AT TIME ZONE 'Asia/Kolkata')
             )
             SELECT close FROM daily ORDER BY d ASC
             """
         ),
-        {"underlying": symbol, "days": str(int(lookback_days))},
+        {
+            "underlying": symbol,
+            "days": str(int(lookback_days)),
+            "completed_through": completed_through,
+        },
     )
     return [float(r[0]) for r in result.fetchall() if r[0] is not None]
+
+
+async def _fetch_daily_closes_bulk(
+    session,
+    symbols: list[str],
+    *,
+    lookback_days: int = 220,
+) -> dict[str, list[float]]:
+    """Load the entire CBE universe in one query.
+
+    The previous per-symbol loop held one connection across ~217 sequential
+    scans and could be killed by the database before completing. One grouped
+    query is both faster and materially safer for the shared production pool.
+    """
+    from sqlalchemy import text
+
+    normalized = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
+    if not normalized:
+        return {}
+    result = await session.execute(
+        text(
+            """
+            WITH daily AS (
+                SELECT underlying,
+                       DATE(time AT TIME ZONE 'Asia/Kolkata') AS d,
+                       (ARRAY_AGG(close ORDER BY time DESC))[1] AS close
+                FROM underlying_spot_candles
+                WHERE underlying = ANY(:underlyings)
+                  AND interval = '30minute'
+                  AND time >= NOW() - (:days || ' days')::interval
+                  AND DATE(time AT TIME ZONE 'Asia/Kolkata') <= :completed_through
+                GROUP BY underlying, DATE(time AT TIME ZONE 'Asia/Kolkata')
+            )
+            SELECT underlying, close
+            FROM daily
+            ORDER BY underlying, d ASC
+            """
+        ),
+        {
+            "underlyings": normalized,
+            "days": str(int(lookback_days)),
+            "completed_through": _completed_session_cutoff(),
+        },
+    )
+    closes_by_symbol: dict[str, list[float]] = {symbol: [] for symbol in normalized}
+    for underlying, close in result.fetchall():
+        if close is not None:
+            closes_by_symbol.setdefault(str(underlying).upper(), []).append(float(close))
+    return closes_by_symbol
+
+
+def _completed_session_cutoff(now: datetime | None = None) -> date:
+    """Latest calendar date whose NSE session may be used by the EOD model."""
+    from core.trading_calendar import trading_calendar
+
+    local = (now or datetime.now(timezone.utc)).astimezone(IST)
+    candidate = local.date() if local.time() >= NSE_SIGNAL_CUTOFF else local.date() - timedelta(days=1)
+    while not trading_calendar.has_exchange_session("NSE", candidate):
+        candidate -= timedelta(days=1)
+    return candidate
 
 
 # ---------------------------------------------------------------------------
@@ -471,11 +554,14 @@ def compute_daily_indicators(closes: list[float]) -> dict[str, Any]:
 def compute_weekly_context(daily_closes: list[float]) -> dict[str, Any]:
     """Weekly trend filter: close vs 20-week EMA on weekly-resampled series.
 
-    Weekly resampling = take every 5th close (rough but adequate for trend).
+    Weekly resampling is an approximate five-session grouping. Groups are
+    anchored from the newest close so the current completed session is never
+    silently omitted when the history length is not divisible by five.
     """
     if len(daily_closes) < 100:  # need ~20 weeks worth of daily bars
         return {"close_vs_ema20": None, "trend": "unknown"}
-    weekly_closes = daily_closes[::5][-30:]  # last ~30 weeks
+    reversed_closes = list(reversed(daily_closes))
+    weekly_closes = list(reversed(reversed_closes[::5]))[-30:]
     if len(weekly_closes) < 25:
         return {"close_vs_ema20": None, "trend": "unknown"}
     weekly_ema = _ema(weekly_closes, 20)
@@ -562,6 +648,62 @@ def score_rsi(indicators: dict[str, Any]) -> tuple[float, dict[str, Any]]:
     return score, {"label": label, "rsi": rsi}
 
 
+def score_bearish_macd(indicators: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+    """Mirror the MACD score for short opportunities.
+
+    A confirmed below-zero bearish trend is strong rather than being punished
+    by the long-oriented MACD score.
+    """
+    line = indicators.get("macd_line")
+    if line is None:
+        return 50.0, {"reason": "macd_not_computable"}
+    above = bool(indicators.get("macd_above_zero"))
+    bull = bool(indicators.get("macd_bullish"))
+    fresh = bool(indicators.get("macd_cross_today"))
+    if (not above) and (not bull) and fresh:
+        score, label = 95.0, "below_zero_bearish_fresh"
+    elif (not above) and (not bull):
+        score, label = 75.0, "below_zero_bearish"
+    elif (not above) and bull:
+        score, label = 45.0, "below_zero_bullish_warning"
+    elif above and (not bull) and fresh:
+        score, label = 60.0, "above_zero_bearish_reversal"
+    elif above and (not bull):
+        score, label = 50.0, "above_zero_bearish_pending"
+    elif above and bull and fresh:
+        score, label = 5.0, "above_zero_bullish_fresh"
+    else:
+        score, label = 25.0, "above_zero_bullish"
+    return score, {
+        "label": label,
+        "line": line,
+        "signal": indicators.get("macd_signal"),
+        "cross_today": fresh,
+    }
+
+
+def score_bearish_rsi(indicators: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+    """RSI opportunity score for a short sleeve."""
+    rsi = indicators.get("rsi_14")
+    if rsi is None:
+        return 50.0, {"reason": "rsi_not_computable"}
+    if 35 <= rsi <= 55:
+        score, label = 90.0, "healthy_downtrend"
+    elif 25 <= rsi < 35:
+        score, label = 60.0, "extended_downtrend"
+    elif 55 < rsi <= 65:
+        score, label = 65.0, "rolling_over"
+    elif 65 < rsi <= 75:
+        score, label = 50.0, "overbought_breakdown_candidate"
+    elif rsi > 75:
+        score, label = 25.0, "overbought_not_confirmed"
+    elif 15 <= rsi < 25:
+        score, label = 30.0, "oversold"
+    else:
+        score, label = 10.0, "extreme_oversold"
+    return score, {"label": label, "rsi": rsi}
+
+
 def _rsi(closes: list[float], period: int = 14) -> float:
     """Standard Wilder RSI on the last `period` deltas. Returns last value."""
     if len(closes) < period + 1:
@@ -575,6 +717,8 @@ def _rsi(closes: list[float], period: int = 14) -> float:
     for i in range(period, len(deltas)):
         avg_gain = (avg_gain * (period - 1) + gains[i]) / period
         avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_gain == 0 and avg_loss == 0:
+        return 50.0
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss
@@ -670,6 +814,31 @@ def _normalize_rs_pct(rs_pct: float) -> float:
     return max(0.0, min(100.0, raw))
 
 
+def _select_balanced_watchlist(
+    scored: list[dict[str, Any]],
+    *,
+    top_n: int,
+    minimum_score: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Select independent long and short sleeves from direction-aware scores."""
+    actionable = [
+        row for row in scored
+        if row.get("directional_bias") in ("bullish", "bearish")
+        and float(row.get("composite_alpha_score") or 0.0) >= minimum_score
+    ]
+    long_candidates = [row for row in actionable if row.get("directional_bias") == "bullish"]
+    short_candidates = [row for row in actionable if row.get("directional_bias") == "bearish"]
+    requested = max(1, int(top_n))
+    if requested == 1:
+        watchlist = actionable[:1]
+    else:
+        long_cap = (requested + 1) // 2
+        short_cap = requested // 2
+        watchlist = long_candidates[:long_cap] + short_candidates[:short_cap]
+        watchlist.sort(key=lambda row: float(row.get("composite_alpha_score") or 0.0), reverse=True)
+    return actionable, long_candidates, short_candidates, watchlist
+
+
 def _ema(series: list[float], period: int) -> list[float]:
     if not series or period <= 0:
         return []
@@ -716,14 +885,23 @@ async def run_alpha_pipeline(config: AlphaEngineConfig | None = None) -> dict[st
     )
 
     scored: list[dict[str, Any]] = []
-    asset_score = float(asset_layer.get("score_for_engine") or 100.0)
+    raw_asset_score = asset_layer.get("score_for_engine")
+    asset_score = 100.0 if raw_asset_score is None else float(raw_asset_score)
     for row in enriched:
+        bias = str(row.get("directional_bias") or "neutral").lower()
+        is_bearish = bias == "bearish"
         score = composite_score(
-            asset_score=asset_score,
-            sector_rs_pct=float(row.get("sector_rs_pct") or 0.0),
-            stock_rs_pct=float(row.get("stock_rs_pct") or 0.0),
-            macd_score=float(row.get("macd_score") or 50.0),
-            rsi_score=float(row.get("rsi_score") or 50.0),
+            asset_score=(100.0 - asset_score) if is_bearish else asset_score,
+            sector_rs_pct=(-float(row.get("sector_rs_pct") or 0.0)) if is_bearish else float(row.get("sector_rs_pct") or 0.0),
+            stock_rs_pct=(-float(row.get("stock_rs_pct") or 0.0)) if is_bearish else float(row.get("stock_rs_pct") or 0.0),
+            macd_score=float(
+                (row.get("bearish_macd_score") if is_bearish else row.get("macd_score"))
+                or 50.0
+            ),
+            rsi_score=float(
+                (row.get("bearish_rsi_score") if is_bearish else row.get("rsi_score"))
+                or 50.0
+            ),
             weights=config.weights,
         )
         scored.append(
@@ -747,39 +925,44 @@ async def run_alpha_pipeline(config: AlphaEngineConfig | None = None) -> dict[st
                 "f4_cp_score": float(row.get("rsi_score") or 0.0) / 10.0,
                 "f5_mp_score": float(row.get("macd_score") or 0.0) / 10.0,
                 "details": {
-                    "engine": "alpha_v3_macd_rsi_rrg",
+                    "engine": "alpha_v4_direction_aware",
+                    "score_direction": "short" if is_bearish else "long",
                     "alpha_score": score["score"],
                     "components": score["components"],
                     "sector_code": row.get("sector_code"),
                     "sector_quadrant": row.get("sector_quadrant"),
                     "stock_quadrant": row.get("stock_quadrant"),
-                    "macd_meta": row.get("macd_meta"),
-                    "rsi_meta": row.get("rsi_meta"),
+                    "macd_meta": row.get("bearish_macd_meta") if is_bearish else row.get("macd_meta"),
+                    "rsi_meta": row.get("bearish_rsi_meta") if is_bearish else row.get("rsi_meta"),
                     "weekly_trend": row.get("weekly_trend"),
                 },
             }
         )
 
     scored.sort(key=lambda r: float(r.get("composite_alpha_score") or 0.0), reverse=True)
-    # Watchlist = top N by composite_alpha_score whose bias is actionable.
-    # Strength is RELATIVE per cycle — no absolute floor. We take up to N
-    # tradeable rows from the head of the sorted list; if fewer than N
-    # have non-neutral bias, the watchlist is shorter (that's honest —
-    # don't trade neutral biases just to fill a quota).
-    actionable = [
-        r for r in scored
-        if r.get("directional_bias") in ("bullish", "bearish")
-    ]
-    watchlist = actionable[: int(config.top_n_watchlist)]
+    # Build independent long and short sleeves. This prevents a long-oriented
+    # momentum scale from crowding valid short setups out of the hedge book.
+    actionable, long_candidates, short_candidates, watchlist = _select_balanced_watchlist(
+        scored,
+        top_n=config.top_n_watchlist,
+        minimum_score=config.low_conviction_floor,
+    )
     # Mark in_top_n on the rows (and keep gate_passed alias for old
     # frontend code that hasn't migrated yet).
     top_n_ids = {id(r) for r in watchlist}
-    for row in scored:
+    actionable_ranks = {id(row): index for index, row in enumerate(actionable, start=1)}
+    long_ranks = {id(row): index for index, row in enumerate(long_candidates, start=1)}
+    short_ranks = {id(row): index for index, row in enumerate(short_candidates, start=1)}
+    for overall_rank, row in enumerate(scored, start=1):
         is_top = id(row) in top_n_ids
         row["in_top_n"] = is_top
         row["gate_passed"] = is_top  # alias for back-compat
-        row["rank_overall"] = scored.index(row) + 1
-        row["rank_actionable"] = (actionable.index(row) + 1) if row in actionable else None
+        row["rank_overall"] = overall_rank
+        row["rank_actionable"] = actionable_ranks.get(id(row))
+        row["rank_direction"] = (
+            long_ranks.get(id(row)) if row.get("directional_bias") == "bullish"
+            else short_ranks.get(id(row))
+        )
     finished = datetime.now(timezone.utc)
     return {
         "scan_date": started.date().isoformat(),
@@ -799,7 +982,8 @@ async def run_alpha_pipeline(config: AlphaEngineConfig | None = None) -> dict[st
         "watchlist_count": len(watchlist),
         "results": scored,
         "watchlist": watchlist,
-        "source": "alpha_engine_v3_macd_rsi_rrg",
+        "signal_session_date": _completed_session_cutoff(started).isoformat(),
+        "source": "alpha_engine_v4_direction_aware",
     }
 
 

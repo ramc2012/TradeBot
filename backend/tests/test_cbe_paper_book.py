@@ -8,7 +8,14 @@ from typing import Any
 
 import pytest
 
-from cbe_scanner.paper import CBEPaperBook, CBE_INITIAL_CAPITAL, MIN_HOLD_TRADING_DAYS
+from cbe_scanner.paper import (
+    CBEPaperBook,
+    CBE_INITIAL_CAPITAL,
+    HEDGE_MAX_GROSS_EXPOSURE_RATIO,
+    HEDGE_MAX_NET_EXPOSURE_RATIO,
+    HEDGE_MAX_SECTOR_EXPOSURE_RATIO,
+    MIN_HOLD_TRADING_DAYS,
+)
 
 
 def _scan_payload(rows: list[dict[str, Any]], *, scan_date: str = "2026-05-29") -> dict[str, Any]:
@@ -23,20 +30,35 @@ def _scan_payload(rows: list[dict[str, Any]], *, scan_date: str = "2026-05-29") 
     }
 
 
-def _row(symbol: str, bias: str, score: float, close: float, conviction: float = 0.6) -> dict[str, Any]:
+def _row(
+    symbol: str,
+    bias: str,
+    score: float,
+    close: float,
+    conviction: float = 0.6,
+    sector: str | None = None,
+) -> dict[str, Any]:
     return {
         "instrument": symbol,
         "composite_score": score,
+        "composite_alpha_score": score * 10.0,
         "directional_bias": bias,
         "bias_conviction": conviction,
         "latest_close": close,
+        "sector_code": sector,
     }
 
 
 @pytest.fixture
 def book() -> CBEPaperBook:
     tmp = tempfile.mkdtemp()
-    return CBEPaperBook(tmp, initial_capital=1_000_000.0, position_notional_cap=100_000.0)
+    return CBEPaperBook(
+        tmp,
+        initial_capital=1_000_000.0,
+        position_notional_cap=100_000.0,
+        slippage_bps=0.0,
+        transaction_cost_bps_per_leg=0.0,
+    )
 
 
 def _run(coro):
@@ -114,17 +136,16 @@ def test_short_position_gains_on_price_drop(book: CBEPaperBook):
     assert pos["unrealized_pnl"] == 2500.0
 
 
-def test_bias_flip_held_during_min_hold_window(book: CBEPaperBook):
-    """Per the weekly-rebalance rule, a bias flip on day 0 does NOT close
-    the position — must wait MIN_HOLD_TRADING_DAYS first."""
+def test_bias_flip_exits_immediately_inside_min_hold_window(book: CBEPaperBook):
+    """Signal invalidation overrides the ordinary weekly hold."""
     _run(book.sync_from_scan(_scan_payload([_row("RELIANCE", "bullish", 6.5, 2500.0)])))
     _run(book.sync_from_scan(_scan_payload([_row("RELIANCE", "bearish", 6.5, 2510.0)])))
     positions = _run(book.list_positions(status="all"))
-    # Both signals arrived inside the min-hold window — original LONG stays open.
+    assert len(positions["closed_positions"]) == 1
+    assert positions["closed_positions"][0]["close_reason"] == "bias_flip"
+    # The current bearish signal may establish the replacement short.
     assert len(positions["open_positions"]) == 1
-    assert positions["open_positions"][0]["direction"] == "long"
-    assert positions["open_positions"][0].get("pending_close_reason") == "bias_flip"
-    assert not positions["closed_positions"]
+    assert positions["open_positions"][0]["direction"] == "short"
 
 
 def test_bias_flip_closes_after_min_hold_elapsed(book: CBEPaperBook):
@@ -179,12 +200,41 @@ def test_reset_archives_and_zeroes_book(book: CBEPaperBook):
     assert archives, "Expected at least one archive directory"
 
 
-def test_capital_capped_when_too_many_signals(book: CBEPaperBook):
-    """Eleven ₹100k positions exceed the ₹1L initial; the 11th must be skipped."""
-    rows = [_row(f"SYM{i}", "bullish", 6.5, 1000.0) for i in range(11)]
+def test_one_sided_book_is_capped_by_net_exposure(book: CBEPaperBook):
+    """A hedge-fund book cannot spend all capital on one directional sleeve."""
+    rows = [_row(f"SYM{i}", "bullish", 6.5, 1000.0, sector=f"SECTOR{i}") for i in range(11)]
     summary = _run(book.sync_from_scan(_scan_payload(rows)))
-    # 10 positions × ₹100k = ₹1M = entire initial capital
+    # 4 positions x 100k = 40% net-long exposure, the configured max.
+    assert summary["open_positions"] == 4
+    assert summary["long_positions"] == 4
+    assert summary["short_positions"] == 0
+    assert summary["net_exposure"] == 400_000.0
+    assert summary["net_exposure_ratio"] == HEDGE_MAX_NET_EXPOSURE_RATIO
+    assert summary["available_capital"] == 600_000.0
+
+
+def test_sector_concentration_caps_same_sector(book: CBEPaperBook):
+    rows = [_row(f"SYM{i}", "bullish", 6.5, 1000.0, sector="BANKS") for i in range(11)]
+    summary = _run(book.sync_from_scan(_scan_payload(rows)))
+    # Sector cap is 30% of equity budget, so the fourth 100k BANKS name is skipped.
+    assert summary["open_positions"] == 3
+    assert summary["sector_exposures"][0]["sector"] == "BANKS"
+    assert summary["sector_exposures"][0]["gross_exposure_ratio"] == HEDGE_MAX_SECTOR_EXPOSURE_RATIO
+
+
+def test_balanced_long_short_book_can_use_full_gross_budget(book: CBEPaperBook):
+    rows = [
+        _row(f"L{i}", "bullish", 6.5, 1000.0, sector=f"LONG{i}")
+        if i % 2 == 0
+        else _row(f"S{i}", "bearish", 6.5, 1000.0, sector=f"SHORT{i}")
+        for i in range(12)
+    ]
+    summary = _run(book.sync_from_scan(_scan_payload(rows)))
     assert summary["open_positions"] == 10
+    assert summary["long_positions"] == 5
+    assert summary["short_positions"] == 5
+    assert summary["gross_exposure_ratio"] == HEDGE_MAX_GROSS_EXPOSURE_RATIO
+    assert summary["net_exposure_ratio"] == 0.0
     assert summary["available_capital"] == 0.0
 
 
@@ -223,3 +273,37 @@ def test_summary_after_close_includes_realized_pnl(book: CBEPaperBook):
     assert summary["realized_pnl"] == 4000.0
     assert summary["total_trades"] == 1
     assert summary["win_rate"] == 1.0
+
+
+def test_hard_stop_closes_without_waiting_for_min_hold(book: CBEPaperBook):
+    _run(book.sync_from_scan(_scan_payload([_row("RELIANCE", "bullish", 6.5, 2500.0)])))
+    summary = _run(book.refresh_open_marks({"RELIANCE": 2300.0}))
+    positions = _run(book.list_positions(status="all"))
+
+    assert summary["open_positions"] == 0
+    assert positions["closed_positions"][0]["close_reason"] == "hard_stop"
+    assert positions["closed_positions"][0]["realized_pnl"] == -8000.0
+
+
+def test_open_loss_is_included_in_drawdown(book: CBEPaperBook):
+    _run(book.sync_from_scan(_scan_payload([_row("RELIANCE", "bullish", 6.5, 2500.0)])))
+    summary = _run(book.refresh_open_marks({"RELIANCE": 2400.0}))
+
+    assert summary["unrealized_pnl"] == -4000.0
+    assert summary["current_drawdown"] == 0.004
+    assert summary["max_drawdown"] == 0.004
+
+
+def test_default_execution_model_applies_slippage_and_costs(tmp_path: Path):
+    live_like = CBEPaperBook(
+        tmp_path,
+        initial_capital=1_000_000.0,
+        position_notional_cap=100_000.0,
+    )
+    _run(live_like.sync_from_scan(_scan_payload([_row("RELIANCE", "bullish", 6.5, 2500.0)])))
+    pos = _run(live_like.list_positions(status="open"))["open_positions"][0]
+
+    assert pos["entry_price"] > 2500.0
+    assert pos["estimated_transaction_costs"] > 0.0
+    assert pos["unrealized_pnl"] < 0.0
+    assert pos["execution_model"] == "cash_equity_delivery"

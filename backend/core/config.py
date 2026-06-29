@@ -171,11 +171,23 @@ class Settings(BaseSettings):
     # within one cycle of its close, which the broker quote refresh rate
     # comfortably supports.
     DIRECTIONAL_OPTIONS_AUTO_INTERVAL_SECONDS: int = 60
+    # POSITIONAL options strategy (2026-06-28): the researched directional edge —
+    # multi-day hold, MONTHLY ATM contract, HTF-direction backbone CONFIRMED by
+    # option positioning (oi_build / PCR from directional_positioning_daily), with
+    # a single position per underlying and a 30% hard stop. Default OFF; when on,
+    # predict() uses the positioning-confirmed positional view instead of the
+    # legacy momentum sum. Edge measured small + cost-sensitive on indices, so
+    # this is a forward PAPER A/B. Vol gate (d_atm_iv>=0) sourced live where
+    # history is null. pcr_low/high = the call-heavy / put-heavy confirmation
+    # thresholds for CE / PE.
+    DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED: bool = False
+    DIRECTIONAL_POSITIONAL_PCR_LOW: float = 0.9
+    DIRECTIONAL_POSITIONAL_PCR_HIGH: float = 1.2
+    DIRECTIONAL_POSITIONAL_STOP_PCT: float = 0.30
     # CBE alpha engine runs at EOD. Cadence = 1 hour: during market hours
-    # the daily MACD/RSI indicators don't move (they're computed off last-bar-
-    # of-day closes), so re-running intra-day is cheap and idempotent. The
-    # supervisor's post-close catch-up gives the canonical EOD scan that
-    # decides position changes for the next session.
+    # the daily MACD/RSI indicators use completed sessions only, so re-running
+    # intra-day is idempotent. A post-close catch-up after the ingestion grace
+    # period gives the canonical EOD scan for the next session.
     CBE_SCANNER_AUTO_ENABLED: bool = True
     CBE_SCANNER_AUTO_INTERVAL_SECONDS: int = 3600
     COMMODITY_FYERS_RATE_LIMIT_BACKOFF_SECONDS: int = 90

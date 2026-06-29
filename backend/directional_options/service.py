@@ -502,7 +502,17 @@ class DirectionalOptionsService:
         spot_price = float(row["close"])
         feature_snapshot = self.feature_engine.snapshot(row)
         regime = self.regime.classify(row, timeframe=timeframe)
-        signal = self.signals.predict(row, regime, timeframe)
+        positioning = None
+        if settings.DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED:
+            # Daily option-positioning context (PCR / oi_build / HTF / vol) that the
+            # positional view confirms its side with. None → predict falls back to
+            # the legacy view, so a missing feed never crashes the live cycle.
+            try:
+                from directional_options.positioning_feed import latest as _positioning_latest
+                positioning = await _positioning_latest(underlying)
+            except Exception:
+                positioning = None
+        signal = self.signals.predict(row, regime, timeframe, positioning=positioning)
         if signal is None and not int(
             strategy_health.get("watchlist_rows_today")
             or strategy_health.get("watchlist_rows_latest")

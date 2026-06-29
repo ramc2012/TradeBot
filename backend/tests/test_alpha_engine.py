@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 
 import pytest
 
@@ -11,6 +12,8 @@ from cbe_scanner.alpha_engine import (
     composite_score,
     compute_daily_indicators,
     compute_weekly_context,
+    score_bearish_macd,
+    score_bearish_rsi,
     score_macd,
     score_rsi,
     _bias_from_signals,
@@ -18,6 +21,8 @@ from cbe_scanner.alpha_engine import (
     _ema,
     _rsi,
     _normalize_rs_pct,
+    _completed_session_cutoff,
+    _select_balanced_watchlist,
 )
 
 
@@ -154,11 +159,24 @@ class TestComputeIndicators:
         assert ind["rsi_14"] is None
 
     def test_rsi_flat_series_around_50(self):
-        # Pure flat series has no gains and no losses → RSI undefined.
-        # Wilder convention returns 100 when avg_loss == 0; our impl matches.
+        # No gains and no losses is neutral, not extreme overbought.
         closes = [100.0] * 50
         rsi = _rsi(closes, 14)
-        assert rsi == 100.0
+        assert rsi == 50.0
+
+    def test_bearish_scores_reward_confirmed_downtrend(self):
+        indicators = {
+            "macd_line": -1.5,
+            "macd_signal": -1.0,
+            "macd_bullish": False,
+            "macd_above_zero": False,
+            "macd_cross_today": True,
+            "rsi_14": 42.0,
+        }
+        macd_score, _ = score_bearish_macd(indicators)
+        rsi_score, _ = score_bearish_rsi(indicators)
+        assert macd_score == 95.0
+        assert rsi_score == 90.0
 
 
 class TestWeeklyContext:
@@ -289,3 +307,28 @@ def test_layer_weights_sum_to_100():
     w = LayerWeights()
     assert w.total() == 100.0
     assert w.macd == 20.0 and w.rsi == 20.0
+
+
+def test_balanced_watchlist_reserves_short_sleeve():
+    scored = [
+        {"instrument": f"L{i}", "directional_bias": "bullish", "composite_alpha_score": 90 - i}
+        for i in range(8)
+    ] + [
+        {"instrument": f"S{i}", "directional_bias": "bearish", "composite_alpha_score": 80 - i}
+        for i in range(8)
+    ]
+    scored.sort(key=lambda row: row["composite_alpha_score"], reverse=True)
+    _, longs, shorts, watchlist = _select_balanced_watchlist(
+        scored,
+        top_n=10,
+        minimum_score=50.0,
+    )
+    assert len(longs) == 8 and len(shorts) == 8
+    assert sum(row["directional_bias"] == "bullish" for row in watchlist) == 5
+    assert sum(row["directional_bias"] == "bearish" for row in watchlist) == 5
+
+
+def test_completed_session_cutoff_excludes_intraday_session():
+    # 09:30 UTC = 15:00 IST, before the 15:35 ingestion grace cutoff.
+    assert _completed_session_cutoff(datetime(2026, 6, 25, 9, 30, tzinfo=timezone.utc)).isoformat() == "2026-06-24"
+    assert _completed_session_cutoff(datetime(2026, 6, 25, 10, 15, tzinfo=timezone.utc)).isoformat() == "2026-06-25"

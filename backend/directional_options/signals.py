@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from core.config import settings
 from directional_options.features import timeframe_minutes
 from directional_options.schemas import DirectionalSignal, RegimeSnapshot
 
@@ -28,7 +29,7 @@ class DirectionalSignalEngine:
     def __init__(self, config: dict[str, Any]):
         self.config = config
 
-    def predict(self, row, regime: RegimeSnapshot, timeframe: str) -> Optional[DirectionalSignal]:
+    def predict(self, row, regime: RegimeSnapshot, timeframe: str, positioning: dict | None = None) -> Optional[DirectionalSignal]:
         # NOTE: the `regime.trade_allowed` gate was removed in the RL
         # refactor. Per the design directive, regimes are FEATURES (the
         # policy sees the label as a one-hot), not barriers. The bandit
@@ -48,29 +49,45 @@ class DirectionalSignalEngine:
         range_expansion = float(row.get("range_expansion", 1.0))
         rv_pct = float(row.get("rv_percentile", 0.0))
 
-        bull_score = (ema_spread * 180.0) + breakout_up + max(di_bias, 0.0) + max(momentum_3, 0.0) * 12.0 + max(momentum_8, 0.0) * 8.0
-        bear_score = (-ema_spread * 180.0) + breakout_down + max(-di_bias, 0.0) + max(-momentum_3, 0.0) * 12.0 + max(-momentum_8, 0.0) * 8.0
+        positional_active = settings.DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED and positioning is not None
+        if positional_active:
+            # POSITIONAL view (researched edge): HTF daily direction sets the side;
+            # OPTION POSITIONING must CONFIRM it (call-OI building / low PCR for CE;
+            # put-side for PE) and the vol gate (d_atm_iv>=0) must pass — else no
+            # trade. Trend alone is anti-predictive; the positioning is the edge.
+            htf_up = bool(positioning.get("htf_up"))
+            oib = positioning.get("oi_build_bias")
+            pcr = positioning.get("pcr_oi")
+            daiv = positioning.get("d_atm_iv")
+            direction = "CE" if htf_up else "PE"
+            if direction == "CE":
+                confirm = (oib is not None and float(oib) > 0.0) or (pcr is not None and float(pcr) < settings.DIRECTIONAL_POSITIONAL_PCR_LOW)
+            else:
+                confirm = (oib is not None and float(oib) < 0.0) or (pcr is not None and float(pcr) > settings.DIRECTIONAL_POSITIONAL_PCR_HIGH)
+            vol_ok = (daiv is None) or (float(daiv) >= 0.0)  # live vol gate enforced upstream when history IV is null
+            if not confirm or not vol_ok:
+                return None
+            direction_score = 0.5
+            confidence = min(MAX_SIGNAL_CONFIDENCE, 0.60)
+        else:
+            bull_score = (ema_spread * 180.0) + breakout_up + max(di_bias, 0.0) + max(momentum_3, 0.0) * 12.0 + max(momentum_8, 0.0) * 8.0
+            bear_score = (-ema_spread * 180.0) + breakout_down + max(-di_bias, 0.0) + max(-momentum_3, 0.0) * 12.0 + max(-momentum_8, 0.0) * 8.0
 
-        direction = "CE" if bull_score >= bear_score else "PE"
-        direction_score = bull_score if direction == "CE" else bear_score
-        # Floor lowered to ~0 so the policy sees ALL non-dead bars,
-        # including chop / risk_off. The bandit's one-hot regime feature
-        # captures the regime context; the value posterior will turn
-        # negative for chop and the policy will Thompson-skip those
-        # trades on its own. We only filter literal zero-momentum bars
-        # (where every momentum/breakout/DI input is exactly 0.0) to
-        # avoid feeding the model degenerate features.
-        min_direction_score = float(self.config.get("min_direction_score_floor", 0.001))
-        if direction_score <= min_direction_score:
-            return None
+            direction = "CE" if bull_score >= bear_score else "PE"
+            direction_score = bull_score if direction == "CE" else bear_score
+            # Floor lowered to ~0 so the policy sees ALL non-dead bars; the
+            # bandit's regime one-hot captures context and Thompson-skips chop.
+            min_direction_score = float(self.config.get("min_direction_score_floor", 0.001))
+            if direction_score <= min_direction_score:
+                return None
 
-        confidence = min(
-            MAX_SIGNAL_CONFIDENCE,
-            0.42
-            + (direction_score * 0.18)
-            + regime.confidence * 0.28
-            + (self.config["breakout_confidence_bonus"] if regime.label == "breakout" else 0.0),
-        )
+            confidence = min(
+                MAX_SIGNAL_CONFIDENCE,
+                0.42
+                + (direction_score * 0.18)
+                + regime.confidence * 0.28
+                + (self.config["breakout_confidence_bonus"] if regime.label == "breakout" else 0.0),
+            )
         # NOTE: no hard min_confidence cutoff anymore. Low-confidence
         # signals pass through to the policy, which decides act/skip from
         # the learned R-multiple posterior.

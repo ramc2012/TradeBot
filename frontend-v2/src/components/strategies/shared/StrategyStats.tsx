@@ -42,7 +42,7 @@ export function StrategyStats({
 
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
-      <MetricTile size={size} label="Equity" value={formatMoney(s.total_equity)} detail={`Return ${formatPct(s.total_return_pct)}`} color={tone(s.total_return_pct)} />
+      <MetricTile size={size} label="Equity" value={formatMoney(s.total_equity)} detail={`Return ${formatPct(s.total_return_pct, 2, { asPercent: true })}`} color={tone(s.total_return_pct)} />
       <MetricTile size={size} label="Net P&L" value={formatSignedMoney(net)} detail={`Real ${formatSignedMoney(s.realized_pnl)} · uPnL ${formatSignedMoney(s.unrealized_pnl)}`} color={tone(net)} />
       <MetricTile size={size} label="Win rate" value={formatPct(winRate)} detail={`${stats.wins}W · ${stats.losses}L`} color={winTone} />
       <MetricTile size={size} label="Profit factor" value={pf === Infinity ? "∞" : formatNumber(pf, 2)} detail={stats.avgR != null ? `Avg ${formatNumber(stats.avgR, 2)}R` : "—"} color={tone(pf - 1)} />

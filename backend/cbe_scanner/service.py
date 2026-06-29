@@ -202,7 +202,7 @@ async def run_scan(
         )
     run_id = await persist_scan_payload(payload)
     payload["run_id"] = run_id
-    if sync_paper_book:
+    if sync_paper_book and source == "alpha_engine":
         # Drive the cash-equity paper book from this scan. Failure is logged
         # but never blocks scan persistence — the scan is the canonical
         # record; the book is a derived artifact.
@@ -213,6 +213,11 @@ async def run_scan(
             import logging
             logging.getLogger(__name__).warning(f"[CBE] paper-book sync failed: {exc}")
             payload["paper_summary"] = {"error": str(exc)}
+    elif sync_paper_book:
+        payload["paper_summary"] = {
+            "skipped": True,
+            "reason": "legacy research scans cannot mutate the alpha paper book",
+        }
     return payload
 
 

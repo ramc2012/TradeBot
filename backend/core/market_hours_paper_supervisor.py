@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Awaitable, Callable
 
 from loguru import logger
@@ -45,7 +45,9 @@ def _next_gann_market_open(now: datetime) -> datetime:
 
 
 def _should_run_post_close_catchup(now: datetime) -> bool:
-    return trading_calendar.has_exchange_session("NSE", now.date()) and now.time() > time(15, 30)
+    # Allow final bars and database writers a short grace period before any
+    # end-of-session strategy snapshots are captured.
+    return trading_calendar.has_exchange_session("NSE", now.date()) and now.time() >= time(15, 35)
 
 
 @dataclass
@@ -62,6 +64,14 @@ class RunnerConfig:
     # that must "act in market hours only" (e.g. CBE) rather than capture a
     # once-a-day end-of-session snapshot.
     post_close_catchup: bool = True
+    # When True, the post-close catch-up fires ONCE per session after the
+    # 15:35 grace cutoff EVEN IF in-session passes already succeeded — it is a
+    # guaranteed end-of-day pass, not just a recovery net. Needed by runners
+    # whose in-session signal uses the PRIOR completed session (e.g. CBE's
+    # _completed_session_cutoff excludes today until 15:35), so only a
+    # post-15:35 pass scores on today's finalized close. Default False keeps
+    # the recovery-only behavior for every other runner.
+    post_close_force_daily: bool = False
     # WS-0.5a — per-runner hard timeout (seconds). None → use the global
     # settings.MARKET_HOURS_SUPERVISOR_RUNNER_TIMEOUT_SECONDS ceiling.
     timeout_seconds: float | None = None
@@ -77,6 +87,10 @@ class RunnerRuntime:
     last_error: str | None = None
     last_message: str | None = None
     last_result_meta: dict[str, Any] = field(default_factory=dict)
+    # Session date of the most recent SUCCESSFUL post-close catch-up run.
+    # Gates post_close_force_daily runners so the guaranteed EOD pass fires
+    # exactly once per session regardless of in-session successes.
+    last_post_close_success_date: date | None = None
 
     def is_due(self, now: datetime) -> bool:
         if not self.config.enabled or self.running:
@@ -448,11 +462,15 @@ class MarketHoursPaperSupervisor:
                 interval_seconds=getattr(settings, "CBE_SCANNER_AUTO_INTERVAL_SECONDS", 900),
                 callback=_cbe_runner,
                 enabled=getattr(settings, "CBE_SCANNER_AUTO_ENABLED", True),
-                # Cash-equity book trades NSE hours only — no after-hours
-                # catch-up run. The last in-session scan is its end-of-day act.
+                # The hourly in-session passes use the previous completed
+                # session (CBE's _completed_session_cutoff excludes today until
+                # 15:35). post_close_force_daily makes a guaranteed once-a-day
+                # pass fire after 15:35 — scoring on today's finalized close —
+                # which is the canonical signal for the next session.
                 market_hours_fn=_in_nse_market_hours,
                 next_open_fn=_next_nse_market_open,
-                post_close_catchup=False,
+                post_close_catchup=True,
+                post_close_force_daily=True,
             ),
             RunnerConfig(
                 key="cbe_marks",
@@ -546,8 +564,20 @@ class MarketHoursPaperSupervisor:
                     and not runtime_market_open
                     and _should_run_post_close_catchup(now)
                     and (
-                        runtime.last_success_at is None
-                        or runtime.last_success_at.date() < catchup_session_date
+                        # Guaranteed once-a-day EOD pass: fire after 15:35
+                        # regardless of in-session successes, tracked by its
+                        # own post-close date so it runs exactly once.
+                        (
+                            runtime.last_post_close_success_date is None
+                            or runtime.last_post_close_success_date < catchup_session_date
+                        )
+                        if runtime.config.post_close_force_daily
+                        # Recovery-only (default): only if no in-session pass
+                        # succeeded for today's session.
+                        else (
+                            runtime.last_success_at is None
+                            or runtime.last_success_at.date() < catchup_session_date
+                        )
                     )
                 ):
                     catchup_runners.append(runtime)
@@ -569,6 +599,7 @@ class MarketHoursPaperSupervisor:
                     )
                 for runtime in catchup_runners:
                     if runtime.last_error is None:
+                        runtime.last_post_close_success_date = catchup_session_date
                         runtime.last_result_meta.setdefault(
                             "catchup_session_date",
                             catchup_session_date.isoformat(),

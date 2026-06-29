@@ -78,6 +78,28 @@ build/
 /backend/fut_span.py
 /backend/tok_test.py
 
+# ── 2026-06-29: ad-hoc CBE/directional research scratch (kept local) ──
+# Loose investigation scripts + columnar caches written during the CBE v4
+# review and directional positioning research. Useful locally, not part of
+# the deployed app.
+/backend/_prep.py
+/backend/build.py
+/backend/check.py
+/backend/check2.py
+/backend/dq.py
+/backend/extra.py
+/backend/feat.py
+/backend/getspot.py
+/backend/ic.py
+/backend/pipe2.py
+/backend/pipe_spc.py
+/backend/posconf.py
+/backend/q.py
+/backend/spread.py
+/backend/scratchpad_*
+*.parquet
+/backend/runtime/directional_options/research/
+
 # Sniper-paper work-in-progress files that hadn't been intentionally
 # staged. The 20 baseline files committed before 2026-06-02 remain
 # tracked; only the WIP additions are ignored. (Specific .gitignore

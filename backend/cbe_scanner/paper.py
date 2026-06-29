@@ -2,7 +2,9 @@
 
 The CBE scanner produces a daily ranked watchlist of NSE F&O stocks each with
 a `directional_bias` (bullish/bearish/neutral) and a `composite_score`. This
-module turns those signals into a long/short cash-equity paper book.
+module turns those signals into a long cash-equity / synthetic-short research
+book. Short rows are explicit single-stock-futures proxies; they are not
+represented as deliverable overnight cash shorts.
 
 Why cash-equity instead of options:
   Pulling ATM option contracts for ~200 F&O stocks each day would require a
@@ -16,8 +18,9 @@ Mechanics:
   - For each such symbol, OPEN a position if not already held:
         LONG  for bullish bias
         SHORT for bearish bias
-    quantity sized so that notional = position_notional_cap (default ₹1L,
-    or whatever fits in available_capital). The unit count rounds down.
+    quantity sized so that notional fits the hedge mandate: cash-only gross
+    exposure, max net exposure, max single-name weight, max sector weight, and
+    available capital. The unit count rounds down.
   - For each currently-open position:
       * If still on the watchlist with the same bias: refresh latest_close +
         unrealized_pnl.
@@ -30,7 +33,8 @@ Mechanics:
 
 Capital accounting mirrors AI/FMP/S1/S2 — `_summary()` returns initial_capital
 / available_capital / reserved_margin / total_equity / sharpe / max_drawdown /
-win_rate, so the frontend portfolio panel renders uniformly.
+win_rate plus hedge-book exposure diagnostics, so the frontend portfolio panel
+renders uniformly.
 """
 from __future__ import annotations
 
@@ -44,9 +48,9 @@ from uuid import uuid4
 
 CBE_INITIAL_CAPITAL: float = 1_000_000.0
 
-# Notional cap per individual cash-equity position. With ₹1L per stock the
-# book can carry ~10 simultaneous concurrent bets at 100% capital deployed,
-# matching the spec's "Top 10 Stocks" output. Sizing rounds DOWN to integer
+# Notional cap per individual cash-equity position. With ₹1L per stock, a
+# balanced long/short book can use the full cash gross budget while one-sided
+# scans are constrained by the hedge mandate. Sizing rounds DOWN to integer
 # shares so reserved margin <= the cap.
 DEFAULT_POSITION_NOTIONAL_CAP: float = 100_000.0
 
@@ -55,6 +59,23 @@ DEFAULT_POSITION_NOTIONAL_CAP: float = 100_000.0
 # days have elapsed unless a hard stop fires. Replaces the old "drop after
 # 3 missed scans" rule which conflicted with weekly cadence.
 MIN_HOLD_TRADING_DAYS: int = 5
+
+# Hedge-fund style portfolio construction guardrails. These are deliberately
+# simple cash-book limits: no leverage, constrained net beta, capped single-name
+# and sector concentration. The UI reads the same values from each summary.
+HEDGE_MAX_GROSS_EXPOSURE_RATIO: float = 1.0
+HEDGE_MAX_NET_EXPOSURE_RATIO: float = 0.40
+HEDGE_MAX_SINGLE_NAME_RATIO: float = 0.10
+HEDGE_MAX_SECTOR_EXPOSURE_RATIO: float = 0.30
+
+# Protective execution assumptions. Stops override the weekly rebalance hold.
+# Paper fills move adversely by the configured slippage and realized P&L is net
+# of a conservative per-leg turnover cost.
+CBE_HARD_STOP_LOSS_PCT: float = 0.05
+CBE_SLIPPAGE_BPS: float = 5.0
+CBE_TRANSACTION_COST_BPS_PER_LEG: float = 10.0
+CBE_MIN_POSITION_FILL_RATIO: float = 0.50
+HEDGE_REBALANCE_DRIFT_RATIO: float = 0.05
 
 
 def _utc_now() -> str:
@@ -84,6 +105,24 @@ def _min_hold_satisfied(position: dict[str, Any]) -> bool:
     return elapsed_days >= (MIN_HOLD_TRADING_DAYS * 7.0 / 5.0)
 
 
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return default
+    if out != out:  # NaN
+        return default
+    return out
+
+
+def _position_notional(position: dict[str, Any]) -> float:
+    mark = _coerce_float(position.get("latest_close"), _coerce_float(position.get("entry_price")))
+    qty = _coerce_float(position.get("quantity"))
+    if mark > 0 and qty > 0:
+        return abs(mark * qty)
+    return abs(_coerce_float(position.get("notional")))
+
+
 class CBEPaperBook:
     """File-backed cash-equity paper-trading book driven by CBE scan output."""
 
@@ -93,6 +132,9 @@ class CBEPaperBook:
         *,
         initial_capital: float = CBE_INITIAL_CAPITAL,
         position_notional_cap: float = DEFAULT_POSITION_NOTIONAL_CAP,
+        hard_stop_loss_pct: float = CBE_HARD_STOP_LOSS_PCT,
+        slippage_bps: float = CBE_SLIPPAGE_BPS,
+        transaction_cost_bps_per_leg: float = CBE_TRANSACTION_COST_BPS_PER_LEG,
     ):
         self.root = Path(root)
         if not self.root.is_absolute():
@@ -102,6 +144,9 @@ class CBEPaperBook:
         self._lock = asyncio.Lock()
         self.initial_capital = float(initial_capital)
         self.position_notional_cap = float(position_notional_cap)
+        self.hard_stop_loss_pct = max(0.0, float(hard_stop_loss_pct))
+        self.slippage_bps = max(0.0, float(slippage_bps))
+        self.transaction_cost_bps_per_leg = max(0.0, float(transaction_cost_bps_per_leg))
 
     async def sync_from_scan(self, scan_payload: dict[str, Any]) -> dict[str, Any]:
         """Drive the book from a single scan payload (output of run_scan).
@@ -114,11 +159,18 @@ class CBEPaperBook:
         # Apply L1 equity exposure budget — scales notional cap. With 100% it
         # behaves unchanged; with 40% the per-position cap halves+halves
         # so the book sizes down when equities are not the asset-class leader.
-        exposure_pct = float(scan_payload.get("equity_exposure_pct") or 100.0)
+        raw_exposure_pct = scan_payload.get("equity_exposure_pct")
+        exposure_pct = float(100.0 if raw_exposure_pct is None else raw_exposure_pct)
+        exposure_pct = max(0.0, min(exposure_pct, 100.0))
         sized_cap = self.position_notional_cap * (exposure_pct / 100.0)
         watchlist_by_symbol = {
             _norm_symbol(row.get("instrument")): row
             for row in watchlist
+            if _norm_symbol(row.get("instrument"))
+        }
+        result_by_symbol = {
+            _norm_symbol(row.get("instrument")): row
+            for row in list(scan_payload.get("results") or [])
             if _norm_symbol(row.get("instrument"))
         }
 
@@ -129,23 +181,35 @@ class CBEPaperBook:
 
             available_capital = self._available_capital(state)
 
-            # Pass 1 — refresh / flip / drop existing positions, with the
-            # weekly-rebalance min-hold rule enforced. A position cannot
-            # close on its first signal flip until MIN_HOLD_TRADING_DAYS
-            # have elapsed since open. Mark-to-market still updates every
-            # scan; only the close decision is gated.
+            # Pass 1 — mark and reconcile existing positions. The weekly hold
+            # applies only to ordinary rank turnover; stops, signal
+            # invalidation, and mandate repair are always immediate.
             surviving: list[dict[str, Any]] = []
             for pos in open_positions:
                 sym = _norm_symbol(pos.get("instrument"))
                 row = watchlist_by_symbol.get(sym)
+                mark_row = result_by_symbol.get(sym) or row or {}
                 hold_ok = _min_hold_satisfied(pos)
+                latest_close = self._coerce_price(mark_row.get("latest_close"))
+                if latest_close is not None:
+                    self._mark_position(pos, latest_close)
+
+                if self._stop_breached(pos):
+                    self._close_position(
+                        pos,
+                        mark_price=latest_close or float(pos.get("latest_close") or pos.get("entry_price") or 0.0),
+                        close_time=recorded_at,
+                        close_reason="hard_stop",
+                    )
+                    closed_positions.append(pos)
+                    continue
 
                 # Case A: symbol absent from watchlist.
                 if row is None:
                     if hold_ok:
                         self._close_position(
                             pos,
-                            mark_price=float(pos.get("latest_close") or pos.get("entry_price") or 0.0),
+                            mark_price=latest_close or float(pos.get("latest_close") or pos.get("entry_price") or 0.0),
                             close_time=recorded_at,
                             close_reason="dropped_from_watchlist",
                         )
@@ -160,53 +224,72 @@ class CBEPaperBook:
                 bias = str(row.get("directional_bias") or "neutral").lower()
                 expected_direction = "long" if bias == "bullish" else "short" if bias == "bearish" else None
                 pos_direction = str(pos.get("direction") or "").lower()
-                latest_close = self._coerce_price(row.get("latest_close"))
 
-                # Case B: bias flipped or went neutral. Only close if min-hold met.
+                # Case B: bias flipped or went neutral. This invalidates the
+                # setup and must not be trapped behind a minimum hold.
                 if expected_direction is None or expected_direction != pos_direction:
-                    if hold_ok:
-                        self._close_position(
-                            pos,
-                            mark_price=latest_close if latest_close is not None else float(pos.get("latest_close") or 0.0),
-                            close_time=recorded_at,
-                            close_reason="bias_flip" if expected_direction else "neutral_bias",
-                        )
-                        closed_positions.append(pos)
-                        continue
-                    # Still in min-hold window — refresh mark and hold.
-                    pos["pending_close_reason"] = "bias_flip" if expected_direction else "neutral_bias"
-                    if latest_close is not None:
-                        pos["latest_close"] = latest_close
-                        entry = float(pos.get("entry_price") or 0.0)
-                        qty = int(pos.get("quantity") or 0)
-                        sign = 1 if pos_direction == "long" else -1
-                        pos["unrealized_pnl"] = round((latest_close - entry) * qty * sign, 2)
-                    surviving.append(pos)
+                    self._close_position(
+                        pos,
+                        mark_price=latest_close if latest_close is not None else float(pos.get("latest_close") or 0.0),
+                        close_time=recorded_at,
+                        close_reason="bias_flip" if expected_direction else "neutral_bias",
+                    )
+                    closed_positions.append(pos)
                     continue
 
                 # Case C: same-direction reaffirmation — mark to market.
                 pos.pop("pending_close_reason", None)
                 pos["last_seen_at"] = recorded_at
                 pos["last_scan_date"] = scan_date
-                if latest_close is not None:
-                    pos["latest_close"] = latest_close
-                    entry = float(pos.get("entry_price") or 0.0)
-                    qty = int(pos.get("quantity") or 0)
-                    sign = 1 if pos_direction == "long" else -1
-                    pos["unrealized_pnl"] = round((latest_close - entry) * qty * sign, 2)
                 pos["latest_composite_score"] = float(row.get("composite_score") or 0.0)
                 pos["latest_bias_conviction"] = float(row.get("bias_conviction") or 0.0)
+                pos["latest_alpha_score"] = _coerce_float(
+                    row.get("composite_alpha_score"),
+                    _coerce_float(row.get("composite_score")) * 10.0,
+                )
+                pos["sector_code"] = row.get("sector_code") or pos.get("sector_code")
+                pos["sector_quadrant"] = row.get("sector_quadrant") or pos.get("sector_quadrant")
+                pos["stock_quadrant"] = row.get("stock_quadrant") or pos.get("stock_quadrant")
+                pos["stock_rs_pct"] = row.get("stock_rs_pct") if row.get("stock_rs_pct") is not None else pos.get("stock_rs_pct")
+                pos["rank_overall"] = row.get("rank_overall") or pos.get("rank_overall")
+                pos["rank_actionable"] = row.get("rank_actionable") or pos.get("rank_actionable")
                 surviving.append(pos)
 
             open_positions = surviving
+
+            open_positions = self._enforce_mandate(
+                open_positions,
+                closed_positions,
+                exposure_pct=exposure_pct,
+                close_time=recorded_at,
+            )
 
             # Recompute available_capital after closes freed margin.
             tmp_state = {"open_positions": open_positions, "closed_positions": closed_positions}
             available_capital = self._available_capital(tmp_state)
 
             # Pass 2 — open new positions for watchlist rows not yet held.
+            # Hedge-fund mandate: stay cash-only, but run the CBE book as a
+            # constrained long/short sleeve. That means each new name has to
+            # fit the gross, net, single-name, and sector budgets before it is
+            # admitted. When a one-sided scan floods the book, only the first
+            # tranche gets capital until offsetting signals arrive.
             open_symbols = {_norm_symbol(pos.get("instrument")) for pos in open_positions}
-            for symbol, row in watchlist_by_symbol.items():
+            sorted_watchlist = sorted(
+                watchlist_by_symbol.items(),
+                key=lambda item: _coerce_float(
+                    item[1].get("composite_alpha_score"),
+                    _coerce_float(item[1].get("composite_score")) * 10.0,
+                ),
+                reverse=True,
+            )
+            capital_base = self._capital_base(open_positions, closed_positions)
+            equity_budget = capital_base * exposure_pct / 100.0
+            max_gross = equity_budget * HEDGE_MAX_GROSS_EXPOSURE_RATIO
+            max_net = equity_budget * HEDGE_MAX_NET_EXPOSURE_RATIO
+            max_single_name = min(sized_cap, capital_base * HEDGE_MAX_SINGLE_NAME_RATIO)
+            max_sector = equity_budget * HEDGE_MAX_SECTOR_EXPOSURE_RATIO
+            for symbol, row in sorted_watchlist:
                 if symbol in open_symbols:
                     continue
                 bias = str(row.get("directional_bias") or "neutral").lower()
@@ -216,18 +299,42 @@ class CBEPaperBook:
                 if latest_close is None or latest_close <= 0.0:
                     continue
 
-                # Size: integer quantity such that notional <= min(cap, available).
-                notional_budget = min(sized_cap, max(0.0, available_capital))
-                if notional_budget < latest_close:
+                direction = "long" if bias == "bullish" else "short"
+                sector_code = str(row.get("sector_code") or "unclassified").strip() or "unclassified"
+                exposure = self._portfolio_exposure(open_positions)
+                gross_room = max(0.0, max_gross - exposure["gross"])
+                if direction == "long":
+                    net_room = max(0.0, max_net - exposure["net"])
+                else:
+                    net_room = max(0.0, max_net + exposure["net"])
+                sector_room = max(0.0, max_sector - exposure["sectors"].get(sector_code, {}).get("gross", 0.0))
+
+                # Size: integer quantity such that notional fits every budget.
+                notional_budget = min(
+                    max_single_name,
+                    max(0.0, available_capital),
+                    gross_room,
+                    net_room,
+                    sector_room,
+                )
+                if notional_budget < max_single_name * CBE_MIN_POSITION_FILL_RATIO:
+                    # Do not create token residual positions merely to consume
+                    # the last few rupees of a sleeve or sector budget.
+                    continue
+                entry_price = self._execution_price(latest_close, direction=direction, is_entry=True)
+                if notional_budget < entry_price:
                     # Can't afford even one share at current price.
                     continue
-                quantity = int(notional_budget // latest_close)
+                quantity = int(notional_budget // entry_price)
                 if quantity <= 0:
                     continue
-                notional = round(latest_close * quantity, 2)
+                notional = round(entry_price * quantity, 2)
                 available_capital = round(available_capital - notional, 2)
 
-                direction = "long" if bias == "bullish" else "short"
+                alpha_score = _coerce_float(
+                    row.get("composite_alpha_score"),
+                    _coerce_float(row.get("composite_score")) * 10.0,
+                )
                 journal_row = {
                     "recorded_at": recorded_at,
                     "scan_date": scan_date,
@@ -236,8 +343,17 @@ class CBEPaperBook:
                     "direction": direction,
                     "bias": bias,
                     "composite_score": float(row.get("composite_score") or 0.0),
+                    "alpha_score": alpha_score,
                     "bias_conviction": float(row.get("bias_conviction") or 0.0),
-                    "entry_price": latest_close,
+                    "sector_code": sector_code,
+                    "risk_budget": {
+                        "max_gross": round(max_gross, 2),
+                        "max_net": round(max_net, 2),
+                        "max_single_name": round(max_single_name, 2),
+                        "max_sector": round(max_sector, 2),
+                    },
+                    "reference_price": latest_close,
+                    "entry_price": entry_price,
                     "quantity": quantity,
                     "notional": notional,
                 }
@@ -256,38 +372,66 @@ class CBEPaperBook:
                         "direction": direction,
                         "bias": bias,
                         "composite_score": float(row.get("composite_score") or 0.0),
+                        "alpha_score": alpha_score,
                         "bias_conviction": float(row.get("bias_conviction") or 0.0),
                         "latest_composite_score": float(row.get("composite_score") or 0.0),
+                        "latest_alpha_score": alpha_score,
                         "latest_bias_conviction": float(row.get("bias_conviction") or 0.0),
-                        "entry_price": latest_close,
+                        "sector_code": sector_code,
+                        "sector_quadrant": row.get("sector_quadrant"),
+                        "stock_quadrant": row.get("stock_quadrant"),
+                        "stock_rs_pct": row.get("stock_rs_pct"),
+                        "rank_overall": row.get("rank_overall"),
+                        "rank_actionable": row.get("rank_actionable"),
+                        "risk_budget_gross": round(max_gross, 2),
+                        "risk_budget_net": round(max_net, 2),
+                        "risk_budget_single_name": round(max_single_name, 2),
+                        "risk_budget_sector": round(max_sector, 2),
+                        "execution_model": (
+                            "cash_equity_delivery" if direction == "long"
+                            else "single_stock_futures_proxy"
+                        ),
+                        "slippage_bps": self.slippage_bps,
+                        "transaction_cost_bps_per_leg": self.transaction_cost_bps_per_leg,
+                        "reference_entry_price": latest_close,
+                        "entry_price": entry_price,
                         "latest_close": latest_close,
                         "exit_price": None,
                         "quantity": quantity,
                         "notional": notional,
+                        "gross_unrealized_pnl": 0.0,
+                        "estimated_transaction_costs": 0.0,
                         "unrealized_pnl": 0.0,
                         "realized_pnl": 0.0,
                         "close_reason": None,
                         "closed_at": None,
                     }
                 )
+                self._mark_position(open_positions[-1], latest_close)
 
+            summary = self._summary(
+                open_positions,
+                closed_positions,
+                peak_equity=state.get("peak_equity"),
+                max_drawdown_seen=state.get("max_drawdown"),
+            )
             self._save_positions(
                 {
                     "open_positions": open_positions,
                     "closed_positions": closed_positions[-250:],
                     "last_synced_at": recorded_at,
+                    "peak_equity": summary["peak_equity"],
+                    "max_drawdown": summary["max_drawdown"],
                 }
             )
-            return self._summary(open_positions, closed_positions)
+            return summary
 
     async def refresh_open_marks(self, prices: dict[str, Any]) -> dict[str, Any]:
         """Lightweight mark-to-market for OPEN positions only.
 
-        Updates ``latest_close`` + ``unrealized_pnl`` for each held position
-        whose symbol has a fresh price in ``prices``, WITHOUT re-running the
-        alpha scan or touching any open/close/rebalance logic. Intended for a
-        fast (5-minute) cadence so the UI shows a live LTP between the heavier
-        end-of-day-design scans, at a fraction of the CPU cost.
+        Updates marks and enforces hard stops without re-running the alpha
+        scan. Stops are deliberately checked on this fast path so a weekly
+        strategy is not exposed to an avoidable multi-day loss.
 
         ``prices`` maps symbol -> latest price. Symbols absent from the map (or
         with a non-positive price) keep their existing mark.
@@ -303,28 +447,44 @@ class CBEPaperBook:
             closed_positions: list[dict[str, Any]] = list(state.get("closed_positions") or [])
             refreshed = 0
             stamp = _utc_now()
+            surviving: list[dict[str, Any]] = []
             for pos in open_positions:
                 sym = _norm_symbol(pos.get("instrument"))
                 price = self._coerce_price(norm_prices.get(sym))
                 if price is None:
+                    surviving.append(pos)
                     continue
-                entry = float(pos.get("entry_price") or 0.0)
-                qty = int(pos.get("quantity") or 0)
-                sign = 1 if str(pos.get("direction") or "").lower() == "long" else -1
-                pos["latest_close"] = price
-                pos["unrealized_pnl"] = round((price - entry) * qty * sign, 2)
+                self._mark_position(pos, price)
                 pos["mark_refreshed_at"] = stamp
                 refreshed += 1
+                if self._stop_breached(pos):
+                    self._close_position(
+                        pos,
+                        mark_price=price,
+                        close_time=stamp,
+                        close_reason="hard_stop",
+                    )
+                    closed_positions.append(pos)
+                    continue
+                surviving.append(pos)
+            open_positions = surviving
+            summary = self._summary(
+                open_positions,
+                closed_positions,
+                peak_equity=state.get("peak_equity"),
+                max_drawdown_seen=state.get("max_drawdown"),
+            )
             if refreshed:
                 self._save_positions(
                     {
                         "open_positions": open_positions,
-                        "closed_positions": closed_positions,
+                        "closed_positions": closed_positions[-250:],
                         "last_synced_at": state.get("last_synced_at"),
                         "last_mark_refresh_at": stamp,
+                        "peak_equity": summary["peak_equity"],
+                        "max_drawdown": summary["max_drawdown"],
                     }
                 )
-            summary = self._summary(open_positions, closed_positions)
             summary["marks_refreshed"] = refreshed
             return summary
 
@@ -343,6 +503,8 @@ class CBEPaperBook:
             "summary": self._summary(
                 list(state.get("open_positions") or []),
                 list(state.get("closed_positions") or []),
+                peak_equity=state.get("peak_equity"),
+                max_drawdown_seen=state.get("max_drawdown"),
             ),
             "open_positions": open_positions[:limit],
             "closed_positions": closed_positions[:limit],
@@ -366,6 +528,8 @@ class CBEPaperBook:
         return self._summary(
             list(state.get("open_positions") or []),
             list(state.get("closed_positions") or []),
+            peak_equity=state.get("peak_equity"),
+            max_drawdown_seen=state.get("max_drawdown"),
         )
 
     async def reset_account(self, *, actor: str | None = None) -> dict[str, Any]:
@@ -382,6 +546,8 @@ class CBEPaperBook:
                     "open_positions": [],
                     "closed_positions": [],
                     "last_synced_at": _utc_now(),
+                    "peak_equity": self.initial_capital,
+                    "max_drawdown": 0.0,
                 }
             )
         return {
@@ -403,13 +569,21 @@ class CBEPaperBook:
         qty = int(position.get("quantity") or 0)
         direction = str(position.get("direction") or "").lower()
         sign = 1 if direction == "long" else -1
-        realized = round((mark_price - entry) * qty * sign, 2)
+        exit_price = self._execution_price(mark_price, direction=direction, is_entry=False)
+        gross_realized = round((exit_price - entry) * qty * sign, 2)
+        transaction_costs = self._transaction_costs(entry, exit_price, qty)
+        realized = round(gross_realized - transaction_costs, 2)
         position["status"] = "closed"
         position["closed_at"] = close_time
         position["updated_at"] = close_time
-        position["exit_price"] = mark_price
+        position["reference_exit_price"] = mark_price
+        position["exit_price"] = exit_price
         position["latest_close"] = mark_price
+        position["gross_realized_pnl"] = gross_realized
+        position["transaction_costs"] = transaction_costs
         position["realized_pnl"] = realized
+        position["gross_unrealized_pnl"] = 0.0
+        position["estimated_transaction_costs"] = 0.0
         position["unrealized_pnl"] = 0.0
         position["close_reason"] = close_reason
         self._append_journal(
@@ -419,12 +593,140 @@ class CBEPaperBook:
                 "event": "close",
                 "direction": direction,
                 "entry_price": entry,
-                "exit_price": mark_price,
+                "reference_exit_price": mark_price,
+                "exit_price": exit_price,
                 "quantity": qty,
+                "gross_realized_pnl": gross_realized,
+                "transaction_costs": transaction_costs,
                 "realized_pnl": realized,
                 "close_reason": close_reason,
             }
         )
+
+    def _execution_price(self, reference_price: float, *, direction: str, is_entry: bool) -> float:
+        """Apply adverse paper slippage to a reference spot price."""
+        price = max(0.0, float(reference_price))
+        slip = self.slippage_bps / 10_000.0
+        is_long = str(direction).lower() == "long"
+        adverse_up = (is_long and is_entry) or ((not is_long) and (not is_entry))
+        return round(price * (1.0 + slip if adverse_up else 1.0 - slip), 4)
+
+    def _transaction_costs(self, entry_price: float, exit_price: float, qty: int) -> float:
+        turnover = (abs(float(entry_price)) + abs(float(exit_price))) * max(0, int(qty))
+        return round(turnover * self.transaction_cost_bps_per_leg / 10_000.0, 2)
+
+    def _mark_position(self, position: dict[str, Any], reference_price: float) -> None:
+        entry = float(position.get("entry_price") or 0.0)
+        qty = int(position.get("quantity") or 0)
+        direction = str(position.get("direction") or "").lower()
+        sign = 1 if direction == "long" else -1
+        exit_price = self._execution_price(reference_price, direction=direction, is_entry=False)
+        gross = round((exit_price - entry) * qty * sign, 2)
+        estimated_costs = self._transaction_costs(entry, exit_price, qty)
+        position["latest_close"] = float(reference_price)
+        position["estimated_exit_price"] = exit_price
+        position["gross_unrealized_pnl"] = gross
+        position["estimated_transaction_costs"] = estimated_costs
+        position["unrealized_pnl"] = round(gross - estimated_costs, 2)
+
+    def _stop_breached(self, position: dict[str, Any]) -> bool:
+        if self.hard_stop_loss_pct <= 0.0:
+            return False
+        # Anchor the stop to ENTRY notional (capital actually at risk), not the
+        # moving mark notional. With a mark-based denominator the loss-% base
+        # drifts with the price, so the 5% stop fires asymmetrically — late for
+        # losing shorts (mark grows) and early for losing longs (mark shrinks).
+        # Entry notional == entry_price * qty (also stored as `notional` at open).
+        entry = _coerce_float(position.get("entry_price"))
+        qty = _coerce_float(position.get("quantity"))
+        notional = abs(entry * qty) or abs(_coerce_float(position.get("notional")))
+        if notional <= 0.0:
+            return False
+        gross = _coerce_float(position.get("gross_unrealized_pnl"))
+        return (gross / notional) <= -self.hard_stop_loss_pct
+
+    def _capital_base(
+        self,
+        open_positions: list[dict[str, Any]],
+        closed_positions: list[dict[str, Any]],
+    ) -> float:
+        realized = sum(_coerce_float(row.get("realized_pnl")) for row in closed_positions)
+        unrealized = sum(_coerce_float(row.get("unrealized_pnl")) for row in open_positions)
+        return max(0.0, self.initial_capital + realized + unrealized)
+
+    def _enforce_mandate(
+        self,
+        open_positions: list[dict[str, Any]],
+        closed_positions: list[dict[str, Any]],
+        *,
+        exposure_pct: float,
+        close_time: str,
+    ) -> list[dict[str, Any]]:
+        """Close weakest positions until every hedge mandate is satisfied."""
+        remaining = list(open_positions)
+        for _ in range(len(remaining) + 1):
+            capital_base = self._capital_base(remaining, closed_positions)
+            budget = capital_base * max(0.0, min(exposure_pct, 100.0)) / 100.0
+            max_gross = budget * HEDGE_MAX_GROSS_EXPOSURE_RATIO
+            max_net = budget * HEDGE_MAX_NET_EXPOSURE_RATIO
+            max_single = min(
+                self.position_notional_cap * max(0.0, min(exposure_pct, 100.0)) / 100.0,
+                capital_base * HEDGE_MAX_SINGLE_NAME_RATIO,
+            )
+            max_sector = budget * HEDGE_MAX_SECTOR_EXPOSURE_RATIO
+            exposure = self._portfolio_exposure(remaining)
+
+            candidates: list[dict[str, Any]] = []
+            drift = 1.0 + HEDGE_REBALANCE_DRIFT_RATIO
+            oversized = [p for p in remaining if _position_notional(p) > max_single * drift + 0.01]
+            if oversized:
+                candidates = oversized
+            else:
+                sector_breach = next(
+                    (
+                        code for code, row in exposure["sectors"].items()
+                        if _coerce_float(row.get("gross")) > max_sector * drift + 0.01
+                    ),
+                    None,
+                )
+                if sector_breach is not None:
+                    candidates = [
+                        p for p in remaining
+                        if str(p.get("sector_code") or "unclassified").strip() == sector_breach
+                    ]
+                elif exposure["net"] > max_net * drift + 0.01:
+                    candidates = [p for p in remaining if str(p.get("direction")).lower() == "long"]
+                elif exposure["net"] < -max_net * drift - 0.01:
+                    candidates = [p for p in remaining if str(p.get("direction")).lower() == "short"]
+                elif exposure["gross"] > max_gross * drift + 0.01:
+                    # Trim the DOMINANT leg so cutting gross also moves net
+                    # toward zero. Closing the weakest name regardless of side
+                    # can unbalance a market-neutral book and force a second
+                    # close on the next pass (net breach).
+                    dominant = "long" if exposure["long"] >= exposure["short"] else "short"
+                    candidates = [
+                        p for p in remaining
+                        if str(p.get("direction") or "").lower() == dominant
+                    ] or list(remaining)
+
+            if not candidates:
+                break
+            victim = min(
+                candidates,
+                key=lambda p: (
+                    _coerce_float(p.get("latest_alpha_score"), _coerce_float(p.get("alpha_score"))),
+                    str(p.get("opened_at") or ""),
+                ),
+            )
+            self._close_position(
+                victim,
+                mark_price=float(victim.get("latest_close") or victim.get("entry_price") or 0.0),
+                close_time=close_time,
+                close_reason="mandate_rebalance",
+            )
+            closed_positions.append(victim)
+            remaining.remove(victim)
+        return remaining
 
     def _available_capital(self, state: dict[str, Any]) -> float:
         realized = sum(float(r.get("realized_pnl") or 0.0) for r in state.get("closed_positions") or [])
@@ -434,13 +736,68 @@ class CBEPaperBook:
         )
         return round(self.initial_capital + realized - reserved, 2)
 
+    def _portfolio_exposure(self, open_positions: list[dict[str, Any]]) -> dict[str, Any]:
+        long_exposure = 0.0
+        short_exposure = 0.0
+        sectors: dict[str, dict[str, Any]] = {}
+        names: list[float] = []
+
+        for pos in open_positions:
+            notional = _position_notional(pos)
+            if notional <= 0:
+                continue
+            direction = str(pos.get("direction") or "").lower()
+            sector = str(pos.get("sector_code") or "unclassified").strip() or "unclassified"
+            sector_row = sectors.setdefault(
+                sector,
+                {"sector": sector, "long": 0.0, "short": 0.0, "gross": 0.0, "names": 0},
+            )
+            if direction == "short":
+                short_exposure += notional
+                sector_row["short"] += notional
+            else:
+                long_exposure += notional
+                sector_row["long"] += notional
+            sector_row["gross"] += notional
+            sector_row["names"] += 1
+            names.append(notional)
+
+        gross = long_exposure + short_exposure
+        net = long_exposure - short_exposure
+        names.sort(reverse=True)
+        return {
+            "long": round(long_exposure, 2),
+            "short": round(short_exposure, 2),
+            "gross": round(gross, 2),
+            "net": round(net, 2),
+            "largest": round(names[0], 2) if names else 0.0,
+            "top3": round(sum(names[:3]), 2),
+            "sectors": sectors,
+        }
+
     def _summary(
         self,
         open_positions: list[dict[str, Any]],
         closed_positions: list[dict[str, Any]],
+        *,
+        peak_equity: Any = None,
+        max_drawdown_seen: Any = None,
     ) -> dict[str, Any]:
         realized = round(sum(float(r.get("realized_pnl") or 0.0) for r in closed_positions), 2)
         unrealized = round(sum(float(p.get("unrealized_pnl") or 0.0) for p in open_positions), 2)
+        gross_realized = round(
+            sum(_coerce_float(r.get("gross_realized_pnl"), _coerce_float(r.get("realized_pnl"))) for r in closed_positions),
+            2,
+        )
+        gross_unrealized = round(
+            sum(_coerce_float(p.get("gross_unrealized_pnl"), _coerce_float(p.get("unrealized_pnl"))) for p in open_positions),
+            2,
+        )
+        closed_costs = round(sum(_coerce_float(r.get("transaction_costs")) for r in closed_positions), 2)
+        estimated_open_costs = round(
+            sum(_coerce_float(p.get("estimated_transaction_costs")) for p in open_positions),
+            2,
+        )
         reserved_margin = round(
             sum(
                 float(p.get("entry_price") or 0.0) * float(p.get("quantity") or 0)
@@ -454,6 +811,58 @@ class CBEPaperBook:
         total_return_pct = round(
             ((total_equity - initial_capital) / initial_capital) * 100.0, 4
         ) if initial_capital else 0.0
+        recorded_peak = max(initial_capital, _coerce_float(peak_equity, initial_capital), total_equity)
+        current_drawdown = (
+            max(0.0, (recorded_peak - total_equity) / recorded_peak)
+            if recorded_peak > 0 else 0.0
+        )
+        exposure = self._portfolio_exposure(open_positions)
+        equity_base = total_equity if total_equity > 0 else initial_capital
+        gross_ratio = (exposure["gross"] / equity_base) if equity_base else 0.0
+        net_ratio = (exposure["net"] / equity_base) if equity_base else 0.0
+        largest_ratio = (exposure["largest"] / equity_base) if equity_base else 0.0
+        concentration_top3_ratio = (exposure["top3"] / equity_base) if equity_base else 0.0
+        long_count = sum(1 for p in open_positions if str(p.get("direction") or "").lower() == "long")
+        short_count = sum(1 for p in open_positions if str(p.get("direction") or "").lower() == "short")
+
+        sector_exposures: list[dict[str, Any]] = []
+        for sector, row in exposure["sectors"].items():
+            gross = float(row.get("gross") or 0.0)
+            long_val = float(row.get("long") or 0.0)
+            short_val = float(row.get("short") or 0.0)
+            sector_exposures.append(
+                {
+                    "sector": sector,
+                    "long_exposure": round(long_val, 2),
+                    "short_exposure": round(short_val, 2),
+                    "gross_exposure": round(gross, 2),
+                    "net_exposure": round(long_val - short_val, 2),
+                    "gross_exposure_ratio": round((gross / equity_base) if equity_base else 0.0, 4),
+                    "names": int(row.get("names") or 0),
+                }
+            )
+        sector_exposures.sort(key=lambda r: float(r.get("gross_exposure") or 0.0), reverse=True)
+
+        top_sector_ratio = float(sector_exposures[0]["gross_exposure_ratio"]) if sector_exposures else 0.0
+        risk_flags: list[str] = []
+        drift = 1.0 + HEDGE_REBALANCE_DRIFT_RATIO
+        if gross_ratio > HEDGE_MAX_GROSS_EXPOSURE_RATIO * drift:
+            risk_flags.append("gross_exposure_over_mandate")
+        if abs(net_ratio) > HEDGE_MAX_NET_EXPOSURE_RATIO * drift:
+            risk_flags.append("net_exposure_over_mandate")
+        if largest_ratio > HEDGE_MAX_SINGLE_NAME_RATIO * drift:
+            risk_flags.append("single_name_over_mandate")
+        if top_sector_ratio > HEDGE_MAX_SECTOR_EXPOSURE_RATIO * drift:
+            risk_flags.append("sector_concentration_over_mandate")
+        if not risk_flags and open_positions:
+            risk_flags.append("inside_hedge_mandate")
+
+        if abs(net_ratio) < 0.05:
+            book_bias = "balanced"
+        elif net_ratio > 0:
+            book_bias = "net_long"
+        else:
+            book_bias = "net_short"
 
         closed_sorted = sorted(
             closed_positions,
@@ -461,7 +870,7 @@ class CBEPaperBook:
         )
         running_equity = initial_capital
         peak = initial_capital
-        max_dd = 0.0
+        max_dd = max(_coerce_float(max_drawdown_seen), current_drawdown)
         trade_returns_pct: list[float] = []
         wins = 0
         losses = 0
@@ -497,11 +906,47 @@ class CBEPaperBook:
             "realized_pnl": realized,
             "unrealized_pnl": unrealized,
             "total_pnl": round(realized + unrealized, 2),
+            "gross_realized_pnl": gross_realized,
+            "gross_unrealized_pnl": gross_unrealized,
+            "transaction_costs": closed_costs,
+            "estimated_open_costs": estimated_open_costs,
             "initial_capital": initial_capital,
             "available_capital": available_capital,
             "reserved_margin": reserved_margin,
             "total_equity": total_equity,
             "total_return_pct": total_return_pct,
+            "long_positions": long_count,
+            "short_positions": short_count,
+            "long_exposure": exposure["long"],
+            "short_exposure": exposure["short"],
+            "gross_exposure": exposure["gross"],
+            "net_exposure": exposure["net"],
+            "gross_exposure_ratio": round(gross_ratio, 4),
+            "net_exposure_ratio": round(net_ratio, 4),
+            "largest_position_exposure": exposure["largest"],
+            "largest_position_ratio": round(largest_ratio, 4),
+            "concentration_top3_ratio": round(concentration_top3_ratio, 4),
+            "risk_budget_usage_ratio": round(
+                min(1.0, gross_ratio / HEDGE_MAX_GROSS_EXPOSURE_RATIO),
+                4,
+            ),
+            "book_bias": book_bias,
+            "sector_exposures": sector_exposures,
+            "risk_flags": risk_flags,
+            "mandate": {
+                "strategy": "cbe_long_short_hedge_fund",
+                "max_gross_exposure_ratio": HEDGE_MAX_GROSS_EXPOSURE_RATIO,
+                "max_net_exposure_ratio": HEDGE_MAX_NET_EXPOSURE_RATIO,
+                "max_single_name_ratio": HEDGE_MAX_SINGLE_NAME_RATIO,
+                "max_sector_exposure_ratio": HEDGE_MAX_SECTOR_EXPOSURE_RATIO,
+                "rebalance": "weekly",
+                "min_hold_trading_days": MIN_HOLD_TRADING_DAYS,
+                "hard_stop_loss_pct": self.hard_stop_loss_pct,
+                "rebalance_drift_ratio": HEDGE_REBALANCE_DRIFT_RATIO,
+                "execution_model": "cash_longs_and_single_stock_futures_proxy_shorts",
+            },
+            "peak_equity": round(recorded_peak, 2),
+            "current_drawdown": round(current_drawdown, 4),
             "max_drawdown": round(max_dd, 4),
             "sharpe_ratio": sharpe,
             "total_trades": wins + losses,
@@ -542,11 +987,23 @@ class CBEPaperBook:
 
     def _load_positions(self) -> dict[str, Any]:
         if not self.positions_path.exists():
-            return {"open_positions": [], "closed_positions": [], "last_synced_at": None}
+            return {
+                "open_positions": [],
+                "closed_positions": [],
+                "last_synced_at": None,
+                "peak_equity": self.initial_capital,
+                "max_drawdown": 0.0,
+            }
         try:
             return json.loads(self.positions_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            return {"open_positions": [], "closed_positions": [], "last_synced_at": None}
+            return {
+                "open_positions": [],
+                "closed_positions": [],
+                "last_synced_at": None,
+                "peak_equity": self.initial_capital,
+                "max_drawdown": 0.0,
+            }
 
     def _save_positions(self, state: dict[str, Any]) -> None:
         self.root.mkdir(parents=True, exist_ok=True)

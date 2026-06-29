@@ -134,7 +134,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Capital safety still comes from one-position-per-symbol and the
         # daily/weekly loss caps below.
         "premium_cap_pct": None,
-        "planned_stop_pct": 0.35,
+        # 30% hard stop (owner directive for the positional ATM book).
+        "planned_stop_pct": 0.30,
         "profit_target_pct": 0.45,
         "trail_giveback_pct": 0.18,
         "expiry_guard_days": 0.8,

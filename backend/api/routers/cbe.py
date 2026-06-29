@@ -43,18 +43,27 @@ class CBEResetRequest(BaseModel):
 
 @router.get("/config")
 async def get_cbe_config() -> dict:
-    cfg = CBEConfig()
+    from cbe_scanner.alpha_engine import AlphaEngineConfig
+
+    alpha_cfg = AlphaEngineConfig()
+    legacy_cfg = CBEConfig()
     return {
+        "default_source": "alpha_engine",
+        "engine_version": "alpha_engine_v4_direction_aware",
+        "timeframe": alpha_cfg.timeframe,
+        "top_n_watchlist": alpha_cfg.top_n_watchlist,
+        "minimum_opportunity_score": alpha_cfg.low_conviction_floor,
         "feature_weights": {
-            "volatility_compression": cfg.w_vc,
-            "option_market_positioning": cfg.w_omp,
-            "cross_sectional_divergence": cfg.w_csmd,
-            "catalyst_proximity": cfg.w_cp,
-            "microstructure_pressure": cfg.w_mp,
+            "asset_rotation": alpha_cfg.weights.asset,
+            "sector_relative_strength": alpha_cfg.weights.sector,
+            "stock_relative_strength": alpha_cfg.weights.stock,
+            "directional_macd": alpha_cfg.weights.macd,
+            "directional_rsi": alpha_cfg.weights.rsi,
         },
-        "watchlist_min_score": cfg.watchlist_min_score,
-        "watchlist_max_size": cfg.watchlist_max_size,
-        "default_source": "project_timescale",
+        "legacy_project_timescale": {
+            "watchlist_min_score": legacy_cfg.watchlist_min_score,
+            "watchlist_max_size": legacy_cfg.watchlist_max_size,
+        },
     }
 
 
@@ -78,8 +87,11 @@ async def scan_cbe(body: CBEScanRequest) -> dict:
             alpha_cfg.timeframe = body.timeframe
         if body.sectors_to_keep:
             alpha_cfg.sectors_to_keep = body.sectors_to_keep
-        if body.stocks_per_sector:
-            alpha_cfg.stocks_per_sector = body.stocks_per_sector
+        if body.stocks_per_sector is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="stocks_per_sector is no longer supported; use top_n_watchlist",
+            )
         # composite_gate is now legacy — accept it for back-compat but it
         # has no effect. The watchlist is purely top-N by ranking.
         if body.top_n_watchlist is not None:

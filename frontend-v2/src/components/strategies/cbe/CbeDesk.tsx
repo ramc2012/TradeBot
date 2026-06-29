@@ -21,7 +21,7 @@
  */
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Compass, Layers3, Radar, TrendingUp } from "lucide-react";
+import { Activity, Briefcase, Compass, Layers3, Radar, Scale, ShieldCheck, Target, TrendingUp } from "lucide-react";
 
 import {
   DeskShell,
@@ -30,6 +30,7 @@ import {
   Section,
   StatusBadge,
   formatNumber,
+  formatMoney,
   formatPct,
   formatSignedMoney,
   tone,
@@ -37,7 +38,7 @@ import {
 } from "@/components/desk-ui";
 import { PaperPerformance } from "@/components/strategies/shared";
 import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStrategyPositionsStream";
-import type { PositionsPayload } from "@/lib/strategy-stats";
+import type { PaperPosition, PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
 
 import { RrgScatter, QUADRANT_COLOR, type RrgPoint } from "./RrgScatter";
@@ -45,6 +46,7 @@ import { SectorRotation, type SectorRow } from "./SectorRotation";
 import { Sparkline } from "./Sparkline";
 
 const TABS = [
+  { key: "portfolio", label: "Portfolio", icon: Briefcase },
   { key: "rotation", label: "Rotation", icon: Radar },
   { key: "candidates", label: "Candidates", icon: Compass },
   { key: "sectors", label: "Sectors", icon: Layers3 },
@@ -91,11 +93,13 @@ type ScanPayload = {
   id?: string;
   source?: string;
   scan_date?: string | null;
+  signal_session_date?: string | null;
   created_at?: string | null;
   universe_size?: number;
   scored_count?: number;
   watchlist_count?: number;
   asset_winner?: string | null;
+  equity_exposure_pct?: number | null;
   config?: {
     timeframe?: string;
     sectors_to_keep?: number;
@@ -119,6 +123,70 @@ type PaperSummary = {
   total_return_pct?: number;
   win_rate?: number;
   total_trades?: number;
+  long_positions?: number;
+  short_positions?: number;
+  long_exposure?: number;
+  short_exposure?: number;
+  gross_exposure?: number;
+  net_exposure?: number;
+  gross_exposure_ratio?: number;
+  net_exposure_ratio?: number;
+  largest_position_exposure?: number;
+  largest_position_ratio?: number;
+  concentration_top3_ratio?: number;
+  risk_budget_usage_ratio?: number;
+  book_bias?: string;
+  risk_flags?: string[];
+  sector_exposures?: SectorExposure[];
+  mandate?: HedgeMandate;
+  current_drawdown?: number;
+  max_drawdown?: number;
+  transaction_costs?: number;
+  estimated_open_costs?: number;
+};
+
+type MarkedCbePosition = PaperPosition & {
+  current_price?: number | null;
+  current_value?: number | null;
+  current_pnl?: number | null;
+  current_pnl_pct?: number | null;
+  mark_source?: string;
+  mark_scan_date?: string | null;
+};
+
+type SectorExposure = {
+  sector: string;
+  long_exposure?: number;
+  short_exposure?: number;
+  gross_exposure?: number;
+  net_exposure?: number;
+  gross_exposure_ratio?: number;
+  names?: number;
+};
+
+type HedgeMandate = {
+  strategy?: string;
+  max_gross_exposure_ratio?: number;
+  max_net_exposure_ratio?: number;
+  max_single_name_ratio?: number;
+  max_sector_exposure_ratio?: number;
+  rebalance?: string;
+  min_hold_trading_days?: number;
+  hard_stop_loss_pct?: number;
+  rebalance_drift_ratio?: number;
+  execution_model?: string;
+};
+
+const DEFAULT_MANDATE: Required<Omit<HedgeMandate, "strategy">> = {
+  max_gross_exposure_ratio: 1,
+  max_net_exposure_ratio: 0.4,
+  max_single_name_ratio: 0.1,
+  max_sector_exposure_ratio: 0.3,
+  rebalance: "weekly",
+  min_hold_trading_days: 5,
+  hard_stop_loss_pct: 0.05,
+  rebalance_drift_ratio: 0.05,
+  execution_model: "cash_longs_and_single_stock_futures_proxy_shorts",
 };
 
 const biasVariant = (b?: string | null) =>
@@ -127,8 +195,8 @@ const trendTone = (t?: string | null) =>
   t === "up" ? "text-accent-green" : t === "down" ? "text-accent-red" : undefined;
 
 export default function CbeDesk() {
-  // Open positions / paper book is the headline view when the desk opens.
-  const [activeTab, setActiveTab] = useUrlTab("performance");
+  // Hedge-fund portfolio construction is the headline view when the desk opens.
+  const [activeTab, setActiveTab] = useUrlTab("portfolio");
 
   const latestQuery = useQuery({
     queryKey: ["cbe", "latest"],
@@ -158,12 +226,33 @@ export default function CbeDesk() {
   const watchlist = scan?.watchlist ?? [];
 
   // Live open-positions stream (shared /ws/positions-overview channel); active
-  // on the performance tab, falls back to CBE's dedicated paper endpoints.
-  const posStream = useStrategyPositionsStream({ enabled: activeTab === "performance" });
+  // on the portfolio/performance tabs, falls back to CBE's dedicated endpoints.
+  const posStream = useStrategyPositionsStream({ enabled: activeTab === "portfolio" || activeTab === "performance" });
   const streamSlice = selectStrategySlice(posStream.data, "cbe");
   const streamLive = posStream.isStreamConnected && Boolean(streamSlice);
   const paperSum = (streamLive ? streamSlice?.summary : paperSummaryQuery.data) as PaperSummary | undefined;
   const positions = (streamLive ? streamSlice : paperPositionsQuery.data) as PositionsPayload | undefined;
+
+  const spotMarks = useMemo(() => buildSpotMarkMap(results), [results]);
+  const markedOpenBook = useMemo(
+    () => markOpenPositions(positions?.open_positions ?? [], spotMarks, scan?.scan_date ?? null),
+    [positions?.open_positions, scan?.scan_date, spotMarks],
+  );
+  const markedPositions = useMemo<PositionsPayload | undefined>(
+    () =>
+      positions
+        ? {
+            ...positions,
+            open_positions: markedOpenBook,
+            summary: markPaperSummary(positions.summary ?? paperSum, markedOpenBook),
+          }
+        : positions,
+    [markedOpenBook, paperSum, positions],
+  );
+  const markedPaperSum = useMemo(
+    () => markPaperSummary(paperSum ?? positions?.summary, positions?.open_positions ? markedOpenBook : undefined),
+    [markedOpenBook, paperSum, positions?.open_positions, positions?.summary],
+  );
 
   // RRG scatter points — every scored name, x=stock RS%, y=MACD histogram.
   const rrgPoints = useMemo<RrgPoint[]>(
@@ -216,12 +305,15 @@ export default function CbeDesk() {
     [results],
   );
 
-  const totalReturn = paperSum?.total_return_pct ?? null;
+  const totalReturn = markedPaperSum?.total_return_pct ?? null;
+  const openBook = markedOpenBook;
+  const mandate = markedPaperSum?.mandate ?? DEFAULT_MANDATE;
+  const riskFlags = markedPaperSum?.risk_flags ?? [];
 
   return (
     <DeskShell
-      title="CBE Scanner"
-      description={`Compression-Before-Expansion — weekly alpha engine (MACD · RSI · RRG). ${
+      title="CBE Hedge Fund"
+      description={`Compression-Before-Expansion research book — cash longs · futures-proxy shorts · weekly MACD/RSI/RRG. ${
         scan?.source ?? ""
       }`}
       asOf={scan?.created_at ?? scan?.scan_date ?? undefined}
@@ -237,7 +329,7 @@ export default function CbeDesk() {
             <StatusBadge label={streamLive ? "● live" : "polling"} variant={streamLive ? "success" : "info"} />
           ) : null}
           <StatusBadge
-            label={`scan ${scan?.scan_date ?? "—"}`}
+            label={`signal ${scan?.signal_session_date ?? scan?.scan_date ?? "—"}`}
             variant="info"
             icon={<Activity size={12} />}
           />
@@ -245,9 +337,73 @@ export default function CbeDesk() {
             label={`${scan?.watchlist_count ?? 0} watchlist`}
             variant={scan?.watchlist_count ? "success" : "neutral"}
           />
+          <StatusBadge
+            label={riskFlags.includes("inside_hedge_mandate") ? "inside mandate" : `${riskFlags.length} risk flags`}
+            variant={riskFlags.includes("inside_hedge_mandate") || !riskFlags.length ? "success" : "warn"}
+            icon={<ShieldCheck size={12} />}
+          />
+          <StatusBadge label="paper research" variant="warn" />
         </div>
       }
     >
+      {/* ── Portfolio ───────────────────────────────────────────────────── */}
+      {activeTab === "portfolio" ? (
+        <div className="space-y-4">
+          <section className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
+            <MetricTile label="Gross" value={formatPct(markedPaperSum?.gross_exposure_ratio, 1)} detail={formatMoney(markedPaperSum?.gross_exposure)} />
+            <MetricTile label="Net" value={formatSignedPct(markedPaperSum?.net_exposure_ratio, 1)} detail={bookBiasLabel(markedPaperSum?.book_bias)} color={tone(markedPaperSum?.net_exposure)} />
+            <MetricTile label="Long sleeve" value={formatMoney(markedPaperSum?.long_exposure)} detail={`${markedPaperSum?.long_positions ?? 0} names`} color="text-accent-green" />
+            <MetricTile label="Short sleeve" value={formatMoney(markedPaperSum?.short_exposure)} detail={`${markedPaperSum?.short_positions ?? 0} names`} color="text-accent-red" />
+            <MetricTile label="Top 3" value={formatPct(markedPaperSum?.concentration_top3_ratio, 1)} detail="name concentration" />
+            <MetricTile label="Equity budget" value={formatPct((scan?.equity_exposure_pct ?? 100) / 100, 0)} detail={`asset ${scan?.asset_winner ?? "—"}`} color="text-accent-amber" />
+          </section>
+
+          <div className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
+            <Section
+              title="Hedge mandate"
+              icon={<ShieldCheck size={16} />}
+              description="Risk budget, beta tilt, and concentration limits for the CBE long/short sleeve."
+              rightSlot={
+                <StatusBadge
+                  label={riskFlags.includes("inside_hedge_mandate") || !openBook.length ? "clear" : "review"}
+                  variant={riskFlags.includes("inside_hedge_mandate") || !openBook.length ? "success" : "warn"}
+                />
+              }
+            >
+              <MandatePanel summary={markedPaperSum} mandate={mandate} />
+            </Section>
+
+            <Section
+              title="Sector exposure"
+              icon={<Layers3 size={16} />}
+              description="Gross exposure by sector, with long/short netting shown separately."
+            >
+              <SectorExposurePanel sectors={markedPaperSum?.sector_exposures ?? []} maxSector={mandate.max_sector_exposure_ratio ?? DEFAULT_MANDATE.max_sector_exposure_ratio} />
+            </Section>
+          </div>
+
+          <Section
+            title="Long/short sleeves"
+            icon={<Scale size={16} />}
+            description="Open CBE book by side, sorted by notional risk."
+          >
+            <div className="grid gap-3 xl:grid-cols-2">
+              <SleeveTable title="Long book" side="long" positions={openBook} summary={markedPaperSum} />
+              <SleeveTable title="Short book" side="short" positions={openBook} summary={markedPaperSum} />
+            </div>
+          </Section>
+
+          <Section
+            title="Next rebalance queue"
+            icon={<Target size={16} />}
+            description="Top ranked names awaiting the next weekly CBE rebalance."
+            rightSlot={<StatusBadge label={`${watchlist.length} candidates`} variant={watchlist.length ? "success" : "neutral"} />}
+          >
+            <CandidateTable rows={watchlist.slice(0, 12)} />
+          </Section>
+        </div>
+      ) : null}
+
       {/* ── Rotation ─────────────────────────────────────────────────────── */}
       {activeTab === "rotation" ? (
         <div className="space-y-4">
@@ -332,14 +488,14 @@ export default function CbeDesk() {
       {activeTab === "performance" ? (
         <div className="space-y-4">
           <section className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
-            <MetricTile label="Open book" value={String(paperSum?.open_positions ?? 0)} detail={`${paperSum?.closed_positions ?? 0} closed`} />
-            <MetricTile label="Total P&L" value={formatSignedMoney(paperSum?.total_pnl)} detail={`real ${formatSignedMoney(paperSum?.realized_pnl)}`} color={tone(paperSum?.total_pnl)} />
-            <MetricTile label="Unrealized" value={formatSignedMoney(paperSum?.unrealized_pnl)} color={tone(paperSum?.unrealized_pnl)} />
-            <MetricTile label="Equity" value={formatSignedMoney(paperSum?.total_equity)} detail={`init ${formatSignedMoney(paperSum?.initial_capital)}`} />
+            <MetricTile label="Open book" value={String(markedPaperSum?.open_positions ?? 0)} detail={`${markedPaperSum?.closed_positions ?? 0} closed`} />
+            <MetricTile label="Total P&L" value={formatSignedMoney(markedPaperSum?.total_pnl)} detail={`real ${formatSignedMoney(markedPaperSum?.realized_pnl)}`} color={tone(markedPaperSum?.total_pnl)} />
+            <MetricTile label="Unrealized" value={formatSignedMoney(markedPaperSum?.unrealized_pnl)} color={tone(markedPaperSum?.unrealized_pnl)} />
+            <MetricTile label="Equity" value={formatSignedMoney(markedPaperSum?.total_equity)} detail={`init ${formatSignedMoney(markedPaperSum?.initial_capital)}`} />
             <MetricTile label="Return" value={totalReturn != null ? formatPct(totalReturn / 100, 2) : "—"} color={tone(totalReturn)} />
-            <MetricTile label="Available" value={formatSignedMoney(paperSum?.available_capital)} detail={`reserved ${formatSignedMoney(paperSum?.reserved_margin)}`} />
+            <MetricTile label="Max drawdown" value={formatPct(markedPaperSum?.max_drawdown, 2)} detail={`current ${formatPct(markedPaperSum?.current_drawdown, 2)}`} color="text-accent-red" />
           </section>
-          <PaperPerformance summary={paperSum} positions={positions} />
+          <PaperPerformance summary={markedPaperSum} positions={markedPositions} />
         </div>
       ) : null}
     </DeskShell>
@@ -347,6 +503,488 @@ export default function CbeDesk() {
 }
 
 // ── Sub-components ──────────────────────────────────────────────────────────
+
+type SpotMark = {
+  symbol: string;
+  latestClose?: number | null;
+  sectorCode?: string | null;
+  sectorQuadrant?: string | null;
+  stockQuadrant?: string | null;
+  alphaScore?: number | null;
+  biasConviction?: number | null;
+};
+
+function finiteNumber(value: unknown): number | null {
+  if (value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function buildSpotMarkMap(rows: ScanResult[]): Map<string, SpotMark> {
+  const map = new Map<string, SpotMark>();
+  for (const row of rows) {
+    const symbol = String(row.instrument || "").trim().toUpperCase();
+    if (!symbol) continue;
+    map.set(symbol, {
+      symbol,
+      latestClose: finiteNumber(row.latest_close),
+      sectorCode: row.sector_code,
+      sectorQuadrant: row.sector_quadrant,
+      stockQuadrant: row.stock_quadrant,
+      alphaScore: finiteNumber(row.composite_alpha_score),
+      biasConviction: finiteNumber(row.bias_conviction),
+    });
+  }
+  return map;
+}
+
+function cbeQuantity(position: PaperPosition): number {
+  return finiteNumber(position.quantity ?? position.quantity_units ?? position.qty) ?? 0;
+}
+
+function cbeEntryPrice(position: PaperPosition): number {
+  return finiteNumber(position.entry_price ?? position.entry_premium) ?? 0;
+}
+
+function cbeMarkPrice(position: PaperPosition): number {
+  return (
+    finiteNumber(position.current_price) ??
+    finiteNumber(position.latest_close) ??
+    finiteNumber(position.latest_premium) ??
+    finiteNumber(position.entry_price) ??
+    finiteNumber(position.entry_premium) ??
+    0
+  );
+}
+
+function cbeSideSign(position: PaperPosition): number {
+  return cbeDirection(position) === "short" ? -1 : 1;
+}
+
+function markOpenPositions(
+  positions: PaperPosition[],
+  spotMarks: Map<string, SpotMark>,
+  scanDate?: string | null,
+): MarkedCbePosition[] {
+  return positions.map((position) => {
+    const symbol = cbeSymbol(position).toUpperCase();
+    const spot = spotMarks.get(symbol);
+    const entry = cbeEntryPrice(position);
+    const qty = cbeQuantity(position);
+    const scanMark = finiteNumber(spot?.latestClose);
+    const mark = scanMark ?? cbeMarkPrice(position);
+    const entryValue = entry * qty;
+    const currentValue = mark * qty;
+    const sideSign = cbeSideSign(position);
+    const slippageBps = finiteNumber(position.slippage_bps) ?? 0;
+    const costBps = finiteNumber(position.transaction_cost_bps_per_leg) ?? 0;
+    const adverseExit = mark * (sideSign > 0 ? 1 - slippageBps / 10_000 : 1 + slippageBps / 10_000);
+    const grossCurrentPnl = (adverseExit - entry) * qty * sideSign;
+    const estimatedCosts = (Math.abs(entry) + Math.abs(adverseExit)) * qty * costBps / 10_000;
+    const currentPnl = grossCurrentPnl - estimatedCosts;
+    const currentPnlPct = entryValue > 0 ? currentPnl / entryValue : null;
+
+    return {
+      ...position,
+      underlying: symbol,
+      trading_symbol: symbol,
+      sector_code: spot?.sectorCode ?? position.sector_code,
+      sector_quadrant: spot?.sectorQuadrant ?? position.sector_quadrant,
+      stock_quadrant: spot?.stockQuadrant ?? position.stock_quadrant,
+      confidence: finiteNumber(position.confidence ?? spot?.biasConviction ?? position.bias_conviction),
+      alpha_score: finiteNumber(position.alpha_score ?? spot?.alphaScore),
+      latest_alpha_score: finiteNumber(position.latest_alpha_score ?? spot?.alphaScore),
+      entry_premium: entry,
+      latest_premium: mark,
+      latest_close: mark,
+      quantity_units: qty,
+      notional: finiteNumber(position.notional) ?? entryValue,
+      current_price: mark,
+      current_value: currentValue,
+      current_pnl: currentPnl,
+      current_pnl_pct: currentPnlPct,
+      unrealized_pnl: currentPnl,
+      mark_source: scanMark != null ? "scan spot" : "paper mark",
+      mark_scan_date: scanMark != null ? scanDate ?? null : position.mark_time ?? null,
+    };
+  });
+}
+
+function markPaperSummary(summary: PaperSummary | undefined, open?: MarkedCbePosition[]): PaperSummary | undefined {
+  if (!open) return summary;
+  if (!summary && !open.length) return summary;
+  const openPositions = open;
+  const base = summary ?? {};
+  const mandate = base.mandate ?? DEFAULT_MANDATE;
+  const initialCapital = base.initial_capital ?? 1_000_000;
+  const realized = base.realized_pnl ?? 0;
+  const unrealized = openPositions.reduce((sum, p) => sum + (finiteNumber(p.current_pnl ?? p.unrealized_pnl) ?? 0), 0);
+  const reserved = openPositions.reduce((sum, p) => sum + cbeNotional(p), 0);
+  const totalEquity = initialCapital + realized + unrealized;
+  const equityBase = totalEquity > 0 ? totalEquity : initialCapital;
+
+  let longExposure = 0;
+  let shortExposure = 0;
+  const nameValues: number[] = [];
+  const sectors = new Map<string, SectorExposure>();
+
+  for (const position of openPositions) {
+    const value = cbeCurrentValue(position);
+    if (value <= 0) continue;
+    const side = cbeDirection(position);
+    const sector = String(position.sector_code || "unclassified");
+    const row =
+      sectors.get(sector) ??
+      {
+        sector,
+        long_exposure: 0,
+        short_exposure: 0,
+        gross_exposure: 0,
+        net_exposure: 0,
+        names: 0,
+      };
+
+    if (side === "short") {
+      shortExposure += value;
+      row.short_exposure = (row.short_exposure ?? 0) + value;
+    } else {
+      longExposure += value;
+      row.long_exposure = (row.long_exposure ?? 0) + value;
+    }
+    row.gross_exposure = (row.gross_exposure ?? 0) + value;
+    row.net_exposure = (row.long_exposure ?? 0) - (row.short_exposure ?? 0);
+    row.names = (row.names ?? 0) + 1;
+    sectors.set(sector, row);
+    nameValues.push(value);
+  }
+
+  nameValues.sort((a, b) => b - a);
+  const gross = longExposure + shortExposure;
+  const net = longExposure - shortExposure;
+  const sectorExposures = Array.from(sectors.values())
+    .map((s) => ({
+      ...s,
+      long_exposure: roundMoney(s.long_exposure),
+      short_exposure: roundMoney(s.short_exposure),
+      gross_exposure: roundMoney(s.gross_exposure),
+      net_exposure: roundMoney(s.net_exposure),
+      gross_exposure_ratio: equityBase ? roundRatio((s.gross_exposure ?? 0) / equityBase) : 0,
+    }))
+    .sort((a, b) => (b.gross_exposure ?? 0) - (a.gross_exposure ?? 0));
+
+  const grossRatio = equityBase ? gross / equityBase : 0;
+  const netRatio = equityBase ? net / equityBase : 0;
+  const largestRatio = equityBase && nameValues.length ? nameValues[0] / equityBase : 0;
+  const top3Ratio = equityBase ? nameValues.slice(0, 3).reduce((s, v) => s + v, 0) / equityBase : 0;
+  const topSectorRatio = sectorExposures[0]?.gross_exposure_ratio ?? 0;
+  const maxGross = mandate.max_gross_exposure_ratio ?? DEFAULT_MANDATE.max_gross_exposure_ratio;
+  const maxNet = mandate.max_net_exposure_ratio ?? DEFAULT_MANDATE.max_net_exposure_ratio;
+  const maxSingle = mandate.max_single_name_ratio ?? DEFAULT_MANDATE.max_single_name_ratio;
+  const maxSector = mandate.max_sector_exposure_ratio ?? DEFAULT_MANDATE.max_sector_exposure_ratio;
+  const drift = 1 + (mandate.rebalance_drift_ratio ?? DEFAULT_MANDATE.rebalance_drift_ratio);
+  const riskFlags: string[] = [];
+
+  // Match the backend's exact comparison (paper.py uses `> limit*drift`, no
+  // epsilon) so the client-recomputed "inside mandate" badge never disagrees
+  // with /paper-summary on a boundary case.
+  if (grossRatio > maxGross * drift) riskFlags.push("gross_exposure_over_mandate");
+  if (Math.abs(netRatio) > maxNet * drift) riskFlags.push("net_exposure_over_mandate");
+  if (largestRatio > maxSingle * drift) riskFlags.push("single_name_over_mandate");
+  if (topSectorRatio > maxSector * drift) riskFlags.push("sector_concentration_over_mandate");
+  if (!riskFlags.length && openPositions.length) riskFlags.push("inside_hedge_mandate");
+
+  return {
+    ...base,
+    open_positions: openPositions.length,
+    realized_pnl: roundMoney(realized),
+    unrealized_pnl: roundMoney(unrealized),
+    total_pnl: roundMoney(realized + unrealized),
+    initial_capital: initialCapital,
+    available_capital: roundMoney(initialCapital + realized - reserved),
+    reserved_margin: roundMoney(reserved),
+    total_equity: roundMoney(totalEquity),
+    total_return_pct: initialCapital ? roundRatio(((totalEquity - initialCapital) / initialCapital) * 100) : 0,
+    long_positions: openPositions.filter((p) => cbeDirection(p) === "long").length,
+    short_positions: openPositions.filter((p) => cbeDirection(p) === "short").length,
+    long_exposure: roundMoney(longExposure),
+    short_exposure: roundMoney(shortExposure),
+    gross_exposure: roundMoney(gross),
+    net_exposure: roundMoney(net),
+    gross_exposure_ratio: roundRatio(grossRatio),
+    net_exposure_ratio: roundRatio(netRatio),
+    largest_position_exposure: roundMoney(nameValues[0] ?? 0),
+    largest_position_ratio: roundRatio(largestRatio),
+    concentration_top3_ratio: roundRatio(top3Ratio),
+    risk_budget_usage_ratio: maxGross > 0 ? roundRatio(Math.min(1, grossRatio / maxGross)) : 0,
+    book_bias: Math.abs(netRatio) < 0.05 ? "balanced" : netRatio > 0 ? "net_long" : "net_short",
+    sector_exposures: sectorExposures,
+    risk_flags: riskFlags,
+    mandate,
+  };
+}
+
+function roundMoney(value?: number | null): number {
+  return Math.round((value ?? 0) * 100) / 100;
+}
+
+function roundRatio(value?: number | null): number {
+  return Math.round((value ?? 0) * 10_000) / 10_000;
+}
+
+function formatSignedPct(value?: number | null, digits = 1): string {
+  if (value == null || Number.isNaN(value)) return "—";
+  const prefix = value > 0 ? "+" : "";
+  return `${prefix}${(value * 100).toFixed(digits)}%`;
+}
+
+function bookBiasLabel(value?: string | null) {
+  if (!value) return "beta neutral";
+  return value.replace(/_/g, " ");
+}
+
+function riskUsed(value?: number | null, limit?: number | null) {
+  if (!value || !limit || limit <= 0) return 0;
+  return Math.min(1, Math.abs(value) / limit);
+}
+
+function riskTone(value?: number | null, limit?: number | null) {
+  const used = riskUsed(value, limit);
+  if (used >= 0.95) return "text-accent-red";
+  if (used >= 0.75) return "text-accent-amber";
+  return "text-accent-green";
+}
+
+function MandatePanel({ summary, mandate }: { summary?: PaperSummary; mandate: HedgeMandate }) {
+  const maxGross = mandate.max_gross_exposure_ratio ?? DEFAULT_MANDATE.max_gross_exposure_ratio;
+  const maxNet = mandate.max_net_exposure_ratio ?? DEFAULT_MANDATE.max_net_exposure_ratio;
+  const maxSingle = mandate.max_single_name_ratio ?? DEFAULT_MANDATE.max_single_name_ratio;
+  const maxSector = mandate.max_sector_exposure_ratio ?? DEFAULT_MANDATE.max_sector_exposure_ratio;
+  const flags = summary?.risk_flags ?? [];
+
+  return (
+    <div className="space-y-3">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <MandateBar label="Gross exposure" value={summary?.gross_exposure_ratio ?? 0} limit={maxGross} />
+        <MandateBar label="Net exposure" value={Math.abs(summary?.net_exposure_ratio ?? 0)} limit={maxNet} />
+        <MandateBar label="Single name" value={summary?.largest_position_ratio ?? 0} limit={maxSingle} />
+        <MandateBar
+          label="Largest sector"
+          value={summary?.sector_exposures?.[0]?.gross_exposure_ratio ?? 0}
+          limit={maxSector}
+        />
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {(flags.length ? flags : ["awaiting_positions"]).map((flag) => (
+          <StatusBadge
+            key={flag}
+            label={flag.replace(/_/g, " ")}
+            variant={flag === "inside_hedge_mandate" || flag === "awaiting_positions" ? "success" : "warn"}
+          />
+        ))}
+        <StatusBadge label={`${mandate.rebalance ?? DEFAULT_MANDATE.rebalance} rebalance`} variant="info" />
+        <StatusBadge label={`${mandate.min_hold_trading_days ?? DEFAULT_MANDATE.min_hold_trading_days}d min hold`} variant="neutral" />
+        {mandate.hard_stop_loss_pct != null ? (
+          <StatusBadge label={`${formatPct(mandate.hard_stop_loss_pct, 0)} hard stop`} variant="warn" />
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function MandateBar({ label, value, limit }: { label: string; value: number; limit: number }) {
+  const used = riskUsed(value, limit);
+  return (
+    <div className="rounded-xl border border-bg-border bg-bg-primary/14 p-3">
+      <div className="flex items-center justify-between gap-2 text-[11px]">
+        <span className="font-semibold uppercase tracking-[0.12em] text-text-muted">{label}</span>
+        <span className={`font-mono ${riskTone(value, limit)}`}>
+          {formatPct(value, 1)} / {formatPct(limit, 0)}
+        </span>
+      </div>
+      <div className="mt-2 h-2 overflow-hidden rounded-full bg-bg-primary/45">
+        <div
+          className="h-full rounded-full bg-accent-blue"
+          style={{
+            width: `${used * 100}%`,
+            background:
+              used >= 0.95
+                ? "rgb(var(--accent-red))"
+                : used >= 0.75
+                  ? "rgb(var(--accent-amber))"
+                  : "rgb(var(--accent-green))",
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function SectorExposurePanel({
+  sectors,
+  maxSector,
+}: {
+  sectors: SectorExposure[];
+  maxSector: number;
+}) {
+  if (!sectors.length) {
+    return (
+      <div className="flex h-[180px] items-center justify-center rounded-xl border border-dashed border-bg-border/60 text-sm text-text-muted">
+        No sector exposure
+      </div>
+    );
+  }
+  const rows = sectors.slice(0, 8);
+  const max = Math.max(maxSector, ...rows.map((s) => Math.abs(s.gross_exposure_ratio ?? 0)));
+  return (
+    <div className="space-y-2">
+      {rows.map((s) => {
+        const grossRatio = s.gross_exposure_ratio ?? 0;
+        const net = s.net_exposure ?? 0;
+        const used = max > 0 ? Math.min(1, grossRatio / max) : 0;
+        return (
+          <div key={s.sector} className="grid grid-cols-[minmax(100px,150px)_1fr_70px] items-center gap-2 text-[11.5px]">
+            <div className="truncate font-medium text-text-secondary" title={s.sector}>
+              {s.sector.replace(/_/g, " ")}
+            </div>
+            <div className="h-4 overflow-hidden rounded bg-bg-primary/25">
+              <div
+                className="h-full rounded"
+                style={{
+                  width: `${used * 100}%`,
+                  background: grossRatio > maxSector ? "rgb(var(--accent-amber))" : "rgb(var(--accent-blue))",
+                  opacity: 0.65,
+                }}
+              />
+            </div>
+            <div className="text-right font-mono text-text-muted">
+              {formatPct(grossRatio, 1)}
+            </div>
+            <div className="col-start-2 col-end-4 -mt-1 flex items-center justify-between text-[10px] text-text-muted">
+              <span>{s.names ?? 0} names</span>
+              <span className={tone(net)}>{formatSignedMoney(net)}</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function cbeSymbol(position: PaperPosition): string {
+  return String(position.instrument ?? position.symbol ?? position.underlying ?? position.trading_symbol ?? "—");
+}
+
+function cbeDirection(position: PaperPosition): string {
+  return String(position.direction ?? position.side ?? "").toLowerCase();
+}
+
+function cbeNotional(position: PaperPosition): number {
+  const direct = finiteNumber(position.notional) ?? 0;
+  if (direct > 0) return direct;
+  const entry = cbeEntryPrice(position);
+  const quantity = cbeQuantity(position);
+  return Math.max(0, entry * quantity);
+}
+
+function cbeUnrealized(position: PaperPosition): number {
+  return finiteNumber(position.current_pnl ?? position.unrealized_pnl ?? position.mtm_pnl) ?? 0;
+}
+
+function cbeCurrentValue(position: PaperPosition): number {
+  const direct = finiteNumber(position.current_value);
+  if (direct != null) return direct;
+  return Math.max(0, cbeMarkPrice(position) * cbeQuantity(position));
+}
+
+function cbePnlPct(position: PaperPosition): number | null {
+  const explicit = finiteNumber(position.current_pnl_pct);
+  if (explicit != null) return explicit;
+  const notional = cbeNotional(position);
+  return notional > 0 ? cbeUnrealized(position) / notional : null;
+}
+
+function SleeveTable({
+  title,
+  side,
+  positions,
+  summary,
+}: {
+  title: string;
+  side: "long" | "short";
+  positions: MarkedCbePosition[];
+  summary?: PaperSummary;
+}) {
+  const equity = summary?.total_equity || summary?.initial_capital || 1;
+  const rows = positions
+    .filter((p) => cbeDirection(p) === side)
+    .sort((a, b) => cbeCurrentValue(b) - cbeCurrentValue(a))
+    .slice(0, 8);
+  const sideColor = side === "long" ? "text-accent-green" : "text-accent-red";
+  const totalValue = rows.reduce((sum, p) => sum + cbeCurrentValue(p), 0);
+
+  return (
+    <div className="rounded-xl border border-bg-border bg-bg-primary/12">
+      <div className="flex items-center justify-between border-b border-bg-border/50 px-3 py-2">
+        <div>
+          <div className={`text-[11px] font-semibold uppercase tracking-[0.14em] ${sideColor}`}>{title}</div>
+          <div className="mt-0.5 text-[10.5px] text-text-muted">{formatMoney(totalValue)} current value</div>
+        </div>
+        <StatusBadge label={`${rows.length} names`} variant={side === "long" ? "success" : "error"} />
+      </div>
+      {rows.length ? (
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse">
+            <thead>
+              <tr className="border-b border-bg-border/40">
+                {["Symbol", "Sector", "Qty", "Entry", "Spot", "Value", "uPnL"].map((h, i) => (
+                  <th
+                    key={h}
+                    className={`px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted ${
+                      i < 2 ? "text-left" : "text-right"
+                    }`}
+                  >
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((p, i) => {
+                const pnl = cbeUnrealized(p);
+                const pnlPct = cbePnlPct(p);
+                return (
+                  <tr key={p.position_id ?? `${side}-${i}`} className="border-b border-bg-border/20 last:border-b-0">
+                    <td className="px-3 py-2">
+                      <div className="font-mono text-[12px] font-semibold text-text-primary">{cbeSymbol(p)}</div>
+                      <div className="text-[10px] text-text-muted">
+                        {String(p.execution_model ?? p.mark_source ?? "mark").replace(/_/g, " ")}
+                        {p.mark_scan_date ? ` · ${p.mark_scan_date}` : ""}
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 text-[11px] text-text-muted">{String(p.sector_code ?? "—").replace(/_/g, " ")}</td>
+                    <td className="px-3 py-2 text-right font-mono text-[12px] text-text-secondary">{formatNumber(cbeQuantity(p), 0)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-[12px] text-text-secondary">{formatNumber(cbeEntryPrice(p), 1)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-[12px] text-text-primary">{formatNumber(cbeMarkPrice(p), 1)}</td>
+                    <td className="px-3 py-2 text-right">
+                      <div className="font-mono text-[12px] text-text-primary">{formatMoney(cbeCurrentValue(p))}</div>
+                      <div className="text-[10px] text-text-muted">{formatPct(cbeCurrentValue(p) / equity, 1)} wt</div>
+                    </td>
+                    <td className={`px-3 py-2 text-right font-mono text-[12px] ${tone(pnl)}`}>
+                      <div>{formatSignedMoney(pnl)}</div>
+                      <div className="text-[10px]">{pnlPct != null ? formatSignedPct(pnlPct, 1) : "—"}</div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="px-3 py-6 text-center text-sm text-text-muted">No {side} positions</div>
+      )}
+    </div>
+  );
+}
 
 function QuadrantCard({ q, n, note }: { q: string; n: number; note: string }) {
   const col = QUADRANT_COLOR[q] || "rgb(var(--accent-blue))";
