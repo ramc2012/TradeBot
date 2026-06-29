@@ -504,10 +504,14 @@ class FyersAdapter(BrokerAdapter):
                 litemode=False,
                 write_to_file=False,
                 reconnect=True,
-                on_connect=lambda: logger.info("Fyers WS connected"),
-                on_close=lambda: logger.warning("Fyers WS closed"),
-                on_error=lambda e: logger.error(f"Fyers WS error: {e}"),
-                on_message=lambda msg: self._handle_message(msg, on_tick_callback),
+                # The Fyers SDK calls these with an inconsistent arity (e.g.
+                # on_close/on_connect receive a payload in some versions). Accept
+                # *args so a callback never raises "takes 0 positional arguments
+                # but 1 was given" and silently kills the WS feed.
+                on_connect=lambda *_a: logger.info("Fyers WS connected"),
+                on_close=lambda *_a: logger.warning("Fyers WS closed"),
+                on_error=lambda *_a: logger.error(f"Fyers WS error: {_a[0] if _a else ''}"),
+                on_message=lambda msg, *_a: self._handle_message(msg, on_tick_callback),
             )
             client.connect()
             client.subscribe(symbols=symbols, data_type="SymbolUpdate")
@@ -542,8 +546,8 @@ class FyersAdapter(BrokerAdapter):
             log_path="",
             reconnect=True,
             on_depth_update=_on_depth,
-            on_error=lambda e: logger.error(f"Fyers TBT WS error: {e}"),
-            on_connect=lambda: (
+            on_error=lambda *_a: logger.error(f"Fyers TBT WS error: {_a[0] if _a else ''}"),
+            on_connect=lambda *_a: (
                 logger.info("Fyers TBT WS connected"),
                 client.subscribe(
                     symbol_tickers=set(symbols),
@@ -551,7 +555,7 @@ class FyersAdapter(BrokerAdapter):
                     mode=tbt_ws.SubscriptionModes.DEPTH,
                 ),
             ),
-            on_close=lambda m: logger.warning(f"Fyers TBT WS closed: {m}"),
+            on_close=lambda *_a: logger.warning(f"Fyers TBT WS closed: {_a[0] if _a else ''}"),
         )
         client.connect()
         return client
