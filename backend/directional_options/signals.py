@@ -55,6 +55,12 @@ class DirectionalSignalEngine:
             # OPTION POSITIONING must CONFIRM it (call-OI building / low PCR for CE;
             # put-side for PE) and the vol gate (d_atm_iv>=0) must pass — else no
             # trade. Trend alone is anti-predictive; the positioning is the edge.
+            if positioning.get("is_stale"):
+                # Stale positioning feed → take NO new positional entries. Do NOT
+                # fall through to legacy intraday momentum (that is the churn the
+                # redesign removes). Held positions keep their stop/target/DTE
+                # exits in the paper book.
+                return None
             htf_up = bool(positioning.get("htf_up"))
             oib = positioning.get("oi_build_bias")
             pcr = positioning.get("pcr_oi")

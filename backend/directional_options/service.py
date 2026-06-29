@@ -51,6 +51,9 @@ class DirectionalOptionsService:
                 self.config["paper_trading"].get("one_position_per_symbol", True)
             ),
             policy=self.policy,
+            planned_stop_pct=float(self.config["risk"].get("planned_stop_pct", 0.30)),
+            profit_target_pct=float(self.config["risk"].get("profit_target_pct", 0.45)),
+            expiry_guard_days=float(self.config["risk"].get("expiry_guard_days", 0.8)),
         )
         self.backtester = DirectionalOptionsBacktester(
             store=self.store,
@@ -704,6 +707,7 @@ class DirectionalOptionsService:
 
         return {
             "as_of": timestamp.isoformat(),
+            "positional": bool(settings.DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED and positioning is not None),
             "underlying": underlying,
             "timeframe": timeframe,
             "spot_price": round(spot_price, 2),

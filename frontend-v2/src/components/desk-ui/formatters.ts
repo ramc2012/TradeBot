@@ -51,12 +51,30 @@ export function formatPct(
 }
 
 /**
+ * Parse a backend timestamp safely. The backend emits TZ-NAIVE ISO strings
+ * (offset stripped) that are actually UTC; with no designator the browser parses
+ * them as LOCAL time, shifting IST desks by +5:30 — trades looked like "odd
+ * hours" and the freshness pill read permanently "stale". Treat a naive datetime
+ * as UTC; leave already-tz-aware, date-only, numeric and Date inputs untouched.
+ */
+export function toDate(value?: string | number | Date | null): Date {
+  if (value == null) return new Date(NaN);
+  if (value instanceof Date) return value;
+  if (typeof value === "number") return new Date(value);
+  let s = String(value).trim();
+  const hasTz = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(s);
+  const isDateTime = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(s);
+  if (isDateTime && !hasTz) s = s.replace(" ", "T") + "Z";
+  return new Date(s);
+}
+
+/**
  * IST timestamp formatter — DD MMM HH:mm.
  * Replaces ad-hoc `new Date(iso).toLocaleString("en-IN", …)` calls.
  */
 export function formatIST(value?: string | number | Date | null): string {
   if (value == null) return NA;
-  const parsed = value instanceof Date ? value : new Date(value);
+  const parsed = toDate(value);
   if (Number.isNaN(parsed.getTime())) return String(value);
   return parsed.toLocaleString("en-IN", {
     day: "2-digit",
@@ -71,7 +89,7 @@ export function formatIST(value?: string | number | Date | null): string {
 /** Full timestamp incl. year — for audit feeds, journal rows. */
 export function formatTimestamp(value?: string | number | Date | null): string {
   if (value == null) return NA;
-  const parsed = value instanceof Date ? value : new Date(value);
+  const parsed = toDate(value);
   if (Number.isNaN(parsed.getTime())) return String(value);
   return parsed.toLocaleString("en-IN", {
     day: "2-digit",
@@ -80,6 +98,7 @@ export function formatTimestamp(value?: string | number | Date | null): string {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
+    timeZone: "Asia/Kolkata",
   });
 }
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -139,6 +139,9 @@ class DirectionalOptionsPaperStore:
         min_hold_bars: int = 3,
         one_position_per_symbol: bool = True,
         policy: DirectionalPolicy | None = None,
+        planned_stop_pct: float = 0.30,
+        profit_target_pct: float = 0.45,
+        expiry_guard_days: float = 0.8,
     ):
         self.root = Path(root)
         if not self.root.is_absolute():
@@ -153,6 +156,11 @@ class DirectionalOptionsPaperStore:
         self.min_hold_bars = int(min_hold_bars)
         self.one_position_per_symbol = bool(one_position_per_symbol)
         self.policy = policy
+        # Protective MTM exits (the lane previously had NONE — only flat/flip
+        # closes). Apply to BOTH legacy and positional books.
+        self.planned_stop_pct = float(planned_stop_pct)
+        self.profit_target_pct = float(profit_target_pct)
+        self.expiry_guard_days = float(expiry_guard_days)
 
     async def list_journal(self, symbol: str | None = None, limit: int = 50) -> dict[str, Any]:
         records = await self._load_journal()
@@ -296,6 +304,42 @@ class DirectionalOptionsPaperStore:
                     quantity = int(row.get("quantity_units") or 0)
                     row["unrealized_pnl"] = round((latest_value - entry_premium) * quantity, 2)
 
+            # Protective MTM exits — fire IMMEDIATELY (no min-hold) for BOTH
+            # legacy and positional books: 30% hard stop, profit target, and a
+            # DTE-roll near expiry. The lane previously had NO stop/target/DTE
+            # exit at all (only flat_signal/signal_flip), so a positional hold
+            # had no bounded exit. Runs before the actionable branches so a stop
+            # still fires on a flat / no-signal / data-gap cycle (with no fresh
+            # mark, latest≈entry → ret≈0 → no false trigger).
+            for row in list(matching):
+                entry_premium = float(row.get("entry_premium") or 0.0)
+                if entry_premium <= 0:
+                    continue
+                latest_value = float(row.get("latest_premium") or entry_premium)
+                ret = (latest_value - entry_premium) / entry_premium
+                reason = None
+                if ret <= -float(self.planned_stop_pct):
+                    reason = "stop_loss"
+                elif ret >= float(self.profit_target_pct):
+                    reason = "profit_target"
+                else:
+                    try:
+                        dte = (date.fromisoformat(str(row.get("expiry") or "")[:10]) - datetime.now(timezone.utc).date()).days
+                        if dte <= float(self.expiry_guard_days):
+                            reason = "expiry_roll"
+                    except Exception:
+                        pass
+                if reason:
+                    self._close_position(
+                        row,
+                        mark=marks.get(str(row.get("position_id") or "")) or {},
+                        close_time=recorded_at,
+                        close_reason=reason,
+                    )
+                    open_positions.remove(row)
+                    closed_positions.append(row)
+                    matching.remove(row)
+
             if not execution_ready:
                 await self._save_positions(
                     {
@@ -317,6 +361,11 @@ class DirectionalOptionsPaperStore:
                 now_dt = datetime.now(timezone.utc)
                 position_timeframe = str(selection.get("timeframe") or "")
                 for row in list(matching):
+                    if row.get("positional"):
+                        # Positional book is HELD through flat signals — it exits
+                        # only on the protective stop / target / DTE pass above,
+                        # not on momentum going flat.
+                        continue
                     if not _has_satisfied_min_hold(
                         row,
                         min_hold_bars=self.min_hold_bars,
@@ -370,6 +419,12 @@ class DirectionalOptionsPaperStore:
                     quantity = int(row.get("quantity_units") or 0)
                     row["unrealized_pnl"] = round((latest_mark - entry_premium) * quantity, 2)
                     refreshed = True
+                    continue
+                if row.get("positional"):
+                    # Positional book is HELD through an opposite signal — it
+                    # exits only on the protective stop / target / DTE pass.
+                    # The new opposite-side open is suppressed by the
+                    # one-position-per-symbol guard below.
                     continue
                 if not _has_satisfied_min_hold(
                     row,
@@ -462,6 +517,9 @@ class DirectionalOptionsPaperStore:
                         "last_actionable_at": recorded_at,
                         "closed_at": None,
                         "underlying": underlying,
+                        # Positional book (multi-day hold): held through flat/flip
+                        # signals; exits only on stop / target / DTE-roll.
+                        "positional": bool(snapshot.get("positional")),
                         "timeframe": selection.get("timeframe"),
                         "direction": signal.get("direction"),
                         "regime": (snapshot.get("regime") or {}).get("label"),

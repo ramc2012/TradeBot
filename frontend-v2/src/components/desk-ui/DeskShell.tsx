@@ -18,7 +18,7 @@ import { useCallback } from "react";
 import { Activity } from "lucide-react";
 
 import { StatusBadge } from "./StatusBadge";
-import { formatIST } from "./formatters";
+import { formatIST, toDate } from "./formatters";
 
 export type DeskTab = {
   key: string;
@@ -82,7 +82,7 @@ export function DeskShell({
               </span>
               {asOf ? (
                 (() => {
-                  const ageSec = Math.max(0, (Date.now() - new Date(asOf).getTime()) / 1000);
+                  const ageSec = Math.max(0, (Date.now() - toDate(asOf).getTime()) / 1000);
                   const stale = ageSec > 90;
                   return (
                     <span className={clsx("inline-flex items-center gap-1.5", stale && "text-accent-amber")}>

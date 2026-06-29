@@ -197,6 +197,14 @@ class Settings(BaseSettings):
     DIRECTIONAL_POSITIONAL_PCR_LOW: float = 0.9
     DIRECTIONAL_POSITIONAL_PCR_HIGH: float = 1.2
     DIRECTIONAL_POSITIONAL_STOP_PCT: float = 0.30
+    # Positioning feed must be fresh to take NEW positional entries: decline new
+    # trades when the latest directional_positioning_daily row lags the most
+    # recent finalized NSE session by more than this many sessions (held
+    # positions still exit on stop/target/DTE). Paired with the daily refresh
+    # runner below so it rarely trips in steady state.
+    DIRECTIONAL_POSITIONAL_MAX_STALE_SESSIONS: int = 1
+    # Once-per-session post-close refresh of directional_positioning_daily.
+    DIRECTIONAL_POSITIONING_REFRESH_INTERVAL_SECONDS: int = 3600
     # CBE alpha engine runs at EOD. Cadence = 1 hour: during market hours
     # the daily MACD/RSI indicators use completed sessions only, so re-running
     # intra-day is idempotent. A post-close catch-up after the ingestion grace

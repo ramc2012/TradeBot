@@ -141,8 +141,49 @@ async def compute_and_store(underlying: str, *, lookback_sessions: int = 120) ->
     return {"underlying": u, "stored": len(payload), "first": str(payload[0]["d"]), "last": str(payload[-1]["d"])}
 
 
+def _positioning_is_stale(row_d) -> bool:
+    """True when the stored positioning date lags the most-recent FINALIZED
+    NSE session by more than DIRECTIONAL_POSITIONAL_MAX_STALE_SESSIONS sessions.
+
+    Today counts as finalized only after ~15:35 IST, so during a live session
+    the prior session's row is correctly considered fresh. Calendar-based, so
+    weekends/holidays never trip it. Defensive: any error → not stale (degrade
+    to current behaviour rather than silently disabling the positional lane).
+    """
+    try:
+        from datetime import datetime, timedelta, time as _dtime, timezone as _tz
+        from core.trading_calendar import trading_calendar
+        from core.config import settings as _settings
+
+        ist = _tz(timedelta(hours=5, minutes=30))
+        now = datetime.now(ist)
+        last_completed = None
+        for off in range(0, 16):
+            d = now.date() - timedelta(days=off)
+            if trading_calendar.has_exchange_session("NSE", d) and (
+                d < now.date() or now.time() >= _dtime(15, 35)
+            ):
+                last_completed = d
+                break
+        if last_completed is None or row_d >= last_completed:
+            return False
+        max_stale = int(getattr(_settings, "DIRECTIONAL_POSITIONAL_MAX_STALE_SESSIONS", 1))
+        gap, d = 0, last_completed
+        while d > row_d and gap <= max_stale + 2:
+            if trading_calendar.has_exchange_session("NSE", d):
+                gap += 1
+            d -= timedelta(days=1)
+        return gap > max_stale
+    except Exception:
+        return False
+
+
 async def latest(underlying: str) -> dict | None:
-    """Latest stored positioning row for `underlying` (for the live decision path)."""
+    """Latest stored positioning row for `underlying` (for the live decision path).
+
+    Carries `is_stale` so the signal layer can decline NEW positional entries on
+    a stale feed WITHOUT silently reverting to legacy intraday momentum.
+    """
     async with AsyncSessionLocal() as s:
         row = (await s.execute(text(
             """
@@ -153,7 +194,8 @@ async def latest(underlying: str) -> dict | None:
     if row is None:
         return None
     return {"d": row.d.isoformat(), "pcr_oi": row.pcr_oi, "oi_build_bias": row.oi_build_bias,
-            "atm_iv": row.atm_iv, "d_atm_iv": row.d_atm_iv, "d_pcr_oi": row.d_pcr_oi, "htf_up": row.htf_up}
+            "atm_iv": row.atm_iv, "d_atm_iv": row.d_atm_iv, "d_pcr_oi": row.d_pcr_oi, "htf_up": row.htf_up,
+            "is_stale": _positioning_is_stale(row.d)}
 
 
 async def main() -> None:

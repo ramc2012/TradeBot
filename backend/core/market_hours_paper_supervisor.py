@@ -326,6 +326,34 @@ class MarketHoursPaperSupervisor:
                 "results": results,
             }
 
+        async def _directional_positioning_runner() -> dict[str, Any]:
+            """Refresh directional_positioning_daily for the directional universe.
+
+            Once-per-session post-close (post_close_force_daily) so the positional
+            lane reads FRESH PCR / oi_build / HTF next session instead of a stale
+            snapshot (the feed previously only updated via a manual CLI). In-session
+            passes are idempotent (upsert by (underlying, d))."""
+            from directional_options.positioning_feed import _ensure_table, compute_and_store
+
+            results: list[dict[str, Any]] = []
+            failures: dict[str, str] = {}
+            try:
+                await asyncio.wait_for(_ensure_table(), timeout=30.0)
+                for u in list(directional_service.config["universe"]):
+                    try:
+                        rep = await asyncio.wait_for(compute_and_store(u), timeout=180.0)
+                        results.append(rep)
+                    except Exception as exc:  # noqa: BLE001
+                        failures[u] = str(exc)
+            except asyncio.TimeoutError:
+                return {"status": "timeout", "result_count": 0, "failure_count": 1,
+                        "failures": {"ensure_table": "timed out"}, "results": []}
+            stored = sum(int(r.get("stored") or 0) for r in results)
+            return {"status": "ok" if not failures else "partial",
+                    "result_count": stored,
+                    "actionable_count": sum(1 for r in results if int(r.get("stored") or 0) > 0),
+                    "failure_count": len(failures), "failures": failures, "results": results}
+
         async def _macd_refined_runner() -> dict[str, Any]:
             """Fetch current + next monthly expiry chains, persist per-contract
             volume/turnover, and sync the MACD Refined paper book. This runner
@@ -485,6 +513,22 @@ class MarketHoursPaperSupervisor:
                 market_hours_fn=_in_nse_market_hours,
                 next_open_fn=_next_nse_market_open,
                 post_close_catchup=False,
+            ),
+            RunnerConfig(
+                key="directional_positioning",
+                label="Directional Positioning Feed Refresh",
+                interval_seconds=getattr(
+                    settings, "DIRECTIONAL_POSITIONING_REFRESH_INTERVAL_SECONDS", 3600
+                ),
+                callback=_directional_positioning_runner,
+                # Only run when the positional lane is live (else the feed is unused).
+                enabled=settings.DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED,
+                # Guaranteed once-a-day post-15:35 EOD write so the feed is fresh
+                # before the next session; in-session passes are idempotent upserts.
+                market_hours_fn=_in_nse_market_hours,
+                next_open_fn=_next_nse_market_open,
+                post_close_catchup=True,
+                post_close_force_daily=True,
             ),
             RunnerConfig(
                 key="macd_refined",
