@@ -5,6 +5,7 @@ import asyncio
 from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 import math
+from time import monotonic
 from typing import Any, Optional
 from urllib.parse import quote
 
@@ -40,9 +41,15 @@ def _parse_time(value: Any) -> datetime:
 
 class OptionHistoryService:
     _UPSTOX_KEYS = ("NSE_FO|", "NSE_INDEX|", "BSE_FO|", "BSE_INDEX|", "MCX_FO|")
+    # Don't re-hit the broker to fill the SAME contract's gaps more than once
+    # per this window — bounds API load and stops re-fetching contracts whose
+    # holes the broker genuinely can't fill (illiquid, no trades that period).
+    _GAP_BACKFILL_TTL_SECONDS = 1800.0
 
     def __init__(self) -> None:
         self.reset_health()
+        # instrument_key|interval -> monotonic ts of last gap-driven backfill.
+        self._gap_backfill_attempts: dict[str, float] = {}
 
     def reset_health(self) -> None:
         self._health: dict[str, Any] = {
@@ -493,6 +500,39 @@ class OptionHistoryService:
             for row in rows
         ]
 
+    def _series_has_gaps(self, rows: list[dict[str, Any]], interval: str) -> bool:
+        """Flag an option-candle window that is materially under-covered.
+
+        The live ATM tracker only persists a contract while it sits near-ATM,
+        so a fixed strike accumulates real holes (late-start mornings, missing
+        mid-day bars, truncated days) that the broker's historical API CAN fill.
+        The existing broker-refresh trigger is row-COUNT gated (`< 35`), so a
+        contract with plenty of total rows but full of holes never gets filled.
+        This detects gappiness without an exchange calendar: bucket rows by IST
+        trading date, treat the busiest day in the window as a full session,
+        and flag if any *completed* (non-today) day falls well below it. Holiday
+        / weekend dates simply don't appear, so they aren't mistaken for gaps.
+        """
+        if interval_minutes(interval) <= 0 or len(rows) < 2:
+            return False
+        per_day: dict[date, int] = {}
+        for r in rows:
+            t = r.get("time")
+            if not t:
+                continue
+            d = _parse_time(t).astimezone(IST).date()
+            per_day[d] = per_day.get(d, 0) + 1
+        if len(per_day) < 2:
+            return False
+        full_session = max(per_day.values())
+        if full_session < 3:
+            return False  # too little data to judge a 'full' day reliably
+        today = self._today_ist_date()
+        completed = [count for d, count in per_day.items() if d != today]
+        # Gappy if a completed trading day in the window has < 70% of a full
+        # session's bars — i.e. real intraday holes the broker can backfill.
+        return any(count < 0.7 * full_session for count in completed)
+
     async def load_candles(
         self,
         *,
@@ -596,7 +636,18 @@ class OptionHistoryService:
                     merged[time_key] = row
 
         needs_live_refresh = instrument_key and self._latest_row_is_stale_for_today(list(merged.values()), interval)
-        if allow_broker_refresh and instrument_key and (len(merged) < 35 or needs_live_refresh):
+        # Fill historical holes (not just sparse/stale series): a contract with
+        # plenty of rows but real intraday gaps was previously never refreshed
+        # because the trigger was row-count gated. TTL-bound so we don't re-hit
+        # the broker for the same contract repeatedly (incl. unfillable holes).
+        has_gaps = False
+        if instrument_key and not (len(merged) < 35 or needs_live_refresh):
+            gap_key = f"{instrument_key}|{interval}"
+            recently_tried = (monotonic() - self._gap_backfill_attempts.get(gap_key, 0.0)) < self._GAP_BACKFILL_TTL_SECONDS
+            if not recently_tried and self._series_has_gaps(list(merged.values()), interval):
+                has_gaps = True
+                self._gap_backfill_attempts[gap_key] = monotonic()
+        if allow_broker_refresh and instrument_key and (len(merged) < 35 or needs_live_refresh or has_gaps):
             # Fetch back 90 days regardless of expiry month — ensures weekly
             # contracts (listed only 1-2 weeks before expiry) still get enough
             # history to warm up the MACD signal line (needs ≥34 bars).
