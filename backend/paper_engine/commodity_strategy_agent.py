@@ -121,11 +121,21 @@ FUTURES_BREAK_EVEN_R_MULTIPLIER = 1.0
 FUTURES_PARTIAL_LOCK_R_MULTIPLIER = 1.5
 FUTURES_TARGET_ARM_R_MULTIPLIER = 2.0
 FUTURES_MIN_STOP_PCT = 0.005
+# Wider, range-adaptive stop used only when settings.COMMODITY_STOP_WIDENING_ENABLED
+# is True (see config). floor 0.8% so quiet names aren't given absurd room, and a
+# 2.0× ATR term so volatile names get real breathing space above that floor.
+FUTURES_MIN_STOP_PCT_WIDE = 0.008
+FUTURES_ATR_STOP_MULT = 2.0
 COMMODITY_DAILY_LOSS_LIMIT = 25_000.0
 COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT = 15_000.0
 COMMODITY_STOP_COOLDOWN_MINUTES = 60
 COMMODITY_EVENT_BLOCK_MINUTES = 90
 COMMODITY_MAX_DRAWDOWN_PCT = 15.0
+# Exit reasons that count as a protective stop-out (vs a discretionary / flat
+# exit) for the longer post-stop cooldown.
+COMMODITY_STOP_EXIT_REASONS = frozenset(
+    {"stop_loss", "hard_stop", "trail_stop", "runner_trail_stop", "trailing_stoploss"}
+)
 
 # Options sleeve deprecated — constants intentionally removed. Historical option
 # trades remain in the persisted trade_history for audit only.
@@ -176,9 +186,11 @@ def _symbol_matches_underlying(symbol: str, underlying: str) -> bool:
     normalized_underlying = extract_commodity_root(str(underlying or ""))
     if not normalized_underlying:
         return False
-    normalized_symbol = str(symbol or "").upper()
-    extracted = extract_commodity_root(normalized_symbol)
-    return extracted == normalized_underlying or normalized_underlying in normalized_symbol
+    extracted = extract_commodity_root(str(symbol or "").upper())
+    # Exact-root match only. The old `normalized_underlying in normalized_symbol`
+    # substring fallback mixed NIFTY with BANKNIFTY (and any root that is a
+    # substring of another), cross-contaminating loss-caps / cooldowns / dedup.
+    return extracted == normalized_underlying
 
 
 def _parse_datetime(value: Any) -> Optional[datetime]:
@@ -628,6 +640,13 @@ class CommodityPositionState:
     entry_iv_pct: Optional[float] = None
     entry_style: Optional[str] = None
     last_reviewed_bar_time: Optional[str] = None
+    # Higher-timeframe alignment (set at entry when COMMODITY_HTF_GATE_ENABLED).
+    # "positional" = aligned/neutral with the weekly+monthly value-area bias
+    # (full size, 2R + runner trail); "scalp" = counter-bias (reduced size,
+    # 1R target, quick time-stop). htf_bias ∈ {strong, weak, neutral}.
+    trade_horizon: str = "positional"
+    htf_bias: Optional[str] = None
+    htf_detail: Optional[str] = None
 
     @property
     def unrealized_pnl(self) -> float:
@@ -652,6 +671,16 @@ class CommodityRuntime:
     futures_watchlist: list[dict[str, Any]] = field(default_factory=list)
     processed_signals: dict[str, str] = field(default_factory=dict)
     signal_audit: list[dict[str, Any]] = field(default_factory=list)
+    # Eviction-proof cooldown timestamps (per canonical root). The `orders`
+    # buffer is capped at DEFAULT_COMMODITY_ORDERS_MAX (80) rows, so on a busy
+    # multi-symbol 1-min session an exit row can be evicted from the buffer while
+    # its re-entry / stop cooldown is still in force — silently failing the
+    # cooldown OPEN and letting the lane re-enter the same name immediately (a
+    # churn driver). These maps are never truncated within a session and back the
+    # cooldown checks so buffer eviction can't defeat them. Not persisted across
+    # restart (the restored `orders` buffer covers that window).
+    last_exit_at: dict[str, datetime] = field(default_factory=dict)
+    last_stop_at: dict[str, datetime] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1171,6 +1200,132 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         lots = round(target_value / per_lot_notional)
         return max(1, int(lots))
 
+    def _htf_value_area_bias(self, root: str, price: float) -> tuple[str, Optional[str]]:
+        """Weekly+monthly value-area bias for an underlying.
+
+        Compares the live price to the composite value area of (a) this week's
+        and (b) this month's persisted daily profiles (the same
+        commodity_profile_store aggregates the dashboard timeline uses). Each
+        timeframe votes +1 when price trades above its VAH (accepted higher),
+        -1 below its VAL (accepted lower), 0 inside value. The summed score:
+
+            score >= +1 → "strong"   (price accepted above higher-TF value)
+            score <= -1 → "weak"     (price accepted below higher-TF value)
+            else        → "neutral"
+
+        Causal — aggregates are built only from persisted prior/current
+        sessions, never future data. Returns ("neutral", None) when there
+        isn't enough history to read a bias.
+        """
+        if price <= 0:
+            return "neutral", None
+        try:
+            from paper_engine import commodity_profile_store as profile_store
+
+            today = _now_ist().date()
+            week = profile_store.this_week(root, today)
+            month = profile_store.this_month(root, today)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[commodity] HTF bias load failed for {root}: {exc}")
+            return "neutral", None
+
+        def _vote(agg: Optional[dict[str, Any]]) -> Optional[int]:
+            if not agg:
+                return None
+            vah, val = agg.get("vah"), agg.get("val")
+            if vah is None or val is None:
+                return None
+            if price > float(vah):
+                return 1
+            if price < float(val):
+                return -1
+            return 0
+
+        wv, mv = _vote(week), _vote(month)
+        votes = [v for v in (wv, mv) if v is not None]
+        parts: list[str] = []
+        if votes:
+            if wv is not None:
+                parts.append(f"W {week.get('val')}–{week.get('vah')}")
+            if mv is not None:
+                parts.append(f"M {month.get('val')}–{month.get('vah')}")
+        else:
+            # Daily fallback: when neither the weekly nor monthly aggregate is
+            # available yet (start of a new week/month, or thin history), read
+            # the higher-timeframe bias off the prior DAILY profile so the desk
+            # still has a directional reference instead of going neutral/blind.
+            day = profile_store.previous_day(root, today)
+            dv = _vote(day)
+            if dv is None:
+                return "neutral", None
+            votes = [dv]
+            parts.append(f"D {day.get('val')}–{day.get('vah')}")
+        score = sum(votes)
+        bias = "strong" if score >= 1 else "weak" if score <= -1 else "neutral"
+        detail = f"{bias} ({'; '.join(parts)})" if parts else bias
+        return bias, detail
+
+    def _naked_poc_target(
+        self,
+        underlying: str,
+        price: float,
+        target_price: Optional[float],
+        signal_dir: Optional[str],
+    ) -> Optional[float]:
+        """R4: structure-anchored exit target. If a prior-session POC (prev-day /
+        this-week / this-month) lies between entry and the blind R-multiple target
+        in the trade direction — and at least MIN_R_FRACTION of the way there —
+        return it (the nearest such POC) to use as the target. These prior POCs are
+        the "unfinished business" magnets price tends to revisit. Returns None when
+        no qualifying POC exists (caller keeps the R-multiple target)."""
+        if price <= 0 or target_price is None:
+            return None
+        try:
+            from paper_engine import commodity_profile_store as profile_store
+
+            today = _now_ist().date()
+            aggs = (
+                profile_store.previous_day(underlying, today),
+                profile_store.this_week(underlying, today),
+                profile_store.this_month(underlying, today),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[commodity] naked-POC target load failed for {underlying}: {exc}")
+            return None
+
+        pocs: list[float] = []
+        for agg in aggs:
+            if not agg:
+                continue
+            raw = agg.get("poc")
+            if raw is None:
+                continue
+            try:
+                pocs.append(float(raw))
+            except (TypeError, ValueError):
+                continue
+        if not pocs:
+            return None
+
+        full_dist = abs(float(target_price) - price)
+        if full_dist <= 0:
+            return None
+        min_dist = full_dist * float(settings.COMMODITY_NAKED_POC_MIN_R_FRACTION)
+        is_buy = str(signal_dir or "").upper() == "BUY"
+        tgt = float(target_price)
+        qualifying: list[float] = []
+        for poc in pocs:
+            if is_buy:
+                if price + min_dist <= poc <= tgt:
+                    qualifying.append(poc)
+            else:
+                if tgt <= poc <= price - min_dist:
+                    qualifying.append(poc)
+        if not qualifying:
+            return None
+        # Nearest magnet in the trade direction (first level price would reach).
+        return round(min(qualifying) if is_buy else max(qualifying), 2)
+
     def _has_underlying_position(self, strategy_key: str, underlying: str) -> bool:
         return any(
             position.strategy_key == strategy_key and position.underlying == underlying
@@ -1212,24 +1367,59 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 total += float(trade.pnl)
         return total
 
-    def _recent_stop_cooldown_reason(self, underlying: str, now: Optional[datetime] = None) -> Optional[str]:
-        current = now or _now_ist()
-        stop_reasons = {"stop_loss", "hard_stop", "trail_stop", "runner_trail_stop", "trailing_stoploss"}
+    def _most_recent_exit_dt(self, underlying: str, *, stop_only: bool) -> Optional[datetime]:
+        """Most recent exit time for an underlying, eviction-proof.
+
+        Combines the per-root timestamp maps (never truncated within a session)
+        with a scan of the bounded `orders` buffer (covers state restored from
+        disk after a restart, before any new exit re-stamps the map). Returns the
+        latest of the two so the cooldown can't be defeated by buffer eviction.
+        """
+        candidates: list[datetime] = []
+        root = extract_commodity_root(underlying)
+        stamped = (self._runtime.last_stop_at if stop_only else self._runtime.last_exit_at).get(root)
+        if stamped is not None:
+            candidates.append(stamped if stamped.tzinfo else stamped.replace(tzinfo=IST))
         for order in self._runtime.orders:
             if str(order.get("flow") or "") != "exit":
                 continue
-            reason = str(order.get("reason") or "")
-            if reason not in stop_reasons:
+            if stop_only and str(order.get("reason") or "") not in COMMODITY_STOP_EXIT_REASONS:
                 continue
             if not _symbol_matches_underlying(str(order.get("symbol") or ""), underlying):
                 continue
             exit_time = _parse_datetime(order.get("time"))
             if exit_time is None:
                 continue
-            minutes_since_stop = (current - exit_time.astimezone(IST)).total_seconds() / 60.0
-            if 0 <= minutes_since_stop < COMMODITY_STOP_COOLDOWN_MINUTES:
-                remaining = max(1, int(COMMODITY_STOP_COOLDOWN_MINUTES - minutes_since_stop))
-                return f"recent stop-out on {extract_commodity_root(underlying)}; cooldown {remaining}m remaining"
+            candidates.append(exit_time.astimezone(IST))
+        return max(candidates) if candidates else None
+
+    def _recent_stop_cooldown_reason(self, underlying: str, now: Optional[datetime] = None) -> Optional[str]:
+        current = now or _now_ist()
+        exit_dt = self._most_recent_exit_dt(underlying, stop_only=True)
+        if exit_dt is None:
+            return None
+        minutes_since_stop = (current - exit_dt).total_seconds() / 60.0
+        if 0 <= minutes_since_stop < COMMODITY_STOP_COOLDOWN_MINUTES:
+            remaining = max(1, int(COMMODITY_STOP_COOLDOWN_MINUTES - minutes_since_stop))
+            return f"recent stop-out on {extract_commodity_root(underlying)}; cooldown {remaining}m remaining"
+        return None
+
+    def _recent_exit_cooldown_reason(self, underlying: str, now: Optional[datetime] = None) -> Optional[str]:
+        """Anti-churn cooldown after ANY exit on this underlying (not only
+        stop-outs). A positional desk should not re-enter the same name on the
+        very next bar after flattening; this enforces a quiet window so the MP
+        signal has to re-establish rather than flip-flop across POC."""
+        minutes = int(settings.COMMODITY_REENTRY_COOLDOWN_MINUTES)
+        if minutes <= 0:
+            return None
+        current = now or _now_ist()
+        exit_dt = self._most_recent_exit_dt(underlying, stop_only=False)
+        if exit_dt is None:
+            return None
+        minutes_since_exit = (current - exit_dt).total_seconds() / 60.0
+        if 0 <= minutes_since_exit < minutes:
+            remaining = max(1, int(minutes - minutes_since_exit))
+            return f"recent exit on {extract_commodity_root(underlying)}; re-entry cooldown {remaining}m remaining"
         return None
 
     def _entry_risk_block(self, underlying: str, now: Optional[datetime] = None) -> Optional[dict[str, str]]:
@@ -1243,21 +1433,29 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     "new entries are blocked pending manual review."
                 ),
             }
-        daily_pnl = self._today_realized_pnl(current)
-        if daily_pnl <= -COMMODITY_DAILY_LOSS_LIMIT:
-            return {
-                "code": "daily_loss_limit",
-                "detail": f"Commodity desk daily loss is {daily_pnl:.0f}; new entries are blocked.",
-            }
-        underlying_pnl = self._underlying_today_realized_pnl(underlying, current)
-        if underlying_pnl <= -COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT:
-            return {
-                "code": "underlying_loss_limit",
-                "detail": f"{extract_commodity_root(underlying)} daily loss is {underlying_pnl:.0f}; new entries are blocked.",
-            }
+        # Daily + per-underlying realized-loss caps. Gated by
+        # COMMODITY_LOSS_CAPS_ENABLED (TEMP off for infra testing). The 15%
+        # catastrophe drawdown backstop above and the cooldowns below still apply.
+        if settings.COMMODITY_LOSS_CAPS_ENABLED:
+            daily_pnl = self._today_realized_pnl(current)
+            if daily_pnl <= -COMMODITY_DAILY_LOSS_LIMIT:
+                return {
+                    "code": "daily_loss_limit",
+                    "detail": f"Commodity desk daily loss is {daily_pnl:.0f}; new entries are blocked.",
+                }
+            underlying_pnl = self._underlying_today_realized_pnl(underlying, current)
+            if underlying_pnl <= -COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT:
+                return {
+                    "code": "underlying_loss_limit",
+                    "detail": f"{extract_commodity_root(underlying)} daily loss is {underlying_pnl:.0f}; new entries are blocked.",
+                }
         cooldown_reason = self._recent_stop_cooldown_reason(underlying, current)
         if cooldown_reason:
             return {"code": "stop_cooldown", "detail": cooldown_reason}
+        # Anti-churn: brief re-entry cooldown after ANY exit (not only stops).
+        reentry_reason = self._recent_exit_cooldown_reason(underlying, current)
+        if reentry_reason:
+            return {"code": "reentry_cooldown", "detail": reentry_reason}
         return None
 
     def _current_drawdown_pct(self) -> float:
@@ -1722,7 +1920,11 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         engine = MarketProfileEngine(
             {
                 "period_minutes": 15,
-                "tick_size": spec.mp_tick_size,
+                # Coarse value-area bucket (NOT the fine exchange tick) so POC/VA
+                # concentrate. Shared by live builds AND the write-once backfill
+                # so historical and live profiles have identical geometry — the
+                # store's aggregates never blend incompatible price grids.
+                "tick_size": spec.mp_profile_tick(),
                 "initial_balance_periods": 4,
                 "value_area_pct": 0.70,
                 "min_tail_tpos": 2,
@@ -2450,7 +2652,6 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     continue
                 current_price = float(row.get("price") or position.current_price)
                 position.current_price = current_price
-                position.macd_value = row.get("macd")
                 position.mp_poc = row.get("mp_poc")
                 position.mp_vah = row.get("mp_vah")
                 position.mp_val = row.get("mp_val")
@@ -2479,8 +2680,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 #            ratcheted before the +2R target hit)
                 #   KEEP   — target_reached marker at +2R + ATR-trail on the
                 #            runner (peak-trail with max(ATR×1.25, 1R) buffer)
-                #   KEEP   — macd_reversal on opposite signal after 4-bar
-                #            min hold (structural exit)
+                #   KEEP   — mp_reversal on an opposite MP+OF signal (only when
+                #            positional-hold is off; structural exit, NOT MACD)
                 #   REMOVE — BE move at +1R: it ratcheted the stop up to
                 #            entry on the first +1R move, then any normal
                 #            intra-move pullback knocked the trade out at
@@ -2493,7 +2694,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 #            scale — knocks out the runner before structure
                 #            actually breaks. No analog in the S1 design.
                 trailing_label: Optional[str] = None
-                if risk_distance > 0:
+                # Scalps don't arm a runner trail — they exit at their 1R
+                # target or a quick time-stop (handled in the decision block
+                # below), so only positionals run the 2R-trail ratchet here.
+                if risk_distance > 0 and position.trade_horizon != "scalp":
                     if position.action == "BUY":
                         favorable_move = current_price - position.entry_price
                         if not position.target_reached and position.target_price is not None and current_price >= position.target_price:
@@ -2527,19 +2731,55 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                             position.stop_price = min(position.stop_price, round(position.peak_price + trail_buffer, 2))
                             trailing_label = "trail_stop"
 
-                if position.action == "BUY":
+                if position.trade_horizon == "scalp":
+                    # Counter-bias scalp: book the 1R target outright (no runner
+                    # trail), bail on the quick time-stop, or take the original
+                    # stop — whichever comes first.
+                    scalp_max_hold = int(settings.COMMODITY_HTF_SCALP_MAX_HOLD_BARS)
+                    if position.action == "BUY":
+                        if current_price <= position.stop_price:
+                            reason = "stop_loss"
+                        elif position.target_price is not None and current_price >= position.target_price:
+                            reason = "scalp_target"
+                        elif hold_bars >= scalp_max_hold:
+                            reason = "scalp_time_stop"
+                        elif hold_bars >= FUTURES_MIN_HOLD_BARS and row.get("raw_signal") == "SELL":
+                            reason = "mp_reversal"
+                    else:
+                        if current_price >= position.stop_price:
+                            reason = "stop_loss"
+                        elif position.target_price is not None and current_price <= position.target_price:
+                            reason = "scalp_target"
+                        elif hold_bars >= scalp_max_hold:
+                            reason = "scalp_time_stop"
+                        elif hold_bars >= FUTURES_MIN_HOLD_BARS and row.get("raw_signal") == "BUY":
+                            reason = "mp_reversal"
+                elif position.action == "BUY":
                     if current_price <= position.stop_price:
                         reason = trailing_label or "stop_loss"
-                    elif hold_bars >= FUTURES_MIN_HOLD_BARS and row.get("raw_signal") == "SELL":
-                        reason = "macd_reversal"
+                    elif (
+                        not settings.COMMODITY_POSITIONAL_HOLD_ENABLED
+                        and hold_bars >= FUTURES_MIN_HOLD_BARS
+                        and row.get("raw_signal") == "SELL"
+                    ):
+                        # Positional desk holds through 1-min MP-signal noise;
+                        # only a stop / target / runner-trail closes it. This is
+                        # an MP+OF signal-flip exit (raw_signal = the live MP+OF
+                        # trigger direction) — NOT MACD. Flag-gated off by
+                        # COMMODITY_POSITIONAL_HOLD_ENABLED.
+                        reason = "mp_reversal"
                 else:
                     if current_price >= position.stop_price:
                         reason = trailing_label or "stop_loss"
-                    elif hold_bars >= FUTURES_MIN_HOLD_BARS and row.get("raw_signal") == "BUY":
-                        reason = "macd_reversal"
+                    elif (
+                        not settings.COMMODITY_POSITIONAL_HOLD_ENABLED
+                        and hold_bars >= FUTURES_MIN_HOLD_BARS
+                        and row.get("raw_signal") == "BUY"
+                    ):
+                        reason = "mp_reversal"
 
                 if reason:
-                    # Unified close path: stop_loss / trail_stop / macd_reversal /
+                    # Unified close path: stop_loss / trail_stop / mp_reversal /
                     # target exits all route through _close_futures_position so the
                     # trade is BOOKED (on_fill or self-heal book_close), audited, and
                     # written to the durable DB ledger consistently. The old inline
@@ -2716,9 +2956,47 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             atr = float(row.get("atr") or 0.0)
             if price <= 0 or atr <= 0:
                 continue
+
+            # ── Higher-timeframe alignment gate ──────────────────────────
+            # A trade whose direction OPPOSES the weekly+monthly value-area
+            # bias (long while HTF is weak, short while HTF is strong) is
+            # downgraded to a "scalp": smaller size + a tighter 1R target + a
+            # quick time-stop (enforced in the manage loop). Aligned/neutral
+            # trades stay positional (full size, 2R + runner trail). Flag-gated
+            # so default behaviour is byte-for-byte unchanged.
+            signal_dir = str(row.get("signal") or "").upper()
+            trade_horizon = "positional"
+            htf_bias: Optional[str] = None
+            htf_detail: Optional[str] = None
+            target_r = float(settings.COMMODITY_HTF_POSITIONAL_TARGET_R)
+            if settings.COMMODITY_HTF_GATE_ENABLED:
+                htf_bias, htf_detail = self._htf_value_area_bias(underlying, price)
+                opposed = (
+                    (signal_dir == "BUY" and htf_bias == "weak")
+                    or (signal_dir == "SELL" and htf_bias == "strong")
+                )
+                if opposed:
+                    if settings.COMMODITY_HTF_REQUIRE_ALIGNMENT:
+                        # Directional/positional desk: never fight the higher
+                        # timeframe. Block the counter-bias entry outright
+                        # instead of taking a counter-trend scalp. Surfaced into
+                        # the signal-audit so the operator sees WHY it skipped.
+                        row["signal_validation"] = "htf_counter_bias"
+                        row["signal_validation_detail"] = (
+                            f"{signal_dir} opposes higher-timeframe bias "
+                            f"({htf_detail or htf_bias}); blocked (directional desk)."
+                        )
+                        self._audit_futures_watchlist([row])
+                        continue
+                    trade_horizon = "scalp"
+                    target_r = float(settings.COMMODITY_HTF_SCALP_TARGET_R)
+
             # Equal-notional sizing: lots chosen so this position ≈ the
-            # target rupee value, the same for every contract.
+            # target rupee value, the same for every contract. Scalps trade a
+            # fraction of that so a counter-bias probe risks less.
             lots = self._target_lots_for_contract(spec, price)
+            if trade_horizon == "scalp":
+                lots = max(1, round(lots * float(settings.COMMODITY_HTF_SCALP_SIZE_FRACTION)))
             qty = spec.futures_lot_size * lots
             required_margin = self._estimate_futures_margin_required(price, qty)
             if required_margin > self._runtime.portfolio.available_capital:
@@ -2728,7 +3006,12 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             # the FUTURES_MIN_STOP_PCT floor so we don't end up with absurdly
             # tight stops. Falls back to the ATR/MP-level rule for any signal
             # that didn't carry an explicit hint.
-            min_stop_distance = max(atr, price * FUTURES_MIN_STOP_PCT)
+            if settings.COMMODITY_STOP_WIDENING_ENABLED:
+                # Range-adaptive + wider: ATR multiple wins on volatile names,
+                # the 0.8% floor binds on quiet ones. Off by default.
+                min_stop_distance = max(atr * FUTURES_ATR_STOP_MULT, price * FUTURES_MIN_STOP_PCT_WIDE)
+            else:
+                min_stop_distance = max(atr, price * FUTURES_MIN_STOP_PCT)
             stop_hint = row.get("stop_hint")
             try:
                 stop_hint_f = float(stop_hint) if stop_hint is not None else None
@@ -2744,7 +3027,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                         if level_value < price and (price - level_value) >= min_stop_distance:
                             stop_candidates.append(level_value)
                 stop_price = max(stop_candidates)
-                target_price = price + ((price - stop_price) * 2.0)
+                target_price = price + ((price - stop_price) * target_r)
             else:
                 stop_candidates = [price + min_stop_distance]
                 if stop_hint_f is not None and stop_hint_f > price and (stop_hint_f - price) >= min_stop_distance:
@@ -2755,7 +3038,17 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                         if level_value > price and (level_value - price) >= min_stop_distance:
                             stop_candidates.append(level_value)
                 stop_price = min(stop_candidates)
-                target_price = price - ((stop_price - price) * 2.0)
+                target_price = price - ((stop_price - price) * target_r)
+
+            # R4: anchor the target to a naked/virgin prior-session POC when one
+            # sits between entry and the R-multiple target (structure-anchored
+            # exit). Target-only — never changes entry/stop. Off by default.
+            if settings.COMMODITY_NAKED_POC_TARGET_ENABLED:
+                naked_target = self._naked_poc_target(
+                    underlying, price, target_price, row.get("signal")
+                )
+                if naked_target is not None:
+                    target_price = naked_target
 
             order = self._runtime.order_book.place_order(
                 symbol=symbol,
@@ -2765,6 +3058,13 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 instrument_type="FUT",
                 session_id=self._runtime.portfolio.session_id,
                 ltp=price,
+                # Persist which MP trigger opened the trade (open_drive / ib_break
+                # / failed_auction / va_migration / lvn_fade) + the day-type so
+                # per-trigger expectancy can be attributed at close. Previously
+                # omitted → setup_type=None on every booked trade, making it
+                # impossible to identify or retire a losing trigger on evidence.
+                setup_type=str(row.get("entry_style") or row.get("reason") or "") or None,
+                regime=str(row.get("mp_day_type") or row.get("regime") or "") or None,
             )
             self._record_order(
                 order,
@@ -2809,12 +3109,21 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 peak_price=fill_price,
                 entry_style=str(row.get("entry_style") or "mp_signal"),
                 last_reviewed_bar_time=bar_time,
+                trade_horizon=trade_horizon,
+                htf_bias=htf_bias,
+                htf_detail=htf_detail,
             )
             self._runtime.processed_signals[f"commodity_futures:{symbol}"] = bar_time
+            horizon_note = (
+                f" | {trade_horizon.upper()} (HTF {htf_bias})"
+                if settings.COMMODITY_HTF_GATE_ENABLED and htf_bias
+                else ""
+            )
             self._append_commentary(
                 "trade",
                 f"ENTRY {spec.display_name} {row.get('signal')} @{fill_price:.2f} | {lots} lot | "
-                f"{str(row.get('entry_style') or 'fresh_cross').replace('_', ' ')} | MP {row.get('mp_day_type')} | stop {stop_price:.2f}",
+                f"{str(row.get('entry_style') or 'fresh_cross').replace('_', ' ')} | MP {row.get('mp_day_type')} | "
+                f"stop {stop_price:.2f}{horizon_note}",
             )
             await record_audit_event(
                 market="commodity",
@@ -2880,6 +3189,13 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             },
         )
         del self._runtime.orders[DEFAULT_COMMODITY_ORDERS_MAX:]
+        # Eviction-proof cooldown stamps — see CommodityRuntime.last_exit_at.
+        if flow == "exit":
+            root = extract_commodity_root(order.symbol)
+            fill_dt = _order_fill_time_ist(order)
+            self._runtime.last_exit_at[root] = fill_dt
+            if reason in COMMODITY_STOP_EXIT_REASONS:
+                self._runtime.last_stop_at[root] = fill_dt
 
     def _append_commentary(self, tone: str, message: str) -> None:
         if not message:

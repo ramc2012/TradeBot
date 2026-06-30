@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from analytics.market_profile_ext import (
+    assess_day_type,
     ib_extension as compute_ib_extension,
     poc_migration as compute_poc_migration,
     value_area_overlap as compute_value_area_overlap,
@@ -56,6 +57,62 @@ from analytics.orderflow import (
     volume_node_density,
     vwap_bands,
 )
+from core.config import settings
+from market_data.commodity_contract_specs import extract_commodity_root
+from paper_engine.commodity_volume_baseline import (
+    is_large_volume as _vb_is_large_volume,
+    load_baseline as _vb_load_baseline,
+    pressure_ratio as _vb_pressure_ratio,
+)
+
+# 1-min bars per MP period (15-min TPO) — the granularity at which per-instrument
+# volume baselines and the OF quality reads are computed (1-min is too sparse).
+_MP_PERIOD_BARS = 15
+
+
+# Corrected `lvn_fade` absorption thresholds — used ONLY when
+# settings.COMMODITY_LVN_ABSORPTION_FIX_ENABLED is set. Textbook absorption is
+# LARGE aggressive per-bar flow that FAILS to move price (orders absorbed at the
+# level), the inverse of the legacy (buggy) "small flow + moving price" check.
+LVN_ABSORB_FLOW_MULT = 1.0    # |3-bar CVD delta| >= this * stdev(per-bar deltas)
+LVN_ABSORB_STALL_MULT = 0.15  # |3-bar price move| <= this * ATR (price stalled)
+
+
+def _of_volume_coverage(
+    closed_1m: list[dict[str, Any]],
+    *,
+    period_bars: int = 15,
+    lookback_periods: int = 20,
+) -> float:
+    """Fraction of recent MP-period buckets carrying nonzero volume (R0 gate).
+
+    Bar-OHLCV volume on MCX is sparse on illiquid names (NICKEL ~5% of 1-min bars
+    nonzero, GOLD ~25%) but far denser at the 15-min MP period, so coverage is
+    measured at the MP-period bucket, not the 1-min bar. Returns 1.0 (=full, do
+    not degrade) when there is too little history to judge.
+    """
+    if not closed_1m:
+        return 1.0
+    bars = closed_1m[-(period_bars * lookback_periods):]
+    if len(bars) < period_bars:
+        return 1.0
+    groups = 0
+    nonzero = 0
+    for i in range(0, len(bars) - period_bars + 1, period_bars):
+        chunk = bars[i:i + period_bars]
+        groups += 1
+        if sum(float(b.get("volume") or 0.0) for b in chunk) > 0.0:
+            nonzero += 1
+    return (nonzero / groups) if groups else 1.0
+
+
+def _symbol_excluded_from_daytype(symbol: str) -> bool:
+    """True if the symbol's root is on the day-type exclude list (R1) — names
+    where the IB/excess reads are noisy across the MCX evening-open."""
+    raw = str(getattr(settings, "COMMODITY_DAYTYPE_EXCLUDE_SYMBOLS", "") or "")
+    excl = [s.strip().upper() for s in raw.split(",") if s.strip()]
+    su = str(symbol or "").upper()
+    return any(su.startswith(e) for e in excl)
 
 
 # ─── Public output shape ───────────────────────────────────────────────────
@@ -195,6 +252,7 @@ def _trigger_open_drive(
     prior_profile: Any,
     closed_1m: list[dict[str, Any]],
     cvd_anchored_last: Optional[float],
+    of_degraded: bool = False,
 ) -> Optional[TriggerResult]:
     if prior_profile is None:
         return None
@@ -221,7 +279,7 @@ def _trigger_open_drive(
     if not drive_up and not drive_dn:
         return None
 
-    if drive_up and last_close > ib_high and cvd_anchored_last > 0:
+    if drive_up and last_close > ib_high and (of_degraded or cvd_anchored_last > 0):
         return TriggerResult(
             signal="BUY",
             entry_style="open_drive",
@@ -241,7 +299,7 @@ def _trigger_open_drive(
                 "cvd_anchored": cvd_anchored_last,
             },
         )
-    if drive_dn and last_close < ib_low and cvd_anchored_last < 0:
+    if drive_dn and last_close < ib_low and (of_degraded or cvd_anchored_last < 0):
         return TriggerResult(
             signal="SELL",
             entry_style="open_drive",
@@ -271,6 +329,7 @@ def _trigger_ib_break(
     cvd_anchored: list[float],
     vwap_last: Optional[float],
     ib_ext: Optional[Any],
+    of_degraded: bool = False,
 ) -> Optional[TriggerResult]:
     period_count = int(_profile_attr(today_profile, "period_count", 0) or 0)
     if period_count < 4 or len(closed_1m) < 2:
@@ -296,7 +355,7 @@ def _trigger_ib_break(
     cvd_window = cvd_anchored[-3:] if len(cvd_anchored) >= 3 else cvd_anchored[-2:]
 
     if last > ib_high and prev > ib_high:
-        if not cvd_agrees_with("BUY", cvd_window):
+        if not of_degraded and not cvd_agrees_with("BUY", cvd_window):
             return None
         if vwap_last is not None and last < vwap_last:
             return None
@@ -324,7 +383,7 @@ def _trigger_ib_break(
             },
         )
     if last < ib_low and prev < ib_low:
-        if not cvd_agrees_with("SELL", cvd_window):
+        if not of_degraded and not cvd_agrees_with("SELL", cvd_window):
             return None
         if vwap_last is not None and last > vwap_last:
             return None
@@ -360,6 +419,7 @@ def _trigger_failed_auction(
     closed_1m: list[dict[str, Any]],
     cvd_total: list[float],
     atr_1m: Optional[float],
+    of_degraded: bool = False,
 ) -> Optional[TriggerResult]:
     period_count = int(_profile_attr(today_profile, "period_count", 0) or 0)
     if period_count < 5 or not closed_1m:
@@ -379,14 +439,19 @@ def _trigger_failed_auction(
         return None
 
     div = cvd_divergence(closed_1m, cvd_total, lookback=20)
-    if div is None or div.strength < 0.4:
+    if not of_degraded and (div is None or div.strength < 0.4):
         return None
+    # OF-degraded: fall back to structure-only (poor extreme + VA position); the
+    # CVD-divergence confirmation is noise on thin volume so it is not required.
+    div_strength = div.strength if div is not None else 0.5
+    bearish_ok = of_degraded or (div is not None and div.kind == "bearish")
+    bullish_ok = of_degraded or (div is not None and div.kind == "bullish")
 
     atr_pad = max(atr_1m or 0.0, 0.0)
 
-    if poor_high and last_close < vah and div.kind == "bearish" and high_price is not None:
+    if poor_high and last_close < vah and bearish_ok and high_price is not None:
         stop = float(high_price) + (atr_pad if atr_pad > 0 else 0.001 * last_close)
-        conf = 0.55 + 0.4 * min(div.strength, 1.0) / 2.0
+        conf = 0.55 + 0.4 * min(div_strength, 1.0) / 2.0
         return TriggerResult(
             signal="SELL",
             entry_style="failed_auction",
@@ -394,7 +459,7 @@ def _trigger_failed_auction(
             validation_detail=(
                 f"Failed-auction SELL: poor_high at {high_price:.2f} rejected; "
                 f"close {last_close:.2f} < VAH {vah:.2f}; bearish CVD divergence "
-                f"strength {div.strength:.2f}."
+                f"strength {div_strength:.2f}."
             ),
             confidence=round(conf, 3),
             stop_hint=float(stop),
@@ -404,13 +469,13 @@ def _trigger_failed_auction(
                 "val": val,
                 "poc": poc,
                 "poor_high_extreme": high_price,
-                "divergence_strength": div.strength,
+                "divergence_strength": div_strength,
                 "atr_1m": atr_1m,
             },
         )
-    if poor_low and last_close > val and div.kind == "bullish" and low_price is not None:
+    if poor_low and last_close > val and bullish_ok and low_price is not None:
         stop = float(low_price) - (atr_pad if atr_pad > 0 else 0.001 * last_close)
-        conf = 0.55 + 0.4 * min(div.strength, 1.0) / 2.0
+        conf = 0.55 + 0.4 * min(div_strength, 1.0) / 2.0
         return TriggerResult(
             signal="BUY",
             entry_style="failed_auction",
@@ -418,7 +483,7 @@ def _trigger_failed_auction(
             validation_detail=(
                 f"Failed-auction BUY: poor_low at {low_price:.2f} rejected; "
                 f"close {last_close:.2f} > VAL {val:.2f}; bullish CVD divergence "
-                f"strength {div.strength:.2f}."
+                f"strength {div_strength:.2f}."
             ),
             confidence=round(conf, 3),
             stop_hint=float(stop),
@@ -428,7 +493,7 @@ def _trigger_failed_auction(
                 "val": val,
                 "poc": poc,
                 "poor_low_extreme": low_price,
-                "divergence_strength": div.strength,
+                "divergence_strength": div_strength,
                 "atr_1m": atr_1m,
             },
         )
@@ -441,6 +506,7 @@ def _trigger_va_migration(
     prior_profile: Any,
     closed_1m: list[dict[str, Any]],
     cvd_anchored_last: Optional[float],
+    of_degraded: bool = False,
 ) -> Optional[TriggerResult]:
     if prior_profile is None:
         return None
@@ -467,7 +533,7 @@ def _trigger_va_migration(
     if last_close <= 0:
         return None
 
-    if poc_info.direction == "up" and last_close > today_poc and cvd_anchored_last > 0:
+    if poc_info.direction == "up" and last_close > today_poc and (of_degraded or cvd_anchored_last > 0):
         return TriggerResult(
             signal="BUY",
             entry_style="va_migration",
@@ -486,7 +552,7 @@ def _trigger_va_migration(
                 "prior_pval": pval,
             },
         )
-    if poc_info.direction == "down" and last_close < today_poc and cvd_anchored_last < 0:
+    if poc_info.direction == "down" and last_close < today_poc and (of_degraded or cvd_anchored_last < 0):
         return TriggerResult(
             signal="SELL",
             entry_style="va_migration",
@@ -514,8 +580,15 @@ def _trigger_lvn_fade(
     closed_1m: list[dict[str, Any]],
     cvd_total: list[float],
     atr_1m: Optional[float],
+    of_degraded: bool = False,
+    baseline: Any = None,
+    current_mp_volume: float = 0.0,
 ) -> Optional[TriggerResult]:
     if not closed_1m:
+        return None
+    # lvn_fade is a pure order-flow (absorption) trigger; on a thin-volume symbol
+    # its CVD inputs are noise, so the R0 quality gate suppresses it entirely.
+    if of_degraded:
         return None
     poc = _attr(today_profile, "poc")
     single_prints = list(_profile_attr(today_profile, "single_prints", []) or [])
@@ -542,30 +615,67 @@ def _trigger_lvn_fade(
     if not (candidates_up or candidates_dn):
         return None
 
-    # Absorption check: CVD change over the last 3 bars must be small
-    # relative to the rolling stddev, while price moved against the
-    # eventual fade direction by ≥ 0.3 × ATR.
+    # Absorption confirmation. The LEGACY definition (kept as default until
+    # COMMODITY_LVN_ABSORPTION_FIX_ENABLED is paper-validated) is mis-defined: it
+    # fires on SMALL flow + a MOVING price, with sigma taken on the CUMULATIVE CVD
+    # series. Textbook absorption is the inverse — LARGE aggressive per-bar flow
+    # that FAILS to move price (absorbed at the level) -> fade back toward POC.
     if len(cvd_total) < 6 or atr_1m is None or atr_1m <= 0:
         return None
-    window = cvd_total[-10:]
-    try:
-        sigma = statistics.pstdev(window) if len(window) > 1 else 0.0
-    except statistics.StatisticsError:
-        sigma = 0.0
-    if sigma <= 0:
-        return None
     cvd_delta_3 = cvd_total[-1] - cvd_total[-4]
-    absorbed = abs(cvd_delta_3) < 0.2 * sigma
-
     last_n_closes = [_candle_close(c) for c in closed_1m[-4:]]
     price_move_3 = last_n_closes[-1] - last_n_closes[0] if len(last_n_closes) >= 2 else 0.0
-    moved_enough = abs(price_move_3) >= 0.3 * atr_1m
-    if not (absorbed and moved_enough):
-        return None
+
+    if settings.COMMODITY_LVN_ABSORPTION_FIX_ENABLED:
+        # sigma on the per-bar DELTA series (flow intensity), not the level.
+        deltas = [cvd_total[i] - cvd_total[i - 1] for i in range(1, len(cvd_total))]
+        recent = deltas[-10:]
+        try:
+            sigma = statistics.pstdev(recent) if len(recent) > 1 else 0.0
+        except statistics.StatisticsError:
+            sigma = 0.0
+        if sigma <= 0:
+            return None
+        # Per-instrument "large flow": prefer this instrument's learned baseline
+        # (its own p90 MP-bar volume) when available — the adaptive-CVD path that
+        # replaces R0's demote; else fall back to the rolling CVD-delta sigma.
+        if baseline is not None and getattr(baseline, "ready", False):
+            flow_strong = _vb_is_large_volume(current_mp_volume, baseline)
+        else:
+            flow_strong = abs(cvd_delta_3) >= LVN_ABSORB_FLOW_MULT * sigma
+        stalled = abs(price_move_3) <= LVN_ABSORB_STALL_MULT * atr_1m
+        if not (flow_strong and stalled):
+            return None
+        # Heavy SELL flow absorbed below POC -> fade up (BUY); heavy BUY flow
+        # absorbed above POC -> fade down (SELL).
+        if candidates_up and cvd_delta_3 < 0:
+            direction = "BUY"
+        elif candidates_dn and cvd_delta_3 > 0:
+            direction = "SELL"
+        else:
+            return None
+    else:
+        window = cvd_total[-10:]
+        try:
+            sigma = statistics.pstdev(window) if len(window) > 1 else 0.0
+        except statistics.StatisticsError:
+            sigma = 0.0
+        if sigma <= 0:
+            return None
+        absorbed = abs(cvd_delta_3) < 0.2 * sigma
+        moved_enough = abs(price_move_3) >= 0.3 * atr_1m
+        if not (absorbed and moved_enough):
+            return None
+        if candidates_up and price_move_3 < 0:
+            direction = "BUY"
+        elif candidates_dn and price_move_3 > 0:
+            direction = "SELL"
+        else:
+            return None
 
     # Fade back toward POC: BUY when price probed below into LVN with a
     # single print above, SELL mirror.
-    if candidates_up and price_move_3 < 0:
+    if direction == "BUY":
         sp_low = min(candidates_up)
         stop = float(sp_low) - 0.5 * atr_1m
         return TriggerResult(
@@ -575,7 +685,7 @@ def _trigger_lvn_fade(
             validation_detail=(
                 f"LVN fade BUY: close {last_close:.2f} in LVN with single-print "
                 f"{sp_low:.2f}<sp≤POC {poc:.2f}; cvd absorbed (Δ {cvd_delta_3:+.0f} "
-                f"vs σ {sigma:.0f}); price Δ {price_move_3:+.2f} ≥ 0.3·ATR."
+                f"vs σ {sigma:.0f}); price Δ {price_move_3:+.2f} (absorption confirmed)."
             ),
             confidence=0.45,
             stop_hint=float(stop),
@@ -588,7 +698,7 @@ def _trigger_lvn_fade(
                 "atr_1m": atr_1m,
             },
         )
-    if candidates_dn and price_move_3 > 0:
+    if direction == "SELL":
         sp_high = max(candidates_dn)
         stop = float(sp_high) + 0.5 * atr_1m
         return TriggerResult(
@@ -598,7 +708,7 @@ def _trigger_lvn_fade(
             validation_detail=(
                 f"LVN fade SELL: close {last_close:.2f} in LVN with single-print "
                 f"POC {poc:.2f}≤sp<{sp_high:.2f}; cvd absorbed (Δ {cvd_delta_3:+.0f} "
-                f"vs σ {sigma:.0f}); price Δ {price_move_3:+.2f} ≥ 0.3·ATR."
+                f"vs σ {sigma:.0f}); price Δ {price_move_3:+.2f} (absorption confirmed)."
             ),
             confidence=0.45,
             stop_hint=float(stop),
@@ -745,6 +855,30 @@ def evaluate_commodity_mp_signal(
 
     base["regime"] = regime
     base["mp_day_type"] = regime
+
+    # R1: day-type classification (assess_day_type) for trigger suppression. Off
+    # by default → mp_day_type keeps the crude regime above and no suppression.
+    day_type: Optional[str] = None
+    if settings.COMMODITY_DAYTYPE_ENABLED and not _symbol_excluded_from_daytype(symbol):
+        prior_ext = _make_ext_dict(prior_profile) if prior_profile is not None else None
+        assessment = assess_day_type(
+            {
+                "poc": poc,
+                "vah": vah,
+                "val": val,
+                "ibh": _attr(today_profile, "initial_balance_high"),
+                "ibl": _attr(today_profile, "initial_balance_low"),
+            },
+            last_close,
+            ib_extension_info=ib_ext,
+            poc_migration_info=(
+                compute_poc_migration(today_ext, prior_ext) if prior_ext is not None else None
+            ),
+            cvd_session=cvd_anchored_last,
+        )
+        day_type = assessment.classification
+        base["mp_day_type"] = day_type
+        base["mp_day_type_confidence"] = round(float(assessment.confidence), 3)
     base["cvd_latest"] = _round(cvd_latest, 0)
     base["cvd_session"] = _round(cvd_anchored_last, 0)
     base["vwap"] = _round(vwap_last, 2)
@@ -773,11 +907,46 @@ def evaluate_commodity_mp_signal(
     # ── Evaluate triggers in priority order ─────────────────────────
     candidates: dict[str, TriggerResult] = {}
 
+    # ── Per-instrument ADAPTIVE order-flow context (supersedes R0 demote) ────
+    # Judge pressure / large-volume RELATIVE to THIS instrument's learned volume
+    # distribution (median/p90/p95 of its MP-period bars). CVD is normalized to the
+    # instrument's own scale, never turned off. Surfaced for the UI + fed to
+    # lvn_fade's absorption. Off by default.
+    vol_baseline = None
+    current_mp_volume = 0.0
+    current_mp_signed = 0.0
+    if settings.COMMODITY_VOL_BASELINE_ENABLED:
+        try:
+            root = extract_commodity_root(symbol) if ":" in str(symbol) else str(symbol or "").strip().upper()
+            vol_baseline = _vb_load_baseline(root)
+            mp_bucket = closed_1m[-_MP_PERIOD_BARS:]
+            current_mp_volume = sum(max(float(b.get("volume") or 0.0), 0.0) for b in mp_bucket)
+            if len(cvd_total) >= 2:
+                k = min(_MP_PERIOD_BARS, len(cvd_total) - 1)
+                current_mp_signed = cvd_total[-1] - cvd_total[-1 - k]
+            base["vol_baseline_ready"] = bool(vol_baseline and vol_baseline.ready)
+            base["vol_baseline_median"] = _round(getattr(vol_baseline, "median", None), 0) if vol_baseline else None
+            base["cvd_pressure_ratio"] = _round(_vb_pressure_ratio(current_mp_signed, vol_baseline), 3)
+            base["large_volume"] = bool(_vb_is_large_volume(current_mp_volume, vol_baseline))
+        except Exception:
+            vol_baseline = None
+
+    # R0 order-flow quality gate — SUPERSEDED by the per-instrument baseline above
+    # and FORCED OFF when that path is on (CVD must never be demoted). Retained
+    # only as a legacy fallback; default-off either way.
+    of_degraded = (
+        not settings.COMMODITY_VOL_BASELINE_ENABLED
+        and settings.COMMODITY_OF_QUALITY_GATE_ENABLED
+        and _of_volume_coverage(closed_1m) < float(settings.COMMODITY_OF_MIN_VOL_COVERAGE)
+    )
+    base["of_degraded"] = bool(of_degraded)
+
     open_drive = _trigger_open_drive(
         today_profile=today_profile,
         prior_profile=prior_profile,
         closed_1m=closed_1m,
         cvd_anchored_last=cvd_anchored_last,
+        of_degraded=of_degraded,
     )
     if open_drive is not None:
         candidates["open_drive"] = open_drive
@@ -788,6 +957,7 @@ def evaluate_commodity_mp_signal(
         cvd_anchored=cvd_anc,
         vwap_last=vwap_last,
         ib_ext=ib_ext,
+        of_degraded=of_degraded,
     )
     if ib_break is not None:
         candidates["ib_break"] = ib_break
@@ -797,6 +967,7 @@ def evaluate_commodity_mp_signal(
         closed_1m=closed_1m,
         cvd_total=cvd_total,
         atr_1m=atr_1m,
+        of_degraded=of_degraded,
     )
     if failed_auction is not None:
         candidates["failed_auction"] = failed_auction
@@ -806,6 +977,7 @@ def evaluate_commodity_mp_signal(
         prior_profile=prior_profile,
         closed_1m=closed_1m,
         cvd_anchored_last=cvd_anchored_last,
+        of_degraded=of_degraded,
     )
     if va_migration is not None:
         candidates["va_migration"] = va_migration
@@ -815,9 +987,31 @@ def evaluate_commodity_mp_signal(
         closed_1m=closed_1m,
         cvd_total=cvd_total,
         atr_1m=atr_1m,
+        of_degraded=of_degraded,
+        baseline=vol_baseline,
+        current_mp_volume=current_mp_volume,
     )
     if lvn_fade is not None:
         candidates["lvn_fade"] = lvn_fade
+
+    # R1 day-type suppression: on a trend day drop counter-trend FADES; in
+    # balance drop the breakout triggers (go-with-breakout is for imbalance).
+    if day_type in ("trend_up", "trend_down"):
+        counter = "SELL" if day_type == "trend_up" else "BUY"
+        for name in ("failed_auction", "lvn_fade"):
+            cand = candidates.get(name)
+            if cand is not None and cand.signal == counter:
+                candidates.pop(name, None)
+                base["signal_validation_detail"] = (
+                    f"{name} {counter} suppressed: counter-trend on {day_type} day."
+                )
+    elif day_type == "balance":
+        for name in ("open_drive", "ib_break"):
+            if name in candidates:
+                candidates.pop(name, None)
+                base["signal_validation_detail"] = (
+                    f"{name} breakout suppressed: balance day (no established imbalance)."
+                )
 
     chosen: Optional[TriggerResult] = None
     for name in _TRIGGER_PRIORITY:

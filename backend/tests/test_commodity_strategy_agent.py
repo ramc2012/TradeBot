@@ -1494,6 +1494,10 @@ def test_futures_signal_blocks_after_recent_stop_cooldown(tmp_path: Path, monkey
 def test_futures_reversal_exit_waits_for_min_hold_bars(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "commodity_strategy.json"
     monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+    # The MP-signal-flip exit (mp_reversal) is opt-in now: positional trades hold
+    # through 1-min reversals by default. Turn the positional-hold off so this
+    # test still exercises the reversal-exit min-hold gating.
+    monkeypatch.setattr(commodity_module.settings, "COMMODITY_POSITIONAL_HOLD_ENABLED", False)
 
     agent = CommodityStrategyAgent()
     position = commodity_module.CommodityPositionState(
@@ -1553,7 +1557,7 @@ def test_futures_reversal_exit_waits_for_min_hold_bars(tmp_path: Path, monkeypat
     asyncio.run(agent._manage_positions(object(), [mature_row], []))
 
     assert position.position_key not in agent._runtime.positions  # type: ignore[attr-defined]
-    assert agent.get_orders()[0]["reason"] == "macd_reversal"
+    assert agent.get_orders()[0]["reason"] == "mp_reversal"
 
 
 def test_futures_target_hit_arms_trailing_runner_instead_of_full_exit(tmp_path: Path, monkeypatch) -> None:

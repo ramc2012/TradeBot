@@ -64,6 +64,66 @@ async def get_upstox_adapter() -> Optional[BrokerAdapter]:
     return None
 
 
+async def snapshot_mcx_active_contracts() -> int:
+    """Archive every currently-active MCX FUTURES contract's metadata.
+
+    Upstox's MCX instruments master is ACTIVE-ONLY (expired contracts are dropped),
+    and Upstox does not serve expired MCX history. Snapshotting daily is the only
+    Upstox-native way to capture instrument keys + expiries before contracts roll
+    off — enabling forward-looking rolling-contract backfill. Forward-only: it
+    cannot recover history from before the first snapshot. Idempotent upsert."""
+    from db.database import AsyncSessionLocal
+    from sqlalchemy import text
+
+    rows = await _load_mcx_instruments()
+    payload: list[dict[str, Any]] = []
+    for r in rows:
+        if (str(r.get("exchange") or "").upper() != "MCX"
+                or str(r.get("segment") or "").upper() != "MCX_FO"
+                or str(r.get("instrument_type") or "").upper() != "FUT"):
+            continue
+        key = str(r.get("instrument_key") or "").strip()
+        if not key:
+            continue
+        root = canonicalize_commodity_root(
+            r.get("underlying_symbol") or r.get("name") or r.get("short_name") or "")
+        expiry = _parse_expiry(r.get("expiry"))
+        payload.append({
+            "instrument_key": key, "root": root or None,
+            "trading_symbol": str(r.get("trading_symbol") or ""),
+            "expiry": expiry, "lot_size": int(r.get("lot_size") or 0),
+        })
+    if not payload:
+        return 0
+    async with AsyncSessionLocal() as session:
+        await session.execute(text("""
+            CREATE TABLE IF NOT EXISTS mcx_contract_snapshots (
+                instrument_key TEXT PRIMARY KEY,
+                root TEXT,
+                trading_symbol TEXT,
+                expiry DATE,
+                lot_size INTEGER,
+                first_seen DATE NOT NULL DEFAULT CURRENT_DATE,
+                last_seen DATE NOT NULL DEFAULT CURRENT_DATE
+            )
+        """))
+        await session.execute(text("""
+            INSERT INTO mcx_contract_snapshots
+                (instrument_key, root, trading_symbol, expiry, lot_size, first_seen, last_seen)
+            VALUES (:instrument_key, :root, :trading_symbol, :expiry, :lot_size,
+                    CURRENT_DATE, CURRENT_DATE)
+            ON CONFLICT (instrument_key) DO UPDATE
+            SET root = COALESCE(EXCLUDED.root, mcx_contract_snapshots.root),
+                trading_symbol = EXCLUDED.trading_symbol,
+                expiry = COALESCE(EXCLUDED.expiry, mcx_contract_snapshots.expiry),
+                lot_size = EXCLUDED.lot_size,
+                last_seen = CURRENT_DATE
+        """), payload)
+        await session.commit()
+    logger.info(f"[Commodity] snapshotted {len(payload)} active MCX futures contracts")
+    return len(payload)
+
+
 async def _load_mcx_instruments() -> list[dict[str, Any]]:
     global _INSTRUMENTS_CACHE
 

@@ -54,6 +54,8 @@ from typing import Any, Iterable, Optional
 
 from loguru import logger
 
+from market_data.commodity_contract_specs import get_commodity_contract_spec
+
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # Persistence root — sits inside the existing runtime/ tree so the backup/
@@ -296,6 +298,93 @@ def _aggregate(profiles: Iterable[DailyProfile]) -> Optional[dict[str, Any]]:
     }
 
 
+# ─── Contract-regime segmentation (roll-aware aggregation) ─────────────────
+#
+# The MCX continuous series is NOT back-adjusted — it re-levels at every
+# front-month roll (e.g. NATURALGAS ~-42%). Summing TPO counts across a roll
+# (commodity owner: "monthly means that contract month only") would blend two
+# disjoint price regimes into one meaningless value area. So before aggregating
+# a week/month we split the daily profiles into contiguous contract regimes at
+# roll boundaries and keep only the regime that the window belongs to.
+#
+# Detection is by session-to-session POC gap fraction vs a per-instrument
+# threshold (CommodityContractSpec.roll_gap_threshold). This is self-correcting:
+# a large roll spread (the kind that corrupts a composite) exceeds the threshold
+# and clips; a tiny roll spread (low-carry contracts like gold) stays under it
+# but is also harmless to aggregate because the two contracts trade at nearly
+# the same price.
+
+
+def _roll_frac_for(root: str) -> float:
+    try:
+        return get_commodity_contract_spec(root).roll_gap_threshold()
+    except Exception:
+        return 0.06
+
+
+def _ref_price(p: DailyProfile) -> Optional[float]:
+    """Reference price for roll detection — POC, else value-area mid, else range mid."""
+    if p.poc is not None:
+        return p.poc
+    if p.vah is not None and p.val is not None:
+        return (p.vah + p.val) / 2.0
+    if p.high is not None and p.low is not None:
+        return (p.high + p.low) / 2.0
+    return None
+
+
+def _segment_by_contract(
+    profiles_desc: list[DailyProfile], roll_frac: float
+) -> list[list[DailyProfile]]:
+    """Split newest-first profiles into contiguous contract regimes at roll gaps.
+
+    Returns a list of segments, newest regime first; each segment is newest-first.
+    """
+    segments: list[list[DailyProfile]] = []
+    current: list[DailyProfile] = []
+    for p in profiles_desc:
+        if not current:
+            current = [p]
+            continue
+        newer = _ref_price(current[-1])
+        older = _ref_price(p)
+        if newer and older and older > 0 and abs(newer - older) / older > roll_frac:
+            segments.append(current)
+            current = [p]
+        else:
+            current.append(p)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _current_contract_segment(root: str) -> list[DailyProfile]:
+    """The most recent contiguous single-contract run of daily profiles."""
+    segments = _segment_by_contract(load_recent(root), _roll_frac_for(root))
+    return segments[0] if segments else []
+
+
+def _previous_contract_segment(root: str) -> list[DailyProfile]:
+    segments = _segment_by_contract(load_recent(root), _roll_frac_for(root))
+    return segments[1] if len(segments) > 1 else []
+
+
+def invalidate_cache(root: Optional[str] = None) -> None:
+    """Drop cached profiles so the next read re-scans disk.
+
+    Used after a backfill/delete so a long-running process picks up rewritten
+    files immediately instead of waiting out the 1h rescan window.
+    """
+    if root is None:
+        _CACHE.clear()
+        _SCAN_AT.clear()
+        return
+    root_clean = str(root or "").strip().upper()
+    for key in [k for k in _CACHE if k[0] == root_clean]:
+        _CACHE.pop(key, None)
+    _SCAN_AT.pop(root_clean, None)
+
+
 def previous_day(root: str, today: date) -> Optional[dict[str, Any]]:
     """Return yesterday's profile if available — used as the 'Y' reference."""
     profile = get_profile(root, today - timedelta(days=1))
@@ -310,32 +399,42 @@ def previous_day(root: str, today: date) -> Optional[dict[str, Any]]:
 
 
 def this_week(root: str, today: date) -> Optional[dict[str, Any]]:
-    """Aggregate days since Monday (inclusive) up to and including today."""
+    """Aggregate days since Monday (inclusive) up to today, single-contract only.
+
+    Clipped to the current contract regime so a week that straddles an MCX roll
+    never blends two price regimes.
+    """
     week_start = today - timedelta(days=today.weekday())
-    week = [p for p in load_recent(root) if week_start <= p.session_date <= today]
-    return _aggregate(week)
+    roll_frac = _roll_frac_for(root)
+    window = [p for p in load_recent(root) if week_start <= p.session_date <= today]
+    segments = _segment_by_contract(window, roll_frac)
+    return _aggregate(segments[0] if segments else [])
 
 
 def last_week(root: str, today: date) -> Optional[dict[str, Any]]:
-    """Aggregate the seven days preceding the start of this week."""
+    """Aggregate the seven days preceding this week, single-contract only."""
     this_week_start = today - timedelta(days=today.weekday())
     last_start = this_week_start - timedelta(days=7)
     last_end = this_week_start - timedelta(days=1)
-    period = [p for p in load_recent(root) if last_start <= p.session_date <= last_end]
-    return _aggregate(period)
+    roll_frac = _roll_frac_for(root)
+    window = [p for p in load_recent(root) if last_start <= p.session_date <= last_end]
+    segments = _segment_by_contract(window, roll_frac)
+    return _aggregate(segments[0] if segments else [])
 
 
 def this_month(root: str, today: date) -> Optional[dict[str, Any]]:
-    month_start = today.replace(day=1)
-    period = [p for p in load_recent(root) if month_start <= p.session_date <= today]
+    """Value area of the CURRENT front-month contract (owner: "monthly means
+    that contract month only"). This is the most-recent contiguous single-
+    contract regime, clipped at the last roll — NOT a calendar month, which
+    would straddle the ~monthly MCX roll and blend two price regimes.
+    """
+    period = [p for p in _current_contract_segment(root) if p.session_date <= today]
     return _aggregate(period)
 
 
 def last_month(root: str, today: date) -> Optional[dict[str, Any]]:
-    this_month_start = today.replace(day=1)
-    last_end = this_month_start - timedelta(days=1)
-    last_start = last_end.replace(day=1)
-    period = [p for p in load_recent(root) if last_start <= p.session_date <= last_end]
+    """Value area of the PREVIOUS contract regime (the segment before the last roll)."""
+    period = [p for p in _previous_contract_segment(root) if p.session_date <= today]
     return _aggregate(period)
 
 

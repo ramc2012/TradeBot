@@ -213,6 +213,52 @@ class Settings(BaseSettings):
     CBE_SCANNER_AUTO_INTERVAL_SECONDS: int = 3600
     COMMODITY_FYERS_RATE_LIMIT_BACKOFF_SECONDS: int = 90
     COMMODITY_KILL_LOCK: bool = False
+    # ── Commodity MP+OF module (restored from feat 2026-06-30) ─────────────
+    # Durable commodity MP history: write-once backfill from the MCX 1-min spot
+    # store + post-close/gap repair; profiles at the per-instrument coarse value
+    # tick so the live HTF gate reads non-degenerate value areas.
+    COMMODITY_MP_HISTORY_AUTO_ENABLED: bool = True
+    COMMODITY_MP_HISTORY_AUTO_INTERVAL_SECONDS: int = 21600  # 6h — boot + post-close
+    COMMODITY_MP_HISTORY_BACKFILL_SESSIONS: int = 90
+    # Higher-timeframe (weekly/monthly) alignment gate. The commodity MP+OF desk
+    # is DIRECTIONAL + POSITIONAL: trades the weekly+monthly value-area bias and
+    # holds for hours/days. ON by default (2026-06-24 positional redesign).
+    COMMODITY_HTF_GATE_ENABLED: bool = True
+    # When True a signal OPPOSING the HTF bias is BLOCKED outright (not downgraded
+    # to a counter-trend scalp).
+    COMMODITY_HTF_REQUIRE_ALIGNMENT: bool = True
+    # Positional trade does NOT flip on a single opposite 1-min MACD — holds to
+    # stop/target/runner-trail (core anti-churn).
+    COMMODITY_POSITIONAL_HOLD_ENABLED: bool = True
+    # Re-entry cooldown (minutes) after ANY exit on an underlying. 0 disables.
+    COMMODITY_REENTRY_COOLDOWN_MINUTES: int = 20
+    # Index-futures MP+OF sleeve. Default OFF (needs index_futures_candles
+    # populated + a live writer; never enable around a monthly expiry roll).
+    COMMODITY_INDEX_FUTURES_ENABLED: bool = False
+    COMMODITY_INDEX_FUTURES_MIN_DAYS_TO_EXPIRY: int = 2
+    # Daily + per-underlying realized-loss caps. OFF during infra testing; the
+    # 15% catastrophe-DD backstop + stop/re-entry cooldowns still apply.
+    COMMODITY_LOSS_CAPS_ENABLED: bool = False
+    # Counter-bias scalp sizing fraction; scalp vs positional target R; scalp
+    # time-stop (1-min bars).
+    COMMODITY_HTF_SCALP_SIZE_FRACTION: float = 0.5
+    COMMODITY_HTF_SCALP_TARGET_R: float = 1.0
+    COMMODITY_HTF_POSITIONAL_TARGET_R: float = 2.0
+    COMMODITY_HTF_SCALP_MAX_HOLD_BARS: int = 6
+    # Range-adaptive + wider futures stop off the flat 0.5% noise band. OFF.
+    COMMODITY_STOP_WIDENING_ENABLED: bool = False
+    # MP+OF gap-fixes (each default OFF, paper-validate before enabling):
+    # R5 textbook lvn_fade absorption; R0 per-symbol OF quality gate (+coverage
+    # floor); R1 day-type trigger suppression (+exclude thin roots); R4 naked-POC
+    # target anchor (+min-R fraction); per-instrument adaptive CVD baselines.
+    COMMODITY_LVN_ABSORPTION_FIX_ENABLED: bool = False
+    COMMODITY_OF_QUALITY_GATE_ENABLED: bool = False
+    COMMODITY_OF_MIN_VOL_COVERAGE: float = 0.70
+    COMMODITY_DAYTYPE_ENABLED: bool = False
+    COMMODITY_DAYTYPE_EXCLUDE_SYMBOLS: str = "GOLD,NICKEL"
+    COMMODITY_NAKED_POC_TARGET_ENABLED: bool = False
+    COMMODITY_NAKED_POC_MIN_R_FRACTION: float = 0.5
+    COMMODITY_VOL_BASELINE_ENABLED: bool = False
     SECTOR_INTERACTION_DURABLE_STATE_ENABLED: bool = False
 
     # Security

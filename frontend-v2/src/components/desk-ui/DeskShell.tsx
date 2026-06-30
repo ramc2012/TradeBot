@@ -39,6 +39,7 @@ export function DeskShell({
   onTabChange,
   v1Href,
   rightSlot,
+  beforeTabs,
   children,
 }: {
   title: string;
@@ -53,6 +54,8 @@ export function DeskShell({
   /** v1 equivalent URL for quick-jump while v2 is being perfected. */
   v1Href?: string;
   rightSlot?: React.ReactNode;
+  /** Optional content rendered between the header and the tab bar. */
+  beforeTabs?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -103,6 +106,8 @@ export function DeskShell({
           </div>
         </div>
       </header>
+
+      {beforeTabs}
 
       <DeskTabBar tabs={tabs} activeTab={activeTab} onTabChange={onTabChange} />
 

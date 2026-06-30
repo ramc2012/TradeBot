@@ -354,6 +354,50 @@ class MarketHoursPaperSupervisor:
                     "actionable_count": sum(1 for r in results if int(r.get("stored") or 0) > 0),
                     "failure_count": len(failures), "failures": failures, "results": results}
 
+        async def _commodity_mp_history_runner() -> dict[str, Any]:
+            """Write-once durable commodity MP history (MCX) + adaptive CVD/volume
+            baselines. Derives per-session daily profiles from the durable 1-min
+            MCX spot store at the per-instrument coarse value tick (so the live
+            HTF gate reads non-degenerate value areas), persisting ONLY missing
+            sessions. post_close_catchup appends the just-closed MCX session once
+            after ~23:30 IST; the startup is-due fire does the one-time/gap
+            backfill. Idempotent + write-once; builds all commodity roots."""
+            from market_data.commodity_contract_specs import COMMODITY_CONTRACT_SPECS
+            from paper_engine.commodity_mp_history import backfill_commodity_mp_history
+
+            lookback = int(getattr(settings, "COMMODITY_MP_HISTORY_BACKFILL_SESSIONS", 90))
+            results: list[dict[str, Any]] = []
+            failures: dict[str, str] = {}
+            persisted_total = 0
+            for root in COMMODITY_CONTRACT_SPECS:
+                try:
+                    report = await asyncio.wait_for(
+                        backfill_commodity_mp_history(root, lookback_sessions=lookback, reason="supervisor"),
+                        timeout=120.0,
+                    )
+                    results.append(report)
+                    persisted_total += int(report.get("missing_persisted") or 0)
+                except Exception as exc:  # noqa: BLE001
+                    failures[root] = str(exc)
+            baseline_report: dict[str, Any] = {}
+            try:
+                from paper_engine.commodity_volume_baseline import backfill_all_baselines
+                baseline_report = await asyncio.wait_for(
+                    backfill_all_baselines(list(COMMODITY_CONTRACT_SPECS), lookback_sessions=lookback, reason="supervisor"),
+                    timeout=120.0,
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures["_volume_baselines"] = str(exc)
+            return {
+                "status": "ok" if not failures else "partial",
+                "result_count": len(results),
+                "actionable_count": persisted_total,
+                "failure_count": len(failures),
+                "failures": failures,
+                "results": results,
+                "volume_baselines": baseline_report,
+            }
+
         async def _macd_refined_runner() -> dict[str, Any]:
             """Fetch current + next monthly expiry chains, persist per-contract
             volume/turnover, and sync the MACD Refined paper book. This runner
@@ -529,6 +573,22 @@ class MarketHoursPaperSupervisor:
                 next_open_fn=_next_nse_market_open,
                 post_close_catchup=True,
                 post_close_force_daily=True,
+            ),
+            RunnerConfig(
+                key="commodity_mp_history",
+                label="Commodity MP Durable History",
+                interval_seconds=getattr(
+                    settings, "COMMODITY_MP_HISTORY_AUTO_INTERVAL_SECONDS", 21600
+                ),
+                callback=_commodity_mp_history_runner,
+                enabled=getattr(settings, "COMMODITY_MP_HISTORY_AUTO_ENABLED", True),
+                timeout_seconds=420.0,
+                # Data-maintenance from the durable MCX 1-min spot store; MCX
+                # hours + post-close catch-up appends the just-closed session,
+                # startup is-due does the one-time/gap backfill. Write-once.
+                market_hours_fn=_in_mcx_market_hours,
+                next_open_fn=_next_mcx_market_open,
+                post_close_catchup=True,
             ),
             RunnerConfig(
                 key="macd_refined",

@@ -614,8 +614,15 @@ async def evaluate_strategy2_mp_of(
         underlying, today=session_date,
     )
     cvd_anchor = _infer_09ist_anchor(closed_1m)
-    atr_series = _compute_atr_series(closed_1m, period=14)
-    atr_1m = atr_series[-1] if atr_series else None
+    # NB: despite the alias name, `_compute_atr_series` IS
+    # `commodity_mp_signal._compute_atr`, which returns a single scalar ATR
+    # (Optional[float]) — not a list/series. Subscripting it with `[-1]`
+    # raised "'float' object is not subscriptable" on every NIFTY/SENSEX scan
+    # (ATR is non-zero during market hours, so the `if atr_series` guard never
+    # short-circuited), silently forcing the lane back onto the MACD fallback
+    # and never running MP+OF. Use the scalar directly, exactly as the
+    # commodity desk does in `_analyze_futures_symbol`.
+    atr_1m = _compute_atr_series(closed_1m, period=14)
 
     result = evaluate_commodity_mp_signal(
         closed_1m,
