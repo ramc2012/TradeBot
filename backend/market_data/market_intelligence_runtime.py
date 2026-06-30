@@ -676,6 +676,15 @@ class MarketIntelligenceRuntime:
         # native rate limiter headroom even when the extended 10-strike
         # window expands the set to ~4k contracts.
         per_call_pause = 0.1
+        # Hard per-call timeout. The time budget below is only checked
+        # *between* calls, so a single load_candles that hangs on a slow/
+        # stuck broker fetch can overrun the budget (observed: premium step
+        # 189s vs a 150s budget, and worse — one hung call near the boundary
+        # blew the runner's 300s timeout). Cap each call so the budget is
+        # actually enforceable.
+        per_call_timeout = max(
+            int(getattr(settings, "MARKET_INTELLIGENCE_PREMIUM_CALL_TIMEOUT_SECONDS", 8)), 2
+        )
 
         async def _topup(contract: dict[str, Any]) -> bool:
             try:
@@ -685,17 +694,26 @@ class MarketIntelligenceRuntime:
                 # the first cycle after market open backfills the whole
                 # session in one call; subsequent cycles incrementally
                 # add only the new bars.
-                await option_history_service.load_candles(
-                    underlying=contract["underlying"],
-                    expiry=contract["expiry"],
-                    strike=contract["strike"],
-                    option_type=contract["option_type"],
-                    instrument_key=contract["instrument_key"],
-                    interval="3minute",
-                    limit=160,
-                    allow_broker_refresh=True,
+                await asyncio.wait_for(
+                    option_history_service.load_candles(
+                        underlying=contract["underlying"],
+                        expiry=contract["expiry"],
+                        strike=contract["strike"],
+                        option_type=contract["option_type"],
+                        instrument_key=contract["instrument_key"],
+                        interval="3minute",
+                        limit=160,
+                        allow_broker_refresh=True,
+                    ),
+                    timeout=per_call_timeout,
                 )
                 return True
+            except asyncio.TimeoutError:
+                logger.debug(
+                    f"[MarketIntelligence] premium refresh timed out (>{per_call_timeout}s) for "
+                    f"{contract['underlying']} {contract['option_type']} {contract['strike']}"
+                )
+                return False
             except Exception as exc:  # noqa: BLE001
                 logger.debug(
                     f"[MarketIntelligence] premium refresh failed for "

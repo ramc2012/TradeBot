@@ -97,6 +97,13 @@ class Settings(BaseSettings):
     # budget (current ATM picks every cycle, extended window round-robin)
     # keeps the runner well under 300s so signal generation actually runs.
     MARKET_INTELLIGENCE_PREMIUM_BUDGET_SECONDS: int = 150
+    # Per-call timeout (seconds) for each load_candles top-up. The budget
+    # above is only checked between calls, so one hung broker fetch can
+    # overrun it (observed: 189s vs a 150s budget; a hung call near the
+    # boundary blew the 300s runner timeout). Capping each call makes the
+    # budget enforceable; a contract that times out is skipped and retried
+    # on a later cycle.
+    MARKET_INTELLIGENCE_PREMIUM_CALL_TIMEOUT_SECONDS: int = 8
     # F1 feed — full-universe option-chain → 3m CE+PE OHLC builder (chain_candle_builder).
     # OFF by default: scales Fyers REST (~30k calls/day, governed by FYERS_DATA_LIMITER);
     # enable deliberately in prod after sign-off + a market-open verification.
