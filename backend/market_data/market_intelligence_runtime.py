@@ -695,7 +695,7 @@ class MarketIntelligenceRuntime:
             int(getattr(settings, "MARKET_INTELLIGENCE_PREMIUM_CALL_TIMEOUT_SECONDS", 8)), 2
         )
 
-        async def _topup(contract: dict[str, Any]) -> bool:
+        async def _topup(contract: dict[str, Any], allow_broker: bool) -> bool:
             try:
                 # 3-minute granularity. The service aggregates from
                 # Upstox 1-min source and persists at `interval='3minute'`.
@@ -703,6 +703,12 @@ class MarketIntelligenceRuntime:
                 # the first cycle after market open backfills the whole
                 # session in one call; subsequent cycles incrementally
                 # add only the new bars.
+                # allow_broker is True only for the priority ATM picks (what
+                # trades now); the extended window is DB-only so it does not
+                # consume the shared broker rate limiter (Fyers 190/60s,
+                # Upstox 1800/30m) and starve the commodity/fractal/auction
+                # lanes. Extended strikes still broker-fill on demand when
+                # they roll into ATM (priority) or are charted.
                 await asyncio.wait_for(
                     option_history_service.load_candles(
                         underlying=contract["underlying"],
@@ -712,7 +718,7 @@ class MarketIntelligenceRuntime:
                         instrument_key=contract["instrument_key"],
                         interval="3minute",
                         limit=160,
-                        allow_broker_refresh=True,
+                        allow_broker_refresh=allow_broker,
                     ),
                     timeout=per_call_timeout,
                 )
@@ -790,7 +796,7 @@ class MarketIntelligenceRuntime:
             if monotonic() >= deadline:
                 budget_hit = True
                 break
-            if await _topup(contract):
+            if await _topup(contract, True):
                 ok += 1
             else:
                 errors += 1
@@ -805,7 +811,7 @@ class MarketIntelligenceRuntime:
                 if monotonic() >= deadline:
                     budget_hit = True
                     break
-                if await _topup(extended_targets[i]):
+                if await _topup(extended_targets[i], False):
                     ok += 1
                 else:
                     errors += 1
