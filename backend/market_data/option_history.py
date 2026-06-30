@@ -699,8 +699,25 @@ class OptionHistoryService:
                 if time_key:
                     merged[time_key] = row
 
-        candles = list(merged.values())
-        candles.sort(key=lambda row: row["time"])
+        # Canonicalize timezone + collapse cross-format duplicates. The same
+        # instant can arrive in mixed tz formats across sources (IST-aware
+        # option_premium_candles rows vs naive-UTC snapshot/broker rows). Keyed
+        # by the raw string they survive as PHANTOM "closed-hours" duplicates of
+        # an in-session bar (e.g. a 09:15 IST bar re-appearing as 03:45), which
+        # pollutes the chart and corrupts MACD (phantom bars + wrong ordering).
+        # Collapse by TRUE instant (naive == UTC), keep the first (greeks-bearing
+        # candle) row per instant, and emit one consistent IST-aware time.
+        canon: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+        for row in merged.values():
+            try:
+                dt = _parse_time(row.get("time"))
+            except Exception:
+                continue
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            row["time"] = dt.astimezone(IST).isoformat()
+            canon.setdefault(dt.astimezone(timezone.utc).isoformat(), row)
+        candles = sorted(canon.values(), key=lambda row: row["time"])
         return candles[-limit:]
 
     async def _load_snapshot_candles(
