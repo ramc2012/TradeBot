@@ -1089,7 +1089,16 @@ class StrategyEntryMixin:
         iv_size_scaler_value = float(candidate.get("iv_size_scaler") or 1.0)
         fraction *= max(0.25, min(1.0, iv_size_scaler_value))
 
-        allocation = max(runtime.portfolio.total_equity * fraction, latest_close * lot_size)
+        # Capital-uncapped paper test (MACD_STRATEGY_UNCAPPED_CAPITAL): size off a
+        # stable base so capital depletion or a drawdown never shrinks the
+        # position — every signal converts to a full-size trade and the
+        # signal→trade count reconciles ~1:1. The paper book has no hard
+        # cash/margin reject, so this is the only place capital could otherwise
+        # cap trading. Live-risk sizing is unaffected.
+        equity_base = float(runtime.portfolio.total_equity)
+        if settings.MACD_STRATEGY_UNCAPPED_CAPITAL:
+            equity_base = max(equity_base, float(runtime.portfolio.initial_capital))
+        allocation = max(equity_base * fraction, latest_close * lot_size)
         lots = max(1, int(allocation // max(latest_close * lot_size, 1.0)))
         lots = min(lots, 5)
         qty = lot_size * lots

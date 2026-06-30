@@ -81,6 +81,14 @@ class Settings(BaseSettings):
     # MAX_SIMULTANEOUS_POSITIONS=5 and Strategy 2's cap are untouched.) Set a
     # finite number here to re-cap later.
     MACD_STRATEGY_MAX_POSITIONS: int = 1000
+    # Signal-generation test mode (paper Strategy 1): pin the position-sizing
+    # base to max(total_equity, initial_capital) so capital depletion or a
+    # drawdown can never SHRINK a signal's position — every signal converts to a
+    # full-size trade and signal→trade reconciles ~1:1. Paper engine sizing
+    # only; the live-risk capital/sizing path is untouched. There is no hard
+    # cash/margin reject in the paper book, so this is the only place capital
+    # could otherwise cap trading. Set False to restore equity-tracking sizing.
+    MACD_STRATEGY_UNCAPPED_CAPITAL: bool = True
     # F1 feed — full-universe option-chain → 3m CE+PE OHLC builder (chain_candle_builder).
     # OFF by default: scales Fyers REST (~30k calls/day, governed by FYERS_DATA_LIMITER);
     # enable deliberately in prod after sign-off + a market-open verification.
