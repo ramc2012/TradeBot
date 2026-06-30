@@ -566,7 +566,16 @@ class MarketIntelligenceRuntime:
         # 60-90s of its close. A 60s cooldown matches the supervisor's
         # cycle interval — every run advances at most one new bar per
         # contract, which is what we want.
-        cooldown_seconds = max(int(settings.MARKET_INTELLIGENCE_REFRESH_INTERVAL_SECONDS), 30)
+        cooldown_seconds = max(
+            int(
+                getattr(
+                    settings,
+                    "MARKET_INTELLIGENCE_PREMIUM_COOLDOWN_SECONDS",
+                    settings.MARKET_INTELLIGENCE_REFRESH_INTERVAL_SECONDS,
+                )
+            ),
+            30,
+        )
         if self._last_premium_refresh_at is not None:
             elapsed = (now - self._last_premium_refresh_at).total_seconds()
             if elapsed < cooldown_seconds:

@@ -96,7 +96,15 @@ class Settings(BaseSettings):
     # whole market_intelligence runner killed. Bounding the top-up to this
     # budget (current ATM picks every cycle, extended window round-robin)
     # keeps the runner well under 300s so signal generation actually runs.
-    MARKET_INTELLIGENCE_PREMIUM_BUDGET_SECONDS: int = 150
+    MARKET_INTELLIGENCE_PREMIUM_BUDGET_SECONDS: int = 90
+    # Premium top-up cooldown (seconds), decoupled from the 60s supervisor
+    # interval. The top-up is data-coverage-only (3-min bars) and was running
+    # ~every cycle, monopolizing the shared DB pool / broker limiter and
+    # starving the actual strategy lanes (fractal/auction/commodity all began
+    # timing out at 300s while completing in <6s when they could run). 180s
+    # matches the 3-min bar cadence — one refresh per bar is plenty — and
+    # frees ~2/3 of cycles for the strategy lanes.
+    MARKET_INTELLIGENCE_PREMIUM_COOLDOWN_SECONDS: int = 180
     # Per-call timeout (seconds) for each load_candles top-up. The budget
     # above is only checked between calls, so one hung broker fetch can
     # overrun it (observed: 189s vs a 150s budget; a hung call near the
