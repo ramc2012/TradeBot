@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     # Full F&O universe (~217 names) × current+next expiry chains per cycle is
     # broker-intensive; 300s keeps load sane and still catches every 30-min bar.
     MACD_REFINED_AUTO_INTERVAL_SECONDS: int = 300
+    # NSE MACD Strategy 1 (macd_strategy) max simultaneous positions. Default
+    # 1000 = effectively NO cap — the strategy trades the full ATM watchlist
+    # (~216 contracts) one position per underlying-side. (The shared live-risk
+    # MAX_SIMULTANEOUS_POSITIONS=5 and Strategy 2's cap are untouched.) Set a
+    # finite number here to re-cap later.
+    MACD_STRATEGY_MAX_POSITIONS: int = 1000
     # F1 feed — full-universe option-chain → 3m CE+PE OHLC builder (chain_candle_builder).
     # OFF by default: scales Fyers REST (~30k calls/day, governed by FYERS_DATA_LIMITER);
     # enable deliberately in prod after sign-off + a market-open verification.

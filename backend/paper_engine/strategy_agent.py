@@ -515,7 +515,7 @@ class _Strategy1LaneAgent(_BaseNSEStrategyLaneAgent):
         timeframe="30minute",
         instrument_scope="NSE F&O ATM options",
         execution_mode="paper_execution",
-        position_cap=MAX_SIMULTANEOUS_POSITIONS,
+        position_cap=int(settings.MACD_STRATEGY_MAX_POSITIONS),
     )
 
     def on_market_closed(self, started_at: datetime, last_live_scan: Optional[str]) -> None:
@@ -658,7 +658,9 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
     """Autonomous paper-trading agent implementing STRATEGY_DOCUMENT.md."""
 
     scan_interval_seconds = 60
-    max_positions = MAX_SIMULTANEOUS_POSITIONS
+    # Strategy 1 (macd_strategy) trades the full ATM watchlist with no practical
+    # position cap (config knob; live-risk MAX_SIMULTANEOUS_POSITIONS untouched).
+    max_positions = int(settings.MACD_STRATEGY_MAX_POSITIONS)
     PHASE_1 = PHASE_1
     PHASE_2 = PHASE_2
     PHASE_TRAILING = PHASE_TRAILING
