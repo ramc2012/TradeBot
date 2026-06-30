@@ -717,7 +717,17 @@ class OptionHistoryService:
                 dt = dt.replace(tzinfo=timezone.utc)
             row["time"] = dt.astimezone(IST).isoformat()
             canon.setdefault(dt.astimezone(timezone.utc).isoformat(), row)
-        candles = sorted(canon.values(), key=lambda row: row["time"])
+        # Session-hours filter: drop CLOSED-hours bars. The round-the-clock LTP
+        # snapshot fallback (and any frozen-tick source) injects pre-/post-session
+        # bars (e.g. 00:00-08:30, 20:30, 23:30 IST) that pollute the chart and
+        # corrupt MACD; persisted candle + broker rows are session-only. NSE/BSE
+        # F&O = 09:15-15:30 IST, MCX commodity = 09:00-23:30 IST (by instrument).
+        key_up = str(instrument_key or "").upper()
+        sess_lo, sess_hi = ("09:00", "23:30") if "MCX" in key_up else ("09:15", "15:30")
+        candles = sorted(
+            (r for r in canon.values() if sess_lo <= str(r.get("time", ""))[11:16] <= sess_hi),
+            key=lambda row: row["time"],
+        )
         return candles[-limit:]
 
     async def _load_snapshot_candles(

@@ -33,12 +33,17 @@ export function CandleChart({
   overlays = [],
   height = 420,
   showVolume = true,
+  tzOffsetMinutes = 330,
 }: {
   bars: CandleBar[];
   priceLines?: ChartPriceLine[];
   overlays?: ChartLineSeries[];
   height?: number;
   showVolume?: boolean;
+  /** Display the time axis in this fixed UTC offset (default +330 = IST).
+   *  lightweight-charts renders the axis in UTC, so we shift the plotted
+   *  timestamps by the offset to show local session times (no DST for IST). */
+  tzOffsetMinutes?: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -100,9 +105,12 @@ export function CandleChart({
   function pushData() {
     const { candle, vol, chart } = refs.current;
     if (!candle || !chart) return;
+    // Shift plotted timestamps to the desk timezone so the (UTC-rendering)
+    // axis shows local session hours instead of UTC (e.g. 09:15 IST, not 03:45).
+    const tzShift = (tzOffsetMinutes || 0) * 60;
     const seen = new Set<number>();
     const data = [...bars]
-      .map((b) => ({ time: toUnix(b.time), open: +b.open, high: +b.high, low: +b.low, close: +b.close }))
+      .map((b) => ({ time: toUnix(b.time) + tzShift, open: +b.open, high: +b.high, low: +b.low, close: +b.close }))
       .sort((a, b) => a.time - b.time)
       .filter((d) => (seen.has(d.time) ? false : seen.add(d.time)));
     candle.setData(data);
@@ -123,7 +131,7 @@ export function CandleChart({
       series.setData(
         ov.data
           .filter((p) => p.value != null && Number.isFinite(Number(p.value)))
-          .map((p) => ({ time: toUnix(p.time), value: Number(p.value) }))
+          .map((p) => ({ time: toUnix(p.time) + tzShift, value: Number(p.value) }))
           .sort((a, b) => a.time - b.time)
           .filter((d) => (oseen.has(d.time) ? false : oseen.add(d.time))),
       );
@@ -133,7 +141,7 @@ export function CandleChart({
       const vseen = new Set<number>();
       vol.setData(
         [...bars]
-          .map((b) => ({ time: toUnix(b.time), value: b.volume || 0, color: +b.close >= +b.open ? "rgba(0,212,163,0.4)" : "rgba(255,71,87,0.4)" }))
+          .map((b) => ({ time: toUnix(b.time) + tzShift, value: b.volume || 0, color: +b.close >= +b.open ? "rgba(0,212,163,0.4)" : "rgba(255,71,87,0.4)" }))
           .sort((a, b) => a.time - b.time)
           .filter((d) => (vseen.has(d.time) ? false : vseen.add(d.time))),
       );
