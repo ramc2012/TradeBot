@@ -89,6 +89,14 @@ class Settings(BaseSettings):
     # cash/margin reject in the paper book, so this is the only place capital
     # could otherwise cap trading. Set False to restore equity-tracking sizing.
     MACD_STRATEGY_UNCAPPED_CAPITAL: bool = True
+    # Per-cycle time budget (seconds) for the ATM premium-candle top-up inside
+    # refresh_nse_runtime. The recorded set spans ~4k contracts (ATM + the
+    # extended 10-strike window across ~217 names); at 0.1s/contract a full
+    # serial pass exceeds the supervisor's 300s runner timeout and gets the
+    # whole market_intelligence runner killed. Bounding the top-up to this
+    # budget (current ATM picks every cycle, extended window round-robin)
+    # keeps the runner well under 300s so signal generation actually runs.
+    MARKET_INTELLIGENCE_PREMIUM_BUDGET_SECONDS: int = 150
     # F1 feed — full-universe option-chain → 3m CE+PE OHLC builder (chain_candle_builder).
     # OFF by default: scales Fyers REST (~30k calls/day, governed by FYERS_DATA_LIMITER);
     # enable deliberately in prod after sign-off + a market-open verification.

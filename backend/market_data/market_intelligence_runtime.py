@@ -189,6 +189,12 @@ class MarketIntelligenceRuntime:
         # on whatever bars it had at the moment of the roll.
         self._session_atm_seen: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
         self._session_atm_seen_date: date | None = None
+        # Round-robin cursor into the extended-window refresh list. The
+        # premium top-up is time-budgeted per cycle (it can span ~4k
+        # contracts), so it processes a slice of the extended window each
+        # run and rotates — full coverage accrues over several cycles
+        # without the loop ever blowing the supervisor's runner timeout.
+        self._premium_refresh_cursor: int = 0
 
     async def load_local_spot_rows(
         self,
@@ -670,12 +676,8 @@ class MarketIntelligenceRuntime:
         # native rate limiter headroom even when the extended 10-strike
         # window expands the set to ~4k contracts.
         per_call_pause = 0.1
-        refresh_targets: list[dict[str, Any]] = [
-            contract
-            for bucket in self._session_atm_seen.values()
-            for contract in bucket.values()
-        ]
-        for contract in refresh_targets:
+
+        async def _topup(contract: dict[str, Any]) -> bool:
             try:
                 # 3-minute granularity. The service aggregates from
                 # Upstox 1-min source and persists at `interval='3minute'`.
@@ -693,15 +695,97 @@ class MarketIntelligenceRuntime:
                     limit=160,
                     allow_broker_refresh=True,
                 )
-                ok += 1
+                return True
             except Exception as exc:  # noqa: BLE001
-                errors += 1
                 logger.debug(
                     f"[MarketIntelligence] premium refresh failed for "
                     f"{contract['underlying']} {contract['option_type']} "
                     f"{contract['strike']}: {exc}"
                 )
+                return False
+
+        # Bound the whole top-up by a monotonic deadline. The recorded
+        # set can span ~4k contracts; at 0.1s/contract that alone exceeds
+        # the supervisor's 300s runner timeout, which previously killed
+        # this runner on ~94% of cycles and starved signal generation.
+        # The current ATM picks (what trading uses *now*) are refreshed
+        # EVERY cycle so S1's MACD scan always sees fresh bars on tradable
+        # contracts; the wider extended window is data-coverage-only and
+        # rotates round-robin under the remaining budget.
+        from time import monotonic
+
+        budget_seconds = max(
+            int(getattr(settings, "MARKET_INTELLIGENCE_PREMIUM_BUDGET_SECONDS", 150)), 10
+        )
+        deadline = monotonic() + budget_seconds
+
+        priority_keys: set[str] = set()
+        priority_targets: list[dict[str, Any]] = []
+        for row in rows:
+            expiry_iso = str(row.get("expiry") or "").strip()
+            underlying = str(row.get("underlying") or "").strip().upper()
+            if not expiry_iso or not underlying:
+                continue
+            try:
+                row_expiry = date.fromisoformat(expiry_iso)
+            except ValueError:
+                continue
+            for side_key in ("ce", "pe"):
+                side = row.get(side_key) or {}
+                strike = side.get("strike")
+                instrument_key = str(side.get("instrument_key") or "").strip()
+                if strike is None or not instrument_key or instrument_key in priority_keys:
+                    continue
+                priority_keys.add(instrument_key)
+                priority_targets.append({
+                    "underlying": underlying,
+                    "option_type": side_key.upper(),
+                    "strike": float(strike),
+                    "expiry": row_expiry,
+                    "instrument_key": instrument_key,
+                })
+
+        # Extended = every recorded strike not already a priority pick, in a
+        # stable order so the rotating cursor advances deterministically.
+        extended_targets: list[dict[str, Any]] = sorted(
+            (
+                contract
+                for bucket in self._session_atm_seen.values()
+                for contract in bucket.values()
+                if str(contract.get("instrument_key") or "") not in priority_keys
+            ),
+            key=lambda c: (c["underlying"], c["option_type"], c["strike"]),
+        )
+
+        budget_hit = False
+        # Pass 1 — current ATM picks, every cycle.
+        for contract in priority_targets:
+            if monotonic() >= deadline:
+                budget_hit = True
+                break
+            if await _topup(contract):
+                ok += 1
+            else:
+                errors += 1
             await asyncio.sleep(per_call_pause)
+
+        # Pass 2 — extended window, round-robin from the saved cursor.
+        ext_n = len(extended_targets)
+        ext_done = 0
+        if ext_n and not budget_hit:
+            i = self._premium_refresh_cursor % ext_n
+            while ext_done < ext_n:
+                if monotonic() >= deadline:
+                    budget_hit = True
+                    break
+                if await _topup(extended_targets[i]):
+                    ok += 1
+                else:
+                    errors += 1
+                ext_done += 1
+                i = (i + 1) % ext_n
+                await asyncio.sleep(per_call_pause)
+            self._premium_refresh_cursor = i
 
         self._last_premium_refresh_at = datetime.now(IST)
         session_strike_count = sum(
@@ -716,6 +800,12 @@ class MarketIntelligenceRuntime:
             "refreshed": ok,
             "skipped": skipped,
             "errors": errors,
+            "priority_targets": len(priority_targets),
+            "extended_total": len(extended_targets),
+            "extended_covered_this_cycle": ext_done,
+            "extended_cursor": self._premium_refresh_cursor,
+            "budget_seconds": budget_seconds,
+            "budget_exhausted": budget_hit,
             "elapsed_seconds": round(
                 (self._last_premium_refresh_at - now).total_seconds(), 2
             ),
