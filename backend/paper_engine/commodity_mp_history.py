@@ -73,24 +73,53 @@ async def _load_session_bars(root: str, *, limit: int) -> dict[date, list[Market
             result = await session.execute(
                 text(
                     """
-                    WITH recent_sessions AS (
-                        SELECT timezone('Asia/Kolkata', time)::date AS session_date
+                    -- One root can contain overlapping continuous and
+                    -- contract-specific histories.  Building a profile from
+                    -- every row mixes duplicate timestamps (and, around a
+                    -- roll, conflicting prices).  Rank one coherent
+                    -- source/instrument per session.  Prefer the continuous
+                    -- series when its coverage is within 90% of the densest
+                    -- candidate; otherwise use the densest contract.
+                    WITH candidates AS (
+                        SELECT timezone('Asia/Kolkata', time)::date AS session_date,
+                               source,
+                               instrument_key,
+                               COUNT(DISTINCT time) AS bar_count
                         FROM underlying_spot_candles
                         WHERE underlying = :root
                           AND interval = '1minute'
-                        GROUP BY timezone('Asia/Kolkata', time)::date
-                        HAVING COUNT(*) >= :min_bars
+                        GROUP BY 1, 2, 3
+                        HAVING COUNT(DISTINCT time) >= :min_bars
+                    ), scored AS (
+                        SELECT *, MAX(bar_count) OVER (PARTITION BY session_date) AS max_bar_count
+                        FROM candidates
+                    ), ranked AS (
+                        SELECT *, ROW_NUMBER() OVER (
+                            PARTITION BY session_date
+                            ORDER BY
+                                CASE WHEN bar_count >= max_bar_count * 0.90 THEN 0 ELSE 1 END,
+                                CASE WHEN source = 'fyers_mcx_cont' THEN 0 ELSE 1 END,
+                                bar_count DESC,
+                                instrument_key
+                        ) AS source_rank
+                        FROM scored
+                    ), recent_sessions AS (
+                        SELECT session_date, source, instrument_key
+                        FROM ranked
+                        WHERE source_rank = 1
                         ORDER BY session_date DESC
                         LIMIT :limit
                     )
-                    SELECT timezone('Asia/Kolkata', time)::date AS session_date,
-                           time, open, high, low, close, volume
-                    FROM underlying_spot_candles
-                    WHERE underlying = :root
-                      AND interval = '1minute'
-                      AND timezone('Asia/Kolkata', time)::date
-                          IN (SELECT session_date FROM recent_sessions)
-                    ORDER BY session_date ASC, time ASC
+                    SELECT r.session_date,
+                           c.time, c.open, c.high, c.low, c.close, c.volume
+                    FROM recent_sessions r
+                    JOIN underlying_spot_candles c
+                      ON c.underlying = :root
+                     AND c.interval = '1minute'
+                     AND c.source = r.source
+                     AND c.instrument_key = r.instrument_key
+                     AND timezone('Asia/Kolkata', c.time)::date = r.session_date
+                    ORDER BY r.session_date ASC, c.time ASC
                     """
                 ),
                 {"root": normalized, "limit": limit, "min_bars": _MIN_BARS},

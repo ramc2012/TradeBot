@@ -2,17 +2,17 @@
 
 The live commodity futures agent (``_analyze_futures_symbol``) enters when the
 intraday Market-Profile + order-flow signal (``evaluate_commodity_mp_signal``)
-fires one of its triggers (open_drive / ib_break / failed_auction / va_migration /
-lvn_fade). This module replays that same per-bar decision on historical MCX futures
+fires one of its entry triggers (open_drive / ib_break / failed_auction / lvn_fade).
+Confirmed value migration is replayed as position context and can invalidate an
+opposing open trade. This module replays that same per-bar decision on historical MCX futures
 candles and writes reusable runtime artifacts, and exposes a harness-ready
 R-multiple backtest (:func:`simulate_signal_backtest`).
 
-PREREQUISITE — DATA DEPTH: meaningful (MinBTL-satisfying) validation needs >= ~2y of
-1-minute commodity history in ``underlying_spot_candles``. The live agent only loads
-``DEFAULT_COMMODITY_HISTORY_DAYS`` (~21 days) from the broker, which is far too
-shallow for walk-forward statistics. Until a deeper 1-minute commodity backfill
-exists, this module's output is a smoke/plumbing artifact, not a validated edge.
-See docs/STRATEGY_TESTING_RESULTS.md Run 3.
+The class runner below remains the broker-window smoke test.  Meaningful local
+edge validation uses ``analysis/_commodity_wf_driver.py``: it reads the durable
+``underlying_spot_candles`` archive, selects one coherent source/contract per
+session, and adds causal volume baselines, HTF gating, live exit management,
+transaction costs and chronological walk-forward folds.
 """
 from __future__ import annotations
 
@@ -28,16 +28,16 @@ from typing import Any, Optional
 
 import pandas as pd
 
+from core.config import settings
 from market_data.commodity_contract_specs import get_commodity_contract_spec
 from paper_engine.commodity_strategy_agent import (
     IST,
-    FUTURES_BREAK_EVEN_R_MULTIPLIER,
     FUTURES_MAX_POSITIONS,
-    FUTURES_MIN_HOLD_BARS,
     FUTURES_MIN_STOP_PCT,
-    FUTURES_TARGET_ARM_R_MULTIPLIER,
     FUTURES_TIMEFRAME,
     FUTURES_TRAIL_ATR_MULTIPLIER,
+    COMMODITY_THESIS_FAILURE_EXIT_REASONS,
+    COMMODITY_SCALP_ENTRY_STYLES,
     CommodityStrategyAgent,
     _compute_atr_series,
     _infer_09ist_anchor,
@@ -75,6 +75,7 @@ class ReplayPosition:
     target_reached: bool
     entry_reason: str
     entry_style: str
+    trade_horizon: str
     mp_day_type: str
     mp_reason: str
     mp_poc: Optional[float]
@@ -240,25 +241,40 @@ def _open_position(row: dict[str, Any], *, index: int, lots: int) -> Optional[Re
         return None
 
     min_stop_distance = max(atr, price * FUTURES_MIN_STOP_PCT)
-    if row.get("signal") == "BUY":
-        stop_candidates = [price - min_stop_distance]
-        for level in (row.get("mp_val"), row.get("mp_ib_low")):
-            level_value = _safe_float(level)
-            if level_value is not None and level_value < price and (price - level_value) >= min_stop_distance:
-                stop_candidates.append(level_value)
-        stop_price = max(stop_candidates)
-        target_price = price + ((price - stop_price) * 2.0)
-    else:
-        stop_candidates = [price + min_stop_distance]
-        for level in (row.get("mp_vah"), row.get("mp_ib_high")):
-            level_value = _safe_float(level)
-            if level_value is not None and level_value > price and (level_value - price) >= min_stop_distance:
-                stop_candidates.append(level_value)
-        stop_price = min(stop_candidates)
-        target_price = price - ((stop_price - price) * 2.0)
+    is_buy = row.get("signal") == "BUY"
+    stop_price = price - min_stop_distance if is_buy else price + min_stop_distance
+    stop_hint = _safe_float(row.get("stop_hint"))
+    if stop_hint is not None and (
+        (is_buy and stop_hint < price and price - stop_hint >= min_stop_distance)
+        or (not is_buy and stop_hint > price and stop_hint - price >= min_stop_distance)
+    ):
+        stop_price = stop_hint
+    risk_distance = abs(price - stop_price)
+    entry_style = str(row.get("entry_style") or "fresh_cross")
+    trade_horizon = str(
+        row.get("trade_horizon")
+        or ("scalp" if entry_style in COMMODITY_SCALP_ENTRY_STYLES else "positional")
+    )
+    target_r = float(
+        settings.COMMODITY_HTF_SCALP_TARGET_R
+        if trade_horizon == "scalp"
+        else settings.COMMODITY_HTF_POSITIONAL_TARGET_R
+    )
+    target_price = price + risk_distance * target_r if is_buy else price - risk_distance * target_r
+    target_hint = _safe_float(row.get("target_hint"))
+    if target_hint is not None:
+        reward = target_hint - price if is_buy else price - target_hint
+        if reward <= 0 or reward / risk_distance < float(settings.COMMODITY_MIN_STRUCTURE_TARGET_R):
+            return None
+        target_price = target_hint
 
     lot_size = int(spec.futures_lot_size or 1)
     safe_lots = max(int(lots or 1), 1)
+    if trade_horizon == "scalp":
+        safe_lots = max(
+            1,
+            round(safe_lots * float(settings.COMMODITY_HTF_SCALP_SIZE_FRACTION)),
+        )
     return ReplayPosition(
         symbol=symbol,
         underlying=spec.root,
@@ -275,7 +291,8 @@ def _open_position(row: dict[str, Any], *, index: int, lots: int) -> Optional[Re
         peak_price=round(price, 4),
         target_reached=False,
         entry_reason=str(row.get("reason") or "futures_signal"),
-        entry_style=str(row.get("entry_style") or "fresh_cross"),
+        entry_style=entry_style,
+        trade_horizon=trade_horizon,
         mp_day_type=str(row.get("mp_day_type") or ""),
         mp_reason=str(row.get("mp_reason") or ""),
         mp_poc=_round_or_none(row.get("mp_poc"), 2),
@@ -314,6 +331,7 @@ def _close_trade(position: ReplayPosition, *, row: dict[str, Any], index: int, r
         "holding_bars": max(index - position.entry_index, 0),
         "entry_reason": position.entry_reason,
         "entry_style": position.entry_style,
+        "trade_horizon": position.trade_horizon,
         "mp_day_type": position.mp_day_type,
         "mp_reason": position.mp_reason,
         "mp_poc": position.mp_poc,
@@ -326,22 +344,52 @@ def _close_trade(position: ReplayPosition, *, row: dict[str, Any], index: int, r
     }
 
 
-def _exit_reason(position: ReplayPosition, *, row: dict[str, Any], raw_signal: Optional[str]) -> Optional[str]:
+def _exit_reason(
+    position: ReplayPosition,
+    *,
+    row: dict[str, Any],
+    raw_signal: Optional[str],
+    value_migration_signal: Optional[str] = None,
+    holding_bars: int = 0,
+) -> Optional[str]:
     current_price = float(row.get("close") or position.entry_price)
     if position.action == "BUY":
         position.peak_price = max(position.peak_price, current_price)
     else:
         position.peak_price = min(position.peak_price, current_price)
 
-    risk_distance = abs(position.target_price - position.entry_price) / FUTURES_TARGET_ARM_R_MULTIPLIER
+    risk_distance = abs(position.entry_price - position.initial_stop_price)
     if risk_distance <= 0:
         risk_distance = abs(position.entry_price - position.stop_price)
+
+    if position.trade_horizon == "scalp":
+        if position.action == "BUY":
+            if current_price <= position.stop_price:
+                return "stop_loss"
+            if current_price >= position.target_price:
+                return "scalp_target"
+            if value_migration_signal == "SELL":
+                return "value_migration_reversal"
+            if holding_bars >= int(settings.COMMODITY_HTF_SCALP_MAX_HOLD_BARS):
+                return "scalp_time_stop"
+            if raw_signal == "SELL":
+                return "mp_reversal"
+        else:
+            if current_price >= position.stop_price:
+                return "stop_loss"
+            if current_price <= position.target_price:
+                return "scalp_target"
+            if value_migration_signal == "BUY":
+                return "value_migration_reversal"
+            if holding_bars >= int(settings.COMMODITY_HTF_SCALP_MAX_HOLD_BARS):
+                return "scalp_time_stop"
+            if raw_signal == "BUY":
+                return "mp_reversal"
+        return None
 
     trailing_label: Optional[str] = None
     if risk_distance > 0:
         if position.action == "BUY":
-            if current_price - position.entry_price >= risk_distance * FUTURES_BREAK_EVEN_R_MULTIPLIER:
-                position.stop_price = max(position.stop_price, position.entry_price)
             if not position.target_reached and current_price >= position.target_price:
                 position.target_reached = True
                 position.stop_price = max(position.stop_price, position.entry_price + (risk_distance * 0.5))
@@ -351,11 +399,11 @@ def _exit_reason(position: ReplayPosition, *, row: dict[str, Any], raw_signal: O
                 trailing_label = "trail_stop"
             if current_price <= position.stop_price:
                 return trailing_label or "stop_loss"
-            if raw_signal == "SELL":
-                return "macd_reversal"
+            if value_migration_signal == "SELL":
+                return "value_migration_reversal"
+            if not settings.COMMODITY_POSITIONAL_HOLD_ENABLED and raw_signal == "SELL":
+                return "mp_reversal"
         else:
-            if position.entry_price - current_price >= risk_distance * FUTURES_BREAK_EVEN_R_MULTIPLIER:
-                position.stop_price = min(position.stop_price, position.entry_price)
             if not position.target_reached and current_price <= position.target_price:
                 position.target_reached = True
                 position.stop_price = min(position.stop_price, position.entry_price - (risk_distance * 0.5))
@@ -365,8 +413,10 @@ def _exit_reason(position: ReplayPosition, *, row: dict[str, Any], raw_signal: O
                 trailing_label = "trail_stop"
             if current_price >= position.stop_price:
                 return trailing_label or "stop_loss"
-            if raw_signal == "BUY":
-                return "macd_reversal"
+            if value_migration_signal == "BUY":
+                return "value_migration_reversal"
+            if not settings.COMMODITY_POSITIONAL_HOLD_ENABLED and raw_signal == "BUY":
+                return "mp_reversal"
     return None
 
 
@@ -473,18 +523,31 @@ class CommodityFuturesWalkForwardRunner:
         trades: list[dict[str, Any]] = []
         position: ReplayPosition | None = None
         prior_cache: dict = {}
+        stopped_setups: set[tuple[_date, str, str, str]] = set()
+        entry_horizons: list[str] = []
         for index in range(40, len(rows)):
             row = rows[index]
             analysis = _evaluate_mp(self.agent, symbol=symbol, rows=rows, index=index, prior_cache=prior_cache)
             if position is not None:
                 hold_bars = index - position.entry_index
-                reason = None
-                if hold_bars >= FUTURES_MIN_HOLD_BARS:
-                    reason = _exit_reason(position, row=row, raw_signal=analysis.get("signal"))
-                else:
-                    reason = _exit_reason(position, row=row, raw_signal=None)
+                reason = _exit_reason(
+                    position,
+                    row=row,
+                    raw_signal=analysis.get("signal"),
+                    value_migration_signal=(
+                        analysis.get("value_migration_signal")
+                        if analysis.get("value_migration_state") == "confirmed"
+                        else None
+                    ),
+                    holding_bars=hold_bars,
+                )
                 if reason:
                     trades.append(_close_trade(position, row=row, index=index, reason=reason))
+                    session_date = _row_session_date(row)
+                    if reason in COMMODITY_THESIS_FAILURE_EXIT_REASONS and session_date is not None:
+                        stopped_setups.add(
+                            (session_date, position.underlying, position.action, position.entry_reason)
+                        )
                     position = None
                 continue
 
@@ -493,7 +556,27 @@ class CommodityFuturesWalkForwardRunner:
             )
             if not entry:
                 continue
+            entry_session = _row_session_date(row)
+            lock_key = (
+                entry_session,
+                str(entry.get("underlying") or ""),
+                str(entry.get("signal") or ""),
+                str(entry.get("reason") or ""),
+            )
+            if entry_session is not None and lock_key in stopped_setups:
+                continue
+            entry_style = str(entry.get("entry_style") or "")
+            horizon = "scalp" if entry_style in COMMODITY_SCALP_ENTRY_STYLES else "positional"
+            if horizon == "scalp":
+                lookback = max(5, int(settings.COMMODITY_SCALP_MIX_LOOKBACK))
+                history = entry_horizons[-max(lookback - 1, 0):]
+                projected_share = (history.count("scalp") + 1) / (len(history) + 1)
+                if projected_share > float(settings.COMMODITY_SCALP_MAX_TRADE_SHARE) + 1e-12:
+                    continue
+            entry["trade_horizon"] = horizon
             position = _open_position(entry, index=index, lots=self.lots)
+            if position is not None:
+                entry_horizons.append(horizon)
 
         if position is not None and rows:
             trades.append(_close_trade(position, row=rows[-1], index=len(rows) - 1, reason="hold_to_end"))

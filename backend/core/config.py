@@ -269,33 +269,60 @@ class Settings(BaseSettings):
     COMMODITY_POSITIONAL_HOLD_ENABLED: bool = True
     # Re-entry cooldown (minutes) after ANY exit on an underlying. 0 disables.
     COMMODITY_REENTRY_COOLDOWN_MINUTES: int = 20
+    # A protective stop invalidates that exact MP thesis (root + direction +
+    # setup) for the rest of the MCX session. A new session rebuilds value/IB
+    # and therefore permits a genuinely new auction thesis.
+    COMMODITY_SETUP_STOP_LOCK_ENABLED: bool = True
     # Index-futures MP+OF sleeve. Default OFF (needs index_futures_candles
     # populated + a live writer; never enable around a monthly expiry roll).
     COMMODITY_INDEX_FUTURES_ENABLED: bool = False
     COMMODITY_INDEX_FUTURES_MIN_DAYS_TO_EXPIRY: int = 2
-    # Daily + per-underlying realized-loss caps. OFF during infra testing; the
-    # 15% catastrophe-DD backstop + stop/re-entry cooldowns still apply.
+    # Daily + per-underlying realized-loss caps remain deferred. Structural
+    # stops, risk sizing, setup invalidation and the portfolio DD backstop stay
+    # active; do not let a calendar cap override the market-led position state.
     COMMODITY_LOSS_CAPS_ENABLED: bool = False
-    # Counter-bias scalp sizing fraction; scalp vs positional target R; scalp
-    # time-stop (1-min bars).
+    # Risk-size from the structural invalidation stop. 0.25% of the ₹50L paper
+    # book = ₹12.5K maximum planned risk per position. If one exchange lot alone
+    # exceeds the budget, the setup is skipped rather than using a fake tight SL.
+    COMMODITY_RISK_PER_TRADE_PCT: float = 0.0025
+    # Responsive MP trades target POC/another supplied structure. Do not enter
+    # when that structural target offers less than 1R from the invalidation stop.
+    COMMODITY_MIN_STRUCTURE_TARGET_R: float = 1.0
+    # Responsive auction trades (failed auction / LVN fade) are the scalp
+    # sleeve.  They may occupy at most 20% of a rolling entry sample; the cap
+    # never creates a scalp when no valid responsive setup exists.
+    COMMODITY_SCALP_MAX_TRADE_SHARE: float = 0.20
+    COMMODITY_SCALP_MIX_LOOKBACK: int = 20
+    # Scalp sizing fraction; scalp vs positional target R; scalp time-stop
+    # (1-min bars).
     COMMODITY_HTF_SCALP_SIZE_FRACTION: float = 0.5
     COMMODITY_HTF_SCALP_TARGET_R: float = 1.0
     COMMODITY_HTF_POSITIONAL_TARGET_R: float = 2.0
     COMMODITY_HTF_SCALP_MAX_HOLD_BARS: int = 6
     # Range-adaptive + wider futures stop off the flat 0.5% noise band. OFF.
     COMMODITY_STOP_WIDENING_ENABLED: bool = False
-    # MP+OF gap-fixes (each default OFF, paper-validate before enabling):
-    # R5 textbook lvn_fade absorption; R0 per-symbol OF quality gate (+coverage
-    # floor); R1 day-type trigger suppression (+exclude thin roots); R4 naked-POC
-    # target anchor (+min-R fraction); per-instrument adaptive CVD baselines.
-    COMMODITY_LVN_ABSORPTION_FIX_ENABLED: bool = False
-    COMMODITY_OF_QUALITY_GATE_ENABLED: bool = False
+    # Textbook MP+OF context: absorption means aggressive flow without price
+    # progress; OF-dependent setups require usable volume; day type controls
+    # initiative vs responsive entries; targets use prior POC magnets; CVD is
+    # normalized to each instrument's own historical MP-period distribution.
+    COMMODITY_LVN_ABSORPTION_FIX_ENABLED: bool = True
+    COMMODITY_OF_QUALITY_GATE_ENABLED: bool = True
     COMMODITY_OF_MIN_VOL_COVERAGE: float = 0.70
-    COMMODITY_DAYTYPE_ENABLED: bool = False
-    COMMODITY_DAYTYPE_EXCLUDE_SYMBOLS: str = "GOLD,NICKEL"
-    COMMODITY_NAKED_POC_TARGET_ENABLED: bool = False
+    COMMODITY_DAYTYPE_ENABLED: bool = True
+    COMMODITY_DAYTYPE_EXCLUDE_SYMBOLS: str = ""
+    COMMODITY_NAKED_POC_TARGET_ENABLED: bool = True
     COMMODITY_NAKED_POC_MIN_R_FRACTION: float = 0.5
-    COMMODITY_VOL_BASELINE_ENABLED: bool = False
+    COMMODITY_VOL_BASELINE_ENABLED: bool = True
+    # Initiative entries need at least modest directionally-aligned pressure
+    # relative to the instrument's own median 15-minute volume.
+    COMMODITY_MIN_OF_PRESSURE_RATIO: float = 0.25
+    # Cost-robust setup isolated by the causal ATR walk-forward: accept only a
+    # trend-day IB break that is not late relative to POC and whose existing
+    # planned invalidation has enough room for a volatility expansion. The ATR
+    # thresholds are entry filters; they never widen a stop or impose a hold.
+    COMMODITY_HIGH_CONVICTION_SETUP_ENABLED: bool = True
+    COMMODITY_HIGH_CONVICTION_MAX_POC_DISTANCE_ATR: float = 3.0
+    COMMODITY_HIGH_CONVICTION_MIN_STOP_DISTANCE_ATR: float = 3.0
     SECTOR_INTERACTION_DURABLE_STATE_ENABLED: bool = False
 
     # Security

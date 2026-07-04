@@ -1,11 +1,10 @@
 """Paper runtime for the commodity desk — MCX futures, MP + Order-Flow entries.
 
-Single sleeve only: 1-minute closes drive a four-trigger Market-Profile + Order-Flow
-evaluator (`commodity_mp_signal.evaluate_commodity_mp_signal`) that produces fresh
-BUY/SELL signals. Triggers in priority order: open_drive, ib_break, failed_auction,
-va_migration, lvn_fade. The existing risk harness (ATR stops, BE move at 1R, partial
-lock at 1.5R, target arm at 2R, ATR trail, daily-loss cap, per-underlying cap, event-
-window blocks, stop cooldown, kill switch) is preserved.
+Single sleeve only: 1-minute closes drive the Market-Profile + Order-Flow evaluator.
+Execution admits the cost-validated compressed-IB-expansion setup; other evaluator
+triggers remain observable context. Value migration manages open positions and is
+never an entry. The existing structural risk sizing, 2R runner, ATR trail, event
+windows, stop cooldown and kill switch are preserved.
 
 The commodity options sleeve was deprecated; historical option trades remain in the
 persisted `trade_history` for audit but the agent no longer scans option chains or
@@ -110,7 +109,9 @@ FUTURES_MP_PERIOD_MINUTES = 15  # canonical TPO period (60-min IB)
 FUTURES_CVD_ANCHOR_HOUR_IST = 9
 FUTURES_MAX_POSITIONS = 1000  # no practical position cap (user 2026-06-04); margin/capital is the real limit
 FUTURES_MP_MIN_PERIODS = 4  # need IB to print before any trigger can fire
-FUTURES_MIN_HOLD_BARS = 4
+# Kept in the status contract for backward compatibility. Structural exits are
+# market-driven; there is no artificial minimum holding period.
+FUTURES_MIN_HOLD_BARS = 0
 FUTURES_TRAIL_ATR_MULTIPLIER = 1.25
 FUTURES_BREAK_EVEN_R_MULTIPLIER = 1.0
 # NEW: intermediate stage between BE (1R) and full target arm (2R).
@@ -136,6 +137,11 @@ COMMODITY_MAX_DRAWDOWN_PCT = 15.0
 COMMODITY_STOP_EXIT_REASONS = frozenset(
     {"stop_loss", "hard_stop", "trail_stop", "runner_trail_stop", "trailing_stoploss"}
 )
+# Only an initial/hard stop invalidates the entry thesis for the session. A
+# profitable runner trail is normal completion, not evidence that the thesis
+# failed.
+COMMODITY_THESIS_FAILURE_EXIT_REASONS = frozenset({"stop_loss", "hard_stop"})
+COMMODITY_SCALP_ENTRY_STYLES = frozenset({"failed_auction", "lvn_fade"})
 
 # Options sleeve deprecated — constants intentionally removed. Historical option
 # trades remain in the persisted trade_history for audit only.
@@ -256,6 +262,8 @@ def _position_open_trade_row(p: Any) -> dict[str, Any]:
         "option_type": None,
         "signal_id": getattr(p, "position_key", None),
         "setup_type": getattr(p, "signal_reason", None),
+        "entry_style": getattr(p, "entry_style", None),
+        "trade_horizon": getattr(p, "trade_horizon", None),
         "entry_iv_pct": None,
         "regime": getattr(p, "regime", None),
         "stop_price": getattr(p, "stop_price", None),
@@ -329,6 +337,9 @@ def _default_saved_state() -> dict[str, Any]:
             "reports": [],
             "commentary": [],
             "processed_signals": {},
+            "last_exit_at": {},
+            "last_stop_at": {},
+            "stopped_setups": {},
             "signal_audit": [],
             "portfolio": {
                 "initial_capital": DEFAULT_COMMODITY_INITIAL_CAPITAL,
@@ -396,6 +407,12 @@ def _normalize_saved_state(payload: Optional[dict[str, Any]]) -> dict[str, Any]:
         for key, bar_time in dict(runtime_payload.get("processed_signals") or {}).items()
         if str(key or "").strip() and str(bar_time or "").strip()
     }
+    for map_name in ("last_exit_at", "last_stop_at", "stopped_setups"):
+        runtime_state[map_name] = {
+            str(key): str(timestamp)
+            for key, timestamp in dict(runtime_payload.get(map_name) or {}).items()
+            if str(key or "").strip() and str(timestamp or "").strip()
+        }
     runtime_state["signal_audit"] = [
         row for row in list(runtime_payload.get("signal_audit") or []) if isinstance(row, dict)
     ]
@@ -525,6 +542,189 @@ def _bars_between(
     return max(0, elapsed_minutes // max(interval_minutes, 1))
 
 
+def _completed_period_rows(
+    candles: list[dict[str, Any]],
+    *,
+    period_minutes: int = FUTURES_MP_PERIOD_MINUTES,
+) -> list[dict[str, Any]]:
+    """Aggregate closed 1-minute rows into completed, session-aligned periods.
+
+    The currently-forming bucket is excluded. Earlier buckets are complete once
+    a later bucket exists, which also tolerates an occasional missing minute at
+    the bucket boundary. Timestamps are kept in IST so overnight true range is
+    retained when ATR spans two MCX sessions.
+    """
+    period = max(int(period_minutes), 1)
+    buckets: dict[datetime, dict[str, Any]] = {}
+    last_seen: dict[datetime, datetime] = {}
+    ordered = sorted(
+        candles,
+        key=lambda row: _parse_iso_timestamp(row.get("time")) or datetime.min.replace(tzinfo=timezone.utc),
+    )
+    for row in ordered:
+        parsed = _parse_iso_timestamp(row.get("time"))
+        close = row.get("close")
+        if parsed is None or close is None:
+            continue
+        ist = parsed.astimezone(IST)
+        start = ist.replace(
+            minute=(ist.minute // period) * period,
+            second=0,
+            microsecond=0,
+        )
+        close_f = float(close)
+        if start not in buckets:
+            buckets[start] = {
+                "time": start.isoformat(),
+                "open": float(row.get("open") or close_f),
+                "high": float(row.get("high") or close_f),
+                "low": float(row.get("low") or close_f),
+                "close": close_f,
+                "volume": float(row.get("volume") or 0.0),
+            }
+        else:
+            bucket = buckets[start]
+            bucket["high"] = max(float(bucket["high"]), float(row.get("high") or close_f))
+            bucket["low"] = min(float(bucket["low"]), float(row.get("low") or close_f))
+            bucket["close"] = close_f
+            bucket["volume"] = float(bucket["volume"]) + float(row.get("volume") or 0.0)
+        last_seen[start] = ist
+
+    starts = sorted(buckets)
+    completed: list[dict[str, Any]] = []
+    for index, start in enumerate(starts):
+        latest = last_seen[start]
+        has_later_bucket = index < len(starts) - 1
+        closed_boundary_seen = latest.minute % period >= period - 1
+        if has_later_bucket or closed_boundary_seen:
+            completed.append(buckets[start])
+    return completed
+
+
+def _completed_15m_atr(candles: list[dict[str, Any]], *, period: int = 14) -> Optional[float]:
+    bars = _completed_period_rows(candles, period_minutes=FUTURES_MP_PERIOD_MINUTES)
+    lookback = max(int(period), 1)
+    if len(bars) < lookback:
+        return None
+    return _compute_atr_series(bars[-lookback:], period=lookback)
+
+
+def _planned_futures_stop_geometry(row: dict[str, Any]) -> dict[str, Any]:
+    """Return the exact pre-risk-sizing stop geometry used by the live lane."""
+    price = float(row.get("price") or 0.0)
+    atr_1m = float(row.get("atr") or 0.0)
+    signal = str(row.get("signal") or "").upper()
+    if price <= 0 or atr_1m <= 0 or signal not in {"BUY", "SELL"}:
+        return {"valid": False}
+    min_distance = (
+        max(atr_1m * FUTURES_ATR_STOP_MULT, price * FUTURES_MIN_STOP_PCT_WIDE)
+        if settings.COMMODITY_STOP_WIDENING_ENABLED
+        else max(atr_1m, price * FUTURES_MIN_STOP_PCT)
+    )
+    is_buy = signal == "BUY"
+    fallback = price - min_distance if is_buy else price + min_distance
+    try:
+        stop_hint = float(row["stop_hint"]) if row.get("stop_hint") is not None else None
+    except (TypeError, ValueError):
+        stop_hint = None
+    structural_hint_used = bool(
+        stop_hint is not None
+        and (
+            (is_buy and stop_hint < price and price - stop_hint >= min_distance)
+            or (not is_buy and stop_hint > price and stop_hint - price >= min_distance)
+        )
+    )
+    stop_price = float(stop_hint) if structural_hint_used else fallback
+    return {
+        "valid": True,
+        "stop_price": stop_price,
+        "risk_distance": abs(price - stop_price),
+        "minimum_distance": min_distance,
+        "structural_hint_used": structural_hint_used,
+    }
+
+
+def _high_conviction_entry_verdict(row: dict[str, Any]) -> dict[str, Any]:
+    """Validate the cost-robust compressed-IB-expansion entry geometry."""
+    if not settings.COMMODITY_HIGH_CONVICTION_SETUP_ENABLED:
+        return {"allowed": True, "code": "disabled", "detail": "High-conviction gate disabled."}
+    if str(row.get("entry_style") or "").lower() != "ib_break":
+        return {
+            "allowed": False,
+            "code": "high_conviction_ib_break_only",
+            "detail": "High-conviction lane accepts trend-day IB breaks only.",
+        }
+    day_type = str(row.get("mp_day_type") or "").lower()
+    if day_type not in {"trend_up", "trend_down"}:
+        return {
+            "allowed": False,
+            "code": "high_conviction_trend_day_required",
+            "detail": f"IB break blocked because MP day type is {day_type or 'unknown'}, not trend.",
+        }
+    atr_15m = float(row.get("atr_15m") or 0.0)
+    if atr_15m <= 0:
+        return {
+            "allowed": False,
+            "code": "high_conviction_atr_warming_up",
+            "detail": "Causal 15-minute ATR(14) is not ready; high-conviction entry held.",
+        }
+    price = float(row.get("price") or 0.0)
+    try:
+        poc = float(row["mp_poc"]) if row.get("mp_poc") is not None else None
+    except (TypeError, ValueError):
+        poc = None
+    if price <= 0 or poc is None:
+        return {
+            "allowed": False,
+            "code": "high_conviction_poc_unavailable",
+            "detail": "POC or tradable price is unavailable for ATR location validation.",
+        }
+    poc_distance_atr = abs(price - poc) / atr_15m
+    max_poc_atr = float(settings.COMMODITY_HIGH_CONVICTION_MAX_POC_DISTANCE_ATR)
+    geometry = _planned_futures_stop_geometry(row)
+    risk_distance = float(geometry.get("risk_distance") or 0.0)
+    stop_distance_atr = risk_distance / atr_15m if risk_distance > 0 else 0.0
+    metrics = {
+        "high_conviction_setup": "compressed_ib_expansion",
+        "atr_15m": round(atr_15m, 6),
+        "poc_distance_atr_15m": round(poc_distance_atr, 4),
+        "planned_stop_distance_atr_15m": round(stop_distance_atr, 4),
+        "planned_stop_price": _round_or_none(geometry.get("stop_price"), 2),
+        "structural_stop_hint_used": bool(geometry.get("structural_hint_used")),
+    }
+    if poc_distance_atr > max_poc_atr:
+        return {
+            **metrics,
+            "allowed": False,
+            "code": "high_conviction_late_extension",
+            "detail": (
+                f"IB break is {poc_distance_atr:.2f}× ATR from POC; maximum is "
+                f"{max_poc_atr:.2f}× ATR. Late extension skipped."
+            ),
+        }
+    min_stop_atr = float(settings.COMMODITY_HIGH_CONVICTION_MIN_STOP_DISTANCE_ATR)
+    if not geometry.get("valid") or stop_distance_atr < min_stop_atr:
+        return {
+            **metrics,
+            "allowed": False,
+            "code": "high_conviction_insufficient_invalidation_room",
+            "detail": (
+                f"Planned invalidation is {stop_distance_atr:.2f}× ATR; high-conviction "
+                f"compression expansion requires at least {min_stop_atr:.2f}× ATR. "
+                "Stop is not widened; setup skipped."
+            ),
+        }
+    return {
+        **metrics,
+        "allowed": True,
+        "code": "high_conviction_ready",
+        "detail": (
+            f"Compressed IB expansion ready: {poc_distance_atr:.2f}× ATR from POC, "
+            f"planned invalidation {stop_distance_atr:.2f}× ATR."
+        ),
+    }
+
+
 def _infer_09ist_anchor(candles: list[dict[str, Any]]) -> int:
     """Find the index of the most-recent 09:00 IST bar boundary.
 
@@ -640,13 +840,18 @@ class CommodityPositionState:
     entry_iv_pct: Optional[float] = None
     entry_style: Optional[str] = None
     last_reviewed_bar_time: Optional[str] = None
-    # Higher-timeframe alignment (set at entry when COMMODITY_HTF_GATE_ENABLED).
-    # "positional" = aligned/neutral with the weekly+monthly value-area bias
-    # (full size, 2R + runner trail); "scalp" = counter-bias (reduced size,
-    # 1R target, quick time-stop). htf_bias ∈ {strong, weak, neutral}.
+    # "positional" = initiative and HTF-aligned/neutral (full size, 2R +
+    # runner trail); "scalp" = responsive failed-auction/LVN setup (reduced
+    # size, structural/1R target, quick time-stop).
     trade_horizon: str = "positional"
     htf_bias: Optional[str] = None
     htf_detail: Optional[str] = None
+    # Developing value is position context, never an autonomous entry.  A
+    # confirmed migration opposite the held side structurally invalidates it.
+    value_migration_state: Optional[str] = None
+    value_migration_direction: Optional[str] = None
+    value_migration_alignment: Optional[str] = None
+    value_migration_detail: Optional[str] = None
 
     @property
     def unrealized_pnl(self) -> float:
@@ -677,10 +882,14 @@ class CommodityRuntime:
     # its re-entry / stop cooldown is still in force — silently failing the
     # cooldown OPEN and letting the lane re-enter the same name immediately (a
     # churn driver). These maps are never truncated within a session and back the
-    # cooldown checks so buffer eviction can't defeat them. Not persisted across
-    # restart (the restored `orders` buffer covers that window).
+    # cooldown checks so buffer eviction can't defeat them. Persisted so a
+    # backend restart cannot silently reopen the cooldown.
     last_exit_at: dict[str, datetime] = field(default_factory=dict)
     last_stop_at: dict[str, datetime] = field(default_factory=dict)
+    # Exact MP theses stopped during the current session. Keyed by
+    # YYYY-MM-DD|ROOT|SIDE|REASON; a new session rebuilds value/IB and naturally
+    # gets a fresh key.
+    stopped_setups: dict[str, datetime] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -916,6 +1125,13 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     entry_iv_pct=_round_or_none(row.get("entry_iv_pct"), 1),
                     entry_style=str(row.get("entry_style") or "") or None,
                     last_reviewed_bar_time=str(row.get("last_reviewed_bar_time") or row.get("entry_bar_time") or "") or None,
+                    trade_horizon=str(row.get("trade_horizon") or "positional"),
+                    htf_bias=str(row.get("htf_bias") or "") or None,
+                    htf_detail=str(row.get("htf_detail") or "") or None,
+                    value_migration_state=str(row.get("value_migration_state") or "") or None,
+                    value_migration_direction=str(row.get("value_migration_direction") or "") or None,
+                    value_migration_alignment=str(row.get("value_migration_alignment") or "") or None,
+                    value_migration_detail=str(row.get("value_migration_detail") or "") or None,
                 )
             except (TypeError, ValueError):
                 continue
@@ -927,6 +1143,17 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             for key, bar_time in dict(runtime_state.get("processed_signals") or {}).items()
             if str(key or "").strip() and str(bar_time or "").strip()
         }
+        def _restore_time_map(name: str) -> dict[str, datetime]:
+            restored: dict[str, datetime] = {}
+            for key, raw_time in dict(runtime_state.get(name) or {}).items():
+                parsed = _parse_datetime(raw_time)
+                if parsed is not None:
+                    restored[str(key)] = parsed.astimezone(IST)
+            return restored
+
+        self._runtime.last_exit_at = _restore_time_map("last_exit_at")
+        self._runtime.last_stop_at = _restore_time_map("last_stop_at")
+        self._runtime.stopped_setups = _restore_time_map("stopped_setups")
         self._runtime.signal_audit = [
             row for row in list(runtime_state.get("signal_audit") or []) if isinstance(row, dict)
         ][:DEFAULT_COMMODITY_SIGNAL_AUDIT_MAX]
@@ -1006,6 +1233,18 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "reports": [asdict(report) for report in self._runtime.reports],
                 "commentary": [asdict(entry) for entry in self._commentary],
                 "processed_signals": dict(self._runtime.processed_signals),
+                "last_exit_at": {
+                    key: timestamp.isoformat()
+                    for key, timestamp in self._runtime.last_exit_at.items()
+                },
+                "last_stop_at": {
+                    key: timestamp.isoformat()
+                    for key, timestamp in self._runtime.last_stop_at.items()
+                },
+                "stopped_setups": {
+                    key: timestamp.isoformat()
+                    for key, timestamp in self._runtime.stopped_setups.items()
+                },
                 "signal_audit": list(self._runtime.signal_audit),
                 "portfolio": {
                     "initial_capital": float(portfolio.initial_capital),
@@ -1422,6 +1661,100 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             return f"recent exit on {extract_commodity_root(underlying)}; re-entry cooldown {remaining}m remaining"
         return None
 
+    @staticmethod
+    def _entry_order_horizon(order: dict[str, Any]) -> str:
+        """Classify persisted entries, including rows written before horizon metadata."""
+        explicit = str(order.get("trade_horizon") or "").lower()
+        if explicit in {"scalp", "positional"}:
+            return explicit
+        style = str(order.get("entry_style") or order.get("reason") or "").lower()
+        if any(style.startswith(prefix) for prefix in COMMODITY_SCALP_ENTRY_STYLES):
+            return "scalp"
+        return "positional"
+
+    def _scalp_mix_snapshot(self) -> dict[str, Any]:
+        """Rolling trade mix and whether one more valid scalp may be accepted.
+
+        The 20% policy is a ceiling, not a production target: directional
+        entries always remain eligible, while a scalp waits until enough
+        positional entries exist to keep the projected rolling share <= cap.
+        """
+        lookback = max(5, int(settings.COMMODITY_SCALP_MIX_LOOKBACK))
+        max_share = min(max(float(settings.COMMODITY_SCALP_MAX_TRADE_SHARE), 0.0), 1.0)
+        entries = [
+            row for row in self._runtime.orders
+            if str(row.get("flow") or "").lower() == "entry"
+        ]
+        current = entries[:lookback]
+        scalp_count = sum(self._entry_order_horizon(row) == "scalp" for row in current)
+        current_total = len(current)
+
+        # The next entry becomes the newest item, so evaluate it with the newest
+        # lookback-1 existing rows (the oldest row rolls out at a full window).
+        projected_history = entries[: max(lookback - 1, 0)]
+        projected_scalps = sum(
+            self._entry_order_horizon(row) == "scalp" for row in projected_history
+        ) + 1
+        projected_total = len(projected_history) + 1
+        projected_share = projected_scalps / projected_total if projected_total else 1.0
+        return {
+            "max_share": round(max_share, 4),
+            "lookback": lookback,
+            "sample_entries": current_total,
+            "scalp_entries": scalp_count,
+            "directional_entries": current_total - scalp_count,
+            "current_share": round(scalp_count / current_total, 4) if current_total else 0.0,
+            "next_scalp_projected_share": round(projected_share, 4),
+            "next_scalp_allowed": bool(max_share > 0 and projected_share <= max_share + 1e-12),
+        }
+
+    @staticmethod
+    def _setup_stop_key(
+        underlying: str,
+        signal_reason: str,
+        action: str,
+        session_date: date,
+    ) -> str:
+        return "|".join(
+            (
+                session_date.isoformat(),
+                extract_commodity_root(underlying),
+                str(action or "").upper(),
+                str(signal_reason or "").strip().lower(),
+            )
+        )
+
+    def _setup_stop_lock_reason(
+        self,
+        underlying: str,
+        signal_reason: str,
+        action: str,
+        now: Optional[datetime] = None,
+    ) -> Optional[str]:
+        """Block a stopped MP thesis until the next session rebuilds value.
+
+        A timer alone re-entered persistent VA-migration signals every hour. In
+        auction terms the structural thesis has failed; it is not new merely
+        because another 60 minutes elapsed.
+        """
+        if not settings.COMMODITY_SETUP_STOP_LOCK_ENABLED:
+            return None
+        current = (now or _now_ist()).astimezone(IST)
+        today_prefix = current.date().isoformat() + "|"
+        self._runtime.stopped_setups = {
+            key: timestamp
+            for key, timestamp in self._runtime.stopped_setups.items()
+            if key.startswith(today_prefix)
+        }
+        key = self._setup_stop_key(underlying, signal_reason, action, current.date())
+        if key not in self._runtime.stopped_setups:
+            return None
+        return (
+            f"{extract_commodity_root(underlying)} {str(action).upper()} "
+            f"{str(signal_reason).replace('_', ' ')} already stopped this session; "
+            "waiting for a new session profile."
+        )
+
     def _entry_risk_block(self, underlying: str, now: Optional[datetime] = None) -> Optional[dict[str, str]]:
         current = now or _now_ist()
         drawdown_pct = self._current_drawdown_pct()
@@ -1519,9 +1852,14 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "broker": "upstox primary · fyers fallback",
                 "notes": (
                     "Entries are driven by the Market-Profile + Order-Flow evaluator on closed 1-minute bars. "
-                    "Triggers in priority: open_drive, ib_break, failed_auction, va_migration, lvn_fade. "
-                    "Stop placement honours per-trigger hints (clamped to 0.5% min); target = 2R; "
-                    "BE move at 1R, partial lock at 1.5R, ATR trail at 1.25× after the runner arms."
+                    "Execution accepts the high-conviction compressed IB expansion only: trend-day IB break, "
+                    "within 3× causal 15-minute ATR(14) of POC, with the existing planned invalidation at least "
+                    "3× ATR away. Stops are never widened to qualify. Confirmed value "
+                    "migration is position context: aligned migration supports a hold; opposing migration "
+                    "invalidates an existing position immediately. The setup is positional and has no artificial "
+                    "minimum hold. Stops sit at the existing planned invalidation and lots are capped by rupee risk; "
+                    "entries target 2R/prior POC, and stopped theses remain "
+                    "invalid for the session. Positionals trail only after the 2R runner arms."
                 ),
             },
         ]
@@ -1538,14 +1876,35 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             bar_time = str(row.get("bar_time") or "")
             spec = get_commodity_contract_spec(symbol)
             price = float(row.get("price") or 0.0)
+            high_conviction = (
+                _high_conviction_entry_verdict(row)
+                if signal in {"BUY", "SELL"}
+                else None
+            )
+            if high_conviction is not None:
+                row.update(
+                    {
+                        key: value
+                        for key, value in high_conviction.items()
+                        if key not in {"allowed", "code", "detail"}
+                    }
+                )
+                row["high_conviction_allowed"] = bool(high_conviction.get("allowed"))
+                row["high_conviction_validation"] = high_conviction.get("code")
+                row["high_conviction_detail"] = high_conviction.get("detail")
             lots = self._target_lots_for_contract(spec, price)
             qty = spec.futures_lot_size * lots
             event_reason = _commodity_event_block_reason(underlying)
             risk_block = self._entry_risk_block(underlying)
+            setup_lock_reason = self._setup_stop_lock_reason(
+                underlying,
+                str(row.get("reason") or ""),
+                signal,
+            )
             validation = "waiting_trigger"
             validation_detail = (
                 "Awaiting an MP+OF trigger (open_drive, ib_break, failed_auction, "
-                "va_migration, or lvn_fade) on the next closed 1-minute bar."
+                "or lvn_fade) on the next closed 1-minute bar. Value migration is context-only."
             )
             if row.get("reason") == "insufficient_data":
                 validation = "warming_up"
@@ -1571,6 +1930,16 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             elif signal in {"BUY", "SELL"} and risk_block:
                 validation = risk_block["code"]
                 validation_detail = risk_block["detail"]
+            elif signal in {"BUY", "SELL"} and setup_lock_reason:
+                validation = "setup_stopped_session"
+                validation_detail = setup_lock_reason
+            elif (
+                signal in {"BUY", "SELL"}
+                and high_conviction is not None
+                and not high_conviction.get("allowed")
+            ):
+                validation = str(high_conviction.get("code") or "high_conviction_block")
+                validation_detail = str(high_conviction.get("detail") or "High-conviction gate blocked entry.")
             elif signal in {"BUY", "SELL"} and self._runtime.processed_signals.get(f"commodity_futures:{symbol}") == bar_time:
                 validation = "bar_consumed"
                 validation_detail = "This 1-minute bar already triggered an entry."
@@ -1592,7 +1961,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                         entry_style = str(row.get("entry_style") or "trigger")
                         confidence = float(row.get("confidence") or 0.0)
                         validation_detail = str(
-                            row.get("signal_validation_detail")
+                            (high_conviction or {}).get("detail")
+                            or row.get("signal_validation_detail")
                             or f"{entry_style} fired ({signal}, confidence {confidence:.2f}) — aligned for entry."
                         )
 
@@ -1969,8 +2339,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
 
         Cache is keyed by `(symbol, today_session_date)` so it stays warm for
         the duration of the day and re-builds automatically when a new session
-        rolls. Used by the open_drive and va_migration triggers; quietly None
-        when fewer than 2 sessions are present in the broker's 1-min history.
+        rolls. Used by open_drive and value-migration context; quietly None
+        when no completed prior session is present in broker 1-min history.
         """
         today = _now_ist().date()
         cache_key = (symbol, today)
@@ -1981,21 +2351,25 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         try:
             candles = await self._load_history(symbol, interval="1minute", lookback_days=5)
             if candles:
-                # Split out the most recent session, then take the session
-                # immediately before it.
+                # If history already contains today's session, exclude it and
+                # use the immediately preceding session.  Before the open (or
+                # on a weekend) the latest session is itself the completed
+                # prior session.  The old unconditional "skip latest" logic
+                # cached D-2 all day when this method warmed before the open.
                 closed = _filter_closed_interval_rows(candles, interval="1minute")
                 latest_session, latest_date = _latest_session_rows(closed)
-                # Walk backwards to find the prior session.
                 if latest_date is not None:
-                    prior_rows = [
-                        c for c in closed
-                        if _parse_iso_timestamp(c.get("time")) is not None
-                        and _parse_iso_timestamp(c.get("time")).astimezone(IST).date() < latest_date
-                    ]
-                    if prior_rows:
-                        prior_session, _prior_date = _latest_session_rows(prior_rows)
-                        if prior_session:
-                            prior_profile = self._build_market_profile(symbol, prior_session)
+                    prior_session = latest_session if latest_date < today else []
+                    if not prior_session:
+                        prior_rows = [
+                            c for c in closed
+                            if _parse_iso_timestamp(c.get("time")) is not None
+                            and _parse_iso_timestamp(c.get("time")).astimezone(IST).date() < latest_date
+                        ]
+                        if prior_rows:
+                            prior_session, _prior_date = _latest_session_rows(prior_rows)
+                    if prior_session:
+                        prior_profile = self._build_market_profile(symbol, prior_session)
         except Exception as exc:
             logger.debug(f"[CommodityStrategy] prior MP load failed for {symbol}: {exc}")
             prior_profile = None
@@ -2036,6 +2410,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         prior_profile = await self._load_prior_session_profile(symbol)
         cvd_anchor_index = _infer_09ist_anchor(closed)
         atr_1m = _compute_atr_series(closed, period=14)
+        atr_15m = _completed_15m_atr(closed, period=14)
 
         result = evaluate_commodity_mp_signal(
             closed,
@@ -2131,6 +2506,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "previous_close": _round_or_none(previous_close, 2),
                 "change": _round_or_none(change, 2),
                 "change_pct": _round_or_none(change_pct, 2),
+                "atr_15m": _round_or_none(atr_15m, 6),
+                "atr_15m_period": 14,
                 "indicator_timeframe": FUTURES_TIMEFRAME,
                 "mp_session_date": session_date.isoformat() if session_date else result.get("mp_session_date"),
             }
@@ -2655,6 +3032,21 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 position.mp_poc = row.get("mp_poc")
                 position.mp_vah = row.get("mp_vah")
                 position.mp_val = row.get("mp_val")
+                migration_state = str(row.get("value_migration_state") or "unavailable").lower()
+                migration_direction = str(row.get("value_migration_direction") or "").lower()
+                migration_signal = str(row.get("value_migration_signal") or "").upper()
+                held_action = str(position.action or "").upper()
+                position.value_migration_state = migration_state
+                position.value_migration_direction = migration_direction or None
+                position.value_migration_detail = str(row.get("value_migration_detail") or "") or None
+                if migration_state == "confirmed" and migration_signal in {"BUY", "SELL"}:
+                    position.value_migration_alignment = (
+                        "aligned" if migration_signal == held_action else "opposed"
+                    )
+                elif migration_state == "developing" and migration_direction:
+                    position.value_migration_alignment = "developing"
+                else:
+                    position.value_migration_alignment = None
                 row_bar_time = str(row.get("bar_time") or "")
                 if row_bar_time:
                     position.last_reviewed_bar_time = row_bar_time
@@ -2673,6 +3065,11 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     position.entry_bar_time,
                     row_bar_time or position.last_reviewed_bar_time,
                     interval=FUTURES_TIMEFRAME,
+                )
+                opposing_value_migration = (
+                    migration_state == "confirmed"
+                    and migration_signal in {"BUY", "SELL"}
+                    and migration_signal != held_action
                 )
                 # Commodity exit cascade (2026-06-02) trimmed to match the
                 # canonical "ride large directional moves" design:
@@ -2741,25 +3138,30 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                             reason = "stop_loss"
                         elif position.target_price is not None and current_price >= position.target_price:
                             reason = "scalp_target"
+                        elif opposing_value_migration:
+                            reason = "value_migration_reversal"
                         elif hold_bars >= scalp_max_hold:
                             reason = "scalp_time_stop"
-                        elif hold_bars >= FUTURES_MIN_HOLD_BARS and row.get("raw_signal") == "SELL":
+                        elif row.get("raw_signal") == "SELL":
                             reason = "mp_reversal"
                     else:
                         if current_price >= position.stop_price:
                             reason = "stop_loss"
                         elif position.target_price is not None and current_price <= position.target_price:
                             reason = "scalp_target"
+                        elif opposing_value_migration:
+                            reason = "value_migration_reversal"
                         elif hold_bars >= scalp_max_hold:
                             reason = "scalp_time_stop"
-                        elif hold_bars >= FUTURES_MIN_HOLD_BARS and row.get("raw_signal") == "BUY":
+                        elif row.get("raw_signal") == "BUY":
                             reason = "mp_reversal"
                 elif position.action == "BUY":
                     if current_price <= position.stop_price:
                         reason = trailing_label or "stop_loss"
+                    elif opposing_value_migration:
+                        reason = "value_migration_reversal"
                     elif (
                         not settings.COMMODITY_POSITIONAL_HOLD_ENABLED
-                        and hold_bars >= FUTURES_MIN_HOLD_BARS
                         and row.get("raw_signal") == "SELL"
                     ):
                         # Positional desk holds through 1-min MP-signal noise;
@@ -2771,9 +3173,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 else:
                     if current_price >= position.stop_price:
                         reason = trailing_label or "stop_loss"
+                    elif opposing_value_migration:
+                        reason = "value_migration_reversal"
                     elif (
                         not settings.COMMODITY_POSITIONAL_HOLD_ENABLED
-                        and hold_bars >= FUTURES_MIN_HOLD_BARS
                         and row.get("raw_signal") == "BUY"
                     ):
                         reason = "mp_reversal"
@@ -2859,7 +3262,18 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             lots=position.lots,
             strategy_key=position.strategy_key,
             strategy_title=position.strategy_title,
+            entry_style=position.entry_style,
+            trade_horizon=position.trade_horizon,
         )
+        if reason in COMMODITY_THESIS_FAILURE_EXIT_REASONS and settings.COMMODITY_SETUP_STOP_LOCK_ENABLED:
+            stopped_at = _order_fill_time_ist(order)
+            setup_key = self._setup_stop_key(
+                position.underlying,
+                position.signal_reason,
+                position.action,
+                stopped_at.date(),
+            )
+            self._runtime.stopped_setups[setup_key] = stopped_at
         self._append_commentary(
             "trade",
             f"EXIT {position.display_name} {exit_action} @{current_price:.2f} ({reason}) | {position.lots} lot",
@@ -2938,6 +3352,18 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 break
             if row.get("signal_validation") != "ready":
                 continue
+            # Migration is auction context, not a stale/replayable order
+            # instruction.  This guard prevents a persisted pre-migration row
+            # from opening after a deploy even if it was already decorated as
+            # ready by an older evaluator.
+            entry_style = str(row.get("entry_style") or "").lower()
+            if entry_style == "va_migration" or str(row.get("reason") or "").startswith("va_migration_"):
+                row["signal_validation"] = "context_only"
+                row["signal_validation_detail"] = (
+                    "Value migration is context-only and cannot open a new position."
+                )
+                self._audit_futures_watchlist([row])
+                continue
 
             symbol = str(row["symbol"])
             bar_time = str(row.get("bar_time") or "")
@@ -2952,23 +3378,59 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 continue
             if self._entry_risk_block(underlying):
                 continue
+            setup_lock_reason = self._setup_stop_lock_reason(
+                underlying,
+                str(row.get("reason") or ""),
+                str(row.get("signal") or ""),
+            )
+            if setup_lock_reason:
+                row["signal_validation"] = "setup_stopped_session"
+                row["signal_validation_detail"] = setup_lock_reason
+                self._audit_futures_watchlist([row])
+                continue
             price = float(row.get("price") or 0.0)
             atr = float(row.get("atr") or 0.0)
             if price <= 0 or atr <= 0:
                 continue
 
+            high_conviction = _high_conviction_entry_verdict(row)
+            row.update(
+                {
+                    key: value
+                    for key, value in high_conviction.items()
+                    if key not in {"allowed", "code", "detail"}
+                }
+            )
+            row["high_conviction_allowed"] = bool(high_conviction.get("allowed"))
+            row["high_conviction_validation"] = high_conviction.get("code")
+            row["high_conviction_detail"] = high_conviction.get("detail")
+            if not high_conviction.get("allowed"):
+                row["signal_validation"] = str(
+                    high_conviction.get("code") or "high_conviction_block"
+                )
+                row["signal_validation_detail"] = str(
+                    high_conviction.get("detail") or "High-conviction gate blocked entry."
+                )
+                self._audit_futures_watchlist([row])
+                continue
+
             # ── Higher-timeframe alignment gate ──────────────────────────
-            # A trade whose direction OPPOSES the weekly+monthly value-area
-            # bias (long while HTF is weak, short while HTF is strong) is
-            # downgraded to a "scalp": smaller size + a tighter 1R target + a
-            # quick time-stop (enforced in the manage loop). Aligned/neutral
-            # trades stay positional (full size, 2R + runner trail). Flag-gated
-            # so default behaviour is byte-for-byte unchanged.
+            # Initiative setups (open drive / IB break) are the directional
+            # positional sleeve. Responsive setups (failed auction / LVN fade)
+            # are scalps: smaller size, structural/1R target and a quick
+            # time-stop. HTF opposition remains blocked when alignment is
+            # required; we do not manufacture counter-bias scalps.
             signal_dir = str(row.get("signal") or "").upper()
-            trade_horizon = "positional"
+            trade_horizon = (
+                "scalp" if entry_style in COMMODITY_SCALP_ENTRY_STYLES else "positional"
+            )
             htf_bias: Optional[str] = None
             htf_detail: Optional[str] = None
-            target_r = float(settings.COMMODITY_HTF_POSITIONAL_TARGET_R)
+            target_r = float(
+                settings.COMMODITY_HTF_SCALP_TARGET_R
+                if trade_horizon == "scalp"
+                else settings.COMMODITY_HTF_POSITIONAL_TARGET_R
+            )
             if settings.COMMODITY_HTF_GATE_ENABLED:
                 htf_bias, htf_detail = self._htf_value_area_bias(underlying, price)
                 opposed = (
@@ -2991,24 +3453,30 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     trade_horizon = "scalp"
                     target_r = float(settings.COMMODITY_HTF_SCALP_TARGET_R)
 
-            # Equal-notional sizing: lots chosen so this position ≈ the
-            # target rupee value, the same for every contract. Scalps trade a
-            # fraction of that so a counter-bias probe risks less.
+            scalp_mix = self._scalp_mix_snapshot()
+            row["trade_horizon"] = trade_horizon
+            row["scalp_mix"] = scalp_mix
+            if trade_horizon == "scalp" and not scalp_mix["next_scalp_allowed"]:
+                row["signal_validation"] = "scalp_mix_cap"
+                row["signal_validation_detail"] = (
+                    f"Valid responsive scalp held: projected rolling scalp share "
+                    f"{scalp_mix['next_scalp_projected_share']:.0%} exceeds the "
+                    f"{scalp_mix['max_share']:.0%} ceiling. Directional entries remain eligible."
+                )
+                self._audit_futures_watchlist([row])
+                continue
+
+            # Start from equal-notional sizing, then cap lots by the rupee risk
+            # from the structural invalidation stop below.
             lots = self._target_lots_for_contract(spec, price)
             if trade_horizon == "scalp":
                 lots = max(1, round(lots * float(settings.COMMODITY_HTF_SCALP_SIZE_FRACTION)))
-            qty = spec.futures_lot_size * lots
-            required_margin = self._estimate_futures_margin_required(price, qty)
-            if required_margin > self._runtime.portfolio.available_capital:
-                continue
 
-            # Honour the MP+OF evaluator's `stop_hint` when present, clamped to
-            # the FUTURES_MIN_STOP_PCT floor so we don't end up with absurdly
-            # tight stops. Falls back to the ATR/MP-level rule for any signal
-            # that didn't carry an explicit hint.
+            # Textbook MP stop = beyond the setup's structural invalidation
+            # (prior value, IB repair, or rejection extreme). The old candidate
+            # max/min selected the *nearest* 0.5% fallback and silently discarded
+            # every wider structural hint, producing repeated noise stop-outs.
             if settings.COMMODITY_STOP_WIDENING_ENABLED:
-                # Range-adaptive + wider: ATR multiple wins on volatile names,
-                # the 0.8% floor binds on quiet ones. Off by default.
                 min_stop_distance = max(atr * FUTURES_ATR_STOP_MULT, price * FUTURES_MIN_STOP_PCT_WIDE)
             else:
                 min_stop_distance = max(atr, price * FUTURES_MIN_STOP_PCT)
@@ -3017,38 +3485,81 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 stop_hint_f = float(stop_hint) if stop_hint is not None else None
             except (TypeError, ValueError):
                 stop_hint_f = None
-            if row.get("signal") == "BUY":
-                stop_candidates = [price - min_stop_distance]
-                if stop_hint_f is not None and stop_hint_f < price and (price - stop_hint_f) >= min_stop_distance:
-                    stop_candidates.append(stop_hint_f)
-                for level in (row.get("mp_val"), row.get("mp_ib_low")):
-                    if level is not None:
-                        level_value = float(level)
-                        if level_value < price and (price - level_value) >= min_stop_distance:
-                            stop_candidates.append(level_value)
-                stop_price = max(stop_candidates)
-                target_price = price + ((price - stop_price) * target_r)
-            else:
-                stop_candidates = [price + min_stop_distance]
-                if stop_hint_f is not None and stop_hint_f > price and (stop_hint_f - price) >= min_stop_distance:
-                    stop_candidates.append(stop_hint_f)
-                for level in (row.get("mp_vah"), row.get("mp_ib_high")):
-                    if level is not None:
-                        level_value = float(level)
-                        if level_value > price and (level_value - price) >= min_stop_distance:
-                            stop_candidates.append(level_value)
-                stop_price = min(stop_candidates)
-                target_price = price - ((stop_price - price) * target_r)
+            is_buy = signal_dir == "BUY"
+            stop_price = price - min_stop_distance if is_buy else price + min_stop_distance
+            structural_stop_valid = (
+                stop_hint_f is not None
+                and (
+                    (is_buy and stop_hint_f < price and price - stop_hint_f >= min_stop_distance)
+                    or (not is_buy and stop_hint_f > price and stop_hint_f - price >= min_stop_distance)
+                )
+            )
+            if structural_stop_valid:
+                stop_price = float(stop_hint_f)
 
-            # R4: anchor the target to a naked/virgin prior-session POC when one
-            # sits between entry and the R-multiple target (structure-anchored
-            # exit). Target-only — never changes entry/stop. Off by default.
-            if settings.COMMODITY_NAKED_POC_TARGET_ENABLED:
+            risk_distance = abs(price - stop_price)
+            current_equity = float(self._runtime.portfolio.total_equity or 0.0)
+            risk_capital = min(
+                float(self._runtime.portfolio.initial_capital),
+                current_equity if current_equity > 0 else float(self._runtime.portfolio.initial_capital),
+            )
+            risk_budget = risk_capital * float(settings.COMMODITY_RISK_PER_TRADE_PCT)
+            risk_per_lot = risk_distance * int(spec.futures_lot_size or 1)
+            risk_lots = int(risk_budget // risk_per_lot) if risk_per_lot > 0 else 0
+            if risk_lots < 1:
+                row["signal_validation"] = "structural_risk_too_large"
+                row["signal_validation_detail"] = (
+                    f"Structural stop risk ₹{risk_per_lot:,.0f} for one lot exceeds "
+                    f"the ₹{risk_budget:,.0f} per-trade budget; entry blocked."
+                )
+                self._audit_futures_watchlist([row])
+                continue
+            lots = min(lots, risk_lots)
+            qty = spec.futures_lot_size * lots
+            required_margin = self._estimate_futures_margin_required(price, qty)
+            if required_margin > self._runtime.portfolio.available_capital:
+                continue
+
+            target_price = (
+                price + risk_distance * target_r
+                if is_buy
+                else price - risk_distance * target_r
+            )
+            structure_target_used = False
+            target_hint = row.get("target_hint")
+            try:
+                target_hint_f = float(target_hint) if target_hint is not None else None
+            except (TypeError, ValueError):
+                target_hint_f = None
+            if target_hint_f is not None:
+                reward_distance = target_hint_f - price if is_buy else price - target_hint_f
+                reward_r = reward_distance / risk_distance if risk_distance > 0 else 0.0
+                if reward_distance <= 0 or reward_r < float(settings.COMMODITY_MIN_STRUCTURE_TARGET_R):
+                    row["signal_validation"] = "structure_target_too_close"
+                    row["signal_validation_detail"] = (
+                        f"MP target {target_hint_f:.2f} offers only {reward_r:.2f}R "
+                        "from the structural stop; entry blocked."
+                    )
+                    self._audit_futures_watchlist([row])
+                    continue
+                target_price = target_hint_f
+                structure_target_used = True
+
+            # Initiative trades without an explicit responsive target may use a
+            # reachable prior POC magnet between entry and the R target.
+            if settings.COMMODITY_NAKED_POC_TARGET_ENABLED and not structure_target_used:
                 naked_target = self._naked_poc_target(
                     underlying, price, target_price, row.get("signal")
                 )
                 if naked_target is not None:
-                    target_price = naked_target
+                    naked_reward = naked_target - price if is_buy else price - naked_target
+                    if naked_reward / risk_distance >= float(settings.COMMODITY_MIN_STRUCTURE_TARGET_R):
+                        target_price = naked_target
+
+            row["planned_stop_price"] = round(stop_price, 2)
+            row["planned_target_price"] = round(target_price, 2)
+            row["planned_risk_rupees"] = round(risk_per_lot * lots, 2)
+            row["risk_sized_lots"] = lots
 
             order = self._runtime.order_book.place_order(
                 symbol=symbol,
@@ -3059,7 +3570,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 session_id=self._runtime.portfolio.session_id,
                 ltp=price,
                 # Persist which MP trigger opened the trade (open_drive / ib_break
-                # / failed_auction / va_migration / lvn_fade) + the day-type so
+                # / failed_auction / lvn_fade) + the day-type so
                 # per-trigger expectancy can be attributed at close. Previously
                 # omitted → setup_type=None on every booked trade, making it
                 # impossible to identify or retire a losing trigger on evidence.
@@ -3074,6 +3585,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 lots=lots,
                 strategy_key="commodity_futures",
                 strategy_title=spec.futures_label,
+                entry_style=entry_style,
+                trade_horizon=trade_horizon,
             )
             fill_price = float(order.fill_price or price)
             position_key = f"commodity_futures:{symbol}"
@@ -3147,6 +3660,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     "lots": lots,
                     "regime": str(row.get("mp_day_type") or row.get("regime") or ""),
                     "entry_style": str(row.get("entry_style") or "mp_signal"),
+                    "trade_horizon": trade_horizon,
+                    "scalp_mix": scalp_mix,
                     "confidence": float(row.get("confidence") or 0.0),
                     "stop_hint": row.get("stop_hint"),
                     "trigger_evidence": row.get("trigger_evidence") or {},
@@ -3167,6 +3682,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         lots: int,
         strategy_key: str,
         strategy_title: str,
+        entry_style: Optional[str] = None,
+        trade_horizon: Optional[str] = None,
     ) -> None:
         self._runtime.orders.insert(
             0,
@@ -3186,6 +3703,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "flow": flow,
                 "strategy_key": strategy_key,
                 "strategy_title": strategy_title,
+                "entry_style": entry_style,
+                "trade_horizon": trade_horizon,
             },
         )
         del self._runtime.orders[DEFAULT_COMMODITY_ORDERS_MAX:]
@@ -3288,6 +3807,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     "price": row.get("price"),
                     "regime": row.get("regime"),
                     "runtime_retained": bool(row.get("runtime_retained")),
+                    "high_conviction_setup": row.get("high_conviction_setup"),
+                    "atr_15m": row.get("atr_15m"),
+                    "poc_distance_atr_15m": row.get("poc_distance_atr_15m"),
+                    "planned_stop_distance_atr_15m": row.get("planned_stop_distance_atr_15m"),
                 }
             )
 
@@ -3499,6 +4022,20 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "commodity_underlying_daily_loss_limit": COMMODITY_UNDERLYING_DAILY_LOSS_LIMIT,
                 "commodity_max_drawdown_pct": COMMODITY_MAX_DRAWDOWN_PCT,
                 "commodity_stop_cooldown_minutes": COMMODITY_STOP_COOLDOWN_MINUTES,
+                "commodity_setup_stop_lock_enabled": settings.COMMODITY_SETUP_STOP_LOCK_ENABLED,
+                "commodity_loss_caps_enabled": settings.COMMODITY_LOSS_CAPS_ENABLED,
+                "commodity_risk_per_trade_pct": settings.COMMODITY_RISK_PER_TRADE_PCT,
+                "commodity_min_structure_target_r": settings.COMMODITY_MIN_STRUCTURE_TARGET_R,
+                "commodity_htf_gate_enabled": settings.COMMODITY_HTF_GATE_ENABLED,
+                "commodity_scalp_max_trade_share": settings.COMMODITY_SCALP_MAX_TRADE_SHARE,
+                "commodity_scalp_mix_lookback": settings.COMMODITY_SCALP_MIX_LOOKBACK,
+                "commodity_daytype_enabled": settings.COMMODITY_DAYTYPE_ENABLED,
+                "commodity_of_quality_gate_enabled": settings.COMMODITY_OF_QUALITY_GATE_ENABLED,
+                "commodity_vol_baseline_enabled": settings.COMMODITY_VOL_BASELINE_ENABLED,
+                "commodity_naked_poc_target_enabled": settings.COMMODITY_NAKED_POC_TARGET_ENABLED,
+                "commodity_high_conviction_setup_enabled": settings.COMMODITY_HIGH_CONVICTION_SETUP_ENABLED,
+                "commodity_high_conviction_max_poc_distance_atr": settings.COMMODITY_HIGH_CONVICTION_MAX_POC_DISTANCE_ATR,
+                "commodity_high_conviction_min_stop_distance_atr": settings.COMMODITY_HIGH_CONVICTION_MIN_STOP_DISTANCE_ATR,
             },
             "strategy_agents": [lane.build_status_payload() for lane in lane_agents],
             "strategies": self._strategy_catalog(),
@@ -3509,6 +4046,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "open_orders": len(self._runtime.order_book.get_open_orders(self._runtime.portfolio.session_id)),
                 "ready_futures_signals": futures_ready,
                 "ready_option_signals": 0,
+                "scalp_mix": self._scalp_mix_snapshot(),
             },
             "watchlist": list(self._runtime.futures_watchlist),
             "futures_watchlist": list(self._runtime.futures_watchlist),

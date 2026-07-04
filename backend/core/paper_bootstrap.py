@@ -92,7 +92,6 @@ async def _prewarm_market_intelligence_runtime() -> None:
 async def _prewarm_commodity_watchlists(*, commodity_strategy_agent, commodity_atm_watchlist_service) -> None:
     try:
         symbols = commodity_strategy_agent.get_symbols()
-        await asyncio.wait_for(commodity_strategy_agent.ensure_selected_option_setup_locks(), timeout=30)
         await asyncio.wait_for(
             commodity_atm_watchlist_service.get_contract_catalog(
                 symbols,

@@ -1,7 +1,7 @@
 """Market-Profile + Order-Flow signal engine for the MCX futures lane.
 
 Replaces the 15-minute MACD trigger that previously drove
-`commodity_strategy_agent._analyze_futures_symbol`. All four canonical
+`commodity_strategy_agent._analyze_futures_symbol`. The canonical
 auction entries are evaluated on 1-minute closed bars; the highest-
 priority non-`None` trigger wins. The output shape mirrors what the
 old MACD evaluator emitted so the surrounding harness
@@ -17,7 +17,7 @@ Reuses without modification:
 * `analytics.market_profile_ext` for `ib_extension`, `poc_migration`,
   `value_area_overlap`.
 
-The four triggers, in priority order:
+The entry triggers, in priority order:
 
 1. **open_drive** — IB prints entirely above prior pVAH (BUY) or below
    prior pVAL (SELL); confirmed by anchored CVD agreement on the first
@@ -27,11 +27,12 @@ The four triggers, in priority order:
    IB extension is already > 50%.
 3. **failed_auction** — poor-high / poor-low reversal back through
    the value-area edge, confirmed by CVD divergence.
-4. **va_migration** — today's value area barely overlaps prior
-   (overlap < 30%) and POC shifted > 0.5%; trade in the migration
-   direction.
-5. **lvn_fade** — fallback: price tests a single-print / LVN level
+4. **lvn_fade** — fallback: price tests a single-print / LVN level
    from the wrong side with CVD absorption; fade back to POC.
+
+Value-area migration is deliberately *context*, not an autonomous entry.
+Confirmed up/down migration is surfaced to the position manager, which can
+use an opposing migration as structural invalidation for an existing trade.
 
 Confidence ∈ [0,1] is observable but doesn't size positions in v1.
 """
@@ -123,7 +124,7 @@ class TriggerResult:
     """Internal result returned by each `_trigger_*` helper."""
 
     signal: str  # "BUY" | "SELL"
-    entry_style: str  # "open_drive" | "ib_break" | "failed_auction" | "va_migration" | "lvn_fade"
+    entry_style: str  # "open_drive" | "ib_break" | "failed_auction" | "lvn_fade"
     reason: str  # short audit-friendly tag
     validation_detail: str  # human-readable evidence with numbers
     confidence: float  # 0..1
@@ -137,7 +138,6 @@ _TRIGGER_PRIORITY: tuple[str, ...] = (
     "open_drive",
     "ib_break",
     "failed_auction",
-    "va_migration",
     "lvn_fade",
 )
 
@@ -254,7 +254,7 @@ def _trigger_open_drive(
     cvd_anchored_last: Optional[float],
     of_degraded: bool = False,
 ) -> Optional[TriggerResult]:
-    if prior_profile is None:
+    if prior_profile is None or of_degraded:
         return None
     period_count = int(_profile_attr(today_profile, "period_count", 0) or 0)
     # Only consider during/just after IB (4 × 15-min periods = 60 min).
@@ -279,7 +279,7 @@ def _trigger_open_drive(
     if not drive_up and not drive_dn:
         return None
 
-    if drive_up and last_close > ib_high and (of_degraded or cvd_anchored_last > 0):
+    if drive_up and last_close > ib_high and cvd_anchored_last > 0:
         return TriggerResult(
             signal="BUY",
             entry_style="open_drive",
@@ -299,7 +299,7 @@ def _trigger_open_drive(
                 "cvd_anchored": cvd_anchored_last,
             },
         )
-    if drive_dn and last_close < ib_low and (of_degraded or cvd_anchored_last < 0):
+    if drive_dn and last_close < ib_low and cvd_anchored_last < 0:
         return TriggerResult(
             signal="SELL",
             entry_style="open_drive",
@@ -332,7 +332,7 @@ def _trigger_ib_break(
     of_degraded: bool = False,
 ) -> Optional[TriggerResult]:
     period_count = int(_profile_attr(today_profile, "period_count", 0) or 0)
-    if period_count < 4 or len(closed_1m) < 2:
+    if period_count < 4 or len(closed_1m) < 2 or of_degraded:
         return None
     ib_high = _attr(today_profile, "initial_balance_high")
     ib_low = _attr(today_profile, "initial_balance_low")
@@ -355,7 +355,7 @@ def _trigger_ib_break(
     cvd_window = cvd_anchored[-3:] if len(cvd_anchored) >= 3 else cvd_anchored[-2:]
 
     if last > ib_high and prev > ib_high:
-        if not of_degraded and not cvd_agrees_with("BUY", cvd_window):
+        if not cvd_agrees_with("BUY", cvd_window):
             return None
         if vwap_last is not None and last < vwap_last:
             return None
@@ -383,7 +383,7 @@ def _trigger_ib_break(
             },
         )
     if last < ib_low and prev < ib_low:
-        if not of_degraded and not cvd_agrees_with("SELL", cvd_window):
+        if not cvd_agrees_with("SELL", cvd_window):
             return None
         if vwap_last is not None and last > vwap_last:
             return None
@@ -427,38 +427,42 @@ def _trigger_failed_auction(
     vah = _attr(today_profile, "vah")
     val = _attr(today_profile, "val")
     poc = _attr(today_profile, "poc")
-    poor_high = bool(_profile_attr(today_profile, "poor_high", False))
-    poor_low = bool(_profile_attr(today_profile, "poor_low", False))
-    high_price = _attr(today_profile, "high_price")
-    low_price = _attr(today_profile, "low_price")
     if None in (vah, val, poc):
         return None
 
     last_close = _candle_close(closed_1m[-1])
-    if last_close <= 0:
+    if last_close <= 0 or len(closed_1m) < 2 or of_degraded:
         return None
 
+    # A poor high/low is an *unfinished* auction and is therefore a likely
+    # revisit, not proof of rejection. A failed auction requires an actual
+    # outside-value probe followed by a close back through the value edge.
+    previous_close = _candle_close(closed_1m[-2])
+    recent = closed_1m[-6:]
+    rejection_high = max(_candle_high(bar) for bar in recent)
+    rejection_low = min(_candle_low(bar) for bar in recent)
+    rejected_above_value = previous_close >= vah and last_close < vah
+    rejected_below_value = previous_close <= val and last_close > val
+
     div = cvd_divergence(closed_1m, cvd_total, lookback=20)
-    if not of_degraded and (div is None or div.strength < 0.4):
+    if div is None or div.strength < 0.4:
         return None
-    # OF-degraded: fall back to structure-only (poor extreme + VA position); the
-    # CVD-divergence confirmation is noise on thin volume so it is not required.
-    div_strength = div.strength if div is not None else 0.5
-    bearish_ok = of_degraded or (div is not None and div.kind == "bearish")
-    bullish_ok = of_degraded or (div is not None and div.kind == "bullish")
+    div_strength = div.strength
+    bearish_ok = div.kind == "bearish"
+    bullish_ok = div.kind == "bullish"
 
     atr_pad = max(atr_1m or 0.0, 0.0)
 
-    if poor_high and last_close < vah and bearish_ok and high_price is not None:
-        stop = float(high_price) + (atr_pad if atr_pad > 0 else 0.001 * last_close)
+    if rejected_above_value and bearish_ok:
+        stop = float(rejection_high) + (atr_pad if atr_pad > 0 else 0.001 * last_close)
         conf = 0.55 + 0.4 * min(div_strength, 1.0) / 2.0
         return TriggerResult(
             signal="SELL",
             entry_style="failed_auction",
             reason="failed_auction_high",
             validation_detail=(
-                f"Failed-auction SELL: poor_high at {high_price:.2f} rejected; "
-                f"close {last_close:.2f} < VAH {vah:.2f}; bearish CVD divergence "
+                f"Failed-auction SELL: outside-value close {previous_close:.2f} "
+                f"rejected back below VAH {vah:.2f} at {last_close:.2f}; bearish CVD divergence "
                 f"strength {div_strength:.2f}."
             ),
             confidence=round(conf, 3),
@@ -468,21 +472,21 @@ def _trigger_failed_auction(
                 "vah": vah,
                 "val": val,
                 "poc": poc,
-                "poor_high_extreme": high_price,
+                "rejection_extreme": rejection_high,
                 "divergence_strength": div_strength,
                 "atr_1m": atr_1m,
             },
         )
-    if poor_low and last_close > val and bullish_ok and low_price is not None:
-        stop = float(low_price) - (atr_pad if atr_pad > 0 else 0.001 * last_close)
+    if rejected_below_value and bullish_ok:
+        stop = float(rejection_low) - (atr_pad if atr_pad > 0 else 0.001 * last_close)
         conf = 0.55 + 0.4 * min(div_strength, 1.0) / 2.0
         return TriggerResult(
             signal="BUY",
             entry_style="failed_auction",
             reason="failed_auction_low",
             validation_detail=(
-                f"Failed-auction BUY: poor_low at {low_price:.2f} rejected; "
-                f"close {last_close:.2f} > VAL {val:.2f}; bullish CVD divergence "
+                f"Failed-auction BUY: outside-value close {previous_close:.2f} "
+                f"rejected back above VAL {val:.2f} at {last_close:.2f}; bullish CVD divergence "
                 f"strength {div_strength:.2f}."
             ),
             confidence=round(conf, 3),
@@ -492,12 +496,175 @@ def _trigger_failed_auction(
                 "vah": vah,
                 "val": val,
                 "poc": poc,
-                "poor_low_extreme": low_price,
+                "rejection_extreme": rejection_low,
                 "divergence_strength": div_strength,
                 "atr_1m": atr_1m,
             },
         )
     return None
+
+
+def _assess_value_migration(
+    *,
+    today_profile: Any,
+    prior_profile: Any,
+    closed_1m: list[dict[str, Any]],
+    cvd_anchored: list[float],
+    vwap_last: Optional[float],
+    of_degraded: bool = False,
+) -> dict[str, Any]:
+    """Describe developing/confirmed value migration without authorizing entry.
+
+    Migration is a session-level auction observation.  A low-overlap, shifted
+    profile establishes the direction; two closes outside prior value plus
+    fresh CVD/VWAP agreement promote it from ``developing`` to ``confirmed``.
+    The caller surfaces this state to existing positions.
+    """
+    context: dict[str, Any] = {
+        "state": "unavailable",
+        "direction": None,
+        "signal": None,
+        "reason": None,
+        "detail": "Prior-session value is unavailable.",
+        "evidence": {},
+        "stop_hint": None,
+    }
+    if prior_profile is None:
+        return context
+    period_count = int(_profile_attr(today_profile, "period_count", 0) or 0)
+    if period_count < 6:
+        context.update(
+            state="warming_up",
+            detail=f"Value migration is warming up ({period_count}/6 profile periods).",
+        )
+        return context
+
+    today_ext = _make_ext_dict(today_profile)
+    prior_ext = _make_ext_dict(prior_profile)
+    overlap = compute_value_area_overlap(today_ext, prior_ext)
+    if overlap is None or overlap >= 0.3:
+        context.update(
+            state="none",
+            detail=(
+                "No value migration: current/prior value overlap is unavailable."
+                if overlap is None
+                else f"No value migration: value-area overlap {overlap:.2f} is not below 0.30."
+            ),
+            evidence={"overlap": overlap},
+        )
+        return context
+    poc_info = compute_poc_migration(today_ext, prior_ext)
+    if poc_info is None or abs(poc_info.pct) < 0.005:
+        context.update(
+            state="none",
+            detail="No value migration: POC shift is below 0.50%.",
+            evidence={
+                "overlap": overlap,
+                "poc_shift_pct": getattr(poc_info, "pct", None),
+            },
+        )
+        return context
+
+    today_poc = _attr(today_profile, "poc")
+    pvah = _attr(prior_profile, "vah")
+    pval = _attr(prior_profile, "val")
+    if today_poc is None or pvah is None or pval is None:
+        context.update(
+            state="unavailable",
+            detail="Value migration cannot be assessed because a POC/VA boundary is missing.",
+        )
+        return context
+
+    direction = str(poc_info.direction or "").lower()
+    signal = "BUY" if direction == "up" else "SELL" if direction == "down" else None
+    reason = f"va_migration_{direction}" if signal else None
+    evidence: dict[str, Any] = {
+        "overlap": overlap,
+        "poc_shift_pct": poc_info.pct,
+        "today_poc": today_poc,
+        "prior_pvah": pvah,
+        "prior_pval": pval,
+    }
+    context.update(
+        state="developing",
+        direction=direction or None,
+        signal=signal,
+        reason=reason,
+        evidence=evidence,
+        stop_hint=float(pval) if signal == "BUY" else float(pvah) if signal == "SELL" else None,
+    )
+    if signal is None:
+        context["detail"] = "Value migration direction is unavailable."
+        return context
+
+    if len(closed_1m) < 2 or len(cvd_anchored) < 2:
+        context["detail"] = (
+            f"Value migration {direction} is developing; two closes and fresh order flow are required."
+        )
+        return context
+
+    last_close = _candle_close(closed_1m[-1])
+    previous_close = _candle_close(closed_1m[-2])
+    if last_close <= 0 or previous_close <= 0:
+        context["detail"] = f"Value migration {direction} is developing; recent closes are unavailable."
+        return context
+
+    # Value migration is acceptance, not merely a shifted developing POC. Two
+    # closes beyond prior value plus fresh (15-minute) directional CVD prevent a
+    # session-old cumulative CVD sign from repeatedly re-authorizing the setup.
+    cvd_window = cvd_anchored[-15:] if len(cvd_anchored) >= 15 else cvd_anchored
+    cvd_delta = cvd_window[-1] - cvd_window[0]
+    accepted = (
+        previous_close > pvah and last_close > max(today_poc, pvah)
+        if signal == "BUY"
+        else previous_close < pval and last_close < min(today_poc, pval)
+    )
+    flow_confirmed = cvd_delta > 0 if signal == "BUY" else cvd_delta < 0
+    vwap_confirmed = (
+        vwap_last is None
+        or (last_close >= vwap_last if signal == "BUY" else last_close <= vwap_last)
+    )
+    evidence.update(
+        {
+            "cvd_delta_15m": cvd_delta,
+            "vwap": vwap_last,
+            "price_accepted": accepted,
+            "flow_confirmed": flow_confirmed,
+            "vwap_confirmed": vwap_confirmed,
+            "of_degraded": bool(of_degraded),
+        }
+    )
+    boundary_label = "VAH" if signal == "BUY" else "VAL"
+    boundary = pvah if signal == "BUY" else pval
+    shift = f"{poc_info.pct * 100:+.2f}%"
+    if accepted and flow_confirmed and vwap_confirmed and not of_degraded:
+        context.update(
+            state="confirmed",
+            detail=(
+                f"Value migration {direction} confirmed: overlap {overlap:.2f}; POC shifted "
+                f"{shift} to {today_poc:.2f}; two closes accepted beyond prior {boundary_label} "
+                f"{boundary:.2f}; 15m CVD delta {cvd_delta:+.0f}."
+            ),
+            evidence=evidence,
+        )
+    else:
+        missing = []
+        if not accepted:
+            missing.append("two-close acceptance")
+        if not flow_confirmed:
+            missing.append("fresh CVD")
+        if not vwap_confirmed:
+            missing.append("VWAP alignment")
+        if of_degraded:
+            missing.append("usable order-flow coverage")
+        context.update(
+            detail=(
+                f"Value migration {direction} is developing (overlap {overlap:.2f}, POC {shift}); "
+                f"awaiting {', '.join(missing) or 'confirmation'}."
+            ),
+            evidence=evidence,
+        )
+    return context
 
 
 def _trigger_va_migration(
@@ -505,73 +672,34 @@ def _trigger_va_migration(
     today_profile: Any,
     prior_profile: Any,
     closed_1m: list[dict[str, Any]],
-    cvd_anchored_last: Optional[float],
+    cvd_anchored: list[float],
+    vwap_last: Optional[float],
     of_degraded: bool = False,
 ) -> Optional[TriggerResult]:
-    if prior_profile is None:
-        return None
-    period_count = int(_profile_attr(today_profile, "period_count", 0) or 0)
-    if period_count < 6 or not closed_1m or cvd_anchored_last is None:
-        return None
+    """Compatibility wrapper returning only a *confirmed context* result.
 
-    today_ext = _make_ext_dict(today_profile)
-    prior_ext = _make_ext_dict(prior_profile)
-    overlap = compute_value_area_overlap(today_ext, prior_ext)
-    if overlap is None or overlap >= 0.3:
+    The evaluator no longer places this result in the entry-candidate queue.
+    Keeping the wrapper makes the confirmation rule independently testable.
+    """
+    context = _assess_value_migration(
+        today_profile=today_profile,
+        prior_profile=prior_profile,
+        closed_1m=closed_1m,
+        cvd_anchored=cvd_anchored,
+        vwap_last=vwap_last,
+        of_degraded=of_degraded,
+    )
+    if context.get("state") != "confirmed" or context.get("signal") not in {"BUY", "SELL"}:
         return None
-    poc_info = compute_poc_migration(today_ext, prior_ext)
-    if poc_info is None or abs(poc_info.pct) < 0.005:
-        return None
-
-    today_poc = _attr(today_profile, "poc")
-    pvah = _attr(prior_profile, "vah")
-    pval = _attr(prior_profile, "val")
-    if today_poc is None or pvah is None or pval is None:
-        return None
-
-    last_close = _candle_close(closed_1m[-1])
-    if last_close <= 0:
-        return None
-
-    if poc_info.direction == "up" and last_close > today_poc and (of_degraded or cvd_anchored_last > 0):
-        return TriggerResult(
-            signal="BUY",
-            entry_style="va_migration",
-            reason="va_migration_up",
-            validation_detail=(
-                f"VA migration BUY: overlap {overlap:.2f} < 0.30; POC shifted "
-                f"+{poc_info.pct * 100:.2f}% to {today_poc:.2f}; close "
-                f"{last_close:.2f} > POC; anchored CVD {cvd_anchored_last:+.0f}."
-            ),
-            confidence=0.65,
-            stop_hint=float(pval),
-            evidence={
-                "overlap": overlap,
-                "poc_shift_pct": poc_info.pct,
-                "today_poc": today_poc,
-                "prior_pval": pval,
-            },
-        )
-    if poc_info.direction == "down" and last_close < today_poc and (of_degraded or cvd_anchored_last < 0):
-        return TriggerResult(
-            signal="SELL",
-            entry_style="va_migration",
-            reason="va_migration_down",
-            validation_detail=(
-                f"VA migration SELL: overlap {overlap:.2f} < 0.30; POC shifted "
-                f"{poc_info.pct * 100:.2f}% to {today_poc:.2f}; close "
-                f"{last_close:.2f} < POC; anchored CVD {cvd_anchored_last:+.0f}."
-            ),
-            confidence=0.65,
-            stop_hint=float(pvah),
-            evidence={
-                "overlap": overlap,
-                "poc_shift_pct": poc_info.pct,
-                "today_poc": today_poc,
-                "prior_pvah": pvah,
-            },
-        )
-    return None
+    return TriggerResult(
+        signal=str(context["signal"]),
+        entry_style="va_migration",
+        reason=str(context.get("reason") or "va_migration"),
+        validation_detail=str(context.get("detail") or "Value migration confirmed."),
+        confidence=0.65,
+        stop_hint=_safe_float(context.get("stop_hint")),
+        evidence=dict(context.get("evidence") or {}),
+    )
 
 
 def _trigger_lvn_fade(
@@ -736,7 +864,7 @@ def evaluate_commodity_mp_signal(
     cvd_anchor_index: Optional[int] = None,
     atr_1m: Optional[float] = None,
 ) -> dict[str, Any]:
-    """Evaluate all four MP+OF triggers + LVN fallback against the latest
+    """Evaluate MP+OF entries and value-migration context against the latest
     closed 1-min bar and return a row matching the shape today's MACD
     evaluator emits.
 
@@ -806,6 +934,12 @@ def evaluate_commodity_mp_signal(
         "ib_extension_pct": None,
         "prior_session_date": None,
         "trigger_evidence": {},
+        "value_migration_state": "unavailable",
+        "value_migration_direction": None,
+        "value_migration_signal": None,
+        "value_migration_reason": None,
+        "value_migration_detail": "Prior-session value is unavailable.",
+        "value_migration_evidence": {},
     }
 
     if not closed_1m or today_profile is None:
@@ -814,8 +948,15 @@ def evaluate_commodity_mp_signal(
     # ── Order flow series ─────────────────────────────────────────────
     anchor = cvd_anchor_index if cvd_anchor_index is not None else 0
     anchor = max(0, min(anchor, len(closed_1m) - 1))
+    # Volume nodes describe the *current auction*.  The live caller supplies a
+    # multi-day history window, so using all of ``closed_1m`` here blended prior
+    # contracts/sessions into today's LVN map and could manufacture or hide an
+    # LVN fade after a roll.  Keep long history for trailing quality checks, but
+    # scope the session profile and absorption CVD to the 09:00 IST anchor.
+    session_1m = closed_1m[anchor:]
     cvd_total = bar_cvd(closed_1m)
     cvd_anc = anchored_cvd(closed_1m, anchor_index=anchor)
+    session_cvd = bar_cvd(session_1m)
     bands = vwap_bands(closed_1m, anchor_index=anchor)
     vwap_last = bands["vwap"][-1] if bands["vwap"] else None
     vwap_upper_last = bands["upper"][-1] if bands["upper"] else None
@@ -832,7 +973,7 @@ def evaluate_commodity_mp_signal(
     div = cvd_divergence(closed_1m, cvd_total, lookback=20)
 
     # Volume node density snapshot (used by lvn_fade and for the UI).
-    histogram = volume_node_density(closed_1m, bins=24)
+    histogram = volume_node_density(session_1m, bins=24)
     nodes = hvn_lvn(histogram)
     hvn_count = len(nodes.get("hvn", []))
     lvn_count = len(nodes.get("lvn", []))
@@ -931,15 +1072,15 @@ def evaluate_commodity_mp_signal(
         except Exception:
             vol_baseline = None
 
-    # R0 order-flow quality gate — SUPERSEDED by the per-instrument baseline above
-    # and FORCED OFF when that path is on (CVD must never be demoted). Retained
-    # only as a legacy fallback; default-off either way.
+    # A historical scale baseline cannot rescue missing observations. When the
+    # recent MP buckets lack usable volume, OF-dependent entries are blocked.
+    volume_coverage = _of_volume_coverage(closed_1m)
     of_degraded = (
-        not settings.COMMODITY_VOL_BASELINE_ENABLED
-        and settings.COMMODITY_OF_QUALITY_GATE_ENABLED
-        and _of_volume_coverage(closed_1m) < float(settings.COMMODITY_OF_MIN_VOL_COVERAGE)
+        settings.COMMODITY_OF_QUALITY_GATE_ENABLED
+        and volume_coverage < float(settings.COMMODITY_OF_MIN_VOL_COVERAGE)
     )
     base["of_degraded"] = bool(of_degraded)
+    base["of_volume_coverage"] = round(float(volume_coverage), 3)
 
     open_drive = _trigger_open_drive(
         today_profile=today_profile,
@@ -972,20 +1113,25 @@ def evaluate_commodity_mp_signal(
     if failed_auction is not None:
         candidates["failed_auction"] = failed_auction
 
-    va_migration = _trigger_va_migration(
+    value_migration = _assess_value_migration(
         today_profile=today_profile,
         prior_profile=prior_profile,
         closed_1m=closed_1m,
-        cvd_anchored_last=cvd_anchored_last,
+        cvd_anchored=cvd_anc,
+        vwap_last=vwap_last,
         of_degraded=of_degraded,
     )
-    if va_migration is not None:
-        candidates["va_migration"] = va_migration
+    base["value_migration_state"] = value_migration.get("state")
+    base["value_migration_direction"] = value_migration.get("direction")
+    base["value_migration_signal"] = value_migration.get("signal")
+    base["value_migration_reason"] = value_migration.get("reason")
+    base["value_migration_detail"] = value_migration.get("detail")
+    base["value_migration_evidence"] = dict(value_migration.get("evidence") or {})
 
     lvn_fade = _trigger_lvn_fade(
         today_profile=today_profile,
-        closed_1m=closed_1m,
-        cvd_total=cvd_total,
+        closed_1m=session_1m,
+        cvd_total=session_cvd,
         atr_1m=atr_1m,
         of_degraded=of_degraded,
         baseline=vol_baseline,
@@ -993,6 +1139,27 @@ def evaluate_commodity_mp_signal(
     )
     if lvn_fade is not None:
         candidates["lvn_fade"] = lvn_fade
+
+    # Initiative activity needs participation in the same direction relative
+    # to this instrument's own historical 15-minute volume distribution.
+    pressure_ratio = _vb_pressure_ratio(current_mp_signed, vol_baseline)
+    if pressure_ratio is not None:
+        min_pressure = float(settings.COMMODITY_MIN_OF_PRESSURE_RATIO)
+        for name in ("open_drive", "ib_break"):
+            candidate = candidates.get(name)
+            if candidate is None:
+                continue
+            aligned_pressure = (
+                pressure_ratio >= min_pressure
+                if candidate.signal == "BUY"
+                else pressure_ratio <= -min_pressure
+            )
+            if not aligned_pressure:
+                candidates.pop(name, None)
+                base["signal_validation_detail"] = (
+                    f"{name} suppressed: adaptive OF pressure {pressure_ratio:+.2f} "
+                    f"does not confirm {candidate.signal} (need ±{min_pressure:.2f})."
+                )
 
     # R1 day-type suppression: on a trend day drop counter-trend FADES; in
     # balance drop the breakout triggers (go-with-breakout is for imbalance).
@@ -1020,14 +1187,36 @@ def evaluate_commodity_mp_signal(
             break
 
     if chosen is None:
-        base["reason"] = "no_trigger"
-        base["candidate_reason"] = "no_trigger"
-        base["signal_validation_detail"] = (
-            f"MP context ready (period {period_count}); no MP+OF trigger fired this bar."
-            if period_count >= 4
-            else f"Warming up — only {period_count} MP periods printed (need ≥ 4 for IB triggers)."
-        )
-        base["mp_reason"] = "mp_no_trigger" if period_count >= 4 else "mp_warming_up"
+        existing_detail = str(base.get("signal_validation_detail") or "")
+        if of_degraded:
+            base["reason"] = "of_quality_block"
+            base["candidate_reason"] = "of_quality_block"
+            base["signal_validation_detail"] = (
+                f"Order-flow quality blocked entries: only {volume_coverage:.0%} of recent "
+                "15-minute MP buckets carried volume."
+            )
+            base["mp_reason"] = "of_quality_block"
+        elif "suppressed:" in existing_detail:
+            base["reason"] = "context_filter"
+            base["candidate_reason"] = "context_filter"
+            base["mp_reason"] = "mp_context_filter"
+        else:
+            base["reason"] = "no_trigger"
+            base["candidate_reason"] = "no_trigger"
+            migration_state = str(base.get("value_migration_state") or "")
+            if migration_state in {"confirmed", "developing"}:
+                base["signal_validation_detail"] = (
+                    f"{base.get('value_migration_detail')} Context only — value migration "
+                    "manages existing positions and does not open a trade."
+                )
+                base["mp_reason"] = f"mp_value_migration_{migration_state}"
+            else:
+                base["signal_validation_detail"] = (
+                    f"MP context ready (period {period_count}); no MP+OF entry trigger fired this bar."
+                    if period_count >= 4
+                    else f"Warming up — only {period_count} MP periods printed (need ≥ 4 for IB triggers)."
+                )
+                base["mp_reason"] = "mp_no_trigger" if period_count >= 4 else "mp_warming_up"
         # CVD-agreement flag still useful for the dashboard
         if cvd_anc and last_close > 0:
             cvd_recent = cvd_anc[-6:] if len(cvd_anc) >= 6 else cvd_anc

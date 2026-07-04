@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 import pytest
 
+from paper_engine import commodity_mp_signal as mp_signal_module
 from paper_engine.commodity_mp_signal import (
     _compute_atr,
     evaluate_commodity_mp_signal,
@@ -238,7 +239,7 @@ def test_failed_auction_sell_after_poor_high() -> None:
 
 
 def test_va_migration_requires_low_overlap_and_poc_shift() -> None:
-    """value_area_overlap < 0.3 + POC shift > 0.5% same side → va_migration."""
+    """Confirmed migration is surfaced as context, never a standalone entry."""
     prior = FakeProfile(
         poc=98.0, vah=100.0, val=96.0,
         initial_balance_high=99.0, initial_balance_low=97.0,
@@ -247,7 +248,9 @@ def test_va_migration_requires_low_overlap_and_poc_shift() -> None:
     )
     today = FakeProfile(
         poc=105.0, vah=107.0, val=103.0,  # no overlap with prior [96, 100]
-        initial_balance_high=104.0, initial_balance_low=103.5,
+        # Straddle prior value and keep the live close inside IB so neither
+        # open_drive nor ib_break can independently authorize an entry.
+        initial_balance_high=108.0, initial_balance_low=99.0,
         high_price=107.0, low_price=103.0, close_price=106.0,
         period_count=8,
     )
@@ -259,10 +262,12 @@ def test_va_migration_requires_low_overlap_and_poc_shift() -> None:
         today_profile=today, prior_profile=prior,
         cvd_anchor_index=0, atr_1m=0.1,
     )
-    # Either va_migration fires, or ib_break wins on priority — both are valid
-    # outcomes for this synthetic data. va_migration alone shouldn't be blocked.
-    assert result["signal"] == "BUY"
-    assert result["entry_style"] in {"va_migration", "ib_break"}
+    assert result["signal"] is None
+    assert result["entry_style"] is None
+    assert result["value_migration_state"] == "confirmed"
+    assert result["value_migration_direction"] == "up"
+    assert result["value_migration_signal"] == "BUY"
+    assert "context only" in result["signal_validation_detail"].lower()
 
 
 def test_va_migration_blocked_when_overlap_high() -> None:
@@ -349,6 +354,46 @@ def test_no_signal_when_no_candles() -> None:
     )
     assert result["signal"] is None
     assert result["reason"] == "insufficient_data"
+
+
+def test_volume_nodes_are_scoped_to_current_session_anchor(monkeypatch) -> None:
+    """A multi-day broker window must not blend yesterday into today's LVNs."""
+    prior_day = _make_uptrend(num_bars=30, start=80.0, step=0.1)
+    current_day = [
+        _candle(
+            minutes_after_open=i,
+            open_=100.0 + i * 0.01,
+            high=100.1 + i * 0.01,
+            low=99.9 + i * 0.01,
+            close=100.05 + i * 0.01,
+            date="2026-05-30",
+        )
+        for i in range(30)
+    ]
+    seen_lengths: list[int] = []
+    original = mp_signal_module.volume_node_density
+
+    def capture(candles, *, bins):
+        seen_lengths.append(len(candles))
+        return original(candles, bins=bins)
+
+    monkeypatch.setattr(mp_signal_module, "volume_node_density", capture)
+    today = FakeProfile(
+        poc=100.0, vah=101.0, val=99.0,
+        initial_balance_high=100.5, initial_balance_low=99.5,
+        high_price=101.0, low_price=99.0, close_price=100.2,
+        period_count=6, single_prints=[99.5, 100.5],
+    )
+    evaluate_commodity_mp_signal(
+        prior_day + current_day,
+        symbol="MCX:GOLD26JUNFUT",
+        today_profile=today,
+        prior_profile=None,
+        cvd_anchor_index=len(prior_day),
+        atr_1m=0.1,
+    )
+    assert seen_lengths
+    assert set(seen_lengths) == {len(current_day)}
 
 
 # ─── ATR helper ────────────────────────────────────────────────────────────

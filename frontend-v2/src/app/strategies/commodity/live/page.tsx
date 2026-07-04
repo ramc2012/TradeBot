@@ -129,6 +129,12 @@ type WatchRow = {
   signal_validation?: string | null;
   signal_validation_detail?: string | null;
   trigger_evidence?: Record<string, unknown> | null;
+  value_migration_state?: string | null;
+  value_migration_direction?: string | null;
+  value_migration_signal?: string | null;
+  value_migration_reason?: string | null;
+  value_migration_detail?: string | null;
+  value_migration_evidence?: Record<string, unknown> | null;
   cvd_latest?: number | null;
   cvd_session?: number | null;
   cvd_window_delta?: number | null;
@@ -219,6 +225,10 @@ type CommodityPosition = {
   trade_horizon?: string | null;
   htf_bias?: string | null;
   htf_detail?: string | null;
+  value_migration_state?: string | null;
+  value_migration_direction?: string | null;
+  value_migration_alignment?: string | null;
+  value_migration_detail?: string | null;
 };
 
 type AuditEvent = {
@@ -629,7 +639,18 @@ function TriggerBadge({ row }: { row: WatchRow }) {
   const conf = Number(row.confidence ?? 0);
   const sig = String(row.signal || row.candidate_signal || "").toUpperCase();
   if (!style) {
-    return <span className="text-[10.5px] text-text-muted">no trigger</span>;
+    const hasMigration =
+      Boolean(row.value_migration_direction) &&
+      ["developing", "confirmed"].includes(String(row.value_migration_state || "").toLowerCase());
+    return hasMigration ? (
+      <ValueMigrationBadge
+        direction={row.value_migration_direction}
+        state={row.value_migration_state}
+        detail={row.value_migration_detail}
+      />
+    ) : (
+      <span className="text-[10.5px] text-text-muted">no trigger</span>
+    );
   }
   // Confidence ladder: tiny 5-segment bar under the badge. Segments fill
   // proportionally to confidence (so 0.6 fills 3 segments brightly + 1 dim).
@@ -679,6 +700,43 @@ function CVDChip({ row }: { row: WatchRow }) {
   );
 }
 
+function ValueMigrationBadge({
+  direction,
+  state,
+  alignment,
+  detail,
+  compact = false,
+}: {
+  direction?: string | null;
+  state?: string | null;
+  alignment?: string | null;
+  detail?: string | null;
+  compact?: boolean;
+}) {
+  const dir = String(direction || "").toLowerCase();
+  const status = String(state || "").toLowerCase();
+  const relation = String(alignment || "").toLowerCase();
+  if (!dir || !["developing", "confirmed"].includes(status)) return null;
+  const arrow = dir === "up" ? "↑" : "↓";
+  const tone =
+    relation === "opposed"
+      ? "bg-rose-500/15 text-rose-300 ring-rose-500/30"
+      : relation === "aligned"
+        ? "bg-emerald-500/15 text-emerald-300 ring-emerald-500/30"
+        : status === "confirmed"
+          ? "bg-sky-500/15 text-sky-300 ring-sky-500/30"
+          : "bg-amber-500/15 text-amber-300 ring-amber-500/30";
+  const suffix = relation && relation !== "developing" ? ` · ${relation}` : status === "developing" ? " · dev" : "";
+  return (
+    <span
+      title={detail || `Value migration ${dir} ${status}`}
+      className={`inline-flex items-center rounded px-1 py-[1px] text-[8.5px] font-semibold uppercase tracking-[0.1em] ring-1 ${tone}`}
+    >
+      {compact ? `V${arrow}` : `value ${arrow}${suffix}`}
+    </span>
+  );
+}
+
 // ─── Position chip ─────────────────────────────────────────────────────────
 
 function PositionChip({ position }: { position?: CommodityPosition }) {
@@ -712,6 +770,13 @@ function PositionChip({ position }: { position?: CommodityPosition }) {
           ⊥{formatSigned(stopDist, 2)}
         </span>
       ) : null}
+      <ValueMigrationBadge
+        direction={position.value_migration_direction}
+        state={position.value_migration_state}
+        alignment={position.value_migration_alignment}
+        detail={position.value_migration_detail}
+        compact
+      />
     </span>
   );
 }
@@ -897,7 +962,7 @@ function ActionQueue({
         <FilterSelect
           value={triggerFilter}
           onChange={setTriggerFilter}
-          options={["all", "open_drive", "ib_break", "failed_auction", "va_migration", "lvn_fade"]}
+          options={["all", "open_drive", "ib_break", "failed_auction", "lvn_fade"]}
         />
         <FilterCount n={filtered.length} total={ranked.length} />
       </FilterBar>
@@ -1072,7 +1137,7 @@ function PositionsTab({
                 <th className="px-3 text-left">Risk gauge</th>
                 <th className="px-2 text-right">Unrealized</th>
                 <th className="px-2 text-right">Return</th>
-                <th className="px-2 text-left">Trigger</th>
+                <th className="px-2 text-left">Trigger · Value</th>
                 <th className="px-2 text-right">Held</th>
               </tr>
             </thead>
@@ -1142,6 +1207,12 @@ function PositionsTab({
                     </td>
                     <td className="px-2 align-middle text-[10.5px] text-text-muted">
                       <div>{triggerLabel(p.entry_style)}</div>
+                      <ValueMigrationBadge
+                        direction={p.value_migration_direction}
+                        state={p.value_migration_state}
+                        alignment={p.value_migration_alignment}
+                        detail={p.value_migration_detail}
+                      />
                       {p.trade_horizon === "scalp" ? (
                         <span
                           title={p.htf_detail || "counter-HTF scalp — reduced size, 1R target, time-stop"}
@@ -1705,7 +1776,7 @@ function StrategyModal({
             <Row k="Min stop %" v={`${(Number(config.futures_min_stop_pct ?? 0) * 100).toFixed(2)}%`} />
             <Row k="Trail × ATR" v={String(config.futures_trail_atr_multiplier ?? "—")} />
             <Row k="Target × R" v={String(config.futures_target_arm_r_multiplier ?? "—")} />
-            <Row k="Min hold (bars)" v={String(config.futures_min_hold_bars ?? "—")} />
+            <Row k="Minimum hold" v={Number(config.futures_min_hold_bars ?? 0) > 0 ? `${config.futures_min_hold_bars} bars` : "market-driven"} />
           </Section>
 
           <Section title="Risk caps" cols={6}>
@@ -1714,6 +1785,8 @@ function StrategyModal({
             <Row k="Per-underlying loss" v={formatINR(Number(config.commodity_underlying_daily_loss_limit ?? 0))} />
             <Row k="Max drawdown" v={`${Number(config.commodity_max_drawdown_pct ?? 0).toFixed(1)}%`} />
             <Row k="Stop cooldown" v={`${config.commodity_stop_cooldown_minutes ?? "—"} min`} />
+            <Row k="Scalp ceiling" v={`${(Number(config.commodity_scalp_max_trade_share ?? 0.2) * 100).toFixed(0)}% of trades`} />
+            <Row k="Mix lookback" v={`${config.commodity_scalp_mix_lookback ?? 20} entries`} />
           </Section>
 
           <Section title="Universe" cols={12}>
@@ -1727,12 +1800,15 @@ function StrategyModal({
           </Section>
 
           <Section title="Triggers (priority high → low)" cols={12}>
-            <div className="col-span-2 grid grid-cols-5 gap-2 text-[10.5px]">
-              {["open_drive", "ib_break", "failed_auction", "va_migration", "lvn_fade"].map((t) => (
+            <div className="col-span-2 grid grid-cols-4 gap-2 text-[10.5px]">
+              {["open_drive", "ib_break", "failed_auction", "lvn_fade"].map((t) => (
                 <div key={t} className="rounded bg-bg-secondary/20 px-2 py-1">
                   <div className="text-[9.5px] uppercase tracking-wider text-text-muted">{triggerLabel(t)}</div>
                 </div>
               ))}
+            </div>
+            <div className="col-span-2 mt-2 rounded bg-sky-500/[0.08] px-2 py-1 text-[10.5px] text-sky-200 ring-1 ring-sky-500/20">
+              Value migration is position context only: aligned supports the hold; confirmed opposing migration exits immediately. Responsive scalps are capped at 20% of the rolling trade mix.
             </div>
           </Section>
 
@@ -2660,6 +2736,14 @@ function InstrumentDetailModal({
               <KV label="Regime" v={String(row.regime || "—")} />
               <KV label="Confidence" v={`${Math.round(Number(row.confidence ?? 0) * 100)}%`} />
               <KV label="Trigger" v={triggerLabel(row.entry_style)} />
+              <KV
+                label="Value"
+                v={
+                  row.value_migration_direction
+                    ? `${row.value_migration_direction === "up" ? "↑" : "↓"} ${row.value_migration_state || "—"}`
+                    : "—"
+                }
+              />
             </div>
           </div>
           <div className="col-span-5 rounded bg-bg-secondary/15 p-2 ring-1 ring-bg-secondary/30">
@@ -2767,6 +2851,14 @@ function InstrumentDetailModal({
               />
               <KV label="Style" v={triggerLabel(position.entry_style)} />
               <KV label="Regime" v={String(position.regime || "—")} />
+              <KV
+                label="Value migration"
+                v={
+                  position.value_migration_direction
+                    ? `${position.value_migration_direction === "up" ? "↑" : "↓"} ${position.value_migration_alignment || position.value_migration_state || "—"}`
+                    : "—"
+                }
+              />
             </div>
           </div>
         ) : null}
