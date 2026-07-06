@@ -300,6 +300,28 @@ async def lifespan(app: FastAPI):
             _macd_diffusion_worker(), name="macd-diffusion")
         logger.info("✓ MACD diffusion daemon started")
 
+    # Greeks enrichment: stamp real broker greeks (from option_chain_snapshots)
+    # onto greeks-null index option candles — restores what the dead 2026-06-23
+    # Fyers greeks writer filled, at zero broker cost. Lightweight; gated ON.
+    greeks_enrich_task = None
+    if settings.GREEKS_ENRICHMENT_ENABLED:
+        async def _greeks_enrichment_worker() -> None:
+            try:
+                from market_data.greeks_enrichment import run_daemon as run_greeks_enrichment
+
+                await run_greeks_enrichment(
+                    poll_minutes=settings.GREEKS_ENRICHMENT_POLL_MINUTES,
+                    lookback_days=settings.GREEKS_ENRICHMENT_LOOKBACK_DAYS,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception(f"Greeks enrichment daemon stopped: {exc}")
+
+        greeks_enrich_task = asyncio.create_task(
+            _greeks_enrichment_worker(), name="greeks-enrichment")
+        logger.info("✓ Greeks enrichment daemon started")
+
     # F1 feed: full-universe option-chain → 3m CE+PE OHLC (S1's headline feed).
     # Gated OFF by default; the poll self-staggers through FYERS_DATA_LIMITER.
     if settings.CHAIN_CANDLE_BUILDER_ENABLED:
@@ -325,6 +347,12 @@ async def lifespan(app: FastAPI):
             await macd_diffusion_task
         except asyncio.CancelledError:
             logger.info("MACD diffusion daemon stopped")
+    if greeks_enrich_task is not None:
+        greeks_enrich_task.cancel()
+        try:
+            await greeks_enrich_task
+        except asyncio.CancelledError:
+            logger.info("Greeks enrichment daemon stopped")
     if loop_lag_task is not None:
         loop_lag_task.cancel()
         try:

@@ -47,7 +47,10 @@ async def test_live_candle_store_persists_spot_and_option_buckets(monkeypatch: p
             "instrument_key": "NSE:TEST26APR24000CE",
             "trading_symbol": "TEST26APR24000CE",
             "underlying": "NIFTY",
-            "expiry": "2026-04-30",
+            # Post-2025-09-01 migration NSE indices expire Tuesday; a Thursday expiry
+            # (2026-04-30) is now rejected by the phantom-expiry guard in
+            # live_candle_store (is_valid_index_expiry), so use a valid Tuesday.
+            "expiry": "2026-04-28",
             "strike": 24000.0,
             "option_type": "CE",
             "market": "NSE",

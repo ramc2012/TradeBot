@@ -1002,9 +1002,20 @@ async def test_directional_options_live_snapshot_uses_local_market_intelligence(
             "latest_spot_rows": {},
         }
 
+    async def fake_list_positions(**kwargs):
+        return []
+
+    async def fake_list_journal(**kwargs):
+        return []
+
     monkeypatch.setattr(service.store, "load_live_spot_frame", fake_load_live_spot_frame)
     monkeypatch.setattr(service.feature_engine, "build_frame", lambda *_args, **_kwargs: feature_frame)
     monkeypatch.setattr(service.store, "list_live_contract_snapshots", fake_list_live_contract_snapshots)
+    # live_snapshot also attaches paper positions/journal, which otherwise open a real
+    # Postgres session (unavailable offline and in CI). This test only asserts the
+    # market-intelligence snapshot, so stub them out.
+    monkeypatch.setattr(service.paper, "list_positions", fake_list_positions)
+    monkeypatch.setattr(service.paper, "list_journal", fake_list_journal)
     monkeypatch.setattr(
         "directional_options.service.market_intelligence_runtime.get_strategy_health",
         fake_strategy_health,

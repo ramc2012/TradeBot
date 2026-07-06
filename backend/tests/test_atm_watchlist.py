@@ -7,8 +7,16 @@ from types import SimpleNamespace
 
 import market_data.atm_watchlist as atm_watchlist_module
 from brokers.base import OptionChain, OptionChainEntry
+from freezegun import freeze_time
 from market_data.atm_watchlist import ATMWatchlistService, UnderlyingMeta
 from sqlalchemy.exc import ProgrammingError
+
+# The get_expiries tests below hardcode a 2026-04/05/06 expiry ladder and assert that
+# the nearest-monthly default resolves to 2026-05-26. That only holds when "today" is
+# on/before that ladder; with the real clock those dates are in the past and the
+# default rolls to the live monthly. Freeze "now" to a date inside the fixture window
+# (before 2026-05-12) so the assertions are stable regardless of when the suite runs.
+_EXPIRY_LADDER_TODAY = "2026-04-24"
 
 
 class _FakeRedis:
@@ -254,6 +262,7 @@ def test_build_row_keeps_selected_weekly_expiry_for_nse_indices(monkeypatch) -> 
     assert row["expiry"] == selected_expiry
 
 
+@freeze_time(_EXPIRY_LADDER_TODAY)
 def test_get_expiries_reports_catalog_fallback_when_saved_ladder_is_used(monkeypatch) -> None:
     service = ATMWatchlistService()
     redis = _FakeRedis()
@@ -310,6 +319,7 @@ def test_get_expiries_reports_catalog_fallback_when_saved_ladder_is_used(monkeyp
     assert "BNKN 2026-05-26" in payload["expiry_scope_note"]
 
 
+@freeze_time(_EXPIRY_LADDER_TODAY)
 def test_get_expiries_prefers_live_fyers_ladders_over_saved_catalog_when_upstox_is_offline(monkeypatch) -> None:
     service = ATMWatchlistService()
     redis = _FakeRedis()
@@ -362,10 +372,13 @@ def test_get_expiries_prefers_live_fyers_ladders_over_saved_catalog_when_upstox_
     assert payload["index_monthlies"]["BANKNIFTY"] == "2026-05-26"
     assert payload["index_monthlies"]["FINNIFTY"] == "2026-05-26"
     assert payload["index_monthlies"]["MIDCPNIFTY"] == "2026-05-26"
-    assert payload["index_monthlies"]["SENSEX"] == "2026-05-29"
+    # SENSEX monthly expiry moved Friday -> Thursday (commit 92743411), so May 2026
+    # resolves to 2026-05-28 (last Thursday), not the old 2026-05-29.
+    assert payload["index_monthlies"]["SENSEX"] == "2026-05-28"
     assert payload["detail"] is None
 
 
+@freeze_time(_EXPIRY_LADDER_TODAY)
 def test_get_expiries_uses_common_nse_monthlies_even_when_live_ladders_are_stale(monkeypatch) -> None:
     service = ATMWatchlistService()
     redis = _FakeRedis()
@@ -399,7 +412,9 @@ def test_get_expiries_uses_common_nse_monthlies_even_when_live_ladders_are_stale
     assert payload["index_monthlies"]["BANKNIFTY"] == "2026-05-26"
     assert payload["index_monthlies"]["FINNIFTY"] == "2026-05-26"
     assert payload["index_monthlies"]["MIDCPNIFTY"] == "2026-05-26"
-    assert payload["index_monthlies"]["SENSEX"] == "2026-05-29"
+    # SENSEX monthly expiry moved Friday -> Thursday (commit 92743411), so May 2026
+    # resolves to 2026-05-28 (last Thursday), not the old 2026-05-29.
+    assert payload["index_monthlies"]["SENSEX"] == "2026-05-28"
 
 
 def test_get_watchlist_returns_building_payload_on_first_load(monkeypatch) -> None:
@@ -605,6 +620,11 @@ def test_get_watchlist_refreshes_stale_full_persisted_board(monkeypatch) -> None
         coro.close()
         return None
 
+    async def fake_build_row(meta, expiry, expiry_date, upstox_adapter, fyers_adapter):
+        # Keep the seed build deterministic and DB-free: the stale stock rows have
+        # been force-dropped and are being rebuilt, so nothing is ready yet.
+        return None
+
     monkeypatch.setattr(atm_watchlist_module, "get_redis", lambda: _fake_get_redis(redis))
     monkeypatch.setattr(atm_watchlist_module, "get_active_adapter", lambda broker: _FakeFyersAdapter() if broker == "fyers" else None)
     monkeypatch.setattr(atm_watchlist_module.asyncio, "ensure_future", fake_ensure_future)
@@ -612,13 +632,18 @@ def test_get_watchlist_refreshes_stale_full_persisted_board(monkeypatch) -> None
     monkeypatch.setattr(service, "_load_underlyings", fake_load_underlyings)
     monkeypatch.setattr(service, "_get_upstox_adapter", lambda: _async_payload(None))
     monkeypatch.setattr(service, "_load_persisted_watchlist_rows", fake_load_persisted_rows)
+    monkeypatch.setattr(service, "_build_row", fake_build_row)
 
     payload = asyncio.run(service.get_watchlist("2026-05-26", live_refresh=True))
 
+    # The saved board is stale (as_of 2026-04-24, older than today's 09:15 session
+    # open), so the force-refresh path (commit 3b04d0f7, 2026-05-18: "force live
+    # refresh past stale prior_rows") drops the stale rows into the pending set and
+    # rebuilds them in the background instead of surfacing them. The immediate payload
+    # is therefore "building" with the stale rows removed and a rebuild scheduled.
     assert payload["build_status"] == "building"
-    assert payload["summary"]["total_rows"] == 2
-    assert "stale" in str(payload["detail"])
-    assert "rebuilding the stock universe" in str(payload["detail"])
+    assert payload["summary"]["total_rows"] == 0
+    assert "Building 2 remaining symbols in background" in str(payload["detail"])
     assert scheduled
 
 
@@ -1085,7 +1110,9 @@ def _make_chain_entry(strike: float, option_type: str, *, ltp: float = 0.0,
 
 
 def test_extended_strike_window_ce_3itm_1atm_6otm():
-    """Standard CE window: 3 lower strikes (ITM), the ATM, then 6 higher (OTM)."""
+    """CE window. The band was widened 2026-06-29 to 8 ITM / 1 ATM / 8 OTM
+    (was 3/1/6). This chain only supplies 3 ITM below and 7 OTM above the ATM,
+    so the whole 11-strike chain is now returned (24700 is no longer trimmed)."""
     strikes = [23700.0, 23800.0, 23900.0, 24000.0, 24100.0, 24200.0,
                24300.0, 24400.0, 24500.0, 24600.0, 24700.0]
     entries = [_make_chain_entry(s, ot) for s in strikes for ot in ("CE", "PE")]
@@ -1095,17 +1122,18 @@ def test_extended_strike_window_ce_3itm_1atm_6otm():
         option_type="CE",
         chain_entries=entries,
     )
-    assert len(window) == 10
+    assert len(window) == 11
     assert [w["strike"] for w in window] == [
-        23700, 23800, 23900, 24000, 24100, 24200, 24300, 24400, 24500, 24600,
+        23700, 23800, 23900, 24000, 24100, 24200, 24300, 24400, 24500, 24600, 24700,
     ]
     atm_rows = [w for w in window if w["is_atm"]]
     assert len(atm_rows) == 1 and atm_rows[0]["strike"] == 24000.0
-    assert 24700.0 not in [w["strike"] for w in window]
 
 
 def test_extended_strike_window_pe_3itm_1atm_6otm():
-    """PE side inverts the ITM/OTM relationship — higher strikes are ITM."""
+    """PE side inverts the ITM/OTM relationship — higher strikes are ITM. With the
+    widened 8/1/8 band this chain supplies only 4 ITM (above) and 6 OTM (below), so
+    the whole 11-strike chain is returned (24400 is no longer trimmed)."""
     strikes = [23400.0, 23500.0, 23600.0, 23700.0, 23800.0, 23900.0,
                24000.0, 24100.0, 24200.0, 24300.0, 24400.0]
     entries = [_make_chain_entry(s, ot) for s in strikes for ot in ("CE", "PE")]
@@ -1115,9 +1143,9 @@ def test_extended_strike_window_pe_3itm_1atm_6otm():
         option_type="PE",
         chain_entries=entries,
     )
-    assert len(window) == 10
+    assert len(window) == 11
     returned = [w["strike"] for w in window]
-    assert 24400.0 not in returned  # only 3 ITM (above)
+    assert 24400.0 in returned  # 4 ITM (above) now fit within the widened band
     assert 24100.0 in returned and 24200.0 in returned and 24300.0 in returned
     assert 24000.0 in returned
     for s in (23400.0, 23500.0, 23600.0, 23700.0, 23800.0, 23900.0):
@@ -1138,8 +1166,9 @@ def test_extended_strike_window_drops_strikes_without_chain_entry():
 
 
 def test_extended_strike_window_atm_at_low_edge_returns_partial():
-    """ATM at the lowest strike means no ITM possible on CE side. Still
-    returns ATM + however many OTM strikes are available."""
+    """ATM at the lowest strike means no ITM possible on CE side. Still returns
+    ATM + however many OTM strikes are available (up to 8 with the widened band —
+    here all 8 higher strikes fit)."""
     strikes = [100.0, 105.0, 110.0, 115.0, 120.0, 125.0, 130.0, 135.0, 140.0]
     entries = [_make_chain_entry(s, "CE") for s in strikes]
     window = atm_watchlist_module._extended_strike_window(
@@ -1149,7 +1178,7 @@ def test_extended_strike_window_atm_at_low_edge_returns_partial():
         chain_entries=entries,
     )
     assert [w["strike"] for w in window] == [
-        100.0, 105.0, 110.0, 115.0, 120.0, 125.0, 130.0,
+        100.0, 105.0, 110.0, 115.0, 120.0, 125.0, 130.0, 135.0, 140.0,
     ]
 
 

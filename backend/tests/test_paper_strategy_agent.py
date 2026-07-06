@@ -36,6 +36,24 @@ def test_detect_macd_zero_cross_on_rising_series() -> None:
     assert reason == "macd_zero_cross"
 
 
+def test_detect_macd_zero_cross_ce_and_pe_use_same_up_cross_rule() -> None:
+    # A10/D1 regression: PE previously used an inverted DOWN-cross. Each leg is
+    # scored on its OWN premium, so CE and PE must use the SAME up-cross rule —
+    # the detector's output is now independent of option_type.
+    rising = [120.0 - (index * 1.2) for index in range(38)] + [80.0, 180.0]
+    falling = [80.0 + (index * 1.2) for index in range(38)] + [180.0, 60.0]
+
+    ce_up = detect_macd_zero_cross(rising, "CE")
+    pe_up = detect_macd_zero_cross(rising, "PE")
+    assert ce_up == pe_up
+    assert ce_up[0] is True  # premium MACD crossing up → enter, both legs
+
+    ce_down = detect_macd_zero_cross(falling, "CE")
+    pe_down = detect_macd_zero_cross(falling, "PE")
+    assert ce_down == pe_down
+    assert pe_down[0] is False  # a down-cross must NOT trigger PE (the old bug)
+
+
 def test_detect_greeks_signal_on_supportive_series() -> None:
     start = datetime(2026, 3, 1, 9, 15, tzinfo=UTC)
     candles = []

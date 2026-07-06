@@ -152,8 +152,12 @@ def test_bootstrap_paper_trading_runtime_normalizes_supervisors(monkeypatch: pyt
     assert payload["enabled"] is True
     assert payload["paper_only"] is True
     assert payload["trading_mode"]["mode"] == "paper"
-    assert payload["nse"]["kill_switch_active"] is False
-    assert payload["nse"]["loop_active"] is True
+    # Bootstrap now PRESERVES an active NSE kill switch (commit ffa1247d, 2026-05-13:
+    # "preserving manual stop until operator restart") instead of clearing it, so a
+    # runtime restart never silently re-arms trading. With the kill switch preserved,
+    # set_auto_run(True) is gated off and the loop does not start.
+    assert payload["nse"]["kill_switch_active"] is True
+    assert payload["nse"]["loop_active"] is False
     assert payload["commodity"]["kill_switch_active"] is True
     assert payload["commodity"]["loop_active"] is False
     assert payload["commodity"]["start_required"] is True

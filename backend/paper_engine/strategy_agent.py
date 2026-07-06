@@ -278,8 +278,13 @@ def detect_macd_zero_cross(
 ) -> tuple[bool, Optional[float], Optional[str]]:
     """Detect MACD zero-line crossover on option premium closes.
 
-    CE: MACD crosses from ≤0 to >0 (bullish)
-    PE: MACD crosses from ≥0 to <0 (bearish — put premium rising)
+    The MACD here is computed on the option's OWN premium. Entries buy when the
+    premium's MACD crosses UP through zero (momentum turning up on THAT premium)
+    — for BOTH CE and PE, since each leg is scored on its own premium. The old
+    PE branch used a DOWN-cross, mirroring the (since-fixed) inverted PE entry;
+    that made the audit/replay surfaces disagree with the live entry rule and
+    would trade the wrong PE side if S2 were ever re-enabled. Single up-cross
+    rule now — see strategy_agent_entries for the same fix on the live path.
     """
     if len(closes) < MACD_MIN_BARS:
         return False, None, None
@@ -294,10 +299,8 @@ def detect_macd_zero_cross(
     if current is None or previous is None:
         return False, None, None
 
-    if option_type == "CE":
-        should_enter = previous <= 0 < current
-    else:
-        should_enter = previous >= 0 > current
+    # Same up-cross rule for CE and PE — each on its own premium's MACD.
+    should_enter = previous <= 0 < current
 
     return should_enter, float(current), "macd_zero_cross" if should_enter else None
 

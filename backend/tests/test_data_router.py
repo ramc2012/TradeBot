@@ -23,7 +23,10 @@ class _FakeBroker:
         self.broker_name = broker_name
         self.subscribe_calls: list[list[str]] = []
 
-    async def subscribe_websocket(self, symbols, callback):
+    async def subscribe_websocket(self, symbols, callback, on_depth_callback=None, **kwargs):
+        # The fyers branch of DataRouter now also passes on_depth_callback (added in
+        # commit 0d8c65a2). Accept it (and any future kwargs) so the fake matches the
+        # real adapter signature (brokers/fyers.py subscribe_websocket).
         self.subscribe_calls.append(list(symbols))
         return _FakeWs()
 

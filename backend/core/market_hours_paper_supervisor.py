@@ -146,6 +146,21 @@ class RunnerRuntime:
         observed_interval = (
             sum(observed_intervals) / len(observed_intervals) if observed_intervals else None
         )
+        # Staleness: a runner is stale when it SHOULD have run (enabled, its
+        # market open, the loop live) but hasn't succeeded within a generous
+        # multiple of its interval. This distinguishes a silently-dead lane from
+        # a healthy idle one — the count alone showed 10/10 healthy after a
+        # restart (all last_error None) even when nothing had run.
+        stale = False
+        market_open_now = market_hours_fn(now)
+        if self.config.enabled and market_open_now and loop_active and not self.running:
+            overdue = max(self.config.interval_seconds * 3, 300)
+            if self.last_success_at is not None:
+                stale = (now - self.last_success_at).total_seconds() > overdue
+            elif self.last_started_at is not None:
+                # Ran but never SUCCEEDED (erroring in a loop) — stale once overdue.
+                stale = (now - self.last_started_at).total_seconds() > overdue
+            # last_started_at None → just armed this session; grace period, not stale.
         return {
             "key": self.config.key,
             "label": self.config.label,
@@ -153,6 +168,7 @@ class RunnerRuntime:
             "interval_seconds": self.config.interval_seconds,
             "loop_active": loop_active,
             "running": self.running,
+            "stale": stale,
             "last_started_at": self.last_started_at.isoformat() if self.last_started_at else None,
             "last_success_at": self.last_success_at.isoformat() if self.last_success_at else None,
             "last_finished_at": self.last_finished_at.isoformat() if self.last_finished_at else None,
@@ -195,6 +211,12 @@ class MarketHoursPaperSupervisor:
         self._lock = asyncio.Lock()
         self._runner_tasks: dict[str, asyncio.Task] = {}
         self._maintenance_tasks: set[asyncio.Task] = set()
+        # Crash watchdog: if the scheduling loop ever raises it would otherwise
+        # stop ALL lanes silently forever. Auto-restart, bounded so a hard crash
+        # loop can't spin — after this many consecutive crashes we give up and
+        # leave the loud audit/log trail instead of hammering.
+        self._loop_crash_count = 0
+        self._loop_max_restarts = 5
         self._runners: dict[str, RunnerRuntime] = {
             runner.key: RunnerRuntime(config=runner)
             for runner in (runners or self._default_runners())
@@ -583,6 +605,44 @@ class MarketHoursPaperSupervisor:
                 "result": result,
             }
 
+        async def _lane_audit_runner() -> dict[str, Any]:
+            """Post-close signal-correctness audit for every registered lane.
+
+            Runs the audits framework (replay parity, gate attribution, trade
+            reconciliation, edge persistence) once per session so live signals
+            are mechanically checked against the strategy definition instead of
+            only being eyeballed via P&L. Persists to lane_audit; results surface
+            in /api/system/health. Auditors are added to audits.lanes.REGISTRY."""
+            from datetime import timedelta as _td
+
+            from audits.lane_audit import run_one as _audit_run_one
+            from audits.lanes import REGISTRY as _AUDIT_REGISTRY
+
+            audit_date = _now_ist().date()
+            results: list[dict[str, Any]] = []
+            failures: dict[str, str] = {}
+            statuses: list[str] = []
+            for lane in list(_AUDIT_REGISTRY):
+                try:
+                    res = await asyncio.wait_for(
+                        _audit_run_one(lane, audit_date, lookback_days=30), timeout=180.0
+                    )
+                    status = str(getattr(res, "overall_status", "") or "unknown")
+                    statuses.append(status)
+                    results.append({"lane": lane, "overall_status": status})
+                except Exception as exc:  # noqa: BLE001 — isolate one lane's failure
+                    failures[lane] = str(exc)[:200]
+            # A non-passing audit is actionable (surfaces a drifted lane).
+            actionable = sum(1 for s in statuses if s not in {"pass", "ok", "unknown"})
+            return {
+                "status": "ok" if not failures else ("error" if not results else "partial"),
+                "result_count": len(results),
+                "actionable_count": actionable,
+                "failure_count": len(failures),
+                "failures": failures,
+                "results": results,
+            }
+
         return [
             RunnerConfig(
                 key="market_intelligence",
@@ -703,6 +763,22 @@ class MarketHoursPaperSupervisor:
                 market_hours_fn=_in_gann_market_hours,
                 next_open_fn=_next_gann_market_open,
             ),
+            RunnerConfig(
+                key="lane_audit",
+                label="Lane Signal-Correctness Audit",
+                # Runs once per session after the close (post_close_force_daily),
+                # so it audits today's finalized signals against the strategy
+                # definition. Hourly in-session interval is a harmless upper
+                # bound; the guaranteed pass is the post-close one.
+                interval_seconds=settings.LANE_AUDIT_INTERVAL_SECONDS,
+                callback=_lane_audit_runner,
+                enabled=settings.LANE_AUDIT_ENABLED,
+                market_hours_fn=_in_nse_market_hours,
+                next_open_fn=_next_nse_market_open,
+                post_close_catchup=True,
+                post_close_force_daily=True,
+                timeout_seconds=600.0,
+            ),
         ]
 
     async def start(self) -> None:
@@ -712,7 +788,49 @@ class MarketHoursPaperSupervisor:
         if self._task and not self._task.done():
             return
         self._task = asyncio.create_task(self._loop(), name="market-hours-paper-supervisor")
+        self._task.add_done_callback(self._on_loop_done)
         logger.info("[MarketHoursSupervisor] started")
+
+    def _on_loop_done(self, task: asyncio.Task) -> None:
+        # Runs when the scheduling loop task ends. A clean end or a deliberate
+        # cancel (stop()) is fine; an EXCEPTION means the loop died and every
+        # lane would go silent — alert loudly and auto-restart (bounded).
+        if task.cancelled() or self._task is not task:
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        self._loop_crash_count += 1
+        logger.exception(
+            "[MarketHoursSupervisor] loop crashed (#{n}): {e}",
+            n=self._loop_crash_count, e=repr(exc),
+        )
+
+        async def _alert_and_restart() -> None:
+            try:
+                await self._emit_scan_audit(
+                    "supervisor_loop", result=None,
+                    error=f"scheduling loop crashed (#{self._loop_crash_count}): {exc!r}",
+                )
+            except Exception:  # noqa: BLE001 — never let alerting block a restart
+                pass
+            if not self._enabled:
+                return
+            if self._loop_crash_count > self._loop_max_restarts:
+                logger.error(
+                    "[MarketHoursSupervisor] loop crashed {n}× — NOT restarting; "
+                    "all lanes are stopped until the backend is redeployed.",
+                    n=self._loop_crash_count,
+                )
+                return
+            logger.warning("[MarketHoursSupervisor] restarting scheduling loop after crash")
+            self._task = asyncio.create_task(self._loop(), name="market-hours-paper-supervisor")
+            self._task.add_done_callback(self._on_loop_done)
+
+        try:
+            asyncio.get_running_loop().create_task(_alert_and_restart())
+        except RuntimeError:
+            pass
 
     async def stop(self) -> None:
         task = self._task
@@ -1187,7 +1305,13 @@ class MarketHoursPaperSupervisor:
             for runtime in self._runners.values()
             if runtime.config.enabled
         )
-        healthy_runner_count = sum(1 for item in runners.values() if item.get("last_error") is None)
+        # Healthy = enabled, no last_error, AND not stale (silently overdue).
+        # Never-ran-idle runners (market closed / just armed) still count healthy.
+        healthy_runner_count = sum(
+            1 for item in runners.values()
+            if item.get("last_error") is None and not item.get("stale")
+        )
+        stale_runner_count = sum(1 for item in runners.values() if item.get("stale"))
         return {
             "enabled": self._enabled,
             "loop_active": loop_active,
@@ -1198,6 +1322,7 @@ class MarketHoursPaperSupervisor:
             "trading_calendar": trading_calendar.status_payload(now).get("status"),
             "runner_count": len(runners),
             "healthy_runner_count": healthy_runner_count,
+            "stale_runner_count": stale_runner_count,
             "runners": runners,
         }
 

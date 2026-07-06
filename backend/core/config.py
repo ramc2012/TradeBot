@@ -62,6 +62,15 @@ class Settings(BaseSettings):
     RESEARCH_SYNC_AUTO_ENABLED: bool = False
     RESEARCH_SYNC_EMBEDDED_ENABLED: bool = False
     STRATEGY_SPOT_SYNC_ENABLED: bool = False
+    # Greeks enrichment — stamp real broker greeks onto greeks-null index option
+    # candles by copying from option_chain_snapshots (the live chain service already
+    # persists per-strike broker greeks for the tracked index expiries). Restores
+    # what the dead 2026-06-23 Fyers greeks writer used to fill, with zero extra
+    # broker load. Index-band + source in ('fyers','upstox') only; iv scaled
+    # percent -> fraction. Cheap in steady state; gated ON.
+    GREEKS_ENRICHMENT_ENABLED: bool = True
+    GREEKS_ENRICHMENT_POLL_MINUTES: int = 10
+    GREEKS_ENRICHMENT_LOOKBACK_DAYS: int = 3
     # MACD diffusion — hourly CE/PE-above-zero breadth snapshot (market sentiment).
     # Reads the live watchlist's per-leg MACD; seeds history from option_premium_candles.
     MACD_DIFFUSION_ENABLED: bool = True
@@ -265,6 +274,16 @@ class Settings(BaseSettings):
     # fell off the ATM rotation / broker refresh not landing) → skip price-based
     # exits that cycle so a frozen mark can't misfire hard_stop/macd_reversal.
     MACD_STRATEGY_MARK_STALE_SECONDS: int = 1200
+    # S1: minimum hold before macd_reversal_30m may fire (one 30m bar). Entry
+    # uses a synthetic forming bar while the exit MACD is persisted-close only;
+    # this stops the reversal exit from churning a position out of its entry bar.
+    MACD_STRATEGY_REVERSAL_MIN_HOLD_SECONDS: int = 1800
+    # Lane signal-correctness audit (audits framework) — post-close once-daily
+    # replay-parity / gate-attribution / reconciliation for every registered
+    # lane, so live signals are mechanically checked against the strategy
+    # definition instead of only via P&L. Persists to lane_audit.
+    LANE_AUDIT_ENABLED: bool = True
+    LANE_AUDIT_INTERVAL_SECONDS: int = 3600
     COMMODITY_FYERS_RATE_LIMIT_BACKOFF_SECONDS: int = 90
     COMMODITY_KILL_LOCK: bool = False
     # ── Commodity MP+OF module (restored from feat 2026-06-30) ─────────────

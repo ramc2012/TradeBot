@@ -8,6 +8,8 @@ and by the integration smoke against the deployed service.
 """
 from __future__ import annotations
 
+from freezegun import freeze_time
+
 from paper_engine import strategy2_mp_of as s2
 
 
@@ -88,6 +90,11 @@ def _scope(monthlies: dict[str, str], expiries: list[str]) -> dict:
     return {"index_monthlies": monthlies, "expiries": expiries}
 
 
+# resolve_s2_expiry_targets picks the "earliest non-monthly expiry after today" as the
+# weekly. Freeze "now" inside the fixture's June ladder (the test's own comment assumes
+# a run date >= 2026-05-31) so 2026-06-04 is the nearest forward weekly regardless of
+# when the suite actually runs.
+@freeze_time("2026-06-01")
 def test_resolve_nifty_picks_weekly_and_monthly() -> None:
     scope = _scope(
         {"NIFTY": "2026-06-30"},
