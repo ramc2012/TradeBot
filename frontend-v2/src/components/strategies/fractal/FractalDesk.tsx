@@ -16,6 +16,8 @@
  *   replay      → /replay-report (metrics gate, equity curve, setup breakdown, trades)
  */
 import { useMemo, useState, useTransition } from "react";
+import { Radio as TerminalRadioIcon } from "lucide-react";
+import { LaneTerminal } from "@/components/terminal/LaneTerminal";
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
@@ -60,6 +62,7 @@ import { SignalCard, type CurrentSignal } from "./SignalCard";
 import { ReplayPanel, type ReplayReport } from "./ReplayPanel";
 
 const TABS = [
+  { key: "terminal", label: "Terminal", icon: TerminalRadioIcon },
   { key: "profile", label: "Profile", icon: Layers },
   { key: "signal", label: "Signal", icon: Crosshair },
   { key: "performance", label: "Performance", icon: TrendingUp },
@@ -327,6 +330,7 @@ export default function FractalDesk() {
       {activeTab === "signal-quality" ? (
         <SignalQualityTab laneKeys={["fractal_market_profile"]} title="Fractal signal validation" />
       ) : null}
+      {activeTab === "terminal" ? <LaneTerminal underlyings={universe as unknown as string[]} positions={positions.open_positions} /> : null}
       {activeTab === "live-stream" ? (
         <StrategyLiveStream
           title="Fractal Market Profile"

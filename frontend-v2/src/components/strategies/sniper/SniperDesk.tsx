@@ -19,6 +19,8 @@
  *   history   → rolling client-side capture of fired signals
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Radio as TerminalRadioIcon } from "lucide-react";
+import { LaneTerminal } from "@/components/terminal/LaneTerminal";
 import { useQuery } from "@tanstack/react-query";
 import { Activity, Crosshair, Gauge, History as HistoryIcon, Radar, Target } from "lucide-react";
 
@@ -43,6 +45,7 @@ import { MagnitudeLadder } from "./MagnitudeLadder";
 import type { SniperRow, SniperSignalsResponse } from "./types";
 
 const TABS = [
+  { key: "terminal", label: "Terminal", icon: TerminalRadioIcon },
   { key: "board", label: "Signal board", icon: Crosshair },
   { key: "quadrant", label: "Conviction map", icon: Radar },
   { key: "history", label: "History", icon: HistoryIcon },
@@ -211,6 +214,7 @@ export default function SniperDesk() {
       {activeTab === "signal-quality" ? (
         <SignalQualityTab laneKeys={["auction_intelligence"]} title="Sniper input validation" />
       ) : null}
+      {activeTab === "terminal" ? <LaneTerminal title="Live Terminal · Sniper" /> : null}
       {activeTab === "live-stream" ? (
         <StrategyLiveStream
           title="Sniper"

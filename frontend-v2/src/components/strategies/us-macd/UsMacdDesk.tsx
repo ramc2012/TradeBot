@@ -9,6 +9,8 @@
  * next monthly 3rd-Friday expiry), Paper book. API under /api/us/macd-refined.
  */
 import { useState, useTransition } from "react";
+import { Radio as TerminalRadioIcon } from "lucide-react";
+import { LaneTerminal } from "@/components/terminal/LaneTerminal";
 import { useQuery } from "@tanstack/react-query";
 import { Activity, Banknote, CalendarClock, ListChecks, RefreshCw } from "lucide-react";
 
@@ -30,6 +32,7 @@ const usd = (n: unknown) => {
 };
 
 const TABS = [
+  { key: "terminal", label: "Terminal", icon: TerminalRadioIcon },
   { key: "health", label: "Data health", icon: Activity },
   { key: "signals", label: "Signals", icon: ListChecks },
   { key: "positioning", label: "Positioning", icon: CalendarClock },
@@ -256,6 +259,7 @@ export default function UsMacdDesk() {
       {activeTab === "signal-quality" ? (
         <SignalQualityTab laneKeys={["us_macd_refined"]} title="US MACD signal validation" />
       ) : null}
+      {activeTab === "terminal" ? <LaneTerminal title="Live Terminal · US MACD" /> : null}
       {activeTab === "live-stream" ? (
         <StrategyLiveStream
           title="US MACD Refined"

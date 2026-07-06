@@ -14,6 +14,8 @@
  * chains, persists per-contract volume/turnover, and syncs the paper book.
  */
 import { useMemo, useState, useTransition } from "react";
+import { Radio as TerminalRadioIcon } from "lucide-react";
+import { LaneTerminal } from "@/components/terminal/LaneTerminal";
 import { useQuery } from "@tanstack/react-query";
 import { BarChart3, Banknote, CalendarClock, RefreshCw, ShieldCheck } from "lucide-react";
 
@@ -50,6 +52,7 @@ type BookMetrics = {
 };
 
 const TABS = [
+  { key: "terminal", label: "Terminal", icon: TerminalRadioIcon },
   { key: "backtest", label: "Backtest", icon: BarChart3 },
   { key: "positioning", label: "Positioning", icon: CalendarClock },
   { key: "paper", label: "Paper book", icon: Banknote },
@@ -293,6 +296,7 @@ export default function MacdRefinedDesk() {
       {activeTab === "signal-quality" ? (
         <SignalQualityTab laneKeys={["macd_refined"]} title="MACD Refined signal validation" />
       ) : null}
+      {activeTab === "terminal" ? <LaneTerminal title="Live Terminal · MACD Refined" /> : null}
       {activeTab === "live-stream" ? (
         <StrategyLiveStream
           title="MACD Refined"

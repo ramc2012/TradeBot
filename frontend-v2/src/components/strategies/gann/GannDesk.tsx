@@ -32,7 +32,7 @@ import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveS
 import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStrategyPositionsStream";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import { createStrategySnapshotSocket } from "@/lib/websocket";
-import { TerminalPanel } from "@/components/terminal/TerminalPanel";
+import { LaneTerminal } from "@/components/terminal/LaneTerminal";
 import type { PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
 
@@ -195,7 +195,7 @@ export default function GannDesk() {
 
       {activeTab === "confluence" ? <ConfluencePanel snap={snap} /> : null}
 
-      {activeTab === "terminal" ? <TerminalPanel /> : null}
+      {activeTab === "terminal" ? <LaneTerminal underlyings={universe as unknown as string[]} positions={positions.open_positions} title="Live Terminal · Gann" /> : null}
 
       {activeTab === "paper" ? (
         <PaperPerformance summary={status?.summary as Record<string, number> | undefined} positions={positions} />

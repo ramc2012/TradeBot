@@ -20,6 +20,8 @@
  * cycle (POST /api/cbe/scan) — this desk reads the latest persisted scan.
  */
 import { useMemo } from "react";
+import { Radio as TerminalRadioIcon } from "lucide-react";
+import { LaneTerminal } from "@/components/terminal/LaneTerminal";
 import { useQuery } from "@tanstack/react-query";
 import { Activity, Briefcase, Compass, Layers3, Radar, Scale, ShieldCheck, Target, TrendingUp } from "lucide-react";
 
@@ -48,6 +50,7 @@ import { SectorRotation, type SectorRow } from "./SectorRotation";
 import { Sparkline } from "./Sparkline";
 
 const TABS = [
+  { key: "terminal", label: "Terminal", icon: TerminalRadioIcon },
   { key: "portfolio", label: "Portfolio", icon: Briefcase },
   { key: "rotation", label: "Rotation", icon: Radar },
   { key: "candidates", label: "Candidates", icon: Compass },
@@ -505,6 +508,7 @@ export default function CbeDesk() {
       {activeTab === "signal-quality" ? (
         <SignalQualityTab laneKeys={["cbe_scanner", "cbe_marks"]} title="CBE signal validation" />
       ) : null}
+      {activeTab === "terminal" ? <LaneTerminal watchlist={watchlist} positions={positions?.open_positions} /> : null}
       {activeTab === "live-stream" ? (
         <StrategyLiveStream
           title="CBE Scanner"

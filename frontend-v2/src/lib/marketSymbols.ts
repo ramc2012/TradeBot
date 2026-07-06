@@ -50,3 +50,55 @@ export const MARKET_SYMBOL_LABELS: Record<string, string> = {
 export function getMarketIndexLabel(symbol: string): string {
   return MARKET_SYMBOL_LABELS[symbol] ?? symbol;
 }
+
+// ── Lane-scoped terminal helpers ────────────────────────────────────────────
+// underlying label ("NIFTY") → live-tape index symbol ("NSE:NIFTY50-INDEX").
+export const UNDERLYING_TO_INDEX_SYMBOL: Record<string, MarketIndexSymbol> = Object.fromEntries(
+  (Object.entries(MARKET_INDEX_LABELS) as [MarketIndexSymbol, string][]).map(
+    ([sym, label]) => [label.toUpperCase(), sym],
+  ),
+) as Record<string, MarketIndexSymbol>;
+
+export function underlyingToTapeSymbol(underlying?: string | null): string | null {
+  if (!underlying) return null;
+  return UNDERLYING_TO_INDEX_SYMBOL[String(underlying).toUpperCase().trim()] ?? null;
+}
+
+/** A string is a broker/tape symbol when it carries a namespace separator
+ *  ("NSE:...-INDEX", "NSE_FO|..."). trading_symbol ("NIFTY 24450 CE") is not. */
+function looksLikeTapeSymbol(value: unknown): value is string {
+  return typeof value === "string" && (value.includes(":") || value.includes("|"));
+}
+
+type SymbolRow = Record<string, unknown>;
+const _SYMBOL_FIELDS = ["tape_symbol", "live_symbol", "instrument_key", "symbol"] as const;
+
+/**
+ * Derive the live-tape symbols a lane cares about from its watchlist +
+ * open-position rows: each row's `underlying` maps to its index tape symbol,
+ * and any direct broker-format symbol field (option legs / futures) is kept.
+ * Robust to the differing row schemas across desks. Returns a de-duped,
+ * index-first ordered list.
+ */
+export function laneTapeSymbols(...rowGroups: (readonly unknown[] | undefined | null)[]): string[] {
+  const out = new Set<string>();
+  for (const group of rowGroups) {
+    for (const row of group ?? []) {
+      if (!row || typeof row !== "object") continue;
+      const idx = underlyingToTapeSymbol((row as SymbolRow).underlying as string | undefined);
+      if (idx) out.add(idx);
+      for (const key of _SYMBOL_FIELDS) {
+        const v = (row as SymbolRow)[key];
+        if (looksLikeTapeSymbol(v)) out.add(v);
+      }
+    }
+  }
+  // Indices first (they stream intraday), then legs/futures, both alphabetized.
+  const all = Array.from(out);
+  const isIndex = (s: string) => s.endsWith("-INDEX");
+  return all.sort((a, b) => {
+    const ai = isIndex(a) ? 0 : 1;
+    const bi = isIndex(b) ? 0 : 1;
+    return ai !== bi ? ai - bi : a.localeCompare(b);
+  });
+}
