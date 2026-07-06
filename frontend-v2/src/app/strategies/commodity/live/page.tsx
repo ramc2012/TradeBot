@@ -39,6 +39,7 @@ import {
 import { IndexMpOfView } from "@/components/strategies/commodity/IndexMpOfView";
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
 import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
+import { LaneTerminal } from "@/components/terminal/LaneTerminal";
 
 import {
   api as apiClient,
@@ -3669,6 +3670,7 @@ const MPOF_TABS = [
   { key: "stats", label: "Stats", icon: BarChart3 },
   { key: "audit", label: "Audit", icon: Radio },
   { key: "instrument", label: "Instrument MP+OF", icon: LineChart },
+  { key: "terminal", label: "Terminal", icon: Radio },
   { key: "signal-quality", label: "Signal quality", icon: ShieldCheck },
   { key: "live-stream", label: "Live stream", icon: Radio },
 ];
@@ -3724,7 +3726,13 @@ export default function MpOfDesk() {
         </section>
       }
     >
-      {tab === "live-stream" ? (
+      {tab === "terminal" ? (
+        <LaneTerminal
+          watchlist={(status.futures_watchlist as Array<Record<string, unknown>> | undefined) ?? []}
+          positions={(status.positions as Array<Record<string, unknown>> | undefined) ?? []}
+          title="Live Terminal · Commodity"
+        />
+      ) : tab === "live-stream" ? (
         <StrategyLiveStream
           title="Commodity MP + Order Flow"
           watchlist={((status.futures_watchlist as Array<Record<string, unknown>> | undefined) ?? []).map((row) => ({

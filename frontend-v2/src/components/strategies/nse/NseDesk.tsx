@@ -70,7 +70,7 @@ import { SignalQualityTab } from "@/components/strategies/overview/SignalQuality
 import { OptionChartModal, type OptionChartContract } from "@/components/strategies/nse/OptionChartModal";
 import { MacdCockpit } from "@/components/strategies/nse/MacdCockpit";
 import { useStrategyPositionsStream } from "@/hooks/useStrategyPositionsStream";
-import { TerminalPanel } from "@/components/terminal/TerminalPanel";
+import { LaneTerminal } from "@/components/terminal/LaneTerminal";
 import type { PaperPosition, PaperSummary, PositionsPayload } from "@/lib/strategy-stats";
 import {
   api as apiClient,
@@ -486,7 +486,7 @@ export default function NseDesk() {
       {activeTab === "cockpit" ? <MacdCockpit positions={positions} watchlist={watchlist} /> : null}
       {activeTab === "signals" ? <WatchlistTab rows={watchlist} /> : null}
       {activeTab === "sentiment" ? <SentimentTab data={diffusionQuery.data} loading={diffusionQuery.isFetching} /> : null}
-      {activeTab === "terminal" ? <TerminalPanel /> : null}
+      {activeTab === "terminal" ? <LaneTerminal watchlist={watchlist} positions={positions} title="Live Terminal · MACD S1" /> : null}
       {activeTab === "positions" ? <PositionsTab rows={positions} /> : null}
       {activeTab === "performance" ? (
         <PaperPerformance summary={summary as PaperSummary} positions={paperPositions} />

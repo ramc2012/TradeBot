@@ -49,7 +49,7 @@ import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveS
 import type { PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
 
-import { TerminalPanel } from "@/components/terminal/TerminalPanel";
+import { LaneTerminal } from "@/components/terminal/LaneTerminal";
 import UniverseWatchlist from "./UniverseWatchlist";
 import EngineCalculations from "./EngineCalculations";
 import PolicyDecisionPanel, { type PolicyBlock } from "./PolicyDecisionPanel";
@@ -291,7 +291,7 @@ export default function DirectionalDesk() {
 
       {activeTab === "gamma" ? <GammaDensity symbol={underlying} /> : null}
 
-      {activeTab === "terminal" ? <TerminalPanel /> : null}
+      {activeTab === "terminal" ? <LaneTerminal underlyings={universe as unknown as string[]} title="Live Terminal · Directional" /> : null}
 
       {activeTab === "paper" ? <PaperTradingTab symbol={underlying} paper={livePaper} /> : null}
 

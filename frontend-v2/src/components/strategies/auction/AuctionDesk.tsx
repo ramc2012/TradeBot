@@ -32,7 +32,7 @@ import { SignalQualityTab } from "@/components/strategies/overview/SignalQuality
 import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStrategyPositionsStream";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
-import { TerminalPanel } from "@/components/terminal/TerminalPanel";
+import { LaneTerminal } from "@/components/terminal/LaneTerminal";
 import { createStrategySnapshotSocket } from "@/lib/websocket";
 import type { PaperPosition, PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
@@ -164,7 +164,7 @@ export default function AuctionDesk() {
 
       {activeTab === "motion" ? <MotionTab snap={snap} /> : null}
 
-      {activeTab === "terminal" ? <TerminalPanel /> : null}
+      {activeTab === "terminal" ? <LaneTerminal underlyings={universe as unknown as string[]} positions={positions.open_positions} title="Live Terminal · Auction IQ" /> : null}
 
       {activeTab === "gates" ? <GatesPanel symbol={symbol} snapshot={snap} /> : null}
 
