@@ -14,8 +14,17 @@ import pytest
 from market_data import live_marks
 
 
+# Own a persistent event loop rather than asyncio.get_event_loop(): a prior test in
+# the full suite that used asyncio.run() leaves the thread with no current loop, which
+# would make get_event_loop() raise "There is no current event loop".
+_MODULE_LOOP: asyncio.AbstractEventLoop | None = None
+
+
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    global _MODULE_LOOP
+    if _MODULE_LOOP is None or _MODULE_LOOP.is_closed():
+        _MODULE_LOOP = asyncio.new_event_loop()
+    return _MODULE_LOOP.run_until_complete(coro)
 
 
 def _patch_live(monkeypatch, value):

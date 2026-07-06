@@ -303,9 +303,14 @@ async def rank_stocks_full_universe(
             }
         )
 
+    unclassified_count = sum(1 for c in candidates if c.get("stock_quadrant") == "unclassified")
     return {
         "candidates": candidates,
         "candidate_count": len(candidates),
+        # Pass-2 F&O names with no sector RRG slice — now RRG-permissive in
+        # _bias_from_signals (were silently unsignalable before). Surfaced so a
+        # coverage collapse in the sector taxonomy is visible.
+        "unclassified_count": unclassified_count,
     }
 
 
@@ -754,8 +759,15 @@ def _bias_from_signals(row: dict[str, Any], trend_score: float = 50.0) -> str:
     macd_bear = (not macd.get("macd_bullish")) and (not macd.get("macd_above_zero"))
     stock_q = str(row.get("stock_quadrant") or "").lower()
     weekly_trend = str(weekly.get("trend") or "").lower()
-    rrg_bull = stock_q in {"leading", "improving"}
-    rrg_bear = stock_q in {"lagging", "weakening"}
+    # "unclassified" = an F&O name with no sector-slice RRG data (pass-2). Per the
+    # pass-2 "still tradeable" intent, RRG must not HARD-BLOCK these — it is
+    # permissive (satisfies both legs) so MACD + RSI + weekly-trend decide the
+    # bias. They still self-haircut in composite_score (RS pct 0 → neutral 50),
+    # so they rank below genuinely leading/lagging names. Without this the 17
+    # pass-2 names were fetched and scored every cycle yet could NEVER signal.
+    rrg_unclassified = stock_q in {"", "unclassified"}
+    rrg_bull = stock_q in {"leading", "improving"} or rrg_unclassified
+    rrg_bear = stock_q in {"lagging", "weakening"} or rrg_unclassified
     rsi_bull = rsi is not None and 45.0 <= float(rsi) <= 70.0
     rsi_bear = rsi is not None and 30.0 <= float(rsi) <= 55.0
     if macd_bull and rrg_bull and rsi_bull and weekly_trend != "down":

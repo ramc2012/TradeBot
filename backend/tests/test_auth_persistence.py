@@ -305,7 +305,15 @@ def test_ensure_fyers_session_refreshes_durable_credentials_before_restore(monke
         async def get_profile(self):
             return SimpleNamespace(user_id="FY123", name="Fyers User")
 
+    # ensure_fyers_session/broker_status call the async variant
+    # refresh_persistent_credentials_async (added in commit dfbd0495, a latency
+    # refactor). Patch it too, delegating to the sync fake, or the real DB-hitting
+    # code runs and the STALE_TOKEN -> LIVE_TOKEN flip never happens.
+    async def fake_refresh_async(*, force: bool = False) -> None:
+        fake_refresh(force=force)
+
     monkeypatch.setattr(auth, "refresh_persistent_credentials", fake_refresh)
+    monkeypatch.setattr(auth, "refresh_persistent_credentials_async", fake_refresh_async)
     monkeypatch.setattr(auth, "_validate_fyers_access_token", fake_validate)
     monkeypatch.setattr(auth, "_persist_broker_session", lambda broker, token, connected_at=None: None)
     monkeypatch.setattr(auth, "_sync_market_data_feed", lambda: asyncio.sleep(0))
@@ -374,7 +382,13 @@ def test_broker_status_avoids_forcing_credential_refresh_on_normal_poll(monkeypa
             "fyers_token_health": {},
         }
 
+    # broker_status calls the async variant refresh_persistent_credentials_async; patch
+    # it too (delegating to the sync fake) so forced_flags records the real call.
+    async def fake_refresh_async(*, force: bool = False) -> None:
+        fake_refresh(force=force)
+
     monkeypatch.setattr(auth, "refresh_persistent_credentials", fake_refresh)
+    monkeypatch.setattr(auth, "refresh_persistent_credentials_async", fake_refresh_async)
     monkeypatch.setattr(auth, "get_broker_connection_snapshot", fake_snapshot)
     monkeypatch.setattr(auth, "_persist_active_session_tokens", lambda: None)
     auth._active_brokers = {}

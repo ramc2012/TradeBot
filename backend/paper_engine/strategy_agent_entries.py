@@ -490,6 +490,38 @@ class StrategyEntryMixin:
                 macd15 = {}
         persist_observation = getattr(self, "_persist_agent_signal_observation", None)
 
+        # Market-IV reference for the relative-IV size scaler. There is no
+        # market_iv producer anywhere else in the backend, so market_iv_pct was
+        # always None → every signal was sized/labeled against the hardcoded 22%
+        # fallback. Use the MEDIAN ATM-leg IV across this cycle's scanned rows as
+        # the live reference: an instrument's IV is "expensive" only relative to
+        # the rest of the tradable universe, which is exactly this median.
+        def _norm_iv(v: Any) -> Optional[float]:
+            if v is None:
+                return None
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                return None
+            if fv <= 0:
+                return None
+            return fv * 100.0 if fv < 1.0 else fv
+
+        _iv_samples: list[float] = []
+        for _row in rows:
+            for _leg_key in ("ce", "pe"):
+                _leg = _row.get(_leg_key) or {}
+                _iv = _norm_iv(_leg.get("iv")) if isinstance(_leg, dict) else None
+                if _iv is not None:
+                    _iv_samples.append(_iv)
+        market_iv_pct_ref: Optional[float] = None
+        if _iv_samples:
+            _iv_samples.sort()
+            _n = len(_iv_samples)
+            market_iv_pct_ref = (
+                _iv_samples[_n // 2] if _n % 2 else (_iv_samples[_n // 2 - 1] + _iv_samples[_n // 2]) / 2.0
+            )
+
         def _tally(reason: str, row: Optional[dict] = None) -> None:
             """Bump per-cycle rejection counter for silent-skip paths that
             never reach persist_raw_signal. This is what surfaces in the
@@ -837,12 +869,11 @@ class StrategyEntryMixin:
                 iv_pct = iv_val * 100.0 if iv_val < 1.0 else iv_val
             # New IV policy: relative-to-market spread drives a size
             # scaler in (0.25 .. 1.0]. We only reject when the IV is
-            # implausibly high (>90% — broker data sanity check).
-            market_iv_pct = float(
-                snapshot_state.get("market_iv_pct")
-                or snapshot_state.get("market_iv")
-                or 0.0
-            ) or None
+            # implausibly high (>90% — broker data sanity check). The market
+            # reference is this cycle's median ATM-leg IV (computed above);
+            # None only when no leg carried IV, in which case the scaler falls
+            # back to its own 22% neutral reference.
+            market_iv_pct = market_iv_pct_ref
             iv_scaler, iv_note = iv_size_scaler(iv_pct, market_iv_pct)
             if iv_scaler <= 0:
                 await persist_raw_signal("blocked", f"iv_{iv_note}", ltp=latest_close, iv_pct=iv_pct)

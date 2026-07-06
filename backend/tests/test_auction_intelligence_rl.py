@@ -214,5 +214,8 @@ def test_swing_agent_persists_rl_state_metadata_even_without_cache() -> None:
 
     assert decision.metadata["rl_state_key"].startswith("v2_")
     assert decision.metadata["risk_multiple"] == 2.0
-    assert decision.metadata["sleeve_fraction"] == 0.35
+    # sleeve_fraction default was deliberately cut 0.35 -> 0.04 in commit a716fe0a
+    # (2026-06-15, "restore the risk-discipline thesis"). This is the shipped default
+    # from auction_intelligence/config/defaults.json, not a learned Q-value.
+    assert decision.metadata["sleeve_fraction"] == 0.04
     assert decision.metadata["buyer_fail_bin"] >= 0

@@ -61,8 +61,21 @@ def book() -> CBEPaperBook:
     )
 
 
+# A dedicated event loop for this module. Using asyncio.get_event_loop() here is
+# fragile: any earlier test in the full suite that calls asyncio.run() leaves the
+# thread with no current event loop, so get_event_loop() then raises
+# "There is no current event loop". We own a persistent loop instead (created lazily,
+# recreated if closed) so these synchronous tests are immune to that cross-test
+# teardown. It must be a *single* reused loop, not one-per-call, because CBEPaperBook
+# holds an asyncio.Lock that binds to the first loop it runs on.
+_MODULE_LOOP: asyncio.AbstractEventLoop | None = None
+
+
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    global _MODULE_LOOP
+    if _MODULE_LOOP is None or _MODULE_LOOP.is_closed():
+        _MODULE_LOOP = asyncio.new_event_loop()
+    return _MODULE_LOOP.run_until_complete(coro)
 
 
 def test_empty_book_summary_is_baseline(book: CBEPaperBook):

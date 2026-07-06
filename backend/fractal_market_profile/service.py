@@ -1576,6 +1576,13 @@ class FractalMarketProfileService:
         daily_direction = str(daily_profile.get("direction_bias") or "neutral")
         order_flow_direction = "bullish" if float(order_flow.get("delta") or 0.0) >= 0 else "bearish"
         order_flow_alignment = float(order_flow.get("timing_confidence") or 0.0)
+        # Only a genuine book may nudge confidence — mirrors the order_flow_ready
+        # gate: real ticks for indices, or the accepted bar/futures proxy for MCX.
+        # A synthesized index book (LTP±tick, size 1.0) is noise, not order flow.
+        _of_source = str(order_flow.get("source") or "")
+        order_flow_genuine = _of_source == "market_ticks" or (
+            _is_mcx_symbol(symbol_code) and _of_source in {"bar_proxy", "bar_fallback", "bar_proxy_timeout"}
+        )
         pullback_tolerance = max(
             float(daily_profile["tick_size"]) * 6,
             float(current_hour_profile["initial_balance_range"]) * float(SCAN_CONFIG["trend_pullback_tolerance_factor"]),
@@ -1681,7 +1688,9 @@ class FractalMarketProfileService:
         elif confidence >= 0.80 and hour_number <= 4 and abs(va_score) >= 3:
             horizon = "positional"
 
-        if action != "FLAT" and order_flow_direction == ("bullish" if action == "LONG" else "bearish"):
+        if action != "FLAT" and not order_flow_genuine:
+            rationale.append("Order flow is synthetic/bar-inferred (no genuine book) — not used to adjust confidence.")
+        elif action != "FLAT" and order_flow_direction == ("bullish" if action == "LONG" else "bearish"):
             confidence += 0.08
             rationale.append("Order flow is leaning in the same direction as the profile thesis.")
         elif action != "FLAT":
@@ -1835,7 +1844,20 @@ class FractalMarketProfileService:
         payload["quote_history"] = quote_history
         payload["trade_prints"] = trades
         payload["depth_snapshot"] = depth
-        payload["source"] = "market_ticks" if quote_history else "bar_fallback"
+        # A "market_ticks" book is only real when a genuine two-sided book with
+        # real sizes was present for a majority of the window. Index ticks carry
+        # no book (LTP only), so bid/ask were synthesized as LTP±tick — that is
+        # not order flow. Tag those as synthetic_book so tick_ready is False and
+        # the ±0.08/-0.05 alignment adjustment is skipped (see _build_live_signal).
+        genuine = sum(1 for q in quote_history if not q.get("synthetic_book"))
+        genuine_fraction = (genuine / len(quote_history)) if quote_history else 0.0
+        if not quote_history:
+            payload["source"] = "bar_fallback"
+        elif genuine_fraction >= 0.5:
+            payload["source"] = "market_ticks"
+        else:
+            payload["source"] = "synthetic_book"
+        payload["genuine_quote_fraction"] = round(genuine_fraction, 3)
         return payload
 
     def _build_bar_order_flow(self, current_rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1998,25 +2020,36 @@ class FractalMarketProfileService:
             ltp = float(row["ltp"] or 0.0)
             if ltp <= 0:
                 continue
-            bid = float(row["bid"] or 0.0)
-            ask = float(row["ask"] or 0.0)
-            if bid <= 0:
-                bid = round(ltp - tick_size, 2)
-            if ask <= 0:
-                ask = round(ltp + tick_size, 2)
+            raw_bid = float(row["bid"] or 0.0)
+            raw_ask = float(row["ask"] or 0.0)
+            raw_bid_qty = float(row["bid_qty"] or 0.0)
+            raw_ask_qty = float(row["ask_qty"] or 0.0)
+            # A row is a GENUINE book only when it carries real two-sided prices
+            # AND real sizes. Otherwise we synthesize bid/ask as LTP±tick with
+            # size 1.0 — that is NOT order flow, so flag it so downstream can zero
+            # its confidence contribution instead of trading on noise dressed as
+            # a real book (index ticks carry no book at all — 0/206k have bid>0).
+            synthetic = raw_bid <= 0 or raw_ask <= 0 or raw_bid_qty <= 0 or raw_ask_qty <= 0
+            bid = raw_bid if raw_bid > 0 else round(ltp - tick_size, 2)
+            ask = raw_ask if raw_ask > 0 else round(ltp + tick_size, 2)
             history.append(
                 {
                     "timestamp": _iso(row["time"]),
                     "bid": bid,
                     "ask": ask,
-                    "bid_size": max(float(row["bid_qty"] or 0.0), 1.0),
-                    "ask_size": max(float(row["ask_qty"] or 0.0), 1.0),
+                    "bid_size": max(raw_bid_qty, 1.0),
+                    "ask_size": max(raw_ask_qty, 1.0),
                     "last_price": ltp,
+                    "synthetic_book": synthetic,
                 }
             )
         if history:
             latest_tick = market_data_router.get_latest_tick(app_symbol)
             if latest_tick and latest_tick.timestamp and latest_tick.timestamp.astimezone(timezone.utc) > _ensure_dt(history[-1]["timestamp"]):
+                _tick_synthetic = (
+                    latest_tick.bid is None or latest_tick.ask is None
+                    or not latest_tick.bid_qty or not latest_tick.ask_qty
+                )
                 history.append(
                     {
                         "timestamp": latest_tick.timestamp.astimezone(timezone.utc).isoformat(),
@@ -2025,6 +2058,7 @@ class FractalMarketProfileService:
                         "bid_size": max(float(latest_tick.bid_qty or 0.0), 1.0),
                         "ask_size": max(float(latest_tick.ask_qty or 0.0), 1.0),
                         "last_price": float(latest_tick.ltp or 0.0),
+                        "synthetic_book": bool(_tick_synthetic),
                     }
                 )
         return history

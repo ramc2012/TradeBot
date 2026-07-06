@@ -41,6 +41,15 @@ from db.database import AsyncSessionLocal
 # are skipped on a stale mark so they never fire on a frozen fiction; the
 # time-based window_end backstop still enforces terminal exits.
 _MARK_STALE_SECONDS = int(getattr(settings, "MACD_STRATEGY_MARK_STALE_SECONDS", 1200))
+
+# Minimum hold before macd_reversal_30m may fire. Entries open on a 30m up-cross
+# assembled with a SYNTHETIC forming bar (live LTP), while the exit MACD is built
+# from PERSISTED 30m closes only — so within the entry bar the two series can
+# disagree and the reversal exit churns the position out of the bar it just
+# entered. Requiring one completed 30m bar means the reversal decision is made on
+# a completed close both series agree on, resolving both the churn and the series
+# divergence. hard_stop / target / window_end still fire regardless.
+_MACD_REVERSAL_MIN_HOLD_SECONDS = int(getattr(settings, "MACD_STRATEGY_REVERSAL_MIN_HOLD_SECONDS", 1800))
 from market_data import option_history_service
 from paper_engine.base_strategy_agent import IST, _now_ist, _parse_iso_timestamp, _round_or_none
 from paper_engine.strategy_agent_state import StrategyEvent, StrategyPosition, StrategyRuntime
@@ -225,8 +234,9 @@ class StrategyExitMixin:
             # premium's momentum has rolled over. The PE branch previously used an
             # UP-cross, which mirrored the (now-fixed) inverted PE entry and would
             # have made a corrected PE exit on its own entry condition.
-            # macd_line[-1] reflects the in-flight bar's close (live LTP) so this
-            # fires INTRA-bar, no wait for bar close. 300m hold is a guideline only.
+            # Gated by a minimum hold (one completed 30m bar) so it can't churn
+            # the position out of the same bar it entered on the synthetic-bar
+            # up-cross — see _MACD_REVERSAL_MIN_HOLD_SECONDS.
             if pos.macd_line and len(pos.macd_line) >= 2:
                 prev_macd = pos.macd_line[-2]
                 curr_macd = pos.macd_line[-1]
@@ -234,7 +244,11 @@ class StrategyExitMixin:
                     prev_macd is not None and curr_macd is not None
                     and prev_macd >= 0 and curr_macd < 0
                 )
-                if opposite_cross and not mark_is_stale:
+                # Minimum-hold: don't reverse inside the entry bar (see constant).
+                entry_ts = _parse_iso_timestamp(pos.entered_at)
+                held_seconds = (_now_ist() - entry_ts).total_seconds() if entry_ts is not None else None
+                min_hold_ok = held_seconds is None or held_seconds >= _MACD_REVERSAL_MIN_HOLD_SECONDS
+                if opposite_cross and min_hold_ok and not mark_is_stale:
                     await self._close_position(runtime, pos, latest_close, "macd_reversal_30m", qty=pos.qty)
                     continue
 
