@@ -93,6 +93,10 @@ class DirectionalSignal:
     timing_precision: float = 0.0
     tail_probability: float = 0.0
     model_uncertainty: float = 0.0
+    # True when this signal came from the POSITIONAL (positioning-confirmed)
+    # view — the selector must then pick the MONTHLY contract in the validated
+    # DTE window, not the regime's intraday weekly preference.
+    positional: bool = False
 
 
 @dataclass(frozen=True)

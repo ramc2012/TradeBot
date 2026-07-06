@@ -24,7 +24,7 @@
 
 import { Fragment, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { BarChart3, CalendarClock, CirclePlay, History, LineChart, ListChecks, Radio, RefreshCcw, ScrollText, Settings, Wallet, Waves, X } from "lucide-react";
+import { BarChart3, CalendarClock, CirclePlay, History, LineChart, ListChecks, Radio, RefreshCcw, ScrollText, Settings, ShieldCheck, Wallet, Waves, X } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import {
@@ -37,6 +37,8 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { IndexMpOfView } from "@/components/strategies/commodity/IndexMpOfView";
+import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
+import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 
 import {
   api as apiClient,
@@ -3667,6 +3669,8 @@ const MPOF_TABS = [
   { key: "stats", label: "Stats", icon: BarChart3 },
   { key: "audit", label: "Audit", icon: Radio },
   { key: "instrument", label: "Instrument MP+OF", icon: LineChart },
+  { key: "signal-quality", label: "Signal quality", icon: ShieldCheck },
+  { key: "live-stream", label: "Live stream", icon: Radio },
 ];
 
 export default function MpOfDesk() {
@@ -3720,7 +3724,18 @@ export default function MpOfDesk() {
         </section>
       }
     >
-      {tab === "instrument" ? (
+      {tab === "live-stream" ? (
+        <StrategyLiveStream
+          title="Commodity MP + Order Flow"
+          watchlist={((status.futures_watchlist as Array<Record<string, unknown>> | undefined) ?? []).map((row) => ({
+            symbol: String(row.active_lookup_symbol ?? row.symbol ?? row.underlying ?? ""),
+            label: String(row.underlying ?? row.symbol ?? ""),
+          }))}
+          positionSources={["commodity", "commodity_futures"]}
+        />
+      ) : tab === "signal-quality" ? (
+        <SignalQualityTab laneKeys={["commodity_strategy", "commodity_mp_history"]} title="Commodity signal validation" />
+      ) : tab === "instrument" ? (
         <InstrumentMpOfTab />
       ) : (
         // Each MCX section renders full-page; the desk component stays mounted

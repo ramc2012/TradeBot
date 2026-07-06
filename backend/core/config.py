@@ -72,9 +72,10 @@ class Settings(BaseSettings):
     # expiry chains, persists per-contract volume/turnover, and syncs the
     # paper book. 30-min strategy → 60s cadence catches each fresh bar close.
     MACD_REFINED_AUTO_ENABLED: bool = True
-    # Full F&O universe (~217 names) × current+next expiry chains per cycle is
-    # broker-intensive; 300s keeps load sane and still catches every 30-min bar.
-    MACD_REFINED_AUTO_INTERVAL_SECONDS: int = 300
+    # Full F&O universe (~217 names) × current+next expiry chains is a bounded,
+    # broker-throttled sweep. Match its cadence to the 30-minute signal bar so
+    # completed cycles do not immediately start another redundant sweep.
+    MACD_REFINED_AUTO_INTERVAL_SECONDS: int = 1800
     # NSE MACD Strategy 1 (macd_strategy) max simultaneous positions. Default
     # 1000 = effectively NO cap — the strategy trades the full ATM watchlist
     # (~216 contracts) one position per underlying-side. (The shared live-risk
@@ -240,6 +241,12 @@ class Settings(BaseSettings):
     # positions still exit on stop/target/DTE). Paired with the daily refresh
     # runner below so it rarely trips in steady state.
     DIRECTIONAL_POSITIONAL_MAX_STALE_SESSIONS: int = 1
+    # Validated contract window for positional entries (backtest_indices_monthly:
+    # MONTHLY ATM, DTE 8-22). The selector filters to this window whenever the
+    # signal is positional; the regime's weekly preference applies only to the
+    # legacy intraday view.
+    DIRECTIONAL_POSITIONAL_DTE_MIN: int = 8
+    DIRECTIONAL_POSITIONAL_DTE_MAX: int = 22
     # Once-per-session post-close refresh of directional_positioning_daily.
     DIRECTIONAL_POSITIONING_REFRESH_INTERVAL_SECONDS: int = 3600
     # CBE alpha engine runs at EOD. Cadence = 1 hour: during market hours
@@ -248,6 +255,16 @@ class Settings(BaseSettings):
     # period gives the canonical EOD scan for the next session.
     CBE_SCANNER_AUTO_ENABLED: bool = True
     CBE_SCANNER_AUTO_INTERVAL_SECONDS: int = 3600
+    # Declared as real Settings fields (extra="ignore" silently drops env
+    # overrides for knobs read only via getattr). cbe_marks refreshes paper
+    # marks; gann runs its own 60s paper cycle on 15-min signal bars.
+    CBE_MARKS_REFRESH_INTERVAL_SECONDS: int = 300
+    GANN_TP_DELTA_AUTO_ENABLED: bool = True
+    GANN_TP_DELTA_AUTO_INTERVAL_SECONDS: int = 60
+    # S1: a held option mark older than this during NSE hours is stale (contract
+    # fell off the ATM rotation / broker refresh not landing) → skip price-based
+    # exits that cycle so a frozen mark can't misfire hard_stop/macd_reversal.
+    MACD_STRATEGY_MARK_STALE_SECONDS: int = 1200
     COMMODITY_FYERS_RATE_LIMIT_BACKOFF_SECONDS: int = 90
     COMMODITY_KILL_LOCK: bool = False
     # ── Commodity MP+OF module (restored from feat 2026-06-30) ─────────────

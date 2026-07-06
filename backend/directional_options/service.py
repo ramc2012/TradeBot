@@ -557,6 +557,7 @@ class DirectionalOptionsService:
         risk_payload: dict[str, object] | None = None
         rag_context: dict[str, Any] | None = None
         policy_payload: dict[str, Any] | None = None
+        chain_payload: dict[str, Any] | None = None
 
         snapshot_rows: list[dict[str, Any]] = []
         option_snapshot_lookup_failed = False
@@ -577,18 +578,34 @@ class DirectionalOptionsService:
                 selection_reason = f"Live option snapshot lookup timed out or failed: {exc}"
                 snapshot_rows = []
             if snapshot_rows and not bool(data_status.get("execution_ready")):
+                # Only override the staleness gate when the snapshot rows are
+                # themselves FRESH — mere row presence must not re-enable
+                # entries: the snapshot query has no lower time bound, so
+                # day-old rows would otherwise negate the stale-watchlist gate
+                # during exactly the feed outages it was built for.
                 latest_option_time = max(str(item.get("time") or "") for item in snapshot_rows)
-                data_status.update(
-                    {
-                        "latest_watchlist_time": latest_option_time or data_status.get("latest_watchlist_time"),
-                        "watchlist_rows_latest": max(
-                            int(data_status.get("watchlist_rows_latest") or 0),
-                            len(snapshot_rows),
-                        ),
-                        "execution_ready": True,
-                        "degraded_reason": None,
-                    }
-                )
+                stale_limit = float(self.config["paper_trading"]["stale_watchlist_seconds"])
+                snapshots_fresh = False
+                try:
+                    latest_dt = pd.Timestamp(latest_option_time)
+                    if latest_dt.tzinfo is None:
+                        latest_dt = latest_dt.tz_localize("UTC")
+                    age = (pd.Timestamp.now(tz="UTC") - latest_dt.tz_convert("UTC")).total_seconds()
+                    snapshots_fresh = 0 <= age <= stale_limit
+                except Exception:
+                    snapshots_fresh = False
+                if snapshots_fresh:
+                    data_status.update(
+                        {
+                            "latest_watchlist_time": latest_option_time or data_status.get("latest_watchlist_time"),
+                            "watchlist_rows_latest": max(
+                                int(data_status.get("watchlist_rows_latest") or 0),
+                                len(snapshot_rows),
+                            ),
+                            "execution_ready": True,
+                            "degraded_reason": None,
+                        }
+                    )
 
         if not bool(data_status.get("execution_ready")):
             selection_reason = (
@@ -622,7 +639,6 @@ class DirectionalOptionsService:
             # tolerate-failure: a missing chain payload just means the
             # policy gets sentinel zeros for chain features and falls
             # back to signal+candidate context alone.
-            chain_payload: dict[str, Any] | None = None
             try:
                 chain_expiry = None
                 best_cand = selection.get("best")

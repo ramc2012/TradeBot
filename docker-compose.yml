@@ -23,6 +23,14 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    # OOM containment (2026-07): the Docker VM (7.75GiB) is shared with a second
+    # TimescaleDB + ~24 containers. PG was auto-tuned as if it owned the whole VM
+    # (shared_buffers 1.94GB) → 786 VM-wide OOM signal-9 kills in 7 days. The
+    # postgres memory caps live in ALTER SYSTEM (persisted in the data volume);
+    # this cgroup limit bounds nomadcurie_db's fair share so a query spike is
+    # contained here instead of the VM OOM-killer taking down a random container.
+    mem_limit: 3g
+    shm_size: 512m
 
   redis:
     image: redis:7-alpine
@@ -60,6 +68,8 @@ services:
       BACKEND_CORS_ORIGIN_REGEX: "${BACKEND_CORS_ORIGIN_REGEX:-^https?://[^/]+(:[0-9]+)?$}"
     volumes:
       - ./backend:/app
+      # MACD Refined research dataset and live catalog/lot-size lookup.
+      - ./data:/data:ro
     depends_on:
       db:
         condition: service_healthy

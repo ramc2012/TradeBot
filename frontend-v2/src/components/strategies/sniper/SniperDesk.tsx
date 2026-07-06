@@ -20,7 +20,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Crosshair, Gauge, History as HistoryIcon, Radar, Target } from "lucide-react";
+import { Activity, Crosshair, Gauge, History as HistoryIcon, Radar, Target } from "lucide-react";
 
 import {
   DeskShell,
@@ -35,6 +35,8 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { api as apiClient } from "@/lib/api";
+import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
+import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 
 import { SniperQuadrant } from "./SniperQuadrant";
 import { MagnitudeLadder } from "./MagnitudeLadder";
@@ -44,9 +46,12 @@ const TABS = [
   { key: "board", label: "Signal board", icon: Crosshair },
   { key: "quadrant", label: "Conviction map", icon: Radar },
   { key: "history", label: "History", icon: HistoryIcon },
+  { key: "signal-quality", label: "Signal quality", icon: Activity },
+  { key: "live-stream", label: "Live stream", icon: Activity },
 ];
 
 const STALE_SEC = 1800; // 30m — sidecar fires every 30m during market hours
+const SNIPER_WATCHLIST = ["NIFTY", "BANKNIFTY", "SENSEX"];
 
 type HistoryEntry = SniperRow & { captured_at: number; key: string };
 
@@ -203,6 +208,16 @@ export default function SniperDesk() {
       ) : null}
 
       {activeTab === "history" ? <HistoryPanel history={history} /> : null}
+      {activeTab === "signal-quality" ? (
+        <SignalQualityTab laneKeys={["auction_intelligence"]} title="Sniper input validation" />
+      ) : null}
+      {activeTab === "live-stream" ? (
+        <StrategyLiveStream
+          title="Sniper"
+          watchlist={(rows.length ? rows.map((row) => row.symbol) : SNIPER_WATCHLIST).map((symbol) => ({ symbol }))}
+          positionSources={["sniper"]}
+        />
+      ) : null}
     </DeskShell>
   );
 }

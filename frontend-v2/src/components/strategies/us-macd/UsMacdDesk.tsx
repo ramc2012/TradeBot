@@ -20,6 +20,8 @@ import {
   getUsMacdSummary, getUsMacdDataHealth, getUsMacdPositioning,
   getUsMacdSignals, getUsMacdPaperPositions, runUsMacdLiveCycle,
 } from "@/lib/api";
+import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
+import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 
 const usd = (n: unknown) => {
   const v = Number(n);
@@ -32,6 +34,8 @@ const TABS = [
   { key: "signals", label: "Signals", icon: ListChecks },
   { key: "positioning", label: "Positioning", icon: CalendarClock },
   { key: "paper", label: "Paper book", icon: Banknote },
+  { key: "signal-quality", label: "Signal quality", icon: Activity },
+  { key: "live-stream", label: "Live stream", icon: Activity },
 ];
 
 export default function UsMacdDesk() {
@@ -248,6 +252,16 @@ export default function UsMacdDesk() {
             </div>
           );
         })()
+      ) : null}
+      {activeTab === "signal-quality" ? (
+        <SignalQualityTab laneKeys={["us_macd_refined"]} title="US MACD signal validation" />
+      ) : null}
+      {activeTab === "live-stream" ? (
+        <StrategyLiveStream
+          title="US MACD Refined"
+          watchlist={(summary?.live_universe ?? []).map((symbol: string) => ({ symbol }))}
+          positionSources={["us_macd"]}
+        />
       ) : null}
     </DeskShell>
   );

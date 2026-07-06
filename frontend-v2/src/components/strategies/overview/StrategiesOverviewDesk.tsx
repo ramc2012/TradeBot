@@ -12,6 +12,7 @@
  * Tabs:
  *   overview         → per-lane summary cards (status / last-scan / open / P&L / signal)
  *   signals          → sortable + filterable table of the latest signal per lane
+ *   signal-quality   → evaluated coverage, rejection funnel, latency, drift and input quality
  *   market-structure → NIFTY market profile (TPO) + order flow + regime consensus
  *
  * Defensiveness is the whole point: any lane field may be missing, any endpoint
@@ -19,7 +20,7 @@
  */
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, LayoutGrid, ListChecks, Map as MapIcon } from "lucide-react";
+import { Activity, LayoutGrid, ListChecks, Map as MapIcon, ShieldCheck } from "lucide-react";
 
 import {
   DeskShell,
@@ -42,6 +43,7 @@ import type { Snapshot as AuctionSnapshot } from "@/components/strategies/auctio
 import { LaneSummaryCard } from "./LaneSummaryCard";
 import { SignalBoardTab } from "./SignalBoardTab";
 import { MarketStructureTab } from "./MarketStructureTab";
+import { SignalQualityTab } from "./SignalQualityTab";
 import {
   LANES,
   STREAM_KEY_BY_LANE,
@@ -53,6 +55,7 @@ import {
 const TABS = [
   { key: "overview", label: "Overview", icon: LayoutGrid },
   { key: "signals", label: "Signals", icon: ListChecks },
+  { key: "signal-quality", label: "Signal quality", icon: ShieldCheck },
   { key: "market-structure", label: "Market structure", icon: MapIcon },
 ];
 
@@ -483,22 +486,23 @@ export default function StrategiesOverviewDesk() {
         />
       }
     >
-      {/* KPI strip — present on every tab. */}
-      <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <MetricTile
-          label="Lanes running"
-          value={`${runningCount} / ${lanes.length}`}
-          detail="active loops / scanners"
-        />
-        <MetricTile label="Open positions" value={String(totalOpen)} detail="live across lanes" />
-        <MetricTile
-          label="Open P&L"
-          value={formatSignedMoney(totalUnreal)}
-          color={tone(totalUnreal)}
-          detail="unrealized, streamed"
-        />
-        <MetricTile label="Live signals" value={String(signalsLive)} detail="lanes with a read" />
-      </section>
+      {activeTab !== "signal-quality" ? (
+        <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
+          <MetricTile
+            label="Lanes running"
+            value={`${runningCount} / ${lanes.length}`}
+            detail="active loops / scanners"
+          />
+          <MetricTile label="Open positions" value={String(totalOpen)} detail="live across lanes" />
+          <MetricTile
+            label="Open P&L"
+            value={formatSignedMoney(totalUnreal)}
+            color={tone(totalUnreal)}
+            detail="unrealized, streamed"
+          />
+          <MetricTile label="Live signals" value={String(signalsLive)} detail="lanes with a read" />
+        </section>
+      ) : null}
 
       {activeTab === "overview" ? (
         <section className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -509,6 +513,8 @@ export default function StrategiesOverviewDesk() {
       ) : null}
 
       {activeTab === "signals" ? <SignalBoardTab lanes={lanes} /> : null}
+
+      {activeTab === "signal-quality" ? <SignalQualityTab /> : null}
 
       {activeTab === "market-structure" ? (
         <MarketStructureTab snapshot={auctionSnapQuery.data} lanes={lanes} />

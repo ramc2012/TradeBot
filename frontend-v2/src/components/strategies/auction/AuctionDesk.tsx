@@ -28,6 +28,8 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { MarketProfileChart, OrderFlowPanel, PaperPerformance } from "@/components/strategies/shared";
+import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
+import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStrategyPositionsStream";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import { TerminalPanel } from "@/components/terminal/TerminalPanel";
@@ -48,6 +50,8 @@ const TABS = [
   { key: "gates", label: "Gates", icon: ListChecks },
   { key: "performance", label: "Performance", icon: TrendingUp },
   { key: "memory", label: "Memory", icon: Brain },
+  { key: "signal-quality", label: "Signal quality", icon: Activity },
+  { key: "live-stream", label: "Live stream", icon: Radio },
 ];
 
 const DEFAULT_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "CRUDEOIL"];
@@ -169,6 +173,16 @@ export default function AuctionDesk() {
       ) : null}
 
       {activeTab === "memory" ? <RagMemory rag={snap?.rag_context} /> : null}
+      {activeTab === "signal-quality" ? (
+        <SignalQualityTab laneKeys={["auction_intelligence"]} title="Auction signal validation" />
+      ) : null}
+      {activeTab === "live-stream" ? (
+        <StrategyLiveStream
+          title="Auction Intelligence"
+          watchlist={universe.map((item) => ({ symbol: String(item) }))}
+          positionSources={["auction"]}
+        />
+      ) : null}
     </DeskShell>
   );
 }

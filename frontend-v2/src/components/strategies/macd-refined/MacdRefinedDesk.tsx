@@ -3,7 +3,7 @@
 /**
  * MACD Refined desk (v2).
  *
- * Premium-MACD entry, low-IV gated, volume-led single-leg long options
+ * Premium-MACD entry, IV-mapped, volume-led single-leg long options
  * (separate CE / PE books). Surfaces:
  *   backtest    → research-validated edge vs the causal forward engine
  *   positioning → current + next monthly expiry + volume-tracking coverage
@@ -15,7 +15,7 @@
  */
 import { useMemo, useState, useTransition } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { BarChart3, Banknote, CalendarClock, RefreshCw } from "lucide-react";
+import { BarChart3, Banknote, CalendarClock, RefreshCw, ShieldCheck } from "lucide-react";
 
 import {
   DeskShell,
@@ -37,6 +37,8 @@ import {
   getMacdRefinedPaperPositions,
   runMacdRefinedLiveCycle,
 } from "@/lib/api";
+import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
+import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 
 type BookMetrics = {
   trades: number;
@@ -51,6 +53,8 @@ const TABS = [
   { key: "backtest", label: "Backtest", icon: BarChart3 },
   { key: "positioning", label: "Positioning", icon: CalendarClock },
   { key: "paper", label: "Paper book", icon: Banknote },
+  { key: "signal-quality", label: "Signal quality", icon: ShieldCheck },
+  { key: "live-stream", label: "Live stream", icon: RefreshCw },
 ];
 
 function pctTone(winRate?: number): string | undefined {
@@ -125,16 +129,32 @@ export default function MacdRefinedDesk() {
 
   const summary = summaryQuery.data as any;
   const params = summary?.params ?? {};
+  const automation = summary?.automation ?? {};
+  const automationFailureCount = Number(automation?.last_result_meta?.failure_count ?? 0);
+  const automationStatus = String(automation?.last_result_meta?.status ?? "").toLowerCase();
+  const automationFailed = Boolean(
+    automation?.last_error
+    || automationFailureCount > 0
+    || ["error", "failed", "timeout", "broker_not_ready"].includes(automationStatus),
+  );
+  const automationMessage = automation?.last_error
+    || automation?.last_result_meta?.message
+    || automation?.last_message;
 
   const runCycle = () => {
     startTransition(async () => {
       try {
         const res = await runMacdRefinedLiveCycle(true);
         const d = res.data as any;
+        const failures = Object.entries(d?.failures ?? {});
         setCycleResult(
-          d?.broker_ready
+          !d?.broker_ready
+            ? `Broker not connected — ${d?.note ?? "nothing fetched"}`
+            : failures.length > 0
+              ? `Cycle failed for ${failures.length} target(s) — ${failures[0]?.[0]}: ${String(failures[0]?.[1] ?? "unknown error")}`
+              : d?.broker_ready
             ? `Persisted ${d.snapshots_persisted} snapshots · ${d.proposals} proposals`
-            : `Broker not connected — ${d?.note ?? "nothing fetched"}`,
+            : "Cycle did not run",
         );
       } catch (e: any) {
         setCycleResult(e?.message ?? "cycle failed");
@@ -145,7 +165,7 @@ export default function MacdRefinedDesk() {
   return (
     <DeskShell
       title="MACD Refined"
-      description="Premium-MACD entry, low-IV gated, volume-led single-leg long options — separate capped CE/PE books, ATM, held to expiry−7d."
+      description="Premium-MACD entry with IV-regime mapping and liquidity gates — separate capped CE/PE books, ATM, held to expiry−7d."
       paperMode
       asOf={summary?.paper_summary ? new Date() : null}
       isFetching={summaryQuery.isFetching}
@@ -153,21 +173,32 @@ export default function MacdRefinedDesk() {
       activeTab={activeTab}
       onTabChange={setActiveTab}
       rightSlot={
-        <button
-          type="button"
-          onClick={runCycle}
-          disabled={isPending}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-bg-border bg-bg-primary/30 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-bg-active hover:text-text-primary disabled:opacity-50"
-        >
-          <RefreshCw size={13} className={isPending ? "animate-spin" : undefined} /> Run live cycle
-        </button>
+        <div className="flex items-center gap-2">
+          <StatusBadge
+            label={automationFailed ? "automation failed" : automation?.running ? "automation running" : "automation ready"}
+            variant={automationFailed ? "error" : automation?.running ? "info" : "success"}
+          />
+          <button
+            type="button"
+            onClick={runCycle}
+            disabled={isPending}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-bg-border bg-bg-primary/30 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-bg-active hover:text-text-primary disabled:opacity-50"
+          >
+            <RefreshCw size={13} className={isPending ? "animate-spin" : undefined} /> Run live cycle
+          </button>
+        </div>
       }
     >
+      {automationFailed ? (
+        <div className="rounded-xl border border-accent-red/35 bg-accent-red/8 px-3 py-2 text-xs text-accent-red">
+          {automationMessage || `Last automated cycle reported ${automationFailureCount} failure(s).`}
+        </div>
+      ) : null}
       {/* Param strip */}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
         <MetricTile label="MACD" value={(params.macd ?? [12, 26, 9]).join(", ")} size="sm" />
         <MetricTile label="Timeframe" value={summary?.timeframe ?? "30minute"} size="sm" />
-        <MetricTile label="IV-rank gate" value={`< ${params.iv_rank_max ?? 0.3}`} size="sm" />
+        <MetricTile label="IV cheap label" value={`< ${params.iv_rank_max ?? 0.3}`} size="sm" />
         <MetricTile label="Stop" value={`−${Math.round((params.catastrophe_stop_pct ?? 0.5) * 100)}% (${params.catastrophe_stop_basis ?? "bar_close"})`} size="sm" />
         <MetricTile label="Books" value={`${params.ce_slots ?? 10} CE / ${params.pe_slots ?? 10} PE`} size="sm" />
         <MetricTile label="Slippage" value={formatPct(params.round_trip_slippage_pct ?? 0.1)} size="sm" />
@@ -258,6 +289,16 @@ export default function MacdRefinedDesk() {
 
       {activeTab === "paper" ? (
         <PaperBook data={paperQuery.data as any} />
+      ) : null}
+      {activeTab === "signal-quality" ? (
+        <SignalQualityTab laneKeys={["macd_refined"]} title="MACD Refined signal validation" />
+      ) : null}
+      {activeTab === "live-stream" ? (
+        <StrategyLiveStream
+          title="MACD Refined"
+          watchlist={(summary?.live_universe ?? []).map((symbol: string) => ({ symbol }))}
+          positionSources={["macd"]}
+        />
       ) : null}
     </DeskShell>
   );

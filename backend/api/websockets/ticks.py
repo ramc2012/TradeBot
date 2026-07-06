@@ -382,6 +382,7 @@ async def _build_positions_overview_structure() -> dict:
     from api.routers.fractal_market_profile import fractal_market_profile_paper_positions
     from api.routers.gann_tp_delta import paper_agent_status as gann_paper_agent_status
     from api.routers.trading import get_positions, strategy_agent_status
+    from macd_refined.service import macd_refined_service, us_macd_refined_service
 
     errors: dict[str, str] = {}
 
@@ -396,6 +397,7 @@ async def _build_positions_overview_structure() -> dict:
     (
         manual_positions, nse_status, commodity_status, directional_positions,
         gann_status, auction_positions, fractal_positions, cbe_positions,
+        macd_positions, us_macd_positions,
     ) = await asyncio.gather(
         settle("manual", get_positions()),
         settle("nse", strategy_agent_status()),
@@ -405,12 +407,21 @@ async def _build_positions_overview_structure() -> dict:
         settle("auction", auction_paper_positions(symbol=None, status="all", limit=100)),
         settle("fractal", fractal_market_profile_paper_positions(symbol=None, status="all", limit=100)),
         settle("cbe", cbe_paper_positions(status="all", limit=100)),
+        settle(
+            "macd",
+            asyncio.to_thread(macd_refined_service.paper_positions, None, "all", 100),
+        ),
+        settle(
+            "us_macd",
+            asyncio.to_thread(us_macd_refined_service.paper_positions, None, "all", 100),
+        ),
     )
     return _slim_positions_overview_structure({
         "manual": manual_positions, "nse": nse_status, "commodity": commodity_status,
         "directional": directional_positions, "gann": gann_status,
         "auction": auction_positions, "fractal": fractal_positions,
-        "cbe": cbe_positions, "errors": errors,
+        "cbe": cbe_positions, "macd": macd_positions,
+        "us_macd": us_macd_positions, "errors": errors,
     })
 
 
@@ -474,7 +485,7 @@ def _slim_positions_overview_structure(structure: dict) -> dict:
             commodity["trade_history"] = _cap_recent(th, _POSITIONS_OVERVIEW_TRADE_TAIL)
         structure["commodity"] = commodity
 
-    for lane in ("directional", "gann", "auction", "fractal", "cbe"):
+    for lane in ("directional", "gann", "auction", "fractal", "cbe", "macd", "us_macd"):
         payload = structure.get(lane)
         if not isinstance(payload, dict):
             continue
@@ -506,6 +517,24 @@ async def _overlay_positions_overview(structure: dict) -> dict:
     if isinstance(commodity_status, dict) and isinstance(commodity_status.get("positions"), list):
         await overlay_live_marks(commodity_status["positions"], side_field="action")
 
+    # Every other strategy book now receives the same hot-cache live-mark
+    # overlay. Long-premium option lanes are always BUY legs (CE and PE are
+    # option types, not sides); CBE carries an explicit LONG/SHORT direction.
+    generic_overlays = []
+    for lane in ("directional", "gann", "auction", "fractal", "macd", "us_macd", "cbe"):
+        payload = structure.get(lane)
+        opened = payload.get("open_positions") if isinstance(payload, dict) else None
+        if isinstance(opened, list):
+            generic_overlays.append(
+                overlay_live_marks(
+                    opened,
+                    side_field="direction",
+                    force_long=lane != "cbe",
+                )
+            )
+    if generic_overlays:
+        await asyncio.gather(*generic_overlays)
+
     return {
         "manual": structure.get("manual"),
         # NB: the old "strategy" alias duplicated the full nse status in every
@@ -517,6 +546,8 @@ async def _overlay_positions_overview(structure: dict) -> dict:
         "auction": structure.get("auction"),
         "fractal": structure.get("fractal"),
         "cbe": structure.get("cbe"),
+        "macd": structure.get("macd"),
+        "us_macd": structure.get("us_macd"),
         "errors": structure.get("errors", {}),
         "fetchedAt": datetime.now(timezone.utc).isoformat(),
     }

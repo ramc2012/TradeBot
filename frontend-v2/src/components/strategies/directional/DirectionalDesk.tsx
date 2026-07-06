@@ -22,7 +22,7 @@
 import { useMemo, useState, useTransition } from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { Banknote, Brain, Gauge, Layers3, Radio, TrendingUp } from "lucide-react";
+import { Banknote, Brain, Gauge, Layers3, Radio, ShieldCheck, TrendingUp } from "lucide-react";
 
 import {
   DeskShell,
@@ -44,6 +44,8 @@ import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStra
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import { createStrategySnapshotSocket } from "@/lib/websocket";
 import { PaperPerformance, GammaDensity } from "@/components/strategies/shared";
+import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
+import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 import type { PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
 
@@ -67,6 +69,8 @@ const TABS = [
   { key: "paper",     label: "Paper trading",      icon: Banknote },
   { key: "policy",    label: "Policy & learning",  icon: Brain },
   { key: "performance", label: "Performance",      icon: TrendingUp },
+  { key: "signal-quality", label: "Signal quality", icon: ShieldCheck },
+  { key: "live-stream", label: "Live stream", icon: Radio },
 ];
 
 type ModuleSummary = {
@@ -297,6 +301,16 @@ export default function DirectionalDesk() {
         <PaperPerformance
           summary={paper.summary.data as Record<string, number> | undefined}
           positions={livePaper.positions.data as PositionsPayload | undefined}
+        />
+      ) : null}
+      {activeTab === "signal-quality" ? (
+        <SignalQualityTab laneKeys={["directional_options", "directional_positioning"]} title="Directional signal validation" />
+      ) : null}
+      {activeTab === "live-stream" ? (
+        <StrategyLiveStream
+          title="Directional Options"
+          watchlist={universe.map((symbol) => ({ symbol }))}
+          positionSources={["directional"]}
         />
       ) : null}
     </DeskShell>

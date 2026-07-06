@@ -48,6 +48,8 @@ import {
   type ChartPriceLine,
   type OrderFlow,
 } from "@/components/strategies/shared";
+import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
+import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStrategyPositionsStream";
 import type { PositionsPayload, PaperSummary, PaperPosition } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
@@ -62,6 +64,8 @@ const TABS = [
   { key: "signal", label: "Signal", icon: Crosshair },
   { key: "performance", label: "Performance", icon: TrendingUp },
   { key: "replay", label: "Replay", icon: Activity },
+  { key: "signal-quality", label: "Signal quality", icon: Activity },
+  { key: "live-stream", label: "Live stream", icon: Activity },
 ];
 
 type ProfileBlock = {
@@ -319,6 +323,16 @@ export default function FractalDesk() {
 
       {activeTab === "replay" ? (
         <ReplayPanel report={replayQuery.data} loading={replayQuery.isFetching} error={replayQuery.isError} />
+      ) : null}
+      {activeTab === "signal-quality" ? (
+        <SignalQualityTab laneKeys={["fractal_market_profile"]} title="Fractal signal validation" />
+      ) : null}
+      {activeTab === "live-stream" ? (
+        <StrategyLiveStream
+          title="Fractal Market Profile"
+          watchlist={universe.map((item) => ({ symbol: String(item) }))}
+          positionSources={["fractal"]}
+        />
       ) : null}
     </DeskShell>
   );

@@ -4,6 +4,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Optional
 
+from loguru import logger
+
 from analysis.indicators_agent import IndicatorContext, indicators_agent
 from analysis.macd_engine import compute_ema, compute_macd  # noqa: F401  (back-compat; calls now go via indicators_agent)
 # Exit cascade (2026-06-02) trimmed to the canonical S1 design:
@@ -27,10 +29,18 @@ from analysis.macd_engine import compute_ema, compute_macd  # noqa: F401  (back-
 #     #8 trailing_stoploss  (premium-trail exit; replaced by macd_reversal as
 #                            the natural exit; trailing_stop level still
 #                            computed by #6 for diagnostic / UI visibility)
-from agent.strategy_config import EXIT, MACD_FAST, MACD_MIN_BARS, MACD_SIGNAL, MACD_SLOW, OPTION_ENTRY_MA_FAST
+from agent.strategy_config import EXIT, MACD_FAST, MACD_MIN_BARS, MACD_SIGNAL, MACD_SLOW, OPTION_ENTRY_MA_FAST, WINDOW_BUFFER_DAYS
 from analytics.technicals import latest_macd_rsi
 from core.config import settings
+from core.trading_calendar import trading_calendar
 from db.database import AsyncSessionLocal
+
+# During market hours a 30m-bar option mark older than this is treated as stale:
+# the contract has likely dropped off the ATM rotation and the per-cycle broker
+# refresh isn't landing. PRICE-based exits (hard_stop / target / macd_reversal)
+# are skipped on a stale mark so they never fire on a frozen fiction; the
+# time-based window_end backstop still enforces terminal exits.
+_MARK_STALE_SECONDS = int(getattr(settings, "MACD_STRATEGY_MARK_STALE_SECONDS", 1200))
 from market_data import option_history_service
 from paper_engine.base_strategy_agent import IST, _now_ist, _parse_iso_timestamp, _round_or_none
 from paper_engine.strategy_agent_state import StrategyEvent, StrategyPosition, StrategyRuntime
@@ -120,6 +130,26 @@ class StrategyExitMixin:
             pos.peak_price = max(pos.peak_price, latest_close)
             pos.price_updated_at = live_observed_at or _now_ist().isoformat()
 
+            # Mark-staleness gate: a frozen mark makes return_pct fiction, so
+            # price-based exits must not act on it. Time-based window_end still
+            # runs. Only trip during market hours (off-hours marks are expected
+            # to be the prior close).
+            mark_is_stale = False
+            if live_observed_at:
+                try:
+                    obs = _parse_iso_timestamp(live_observed_at)
+                    if obs is not None:
+                        age = (_now_ist() - obs).total_seconds()
+                        if age > _MARK_STALE_SECONDS and trading_calendar.is_exchange_open("NSE", _now_ist()):
+                            mark_is_stale = True
+                except Exception:
+                    mark_is_stale = False
+            if mark_is_stale:
+                logger.debug(
+                    "[{lane}] {sym} mark stale ({age}s) — skipping price-based exits this cycle",
+                    lane=runtime.key, sym=pos.symbol, age=int(age),
+                )
+
             # Cache MACD + EMA via indicators_agent so the entries side and
             # exit side of the same scan cycle don't recompute on the same
             # closes. Key includes symbol + interval + last bar time, so
@@ -152,12 +182,12 @@ class StrategyExitMixin:
             return_pct = pos.return_pct
 
             # ── #1 HARD STOP at -25% — fires anytime, no hold gate ──
-            if return_pct <= -EXIT.hard_stop_pct:
+            if return_pct <= -EXIT.hard_stop_pct and not mark_is_stale:
                 await self._close_position(runtime, pos, latest_close, "hard_stop", qty=pos.qty)
                 continue
 
             # ── #5 target_50pct partial — half off at +50%, runner stays ──
-            if pos.phase == self.PHASE_1 and return_pct >= EXIT.target_pct:
+            if pos.phase == self.PHASE_1 and return_pct >= EXIT.target_pct and not mark_is_stale:
                 exit_qty = max(1, int(pos.qty * EXIT.target_exit_fraction))
                 await self._close_position(runtime, pos, latest_close, "target_50pct", qty=exit_qty, partial=True)
                 pos.qty -= exit_qty
@@ -204,9 +234,38 @@ class StrategyExitMixin:
                     prev_macd is not None and curr_macd is not None
                     and prev_macd >= 0 and curr_macd < 0
                 )
-                if opposite_cross:
+                if opposite_cross and not mark_is_stale:
                     await self._close_position(runtime, pos, latest_close, "macd_reversal_30m", qty=pos.qty)
                     continue
+
+            # ── window_end / expiry backstop — MANDATORY time exit, LAST resort ──
+            # S1 is the MONTHLY physical-delivery-window strategy; a position must
+            # not ride INTO the delivery window (expiry − WINDOW_BUFFER_DAYS) or
+            # toward expiry. Placed at the END of the cascade so a genuine price
+            # exit (hard_stop / target / macd_reversal) still takes attribution
+            # when it fires — but a position whose mark has FROZEN (so none of
+            # those can fire) is still force-closed here instead of becoming a
+            # zombie that rides to expiry. Time-based, so it works on a stale
+            # mark. Closes the hole left when window_end was deleted 2026-06-02.
+            today_ist = _now_ist().date()
+            try:
+                pos_expiry = date.fromisoformat(str(pos.expiry)[:10])
+            except (TypeError, ValueError):
+                pos_expiry = None
+            window_end_date = None
+            if pos.window_end:
+                try:
+                    window_end_date = date.fromisoformat(str(pos.window_end)[:10])
+                except (TypeError, ValueError):
+                    window_end_date = None
+            if window_end_date is None and pos_expiry is not None:
+                window_end_date = pos_expiry - timedelta(days=WINDOW_BUFFER_DAYS)
+            expiry_backstop = (pos_expiry - timedelta(days=1)) if pos_expiry is not None else None
+            if (window_end_date is not None and today_ist >= window_end_date) or (
+                expiry_backstop is not None and today_ist >= expiry_backstop
+            ):
+                await self._close_position(runtime, pos, latest_close, "window_end", qty=pos.qty)
+                continue
 
         latest_prices = {sym: position.current_price for sym, position in runtime.positions.items()}
         if latest_prices:

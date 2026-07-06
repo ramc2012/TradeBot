@@ -34,6 +34,43 @@ function toUnix(t: number | string): number {
   return Math.floor((Number.isNaN(ms) ? Date.now() : ms) / 1000);
 }
 
+type LightweightTime = number | string | { year: number; month: number; day: number };
+
+function chartTimeToDate(time: LightweightTime): Date | null {
+  if (typeof time === "number") {
+    const ms = time > 1e12 ? time : time * 1000;
+    const parsed = new Date(ms);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+  if (typeof time === "string") {
+    const parsed = new Date(time);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+  if (time && Number.isFinite(time.year) && Number.isFinite(time.month) && Number.isFinite(time.day)) {
+    return new Date(Date.UTC(time.year, time.month - 1, time.day));
+  }
+  return null;
+}
+
+function formatISTChartTime(time: LightweightTime, includeDate: boolean): string {
+  const parsed = chartTimeToDate(time);
+  if (!parsed) return "";
+  const timeLabel = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(parsed);
+  if (!includeDate) return timeLabel;
+  const dateLabel = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "2-digit",
+  }).format(parsed);
+  return `${dateLabel} ${timeLabel}`;
+}
+
 // Build series data with ONE point per bar timestamp — a real value where the
 // indicator is defined, otherwise a *whitespace* point ({ time } only) during
 // the warm-up. This is what keeps the panes time-aligned: lightweight-charts
@@ -109,12 +146,37 @@ export function OptionStudyChart({
       const hMacd = Math.round(height * 0.21);
       const hRsi = height - hPrice - hMacd;
 
+      const tickMarkFormatter = (time: LightweightTime, tickMarkType: number) => {
+        const parsed = chartTimeToDate(time);
+        if (!parsed) return "";
+        if (tickMarkType === lw.TickMarkType.Year) {
+          return new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", year: "numeric" }).format(parsed);
+        }
+        if (tickMarkType === lw.TickMarkType.Month) {
+          return new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", month: "short" }).format(parsed);
+        }
+        if (tickMarkType === lw.TickMarkType.DayOfMonth) {
+          return new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", day: "2-digit" }).format(parsed);
+        }
+        return formatISTChartTime(time, false);
+      };
+
       const common = (h: number, showTime: boolean) => ({
         height: h,
         layout: { background: { type: lw.ColorType.Solid, color: "transparent" }, textColor: col("--text-secondary"), fontSize: 10 },
         grid: { vertLines: { color: "rgba(255,255,255,0.04)" }, horzLines: { color: "rgba(255,255,255,0.05)" } },
         rightPriceScale: { borderColor: col("--bg-border"), minimumWidth: PRICE_SCALE_WIDTH },
-        timeScale: { borderColor: col("--bg-border"), timeVisible: true, secondsVisible: false, visible: showTime },
+        localization: {
+          locale: "en-IN",
+          timeFormatter: (time: LightweightTime) => formatISTChartTime(time, true),
+        },
+        timeScale: {
+          borderColor: col("--bg-border"),
+          timeVisible: true,
+          secondsVisible: false,
+          visible: showTime,
+          tickMarkFormatter,
+        },
         crosshair: { mode: lw.CrosshairMode.Normal },
       });
 

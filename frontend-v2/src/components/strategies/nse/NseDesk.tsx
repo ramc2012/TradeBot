@@ -65,6 +65,8 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { PaperPerformance } from "@/components/strategies/shared";
+import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
+import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
 import { OptionChartModal, type OptionChartContract } from "@/components/strategies/nse/OptionChartModal";
 import { MacdCockpit } from "@/components/strategies/nse/MacdCockpit";
 import { useStrategyPositionsStream } from "@/hooks/useStrategyPositionsStream";
@@ -138,6 +140,13 @@ type TradeRow = {
   option_type?: string | null;
 };
 
+type StrategyEventRow = {
+  time?: string | null;
+  event?: string | null;
+  underlying?: string | null;
+  option_type?: string | null;
+};
+
 type LaneSummary = {
   initial_capital?: number | null;
   available_capital?: number | null;
@@ -175,6 +184,7 @@ type StrategyLane = {
   signals?: WatchRow[];
   trade_history?: TradeRow[];
   today_trades?: TradeRow[];
+  recent_events?: StrategyEventRow[];
 };
 
 type Commentary = { time?: string; scope?: string; tone?: string; level?: string; message?: string };
@@ -215,6 +225,32 @@ type DiffusionPoint = {
   net_diffusion?: number | null;
   source?: string;
 };
+
+function mergeAgentStatusWithPositionStream(
+  polled: AgentStatus | undefined,
+  streamed: AgentStatus | undefined,
+): AgentStatus | undefined {
+  if (!streamed) return polled;
+  if (!polled) return streamed;
+
+  // The positions-overview socket intentionally strips bulky lane fields such
+  // as recent_events, signals and meta. Overlay its live positions/summary on
+  // the complete polled lane instead of replacing the whole status payload.
+  const streamedByKey = new Map(
+    (streamed.strategies ?? []).map((lane) => [lane.key, lane] as const),
+  );
+  const mergedStrategies = (polled.strategies ?? []).map((lane) => {
+    const liveLane = streamedByKey.get(lane.key);
+    return liveLane ? { ...lane, ...liveLane } : lane;
+  });
+  const knownKeys = new Set(mergedStrategies.map((lane) => lane.key));
+  for (const liveLane of streamed.strategies ?? []) {
+    if (!knownKeys.has(liveLane.key)) mergedStrategies.push(liveLane);
+  }
+
+  return { ...polled, ...streamed, strategies: mergedStrategies };
+}
+
 type DiffusionPayload = { market?: string; days?: number; count?: number; series?: DiffusionPoint[]; latest?: DiffusionPoint | null };
 
 const TABS = [
@@ -226,6 +262,8 @@ const TABS = [
   { key: "sentiment", label: "Sentiment", icon: Gauge },
   { key: "performance", label: "Performance", icon: BarChart3 },
   { key: "activity", label: "Activity", icon: Activity },
+  { key: "signal-quality", label: "Signal quality", icon: Activity },
+  { key: "live-stream", label: "Live stream", icon: Radio },
 ];
 
 type SortDir = "asc" | "desc";
@@ -342,7 +380,13 @@ export default function NseDesk() {
     enabled: activeTab === "cockpit" || activeTab === "positions" || activeTab === "performance" || activeTab === "overview",
   });
   const streamLive = posStream.isStreamConnected && Boolean(posStream.data?.nse);
-  const status = (streamLive ? (posStream.data?.nse as unknown as AgentStatus) : statusQuery.data);
+  const streamedStatus = posStream.data?.nse as unknown as AgentStatus | undefined;
+  const status = useMemo(
+    () => streamLive
+      ? mergeAgentStatusWithPositionStream(statusQuery.data, streamedStatus)
+      : statusQuery.data,
+    [statusQuery.data, streamLive, streamedStatus],
+  );
   const lane = useMemo<StrategyLane | undefined>(
     () => (status?.strategies || []).find((s) => s.key === "macd_strategy") || (status?.strategies || [])[0],
     [status?.strategies],
@@ -351,6 +395,24 @@ export default function NseDesk() {
   const watchlist = useMemo(() => signalsQuery.data?.strategy1_watchlist ?? [], [signalsQuery.data]);
   const positions = useMemo(() => lane?.positions ?? [], [lane?.positions]);
   const closedTrades = useMemo(() => lane?.trade_history ?? [], [lane?.trade_history]);
+  const todayActivity = useMemo(() => {
+    const formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    const today = formatter.format(new Date());
+    const events = (lane?.recent_events ?? []).filter((event) => {
+      if (!event.time) return false;
+      const parsed = new Date(event.time);
+      return !Number.isNaN(parsed.getTime()) && formatter.format(parsed) === today;
+    });
+    return {
+      entries: events.filter((event) => event.event === "entry").length,
+      exits: events.filter((event) => event.event === "exit").length,
+    };
+  }, [lane?.recent_events]);
 
   const kill = killQuery.data;
   const killActive = kill?.kill_switch_active ?? status?.kill_switch_active ?? false;
@@ -399,7 +461,11 @@ export default function NseDesk() {
         <MetricTile label="Day P&L" value={formatSignedMoney(summary.day_pnl)} color={tone(summary.day_pnl)} detail={`realized ${formatSignedMoney(summary.day_realized_pnl)}`} />
         <MetricTile label="Realized (life)" value={formatSignedMoney(summary.realized_pnl_lifetime ?? summary.realized_pnl)} color={tone(summary.realized_pnl_lifetime ?? summary.realized_pnl)} />
         <MetricTile label="Open P&L" value={formatSignedMoney(summary.unrealized_pnl)} color={tone(summary.unrealized_pnl)} />
-        <MetricTile label="Open / Trades" value={`${summary.open_positions ?? positions.length} / ${summary.total_trades ?? 0}`} detail={`cap ${lane?.position_cap ?? "—"}`} />
+        <MetricTile
+          label="Open / Trades"
+          value={`${summary.open_positions ?? positions.length} / ${summary.total_trades ?? 0}`}
+          detail={`today ${todayActivity.entries} entries · ${todayActivity.exits} exits · cap ${lane?.position_cap ?? "—"}`}
+        />
         <MetricTile label="Win rate" value={summary.win_rate != null ? formatPct(summary.win_rate) : "—"} detail={`PF ${formatNumber(summary.profit_factor, 2)}`} color={tone((summary.profit_factor ?? 0) - 1)} />
       </section>
 
@@ -429,6 +495,16 @@ export default function NseDesk() {
         <ActivityTab
           commentary={normalizeComments(commentsQuery.data, status?.commentary)}
           audit={auditQuery.data?.events ?? []}
+        />
+      ) : null}
+      {activeTab === "signal-quality" ? (
+        <SignalQualityTab laneKeys={["macd_strategy", "market_intelligence"]} title="MACD signal validation" />
+      ) : null}
+      {activeTab === "live-stream" ? (
+        <StrategyLiveStream
+          title="MACD Strategy"
+          watchlist={["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"].map((symbol) => ({ symbol }))}
+          positionSources={["macd_strategy"]}
         />
       ) : null}
     </DeskShell>

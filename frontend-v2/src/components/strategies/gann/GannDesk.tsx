@@ -27,6 +27,8 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { PaperPerformance } from "@/components/strategies/shared";
+import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
+import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStrategyPositionsStream";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import { createStrategySnapshotSocket } from "@/lib/websocket";
@@ -42,6 +44,8 @@ const TABS = [
   { key: "confluence", label: "Confluence", icon: Sparkles },
   { key: "paper", label: "Performance", icon: TrendingUp },
   { key: "backtest", label: "Backtest", icon: Activity },
+  { key: "signal-quality", label: "Signal quality", icon: Activity },
+  { key: "live-stream", label: "Live stream", icon: Radio },
 ];
 
 type Signal = {
@@ -198,6 +202,16 @@ export default function GannDesk() {
       ) : null}
 
       {activeTab === "backtest" ? <BacktestTab data={backtestQuery.data} loading={backtestQuery.isFetching} /> : null}
+      {activeTab === "signal-quality" ? (
+        <SignalQualityTab laneKeys={["gann_tp_delta"]} title="Gann signal validation" />
+      ) : null}
+      {activeTab === "live-stream" ? (
+        <StrategyLiveStream
+          title="Gann TP Delta"
+          watchlist={universe.map((symbol) => ({ symbol }))}
+          positionSources={["gann"]}
+        />
+      ) : null}
     </DeskShell>
   );
 }

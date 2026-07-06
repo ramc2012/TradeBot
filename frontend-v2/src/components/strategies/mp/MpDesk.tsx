@@ -60,6 +60,8 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { CandleChart, CHART, MarketProfileChart, OrderFlowPanel, type ChartPriceLine, type OrderFlow } from "@/components/strategies/shared";
+import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
+import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 import { api as apiClient } from "@/lib/api";
 
 // ── types (built from the curled prod shapes; everything is nullable) ────────
@@ -261,6 +263,8 @@ const TABS = [
   { key: "structure", label: "Structure", icon: Layers3 },
   { key: "migration", label: "Value Migration", icon: TrendingUp },
   { key: "drift", label: "Drift & CVD", icon: Brain },
+  { key: "signal-quality", label: "Signal quality", icon: Activity },
+  { key: "live-stream", label: "Live stream", icon: Activity },
 ];
 
 const UNDERLYINGS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "CRUDEOIL"];
@@ -397,6 +401,16 @@ export default function MpDesk() {
         {activeTab === "migration" ? <MigrationTab migration={migration} setup={setup} /> : null}
 
         {activeTab === "drift" ? <DriftTab drift={drift} orderflow={analytics?.orderflow_proxy} /> : null}
+        {activeTab === "signal-quality" ? (
+          <SignalQualityTab laneKeys={["market_intelligence", "auction_intelligence"]} title="Market-profile signal validation" />
+        ) : null}
+        {activeTab === "live-stream" ? (
+          <StrategyLiveStream
+            title="Market Profile"
+            watchlist={UNDERLYINGS.map((symbol) => ({ symbol }))}
+            positionSources={["mp"]}
+          />
+        ) : null}
       </div>
     </DeskShell>
   );
