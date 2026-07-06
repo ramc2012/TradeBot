@@ -41,6 +41,21 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _timeframe_minutes(timeframe: str | None) -> int:
+    """'15minute' -> 15. Falls back to 15 so a bad config can never turn the
+    time stop back into a per-scan counter."""
+    digits = "".join(ch for ch in str(timeframe or "") if ch.isdigit())
+    try:
+        minutes = int(digits)
+    except ValueError:
+        return 15
+    return minutes if minutes > 0 else 15
+
+
+def _bar_bucket(minutes: int) -> int:
+    return int(datetime.now(UTC).timestamp() // (minutes * 60))
+
+
 def _safe_float(value: Any, default: float | None = None) -> float | None:
     try:
         result = float(value)
@@ -312,7 +327,7 @@ class GannTPDeltaPaperAgent:
 
             # Track the underlying, advance break-even / trailing stop, then
             # decide the exit off Gann levels on the underlying.
-            self._update_underlying_tracking(position, spot, risk_cfg)
+            self._update_underlying_tracking(position, spot, risk_cfg, timeframe=timeframe)
             close_reason = self._risk_exit_reason(position, spot, signal, risk_cfg=risk_cfg, rev_min=rev_min)
 
             if close_reason:
@@ -559,10 +574,24 @@ class GannTPDeltaPaperAgent:
         )
         return closed
 
-    def _update_underlying_tracking(self, position: dict[str, Any], spot: float | None, risk_cfg: dict[str, Any]) -> None:
+    def _update_underlying_tracking(
+        self,
+        position: dict[str, Any],
+        spot: float | None,
+        risk_cfg: dict[str, Any],
+        *,
+        timeframe: str | None = None,
+    ) -> None:
         """Advance bar count, peak/trough, break-even and trailing stop on the
-        UNDERLYING (in R units, so it works identically for options & futures)."""
-        position["bars_held"] = _safe_int(position.get("bars_held"), 0) + 1
+        UNDERLYING (in R units, so it works identically for options & futures).
+
+        bars_held advances once per SIGNAL BAR (e.g. 15 minutes), not once per
+        scan cycle — the scan runs every ~60s, and counting cycles made the
+        26-bar time stop fire in ~26 minutes instead of ~6.5 hours."""
+        bucket = _bar_bucket(_timeframe_minutes(timeframe))
+        if _safe_int(position.get("last_bar_bucket"), -1) != bucket:
+            position["last_bar_bucket"] = bucket
+            position["bars_held"] = _safe_int(position.get("bars_held"), 0) + 1
         if spot is None:
             return
         position["current_underlying"] = round(spot, 2)

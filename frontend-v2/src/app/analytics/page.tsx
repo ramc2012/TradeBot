@@ -39,6 +39,7 @@ import { createPositionsOverviewSocket } from "@/lib/websocket";
 
 type PositionsOverviewPayload = AppStrategyPortfolioSnapshot & {
   strategy?: AppStrategyPortfolioSnapshot["nse"];
+  us_macd?: AppStrategyPortfolioSnapshot["usMacd"];
 };
 
 function normalizePositionsOverview(payload: PositionsOverviewPayload): AppStrategyPortfolioSnapshot {
@@ -51,6 +52,7 @@ function normalizePositionsOverview(payload: PositionsOverviewPayload): AppStrat
     fractal: payload.fractal ?? null,
     cbe: payload.cbe ?? null,
     macd: payload.macd ?? null,
+    usMacd: payload.usMacd ?? payload.us_macd ?? null,
     errors: payload.errors ?? {},
     fetchedAt: payload.fetchedAt ?? new Date().toISOString(),
   };

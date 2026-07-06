@@ -4,7 +4,7 @@ A standalone long-premium options lane implementing
 `STRATEGY-premium-macd-lowiv.md` end-to-end:
 
 > Buy the single-leg ATM option (CE **or** PE) whose **option-premium MACD(12,26,9)**
-> just crossed zero, only when its IV is cheap vs its own history (IV-rank < 0.30),
+> just crossed zero, with IV rank recorded as market-regime context (not an entry gate),
 > sized to its live traded volume, held to the expiry-7d window, run as separate
 > capped CE / PE books — calls carry up-markets, puts carry down-markets, volume
 > gives ~6 days' and a directional heads-up.
@@ -16,7 +16,7 @@ A standalone long-premium options lane implementing
 | `config.py` | Frozen parameters from the study (spec §11A), data roots, live universe, label `MACD Refined`. |
 | `indicators.py` | MACD, IV-rank, turnover, realised-vol, trailing turnover baseline. |
 | `data.py` | Reads the repo-root `data/` dataset (30-min option premium candles + spot + catalogs + validated signals); builds per-underlying ATM-IV history; resolves current + next monthly expiry. |
-| `signals.py` | One ATM premium-MACD zero-cross signal per leg per cycle (spec §4), with the low-IV / liquidity / window gates (§5) and the trend leg-selector (§5.4). |
+| `signals.py` | One ATM premium-MACD zero-cross signal per leg per cycle (spec §4), with liquidity / window gates (§5) and IV-regime mapping. |
 | `risk.py` | Liquidity-scaled sizing (§6), kill switch (§9). |
 | `backtest.py` | Portfolio overlay (separate CE/PE books, slots, one-leg-per-stock, daily cap, compounding sizing) over either the **research** (validated) or **engine** (causal) signal source. |
 | `paper.py` | File-backed CE/PE paper book + journal + capital summary (spec §7–§9). |
@@ -53,9 +53,8 @@ proposals to the paper book. With no broker authenticated it degrades cleanly
 
 ## Implemented vs deferred (honest map against the spec)
 
-**Implemented:** premium-MACD(12,26,9) ATM zero-cross entry (§4.1–4.3); IV-rank<0.30
-gate with IV-vs-median and IV-vs-realised-vol fallbacks, all computed causally
-as-of the signal date (§5.1); liquidity floor on trailing daily turnover (§5.2);
+**Implemented:** premium-MACD(12,26,9) ATM zero-cross entry (§4.1–4.3); IV-rank
+mapping computed causally as-of the signal date (§5.1); liquidity floor on trailing daily turnover (§5.2);
 entry window expiry−7d (§5.3); trend leg-selection CE/PE with a CE/PE
 turnover-imbalance fallback (§4.5, §5.4); liquidity-scaled compounding sizing
 (§6); separate CE/PE books, slot limits, one-leg-per-stock, daily new-entry cap

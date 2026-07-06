@@ -23,6 +23,7 @@ from db.database import AsyncSessionLocal
 from db.redis_client import get_redis
 from fractal_market_profile.service import fmp_service
 from market_data.data_router import data_router
+from market_data.validated_snapshots import validated_snapshot_store
 from paper_engine.commodity_strategy_agent import commodity_strategy_agent, _in_commodity_hours
 from paper_engine.strategy_agent import paper_strategy_agent, _in_market_hours
 
@@ -751,3 +752,250 @@ async def system_overview() -> dict[str, Any]:
         _overview_cache["payload"] = payload
         _overview_cache["expires_at"] = monotonic() + _OVERVIEW_CACHE_TTL_SECONDS
         return payload
+
+
+def _replay_mismatch_count(value: Any) -> int:
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, dict):
+        total = 0
+        for nested in value.values():
+            if isinstance(nested, (list, dict)):
+                total += _replay_mismatch_count(nested)
+            elif isinstance(nested, bool):
+                total += int(not nested)
+            elif isinstance(nested, (int, float)):
+                total += int(max(nested, 0))
+            elif nested:
+                total += 1
+        return total
+    return int(bool(value))
+
+
+def _agent_validation_runner(
+    status: dict[str, Any],
+    *,
+    key: str,
+    label: str,
+    strategy_key: str | None = None,
+) -> dict[str, Any]:
+    strategies = status.get("strategies") or status.get("strategy_agents") or []
+    strategy = next(
+        (item for item in strategies if not strategy_key or item.get("key") == strategy_key),
+        {},
+    )
+    signals = strategy.get("signals") if isinstance(strategy.get("signals"), list) else []
+    run_summary = strategy.get("last_run_summary") or {}
+    requested = (
+        status.get("instrument_universe")
+        or (strategy.get("meta") or {}).get("instrument_universe")
+        or []
+    )
+    if not requested:
+        requested = [
+            item.get("symbol") or item.get("underlying")
+            for item in (status.get("futures_watchlist") or status.get("watchlist") or [])
+            if isinstance(item, dict) and (item.get("symbol") or item.get("underlying"))
+        ]
+    evaluated = int(
+        run_summary.get("evaluated")
+        or run_summary.get("scanned")
+        or status.get("active_windows")
+        or len(requested)
+        or len(signals)
+    )
+    actionable = sum(
+        1
+        for item in signals
+        if str(item.get("status") or "").lower()
+        in {"actionable", "approved", "entry-ready", "triggered", "open"}
+    )
+    blocked = dict(run_summary.get("blocked_reasons") or run_summary.get("rejection_counts") or {})
+    last_error = status.get("last_error")
+    return {
+        "key": key,
+        "label": label,
+        "enabled": status.get("enabled", True),
+        "running": status.get("running", False),
+        "interval_seconds": status.get("scan_interval_seconds"),
+        "last_started_at": status.get("last_run_at"),
+        "last_success_at": status.get("last_run_at") if not last_error else None,
+        "last_finished_at": status.get("last_run_at"),
+        "last_error": last_error,
+        "last_message": status.get("last_message") or strategy.get("last_message"),
+        "last_result_meta": {
+            "result_count": evaluated,
+            "actionable_count": actionable,
+            "failure_count": int(bool(last_error)),
+            "rejection_counts": blocked,
+            "symbols_requested": requested,
+            "symbols_completed": requested if evaluated else [],
+        },
+        "cycle_stats": {},
+    }
+
+
+def build_signal_validation_payload(
+    supervisor_status: dict[str, Any],
+    audits: list[dict[str, Any]],
+    snapshot_status: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Normalize runtime evidence around signal correctness, not paper P/L."""
+    generated_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    audit_by_lane = {str(item.get("lane")): item for item in audits}
+    audit_aliases = {
+        "macd_refined": "s1",
+        "directional_options": "directional_options",
+        "auction_intelligence": "auction_intelligence",
+        "fractal_market_profile": "fmp",
+        "cbe_scanner": "cbe_scanner",
+    }
+    lanes: list[dict[str, Any]] = []
+    total_evaluated = total_actionable = total_failures = total_stale_missing = 0
+    for key, runner in (supervisor_status.get("runners") or {}).items():
+        meta = runner.get("last_result_meta") or {}
+        evaluated = int(meta.get("result_count") or 0)
+        actionable = int(meta.get("actionable_count") or 0)
+        failures = int(meta.get("failure_count") or 0)
+        requested = meta.get("symbols_requested") or meta.get("requested") or []
+        completed = meta.get("symbols_completed") or meta.get("completed") or []
+        coverage_pct = meta.get("coverage_pct")
+        if isinstance(requested, list) and requested:
+            coverage_pct = round(len(set(map(str, completed))) / len(set(map(str, requested))) * 100.0, 2)
+        rejection_counts = dict(meta.get("rejection_counts") or {})
+        funnel = dict(meta.get("funnel") or {})
+        stale_missing = sum(
+            int(count or 0)
+            for reason, count in rejection_counts.items()
+            if any(token in str(reason).lower() for token in ("stale", "missing", "no_data", "no data", "fresh"))
+        )
+        audit = audit_by_lane.get(audit_aliases.get(str(key), str(key)))
+        mismatch_count = _replay_mismatch_count((audit or {}).get("replay_mismatches")) if audit else None
+        cycle_stats = runner.get("cycle_stats") or {}
+        lanes.append(
+            {
+                "key": key,
+                "label": runner.get("label") or key,
+                "status": "running" if runner.get("running") else "failed" if runner.get("last_error") else "ready",
+                "interval_seconds": runner.get("interval_seconds"),
+                "last_success_at": runner.get("last_success_at"),
+                "evaluated_count": evaluated,
+                "actionable_count": actionable,
+                "failure_count": failures,
+                "coverage_pct": coverage_pct,
+                "rejection_counts": rejection_counts,
+                "rejection_funnel": funnel,
+                "stale_or_missing_count": stale_missing,
+                "median_latency_seconds": cycle_stats.get("median_duration_seconds"),
+                "frequency_drift_pct": cycle_stats.get("frequency_drift_pct"),
+                "replay_mismatch_count": mismatch_count,
+                "replay_parity_pass": (audit or {}).get("replay_parity_pass"),
+                "audit_date": (audit or {}).get("audit_date"),
+                "last_error": runner.get("last_error"),
+            }
+        )
+        total_evaluated += evaluated
+        total_actionable += actionable
+        total_failures += failures
+        total_stale_missing += stale_missing
+    return {
+        "generated_at": generated_at.isoformat(),
+        "summary": {
+            "lane_count": len(lanes),
+            "evaluated_count": total_evaluated,
+            "actionable_count": total_actionable,
+            "failure_count": total_failures,
+            "stale_or_missing_count": total_stale_missing,
+            "degraded_feed_count": int(snapshot_status.get("degraded_count") or 0)
+            + int(snapshot_status.get("rejected_count") or 0),
+        },
+        "lanes": lanes,
+        "validated_snapshots": snapshot_status,
+        "audits": audits,
+    }
+
+
+@router.get("/signal-validation")
+async def signal_validation() -> dict[str, Any]:
+    audits: list[dict[str, Any]] = []
+    try:
+        async with AsyncSessionLocal() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT DISTINCT ON (lane)
+                            lane, audit_date, replay_parity_pass, replay_mismatches,
+                            data_integrity_pass, freshness_violations,
+                            gate_block_breakdown, overall_status, created_at
+                        FROM lane_audit
+                        ORDER BY lane, audit_date DESC, created_at DESC
+                        """
+                    )
+                )
+            ).mappings().all()
+        for row in rows:
+            item = dict(row)
+            for key, value in list(item.items()):
+                if hasattr(value, "isoformat"):
+                    item[key] = value.isoformat()
+            audits.append(item)
+    except Exception as exc:
+        # Older/dev databases may not have the audit migration yet. Runtime
+        # signal telemetry remains useful and the gap is explicit in `audits`.
+        logger.debug(f"[System] lane audit read unavailable: {exc}")
+    supervisor_status = market_hours_paper_supervisor.get_status()
+    runners = dict(supervisor_status.get("runners") or {})
+    nse_status = _agent_status_snapshot(paper_strategy_agent)
+    runners["macd_strategy"] = _agent_validation_runner(
+        nse_status,
+        key="macd_strategy",
+        label="Strategy 1 · 30m ATM MACD",
+        strategy_key="macd_strategy",
+    )
+    commodity_status = _agent_status_snapshot(commodity_strategy_agent)
+    runners["commodity_strategy"] = _agent_validation_runner(
+        commodity_status,
+        key="commodity_strategy",
+        label="Commodity MP + Order Flow",
+        strategy_key="commodity_futures",
+    )
+    try:
+        from macd_refined.service import us_macd_refined_service
+
+        us_summary, us_signals = await asyncio.gather(
+            asyncio.to_thread(us_macd_refined_service.summary),
+            asyncio.to_thread(us_macd_refined_service.signals, limit=100),
+        )
+        automation = dict(us_summary.get("automation") or {})
+        rows = list(us_signals.get("signals") or [])
+        rejection_counts: dict[str, int] = {}
+        for row in rows:
+            if row.get("accepted") is False:
+                reason = str(row.get("gate_reason") or row.get("reason") or "rejected")
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+        runners["us_macd_refined"] = {
+            **automation,
+            "key": "us_macd_refined",
+            "label": us_summary.get("label") or "US MACD Refined",
+            "interval_seconds": automation.get("interval_seconds"),
+            "last_result_meta": {
+                "result_count": int(us_signals.get("count") or len(rows)),
+                "actionable_count": int(us_signals.get("accepted") or 0),
+                "failure_count": int(bool(automation.get("last_error"))),
+                "rejection_counts": rejection_counts,
+                "symbols_requested": list(us_summary.get("live_universe") or []),
+                "symbols_completed": list(us_summary.get("live_universe") or []) if rows else [],
+            },
+            "cycle_stats": automation.get("cycle_stats") or {},
+        }
+    except Exception as exc:
+        logger.debug(f"[System] US MACD validation status unavailable: {exc}")
+    supervisor_status = {**supervisor_status, "runners": runners}
+    return build_signal_validation_payload(
+        supervisor_status,
+        audits,
+        validated_snapshot_store.status(),
+    )

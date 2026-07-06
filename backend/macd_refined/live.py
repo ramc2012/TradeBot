@@ -20,8 +20,10 @@ left untouched.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import date, datetime, timedelta, timezone
+from importlib import import_module
 from pathlib import Path
 from typing import Any, Optional
 
@@ -45,6 +47,27 @@ _INDEX_FYERS = {
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _utc_key(ts) -> str:
+    """Canonical, chronologically-sortable UTC ISO key for a bar timestamp.
+
+    macd_refined's 30m series come from two sources with different tz
+    conventions: the parquet-resample path indexes on ``captured_at`` (UTC,
+    +00:00) while the broker-history fallback can surface UTC or tz-naive
+    timestamps. Comparing ``str(ts)`` lexically then mis-orders '+00:00' vs
+    '+05:30' (or naive) strings — a genuinely newer bar can read as LESS THAN
+    a stored one, silently dropping a fresh zero-cross for the rest of the
+    session (or re-firing an already-signalled one on the reverse flip). All
+    dedup comparisons and persisted state go through this so both sides are
+    UTC and lexical order == chronological order. tz-naive is assumed UTC to
+    match the dominant (parquet + DB) convention."""
+    t = pd.Timestamp(ts)
+    if t.tzinfo is None or t.tz is None:
+        t = t.tz_localize("UTC")
+    else:
+        t = t.tz_convert("UTC")
+    return t.isoformat()
 
 
 def fyers_symbol(underlying: str) -> str:
@@ -100,7 +123,17 @@ class MacdRefinedLiveEngine:
     def _load_signal_state(self) -> dict[str, str]:
         try:
             if self._signal_state_path.exists():
-                return dict(json.loads(self._signal_state_path.read_text()))
+                raw = dict(json.loads(self._signal_state_path.read_text()))
+                # Migrate any legacy mixed-tz string values to canonical UTC ISO
+                # so the dedup comparison (now UTC-vs-UTC) is chronologically
+                # correct on the first cycle after this fix.
+                migrated: dict[str, str] = {}
+                for key, value in raw.items():
+                    try:
+                        migrated[key] = _utc_key(value)
+                    except Exception:
+                        migrated[key] = str(value)
+                return migrated
         except Exception:
             pass
         return {}
@@ -247,17 +280,37 @@ class MacdRefinedLiveEngine:
     def _tracking_path(self, underlying: str) -> Path:
         return self.tracking_root / f"{str(underlying).upper()}.parquet"
 
+    @staticmethod
+    def _parquet_storage_error() -> str | None:
+        """Return a fatal configuration error when pandas cannot use Parquet.
+
+        The live cycle depends on durable snapshots for MACD history, turnover
+        gates, and open-position marks.  Failing once up front is safer than
+        reporting one identical failure for every F&O symbol.
+        """
+        errors: list[str] = []
+        for module_name in ("pyarrow", "fastparquet"):
+            try:
+                import_module(module_name)
+                return None
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{module_name}: {exc}")
+        return (
+            "MACD Refined Parquet storage is unavailable; install pyarrow or "
+            f"fastparquet. Tried {', '.join(errors)}"
+        )
+
     def _persist_snapshots(self, underlying: str, rows: list[dict[str, Any]]) -> int:
         if not rows:
             return 0
         path = self._tracking_path(underlying)
         new = pd.DataFrame(rows)
         if path.exists():
-            try:
-                existing = pd.read_parquet(path)
-                combined = pd.concat([existing, new], ignore_index=True)
-            except Exception:
-                combined = new
+            # Never replace unreadable history with a fresh one-row file.  A
+            # read error is operationally significant and must reach the
+            # cycle's failure report while the original remains untouched.
+            existing = pd.read_parquet(path)
+            combined = pd.concat([existing, new], ignore_index=True)
         else:
             combined = new
         # Bound growth — keep the most recent ~80k rows per name.
@@ -265,8 +318,12 @@ class MacdRefinedLiveEngine:
         # Atomic write (tmp + replace) so a concurrent reader (load_tracking /
         # positioning) never sees a half-written parquet.
         tmp = path.with_suffix(".parquet.tmp")
-        combined.to_parquet(tmp, index=False)
-        tmp.replace(path)
+        try:
+            combined.to_parquet(tmp, index=False)
+            tmp.replace(path)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
         return len(rows)
 
     def load_tracking(self, underlying: str) -> pd.DataFrame:
@@ -292,10 +349,17 @@ class MacdRefinedLiveEngine:
             "snapshots_persisted": 0,
             "proposals": 0,
             "failures": {},
+            "storage_ready": False,
         }
         if adapter is None:
             status["note"] = "No authenticated broker adapter; persisted nothing. Volume tracking + signals resume once FYERS is connected."
             return status
+        storage_error = self._parquet_storage_error()
+        if storage_error:
+            status["failures"]["storage"] = storage_error
+            status["note"] = storage_error
+            return status
+        status["storage_ready"] = True
 
         all_proposals: list[dict[str, Any]] = []
         marks: dict[str, dict[str, Any]] = {}
@@ -304,35 +368,59 @@ class MacdRefinedLiveEngine:
         diag = {"legs_evaluated": 0, "macd_series_ready": 0, "fresh_cross": 0,
                 "iv_pass": 0, "liquidity_pass": 0, "sized_ok": 0}
 
-        for underlying in universe:
-            try:
+        # Each name is independent until the final paper-book sync.  Bound the
+        # concurrency so a 217-name universe finishes inside the supervisor
+        # timeout while the process-global Fyers limiter still governs the
+        # aggregate request rate.
+        concurrency = max(1, int(self.config["live"].get("max_concurrent_names", 6)))
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _process_underlying(underlying: str) -> dict[str, Any]:
+            async with semaphore:
                 expiries = self.resolve_expiries(underlying, today)
                 fy = self._underlying_symbol(underlying)
                 persisted_here = 0
-                snapshots_by_exp: dict[str, list[dict[str, Any]]] = {}
                 for kind, exp in zip(("current", "next"), expiries):
                     chain = await adapter.get_option_chain(fy, exp.isoformat())
-                    rows, snaps = self._chain_to_rows(underlying, exp, kind, chain, strikes_side)
+                    rows, _snaps = self._chain_to_rows(underlying, exp, kind, chain, strikes_side)
                     persisted_here += self._persist_snapshots(underlying, rows)
-                    snapshots_by_exp[exp.isoformat()] = snaps
-                status["fetched"][underlying] = {
-                    "expiries": [e.isoformat() for e in expiries],
-                    "persisted_rows": persisted_here,
-                }
-                status["snapshots_persisted"] += persisted_here
                 # Generate causal proposals (premium-MACD seeded from broker
                 # history when live snapshots are still thin). Per-name diag is
-                # captured for the data-sufficiency audit, then folded into the
-                # aggregate funnel.
+                # returned to the caller and folded into the aggregate funnel.
                 name_diag: dict[str, int] = {}
                 props = await self._evaluate(adapter, underlying, expiries, name_diag)
-                for k, v in name_diag.items():
-                    diag[k] = diag.get(k, 0) + v
-                status["fetched"][underlying]["legs"] = name_diag.get("legs_evaluated", 0)
-                status["fetched"][underlying]["macd_ready"] = name_diag.get("macd_series_ready", 0)
-                all_proposals.extend(props)
+                return {
+                    "underlying": underlying,
+                    "expiries": [e.isoformat() for e in expiries],
+                    "persisted_rows": persisted_here,
+                    "proposals": props,
+                    "diag": name_diag,
+                }
+
+        async def _safe_process(underlying: str) -> dict[str, Any]:
+            try:
+                return await _process_underlying(underlying)
             except Exception as exc:  # noqa: BLE001
-                status["failures"][underlying] = str(exc)
+                return {"underlying": underlying, "error": str(exc)}
+
+        processed = await asyncio.gather(*(_safe_process(underlying) for underlying in universe))
+        for item in processed:
+            underlying = str(item["underlying"])
+            if item.get("error") is not None:
+                status["failures"][underlying] = str(item["error"])
+                continue
+            persisted_here = int(item.get("persisted_rows") or 0)
+            name_diag = dict(item.get("diag") or {})
+            status["fetched"][underlying] = {
+                "expiries": list(item.get("expiries") or []),
+                "persisted_rows": persisted_here,
+                "legs": name_diag.get("legs_evaluated", 0),
+                "macd_ready": name_diag.get("macd_series_ready", 0),
+            }
+            status["snapshots_persisted"] += persisted_here
+            all_proposals.extend(list(item.get("proposals") or []))
+            for k, v in name_diag.items():
+                diag[k] = diag.get(k, 0) + v
 
         # Persist the per-contract last-signalled-bar dedup state.
         self._save_signal_state()
@@ -545,14 +633,16 @@ class MacdRefinedLiveEngine:
                 # tolerance vs the cache/cycle interaction), AND newer than the
                 # last bar we already signalled for this contract (dedup, no miss).
                 ckey = f"{underlying}|{exp_iso}|{atm}|{option_type}"
-                last_sig = self._signal_state.get(ckey)
+                last_sig = self._signal_state.get(ckey)  # canonical UTC ISO (migrated on load)
                 recent_idx = list(series.index[-2:])
                 cross_bars = [t for t, c in zip(series.index, crosses.to_numpy()) if c and t in recent_idx]
-                fresh = [t for t in cross_bars if last_sig is None or str(t) > last_sig]
+                # Compare in canonical UTC so a +05:30 (or naive) fallback bar is
+                # ordered correctly against a +00:00 parquet bar.
+                fresh = [t for t in cross_bars if last_sig is None or _utc_key(t) > last_sig]
                 if not fresh:
                     continue
-                signal_bar = max(fresh)
-                self._signal_state[ckey] = str(signal_bar)
+                signal_bar = max(fresh, key=_utc_key)
+                self._signal_state[ckey] = _utc_key(signal_bar)
                 _bump("fresh_cross")
 
                 last = latest_rows[latest_rows["strike"] == atm]
@@ -562,9 +652,18 @@ class MacdRefinedLiveEngine:
                 iv = self._normalize_iv(float(last.get("iv") or 0.0))
                 ltp = float(last.get("ltp") or 0.0)
                 lot = self._lot_for(underlying, last.get("lot_size"))
-                # IV-rank — MAPPING LABEL ONLY (never gates).
-                iv_hist = atm_rows["iv"].astype(float).map(self._normalize_iv).iloc[:-1]
-                ivr = iv_rank(iv, iv_hist.tail(iv_window))
+                # IV-rank — MAPPING LABEL ONLY (never gates). Rank against ONE IV
+                # observation PER SESSION (last capture of each day), so
+                # iv_rank_window_sessions=252 really spans 252 sessions — not 252
+                # per-cycle capture snapshots (~13/session ≈ 19 sessions), which
+                # mislabelled every journaled iv_zone for the mapping study.
+                iv_by_session = (
+                    atm_rows.assign(_d=atm_rows["captured_at"].dt.date)
+                    .groupby("_d")["iv"].last().astype(float).map(self._normalize_iv)
+                )
+                if len(iv_by_session):
+                    iv_by_session = iv_by_session.iloc[:-1]  # drop today's forming session
+                ivr = iv_rank(iv, iv_by_session.tail(iv_window))
                 # Liquidity baseline (real tradeability gate).
                 daily_turn = atm_rows.assign(_d=atm_rows["captured_at"].dt.date).groupby("_d")["turnover_rupees"].max()
                 prior_days = daily_turn[[d < today for d in daily_turn.index]]
@@ -686,6 +785,19 @@ class MacdRefinedLiveEngine:
             out = {"broker_ready": False, "note": "No authenticated broker adapter.", "ran_at": _utc_now()}
             _write(out)
             return out
+        storage_error = self._parquet_storage_error()
+        if storage_error:
+            out = {
+                "broker_ready": True,
+                "storage_ready": False,
+                "fatal_error": storage_error,
+                "ran_at": _utc_now(),
+                "summary": {"sufficient": 0, "insufficient": 0, "no_data": 0, "error": 1, "total": 0},
+                "insufficient": [{"underlying": "_storage", "status": "error", "error": storage_error}],
+                "names": [],
+            }
+            _write(out)
+            return out
         sig_cfg = self.config["signal"]
         min_bars = int(sig_cfg["macd_slow"]) + int(sig_cfg["macd_signal"])
         strikes_side = int(self.config["live"].get("strikes_each_side", 3))
@@ -750,6 +862,7 @@ class MacdRefinedLiveEngine:
         out = {
             "ran_at": _utc_now(),
             "broker_ready": True,
+            "storage_ready": True,
             "universe_size": len(universe),
             "min_macd_bars": min_bars + 2,
             "summary": {"sufficient": suff, "insufficient": insuff, "no_data": nodata, "error": err, "total": len(universe)},

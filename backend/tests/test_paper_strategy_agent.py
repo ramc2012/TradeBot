@@ -357,6 +357,7 @@ def test_run_once_uses_next_strategy1_window_instead_of_idling(monkeypatch) -> N
     assert "No active Strategy 1 monthly trading windows." not in status["strategy_agents"][0]["last_message"]
 
 
+@pytest.mark.skip(reason="S2 lane (_run_strategy2) removed from registered agents 2026-06-02; captured underlyings are set by the S2 runner which no longer executes. S1's consumption of monthly-filtered native index rows is covered by test_run_once_s1_scans_only_monthly_index_rows.")
 def test_run_once_includes_native_strategy2_index_expiry_rows(monkeypatch) -> None:
     agent = PaperStrategyAgent()
     captured: dict[str, list[str]] = {}
@@ -488,6 +489,100 @@ def test_run_once_includes_native_strategy2_index_expiry_rows(monkeypatch) -> No
     assert (None, strategy_agent_module.STRATEGY2_UNDERLYINGS) in requested_watchlists
 
 
+def test_run_once_s1_scans_only_monthly_index_rows(monkeypatch) -> None:
+    """A3 regression: the native index (ex-S2) watchlist matrix returns both
+    weekly and monthly composite rows, but S1 — the monthly physical-delivery
+    lane — must scan ONLY the monthly track. A weekly index row leaking into
+    S1's scan is the bug this locks out.
+    """
+    agent = PaperStrategyAgent()
+    scanned_rows: dict[str, list[dict]] = {}
+
+    async def fake_snapshot(*, force_validate: bool = False):
+        return {
+            "connected_brokers": ["fyers"], "upstox_ready": False, "fyers_ready": True,
+            "broker_ready": True, "upstox_token_health": {"status": "disconnected"},
+            "fyers_token_health": {"status": "valid"},
+        }
+
+    async def fake_active_windows(*, as_of: date | None = None):
+        return []
+
+    async def fake_scan_windows(*, as_of: date | None = None):
+        # A stock scan window drives the S1 watchlist pipeline; the index rows
+        # under test arrive via the native (ex-S2) matrix merge.
+        return [{
+            "underlying": "AUROPHARMA", "expiry": date(2026, 4, 28),
+            "prev_expiry": date(2026, 3, 26), "window_start": date(2026, 3, 19),
+            "window_end": date(2026, 4, 21), "window_state": "active",
+        }]
+
+    async def fake_expiries(_expiry: str | None = None, *, live_refresh: bool = False):
+        return {"default_expiry": "2026-04-28", "monthly_expiry": "2026-04-28",
+                "stock_monthly_expiry": "2026-04-28", "index_monthlies": {"NIFTY": "2026-04-28"}}
+
+    async def fake_watchlist(expiry: str | None = None, symbols=None, *, live_refresh: bool = False):
+        # Primary monthly scan returns the plain NIFTY monthly row.
+        return {"rows": [{"underlying": "NIFTY", "kind": "INDEX", "expiry": "2026-04-28",
+                          "spot_price": 24200.0, "ce": {"option_type": "CE"}, "pe": {"option_type": "PE"}}],
+                "detail": None}
+
+    async def fake_native_rows(_expiry_scope, *, live_refresh: bool = False):
+        # The native matrix hands back BOTH tracks for NIFTY.
+        return {
+            "NIFTY:weekly": {"underlying": "NIFTY", "kind": "INDEX", "expiry": "2026-04-09",
+                             "expiry_track": "weekly", "spot_price": 24200.0,
+                             "ce": {"option_type": "CE"}, "pe": {"option_type": "PE"}},
+            "NIFTY:monthly": {"underlying": "NIFTY", "kind": "INDEX", "expiry": "2026-04-28",
+                              "expiry_track": "monthly", "spot_price": 24200.0,
+                              "ce": {"option_type": "CE"}, "pe": {"option_type": "PE"}},
+        }
+
+    async def fake_scan_entries(runtime, rows, window_map):
+        scanned_rows["rows"] = list(rows)
+        runtime.last_message = f"Scanned {len(rows)} instruments."
+
+    async def fake_manage_exits(_runtime, _rows=None):
+        return None
+
+    async def fake_bootstrap(**_kwargs):
+        return {"status": "ready", "counts_after": {"keyed_rows": 100}}
+
+    async def fake_status():
+        return agent.get_status()
+
+    async def fake_async_noop():
+        return None
+
+    monkeypatch.setattr(strategy_agent_module, "_in_market_hours", lambda _: True)
+    monkeypatch.setattr(strategy_agent_module, "get_broker_connection_snapshot", fake_snapshot)
+    monkeypatch.setattr(strategy_agent_module, "get_all_active_windows", fake_active_windows)
+    monkeypatch.setattr(strategy_agent_module, "get_all_strategy1_scan_windows", fake_scan_windows)
+    monkeypatch.setattr(strategy_agent_module, "ensure_fo_underlying_catalog", fake_bootstrap)
+    monkeypatch.setattr(strategy_agent_module.atm_watchlist_service, "get_expiries", fake_expiries)
+    monkeypatch.setattr(strategy_agent_module.atm_watchlist_service, "get_watchlist", fake_watchlist)
+    monkeypatch.setattr(agent, "_load_strategy2_native_watchlist_rows", fake_native_rows)
+    monkeypatch.setattr(agent, "_manage_exits", fake_manage_exits)
+    monkeypatch.setattr(agent, "_scan_entries", fake_scan_entries)
+    monkeypatch.setattr(agent, "_status_with_risk_snapshot", fake_status)
+    monkeypatch.setattr(agent, "_maybe_send_telegram_report", fake_async_noop)
+    monkeypatch.setattr(agent, "_maybe_sync_spot_candles", fake_async_noop)
+    monkeypatch.setattr(strategy_agent_module.option_history_service, "reset_health", lambda: None)
+    monkeypatch.setattr(strategy_agent_module.option_history_service, "get_health_snapshot", lambda: {})
+
+    for runtime in (agent._strategy1, agent._strategy2):
+        runtime.portfolio.snapshot_equity = lambda: None
+        runtime.portfolio.persist_equity_to_redis = fake_async_noop
+
+    asyncio.run(agent.run_once(force=False))
+
+    nifty_rows = [r for r in scanned_rows.get("rows", []) if r.get("underlying") == "NIFTY"]
+    assert nifty_rows, "NIFTY should still reach the S1 scan"
+    # No weekly-track row, and every NIFTY row is the monthly expiry.
+    assert all(r.get("expiry_track", "monthly") == "monthly" for r in nifty_rows)
+    assert all(str(r.get("expiry")) == "2026-04-28" for r in nifty_rows)
+
+
 def test_get_status_exposes_next_scan_and_runtime_timestamps() -> None:
     agent = PaperStrategyAgent()
     agent._last_run_at = "2026-04-09T09:15:00+05:30"
@@ -504,9 +599,9 @@ def test_get_status_exposes_next_scan_and_runtime_timestamps() -> None:
     assert status["strategies"][0]["last_scan_at"] == "2026-04-09T09:15:00+05:30"
     assert status["strategies"][0]["agent"]["key"] == "macd_strategy"
     assert status["strategies"][0]["last_message"] == "Scanned 218 instruments."
-    assert status["strategies"][1]["key"] == "index_mp_strategy"
-    assert status["strategies"][1]["agent"]["timeframe"] == "15minute"
-    assert status["strategies"][1]["last_message"] == "Scanned 5 indices."
+    # S2 (index_mp_strategy) was removed from the registered lanes 2026-06-02, so
+    # get_status() now exposes only the S1 lane.
+    assert len(status["strategies"]) == 1
 
 
 def test_strategy2_spot_rows_prefer_fyers_history_before_upstox(monkeypatch) -> None:
@@ -558,7 +653,7 @@ def test_strategy1_scan_entries_uses_snapshot_macd_cross(monkeypatch) -> None:
 
     monkeypatch.setattr(strategy_entries_module, "_now_ist", lambda: datetime(2026, 4, 16, 12, 0, tzinfo=strategy_agent_module.IST))
 
-    async def fake_snapshot_state(_rows):
+    async def fake_snapshot_state(_rows, *, bucket_minutes: int = 30):
         return {
             "NSE_FO|CE1": {
                 1: {
@@ -827,6 +922,7 @@ def test_strategy2_signal_context_enters_when_mp_confirms_macd_above_zero(monkey
     assert context["signal"]["entry_reason"] == "macd_above_zero"
 
 
+@pytest.mark.skip(reason="S2 (index_mp_strategy) lane removed from registered agents 2026-06-02; get_status no longer exposes strategies[1].")
 def test_market_closed_keeps_strategy2_last_signal_snapshot(monkeypatch) -> None:
     agent = PaperStrategyAgent()
     agent._last_run_at = "2026-04-09T15:20:00+05:30"
@@ -936,8 +1032,8 @@ def test_closed_market_empty_watchlist_preserves_saved_strategy_state(monkeypatc
     assert "closed-market watchlist returned 0 rows" in status["last_message"]
     assert status["strategies"][0]["meta"]["prepared_watchlist"][0]["underlying"] == "NIFTY"
     assert status["strategies"][0]["meta"]["watchlist_rows"] == 171
-    assert status["strategies"][1]["signals"][0]["underlying"] == "NIFTY"
-    assert status["strategies"][1]["meta"]["pipeline"][0]["rows"] == 45
+    # S2 lane removed 2026-06-02 — status exposes only S1 now.
+    assert len(status["strategies"]) == 1
 
 
 def test_latest_session_rows_use_most_recent_trading_day() -> None:
@@ -1380,6 +1476,7 @@ def test_run_once_blocks_stale_market_intelligence_when_paper_only(monkeypatch) 
     assert status["strategies"][0]["meta"]["mode"] == "local_data_stale"
 
 
+@pytest.mark.skip(reason="ma20_pullback_exit was deleted from the exit cascade 2026-06-02 (proven destructive); this asserts the removed behavior.")
 def test_manage_exits_ignores_first_ma20_pullback(monkeypatch) -> None:
     agent = PaperStrategyAgent()
     runtime = agent._strategy1
@@ -1433,6 +1530,7 @@ def test_manage_exits_ignores_first_ma20_pullback(monkeypatch) -> None:
     assert position.first_pullback_ignored_at is not None
 
 
+@pytest.mark.skip(reason="ma20_pullback_exit was deleted from the exit cascade 2026-06-02 (proven destructive); this asserts the removed behavior.")
 def test_manage_exits_closes_after_pullback_ignore_window(monkeypatch) -> None:
     agent = PaperStrategyAgent()
     runtime = agent._strategy1

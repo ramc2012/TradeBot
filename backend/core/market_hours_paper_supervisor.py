@@ -87,6 +87,7 @@ class RunnerRuntime:
     last_error: str | None = None
     last_message: str | None = None
     last_result_meta: dict[str, Any] = field(default_factory=dict)
+    cycle_history: list[dict[str, Any]] = field(default_factory=list)
     # Session date of the most recent SUCCESSFUL post-close catch-up run.
     # Gates post_close_force_daily runners so the guaranteed EOD pass fires
     # exactly once per session regardless of in-session successes.
@@ -123,6 +124,28 @@ class RunnerRuntime:
         next_open_fn: NextOpenFn,
     ) -> dict[str, Any]:
         next_run_at = self.next_run_at(now, market_hours_fn=market_hours_fn, next_open_fn=next_open_fn)
+        durations = [
+            float(item["duration_seconds"])
+            for item in self.cycle_history
+            if item.get("duration_seconds") is not None
+        ]
+        starts = [
+            datetime.fromisoformat(str(item["started_at"]))
+            for item in self.cycle_history
+            if item.get("started_at")
+        ]
+        observed_intervals = [
+            (current - previous).total_seconds()
+            for previous, current in zip(starts, starts[1:])
+            if current >= previous
+        ]
+        sorted_durations = sorted(durations)
+        median_duration = (
+            sorted_durations[len(sorted_durations) // 2] if sorted_durations else None
+        )
+        observed_interval = (
+            sum(observed_intervals) / len(observed_intervals) if observed_intervals else None
+        )
         return {
             "key": self.config.key,
             "label": self.config.label,
@@ -137,6 +160,20 @@ class RunnerRuntime:
             "last_error": self.last_error,
             "last_message": self.last_message,
             "last_result_meta": self.last_result_meta,
+            "cycle_stats": {
+                "sample_count": len(self.cycle_history),
+                "median_duration_seconds": median_duration,
+                "observed_interval_seconds": observed_interval,
+                "frequency_drift_pct": (
+                    round(
+                        ((observed_interval / max(self.config.interval_seconds, 1)) - 1.0) * 100.0,
+                        2,
+                    )
+                    if observed_interval is not None
+                    else None
+                ),
+            },
+            "recent_cycles": self.cycle_history[-20:],
         }
 
 
@@ -156,6 +193,8 @@ class MarketHoursPaperSupervisor:
         self._next_open_fn = next_open_fn or _next_nse_market_open
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
+        self._runner_tasks: dict[str, asyncio.Task] = {}
+        self._maintenance_tasks: set[asyncio.Task] = set()
         self._runners: dict[str, RunnerRuntime] = {
             runner.key: RunnerRuntime(config=runner)
             for runner in (runners or self._default_runners())
@@ -365,7 +404,7 @@ class MarketHoursPaperSupervisor:
             from market_data.commodity_contract_specs import COMMODITY_CONTRACT_SPECS
             from paper_engine.commodity_mp_history import backfill_commodity_mp_history
 
-            lookback = int(getattr(settings, "COMMODITY_MP_HISTORY_BACKFILL_SESSIONS", 90))
+            lookback = int(settings.COMMODITY_MP_HISTORY_BACKFILL_SESSIONS)
             results: list[dict[str, Any]] = []
             failures: dict[str, str] = {}
             persisted_total = 0
@@ -409,22 +448,45 @@ class MarketHoursPaperSupervisor:
                 # Full F&O universe × current+next expiry → allow a wide budget.
                 result = await asyncio.wait_for(
                     macd_refined_service.run_live_cycle(allow_entries=True),
-                    timeout=540.0,
+                    timeout=1140.0,
                 )
             except asyncio.TimeoutError:
                 return {
                     "status": "timeout", "result_count": 0, "failure_count": 1,
-                    "failures": {"macd_refined": "timed out after 540s"}, "results": [],
+                    "failures": {"macd_refined": "timed out after 1140s"}, "results": [],
                 }
             paper_summary = dict(result.get("paper_summary") or {})
+            result_count = int(result.get("snapshots_persisted") or 0)
+            failures = dict(result.get("failures") or {})
+            failure_count = len(failures)
+            broker_ready = bool(result.get("broker_ready"))
+            if not broker_ready:
+                cycle_status = "broker_not_ready"
+            elif failure_count and result_count == 0:
+                cycle_status = "error"
+            elif failure_count:
+                cycle_status = "partial"
+            else:
+                cycle_status = "ok"
+            first_failure = next(iter(failures.items()), None)
+            message = None
+            if first_failure:
+                message = (
+                    f"MACD Refined failed for {failure_count} target(s); "
+                    f"{first_failure[0]}: {first_failure[1]}"
+                )
             return {
-                "status": "ok" if result.get("broker_ready") else "broker_not_ready",
-                "result_count": int(result.get("snapshots_persisted") or 0),
+                "status": cycle_status,
+                "message": message,
+                "result_count": result_count,
                 "actionable_count": int(result.get("proposals") or 0),
-                "failure_count": len(result.get("failures") or {}),
-                "broker_ready": bool(result.get("broker_ready")),
+                "failure_count": failure_count,
+                "failure_samples": dict(list(failures.items())[:10]),
+                "broker_ready": broker_ready,
+                "storage_ready": bool(result.get("storage_ready")),
                 "paper_summary": paper_summary,
                 "fetched": result.get("fetched") or {},
+                "funnel": result.get("funnel") or {},
             }
 
         async def _cbe_runner() -> dict[str, Any]:
@@ -581,7 +643,7 @@ class MarketHoursPaperSupervisor:
                     settings, "COMMODITY_MP_HISTORY_AUTO_INTERVAL_SECONDS", 21600
                 ),
                 callback=_commodity_mp_history_runner,
-                enabled=getattr(settings, "COMMODITY_MP_HISTORY_AUTO_ENABLED", True),
+                enabled=settings.COMMODITY_MP_HISTORY_AUTO_ENABLED,
                 timeout_seconds=420.0,
                 # Data-maintenance from the durable MCX 1-min spot store; MCX
                 # hours + post-close catch-up appends the just-closed session,
@@ -598,7 +660,7 @@ class MarketHoursPaperSupervisor:
                 enabled=settings.MACD_REFINED_AUTO_ENABLED,
                 # Full F&O universe × current+next expiry needs more than the
                 # 300s global ceiling for a cold-start cycle.
-                timeout_seconds=600.0,
+                timeout_seconds=1200.0,
                 # Long-premium stock + index book. Fetch current+next monthly
                 # expiry and trade during the NSE session; no after-hours
                 # frozen-heartbeat entries (post_close_catchup=False).
@@ -609,9 +671,9 @@ class MarketHoursPaperSupervisor:
             RunnerConfig(
                 key="cbe_scanner",
                 label="CBE Scanner Paper Cycle",
-                interval_seconds=getattr(settings, "CBE_SCANNER_AUTO_INTERVAL_SECONDS", 900),
+                interval_seconds=settings.CBE_SCANNER_AUTO_INTERVAL_SECONDS,
                 callback=_cbe_runner,
-                enabled=getattr(settings, "CBE_SCANNER_AUTO_ENABLED", True),
+                enabled=settings.CBE_SCANNER_AUTO_ENABLED,
                 # The hourly in-session passes use the previous completed
                 # session (CBE's _completed_session_cutoff excludes today until
                 # 15:35). post_close_force_daily makes a guaranteed once-a-day
@@ -625,9 +687,9 @@ class MarketHoursPaperSupervisor:
             RunnerConfig(
                 key="cbe_marks",
                 label="CBE Paper Marks Refresh",
-                interval_seconds=getattr(settings, "CBE_MARKS_REFRESH_INTERVAL_SECONDS", 300),
+                interval_seconds=settings.CBE_MARKS_REFRESH_INTERVAL_SECONDS,
                 callback=_cbe_marks_runner,
-                enabled=getattr(settings, "CBE_SCANNER_AUTO_ENABLED", True),
+                enabled=settings.CBE_SCANNER_AUTO_ENABLED,
                 market_hours_fn=_in_nse_market_hours,
                 next_open_fn=_next_nse_market_open,
                 post_close_catchup=False,
@@ -635,13 +697,9 @@ class MarketHoursPaperSupervisor:
             RunnerConfig(
                 key="gann_tp_delta",
                 label="Gann TP Delta Paper Cycle",
-                interval_seconds=getattr(
-                    settings,
-                    "GANN_TP_DELTA_AUTO_INTERVAL_SECONDS",
-                    settings.DIRECTIONAL_OPTIONS_AUTO_INTERVAL_SECONDS,
-                ),
+                interval_seconds=settings.GANN_TP_DELTA_AUTO_INTERVAL_SECONDS,
                 callback=_gann_runner,
-                enabled=getattr(settings, "GANN_TP_DELTA_AUTO_ENABLED", True),
+                enabled=settings.GANN_TP_DELTA_AUTO_ENABLED,
                 market_hours_fn=_in_gann_market_hours,
                 next_open_fn=_next_gann_market_open,
             ),
@@ -659,19 +717,22 @@ class MarketHoursPaperSupervisor:
     async def stop(self) -> None:
         task = self._task
         self._task = None
-        if task is None:
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        tasks = [task] if task is not None else []
+        tasks.extend(self._runner_tasks.values())
+        tasks.extend(self._maintenance_tasks)
+        for pending in tasks:
+            pending.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._runner_tasks.clear()
+        self._maintenance_tasks.clear()
         logger.info("[MarketHoursSupervisor] stopped")
 
     async def _loop(self) -> None:
         try:
             while True:
-                await self.run_due_once()
+                # Dispatch only: no lane is allowed to hold the scheduler clock.
+                await self._schedule_due_once()
                 now = self._now_fn()
                 enabled_runners = [
                     runtime for runtime in self._runners.values()
@@ -692,6 +753,103 @@ class MarketHoursPaperSupervisor:
             logger.exception(f"[MarketHoursSupervisor] loop failed: {exc}")
             raise
 
+    async def _schedule_due_once(self) -> None:
+        """Launch due lanes independently and return without awaiting scans."""
+        if not self._enabled:
+            return
+        async with self._lock:
+            now = self._now_fn()
+            due_runners: list[RunnerRuntime] = []
+            catchup_runners: list[RunnerRuntime] = []
+            catchup_session_date = now.date()
+            for runtime in self._runners.values():
+                if (
+                    not runtime.config.enabled
+                    or runtime.running
+                    or runtime.config.key in self._runner_tasks
+                ):
+                    continue
+                runtime_market_open = self._runtime_market_open(runtime, now)
+                if runtime_market_open and runtime.is_due(now):
+                    due_runners.append(runtime)
+                elif (
+                    runtime.config.post_close_catchup
+                    and not runtime_market_open
+                    and _should_run_post_close_catchup(now)
+                    and (
+                        (
+                            runtime.last_post_close_success_date is None
+                            or runtime.last_post_close_success_date < catchup_session_date
+                        )
+                        if runtime.config.post_close_force_daily
+                        else (
+                            runtime.last_success_at is None
+                            or runtime.last_success_at.date() < catchup_session_date
+                        )
+                    )
+                ):
+                    catchup_runners.append(runtime)
+
+            catchup_tasks: list[tuple[RunnerRuntime, asyncio.Task]] = []
+            for runtime in due_runners + catchup_runners:
+                runtime.running = True
+                task = asyncio.create_task(
+                    self._run_runner(runtime, now=now),
+                    name=f"paper-lane-{runtime.config.key}",
+                )
+                self._runner_tasks[runtime.config.key] = task
+
+                def _cleanup(
+                    done: asyncio.Task,
+                    *,
+                    key: str = runtime.config.key,
+                    scheduled_runtime: RunnerRuntime = runtime,
+                ) -> None:
+                    scheduled_runtime.running = False
+                    if self._runner_tasks.get(key) is done:
+                        self._runner_tasks.pop(key, None)
+
+                task.add_done_callback(_cleanup)
+                if runtime in catchup_runners:
+                    catchup_tasks.append((runtime, task))
+
+            if catchup_tasks:
+                maintenance = asyncio.create_task(
+                    self._finalize_background_catchup(catchup_tasks, catchup_session_date),
+                    name=f"paper-catchup-{catchup_session_date.isoformat()}",
+                )
+                self._maintenance_tasks.add(maintenance)
+                maintenance.add_done_callback(self._maintenance_tasks.discard)
+
+            for runtime in self._runners.values():
+                if (
+                    runtime.config.enabled
+                    and not runtime.running
+                    and runtime.last_message is None
+                    and not self._runtime_market_open(runtime, now)
+                ):
+                    runtime.last_message = "Armed for the next market session."
+
+    async def _finalize_background_catchup(
+        self,
+        catchup_tasks: list[tuple[RunnerRuntime, asyncio.Task]],
+        session_date: date,
+    ) -> None:
+        await asyncio.gather(*(task for _, task in catchup_tasks), return_exceptions=True)
+        successful = [runtime for runtime, _ in catchup_tasks if runtime.last_error is None]
+        for runtime in successful:
+            runtime.last_post_close_success_date = session_date
+            runtime.last_result_meta.setdefault("catchup_session_date", session_date.isoformat())
+            runtime.last_message = (
+                f"{runtime.last_message} Catch-up captured for {session_date.isoformat()}."
+            )
+        if successful:
+            try:
+                from core.paper_trade_recorder import paper_trade_recorder
+
+                await paper_trade_recorder.snapshot_daily(session_date=session_date.isoformat())
+            except Exception as exc:
+                logger.warning("[MarketHoursSupervisor] portfolio snapshot failed: {}", exc)
     async def run_due_once(self, *, force: bool = False) -> dict[str, Any]:
         if not self._enabled:
             return self.get_status()
@@ -702,7 +860,11 @@ class MarketHoursPaperSupervisor:
             catchup_runners: list[RunnerRuntime] = []
             catchup_session_date = now.date()
             for runtime in self._runners.values():
-                if not runtime.config.enabled or runtime.running:
+                if (
+                    not runtime.config.enabled
+                    or runtime.running
+                    or runtime.config.key in self._runner_tasks
+                ):
                     continue
                 runtime_market_open = self._runtime_market_open(runtime, now)
                 if force or (runtime_market_open and runtime.is_due(now)):
@@ -770,22 +932,7 @@ class MarketHoursPaperSupervisor:
         return self.get_status()
 
     async def _run_due_runners(self, due_runners: list[RunnerRuntime], *, now: datetime) -> None:
-        market_intelligence_runner = next(
-            (runtime for runtime in due_runners if runtime.config.key == "market_intelligence"),
-            None,
-        )
-        if market_intelligence_runner is not None:
-            await self._run_runner(market_intelligence_runner, now=now)
-
-        trailing_runners = [
-            runtime
-            for runtime in due_runners
-            if runtime is not market_intelligence_runner
-        ]
-        if trailing_runners:
-            await asyncio.gather(
-                *(self._run_runner(runtime, now=now) for runtime in trailing_runners)
-            )
+        await asyncio.gather(*(self._run_runner(runtime, now=now) for runtime in due_runners))
 
     async def _run_runner(self, runtime: RunnerRuntime, *, now: datetime) -> None:
         runtime.running = True
@@ -810,9 +957,30 @@ class MarketHoursPaperSupervisor:
             logger.warning(f"[MarketHoursSupervisor] {runtime.config.key} failed: {exc}")
             await self._emit_scan_audit(runtime.config.key, result=None, error=str(exc))
         else:
+            runtime.last_result_meta = result if isinstance(result, dict) else {"result": result}
+            reported_status = str(
+                result.get("status") if isinstance(result, dict) else ""
+            ).strip().lower()
+            if reported_status in {"error", "failed", "timeout", "broker_not_ready"}:
+                runtime.last_finished_at = self._now_fn()
+                runtime.last_error = str(
+                    result.get("message")
+                    or result.get("note")
+                    or f"Runner reported {reported_status}."
+                )
+                runtime.last_message = runtime.last_error
+                logger.warning(
+                    f"[MarketHoursSupervisor] {runtime.config.key} reported {reported_status}: "
+                    f"{runtime.last_error}"
+                )
+                await self._emit_scan_audit(
+                    runtime.config.key,
+                    result=result,
+                    error=runtime.last_error,
+                )
+                return
             runtime.last_success_at = self._now_fn()
             runtime.last_finished_at = runtime.last_success_at
-            runtime.last_result_meta = result if isinstance(result, dict) else {"result": result}
             completed = result.get("result_count") if isinstance(result, dict) else None
             failure_count = result.get("failure_count") if isinstance(result, dict) else None
             if completed is not None:
@@ -836,6 +1004,21 @@ class MarketHoursPaperSupervisor:
                     )
             except Exception:
                 pass
+            finished_at = runtime.last_finished_at or self._now_fn()
+            started_at = runtime.last_started_at or now
+            meta = runtime.last_result_meta if isinstance(runtime.last_result_meta, dict) else {}
+            runtime.cycle_history.append(
+                {
+                    "started_at": started_at.isoformat(),
+                    "finished_at": finished_at.isoformat(),
+                    "duration_seconds": round(max((finished_at - started_at).total_seconds(), 0.0), 3),
+                    "status": "failed" if runtime.last_error else "completed",
+                    "evaluated_count": meta.get("result_count"),
+                    "actionable_count": meta.get("actionable_count"),
+                    "failure_count": meta.get("failure_count"),
+                }
+            )
+            del runtime.cycle_history[:-120]
 
     # State carried across scan cycles to dedupe audit emits — we only want
     # to push to the audit log on actionable signals, transitions, errors,
@@ -855,6 +1038,7 @@ class MarketHoursPaperSupervisor:
             "fractal_market_profile": "fmp",
             "directional_options": "directional_options",
             "cbe_scanner": "cbe_scanner",
+            "macd_refined": "macd_refined",
             "market_intelligence": "market_intelligence",
             "gann_tp_delta": "gann_tp_delta",
         }

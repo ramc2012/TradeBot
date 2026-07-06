@@ -461,7 +461,6 @@ class StrategyEntryMixin:
         window_map: dict[str, dict],
     ) -> None:
         capacity = max(self.max_positions - len(runtime.positions), 0)
-        cap_reached = capacity <= 0
         # Observability: log per-cycle scan dimensions so when entries
         # don't fire we can tell whether the scan ran at all and what
         # universe it considered. Was silent before — only successful
@@ -679,6 +678,13 @@ class StrategyEntryMixin:
             if not latest_bar_time:
                 _tally("no_latest_bar_time", row)
                 continue
+            # Dedupe key: the 30m MACD BUCKET, not the per-minute snapshot
+            # timestamp. The strategy defines exactly ONE fresh 30m zero-cross
+            # per bar; keying on the advancing snapshot timestamp let the same
+            # cross re-arm every 60s cycle (and re-enter the same bar right
+            # after any intra-bar exit). Fall back to the raw timestamp only if
+            # the bucket is somehow absent.
+            latest_macd_bucket = str(side_snapshot.get("latest_macd_bucket") or "") or latest_bar_time
 
             strength = abs(float(side_snapshot.get("current_macd") or 0.0))
             reason = "macd_zero_cross_15m_reentry" if entry_kind == "reentry_15m" else "macd_zero_cross"
@@ -784,33 +790,26 @@ class StrategyEntryMixin:
                 (p for p in runtime.positions.values() if p.underlying == underlying),
                 None,
             )
+            flip_close_target = None
             if existing is not None:
                 if existing.option_type == opt_type:
                     await persist_raw_signal(
                         "blocked", "existing_underlying_position_same_side"
                     )
                     continue
-                # Opposite side — flip. Use the position's last-known
-                # current_price as the exit fill; if missing, fall back
-                # to entry_price so PnL is at least defined.
-                exit_ltp = float(existing.current_price or existing.entry_price or 0.0)
-                await self._close_position(
-                    runtime,
-                    existing,
-                    exit_ltp,
-                    f"signal_flip_to_{opt_type}",
-                )
-                await persist_raw_signal(
-                    "signal_flip",
-                    f"closed_{existing.option_type}_for_{opt_type}",
-                    ltp=exit_ltp,
-                )
-                # Capacity opens up — the new opposite-side entry
-                # below now has room.
-                capacity = max(self.max_positions - len(runtime.positions), 0)
-                cap_reached = capacity <= 0
+                # Opposite side — flip. DEFER the close: the existing leg is
+                # closed only once the replacement entry clears EVERY gate
+                # (data freshness, IV, dedupe, MP gate, learning, kill switch,
+                # capacity). Closing here — before those gates and before the
+                # kill-switch check — meant a blocked flip left the book flat
+                # with a misleading signal_flip record, and flips even fired
+                # while the kill switch forbade acting.
+                flip_close_target = existing
 
-            if cap_reached:
+            # Capacity: a flip reuses its own underlying's slot, so it does not
+            # count against capacity for the replacement entry.
+            effective_positions = len(runtime.positions) - (1 if flip_close_target is not None else 0)
+            if max(self.max_positions - effective_positions, 0) <= 0:
                 await persist_raw_signal("blocked", "position_cap_reached")
                 continue
 
@@ -857,7 +856,7 @@ class StrategyEntryMixin:
                 else "cautious"
             )
 
-            if runtime.processed_signals.get(signal_key) == latest_bar_time:
+            if runtime.processed_signals.get(signal_key) == latest_macd_bucket:
                 await persist_raw_signal("blocked", "already_processed", ltp=latest_close, iv_pct=iv_pct)
                 continue
 
@@ -885,6 +884,8 @@ class StrategyEntryMixin:
                     "closes": [],
                     "latest_close": latest_close,
                     "latest_bar_time": latest_bar_time,
+                    "latest_macd_bucket": latest_macd_bucket,
+                    "flip_close_target": flip_close_target,
                     "signal_key": signal_key,
                     "strength": strength or 0.0,
                     "reason": reason,
@@ -1000,8 +1001,25 @@ class StrategyEntryMixin:
                 tone="warning",
             )
 
+        # Flip candidates free their own underlying's slot, so grant one extra
+        # slot per pending flip when applying the capacity cap.
+        flip_bonus = sum(1 for c in tradable_candidates if c.get("flip_close_target") is not None)
         opened = 0
-        for candidate in tradable_candidates[:capacity]:
+        for candidate in tradable_candidates[: capacity + flip_bonus]:
+            flip_target = candidate.get("flip_close_target")
+            if flip_target is not None and flip_target.symbol in runtime.positions:
+                # Replacement cleared every gate — now close the opposite leg
+                # and record the flip (deferred from the scan phase so a
+                # blocked flip never flattens the book).
+                exit_ltp = float(flip_target.current_price or flip_target.entry_price or 0.0)
+                await self._close_position(
+                    runtime, flip_target, exit_ltp, f"signal_flip_to_{candidate['opt_type']}"
+                )
+                summary = runtime.last_run_summary if isinstance(runtime.last_run_summary, dict) else {}
+                if not isinstance(runtime.last_run_summary, dict):
+                    runtime.last_run_summary = summary
+                counters = summary.setdefault("counters", {})
+                counters["signal_flip"] = int(counters.get("signal_flip") or 0) + 1
             await self._open_position(runtime, candidate)
             opened += 1
 
@@ -1153,7 +1171,11 @@ class StrategyEntryMixin:
             lot_size=lot_size,
         )
         runtime.entries += 1
-        runtime.processed_signals[candidate["signal_key"]] = str(candidate["latest_bar_time"])
+        # Mark the 30m BUCKET processed so this cross cannot re-arm within the
+        # same bar (matches the dedupe check in _scan_entries).
+        runtime.processed_signals[candidate["signal_key"]] = str(
+            candidate.get("latest_macd_bucket") or candidate["latest_bar_time"]
+        )
 
         self._append_event(
             runtime,

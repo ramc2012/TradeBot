@@ -13,6 +13,7 @@ from brokers.base import BrokerAdapter, OptionChain
 from db.database import AsyncSessionLocal
 from db.redis_client import get_redis
 from market_data.symbols import to_broker_symbol, to_fyers_symbol
+from market_data.validated_snapshots import validate_option_chain_rows
 
 
 POLL_INTERVAL = 30   # seconds — Redis cache refresh cadence
@@ -77,8 +78,12 @@ class OptionChainService:
     async def _poll_loop(self):
         while True:
             try:
-                for symbol, expiry in self._tracked:
-                    await self._refresh(symbol, expiry)
+                # A slow broker response for one expiry must not delay every
+                # other tracked chain. Each refresh remains independently
+                # bounded by the broker adapter while the poll cadence stays flat.
+                await asyncio.gather(
+                    *(self._refresh(symbol, expiry) for symbol, expiry in tuple(self._tracked))
+                )
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -92,45 +97,13 @@ class OptionChainService:
             broker_name = getattr(self._broker, "broker_name", "")
             lookup_symbol = to_fyers_symbol(symbol) if broker_name == "fyers" else to_broker_symbol(symbol)
             chain: OptionChain = await self._broker.get_option_chain(lookup_symbol, expiry)
-            analytics = self._calculate_analytics(chain)
-            payload = {
-                "symbol": symbol,
-                "expiry": expiry,
-                "spot_price": chain.spot_price,
-                "timestamp": datetime.utcnow().isoformat(),
-                "source": getattr(self._broker, "broker_name", "unknown"),
-                "entries": [
-                    {
-                        "strike": e.strike,
-                        "option_type": e.option_type,
-                        "ltp": e.ltp,
-                        "oi": e.oi,
-                        "volume": e.volume,
-                        "bid": e.bid,
-                        "ask": e.ask,
-                        "iv": e.iv,
-                        "delta": e.delta,
-                        "gamma": e.gamma,
-                        "theta": e.theta,
-                        "vega": e.vega,
-                        "prev_oi": e.prev_oi,
-                        "prev_close": e.prev_close,
-                        "oi_change": round(float(e.oi) - float(e.prev_oi or 0.0), 2),
-                        "oi_change_pct": round(
-                            ((float(e.oi) - float(e.prev_oi or 0.0)) / float(e.prev_oi or 1.0)) * 100.0,
-                            2,
-                        ) if e.prev_oi else None,
-                        "ltp_change": round(float(e.ltp) - float(e.prev_close or 0.0), 2),
-                        "ltp_change_pct": round(
-                            ((float(e.ltp) - float(e.prev_close or 0.0)) / float(e.prev_close or 1.0)) * 100.0,
-                            2,
-                        ) if e.prev_close else None,
-                        "instrument_key": e.instrument_key,
-                    }
-                    for e in chain.entries
-                ],
-                **analytics,
-            }
+            source = getattr(self._broker, "broker_name", "unknown")
+            payload, validated_chain = await self.build_validated_payload(
+                symbol=symbol,
+                expiry=expiry,
+                chain=chain,
+                source=source,
+            )
             redis = await get_redis()
             await redis.set(f"oc:{symbol}:{expiry}", json.dumps(payload), ex=OC_TTL)
             logger.debug(f"[OC] Refreshed {symbol} {expiry}")
@@ -145,12 +118,92 @@ class OptionChainService:
             last = self._last_persist.get((symbol, expiry))
             if last is None or (now - last).total_seconds() >= PERSIST_INTERVAL:
                 try:
-                    await self._persist_snapshot(symbol, expiry, chain, now)
+                    await self._persist_snapshot(symbol, expiry, validated_chain, now)
                     self._last_persist[(symbol, expiry)] = now
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(f"[OC] persist failed {symbol}/{expiry}: {exc}")
         except Exception as e:
             logger.error(f"[OC] Refresh failed {symbol}/{expiry}: {e}")
+
+    @staticmethod
+    def _serialize_entry(entry: Any) -> dict[str, Any]:
+        return {
+            "strike": entry.strike,
+            "option_type": entry.option_type,
+            "ltp": entry.ltp,
+            "oi": entry.oi,
+            "volume": entry.volume,
+            "bid": entry.bid,
+            "ask": entry.ask,
+            "iv": entry.iv,
+            "delta": entry.delta,
+            "gamma": entry.gamma,
+            "theta": entry.theta,
+            "vega": entry.vega,
+            "prev_oi": entry.prev_oi,
+            "prev_close": entry.prev_close,
+            "oi_change": round(float(entry.oi) - float(entry.prev_oi or 0.0), 2),
+            "oi_change_pct": round(
+                ((float(entry.oi) - float(entry.prev_oi or 0.0)) / float(entry.prev_oi or 1.0)) * 100.0,
+                2,
+            ) if entry.prev_oi else None,
+            "ltp_change": round(float(entry.ltp) - float(entry.prev_close or 0.0), 2),
+            "ltp_change_pct": round(
+                ((float(entry.ltp) - float(entry.prev_close or 0.0)) / float(entry.prev_close or 1.0)) * 100.0,
+                2,
+            ) if entry.prev_close else None,
+            "instrument_key": entry.instrument_key,
+        }
+
+    async def build_validated_payload(
+        self,
+        *,
+        symbol: str,
+        expiry: str,
+        chain: OptionChain,
+        source: str,
+    ) -> tuple[dict[str, Any], OptionChain]:
+        """Build the one canonical chain payload used by every producer."""
+        raw_entries = [self._serialize_entry(entry) for entry in chain.entries]
+        received_at = datetime.now(timezone.utc)
+        validation = validate_option_chain_rows(
+            raw_entries,
+            symbol=symbol,
+            expiry=expiry,
+            spot_price=chain.spot_price,
+            source=source,
+            observed_at=received_at,
+            now=received_at,
+            freshness_budget_seconds=OC_TTL,
+        )
+        accepted_objects = [chain.entries[index] for index in validation.accepted_indices]
+        validated_chain = OptionChain(
+            symbol=chain.symbol,
+            expiry=chain.expiry,
+            spot_price=chain.spot_price,
+            entries=accepted_objects,
+        )
+        # Max-pain is O(strikes^2); never let it block the event loop.
+        analytics = await asyncio.to_thread(self._calculate_analytics, validated_chain)
+        return (
+            {
+                "symbol": symbol,
+                "expiry": expiry,
+                "spot_price": float(chain.spot_price or 0.0),
+                "timestamp": received_at.isoformat(),
+                "source": source,
+                "entries": validation.rows,
+                "data_quality": validation.quality,
+                "provenance": {
+                    "source": source,
+                    "observed_at": validation.quality.get("observed_at"),
+                    "received_at": validation.quality.get("received_at"),
+                    "expiry": expiry,
+                },
+                **analytics,
+            },
+            validated_chain,
+        )
 
     async def _persist_snapshot(
         self, symbol: str, expiry: str, chain: OptionChain, ts: datetime

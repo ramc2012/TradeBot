@@ -383,7 +383,7 @@ class OptionStrategyMapper:
         except Exception as exc:
             logger.debug(f"[AuctionIQ] Local option-chain cache lookup failed for {app_symbol} {expiry_iso}: {exc}")
             cached_payload = None
-        if cached_payload:
+        if cached_payload and (cached_payload.get("data_quality") or {}).get("execution_ready") is not False:
             chain = OptionChain(
                 symbol=str(cached_payload.get("symbol") or app_symbol),
                 expiry=expiry_iso,

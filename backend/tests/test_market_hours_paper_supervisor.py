@@ -40,6 +40,40 @@ def test_market_hours_supervisor_runs_due_runners_only_once_per_interval() -> No
     assert second["runners"]["auction_intelligence"]["last_success_at"] == runner["last_success_at"]
 
 
+def test_market_hours_supervisor_treats_reported_error_as_failure() -> None:
+    now = datetime(2026, 4, 21, 9, 20, tzinfo=IST)
+
+    async def _runner() -> dict[str, object]:
+        return {
+            "status": "error",
+            "message": "MACD Refined storage unavailable",
+            "result_count": 0,
+            "failure_count": 1,
+        }
+
+    supervisor = MarketHoursPaperSupervisor(
+        enabled=True,
+        runners=[
+            RunnerConfig(
+                key="macd_refined",
+                label="MACD Refined",
+                interval_seconds=60,
+                callback=_runner,
+            )
+        ],
+        now_fn=lambda: now,
+        market_hours_fn=lambda _current: True,
+        next_open_fn=lambda current: current + timedelta(days=1),
+    )
+
+    status = asyncio.run(supervisor.run_due_once())
+    runner = status["runners"]["macd_refined"]
+
+    assert runner["last_success_at"] is None
+    assert runner["last_error"] == "MACD Refined storage unavailable"
+    assert runner["last_result_meta"]["status"] == "error"
+
+
 def test_market_hours_supervisor_stays_armed_when_market_is_closed() -> None:
     now = datetime(2026, 4, 20, 8, 0, tzinfo=IST)
     calls: list[str] = []
@@ -141,3 +175,40 @@ def test_runner_specific_market_hours_can_run_when_primary_market_closed() -> No
     assert status["any_runner_market_open"] is True
     runner = status["runners"]["gann_tp_delta"]
     assert runner["last_success_at"] is not None
+
+
+def test_background_scheduler_does_not_let_slow_lane_starve_fast_lane() -> None:
+    async def _scenario() -> None:
+        now = datetime(2026, 4, 21, 9, 20, tzinfo=IST)
+        release_slow = asyncio.Event()
+        fast_finished = asyncio.Event()
+
+        async def _slow() -> dict[str, object]:
+            await release_slow.wait()
+            return {"result_count": 1}
+
+        async def _fast() -> dict[str, object]:
+            fast_finished.set()
+            return {"result_count": 1}
+
+        supervisor = MarketHoursPaperSupervisor(
+            enabled=True,
+            runners=[
+                RunnerConfig(key="slow", label="Slow", interval_seconds=60, callback=_slow),
+                RunnerConfig(key="fast", label="Fast", interval_seconds=60, callback=_fast),
+            ],
+            now_fn=lambda: now,
+            market_hours_fn=lambda _current: True,
+            next_open_fn=lambda current: current + timedelta(days=1),
+        )
+
+        await supervisor._schedule_due_once()
+        running_tasks = list(supervisor._runner_tasks.values())
+        await asyncio.wait_for(fast_finished.wait(), timeout=0.2)
+        assert supervisor.get_status()["runners"]["slow"]["running"] is True
+        assert supervisor.get_status()["runners"]["fast"]["last_success_at"] is not None
+
+        release_slow.set()
+        await asyncio.gather(*running_tasks)
+
+    asyncio.run(_scenario())

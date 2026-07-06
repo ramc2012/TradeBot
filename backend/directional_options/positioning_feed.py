@@ -43,6 +43,36 @@ CREATE TABLE IF NOT EXISTS directional_positioning_daily (
 """
 
 
+def _bs_price(spot: float, strike: float, t: float, sigma: float, is_call: bool, r: float = 0.065) -> float:
+    import math
+    if t <= 0 or sigma <= 0 or spot <= 0 or strike <= 0:
+        return max(0.0, (spot - strike) if is_call else (strike - spot))
+    d1 = (math.log(spot / strike) + (r + sigma * sigma / 2.0) * t) / (sigma * math.sqrt(t))
+    d2 = d1 - sigma * math.sqrt(t)
+    n = lambda x: 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+    if is_call:
+        return spot * n(d1) - strike * math.exp(-r * t) * n(d2)
+    return strike * math.exp(-r * t) * n(-d2) - spot * n(-d1)
+
+
+def _implied_vol(premium: float, spot: float, strike: float, t: float, is_call: bool) -> float | None:
+    """ATM implied vol by bisection. The broker iv column died 2026-06-23, so the
+    feed derives IV uniformly from the EOD ATM premium — one convention across the
+    whole series, which is what d_atm_iv (a day-over-day diff) needs."""
+    if premium <= 0 or spot <= 0 or strike <= 0 or t <= 0:
+        return None
+    lo, hi = 0.01, 3.0
+    if not (_bs_price(spot, strike, t, lo, is_call) <= premium <= _bs_price(spot, strike, t, hi, is_call)):
+        return None
+    for _ in range(60):
+        mid = (lo + hi) / 2.0
+        if _bs_price(spot, strike, t, mid, is_call) < premium:
+            lo = mid
+        else:
+            hi = mid
+    return round((lo + hi) / 2.0 * 100.0, 4)  # percent, matching broker iv convention
+
+
 async def _ensure_table() -> None:
     async with AsyncSessionLocal() as s:
         await s.execute(text(_DDL))
@@ -63,19 +93,33 @@ async def compute_and_store(underlying: str, *, lookback_sessions: int = 120) ->
         rows = (await s.execute(text(
             """
             SELECT timezone('Asia/Kolkata', time)::date AS d, expiry, strike, option_type,
-                   oi, iv, underlying_price,
+                   oi, close, underlying_price,
                    row_number() OVER (PARTITION BY timezone('Asia/Kolkata', time)::date, expiry, strike, option_type
                                       ORDER BY time DESC) AS rn
             FROM option_premium_candles
             WHERE underlying = :u AND interval = '30minute' AND oi IS NOT NULL
             """
         ), {"u": u})).all()
+        # Canonical daily spot closes. The option rows' underlying_price column
+        # is best-effort (it stopped populating 2026-06-22, which froze the EMA
+        # backbone and nulled d_atm_iv via the NaN ATM-distance); the spot store
+        # is the authoritative series, option-scraped spot only a fallback.
+        spot_rows = (await s.execute(text(
+            """
+            SELECT DISTINCT ON (timezone('Asia/Kolkata', time)::date)
+                   timezone('Asia/Kolkata', time)::date AS d, close
+            FROM underlying_spot_candles
+            WHERE underlying = :u AND interval = '30minute' AND close IS NOT NULL
+            ORDER BY timezone('Asia/Kolkata', time)::date, time DESC
+            """
+        ), {"u": u})).all()
     if not rows:
         return {"underlying": u, "stored": 0, "reason": "no option data"}
-    df = pd.DataFrame(rows, columns=["d", "expiry", "strike", "option_type", "oi", "iv", "spot", "rn"])
+    spot_by_day = {r.d: float(r.close) for r in spot_rows}
+    df = pd.DataFrame(rows, columns=["d", "expiry", "strike", "option_type", "oi", "close", "spot", "rn"])
     df = df[df["rn"] == 1].drop(columns=["rn"])  # EOD snapshot per contract
     df["oi"] = pd.to_numeric(df["oi"], errors="coerce").fillna(0.0)
-    df["iv"] = pd.to_numeric(df["iv"], errors="coerce")
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
     df["strike"] = df["strike"].astype(float)
     df["spot"] = df["spot"].astype(float)
     df["dte"] = (pd.to_datetime(df["expiry"]) - pd.to_datetime(df["d"])).dt.days
@@ -91,11 +135,27 @@ async def compute_and_store(underlying: str, *, lookback_sessions: int = 120) ->
         pe_oi = float(chain[chain["option_type"] == "PE"]["oi"].sum())
         if ce_oi <= 0 and pe_oi <= 0:
             continue
-        spot = float(chain["spot"].iloc[0])
+        scraped = float(chain["spot"].iloc[0])
+        spot = spot_by_day.get(d, scraped if np.isfinite(scraped) else np.nan)
+        if not np.isfinite(spot):
+            continue  # no usable spot for the day — a NaN here poisons the EMA backbone
         ch = chain.copy()
         ch["dd"] = (ch["strike"] - spot).abs()
-        ch_iv = ch.dropna(subset=["iv", "dd"])
-        atm_iv = float(ch_iv.sort_values("dd")["iv"].iloc[0]) if not ch_iv.empty else np.nan
+        # ATM IV via BS inversion from the EOD ATM premium — uniform convention
+        # for the whole series (the broker iv column stopped populating 06-23).
+        atm_iv = np.nan
+        ch_px = ch.dropna(subset=["close", "dd"])
+        if not ch_px.empty:
+            atm_strike = float(ch_px.sort_values("dd")["strike"].iloc[0])
+            dte_days = int(ch_px[ch_px["strike"] == atm_strike]["dte"].iloc[0])
+            t_years = max(dte_days, 1) / 365.0
+            legs = [
+                _implied_vol(float(leg["close"]), spot, atm_strike, t_years, str(leg["option_type"]) == "CE")
+                for _, leg in ch_px[ch_px["strike"] == atm_strike].iterrows()
+            ]
+            legs = [v for v in legs if v is not None]
+            if legs:
+                atm_iv = float(np.mean(legs))
         pcr = pe_oi / ce_oi if ce_oi > 0 else np.nan
         recs.append({"d": d, "ce_oi": ce_oi, "pe_oi": pe_oi, "pcr_oi": pcr, "atm_iv": atm_iv, "spot": spot})
     if not recs:
@@ -147,8 +207,10 @@ def _positioning_is_stale(row_d) -> bool:
 
     Today counts as finalized only after ~15:35 IST, so during a live session
     the prior session's row is correctly considered fresh. Calendar-based, so
-    weekends/holidays never trip it. Defensive: any error → not stale (degrade
-    to current behaviour rather than silently disabling the positional lane).
+    weekends/holidays never trip it. FAILS CLOSED: an error here marks the feed
+    stale, which declines NEW positional entries (held positions still exit on
+    stop/target/DTE) — the gate exists precisely for degraded-data conditions,
+    so failing open would negate it when it matters most.
     """
     try:
         from datetime import datetime, timedelta, time as _dtime, timezone as _tz
@@ -175,7 +237,7 @@ def _positioning_is_stale(row_d) -> bool:
             d -= timedelta(days=1)
         return gap > max_stale
     except Exception:
-        return False
+        return True
 
 
 async def latest(underlying: str) -> dict | None:

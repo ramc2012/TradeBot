@@ -19,6 +19,7 @@ from core.trading_calendar import trading_calendar
 from db.database import AsyncSessionLocal
 from market_data.option_chain import OC_TTL, option_chain_service
 from market_data.symbols import to_broker_symbol, to_fyers_symbol
+from market_data.validated_snapshots import validate_candle_rows
 from macro_research import macro_research_service
 from sector_interaction.india_live import india_live_sector_service
 
@@ -236,10 +237,26 @@ class MarketIntelligenceRuntime:
         ]
         payload = _drop_contaminated_spot_rows(payload)
         if payload:
-            return payload, "timescaledb_spot_1minute", symbol_code.upper()
+            validated = validate_candle_rows(
+                payload,
+                symbol=symbol_code,
+                source="timescaledb_spot_1minute",
+                interval="1minute",
+                freshness_budget_seconds=180,
+                min_rows=2,
+            )
+            return validated.rows, "timescaledb_spot_1minute", symbol_code.upper()
 
         csv_path = _runtime_root() / "spot" / f"underlying={symbol_code.upper()}" / "1minute.csv.gz"
         if not csv_path.exists():
+            validate_candle_rows(
+                [],
+                symbol=symbol_code,
+                source="none",
+                interval="1minute",
+                freshness_budget_seconds=180,
+                min_rows=2,
+            )
             return [], "none", symbol_code.upper()
 
         cutoff_date = (datetime.now(IST) - timedelta(days=max(int(lookback_days), 1))).date()
@@ -263,7 +280,15 @@ class MarketIntelligenceRuntime:
                         "volume": float(row.get("volume") or 0.0),
                     }
                 )
-        return local_rows, "local_csv_spot", csv_path.name
+        validated = validate_candle_rows(
+            _drop_contaminated_spot_rows(local_rows),
+            symbol=symbol_code,
+            source="local_csv_spot",
+            interval="1minute",
+            freshness_budget_seconds=180,
+            min_rows=2,
+        )
+        return validated.rows, "local_csv_spot", csv_path.name
 
     async def gap_fill_spot_history(
         self,
@@ -384,8 +409,15 @@ class MarketIntelligenceRuntime:
                             SELECT COUNT(DISTINCT underlying)
                             FROM atm_option_watchlist_snapshots
                             WHERE kind = 'STOCK'
+                              AND time >= :recent_start
                             """
                         ),
+                        # Bound to the recent past: this is meant to be the last
+                        # session's stock-universe size (which is stable), so a
+                        # 7-day window gives the same answer without an unbounded
+                        # COUNT(DISTINCT) over the whole growing hypertable every
+                        # 60s inside the runner the whole loop waits on.
+                        {"recent_start": (now - timedelta(days=7)).astimezone(UTC)},
                     )
                 stock_today = int(stock_today or 0)
                 stock_latest = int(stock_latest or 0)
@@ -413,10 +445,17 @@ class MarketIntelligenceRuntime:
                 # payload satisfies _watchlist_rows_are_fresh() and the BG
                 # build for stocks never fires.
                 try:
+                    from market_data.atm_watchlist import WATCHLIST_CACHE_VERSION
+
                     redis = await get_redis()
+                    # Use the shared version constant, not a hardcoded "v12":
+                    # a version bump in atm_watchlist would otherwise silently
+                    # no-op this invalidation and reintroduce the stale
+                    # full-universe watchlist this delete exists to prevent.
+                    v = WATCHLIST_CACHE_VERSION
                     cache_keys = [
-                        f"atm_watchlist:v12:live:{full_universe_expiry}:all",
-                        f"atm_watchlist:partial:v12:live:{full_universe_expiry}:all",
+                        f"atm_watchlist:{v}:live:{full_universe_expiry}:all",
+                        f"atm_watchlist:partial:{v}:live:{full_universe_expiry}:all",
                     ]
                     for key in cache_keys:
                         await redis.delete(key)
@@ -1333,50 +1372,12 @@ class MarketIntelligenceRuntime:
         chain: Any,
         source: str,
     ) -> None:
-        # CPU-bulkhead offload: option-chain analytics (PCR/OI sums, per-strike
-        # gamma-exposure loop, O(strikes^2) max-pain loop) is pure sync compute
-        # over the just-fetched `chain`. Run it on a worker thread so it does not
-        # block the event loop during the per-index refresh loop. Behaviour is
-        # identical — same pure function, same inputs/outputs.
-        analytics = await asyncio.to_thread(option_chain_service._calculate_analytics, chain)
-        payload = {
-            "symbol": app_symbol,
-            "expiry": expiry_iso,
-            "spot_price": float(chain.spot_price or 0.0),
-            "timestamp": datetime.now(UTC).isoformat(),
-            "source": source,
-            "entries": [
-                {
-                    "strike": entry.strike,
-                    "option_type": entry.option_type,
-                    "ltp": entry.ltp,
-                    "oi": entry.oi,
-                    "volume": entry.volume,
-                    "bid": entry.bid,
-                    "ask": entry.ask,
-                    "iv": entry.iv,
-                    "delta": entry.delta,
-                    "gamma": entry.gamma,
-                    "theta": entry.theta,
-                    "vega": entry.vega,
-                    "prev_oi": entry.prev_oi,
-                    "prev_close": entry.prev_close,
-                    "oi_change": round(float(entry.oi) - float(entry.prev_oi or 0.0), 2),
-                    "oi_change_pct": round(
-                        ((float(entry.oi) - float(entry.prev_oi or 0.0)) / float(entry.prev_oi or 1.0)) * 100.0,
-                        2,
-                    ) if entry.prev_oi else None,
-                    "ltp_change": round(float(entry.ltp) - float(entry.prev_close or 0.0), 2),
-                    "ltp_change_pct": round(
-                        ((float(entry.ltp) - float(entry.prev_close or 0.0)) / float(entry.prev_close or 1.0)) * 100.0,
-                        2,
-                    ) if entry.prev_close else None,
-                    "instrument_key": entry.instrument_key,
-                }
-                for entry in chain.entries
-            ],
-            **analytics,
-        }
+        payload, _ = await option_chain_service.build_validated_payload(
+            symbol=app_symbol,
+            expiry=expiry_iso,
+            chain=chain,
+            source=source,
+        )
         redis = await get_redis()
         await redis.set(f"oc:{app_symbol}:{expiry_iso}", json.dumps(payload), ex=OC_TTL)
 

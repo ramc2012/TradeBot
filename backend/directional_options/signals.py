@@ -70,7 +70,12 @@ class DirectionalSignalEngine:
                 confirm = (oib is not None and float(oib) > 0.0) or (pcr is not None and float(pcr) < settings.DIRECTIONAL_POSITIONAL_PCR_LOW)
             else:
                 confirm = (oib is not None and float(oib) < 0.0) or (pcr is not None and float(pcr) > settings.DIRECTIONAL_POSITIONAL_PCR_HIGH)
-            vol_ok = (daiv is None) or (float(daiv) >= 0.0)  # live vol gate enforced upstream when history IV is null
+            # MANDATORY vol gate — FAILS CLOSED. d_atm_iv is the researched
+            # long-premium conditioner (2026-06-28: high/rising IV-pct is the
+            # strongest negative for long premium); a NULL means the feed could
+            # not compute ATM IV, and passing on NULL silently disabled the
+            # gate for weeks. No IV trend -> no new positional entry.
+            vol_ok = daiv is not None and float(daiv) >= 0.0
             if not confirm or not vol_ok:
                 return None
             direction_score = 0.5
@@ -163,6 +168,7 @@ class DirectionalSignalEngine:
         )
 
         return DirectionalSignal(
+            positional=positional_active,
             direction=direction,
             confidence=round(confidence, 4),
             expected_move=round(expected_move, 2),

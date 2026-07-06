@@ -27,7 +27,7 @@ import { createPositionsOverviewSocket } from "@/lib/websocket";
 import { useLiveSnapshotQuery } from "./useLiveSnapshotQuery";
 
 /** Strategy slices that expose the canonical {open_positions, closed_positions} shape. */
-export type StrategyStreamKey = "directional" | "gann" | "auction" | "fractal" | "cbe";
+export type StrategyStreamKey = "directional" | "gann" | "auction" | "fractal" | "cbe" | "macd" | "usMacd";
 
 export type StrategyPositionsSlice = {
   summary?: Record<string, unknown>;
@@ -38,6 +38,7 @@ export type StrategyPositionsSlice = {
 type PositionsOverviewPayload = AppStrategyPortfolioSnapshot & {
   // The overview socket aliases the nse slice as `strategy` for legacy reasons.
   strategy?: AppStrategyPortfolioSnapshot["nse"];
+  us_macd?: AppStrategyPortfolioSnapshot["usMacd"];
 };
 
 function normalizePositionsOverview(payload: PositionsOverviewPayload): AppStrategyPortfolioSnapshot {
@@ -50,6 +51,7 @@ function normalizePositionsOverview(payload: PositionsOverviewPayload): AppStrat
     fractal: payload.fractal ?? null,
     cbe: payload.cbe ?? null,
     macd: payload.macd ?? null,
+    usMacd: payload.usMacd ?? payload.us_macd ?? null,
     errors: payload.errors ?? {},
     fetchedAt: payload.fetchedAt ?? new Date().toISOString(),
   };

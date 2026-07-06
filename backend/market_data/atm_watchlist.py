@@ -680,8 +680,19 @@ class ATMWatchlistService:
         cached = await redis.get(cache_key)
         if cached:
             cached_payload = json.loads(cached)
-            cached_rows = list(cached_payload.get("rows") or [])
-            if live_refresh and not _watchlist_rows_are_fresh(cached_rows):
+            # This is the EXPIRIES payload — it carries no watchlist rows, so
+            # judge live_refresh freshness by the payload's own age (bounded by
+            # DEFAULT_EXPIRY_TTL), not the rows-freshness helper that could never
+            # pass on a rows-less payload and so rebuilt the ladder ~2×/minute.
+            stale = True
+            as_of_raw = cached_payload.get("as_of")
+            if as_of_raw:
+                try:
+                    age = (datetime.now(timezone.utc) - datetime.fromisoformat(str(as_of_raw))).total_seconds()
+                    stale = age > DEFAULT_EXPIRY_TTL
+                except (TypeError, ValueError):
+                    stale = True
+            if live_refresh and stale:
                 await redis.delete(cache_key)
             else:
                 return cached_payload
@@ -806,6 +817,10 @@ class ATMWatchlistService:
                 f"Stocks {stock_monthly_expiry_iso}"
             ),
             "index_monthlies": _index_monthlies,
+            # Age stamp so a live_refresh read can judge this rows-less payload
+            # by its OWN freshness (the expiry ladder changes at most daily)
+            # instead of the watchlist-rows check that can never pass here.
+            "as_of": datetime.now(timezone.utc).isoformat(),
         }
         await redis.set(cache_key, json.dumps(payload), ex=DEFAULT_EXPIRY_TTL)
         return payload

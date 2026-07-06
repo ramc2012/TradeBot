@@ -159,7 +159,15 @@ class OptionSelectionEngine:
         if not contracts:
             return {"best": None, "candidates": [], "reason": "No persisted option contracts were available for this timestamp."}
 
-        expiry_preference = regime.preferred_expiry_kind
+        # POSITIONAL signals trade the validated instrument class: MONTHLY ATM
+        # in the researched DTE window — never the regime's intraday weekly
+        # preference (weeklies churned out on expiry_roll and never tested the
+        # monthly edge the lane was redesigned for).
+        expiry_preference = "monthly" if signal.positional else regime.preferred_expiry_kind
+        if signal.positional:
+            contracts = self._positional_dte_contracts(contracts=contracts, timestamp=timestamp)
+            if not contracts:
+                return {"best": None, "candidates": [], "reason": "Positional view: no contract inside the validated DTE window."}
         contracts = self._front_expiry_contracts(
             contracts=contracts,
             timestamp=timestamp,
@@ -234,7 +242,11 @@ class OptionSelectionEngine:
             return {"best": None, "candidates": [], "reason": "No local watchlist contracts were available for this timestamp."}
 
         selector_cfg = self.config
-        expiry_preference = regime.preferred_expiry_kind
+        expiry_preference = "monthly" if signal.positional else regime.preferred_expiry_kind
+        if signal.positional:
+            snapshot_rows = self._positional_dte_snapshots(snapshot_rows=snapshot_rows, timestamp=timestamp)
+            if not snapshot_rows:
+                return {"best": None, "candidates": [], "reason": "Positional view: no watchlist contract inside the validated DTE window."}
         snapshot_rows = self._front_expiry_snapshots(
             snapshot_rows=snapshot_rows,
             timestamp=timestamp,
@@ -313,6 +325,38 @@ class OptionSelectionEngine:
         if expiry_date.isoformat() != str(item.get("expiry") or "")[:10]:
             return "monthly"
         return str(item.get("expiry_kind") or "weekly")
+
+    def _positional_dte_bounds(self) -> tuple[int, int]:
+        from core.config import settings
+        return (
+            int(getattr(settings, "DIRECTIONAL_POSITIONAL_DTE_MIN", 8)),
+            int(getattr(settings, "DIRECTIONAL_POSITIONAL_DTE_MAX", 22)),
+        )
+
+    def _positional_dte_contracts(
+        self, *, contracts: list[ContractMeta], timestamp: pd.Timestamp
+    ) -> list[ContractMeta]:
+        # The positional strategy's validated window (backtest_indices_monthly:
+        # monthly ATM, DTE 8-22) — outside it, no positional trade.
+        lo, hi = self._positional_dte_bounds()
+        as_of = timestamp.date()
+        return [
+            item for item in contracts
+            if lo <= (self._contract_expiry_date(item) - as_of).days <= hi
+        ]
+
+    def _positional_dte_snapshots(
+        self, *, snapshot_rows: list[dict[str, Any]], timestamp: pd.Timestamp
+    ) -> list[dict[str, Any]]:
+        lo, hi = self._positional_dte_bounds()
+        as_of = timestamp.date()
+        kept: list[dict[str, Any]] = []
+        for item in snapshot_rows:
+            if not item.get("expiry"):
+                continue
+            if lo <= (self._snapshot_expiry_date(item) - as_of).days <= hi:
+                kept.append(item)
+        return kept
 
     def _front_expiry_contracts(
         self,

@@ -136,8 +136,13 @@ async def overlay_live_marks(
             continue
 
         try:
-            entry = float(pos.get("entry_price") or 0.0)
-            qty = float(pos.get("qty") or 0.0)
+            entry = float(pos.get("entry_price") or pos.get("entry_premium") or 0.0)
+            qty = float(
+                pos.get("qty")
+                or pos.get("quantity_units")
+                or pos.get("quantity")
+                or 0.0
+            )
         except (TypeError, ValueError):
             continue
 
@@ -153,7 +158,11 @@ async def overlay_live_marks(
         # scan-cadence price instead. The reference must be > 0 to compare.
         ref_price = 0.0
         try:
-            ref_price = float(pos.get("current_price") or 0.0)
+            ref_price = float(
+                pos.get("current_price")
+                or pos.get("latest_premium")
+                or 0.0
+            )
         except (TypeError, ValueError):
             ref_price = 0.0
         if ref_price > 0 and (
@@ -169,6 +178,8 @@ async def overlay_live_marks(
 
         mult = 1.0 if (force_long or _is_long(pos.get(side_field))) else -1.0
         pos["current_price"] = round(live, 4)
+        if "latest_premium" in pos or "entry_premium" in pos:
+            pos["latest_premium"] = round(live, 4)
         pos["unrealized_pnl"] = round(mult * (live - entry) * qty, 2)
         pos["return_pct"] = (
             round(mult * ((live - entry) / entry) * 100.0, 2) if entry else 0.0

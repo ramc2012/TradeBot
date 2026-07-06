@@ -169,7 +169,7 @@ class GannTPDeltaService:
                 "conviction": p.get("conviction"),
                 "opened_at": p.get("opened_at"),
                 "closed_at": p.get("updated_at") if kind == "closed" else None,
-                "exit_reason": p.get("exit_reason"),
+                "exit_reason": p.get("close_reason") or p.get("exit_reason"),
                 "bars_held": p.get("bars_held"),
                 "realized_pnl": p.get("realized_pnl"),
                 "unrealized_pnl": p.get("unrealized_pnl"),

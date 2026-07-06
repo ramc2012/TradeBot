@@ -2490,13 +2490,22 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                     expiry_scope,
                     live_refresh=not local_only_mode,
                 )
+                # S2 is dark (removed from _strategy_agents), so ONLY the S1 lane
+                # scans these rows now. S1 is the MONTHLY physical-delivery-window
+                # strategy, so drop the native WEEKLY index tracks — they were
+                # leaking front-weekly NIFTY/SENSEX contracts into S1's scan
+                # (churned out on expiry_roll, never the monthly definition the
+                # lane is measured against). Keep only the :monthly track.
+                strategy2_native_rows = {
+                    key: r
+                    for key, r in (strategy2_native_rows or {}).items()
+                    if str(r.get("expiry_track") or "monthly") == "monthly"
+                }
                 if strategy2_native_rows:
-                    # The S2 loader returns composite-keyed rows
-                    # ("NIFTY:weekly", "NIFTY:monthly", …). When we have
-                    # composite entries for an underlying, drop the
-                    # legacy single-key entry so the S2 lane doesn't see
-                    # the same underlying both as a one-expiry and as a
-                    # multi-expiry row matrix.
+                    # The (now monthly-only) loader returns composite-keyed rows
+                    # ("NIFTY:monthly", …). Drop the legacy single-key entry for
+                    # any underlying that has a native monthly row so S1 keeps
+                    # exactly one monthly row per underlying.
                     s2_underlyings_with_tracks: set[str] = set()
                     for key in strategy2_native_rows.keys():
                         if ":" in key:
@@ -3095,7 +3104,9 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             )
             if candidate.get("learning_blocked"):
                 continue
-            if runtime.processed_signals.get(candidate["signal_key"]) == candidate["latest_bar_time"]:
+            if runtime.processed_signals.get(candidate["signal_key"]) == (
+                candidate.get("latest_macd_bucket") or candidate["latest_bar_time"]
+            ):
                 continue
             await self._open_position(runtime, candidate)
             opened += 1

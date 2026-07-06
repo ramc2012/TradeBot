@@ -418,7 +418,11 @@ async def chain_strike_mark(
         )
     except (asyncio.TimeoutError, Exception):
         cached = None
-    if not cached or not cached.get("entries"):
+    if (
+        not cached
+        or not cached.get("entries")
+        or (cached.get("data_quality") or {}).get("execution_ready") is False
+    ):
         return None
     want = str(option_type or "").upper()
     for entry in cached.get("entries") or []:
@@ -468,7 +472,11 @@ async def fetch_chain_analytics(
         )
     except (asyncio.TimeoutError, Exception):
         cached = None
-    if not cached or not cached.get("entries"):
+    if (
+        not cached
+        or not cached.get("entries")
+        or (cached.get("data_quality") or {}).get("execution_ready") is False
+    ):
         # Cache miss — return None. Whatever populates the chain
         # (market-intel runtime, poll loop, /api/market/option-chain
         # callers) will fill it in due course. Policy gets zero chain
@@ -522,7 +530,10 @@ async def fetch_chain_analytics(
         oi_build_pe=_classify_oi_build(entries, "PE"),
         gamma_curve=_gamma_curve(entries, spot or 0.0, window_strikes=5),
     )
-    return _as_dict(payload)
+    result = _as_dict(payload)
+    result["data_quality"] = cached.get("data_quality") or {}
+    result["provenance"] = cached.get("provenance") or {}
+    return result
 
 
 # Synchronous wrapper for callers in non-async contexts.

@@ -69,3 +69,20 @@ def test_guard_pnl_uses_live_when_accepted(monkeypatch):
     out = _run(live_marks.overlay_live_marks(pos, force_long=True))
     # long premium: pnl = (100 - 80) * 50 = 1000
     assert out[0]["unrealized_pnl"] == 1000.0
+
+
+def test_live_mark_supports_canonical_premium_position_fields(monkeypatch):
+    _patch_live(monkeypatch, 125.0)
+    pos = [{
+        "symbol": "OPT:X:2026-06-30:100:CE",
+        "entry_premium": 100.0,
+        "latest_premium": 110.0,
+        "quantity_units": 20,
+    }]
+
+    out = _run(live_marks.overlay_live_marks(pos, force_long=True))
+
+    assert out[0]["latest_premium"] == 125.0
+    assert out[0]["current_price"] == 125.0
+    assert out[0]["unrealized_pnl"] == 500.0
+    assert out[0]["return_pct"] == 25.0

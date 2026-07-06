@@ -66,9 +66,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "market": "india",
     "lot_size_override": None,
     "description": (
-        "Premium-MACD entry, low-IV gated, volume-led single-leg long options. "
+        "Premium-MACD entry, IV-regime mapped, liquidity-gated single-leg long options. "
         "Buys the ATM CE/PE whose option-premium MACD(12,26,9) just crossed zero "
-        "when IV-rank < 0.30, sized to live option turnover, held to expiry-7d, "
+        "with IV rank recorded as context, sized to live option turnover, held to expiry-7d, "
         "run as separate capped CE & PE books (1 leg per stock)."
     ),
     "data_root": str(DATA_ROOT),
@@ -79,7 +79,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # fo_underlying_catalog (the spec's ~180–217-name universe); "list" → the
     # curated MACD_REFINED_LIVE_UNIVERSE below. Full-universe cycles fetch
     # current+next expiry chains for all names, so the auto-runner interval is
-    # widened (env MACD_REFINED_AUTO_INTERVAL_SECONDS, default 300s) to respect
+    # aligned to 30-minute bars (env MACD_REFINED_AUTO_INTERVAL_SECONDS, default
+    # 1800s) to respect
     # broker rate limits — a 30-min strategy doesn't need a tighter cadence.
     "live_universe_mode": "full",
     "live_universe": list(MACD_REFINED_LIVE_UNIVERSE),
@@ -121,6 +122,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "iv_gate_enabled": False,
         "iv_rank_max": 0.30,               # (label threshold for mapping only)
         "iv_rank_window_sessions": 252,
+        # Retained for causal IV-regime mapping and research/backtest
+        # compatibility. These values do not gate live entries while
+        # iv_gate_enabled is False.
+        "iv_below_median_ratio": 0.80,
+        "iv_below_realized_vol": True,
         # Liquidity floor — skip if recent daily turnover < ₹3L/day (real
         # tradeability guard, not an edge gate).
         "min_daily_turnover_rupees": 300_000.0,
@@ -213,6 +219,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "strikes_each_side": 3,
         # Resolve current + next monthly expiry for next-month positioning.
         "expiries_ahead": 2,
+        # Per-name chain/history work is independent. The Fyers adapter's
+        # process-global limiter still caps aggregate REST admission.
+        "max_concurrent_names": 6,
         "broker_timeout_seconds": 12.0,
     },
 }

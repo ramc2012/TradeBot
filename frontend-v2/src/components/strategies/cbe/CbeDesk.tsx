@@ -37,6 +37,8 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { PaperPerformance } from "@/components/strategies/shared";
+import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
+import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStrategyPositionsStream";
 import type { PaperPosition, PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
@@ -51,6 +53,8 @@ const TABS = [
   { key: "candidates", label: "Candidates", icon: Compass },
   { key: "sectors", label: "Sectors", icon: Layers3 },
   { key: "performance", label: "Performance", icon: TrendingUp },
+  { key: "signal-quality", label: "Signal quality", icon: ShieldCheck },
+  { key: "live-stream", label: "Live stream", icon: Activity },
 ];
 
 // ── Scan payload types (from /api/cbe/latest, source=alpha_engine) ──────────
@@ -497,6 +501,16 @@ export default function CbeDesk() {
           </section>
           <PaperPerformance summary={markedPaperSum} positions={markedPositions} />
         </div>
+      ) : null}
+      {activeTab === "signal-quality" ? (
+        <SignalQualityTab laneKeys={["cbe_scanner", "cbe_marks"]} title="CBE signal validation" />
+      ) : null}
+      {activeTab === "live-stream" ? (
+        <StrategyLiveStream
+          title="CBE Scanner"
+          watchlist={watchlist.map((row) => ({ symbol: row.instrument }))}
+          positionSources={["cbe"]}
+        />
       ) : null}
     </DeskShell>
   );
