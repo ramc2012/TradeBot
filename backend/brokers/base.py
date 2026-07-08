@@ -171,6 +171,20 @@ class Tick:
     # index spot (no book); populated for futures/option book contracts.
     total_buy_qty: int = 0
     total_sell_qty: int = 0
+    # Previous-day open interest — streamed by Fyers as `pdoi` (the NSE
+    # prior-session-close OI baseline the watchlist uses for oi_change). None
+    # when the source doesn't carry it (Upstox WS has no previous-OI field).
+    prev_oi: Optional[int] = None
+    # Option greeks + IV, when the feed carries them natively (Upstox V3
+    # `option_greeks`/`full` modes). Fyers never streams these — they stay None
+    # on the tick and are Black-Scholes-derived app-side. Purely additive: no
+    # consumer reads these off the Tick yet (WS-first chain design, phase P0).
+    iv: Optional[float] = None
+    delta: Optional[float] = None
+    gamma: Optional[float] = None
+    theta: Optional[float] = None
+    vega: Optional[float] = None
+    rho: Optional[float] = None
     timestamp: Optional[datetime] = None
 
 

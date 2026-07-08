@@ -13,11 +13,9 @@
  * /api/macd-refined. The "Run live cycle" action fetches current+next expiry
  * chains, persists per-contract volume/turnover, and syncs the paper book.
  */
-import { useMemo, useState, useTransition } from "react";
-import { Radio as TerminalRadioIcon } from "lucide-react";
-import { LaneTerminal } from "@/components/terminal/LaneTerminal";
+import { Fragment, useMemo, useState, useTransition } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { BarChart3, Banknote, CalendarClock, RefreshCw, ShieldCheck } from "lucide-react";
+import { BarChart3, Banknote, CalendarClock, CandlestickChart, RefreshCw, ShieldCheck } from "lucide-react";
 
 import {
   DeskShell,
@@ -29,6 +27,7 @@ import {
   formatPct,
   formatSignedMoney,
   formatIST,
+  formatMoney,
   tone,
   useUrlTab,
 } from "@/components/desk-ui";
@@ -39,8 +38,11 @@ import {
   getMacdRefinedPaperPositions,
   runMacdRefinedLiveCycle,
 } from "@/lib/api";
+import { LiveMarkCell } from "@/components/terminal/LiveMarkCell";
+import { legTapeSymbol } from "@/lib/marketSymbols";
+import { OptionChartModal, type OptionChartContract } from "@/components/strategies/nse/OptionChartModal";
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
-import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
+import { selectStrategySlice, useStrategyPositionsStream } from "@/hooks/useStrategyPositionsStream";
 
 type BookMetrics = {
   trades: number;
@@ -51,19 +53,125 @@ type BookMetrics = {
   pct_below_minus_50: number;
 };
 
+type MacdPaperPosition = {
+  position_id?: string | null;
+  status?: string | null;
+  underlying?: string | null;
+  book?: string | null;
+  option_type?: string | null;
+  direction?: string | null;
+  instrument_key?: string | null;
+  strike?: number | string | null;
+  expiry?: string | null;
+  quantity_units?: number | null;
+  initial_qty?: number | null;
+  entry_premium?: number | null;
+  latest_premium?: number | null;
+  current_price?: number | null;
+  exit_premium?: number | null;
+  unrealized_pnl?: number | null;
+  realized_pnl?: number | null;
+  latest_spot?: number | string | null;
+  exit_spot?: number | string | null;
+  entry_spot?: number | string | null;
+  opened_at?: string | null;
+  closed_at?: string | null;
+  updated_at?: string | null;
+  mark_source?: string | null;
+  close_reason?: string | null;
+};
+
 const TABS = [
-  { key: "terminal", label: "Terminal", icon: TerminalRadioIcon },
+  { key: "paper", label: "Paper book", icon: Banknote },
   { key: "backtest", label: "Backtest", icon: BarChart3 },
   { key: "positioning", label: "Positioning", icon: CalendarClock },
-  { key: "paper", label: "Paper book", icon: Banknote },
   { key: "signal-quality", label: "Signal quality", icon: ShieldCheck },
-  { key: "live-stream", label: "Live stream", icon: RefreshCw },
 ];
 
 function pctTone(winRate?: number): string | undefined {
   if (winRate == null) return undefined;
   return winRate >= 0.6 ? "text-accent-green" : winRate >= 0.45 ? "text-accent-amber" : "text-accent-red";
 }
+
+function sideOfPosition(position: MacdPaperPosition): "CE" | "PE" {
+  return String(position.book || position.option_type || position.direction || "CE").toUpperCase() === "PE" ? "PE" : "CE";
+}
+
+function positionToContract(position: MacdPaperPosition): OptionChartContract | null {
+  const strike = Number(position.strike);
+  const expiry = String(position.expiry || "").slice(0, 10);
+  const underlying = String(position.underlying || "").trim();
+  if (!underlying || !Number.isFinite(strike) || !expiry) return null;
+  return {
+    underlying,
+    direction: sideOfPosition(position),
+    strike,
+    expiry,
+    instrumentKey: position.instrument_key ?? null,
+    ltp: Number(position.latest_premium ?? position.exit_premium ?? NaN),
+  };
+}
+
+function sameContract(left: OptionChartContract, right: OptionChartContract): boolean {
+  return (
+    left.underlying === right.underlying
+    && left.direction === right.direction
+    && left.expiry === right.expiry
+    && Number(left.strike) === Number(right.strike)
+  );
+}
+
+function finiteNumber(value: unknown, fallback = 0): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function positionId(position: MacdPaperPosition, index: number): string {
+  return String(
+    position.position_id
+    || position.instrument_key
+    || `${position.underlying ?? "row"}-${position.book ?? position.option_type ?? "book"}-${position.strike ?? "strike"}-${position.opened_at ?? position.closed_at ?? index}`,
+  );
+}
+
+function markPremium(position: MacdPaperPosition, isOpen: boolean): number {
+  return finiteNumber(
+    isOpen
+      ? position.current_price ?? position.latest_premium ?? position.entry_premium
+      : position.exit_premium ?? position.latest_premium,
+  );
+}
+
+function spotLtp(position: MacdPaperPosition, isOpen: boolean): number | null {
+  const value = finiteNumber(
+    isOpen
+      ? position.latest_spot ?? position.entry_spot
+      : position.exit_spot ?? position.latest_spot ?? position.entry_spot,
+    NaN,
+  );
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function positionPnl(position: MacdPaperPosition, isOpen: boolean): number {
+  return finiteNumber(isOpen ? position.unrealized_pnl : position.realized_pnl);
+}
+
+function displayQty(position: MacdPaperPosition, isOpen: boolean): number {
+  return finiteNumber(isOpen ? position.quantity_units : position.initial_qty ?? position.quantity_units);
+}
+
+function zebra(index: number): string {
+  return index % 2 === 0 ? "bg-bg-primary/10" : "bg-bg-secondary/20";
+}
+
+type OpenBookGroup = {
+  book: string;
+  rows: MacdPaperPosition[];
+  qty: number;
+  entryValue: number;
+  markValue: number;
+  pnl: number;
+};
 
 function BooksTable({ books, label }: { books?: Record<string, BookMetrics>; label: string }) {
   if (!books) return null;
@@ -102,7 +210,7 @@ function BooksTable({ books, label }: { books?: Record<string, BookMetrics>; lab
 }
 
 export default function MacdRefinedDesk() {
-  const [activeTab, setActiveTab] = useUrlTab("backtest");
+  const [activeTab, setActiveTab] = useUrlTab("paper");
   const [isPending, startTransition] = useTransition();
   const [cycleResult, setCycleResult] = useState<string | null>(null);
 
@@ -204,7 +312,7 @@ export default function MacdRefinedDesk() {
         <MetricTile label="IV cheap label" value={`< ${params.iv_rank_max ?? 0.3}`} size="sm" />
         <MetricTile label="Stop" value={`−${Math.round((params.catastrophe_stop_pct ?? 0.5) * 100)}% (${params.catastrophe_stop_basis ?? "bar_close"})`} size="sm" />
         <MetricTile label="Books" value={`${params.ce_slots ?? 10} CE / ${params.pe_slots ?? 10} PE`} size="sm" />
-        <MetricTile label="Slippage" value={formatPct(params.round_trip_slippage_pct ?? 0.1)} size="sm" />
+        <MetricTile label="Slippage" value={formatPct(params.round_trip_slippage_pct ?? 0.05)} size="sm" />
       </div>
       {cycleResult ? (
         <div className="rounded-xl border border-bg-border bg-bg-primary/14 px-3 py-2 text-xs text-text-secondary">{cycleResult}</div>
@@ -296,23 +404,50 @@ export default function MacdRefinedDesk() {
       {activeTab === "signal-quality" ? (
         <SignalQualityTab laneKeys={["macd_refined"]} title="MACD Refined signal validation" />
       ) : null}
-      {activeTab === "terminal" ? <LaneTerminal title="Live Terminal · MACD Refined" /> : null}
-      {activeTab === "live-stream" ? (
-        <StrategyLiveStream
-          title="MACD Refined"
-          watchlist={(summary?.live_universe ?? []).map((symbol: string) => ({ symbol }))}
-          positionSources={["macd"]}
-        />
-      ) : null}
     </DeskShell>
   );
 }
 
 function PaperBook({ data }: { data: any }) {
-  const summary = data?.summary ?? {};
-  const open = data?.open_positions ?? [];
-  const closed = data?.closed_positions ?? [];
-  const rows = useMemo(() => [...open, ...closed], [open, closed]);
+  const [bookTab, setBookTab] = useState<"open" | "closed">("open");
+  const positionsStream = useStrategyPositionsStream();
+  const streamSlice = selectStrategySlice(positionsStream.data, "macd");
+  const restOpen = (data?.open_positions ?? []) as MacdPaperPosition[];
+  const streamedOpen = streamSlice?.open_positions;
+  const open = (Array.isArray(streamedOpen) ? streamedOpen : restOpen) as MacdPaperPosition[];
+  const closed = (data?.closed_positions ?? []) as MacdPaperPosition[];
+  const summary = (streamSlice?.summary ?? data?.summary ?? {}) as Record<string, any>;
+  const openGroups = useMemo(() => {
+    const groups = ["CE", "PE"].map((book) => ({
+      book,
+      rows: open.filter((position) => sideOfPosition(position) === book),
+    }));
+    const extras = open.filter((position) => !["CE", "PE"].includes(sideOfPosition(position)));
+    if (extras.length) groups.push({ book: "OTHER", rows: extras });
+    return groups
+      .map((group) => {
+        const qty = group.rows.reduce((sum, position) => sum + displayQty(position, true), 0);
+        const entryValue = group.rows.reduce((sum, position) => sum + finiteNumber(position.entry_premium) * displayQty(position, true), 0);
+        const markValue = group.rows.reduce((sum, position) => sum + markPremium(position, true) * displayQty(position, true), 0);
+        const pnl = group.rows.reduce((sum, position) => sum + positionPnl(position, true), 0);
+        return { ...group, qty, entryValue, markValue, pnl };
+      })
+      .filter((group) => group.rows.length > 0);
+  }, [open]);
+  const chartContracts = useMemo(
+    () => open.map(positionToContract).filter((contract): contract is OptionChartContract => contract !== null),
+    [open],
+  );
+  const [chart, setChart] = useState<{ list: OptionChartContract[]; index: number } | null>(null);
+  const streamUsingOpenRows = Array.isArray(streamedOpen);
+
+  const openChart = (position: MacdPaperPosition) => {
+    const target = positionToContract(position);
+    if (!target || !chartContracts.length) return;
+    const index = chartContracts.findIndex((contract) => sameContract(contract, target));
+    setChart({ list: chartContracts, index: index >= 0 ? index : 0 });
+  };
+
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
@@ -323,46 +458,246 @@ function PaperBook({ data }: { data: any }) {
         <MetricTile label="Win rate" value={formatPct(summary.win_rate)} color={pctTone(summary.win_rate)} />
         <MetricTile label="Max DD" value={formatPct(summary.max_drawdown)} />
       </div>
-      <Section title={`Positions (${open.length} open · ${closed.length} closed)`}>
-        {rows.length === 0 ? (
-          <div className="rounded-xl border border-bg-border bg-bg-primary/14 p-4 text-sm text-text-muted">
-            No paper positions yet. Entries open during the NSE session once a live broker is connected and a fresh premium-MACD cross clears the IV / liquidity gates.
+      <Section
+        title="Paper book"
+        description={bookTab === "open" ? "Open positions stream from the positions-overview socket when available." : "Closed trades are kept on the stable REST snapshot."}
+        rightSlot={
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {bookTab === "open" ? (
+              <StatusBadge
+                label={positionsStream.isStreamConnected && streamUsingOpenRows ? "stream live" : "poll fallback"}
+                variant={positionsStream.isStreamConnected && streamUsingOpenRows ? "success" : "warn"}
+              />
+            ) : null}
+            <div className="inline-flex rounded-lg border border-bg-border bg-bg-primary/20 p-1 text-xs">
+              <button
+                type="button"
+                onClick={() => setBookTab("open")}
+                className={`rounded-md px-3 py-1.5 transition-colors ${bookTab === "open" ? "bg-accent-blue/18 text-accent-blue" : "text-text-muted hover:text-text-primary"}`}
+              >
+                Open book
+              </button>
+              <button
+                type="button"
+                onClick={() => setBookTab("closed")}
+                className={`rounded-md px-3 py-1.5 transition-colors ${bookTab === "closed" ? "bg-accent-blue/18 text-accent-blue" : "text-text-muted hover:text-text-primary"}`}
+              >
+                Closed trades
+              </button>
+            </div>
           </div>
+        }
+      >
+        {bookTab === "open" ? (
+          <OpenBookTable
+            groups={openGroups}
+            openCount={open.length}
+            onOpenChart={openChart}
+          />
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-bg-border">
-            <table className="w-full text-sm">
-              <thead className="bg-bg-secondary/40 text-[11px] uppercase tracking-wide text-text-muted">
-                <tr>
-                  {["Symbol", "Book", "Strike", "Expiry", "Qty", "Entry", "Latest/Exit", "P&L", "Status"].map((h) => (
-                    <th key={h} className="px-3 py-2 text-left font-medium">{h}</th>
-                  ))}
+          <ClosedTradesTable closed={closed} />
+        )}
+        {chart && chart.list[chart.index] ? (
+          <OptionChartModal
+            contracts={chart.list}
+            index={chart.index}
+            onIndexChange={(index) => setChart((current) => (current ? { ...current, index } : current))}
+            onClose={() => setChart(null)}
+          />
+        ) : null}
+      </Section>
+    </div>
+  );
+}
+
+function OpenBookTable({
+  groups,
+  openCount,
+  onOpenChart,
+}: {
+  groups: OpenBookGroup[];
+  openCount: number;
+  onOpenChart: (position: MacdPaperPosition) => void;
+}) {
+  if (openCount === 0) {
+    return (
+      <div className="rounded-xl border border-bg-border bg-bg-primary/14 p-4 text-sm text-text-muted">
+        No open paper positions. Entries open during the NSE session once a live broker is connected and a fresh premium-MACD cross clears the IV / liquidity gates.
+      </div>
+    );
+  }
+
+  let rowIndex = 0;
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {groups.map((group) => (
+          <div key={group.book} className="rounded-xl border border-bg-border bg-bg-primary/12 px-3 py-2">
+            <div className="flex items-center justify-between gap-3">
+              <StatusBadge label={`${group.book} subtotal`} variant={group.book === "CE" ? "success" : group.book === "PE" ? "info" : "neutral"} />
+              <span className={`font-mono text-sm ${tone(group.pnl)}`}>{formatSignedMoney(group.pnl)}</span>
+            </div>
+            <div className="mt-2 grid grid-cols-3 gap-2 text-[11px] text-text-muted">
+              <div>
+                <div className="uppercase tracking-wide">Positions</div>
+                <div className="font-mono text-text-primary">{group.rows.length}</div>
+              </div>
+              <div>
+                <div className="uppercase tracking-wide">Qty</div>
+                <div className="font-mono text-text-primary">{formatNumber(group.qty, 0)}</div>
+              </div>
+              <div>
+                <div className="uppercase tracking-wide">Live value</div>
+                <div className="font-mono text-text-primary">{formatMoney(group.markValue)}</div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="overflow-x-auto rounded-xl border border-bg-border">
+        <table className="w-full min-w-[1320px] table-fixed text-sm">
+          <thead className="bg-bg-secondary/40 text-[11px] uppercase tracking-wide text-text-muted">
+            <tr>
+              <th className="w-10 px-3 py-2 text-left font-medium" aria-label="Chart" />
+              <th className="w-32 px-3 py-2 text-left font-medium">Symbol</th>
+              <th className="w-16 px-3 py-2 text-left font-medium">Book</th>
+              <th className="w-24 px-3 py-2 text-right font-medium">Strike</th>
+              <th className="w-28 px-3 py-2 text-left font-medium">Expiry</th>
+              <th className="w-24 px-3 py-2 text-right font-medium">Spot LTP</th>
+              <th className="w-24 px-3 py-2 text-right font-medium">Qty</th>
+              <th className="w-24 px-3 py-2 text-right font-medium">Entry</th>
+              <th className="w-28 px-3 py-2 text-right font-medium">Live mark</th>
+              <th className="w-28 px-3 py-2 text-right font-medium">P&L</th>
+              <th className="w-28 px-3 py-2 text-left font-medium">Opened</th>
+              <th className="w-28 px-3 py-2 text-left font-medium">Updated</th>
+              <th className="w-28 px-3 py-2 text-left font-medium">State</th>
+            </tr>
+          </thead>
+          <tbody>
+            {groups.map((group) => (
+              <Fragment key={group.book}>
+                <tr key={`${group.book}-heading`} className="border-t border-bg-border/70 bg-bg-secondary/35">
+                  <td colSpan={13} className="px-3 py-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-mono text-xs font-semibold uppercase tracking-wide text-text-primary">{group.book} book</span>
+                      <span className="text-[11px] text-text-muted">
+                        {group.rows.length} positions · qty {formatNumber(group.qty, 0)} · entry value {formatMoney(group.entryValue)} · live value {formatMoney(group.markValue)}
+                      </span>
+                    </div>
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {rows.map((p: any) => {
-                  const isOpen = p.status === "open";
-                  const pnl = isOpen ? p.unrealized_pnl : p.realized_pnl;
+                {group.rows.map((p) => {
+                  const pnl = positionPnl(p, true);
+                  const canChart = positionToContract(p) !== null;
+                  const rowClass = zebra(rowIndex++);
+                  const liveMark = markPremium(p, true);
+                  const markSource = String(p.mark_source || "").toLowerCase();
                   return (
-                    <tr key={p.position_id} className="border-t border-bg-border/60">
-                      <td className="px-3 py-2 font-mono text-text-primary">{p.underlying}</td>
-                      <td className="px-3 py-2 font-mono">{p.book ?? p.option_type}</td>
-                      <td className="px-3 py-2 font-mono">{formatNumber(p.strike, 0)}</td>
-                      <td className="px-3 py-2 font-mono text-text-muted">{p.expiry}</td>
-                      <td className="px-3 py-2 font-mono text-right">{p.quantity_units}</td>
-                      <td className="px-3 py-2 font-mono text-right">{formatNumber(p.entry_premium, 2)}</td>
-                      <td className="px-3 py-2 font-mono text-right">{formatNumber(isOpen ? p.latest_premium : p.exit_premium, 2)}</td>
-                      <td className={`px-3 py-2 font-mono text-right ${tone(pnl)}`}>{formatSignedMoney(pnl)}</td>
+                    <tr key={positionId(p, rowIndex)} className={`border-t border-bg-border/45 ${rowClass} hover:bg-bg-primary/25`}>
                       <td className="px-3 py-2">
-                        <StatusBadge label={isOpen ? "open" : (p.close_reason ?? "closed")} variant={isOpen ? "info" : (pnl >= 0 ? "success" : "warn")} />
+                        {canChart ? (
+                          <button
+                            type="button"
+                            onClick={() => onOpenChart(p)}
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-bg-border bg-bg-primary/30 text-text-muted transition-colors hover:border-accent-blue/60 hover:text-accent-blue"
+                            aria-label={`Open chart for ${p.underlying}`}
+                            title="Open premium chart · KAMA · MACD"
+                          >
+                            <CandlestickChart size={14} />
+                          </button>
+                        ) : (
+                          <span className="block h-7 w-7" />
+                        )}
+                      </td>
+                      <td className="truncate px-3 py-2 font-mono text-text-primary">{p.underlying}</td>
+                      <td className="px-3 py-2 font-mono">{p.book ?? p.option_type}</td>
+                      <td className="px-3 py-2 text-right font-mono">{formatNumber(Number(p.strike), 0)}</td>
+                      <td className="px-3 py-2 font-mono text-text-muted">{p.expiry}</td>
+                      <td className="px-3 py-2 text-right font-mono text-text-secondary">{formatNumber(spotLtp(p, true), 2)}</td>
+                      <td className="px-3 py-2 text-right font-mono">{formatNumber(displayQty(p, true), 0)}</td>
+                      <td className="px-3 py-2 text-right font-mono">{formatNumber(finiteNumber(p.entry_premium), 2)}</td>
+                      <td className="px-3 py-2 text-right text-accent-blue">
+                        <LiveMarkCell symbol={legTapeSymbol(p)} fallback={liveMark} decimals={2} />
+                      </td>
+                      <td className={`px-3 py-2 text-right font-mono ${tone(pnl)}`}>{formatSignedMoney(pnl)}</td>
+                      <td className="px-3 py-2 font-mono text-[12px] text-text-muted">{formatIST(p.opened_at)}</td>
+                      <td className="px-3 py-2 font-mono text-[12px] text-text-muted">{formatIST(p.updated_at ?? p.opened_at)}</td>
+                      <td className="px-3 py-2">
+                        <StatusBadge
+                          label={markSource === "live_tick" ? "live" : markSource === "scan_guarded" ? "guarded" : "scan"}
+                          variant={markSource === "live_tick" ? "success" : markSource === "scan_guarded" ? "warn" : "info"}
+                        />
                       </td>
                     </tr>
                   );
                 })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Section>
+                <tr key={`${group.book}-subtotal`} className="border-t border-bg-border/70 bg-bg-primary/25">
+                  <td colSpan={6} className="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-wide text-text-muted">{group.book} subtotal</td>
+                  <td className="px-3 py-2 text-right font-mono font-semibold text-text-primary">{formatNumber(group.qty, 0)}</td>
+                  <td className="px-3 py-2 text-right font-mono text-text-muted">{formatMoney(group.entryValue)}</td>
+                  <td className="px-3 py-2 text-right font-mono text-text-muted">{formatMoney(group.markValue)}</td>
+                  <td className={`px-3 py-2 text-right font-mono font-semibold ${tone(group.pnl)}`}>{formatSignedMoney(group.pnl)}</td>
+                  <td colSpan={3} />
+                </tr>
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ClosedTradesTable({ closed }: { closed: MacdPaperPosition[] }) {
+  if (closed.length === 0) {
+    return (
+      <div className="rounded-xl border border-bg-border bg-bg-primary/14 p-4 text-sm text-text-muted">
+        No closed MACD Refined paper trades yet.
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-x-auto rounded-xl border border-bg-border">
+      <table className="w-full min-w-[1240px] table-fixed text-sm">
+        <thead className="bg-bg-secondary/40 text-[11px] uppercase tracking-wide text-text-muted">
+          <tr>
+            <th className="w-32 px-3 py-2 text-left font-medium">Symbol</th>
+            <th className="w-16 px-3 py-2 text-left font-medium">Book</th>
+            <th className="w-24 px-3 py-2 text-right font-medium">Strike</th>
+            <th className="w-28 px-3 py-2 text-left font-medium">Expiry</th>
+            <th className="w-24 px-3 py-2 text-right font-medium">Spot LTP</th>
+            <th className="w-24 px-3 py-2 text-right font-medium">Qty</th>
+            <th className="w-24 px-3 py-2 text-right font-medium">Entry</th>
+            <th className="w-24 px-3 py-2 text-right font-medium">Exit</th>
+            <th className="w-28 px-3 py-2 text-right font-medium">P&L</th>
+            <th className="w-28 px-3 py-2 text-left font-medium">Opened</th>
+            <th className="w-28 px-3 py-2 text-left font-medium">Closed</th>
+            <th className="w-32 px-3 py-2 text-left font-medium">Reason</th>
+          </tr>
+        </thead>
+        <tbody>
+          {closed.map((p, index) => {
+            const pnl = positionPnl(p, false);
+            return (
+              <tr key={positionId(p, index)} className={`border-t border-bg-border/45 ${zebra(index)} hover:bg-bg-primary/25`}>
+                <td className="truncate px-3 py-2 font-mono text-text-primary">{p.underlying}</td>
+                <td className="px-3 py-2 font-mono">{p.book ?? p.option_type}</td>
+                <td className="px-3 py-2 text-right font-mono">{formatNumber(Number(p.strike), 0)}</td>
+                <td className="px-3 py-2 font-mono text-text-muted">{p.expiry}</td>
+                <td className="px-3 py-2 text-right font-mono text-text-secondary">{formatNumber(spotLtp(p, false), 2)}</td>
+                <td className="px-3 py-2 text-right font-mono">{formatNumber(displayQty(p, false), 0)}</td>
+                <td className="px-3 py-2 text-right font-mono">{formatNumber(finiteNumber(p.entry_premium), 2)}</td>
+                <td className="px-3 py-2 text-right font-mono">{formatNumber(markPremium(p, false), 2)}</td>
+                <td className={`px-3 py-2 text-right font-mono ${tone(pnl)}`}>{formatSignedMoney(pnl)}</td>
+                <td className="px-3 py-2 font-mono text-[12px] text-text-muted">{formatIST(p.opened_at)}</td>
+                <td className="px-3 py-2 font-mono text-[12px] text-text-muted">{formatIST(p.closed_at)}</td>
+                <td className="px-3 py-2"><StatusBadge label={p.close_reason ?? "closed"} variant={pnl >= 0 ? "success" : "warn"} /></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

@@ -386,9 +386,13 @@ async def _build_positions_overview_structure() -> dict:
 
     errors: dict[str, str] = {}
 
-    async def settle(key: str, task):
+    async def settle(key: str, task, *, timeout_seconds: float = 1.8):
         try:
-            return await task
+            return await asyncio.wait_for(task, timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            errors[key] = f"timed out after {timeout_seconds:.1f}s"
+            logger.warning(f"[WS] positions overview source timed out: {key}")
+            return None
         except Exception as exc:  # pragma: no cover - defensive stream isolation
             errors[key] = str(exc)
             logger.warning(f"[WS] positions overview source failed: {key}: {exc}")
@@ -423,6 +427,21 @@ async def _build_positions_overview_structure() -> dict:
         "cbe": cbe_positions, "macd": macd_positions,
         "us_macd": us_macd_positions, "errors": errors,
     })
+
+
+def _carry_forward_positions_lanes(next_structure: dict, previous_structure: dict | None) -> dict:
+    """Keep the combined terminal stream stable when one lane misses a refresh."""
+    if not previous_structure:
+        return next_structure
+    errors = next_structure.setdefault("errors", {})
+    for lane in (
+        "manual", "nse", "commodity", "directional", "gann", "auction",
+        "fractal", "cbe", "macd", "us_macd",
+    ):
+        if next_structure.get(lane) is None and previous_structure.get(lane) is not None:
+            next_structure[lane] = previous_structure[lane]
+            errors[f"{lane}_stale"] = "reused last known snapshot after refresh miss"
+    return next_structure
 
 
 # The combined stream is re-encoded once per second per client, so payload size
@@ -624,7 +643,10 @@ async def ws_positions_overview(websocket: WebSocket):
             now = monotonic()
             rebuilt = False
             if structure is None or (now - last_build) >= 2.0:
-                structure = await _build_positions_overview_structure()
+                structure = _carry_forward_positions_lanes(
+                    await _build_positions_overview_structure(),
+                    structure,
+                )
                 last_build = now
                 rebuilt = True
 

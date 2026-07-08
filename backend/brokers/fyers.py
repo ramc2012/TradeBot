@@ -66,23 +66,28 @@ class FyersAdapter(BrokerAdapter):
         concatenated JSON objects on a burst).
         """
         from brokers.rate_limiter import FYERS_DATA_LIMITER, parse_first_json
+        from brokers.http_client import get_shared_async_client
+        from market_data.broker_circuit import broker_circuit
 
+        dt = "chain" if "chain" in path else "history" if "history" in path else "quote"
         last_error: Optional[str] = None
         for attempt in range(5):
             await FYERS_DATA_LIMITER.acquire()
             try:
-                async with httpx.AsyncClient(timeout=15) as client:
-                    response = await client.get(
-                        f"{self.DATA_URL}{path}",
-                        params=params or {},
-                        headers=self._auth_header(),
-                    )
+                client = get_shared_async_client("fyers")
+                response = await client.get(
+                    f"{self.DATA_URL}{path}",
+                    params=params or {},
+                    headers=self._auth_header(),
+                    timeout=15,
+                )
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_error = f"transport: {exc}"
                 await asyncio.sleep(min(2 ** attempt, 30))
                 continue
 
             if response.status_code == 429:
+                FYERS_DATA_LIMITER.record_429()
                 retry_after = 0.0
                 try:
                     retry_after = float(response.headers.get("Retry-After") or 0)
@@ -112,11 +117,15 @@ class FyersAdapter(BrokerAdapter):
                 continue
             if response.status_code != 200:
                 message = payload.get("message") if isinstance(payload, dict) else response.text[:240]
+                broker_circuit.record_failure("fyers", dt)
                 raise ValueError(f"Fyers data API error {response.status_code}: {message}")
             if isinstance(payload, dict) and payload.get("s") == "error":
+                broker_circuit.record_failure("fyers", dt)
                 raise ValueError(payload.get("message") or "Fyers data API returned an error")
+            broker_circuit.record_success("fyers", dt)
             return payload
 
+        broker_circuit.record_failure("fyers", dt)
         raise ValueError(f"Fyers data API failed after retries on {path}: {last_error}")
 
     @staticmethod
@@ -487,6 +496,7 @@ class FyersAdapter(BrokerAdapter):
         symbols: list[str],
         on_tick_callback: Callable[[Tick], None],
         on_depth_callback: Optional[Callable[[dict], None]] = None,
+        on_reconnect_callback: Optional[Callable[[], None]] = None,
     ) -> Any:
         """Open Fyers WebSocket for real-time data.
 
@@ -494,21 +504,40 @@ class FyersAdapter(BrokerAdapter):
         frames. Depth subscriptions themselves are added incrementally on the
         returned client by the data router (``client.subscribe(..., DepthUpdate)``)
         only for the focused symbols, so the base feed stays lean.
+
+        ``on_reconnect_callback`` (optional) fires on every RE-connect (not the
+        first connect). The SDK's reconnect=True restores the socket but NOT the
+        subscriptions — on 2026-07-08 an 11:14 IST drop left the tape blind for
+        4h16m because the router's dedupe gate skipped resubscribing. The router
+        uses this hook to invalidate its subscription state so the next periodic
+        subscribe() re-sends the full set. Called from the SDK's WS thread.
         """
         self._on_depth_callback = on_depth_callback
         try:
             from fyers_apiv3.FyersWebsocket import data_ws
+
+            state = {"connected_once": False}
+
+            def _on_connect(*_a) -> None:
+                # SDK calls with inconsistent arity across versions — accept *args.
+                if not state["connected_once"]:
+                    state["connected_once"] = True
+                    logger.info("Fyers WS connected")
+                    return
+                logger.warning("Fyers WS RE-connected — subscriptions must be re-sent")
+                if on_reconnect_callback is not None:
+                    try:
+                        on_reconnect_callback()
+                    except Exception as exc:  # noqa: BLE001 — WS thread must never die
+                        logger.error(f"Fyers WS reconnect callback failed: {exc}")
+
             client = data_ws.FyersDataSocket(
                 access_token=f"{settings.FYERS_APP_ID}:{self._access_token}",
                 log_path="",
                 litemode=False,
                 write_to_file=False,
                 reconnect=True,
-                # The Fyers SDK calls these with an inconsistent arity (e.g.
-                # on_close/on_connect receive a payload in some versions). Accept
-                # *args so a callback never raises "takes 0 positional arguments
-                # but 1 was given" and silently kills the WS feed.
-                on_connect=lambda *_a: logger.info("Fyers WS connected"),
+                on_connect=_on_connect,
                 on_close=lambda *_a: logger.warning("Fyers WS closed"),
                 on_error=lambda *_a: logger.error(f"Fyers WS error: {_a[0] if _a else ''}"),
                 on_message=lambda msg, *_a: self._handle_message(msg, on_tick_callback),
@@ -678,8 +707,26 @@ class FyersAdapter(BrokerAdapter):
                 # whole-book buy/sell totals; real depth_imbalance source.
                 total_buy_qty=_first("tot_buy_qty", "total_buy_qty"),
                 total_sell_qty=_first("tot_sell_qty", "total_sell_qty"),
+                # Previous-day OI — Fyers SymbolUpdate carries `pdoi`. This is the
+                # exact prior-session-close baseline the watchlist uses for
+                # oi_change (= oi − prev_oi), so streaming oi+pdoi reconstructs
+                # oi_change with NO 09:15 REST snapshot (WS-first chain design,
+                # phase P0). None on frames/instruments that omit it.
+                prev_oi=(msg.get("pdoi") if msg.get("pdoi") not in (None, 0) else None),
                 timestamp=datetime.now(UTC),
             )
+            if settings.WS_CHAIN_PROBE_ENABLED:
+                from market_data.ws_chain_probe import ws_chain_probe
+                # Some Fyers frames carry a numeric symbol/token in `n` —
+                # str() it, else .endswith raises and the except below drops
+                # the ENTIRE tick (callback never runs). Seen live 2026-07-08
+                # as recurring "'int' object has no attribute 'endswith'".
+                _sym = str(tick.symbol or "")
+                ws_chain_probe.observe(
+                    "fyers",
+                    is_option=_sym.endswith(("CE", "PE")),
+                    oi=tick.oi, prev_oi=tick.prev_oi,
+                )
             callback(tick)
         except Exception as e:
             logger.error(f"Error parsing Fyers tick: {e}")

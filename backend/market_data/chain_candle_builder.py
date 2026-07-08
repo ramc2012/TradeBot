@@ -30,20 +30,36 @@ from loguru import logger
 from core.trading_calendar import trading_calendar
 
 BUCKET_SECONDS = 180  # 3-minute bars
+BUCKET_SECONDS_30M = 1800  # 30-minute bars — the series S1's entry MACD reads
+# NSE option 30-min bars are anchored to the :15/:45 IST session grid (09:15,
+# 09:45, 10:15, …), NOT the :00/:30 wall-clock grid. In absolute-epoch terms that
+# is a 900s phase within each 1800s bucket (IST :15/:45 == UTC :45/:15). The
+# broker-native 30m rows AND the s1_atm_30m_macd audit (_floor_30m) both use this
+# grid — the builder MUST match, else the interval='30minute' partition
+# interleaves two 15-min-offset grids and corrupts S1's MACD. The 3m grid needs
+# no phase (09:15 IST is already a 180s epoch boundary).
+BUCKET_PHASE_30M = 900
 
 # Per-kind poll cadence (seconds). INDEX gets a tighter cadence for true OHLC;
-# stocks are polled at the bar width to stay inside the daily budget.
+# stocks are polled at the bar width to stay inside the daily budget. These were
+# accidentally dropped in the 2026-07-08 grid-anchor edit — poll_once NameError'd
+# every cycle (zero fyers_chain rows) until restored. Regression test now covers
+# a full poll_once cycle so a missing module constant can't slip through again.
 TIER_INTERVAL_SECONDS = {"INDEX": 60.0, "STOCK": 180.0}
 DEFAULT_INTERVAL_SECONDS = 180.0
 
 
-def _bucket_start(ts: datetime) -> datetime:
-    """Floor a UTC timestamp to its 3-minute bucket start."""
+def _bucket_start(
+    ts: datetime, bucket_seconds: int = BUCKET_SECONDS, phase_offset_seconds: int = 0
+) -> datetime:
+    """Floor a UTC timestamp to its bucket start, offset by `phase_offset_seconds`
+    so the grid can be anchored to the NSE :15/:45 session grid (30m) rather than
+    the wall-clock :00/:30 grid."""
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     ts = ts.astimezone(timezone.utc)
     epoch = int(ts.timestamp())
-    floored = epoch - (epoch % BUCKET_SECONDS)
+    floored = ((epoch - phase_offset_seconds) // bucket_seconds) * bucket_seconds + phase_offset_seconds
     return datetime.fromtimestamp(floored, timezone.utc)
 
 
@@ -97,6 +113,8 @@ class ChainBarAccumulator:
     is unit-tested without a broker or DB.
     """
 
+    bucket_seconds: int = BUCKET_SECONDS
+    phase_offset_seconds: int = 0
     _cur: dict[ContractKey, _Bar] = field(default_factory=dict)
     _instrument_key: dict[ContractKey, Optional[str]] = field(default_factory=dict)
 
@@ -118,7 +136,7 @@ class ChainBarAccumulator:
     ) -> Optional[tuple[ContractKey, _Bar]]:
         if ltp is None or ltp <= 0:
             return None
-        bucket = _bucket_start(ts)
+        bucket = _bucket_start(ts, self.bucket_seconds, self.phase_offset_seconds)
         self._instrument_key[key] = instrument_key or self._instrument_key.get(key)
         cur = self._cur.get(key)
 
@@ -145,7 +163,7 @@ class ChainBarAccumulator:
 
     def flush(self, now: datetime) -> list[tuple[ContractKey, _Bar]]:
         """Close every open bar whose bucket has fully elapsed before `now`."""
-        cutoff = _bucket_start(now)
+        cutoff = _bucket_start(now, self.bucket_seconds, self.phase_offset_seconds)
         out: list[tuple[ContractKey, _Bar]] = []
         for key, bar in list(self._cur.items()):
             if bar.bucket_start < cutoff:
@@ -161,10 +179,21 @@ class ChainCandleBuilder:
     """Polls the full F&O universe and builds 3m CE+PE OHLC into option_premium_candles."""
 
     def __init__(self):
-        self._acc = ChainBarAccumulator()
+        self._acc = ChainBarAccumulator(bucket_seconds=BUCKET_SECONDS)
+        # Parallel 30m accumulator over the SAME snapshots — no extra broker
+        # calls. Emits interval='30minute' fyers_chain rows, which is the series
+        # S1's entry MACD actually reads (load_closes(interval="30minute")); the
+        # 3m rows alone never fed S1. Gated so it's inert when the flag is off.
+        from core.config import settings
+        self._acc_30m: Optional[ChainBarAccumulator] = (
+            ChainBarAccumulator(bucket_seconds=BUCKET_SECONDS_30M, phase_offset_seconds=BUCKET_PHASE_30M)
+            if getattr(settings, "CHAIN_CANDLE_BUILDER_EMIT_30M", True)
+            else None
+        )
         self._next_due: dict[str, float] = {}   # symbol -> monotonic time it may next be polled
         self._task: Optional[asyncio.Task] = None
         self._running = False
+        self._last_stats: dict[str, Any] = {}    # last cycle coverage, for verification
 
     # ── universe / broker resolution (reuse the ATM watchlist + Fyers adapter) ──
     async def _universe(self) -> list[Any]:
@@ -207,19 +236,45 @@ class ChainCandleBuilder:
 
             try:
                 # Empty expiry → Fyers returns the NEAREST-expiry band (front month).
-                chain = await adapter.get_option_chain(self._fyers_symbol(meta), "")
+                # CHAIN_BUILDER priority — ahead of the bulk premium top-up, behind
+                # interactive reads/live marks (contextvar → limiter.acquire()).
+                from brokers.rate_limiter import PRIORITY_CHAIN_BUILDER, broker_priority
+                with broker_priority(PRIORITY_CHAIN_BUILDER):
+                    chain = await adapter.get_option_chain(self._fyers_symbol(meta), "")
             except Exception as exc:  # noqa: BLE001 - isolate one bad name from the sweep
                 logger.debug(f"[chain-builder] {meta.symbol} chain fetch failed: {exc}")
                 continue
             polled += 1
             ts = datetime.now(timezone.utc)
-            closed = self._ingest_chain(meta.symbol, chain, ts)
-            persisted += await self._persist(closed)
+            closed_3m, closed_30m = self._ingest_chain(meta.symbol, chain, ts)
+            persisted += await self._persist(closed_3m, interval="3minute", acc=self._acc)
+            if self._acc_30m is not None:
+                persisted += await self._persist(closed_30m, interval="30minute", acc=self._acc_30m)
 
-        return {"polled": polled, "persisted": persisted, "skipped": skipped}
+        stats = {
+            "polled": polled, "persisted": persisted, "skipped": skipped,
+            "universe": len(universe), "coverage_pct": round(100.0 * polled / max(len(universe), 1), 1),
+            "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        self._last_stats = stats
+        return stats
 
-    def _ingest_chain(self, underlying: str, chain: Any, ts: datetime) -> list[tuple[ContractKey, _Bar]]:
-        closed: list[tuple[ContractKey, _Bar]] = []
+    def status(self) -> dict[str, Any]:
+        """Operator-facing coverage snapshot — used to VERIFY the builder is
+        covering the universe before the premium top-up is demoted to gaps-only."""
+        from core.config import settings
+        return {
+            "running": self._running,
+            "enabled": bool(getattr(settings, "CHAIN_CANDLE_BUILDER_ENABLED", False)),
+            "emit_30m": self._acc_30m is not None,
+            "last_cycle": self._last_stats,
+        }
+
+    def _ingest_chain(
+        self, underlying: str, chain: Any, ts: datetime
+    ) -> tuple[list[tuple[ContractKey, _Bar]], list[tuple[ContractKey, _Bar]]]:
+        closed_3m: list[tuple[ContractKey, _Bar]] = []
+        closed_30m: list[tuple[ContractKey, _Bar]] = []
         expiry_iso = str(getattr(chain, "expiry", "") or "")
         spot = float(getattr(chain, "spot_price", 0) or 0)
         for e in getattr(chain, "entries", []) or []:
@@ -227,8 +282,7 @@ class ChainCandleBuilder:
             if otype not in {"CE", "PE"}:
                 continue
             key: ContractKey = (underlying, expiry_iso, float(getattr(e, "strike", 0) or 0), otype)
-            result = self._acc.update(
-                key, ts, float(getattr(e, "ltp", 0) or 0),
+            kw = dict(
                 volume=float(getattr(e, "volume", 0) or 0),
                 oi=int(getattr(e, "oi", 0) or 0),
                 iv=getattr(e, "iv", None), delta=getattr(e, "delta", None),
@@ -236,11 +290,23 @@ class ChainCandleBuilder:
                 vega=getattr(e, "vega", None), underlying_price=spot or None,
                 instrument_key=getattr(e, "instrument_key", None),
             )
-            if result is not None:
-                closed.append(result)
-        return closed
+            ltp = float(getattr(e, "ltp", 0) or 0)
+            r3 = self._acc.update(key, ts, ltp, **kw)
+            if r3 is not None:
+                closed_3m.append(r3)
+            if self._acc_30m is not None:
+                r30 = self._acc_30m.update(key, ts, ltp, **kw)
+                if r30 is not None:
+                    closed_30m.append(r30)
+        return closed_3m, closed_30m
 
-    async def _persist(self, closed: list[tuple[ContractKey, _Bar]]) -> int:
+    async def _persist(
+        self,
+        closed: list[tuple[ContractKey, _Bar]],
+        *,
+        interval: str,
+        acc: ChainBarAccumulator,
+    ) -> int:
         if not closed:
             return 0
         from market_data.option_history import OptionHistoryService
@@ -248,7 +314,7 @@ class ChainCandleBuilder:
         count = 0
         for key, bar in closed:
             underlying, expiry_iso, strike, otype = key
-            instrument_key = self._acc.instrument_key_for(key)
+            instrument_key = acc.instrument_key_for(key)
             if not instrument_key or not expiry_iso:
                 continue
             try:
@@ -263,13 +329,13 @@ class ChainCandleBuilder:
                     strike=strike,
                     option_type=otype,
                     instrument_key=instrument_key,
-                    interval="3minute",
+                    interval=interval,
                     already_in_db=set(),
                     source="fyers_chain",
                 )
                 count += 1
             except Exception as exc:  # noqa: BLE001
-                logger.debug(f"[chain-builder] persist failed {underlying} {strike}{otype}: {exc}")
+                logger.debug(f"[chain-builder] persist {interval} failed {underlying} {strike}{otype}: {exc}")
         return count
 
     # ── lifecycle ────────────────────────────────────────────────────────────
@@ -299,9 +365,14 @@ class ChainCandleBuilder:
                     logger.warning(f"[chain-builder] cycle error: {exc}")
                 await asyncio.sleep(cycle_seconds)
         finally:
-            # Flush any open bars on shutdown.
+            # Flush any open bars on shutdown (both timeframes).
             try:
-                await self._persist(self._acc.flush(datetime.now(timezone.utc)))
+                now = datetime.now(timezone.utc)
+                await self._persist(self._acc.flush(now), interval="3minute", acc=self._acc)
+                if self._acc_30m is not None:
+                    await self._persist(
+                        self._acc_30m.flush(now), interval="30minute", acc=self._acc_30m
+                    )
             except Exception:
                 pass
 

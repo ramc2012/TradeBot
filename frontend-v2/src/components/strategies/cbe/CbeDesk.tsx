@@ -20,8 +20,6 @@
  * cycle (POST /api/cbe/scan) — this desk reads the latest persisted scan.
  */
 import { useMemo } from "react";
-import { Radio as TerminalRadioIcon } from "lucide-react";
-import { LaneTerminal } from "@/components/terminal/LaneTerminal";
 import { useQuery } from "@tanstack/react-query";
 import { Activity, Briefcase, Compass, Layers3, Radar, Scale, ShieldCheck, Target, TrendingUp } from "lucide-react";
 
@@ -44,13 +42,14 @@ import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveS
 import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStrategyPositionsStream";
 import type { PaperPosition, PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
+import { LiveMarkCell } from "@/components/terminal/LiveMarkCell";
+import { rowTapeSymbol } from "@/lib/marketSymbols";
 
 import { RrgScatter, QUADRANT_COLOR, type RrgPoint } from "./RrgScatter";
 import { SectorRotation, type SectorRow } from "./SectorRotation";
 import { Sparkline } from "./Sparkline";
 
 const TABS = [
-  { key: "terminal", label: "Terminal", icon: TerminalRadioIcon },
   { key: "portfolio", label: "Portfolio", icon: Briefcase },
   { key: "rotation", label: "Rotation", icon: Radar },
   { key: "candidates", label: "Candidates", icon: Compass },
@@ -508,7 +507,6 @@ export default function CbeDesk() {
       {activeTab === "signal-quality" ? (
         <SignalQualityTab laneKeys={["cbe_scanner", "cbe_marks"]} title="CBE signal validation" />
       ) : null}
-      {activeTab === "terminal" ? <LaneTerminal watchlist={watchlist} positions={positions?.open_positions} /> : null}
       {activeTab === "live-stream" ? (
         <StrategyLiveStream
           title="CBE Scanner"
@@ -982,7 +980,9 @@ function SleeveTable({
                     <td className="px-3 py-2 text-[11px] text-text-muted">{String(p.sector_code ?? "—").replace(/_/g, " ")}</td>
                     <td className="px-3 py-2 text-right font-mono text-[12px] text-text-secondary">{formatNumber(cbeQuantity(p), 0)}</td>
                     <td className="px-3 py-2 text-right font-mono text-[12px] text-text-secondary">{formatNumber(cbeEntryPrice(p), 1)}</td>
-                    <td className="px-3 py-2 text-right font-mono text-[12px] text-text-primary">{formatNumber(cbeMarkPrice(p), 1)}</td>
+                    <td className="px-3 py-2 text-right text-[12px] text-text-primary">
+                      <LiveMarkCell symbol={rowTapeSymbol(p)} fallback={cbeMarkPrice(p)} decimals={1} />
+                    </td>
                     <td className="px-3 py-2 text-right">
                       <div className="font-mono text-[12px] text-text-primary">{formatMoney(cbeCurrentValue(p))}</div>
                       <div className="text-[10px] text-text-muted">{formatPct(cbeCurrentValue(p) / equity, 1)} wt</div>

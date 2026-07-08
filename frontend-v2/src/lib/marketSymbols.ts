@@ -74,6 +74,31 @@ type SymbolRow = Record<string, unknown>;
 const _SYMBOL_FIELDS = ["tape_symbol", "live_symbol", "instrument_key", "symbol"] as const;
 
 /**
+ * The tape symbol for a row's OWN instrument only — a namespaced broker key on
+ * the row (an option/future leg's premium symbol). Returns null when the row has
+ * no streamable leg key. Use this for OPTION-LEG cells: never fall back to the
+ * underlying index (that would show the index spot as the option's price).
+ * `trading_symbol` ("NIFTY 24450 CE") is intentionally NOT a tape symbol.
+ */
+export function legTapeSymbol(row: unknown): string | null {
+  if (!row || typeof row !== "object") return null;
+  for (const key of _SYMBOL_FIELDS) {
+    const v = (row as SymbolRow)[key];
+    if (looksLikeTapeSymbol(v)) return v;
+  }
+  return null;
+}
+
+/**
+ * The tape symbol for a row, preferring its own leg key and falling back to the
+ * underlying's index tape symbol. Use this for UNDERLYING/spot cells (e.g. a
+ * universe watchlist showing index spot), NOT for option-leg premium cells.
+ */
+export function rowTapeSymbol(row: unknown): string | null {
+  return legTapeSymbol(row) ?? underlyingToTapeSymbol((row as SymbolRow)?.underlying as string | undefined);
+}
+
+/**
  * Derive the live-tape symbols a lane cares about from its watchlist +
  * open-position rows: each row's `underlying` maps to its index tape symbol,
  * and any direct broker-format symbol field (option legs / futures) is kept.

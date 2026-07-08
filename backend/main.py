@@ -1,7 +1,10 @@
 """Nomad Curie — FastAPI application entry point."""
 from __future__ import annotations
 import asyncio
+import faulthandler
 import hmac
+import signal
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response, WebSocket
@@ -58,6 +61,11 @@ from market_data.symbols import LIVE_INDEX_APP_SYMBOLS, SECTOR_INDEX_APP_SYMBOLS
 from auction_intelligence.rl.automation import rl_auto_trainer
 from paper_engine.commodity_strategy_agent import commodity_strategy_agent
 from paper_engine.strategy_agent import paper_strategy_agent
+
+try:
+    faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True)
+except Exception:
+    pass
 
 
 OAUTH_CALLBACK_PATHS = {"/api/auth/fyers/callback", "/api/auth/upstox/callback"}
@@ -391,6 +399,11 @@ async def lifespan(app: FastAPI):
     await market_data_router.stop_mock_feed()
     await close_redis()
     await market_data_router.unsubscribe()
+    try:
+        from brokers.http_client import aclose_all_shared_clients
+        await aclose_all_shared_clients()
+    except Exception:  # noqa: BLE001
+        pass
     logger.info("═══ Nomad Curie shut down ═══")
 
 

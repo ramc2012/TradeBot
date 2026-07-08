@@ -469,7 +469,7 @@ export default function PositionsPage() {
       }, onStatusChange),
     streamWhenHidden: true,
     staleTime: 5_000,
-    refetchInterval: 15_000,
+    refetchInterval: 30_000,
   });
   const data = positionsQuery.data;
   const isLoading = positionsQuery.isLoading;

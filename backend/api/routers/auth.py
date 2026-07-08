@@ -332,6 +332,29 @@ def _reset_fyers_token_health_cache() -> None:
     )
 
 
+def _cached_token_health_invalid(cache: dict, token: str) -> bool:
+    result = cache.get("result")
+    return (
+        bool(token)
+        and cache.get("token") == token
+        and isinstance(result, dict)
+        and result.get("valid") is False
+        and result.get("needs_reconnect") is True
+    )
+
+
+def _record_invalid_token_health(cache: dict, token: str) -> None:
+    if not token:
+        return
+    cache.update(
+        {
+            "token": token,
+            "checked_at": datetime.now(timezone.utc),
+            "result": {"valid": False, "needs_reconnect": True},
+        }
+    )
+
+
 def _persist_access_token(broker: str, access_token: Optional[str]) -> None:
     """Persist a broker session token when the broker supports restore."""
     token_value = str(access_token or "").strip()
@@ -591,6 +614,7 @@ def _bootstrap_credentials() -> None:
 def load_persistent_credentials() -> None:
     """Merge durable database credentials into memory, then re-apply explicit env overrides."""
     global _broker_credentials, _credentials_db_updated_at, _credentials_db_checked_at_monotonic
+    _persist_active_session_tokens()
     db_creds, updated_at = _load_credentials_payload_from_database()
     if not db_creds:
         _credentials_db_checked_at_monotonic = monotonic()
@@ -603,6 +627,9 @@ def load_persistent_credentials() -> None:
     _broker_credentials, _ = _normalize_broker_credentials(_broker_credentials)
     for broker, creds in _broker_credentials.items():
         _apply_credentials_to_settings(broker, creds)
+    # Materialize DB-restored credentials onto the bind-mounted credentials
+    # file so container recreates and local scripts see the same saved state.
+    _save_credentials_to_disk(_broker_credentials)
     _credentials_db_updated_at = updated_at
     _credentials_db_checked_at_monotonic = monotonic()
     logger.info(f"Loaded durable credentials from database for: {', '.join(sorted(db_creds.keys()))}")
@@ -617,6 +644,7 @@ def refresh_persistent_credentials(force: bool = False) -> None:
     """
     global _credentials_db_checked_at_monotonic, _credentials_db_updated_at, _broker_credentials
 
+    _persist_active_session_tokens()
     now = monotonic()
     if not force and (now - _credentials_db_checked_at_monotonic) < _CREDENTIAL_REFRESH_TTL_SECONDS:
         return
@@ -636,6 +664,7 @@ def refresh_persistent_credentials(force: bool = False) -> None:
     _broker_credentials, _ = _normalize_broker_credentials(_broker_credentials)
     for broker, creds in _broker_credentials.items():
         _apply_credentials_to_settings(broker, creds)
+    _save_credentials_to_disk(_broker_credentials)
     _credentials_db_updated_at = updated_at
 
 
@@ -648,6 +677,15 @@ async def refresh_persistent_credentials_async(force: bool = False) -> None:
     """
     global _credentials_db_checked_at_monotonic, _credentials_db_updated_at, _broker_credentials
 
+    # Opportunistic durability (owner rule: tokens must survive all restarts and
+    # events): any active-session token is re-persisted whenever credentials are
+    # refreshed — INCLUDING on read paths like broker_status. Guarded so a
+    # persist failure (e.g. the DB briefly down, as during the 2026-07-08 OOM
+    # crashes) degrades to a debug line, never a broken status read.
+    try:
+        await asyncio.to_thread(_persist_active_session_tokens)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"Opportunistic token persist skipped: {exc}")
     now = monotonic()
     if not force and (now - _credentials_db_checked_at_monotonic) < _CREDENTIAL_REFRESH_TTL_SECONDS:
         return
@@ -667,6 +705,7 @@ async def refresh_persistent_credentials_async(force: bool = False) -> None:
     _broker_credentials, _ = _normalize_broker_credentials(_broker_credentials)
     for broker, creds in _broker_credentials.items():
         _apply_credentials_to_settings(broker, creds)
+    await asyncio.to_thread(_save_credentials_to_disk, _broker_credentials)
     _credentials_db_updated_at = updated_at
 
 
@@ -1112,7 +1151,9 @@ async def ensure_upstox_session(force_validate: bool = False) -> bool:
             access_token,
             expires_at=getattr(token, "expires_at", None),
         ):
-            if not force_validate or await _validate_upstox_access_token(access_token):
+            if not force_validate and _cached_token_health_invalid(_upstox_token_health_cache, access_token):
+                logger.info("[Upstox] In-memory session token previously failed validation — evicting")
+            elif not force_validate or await _validate_upstox_access_token(access_token):
                 # Mirror the Fyers branch: ensure the data router is wired
                 # even when we short-circuit on a still-valid in-memory
                 # session. Without this, a container that boots with a
@@ -1121,6 +1162,7 @@ async def ensure_upstox_session(force_validate: bool = False) -> bool:
                 await _ensure_feed_sync_for("upstox")
                 return True
             logger.info("[Upstox] In-memory session token failed validation — evicting")
+            _record_invalid_token_health(_upstox_token_health_cache, access_token)
         else:
             logger.info("[Upstox] In-memory session token expired — evicting")
         with _active_brokers_lock:
@@ -1135,8 +1177,13 @@ async def ensure_upstox_session(force_validate: bool = False) -> bool:
         logger.info("[Upstox] Saved token is expired — re-authentication required")
         return False
 
+    if not force_validate and _cached_token_health_invalid(_upstox_token_health_cache, saved_token):
+        logger.info("[Upstox] Saved token previously failed validation — re-authentication required")
+        return False
+
     if force_validate and not await _validate_upstox_access_token(saved_token):
         logger.warning("Saved Upstox token is invalid during on-demand restore")
+        _record_invalid_token_health(_upstox_token_health_cache, saved_token)
         return False
 
     try:
@@ -1193,7 +1240,9 @@ async def ensure_fyers_session(force_validate: bool = False) -> bool:
             access_token,
             expires_at=getattr(token, "expires_at", None),
         ):
-            if not force_validate or await _validate_fyers_access_token(access_token):
+            if not force_validate and _cached_token_health_invalid(_fyers_token_health_cache, access_token):
+                logger.info("[Fyers] In-memory session token previously failed validation — evicting")
+            elif not force_validate or await _validate_fyers_access_token(access_token):
                 # The adapter is in _active_brokers but the data router
                 # may not yet be wired to it (this happens at startup when
                 # auto_restore returns True before the data router is fully
@@ -1203,6 +1252,7 @@ async def ensure_fyers_session(force_validate: bool = False) -> bool:
                 await _ensure_feed_sync_for("fyers")
                 return True
             logger.info("[Fyers] In-memory session token failed validation — evicting")
+            _record_invalid_token_health(_fyers_token_health_cache, access_token)
         else:
             logger.info("[Fyers] In-memory session token expired — evicting")
         with _active_brokers_lock:
@@ -1217,8 +1267,13 @@ async def ensure_fyers_session(force_validate: bool = False) -> bool:
         logger.info("[Fyers] Saved token is expired — re-authentication required")
         return await _refresh_fyers_session_from_saved_credentials()
 
+    if not force_validate and _cached_token_health_invalid(_fyers_token_health_cache, saved_token):
+        logger.info("[Fyers] Saved token previously failed validation — trying refresh material")
+        return await _refresh_fyers_session_from_saved_credentials()
+
     if force_validate and not await _validate_fyers_access_token(saved_token):
         logger.warning("Saved Fyers token is invalid during on-demand restore")
+        _record_invalid_token_health(_fyers_token_health_cache, saved_token)
         return await _refresh_fyers_session_from_saved_credentials()
 
     try:
@@ -2045,3 +2100,50 @@ async def auto_restore_sessions() -> None:
             logger.warning("Fyers refresh-token restore timed out after 10 seconds")
         if not restored:
             logger.warning("Fyers refresh-token restore failed — manual connect required")
+
+
+async def morning_token_readiness() -> dict[str, Any]:
+    """Pre-open token readiness sweep (supervisor runner, ~07:00-09:20 IST).
+
+    Both brokers expire their access tokens daily (Upstox at 03:30 IST by
+    policy; Fyers each morning). Session restore is otherwise LAZY — the first
+    data call after expiry pays the refresh/validation latency, and a FAILED
+    refresh only surfaces mid-session. This sweep makes token state a
+    PRE-OPEN fact instead: validate Fyers (auto-refresh from the saved
+    refresh token + PIN when the access token is dead — no owner action for
+    ~15 days), check Upstox expiry, and log one unambiguous readiness line
+    the market-hours monitor and the owner can act on BEFORE 09:15.
+    Read-only apart from the Fyers refresh, which already persists via
+    _persist_broker_session. Never raises."""
+    out: dict[str, Any] = {"fyers": "unknown", "upstox": "unknown"}
+    try:
+        fyers_ok = await asyncio.wait_for(
+            ensure_fyers_session(force_validate=True), timeout=30
+        )
+        out["fyers"] = "ready" if fyers_ok else "NEEDS_OWNER_TOKEN"
+    except Exception as exc:  # noqa: BLE001
+        out["fyers"] = f"check_failed: {exc}"
+    try:
+        upstox_ok = await asyncio.wait_for(
+            ensure_upstox_session(force_validate=True), timeout=30
+        )
+        out["upstox"] = "ready" if upstox_ok else "NEEDS_OWNER_TOKEN"
+    except Exception as exc:  # noqa: BLE001
+        out["upstox"] = f"check_failed: {exc}"
+
+    ready = all(v == "ready" for v in out.values())
+    line = f"[TokenReadiness] pre-open: fyers={out['fyers']} upstox={out['upstox']}"
+    if ready:
+        logger.info(line)
+    else:
+        # Loud: the owner must supply a fresh daily token before 09:15.
+        logger.warning(f"{line} — OWNER ACTION NEEDED before market open")
+        try:
+            from notifications.telegram_agent import telegram_agent
+            await telegram_agent.send(
+                f"⚠️ TradeBot pre-open: broker token needed — {out}"
+            )
+        except Exception:  # noqa: BLE001 — Telegram optional (token currently 401)
+            pass
+    out["ready"] = ready
+    return out

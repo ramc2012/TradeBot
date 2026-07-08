@@ -578,6 +578,14 @@ class OptionHistoryService:
             # MACD that swings with the queried key. The DISTINCT ON
             # collapses cross-broker duplicates at the same timestamp,
             # keeping the most recently synced row.
+            # Time floor: without it the planner locks EVERY hypertable chunk
+            # (~510 on option_premium_candles), and with many concurrent
+            # load_candles calls the shared lock table exhausts → Postgres
+            # "out of shared memory / increase max_locks_per_transaction" —
+            # confirmed killer in the 2026-07-08 session freeze (09:51 IST).
+            # An option contract's usable history is bounded by its listing
+            # life anyway; 180 days covers monthly + weekly contracts with a
+            # wide margin while pruning the chunk set (and lock count) ~3x.
             await load_rows(
                 """
                 SELECT
@@ -593,6 +601,7 @@ class OptionHistoryService:
                       AND strike = :strike
                       AND option_type = :option_type
                       AND interval = :interval
+                      AND time > now() - interval '180 days'
                     -- Dedup precedence: at a shared timestamp prefer the
                     -- greeks-bearing chain/history row over a greeks-null live
                     -- row (fyers_chain > fyers > upstox > live_tick/ws), then

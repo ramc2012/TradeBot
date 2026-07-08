@@ -1,0 +1,45 @@
+name: backend-tests
+
+# Guards the bind-mount deploy: the backend container mounts ./backend:/app, so a
+# `docker restart nomadcurie_backend` ships whatever is on disk. This job runs the
+# unit/contract suite on every backend change so a red suite can't reach the box.
+
+on:
+  push:
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-tests.yml'
+  pull_request:
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-tests.yml'
+  workflow_dispatch: {}
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      # The suite mocks or gracefully degrades every external dependency (Postgres,
+      # Redis, brokers), so none are provisioned here. Point at guaranteed-unreachable
+      # local ports so the degrade paths trip instantly (connection refused) instead
+      # of hanging on a connect timeout.
+      DATABASE_URL: postgresql+asyncpg://ci:ci@127.0.0.1:59999/ci
+      REDIS_URL: redis://127.0.0.1:59998/0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run backend tests
+        run: pytest tests

@@ -31,6 +31,92 @@ class UpstoxAdapter(BrokerAdapter):
             "Accept-Encoding": "identity",
         }
 
+    @staticmethod
+    def _error_detail(body: Any, response: httpx.Response) -> str:
+        """Best-effort human message from an Upstox error body."""
+        if isinstance(body, dict):
+            errors = body.get("errors")
+            if errors:
+                return "; ".join(str(e.get("message") or e) for e in errors)
+            if body.get("message"):
+                return str(body.get("message"))
+        return response.text[:240]
+
+    async def _get_data_json(
+        self, path: str, params: Optional[dict] = None, *, timeout: float = 15.0
+    ) -> dict:
+        """Single chokepoint for Upstox data-REST GETs (option chain, LTP,
+        contracts, instrument search).
+
+        Every call passes through the process-global UPSTOX_DATA_LIMITER so the
+        full-universe (~222-name) option-chain rebuild and the per-cycle premium
+        top-up share ONE 8/s · 1800/30min budget and get spread under the
+        governor instead of bursting into a 429. 429 / 5xx / transport errors are
+        retried with exponential back-off.
+
+        Previously these calls used raw httpx with NO throttle and NO retry: a
+        forced full watchlist rebuild fired ~222 calls uncontrolled, tripping
+        429s that cascaded into the premium-top-up freeze (2026-07-07, 211/216
+        names stopped updating). This is the fail-safe that makes Upstox
+        enforcement match the airtight Fyers chokepoint.
+        """
+        from brokers.rate_limiter import UPSTOX_DATA_LIMITER
+        from brokers.http_client import get_shared_async_client
+        from market_data.broker_circuit import broker_circuit
+
+        dt = "chain" if "chain" in path else "history" if "history" in path else "quote"
+        last_error: Optional[str] = None
+        for attempt in range(5):
+            await UPSTOX_DATA_LIMITER.acquire()
+            try:
+                client = get_shared_async_client("upstox")
+                response = await client.get(
+                    f"{self.BASE_URL}{path}",
+                    params=params or {},
+                    headers=self._headers(),
+                    timeout=timeout,
+                )
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                last_error = f"transport: {exc}"
+                await asyncio.sleep(min(2 ** attempt, 20))
+                continue
+
+            if response.status_code == 429:
+                UPSTOX_DATA_LIMITER.record_429()
+                retry_after = 0.0
+                try:
+                    retry_after = float(response.headers.get("Retry-After") or 0)
+                except (TypeError, ValueError):
+                    retry_after = 0.0
+                backoff = retry_after if retry_after > 0 else min(2 ** attempt, 20)
+                logger.warning(
+                    f"Upstox 429 on {path} — backoff {backoff:.1f}s (attempt {attempt + 1}/5)"
+                )
+                await asyncio.sleep(backoff)
+                last_error = "429 rate limited"
+                continue
+
+            is_json = response.headers.get("content-type", "").startswith("application/json")
+            body = response.json() if is_json else {}
+
+            if response.status_code >= 500:
+                last_error = f"{response.status_code}: {self._error_detail(body, response)}"
+                logger.warning(
+                    f"Upstox 5xx on {path} — retrying (attempt {attempt + 1}/5): {last_error}"
+                )
+                await asyncio.sleep(min(2 ** attempt, 20))
+                continue
+            if response.status_code != 200:
+                broker_circuit.record_failure("upstox", dt)
+                raise ValueError(
+                    f"Upstox {path} failed ({response.status_code}): {self._error_detail(body, response)}"
+                )
+            broker_circuit.record_success("upstox", dt)
+            return body if isinstance(body, dict) else {"data": body}
+
+        broker_circuit.record_failure("upstox", dt)
+        raise ValueError(f"Upstox {path} failed after retries: {last_error}")
+
     def get_auth_url(self) -> str:
         """Generate Upstox OAuth2 PKCE authorization URL."""
         import urllib.parse
@@ -244,13 +330,10 @@ class UpstoxAdapter(BrokerAdapter):
 
     async def get_ltp(self, symbols: list[str]) -> dict[str, float]:
         joined = ",".join(symbols)
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(
-                f"{self.BASE_URL}/market-quote/ltp",
-                params={"instrument_key": joined},
-                headers=self._headers(),
-            )
-        data = r.json().get("data", {})
+        body = await self._get_data_json(
+            "/market-quote/ltp", {"instrument_key": joined}, timeout=10
+        )
+        data = body.get("data", {})
         return {
             v.get("instrument_token") or k: float(v.get("last_price", 0) or 0)
             for k, v in data.items()
@@ -284,33 +367,15 @@ class UpstoxAdapter(BrokerAdapter):
         if atm_offset is not None:
             params["atm_offset"] = int(atm_offset)
 
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(
-                f"{self.BASE_URL}/instruments/search",
-                params=params,
-                headers=self._headers(),
-            )
-        body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
-        if r.status_code != 200:
-            errors = body.get("errors", [])
-            if errors:
-                detail = "; ".join(str(error.get("message") or error) for error in errors)
-            else:
-                detail = str(body.get("message") or body or r.text)
-            raise ValueError(f"Upstox instrument search failed ({r.status_code}): {detail}")
+        body = await self._get_data_json("/instruments/search", params, timeout=10)
         return list(body.get("data") or [])
 
     async def get_option_contracts(self, symbol: str, expiry: Optional[str] = None) -> list[dict]:
         params = {"instrument_key": symbol}
         if expiry:
             params["expiry_date"] = expiry
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(
-                f"{self.BASE_URL}/option/contract",
-                params=params,
-                headers=self._headers(),
-            )
-        return r.json().get("data", [])
+        body = await self._get_data_json("/option/contract", params)
+        return body.get("data", [])
 
     async def subscribe_websocket(
         self,
@@ -354,6 +419,29 @@ class UpstoxAdapter(BrokerAdapter):
                     )
                 return (0.0, 0.0, 0, 0)
 
+            def _opt_greeks(container: dict) -> tuple[Optional[float], ...]:
+                # Upstox V3 marketFF ('full' mode) and firstLevelWithGreeks
+                # ('option_greeks' mode) carry native option greeks under
+                # `optionGreeks` {delta,theta,gamma,vega,rho} with `iv` as a
+                # SIBLING scalar on the union (NOT inside optionGreeks). Index
+                # feeds (indexFF) carry neither → all None, harmless.
+                if not isinstance(container, dict):
+                    return (None, None, None, None, None, None)
+                g = container.get("optionGreeks")
+                g = g if isinstance(g, dict) else {}
+
+                def _f(v: Any) -> Optional[float]:
+                    try:
+                        return float(v) if v is not None else None
+                    except (TypeError, ValueError):
+                        return None
+
+                return (
+                    _f(container.get("iv")),
+                    _f(g.get("delta")), _f(g.get("gamma")),
+                    _f(g.get("theta")), _f(g.get("vega")), _f(g.get("rho")),
+                )
+
             def build_tick(feed_key: str, feed: dict) -> Optional[Tick]:
                 ltpc = {}
                 ohlc_entries: list[dict] = []
@@ -362,9 +450,12 @@ class UpstoxAdapter(BrokerAdapter):
                 bid = ask = 0.0
                 bid_qty = ask_qty = 0
                 total_buy_qty = total_sell_qty = 0
+                iv = delta = gamma = theta = vega = rho = None
 
                 if "fullFeed" in feed:
                     full_feed = feed.get("fullFeed", {})
+                    # indexFF carries no greeks/oi; marketFF does. Track which
+                    # union we got so greeks are only pulled from the option one.
                     full_union = full_feed.get("indexFF") or full_feed.get("marketFF") or {}
                     ltpc = full_union.get("ltpc", {})
                     ohlc_entries = (full_union.get("marketOHLC") or {}).get("ohlc", [])
@@ -375,12 +466,16 @@ class UpstoxAdapter(BrokerAdapter):
                     # total buy/sell qty; real depth_imbalance source.
                     total_buy_qty = int(full_union.get("tbq", 0) or 0)
                     total_sell_qty = int(full_union.get("tsq", 0) or 0)
+                    # Native greeks/IV on the wire (marketFF only; indexFF omits
+                    # optionGreeks so this stays None). WS-first chain design P0.
+                    iv, delta, gamma, theta, vega, rho = _opt_greeks(full_feed.get("marketFF") or {})
                 elif "firstLevelWithGreeks" in feed:
                     first_level = feed.get("firstLevelWithGreeks", {})
                     ltpc = first_level.get("ltpc", {})
                     volume = int(first_level.get("vtt", 0) or 0)
                     oi = int(first_level.get("oi", 0) or 0)
                     bid, ask, bid_qty, ask_qty = _top_of_book(first_level.get("firstLevel", {}) or {})
+                    iv, delta, gamma, theta, vega, rho = _opt_greeks(first_level)
                 else:
                     ltpc = feed.get("ltpc", {})
 
@@ -390,6 +485,18 @@ class UpstoxAdapter(BrokerAdapter):
 
                 day_ohlc = pick_day_ohlc(ohlc_entries)
                 prev_close = float(ltpc.get("cp", 0) or day_ohlc.get("close", 0) or ltp)
+
+                if settings.WS_CHAIN_PROBE_ENABLED:
+                    from market_data.ws_chain_probe import ws_chain_probe
+                    # Option markers only: the option_greeks feed shape, or native
+                    # greeks/iv. Deliberately NOT `oi > 0` — index/stock FUTURES
+                    # (marketFF) also carry OI and would pollute the greeks/oi
+                    # diagnostic; futures never carry greeks.
+                    ws_chain_probe.observe(
+                        "upstox",
+                        is_option=("firstLevelWithGreeks" in feed) or (delta is not None) or (iv is not None),
+                        oi=oi, prev_oi=None, iv=iv, delta=delta,
+                    )
 
                 return Tick(
                     symbol=feed.get("symbol", "") or feed.get("instrument_key", "") or feed_key,
@@ -406,6 +513,12 @@ class UpstoxAdapter(BrokerAdapter):
                     ask_qty=ask_qty,
                     total_buy_qty=total_buy_qty,
                     total_sell_qty=total_sell_qty,
+                    iv=iv,
+                    delta=delta,
+                    gamma=gamma,
+                    theta=theta,
+                    vega=vega,
+                    rho=rho,
                     timestamp=datetime.utcnow(),
                 )
 
@@ -423,13 +536,10 @@ class UpstoxAdapter(BrokerAdapter):
             raise
 
     async def get_option_chain(self, symbol: str, expiry: str) -> OptionChain:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(
-                f"{self.BASE_URL}/option/chain",
-                params={"instrument_key": symbol, "expiry_date": expiry},
-                headers=self._headers(),
-            )
-        data = r.json().get("data", [])
+        body = await self._get_data_json(
+            "/option/chain", {"instrument_key": symbol, "expiry_date": expiry}
+        )
+        data = body.get("data", [])
         entries = []
         spot = 0.0
         for row in data:

@@ -70,7 +70,8 @@ import { SignalQualityTab } from "@/components/strategies/overview/SignalQuality
 import { OptionChartModal, type OptionChartContract } from "@/components/strategies/nse/OptionChartModal";
 import { MacdCockpit } from "@/components/strategies/nse/MacdCockpit";
 import { useStrategyPositionsStream } from "@/hooks/useStrategyPositionsStream";
-import { LaneTerminal } from "@/components/terminal/LaneTerminal";
+import { LiveMarkCell } from "@/components/terminal/LiveMarkCell";
+import { legTapeSymbol } from "@/lib/marketSymbols";
 import type { PaperPosition, PaperSummary, PositionsPayload } from "@/lib/strategy-stats";
 import {
   api as apiClient,
@@ -253,12 +254,13 @@ function mergeAgentStatusWithPositionStream(
 
 type DiffusionPayload = { market?: string; days?: number; count?: number; series?: DiffusionPoint[]; latest?: DiffusionPoint | null };
 
+// Paperbook-first (owner 2026-07-08): open positions is the default tab on
+// every lane; watchlist next; live marks are embedded in both (LiveMarkCell).
 const TABS = [
-  { key: "cockpit", label: "Cockpit", icon: LayoutPanelLeft },
   { key: "positions", label: "Positions", icon: Wallet },
-  { key: "terminal", label: "Terminal", icon: Radio },
-  { key: "overview", label: "Overview", icon: TrendingUp },
   { key: "signals", label: "Signals", icon: ListChecks },
+  { key: "cockpit", label: "Cockpit", icon: LayoutPanelLeft },
+  { key: "overview", label: "Overview", icon: TrendingUp },
   { key: "sentiment", label: "Sentiment", icon: Gauge },
   { key: "performance", label: "Performance", icon: BarChart3 },
   { key: "activity", label: "Activity", icon: Activity },
@@ -315,13 +317,12 @@ function positionToPaperPosition(p: PositionRow): PaperPosition {
 
 export default function NseDesk() {
   // Open positions is the headline view when the desk opens.
-  const [activeTab, setActiveTab] = useUrlTab("cockpit");
+  const [activeTab, setActiveTab] = useUrlTab("positions");
 
   const statusQuery = useQuery({
     queryKey: ["nse", "status"],
     queryFn: async () => (await getStrategyAgentStatus()).data as AgentStatus,
     refetchInterval: REFRESH_MS.snapshot,
-    refetchIntervalInBackground: true,
     refetchOnWindowFocus: false,
   });
 
@@ -486,7 +487,6 @@ export default function NseDesk() {
       {activeTab === "cockpit" ? <MacdCockpit positions={positions} watchlist={watchlist} /> : null}
       {activeTab === "signals" ? <WatchlistTab rows={watchlist} /> : null}
       {activeTab === "sentiment" ? <SentimentTab data={diffusionQuery.data} loading={diffusionQuery.isFetching} /> : null}
-      {activeTab === "terminal" ? <LaneTerminal watchlist={watchlist} positions={positions} title="Live Terminal · MACD S1" /> : null}
       {activeTab === "positions" ? <PositionsTab rows={positions} /> : null}
       {activeTab === "performance" ? (
         <PaperPerformance summary={summary as PaperSummary} positions={paperPositions} />
@@ -899,7 +899,9 @@ function WatchRowItem({ r, onOpen, dim }: { r: WatchRow; onOpen: (r: WatchRow) =
       </td>
       <td className="px-2.5 py-2"><DirBadge direction={r.direction} /></td>
       <td className="px-2.5 py-2 text-right font-mono text-text-secondary">{formatNumber(r.strike ?? r.atm_strike, 0)}</td>
-      <td className="px-2.5 py-2 text-right font-mono text-text-primary">{formatNumber(r.ltp, 1)}</td>
+      <td className="px-2.5 py-2 text-right text-text-primary">
+        <LiveMarkCell symbol={legTapeSymbol(r)} fallback={r.ltp} decimals={1} />
+      </td>
       <td className="px-2.5 py-2 text-right font-mono text-text-secondary">{formatNumber(r.iv_pct, 1)}</td>
       <td className="px-2.5 py-2 text-right font-mono text-text-secondary">{formatNumber(r.rsi, 1)}</td>
       <td className="px-2.5 py-2"><MacdTrend macd={r.macd} prev={r.previous_macd} hist={r.macd_histogram} /></td>
@@ -984,10 +986,43 @@ function SentLegend({ color, label }: { color: string; label: string }) {
 
 // ── Positions tab ───────────────────────────────────────────────────────────
 
+// Map an open position to a chartable contract (mirror of rowToContract; the
+// side field on a position is `option_type`, not `direction`). The leg's own
+// namespaced key comes from `symbol`/`trading_symbol` when broker-formatted.
+function positionToContract(p: PositionRow): OptionChartContract | null {
+  const strike = p.strike;
+  const expiry = (p.expiry || "").slice(0, 10);
+  const direction = (p.option_type || "").toUpperCase();
+  if (strike == null || !expiry || (direction !== "CE" && direction !== "PE")) return null;
+  const instrumentKey =
+    [p.symbol, p.trading_symbol].find(
+      (v): v is string => typeof v === "string" && (v.includes(":") || v.includes("|")),
+    ) ?? null;
+  return { underlying: p.underlying || "", direction, strike, expiry, instrumentKey, ltp: p.current_price ?? null };
+}
+
 function PositionsTab({ rows }: { rows: PositionRow[] }) {
+  // Frozen chartable list + index so prev/next steps through the open book.
+  const [chart, setChart] = useState<{ list: OptionChartContract[]; index: number } | null>(null);
   if (!rows.length) return <EmptyState message="No open positions right now." />;
+
+  const openChart = (p: PositionRow) => {
+    const target = positionToContract(p);
+    if (!target) return;
+    const list = rows.map(positionToContract).filter((c): c is OptionChartContract => c !== null);
+    const idx = list.findIndex(
+      (c) => c.underlying === target.underlying && c.strike === target.strike && c.direction === target.direction,
+    );
+    setChart({ list, index: idx >= 0 ? idx : 0 });
+  };
+
   return (
-    <Section title="Open positions" icon={<Wallet size={16} className="text-accent-green" />} rightSlot={<span className="text-[11px] text-text-muted">{rows.length} open</span>}>
+    <Section
+      title="Open positions"
+      icon={<Wallet size={16} className="text-accent-green" />}
+      description="Live marks · click a position for its premium chart (BB · KAMA · MACD · RSI)"
+      rightSlot={<span className="text-[11px] text-text-muted">{rows.length} open</span>}
+    >
       <div className="-mx-2 overflow-x-auto">
         <table className="w-full min-w-[1080px] border-collapse text-left">
           <thead>
@@ -998,17 +1033,29 @@ function PositionsTab({ rows }: { rows: PositionRow[] }) {
             </tr>
           </thead>
           <tbody>
-            {rows.map((p, idx) => (
-              <tr key={`${p.underlying}-${p.option_type}-${p.strike}-${idx}`} className="border-b border-bg-border/25 align-top hover:bg-bg-primary/20">
+            {rows.map((p, idx) => {
+              const chartable = positionToContract(p) !== null;
+              return (
+              <tr
+                key={`${p.underlying}-${p.option_type}-${p.strike}-${idx}`}
+                className={clsx("border-b border-bg-border/25 align-top", chartable ? "cursor-pointer hover:bg-bg-primary/30" : "hover:bg-bg-primary/20")}
+                onClick={() => openChart(p)}
+                title={chartable ? "Open premium chart (BB · KAMA · MACD · RSI)" : undefined}
+              >
                 <td className="px-2.5 py-2 font-semibold text-text-primary">{p.underlying || "—"}</td>
                 <td className="px-2.5 py-2 font-mono text-text-secondary">
-                  {p.option_type} {formatNumber(p.strike, 0)}
+                  <span className="inline-flex items-center gap-1.5">
+                    {chartable ? <CandlestickChart size={12} className="text-text-muted" /> : null}
+                    {p.option_type} {formatNumber(p.strike, 0)}
+                  </span>
                   <div className="text-[10px] text-text-muted">{p.expiry || "—"}</div>
                 </td>
                 <td className="px-2.5 py-2"><DirBadge direction={p.option_type} /></td>
                 <td className="px-2.5 py-2 text-right font-mono text-text-secondary">{p.qty ?? "—"}</td>
                 <td className="px-2.5 py-2 text-right font-mono text-text-primary">{formatNumber(p.entry_price, 2)}</td>
-                <td className="px-2.5 py-2 text-right font-mono text-text-primary">{formatNumber(p.current_price, 2)}</td>
+                <td className="px-2.5 py-2 text-right text-text-primary">
+                  <LiveMarkCell symbol={legTapeSymbol(p)} fallback={p.current_price} decimals={2} />
+                </td>
                 <td className={clsx("px-2.5 py-2 text-right font-mono font-semibold", tone(p.unrealized_pnl))}>
                   {formatSignedMoney(p.unrealized_pnl)}
                   {p.return_pct != null ? <div className="text-[10px] font-normal text-text-muted">{p.return_pct > 0 ? "+" : ""}{formatNumber(p.return_pct, 1)}%</div> : null}
@@ -1021,10 +1068,20 @@ function PositionsTab({ rows }: { rows: PositionRow[] }) {
                 <td className="max-w-[180px] px-2.5 py-2 text-[11px] text-text-secondary">{prettify(p.signal_reason)}</td>
                 <td className="px-2.5 py-2 text-[11px] text-text-muted">{heldFor(p.entered_at)}</td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
+
+      {chart && chart.list[chart.index] ? (
+        <OptionChartModal
+          contracts={chart.list}
+          index={chart.index}
+          onIndexChange={(i) => setChart((c) => (c ? { ...c, index: i } : c))}
+          onClose={() => setChart(null)}
+        />
+      ) : null}
     </Section>
   );
 }

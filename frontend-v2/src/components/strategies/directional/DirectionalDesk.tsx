@@ -49,7 +49,6 @@ import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveS
 import type { PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
 
-import { LaneTerminal } from "@/components/terminal/LaneTerminal";
 import UniverseWatchlist from "./UniverseWatchlist";
 import EngineCalculations from "./EngineCalculations";
 import PolicyDecisionPanel, { type PolicyBlock } from "./PolicyDecisionPanel";
@@ -62,11 +61,10 @@ const DEFAULT_TIMEFRAME = "5minute";
 const DEFAULT_LOOKBACK = 16;
 
 const TABS = [
+  { key: "paper",     label: "Paper trading",      icon: Banknote },
   { key: "live",      label: "Live overview",      icon: Gauge },
-  { key: "terminal",  label: "Terminal",           icon: Radio },
   { key: "analytics", label: "Option analytics",   icon: Layers3 },
   { key: "gamma",     label: "Gamma / GEX",         icon: Layers3 },
-  { key: "paper",     label: "Paper trading",      icon: Banknote },
   { key: "policy",    label: "Policy & learning",  icon: Brain },
   { key: "performance", label: "Performance",      icon: TrendingUp },
   { key: "signal-quality", label: "Signal quality", icon: ShieldCheck },
@@ -291,7 +289,6 @@ export default function DirectionalDesk() {
 
       {activeTab === "gamma" ? <GammaDensity symbol={underlying} /> : null}
 
-      {activeTab === "terminal" ? <LaneTerminal underlyings={universe as unknown as string[]} title="Live Terminal · Directional" /> : null}
 
       {activeTab === "paper" ? <PaperTradingTab symbol={underlying} paper={livePaper} /> : null}
 

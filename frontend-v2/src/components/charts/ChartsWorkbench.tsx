@@ -42,7 +42,8 @@ import {
   tone,
   useUrlTab,
 } from "@/components/desk-ui";
-import { CandleChart, CHART, type CandleBar, type ChartPriceLine } from "@/components/strategies/shared";
+import { CandleChart, CHART, type CandleBar, type ChartPriceLine, type ChartLineSeries } from "@/components/strategies/shared";
+import { computeKama } from "@/lib/indicators";
 import { useTickStream } from "@/hooks/useTickStream";
 import { api as apiClient } from "@/lib/api";
 
@@ -125,6 +126,7 @@ export default function ChartsWorkbench() {
   const [search, setSearch] = useState("");
   const [kindFilter, setKindFilter] = useState<Kind | "ALL" | "TRADED">("ALL");
   const [showBands, setShowBands] = useState(true);
+  const [showKama, setShowKama] = useState(false);
   const [enabledStrategies, setEnabledStrategies] = useState<Set<Strategy>>(
     new Set<Strategy>(["s1", "s2", "commodity", "cbe", "directional"]),
   );
@@ -235,6 +237,19 @@ export default function ChartsWorkbench() {
     if (kpis?.vwap != null) out.push({ price: kpis.vwap, color: CHART.violet, title: "VWAP", dashed: true });
     return out;
   }, [showBands, bars.length, indicators, kpis?.vwap]);
+
+  // ── KAMA(10,2,30) adaptive MA — a full overlay line (client-computed) ──
+  const overlays = useMemo<ChartLineSeries[]>(() => {
+    if (!showKama || !bars.length) return [];
+    const kama = computeKama(bars.map((b) => b.close));
+    return [{
+      id: "kama",
+      title: "KAMA(10,2,30)",
+      color: CHART.amber,
+      lineWidth: 2,
+      data: bars.map((b, i) => ({ time: b.time, value: kama[i] })),
+    }];
+  }, [showKama, bars]);
 
   const toggleStrategy = (s: Strategy) =>
     setEnabledStrategies((prev) => {
@@ -394,10 +409,19 @@ export default function ChartsWorkbench() {
                   >
                     BB · EMA · VWAP
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowKama((v) => !v)}
+                    className={`rounded-md border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] transition-colors ${
+                      showKama ? "border-accent-amber/60 bg-accent-amber/10 text-accent-amber" : "border-bg-border bg-bg-primary/20 text-text-muted hover:border-bg-active"
+                    }`}
+                  >
+                    KAMA
+                  </button>
                 </div>
               }
             >
-              <CandleChart bars={candleBars} priceLines={priceLines} height={460} showVolume />
+              <CandleChart bars={candleBars} priceLines={priceLines} overlays={overlays} height={460} showVolume />
               <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] uppercase tracking-[0.12em] text-text-muted">
                 <Legend color={CHART.blue} label="BB ±2σ(20)" />
                 <Legend color={CHART.amber} label="EMA(50)" />

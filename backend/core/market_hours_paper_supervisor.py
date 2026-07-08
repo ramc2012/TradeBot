@@ -50,6 +50,26 @@ def _should_run_post_close_catchup(now: datetime) -> bool:
     return trading_calendar.has_exchange_session("NSE", now.date()) and now.time() >= time(15, 35)
 
 
+def _in_token_readiness_window(now: datetime) -> bool:
+    """Pre-open sweep window: 07:00–09:20 IST on NSE session days. Both brokers
+    expire tokens daily (Upstox 03:30 IST); this window validates/refreshes
+    BEFORE 09:15 so a dead token is an actionable pre-open alert, not a
+    mid-session surprise."""
+    return (
+        trading_calendar.has_exchange_session("NSE", now.date())
+        and time(7, 0) <= now.time() <= time(9, 20)
+    )
+
+
+def _next_token_readiness_open(now: datetime) -> datetime:
+    if _in_token_readiness_window(now):
+        return now
+    candidate = now.replace(hour=7, minute=0, second=0, microsecond=0)
+    while candidate <= now or not trading_calendar.has_exchange_session("NSE", candidate.date()):
+        candidate = (candidate + timedelta(days=1)).replace(hour=7, minute=0, second=0, microsecond=0)
+    return candidate
+
+
 @dataclass
 class RunnerConfig:
     key: str
@@ -235,6 +255,10 @@ class MarketHoursPaperSupervisor:
 
         async def _market_intelligence_runner() -> dict[str, Any]:
             return await market_intelligence_runtime.refresh_nse_runtime()
+
+        async def _token_readiness_runner() -> dict[str, Any]:
+            from api.routers.auth import morning_token_readiness
+            return await morning_token_readiness()
 
         async def _auction_runner() -> dict[str, Any]:
             return await run_auction_market_cycle()
@@ -644,6 +668,15 @@ class MarketHoursPaperSupervisor:
             }
 
         return [
+            RunnerConfig(
+                key="token_readiness",
+                label="Pre-open Broker Token Readiness",
+                interval_seconds=900,
+                callback=_token_readiness_runner,
+                enabled=getattr(settings, "TOKEN_READINESS_AUTO_ENABLED", True),
+                market_hours_fn=_in_token_readiness_window,
+                next_open_fn=_next_token_readiness_open,
+            ),
             RunnerConfig(
                 key="market_intelligence",
                 label="Market Intelligence Refresh",

@@ -9,8 +9,6 @@
  * next monthly 3rd-Friday expiry), Paper book. API under /api/us/macd-refined.
  */
 import { useState, useTransition } from "react";
-import { Radio as TerminalRadioIcon } from "lucide-react";
-import { LaneTerminal } from "@/components/terminal/LaneTerminal";
 import { useQuery } from "@tanstack/react-query";
 import { Activity, Banknote, CalendarClock, ListChecks, RefreshCw } from "lucide-react";
 
@@ -22,6 +20,8 @@ import {
   getUsMacdSummary, getUsMacdDataHealth, getUsMacdPositioning,
   getUsMacdSignals, getUsMacdPaperPositions, runUsMacdLiveCycle,
 } from "@/lib/api";
+import { LiveMarkCell } from "@/components/terminal/LiveMarkCell";
+import { legTapeSymbol } from "@/lib/marketSymbols";
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
 import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 
@@ -32,17 +32,16 @@ const usd = (n: unknown) => {
 };
 
 const TABS = [
-  { key: "terminal", label: "Terminal", icon: TerminalRadioIcon },
+  { key: "paper", label: "Paper book", icon: Banknote },
   { key: "health", label: "Data health", icon: Activity },
   { key: "signals", label: "Signals", icon: ListChecks },
   { key: "positioning", label: "Positioning", icon: CalendarClock },
-  { key: "paper", label: "Paper book", icon: Banknote },
   { key: "signal-quality", label: "Signal quality", icon: Activity },
   { key: "live-stream", label: "Live stream", icon: Activity },
 ];
 
 export default function UsMacdDesk() {
-  const [activeTab, setActiveTab] = useUrlTab("health");
+  const [activeTab, setActiveTab] = useUrlTab("paper");
   const [isPending, startTransition] = useTransition();
   const [cycleMsg, setCycleMsg] = useState<string | null>(null);
 
@@ -241,7 +240,13 @@ export default function UsMacdDesk() {
                               <td className="px-3 py-2 font-mono text-text-muted">{p.expiry}</td>
                               <td className="px-3 py-2 font-mono text-right">{p.quantity_units}</td>
                               <td className="px-3 py-2 font-mono text-right">{usd(p.entry_premium)}</td>
-                              <td className="px-3 py-2 font-mono text-right">{usd(isOpen ? p.latest_premium : p.exit_premium)}</td>
+                              <td className="px-3 py-2 text-right">
+                                {isOpen ? (
+                                  <LiveMarkCell symbol={legTapeSymbol(p)} fallback={p.latest_premium} decimals={2} prefix="$" />
+                                ) : (
+                                  <span className="font-mono">{usd(p.exit_premium)}</span>
+                                )}
+                              </td>
                               <td className={`px-3 py-2 font-mono text-right ${tone(pnl)}`}>{usd(pnl)}</td>
                               <td className="px-3 py-2"><StatusBadge label={isOpen ? "open" : (p.close_reason ?? "closed")} variant={isOpen ? "info" : (pnl >= 0 ? "success" : "warn")} /></td>
                             </tr>
@@ -259,7 +264,6 @@ export default function UsMacdDesk() {
       {activeTab === "signal-quality" ? (
         <SignalQualityTab laneKeys={["us_macd_refined"]} title="US MACD signal validation" />
       ) : null}
-      {activeTab === "terminal" ? <LaneTerminal title="Live Terminal · US MACD" /> : null}
       {activeTab === "live-stream" ? (
         <StrategyLiveStream
           title="US MACD Refined"

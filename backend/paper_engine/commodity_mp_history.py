@@ -25,6 +25,7 @@ commodity changes:
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from datetime import date, datetime, time
 
@@ -209,6 +210,10 @@ async def backfill_commodity_mp_history(
     skipped_today_open = 0
     skipped_build = 0
     for session_date in sorted(sessions):
+        # Scheduling valve: this backfill loops up to ~90 sessions of pure-CPU
+        # TPO building; without a yield the whole loop runs as one event-loop
+        # block (it blew its 420s watchdog inside the 2026-07-08 wedge).
+        await asyncio.sleep(0)
         if not force and session_date in existing:
             skipped_existing += 1
             continue
@@ -220,7 +225,10 @@ async def backfill_commodity_mp_history(
             skipped_build += 1
             continue
         try:
-            snapshot = _build_session_profile(normalized, spec, bars)
+            # Pure per-session TPO build (own MarketProfileEngine, reads only
+            # the local bars list) — run off-loop so a 90-session backfill
+            # cannot wedge the tape/API.
+            snapshot = await asyncio.to_thread(_build_session_profile, normalized, spec, bars)
         except Exception as exc:
             logger.debug(f"[commodity_mp_history] build failed {normalized} {session_date}: {exc}")
             skipped_build += 1

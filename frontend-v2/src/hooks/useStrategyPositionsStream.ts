@@ -75,7 +75,7 @@ export function useStrategyPositionsStream(options?: { enabled?: boolean }) {
         onData(normalizePositionsOverview(payload as PositionsOverviewPayload));
       }, onStatusChange),
     staleTime: 5_000,
-    refetchInterval: 15_000,
+    refetchInterval: 30_000,
     enabled,
   });
 }

@@ -14,6 +14,7 @@ from sqlalchemy import text
 
 from api.routers.auth import ensure_fyers_session, ensure_upstox_session, get_active_adapter
 from db.redis_client import get_redis
+from brokers.rate_limiter import PRIORITY_BULK, broker_priority
 from core.config import settings
 from core.trading_calendar import trading_calendar
 from db.database import AsyncSessionLocal
@@ -196,6 +197,14 @@ class MarketIntelligenceRuntime:
         # run and rotates — full coverage accrues over several cycles
         # without the loop ever blowing the supervisor's runner timeout.
         self._premium_refresh_cursor: int = 0
+        # Fairness cursor for the PRIORITY (ATM) pass. When the broker throttles
+        # and the per-cycle budget can't cover all ~434 priority contracts, a
+        # fixed-order pass always refreshes the FRONT of the list and starves the
+        # tail forever (root cause of the 2026-07-07 INFY/HAVELLS miss — they sat
+        # in the starved tail). Rotating the start point each cycle turns
+        # permanent tail-starvation into bounded round-robin lag: every priority
+        # contract is refreshed within ⌈total / covered-per-cycle⌉ cycles.
+        self._priority_refresh_cursor: int = 0
 
     async def load_local_spot_rows(
         self,
@@ -317,6 +326,17 @@ class MarketIntelligenceRuntime:
                     "results": [],
                     "status": "skipped_cooldown",
                 }
+        # Register the cooldown BEFORE doing the work: this used to be set only
+        # after the loop completed, so a run killed mid-flight (supervisor 300s
+        # watchdog / wait_for timeout) never entered cooldown and every
+        # subsequent cycle re-ran the full backfill from scratch — the re-run
+        # storm behind the 2026-07-08 watchlist freeze. Worst case now: one
+        # failed run costs a single 600s reconciliation window, which the live
+        # tick feed covers anyway.
+        if not hasattr(self, "_gap_fill_cooldown") or self._gap_fill_cooldown is None:
+            self._gap_fill_cooldown = {}
+        self._gap_fill_cooldown[cooldown_key] = monotonic() + 600.0
+
         results: list[dict[str, Any]] = []
         stored_total = 0
 
@@ -356,9 +376,6 @@ class MarketIntelligenceRuntime:
                 )
             await asyncio.sleep(0.1)
 
-        if not hasattr(self, "_gap_fill_cooldown") or self._gap_fill_cooldown is None:
-            self._gap_fill_cooldown = {}
-        self._gap_fill_cooldown[cooldown_key] = monotonic() + 600.0
         return {
             "symbols_requested": requested,
             "stored_total": stored_total,
@@ -830,34 +847,92 @@ class MarketIntelligenceRuntime:
         )
 
         budget_hit = False
-        # Pass 1 — current ATM picks, every cycle.
-        for contract in priority_targets:
-            if monotonic() >= deadline:
-                budget_hit = True
-                break
-            if await _topup(contract, True):
-                ok += 1
-            else:
-                errors += 1
-            await asyncio.sleep(per_call_pause)
+        # Concurrency: run top-ups in parallel BATCHES rather than strictly
+        # serially. Serially, a broker that rate-limits (Fyers 429) makes each
+        # fetch hang to its 8s timeout, so a 150s budget covers only ~18 of the
+        # ~434 priority contracts and the rest of the stock universe's snapshots
+        # FREEZE mid-session (observed 2026-07-07: 211/216 names stopped
+        # updating after ~09:54, so S1 never saw later zero-crosses). Batches
+        # let DB-fresh reads return instantly in parallel while only the
+        # genuinely-stale contracts queue on the shared broker rate limiter —
+        # multiplying coverage per cycle at the same budget. The limiter still
+        # caps real broker calls, so this does not worsen the 429s.
+        concurrency = max(int(getattr(settings, "MARKET_INTELLIGENCE_PREMIUM_CONCURRENCY", 6)), 1)
 
-        # Pass 2 — extended window, round-robin from the saved cursor.
-        ext_n = len(extended_targets)
-        ext_done = 0
-        if ext_n and not budget_hit:
-            i = self._premium_refresh_cursor % ext_n
-            while ext_done < ext_n:
+        # DEMOTION (WS-first chain design P4): once chain_candle_builder is the
+        # broad-universe feed (1 chain call/underlying → 3m+30m fyers_chain bars),
+        # Pass 1's per-contract broker fetches of the same ~434 ATM legs are
+        # redundant. When enabled AND the builder is LIVE + covering, Pass 1 goes
+        # DB-ONLY — chain_builder supplies the bars, held/active legs get fresh
+        # marks from the WS tape, and any genuine hole self-heals via load_candles'
+        # own gap-fill on the read path. Defaults preserve today's broker-fetch.
+        #
+        # Gated on LIVE COVERAGE, not just the static flag: if the builder dies or
+        # lags mid-session (a swallowed per-name error, a dead runner), we must
+        # NOT keep the top-up demoted or S1 would starve. Each cycle we re-check
+        # the builder is running, recently cycled, and covering most of the
+        # universe; otherwise the top-up resumes broker fetching this cycle.
+        gaps_only = False
+        if (
+            getattr(settings, "MARKET_INTELLIGENCE_PREMIUM_TOPUP_GAPS_ONLY", False)
+            and getattr(settings, "CHAIN_CANDLE_BUILDER_ENABLED", False)
+        ):
+            try:
+                from market_data.chain_candle_builder import chain_candle_builder
+                st = chain_candle_builder.status()
+                lc = st.get("last_cycle") or {}
+                cov = float(lc.get("coverage_pct") or 0.0)
+                fresh = False
+                at = lc.get("at")
+                if at:
+                    at_dt = datetime.fromisoformat(str(at).replace("Z", "+00:00"))
+                    fresh = (datetime.now(UTC) - at_dt).total_seconds() < 600
+                gaps_only = bool(st.get("running") and fresh and cov >= 80.0)
+            except Exception:  # noqa: BLE001 — any doubt → keep broker fetch (safe)
+                gaps_only = False
+
+        async def _run_in_batches(targets: list[dict[str, Any]], allow_broker: bool, start: int = 0) -> tuple[int, int]:
+            """Process `targets` (from index `start`, wrapping) in concurrent
+            batches until the deadline. Returns (covered_count, next_index)."""
+            nonlocal ok, errors, budget_hit
+            n = len(targets)
+            if not n:
+                return 0, start
+            covered = 0
+            i = start % n
+            while covered < n:
                 if monotonic() >= deadline:
                     budget_hit = True
                     break
-                if await _topup(extended_targets[i], False):
-                    ok += 1
-                else:
-                    errors += 1
-                ext_done += 1
-                i = (i + 1) % ext_n
-                await asyncio.sleep(per_call_pause)
-            self._premium_refresh_cursor = i
+                batch = [targets[(i + k) % n] for k in range(min(concurrency, n - covered))]
+                results = await asyncio.gather(*(_topup(c, allow_broker) for c in batch))
+                for r in results:
+                    if r:
+                        ok += 1
+                    else:
+                        errors += 1
+                covered += len(batch)
+                i = (i + len(batch)) % n
+            return covered, i
+
+        # BULK priority: this is background broad-universe coverage — it must
+        # yield the shared broker budget to interactive reads and live marks
+        # under load (fair-share aging still guarantees it isn't starved).
+        with broker_priority(PRIORITY_BULK):
+            # Pass 1 — current ATM picks, rotated from the fairness cursor so a
+            # budget-starved tail is refreshed on a later cycle rather than never.
+            # Broker-allowed unless demoted to gaps-only (chain_builder feeds them).
+            prio_done, self._priority_refresh_cursor = await _run_in_batches(
+                priority_targets, not gaps_only, start=self._priority_refresh_cursor
+            )
+
+            # Pass 2 — extended window, round-robin from the saved cursor (DB-only).
+            ext_n = len(extended_targets)
+            ext_done = 0
+            if ext_n and not budget_hit:
+                ext_done, self._premium_refresh_cursor = await _run_in_batches(
+                    extended_targets, False, start=self._premium_refresh_cursor
+                )
 
         self._last_premium_refresh_at = datetime.now(IST)
         session_strike_count = sum(
@@ -873,6 +948,9 @@ class MarketIntelligenceRuntime:
             "skipped": skipped,
             "errors": errors,
             "priority_targets": len(priority_targets),
+            "priority_covered_this_cycle": prio_done,
+            "priority_cursor": self._priority_refresh_cursor,
+            "topup_gaps_only": gaps_only,
             "extended_total": len(extended_targets),
             "extended_covered_this_cycle": ext_done,
             "extended_cursor": self._premium_refresh_cursor,
@@ -950,11 +1028,28 @@ class MarketIntelligenceRuntime:
             finally:
                 _timings[name] = round(monotonic() - _s, 2)
 
-        spot_gap_fill = await _timed("gap_fill", self.gap_fill_spot_history(
-            symbols=list(NSE_INDEX_SCOPE),
-            lookback_days=max(int(settings.MARKET_INTELLIGENCE_GAP_FILL_LOOKBACK_DAYS), 1),
-        ))
+        # S1-critical write FIRST (2026-07-08 freeze): gap_fill used to run as
+        # step 1 unguarded; when it hung (broker fetch starved by a saturated
+        # limiter + Postgres lock-table OOM on the wide upsert) the supervisor's
+        # 300s watchdog killed the whole runner every cycle, so this call never
+        # ran and atm_option_watchlist_snapshots froze at 09:53 for the rest of
+        # the session (0 S1 entries). The watchlist write must never sit behind
+        # periodic reconciliation.
         watchlists = await _timed("watchlists", self.refresh_nse_watchlists())
+        # Spot gap-fill is reconciliation, not a per-cycle need (the live tick
+        # feed populates current candles) — hard-bound it and never let it
+        # abort the cycle.
+        try:
+            spot_gap_fill = await _timed("gap_fill", asyncio.wait_for(
+                self.gap_fill_spot_history(
+                    symbols=list(NSE_INDEX_SCOPE),
+                    lookback_days=max(int(settings.MARKET_INTELLIGENCE_GAP_FILL_LOOKBACK_DAYS), 1),
+                ),
+                timeout=120.0,
+            ))
+        except Exception as exc:  # noqa: BLE001 — includes asyncio.TimeoutError
+            logger.warning(f"[MarketIntelligence] Spot gap-fill failed/timed out: {exc}")
+            spot_gap_fill = {"status": "error", "error": str(exc)}
         option_chains = await _timed("option_chains", self.refresh_index_option_chains())
         # Top up 30m option premium candles across the full ATM watchlist
         # so S1's MACD scan sees fresh bars throughout the session.

@@ -42,8 +42,9 @@ accepted trade-off of a snapshot-sourced (zero extra broker load) enrichment.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 from sqlalchemy import text
@@ -82,10 +83,20 @@ _TARGET_SOURCES: tuple[str, ...] = ("fyers", "upstox")
 # close of a bar still matches.
 _WINDOW_SLACK_SECONDS = 90
 
-# One index UPDATE, per interval, over a bounded day-sized window. Fills only
-# greeks-null target rows; ranks candidate snapshots by proximity to the bar
-# midpoint and copies the nearest one's greeks (iv scaled percent -> fraction).
-# `:batch` is a safety cap on a single day's rows, not a pagination cursor.
+# Terminal hot-path guardrails. The enrichment job is helpful, but it must never
+# block websocket lanes or paper supervisors while it catches up.
+_WINDOW_HOURS = 2
+_DAEMON_LOOKBACK_HOURS = 6
+_DAEMON_BATCH = 10_000
+_STATEMENT_TIMEOUT_MS = 20_000
+_LOCK_TIMEOUT_MS = 3_000
+_IST = ZoneInfo("Asia/Kolkata")
+_POST_CLOSE_GRACE_END = time(16, 0)
+
+# One index UPDATE, per interval, over a short bounded window. Fills only greeks-null
+# target rows; ranks candidate snapshots by proximity to the bar midpoint and copies
+# the nearest one's greeks (iv scaled percent -> fraction). `:batch` is a safety cap
+# on a single window's rows, not a pagination cursor.
 _ENRICH_SQL = text(
     """
     WITH symmap(underlying, ocs_symbol) AS (
@@ -138,18 +149,37 @@ _ENRICH_SQL = text(
 )
 
 
-def _day_windows(since: datetime, until: datetime) -> list[tuple[datetime, datetime]]:
-    """Split [since, until) into UTC-day-aligned chunks so each UPDATE is bounded
-    and its transaction stays short (mindful of the small prod connection pool)."""
+def _time_windows(
+    since: datetime,
+    until: datetime,
+    *,
+    hours: int = _WINDOW_HOURS,
+) -> list[tuple[datetime, datetime]]:
+    """Split [since, until) into short UTC windows so every UPDATE remains bounded."""
     windows: list[tuple[datetime, datetime]] = []
     cursor = since
+    step = timedelta(hours=max(1, hours))
     while cursor < until:
-        day_end = (cursor + timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        windows.append((cursor, min(day_end, until)))
-        cursor = day_end
+        win_end = min(cursor + step, until)
+        windows.append((cursor, win_end))
+        cursor = win_end
     return windows
+
+
+def _daemon_should_run(now: datetime) -> bool:
+    """Keep live enrichment out of the after-hours research/backfill lane."""
+    try:
+        from core.trading_calendar import trading_calendar
+
+        if trading_calendar.is_exchange_open("NSE", now):
+            return True
+        local = now.astimezone(_IST)
+        return (
+            trading_calendar.has_exchange_session("NSE", local.date())
+            and time(15, 30) <= local.time() <= _POST_CLOSE_GRACE_END
+        )
+    except Exception:  # noqa: BLE001
+        return True
 
 
 async def _enrich_interval(
@@ -160,32 +190,47 @@ async def _enrich_interval(
     until: datetime,
     batch: int,
 ) -> int:
-    """Enrich one interval across [since, until), one UTC-day UPDATE at a time.
-    Returns the number of rows updated (committed per day to keep locks short)."""
+    """Enrich one interval across [since, until), one short UPDATE at a time.
+    Returns the number of rows updated (committed per window to keep locks short)."""
     bar = INTERVAL_SECONDS[interval]
     total = 0
-    for win_start, win_end in _day_windows(since, until):
-        result = await session.execute(
-            _ENRICH_SQL,
-            {
-                "interval": interval,
-                "sources": list(_TARGET_SOURCES),
-                "underlyings": list(INDEX_SYMBOL_MAP.keys()),
-                "ocs_symbols": list(INDEX_SYMBOL_MAP.values()),
-                "since": win_start,
-                "until": win_end,
-                "batch": batch,
-                "slack": _WINDOW_SLACK_SECONDS,
-                "bar_plus_slack": bar + _WINDOW_SLACK_SECONDS,
-                "half_bar": bar / 2.0,
-            },
-        )
-        await session.commit()
+    for win_start, win_end in _time_windows(since, until):
+        try:
+            await session.execute(
+                text(f"SET LOCAL statement_timeout = '{_STATEMENT_TIMEOUT_MS}ms'")
+            )
+            await session.execute(text(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT_MS}ms'"))
+            result = await session.execute(
+                _ENRICH_SQL,
+                {
+                    "interval": interval,
+                    "sources": list(_TARGET_SOURCES),
+                    "underlyings": list(INDEX_SYMBOL_MAP.keys()),
+                    "ocs_symbols": list(INDEX_SYMBOL_MAP.values()),
+                    "since": win_start,
+                    "until": win_end,
+                    "batch": batch,
+                    "slack": _WINDOW_SLACK_SECONDS,
+                    "bar_plus_slack": bar + _WINDOW_SLACK_SECONDS,
+                    "half_bar": bar / 2.0,
+                },
+            )
+            await session.commit()
+        except Exception as exc:  # noqa: BLE001
+            # Compressed or busy Timescale chunks can still reject an UPDATE.
+            # Skip that narrow window and let the next cycle/manual backfill retry.
+            await session.rollback()
+            message = str(exc).splitlines()[0]
+            logger.warning(
+                f"[greeks_enrich] {interval} window "
+                f"{win_start.isoformat()}..{win_end.isoformat()} skipped: {message}"
+            )
+            continue
         updated = result.rowcount or 0
         total += updated
         if updated >= batch:
             logger.warning(
-                f"[greeks_enrich] {interval} {win_start.date()} hit the {batch}-row "
+                f"[greeks_enrich] {interval} {win_start.isoformat()} hit the {batch}-row "
                 "safety cap; some bars may remain null — narrow the window or raise batch"
             )
     return total
@@ -230,18 +275,29 @@ async def enrich_option_greeks(
 
 
 async def run_daemon(*, poll_minutes: int = 10, lookback_days: int = 3) -> None:
-    """Periodically enrich the trailing `lookback_days` of greeks-null index
-    option candles. Cheap in steady state: once caught up, each cycle only sees
-    the handful of newly broker-backfilled bars still missing greeks."""
+    """Periodically enrich recent greeks-null index option candles.
+
+    The daemon is intentionally capped to the latest terminal session window.
+    Older catch-up is a manual/backfill concern; the live worker's job is to keep
+    charts current without starving websocket traffic.
+    """
     logger.info(
-        f"[greeks_enrich] daemon starting (poll={poll_minutes}m, lookback={lookback_days}d)"
+        "[greeks_enrich] daemon starting "
+        f"(poll={poll_minutes}m, lookback={lookback_days}d, "
+        f"cap={_DAEMON_LOOKBACK_HOURS}h, batch={_DAEMON_BATCH})"
     )
     while True:
         try:
             now = datetime.now(timezone.utc)
+            if not _daemon_should_run(now):
+                await asyncio.sleep(max(60, poll_minutes * 60))
+                continue
+            requested_since = now - timedelta(days=lookback_days)
+            capped_since = now - timedelta(hours=_DAEMON_LOOKBACK_HOURS)
             await enrich_option_greeks(
-                since=now - timedelta(days=lookback_days),
+                since=max(requested_since, capped_since),
                 until=now + timedelta(minutes=1),
+                batch=_DAEMON_BATCH,
             )
         except asyncio.CancelledError:
             raise

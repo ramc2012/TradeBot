@@ -173,7 +173,13 @@ def test_broker_status_can_force_validation(monkeypatch) -> None:
     assert calls == [True]
 
 
-def test_broker_status_read_path_does_not_persist_active_tokens(monkeypatch) -> None:
+def test_broker_status_read_survives_persist_failure(monkeypatch) -> None:
+    """Owner durability contract (2026-07-08): active-session tokens are
+    OPPORTUNISTICALLY persisted on every credential refresh — including read
+    paths like broker_status — so tokens survive all restarts and events.
+    The flip side this test pins down: a persist FAILURE (e.g. the DB briefly
+    down, as during the 2026-07-08 OOM crashes) must degrade silently and
+    never break the status read itself."""
     monkeypatch.setattr(auth, "refresh_persistent_credentials", lambda force=False: None)
 
     async def fake_snapshot(*, force_validate: bool = False):
@@ -186,13 +192,14 @@ def test_broker_status_read_path_does_not_persist_active_tokens(monkeypatch) -> 
             "fyers_token_health": {"status": "valid_session"},
         }
 
-    def fail_persist() -> None:
-        raise AssertionError("broker_status should not persist tokens on a read")
+    def failing_persist() -> None:
+        raise RuntimeError("simulated DB outage during persist")
 
     monkeypatch.setattr(auth, "get_broker_connection_snapshot", fake_snapshot)
-    monkeypatch.setattr(auth, "_persist_active_session_tokens", fail_persist)
+    monkeypatch.setattr(auth, "_persist_active_session_tokens", failing_persist)
     monkeypatch.setattr(auth, "_active_brokers", {})
 
+    # The read must succeed despite the persist blowing up.
     statuses = asyncio.run(auth.broker_status())
 
     assert any(item.broker == "fyers" and item.connected for item in statuses)

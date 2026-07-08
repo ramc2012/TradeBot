@@ -195,7 +195,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "execution": {
         # Round-trip slippage assumption applied in the backtest so figures
         # are not the optimistic "fills at recorded prices" upper bound.
-        "round_trip_slippage_pct": 0.10,   # start 10% round-trip (spec §11B)
+        "round_trip_slippage_pct": 0.05,   # 5% round-trip (2.5% entry + 2.5% exit)
         "fill_on": "next_bar_open",        # enter on the next bar (no lookahead)
     },
 

@@ -90,6 +90,11 @@ async def compute_and_store(underlying: str, *, lookback_sessions: int = 120) ->
     """
     u = underlying.upper()
     async with AsyncSessionLocal() as s:
+        # Time floor: lookback_sessions=120 ≈ 170 trading days; 260 calendar
+        # days covers it with margin. Without the floor this window-sorted the
+        # ENTIRE 30minute partition (~380k rows for BANKNIFTY, 5 parallel
+        # workers) on the OOM-fragile DB — a prime contributor to the
+        # 2026-07-08 evening event-loop wedge window.
         rows = (await s.execute(text(
             """
             SELECT timezone('Asia/Kolkata', time)::date AS d, expiry, strike, option_type,
@@ -98,6 +103,7 @@ async def compute_and_store(underlying: str, *, lookback_sessions: int = 120) ->
                                       ORDER BY time DESC) AS rn
             FROM option_premium_candles
             WHERE underlying = :u AND interval = '30minute' AND oi IS NOT NULL
+              AND time >= now() - interval '260 days'
             """
         ), {"u": u})).all()
         # Canonical daily spot closes. The option rows' underlying_price column
@@ -110,11 +116,49 @@ async def compute_and_store(underlying: str, *, lookback_sessions: int = 120) ->
                    timezone('Asia/Kolkata', time)::date AS d, close
             FROM underlying_spot_candles
             WHERE underlying = :u AND interval = '30minute' AND close IS NOT NULL
+              AND time >= now() - interval '260 days'
             ORDER BY timezone('Asia/Kolkata', time)::date, time DESC
             """
         ), {"u": u})).all()
     if not rows:
         return {"underlying": u, "stored": 0, "reason": "no option data"}
+    # Minutes of pure-sync pandas + per-day Black-Scholes bisection — MUST run
+    # off the event loop (it wedged the loop for ~8.5 min on 2026-07-08; a
+    # sync block also delays its own supervisor timeout, so wait_for can't
+    # protect against it). The helper touches only its local arguments.
+    payload = await asyncio.to_thread(
+        _compute_positioning_payload, rows, spot_rows, u, lookback_sessions
+    )
+    if payload is None:
+        return {"underlying": u, "stored": 0, "reason": "no front-month chain days"}
+    async with AsyncSessionLocal() as s:
+        await s.execute(
+            text(
+                """
+                INSERT INTO directional_positioning_daily
+                    (underlying, d, ce_oi, pe_oi, pcr_oi, oi_build_bias, atm_iv, d_atm_iv, d_pcr_oi, spot, htf_up, updated_at)
+                VALUES (:u, :d, :ce_oi, :pe_oi, :pcr_oi, :oib, :aiv, :daiv, :dpcr, :spot, :htf, now())
+                ON CONFLICT (underlying, d) DO UPDATE SET
+                    ce_oi=EXCLUDED.ce_oi, pe_oi=EXCLUDED.pe_oi, pcr_oi=EXCLUDED.pcr_oi,
+                    oi_build_bias=EXCLUDED.oi_build_bias, atm_iv=EXCLUDED.atm_iv,
+                    d_atm_iv=EXCLUDED.d_atm_iv, d_pcr_oi=EXCLUDED.d_pcr_oi,
+                    spot=EXCLUDED.spot, htf_up=EXCLUDED.htf_up, updated_at=now()
+                """
+            ),
+            payload,
+        )
+        await s.commit()
+    return {"underlying": u, "stored": len(payload), "first": str(payload[0]["d"]), "last": str(payload[-1]["d"])}
+
+
+def _compute_positioning_payload(
+    rows: list, spot_rows: list, u: str, lookback_sessions: int
+) -> list[dict] | None:
+    """Pure-sync positioning computation (pandas + BS bisection). Runs in a
+    worker thread via asyncio.to_thread — touches ONLY its local arguments and
+    the pure-math module helpers (_bs_price/_implied_vol); mutates no shared
+    state. Returns the upsert payload, or None when no front-month chain days
+    exist. Output is byte-identical to the previous on-loop implementation."""
     spot_by_day = {r.d: float(r.close) for r in spot_rows}
     df = pd.DataFrame(rows, columns=["d", "expiry", "strike", "option_type", "oi", "close", "spot", "rn"])
     df = df[df["rn"] == 1].drop(columns=["rn"])  # EOD snapshot per contract
@@ -159,7 +203,7 @@ async def compute_and_store(underlying: str, *, lookback_sessions: int = 120) ->
         pcr = pe_oi / ce_oi if ce_oi > 0 else np.nan
         recs.append({"d": d, "ce_oi": ce_oi, "pe_oi": pe_oi, "pcr_oi": pcr, "atm_iv": atm_iv, "spot": spot})
     if not recs:
-        return {"underlying": u, "stored": 0, "reason": "no front-month chain days"}
+        return None
     pos = pd.DataFrame(recs).sort_values("d").reset_index(drop=True).tail(lookback_sessions + 5)
     denom = (pos["ce_oi"] + pos["pe_oi"]).replace(0, np.nan)
     pos["oi_build_bias"] = ((pos["ce_oi"].diff() - pos["pe_oi"].diff()) / denom).astype(float)
@@ -173,7 +217,7 @@ async def compute_and_store(underlying: str, *, lookback_sessions: int = 120) ->
     pos["htf_up"] = pos["ema20"] > pos["ema50"]
     pos = pos.tail(lookback_sessions).replace({np.nan: None})
 
-    payload = [
+    return [
         {
             "u": u, "d": r["d"], "ce_oi": r["ce_oi"], "pe_oi": r["pe_oi"], "pcr_oi": r["pcr_oi"],
             "oib": r["oi_build_bias"], "aiv": r["atm_iv"], "daiv": r["d_atm_iv"], "dpcr": r["d_pcr_oi"],
@@ -181,24 +225,6 @@ async def compute_and_store(underlying: str, *, lookback_sessions: int = 120) ->
         }
         for _, r in pos.iterrows()
     ]
-    async with AsyncSessionLocal() as s:
-        await s.execute(
-            text(
-                """
-                INSERT INTO directional_positioning_daily
-                    (underlying, d, ce_oi, pe_oi, pcr_oi, oi_build_bias, atm_iv, d_atm_iv, d_pcr_oi, spot, htf_up, updated_at)
-                VALUES (:u, :d, :ce_oi, :pe_oi, :pcr_oi, :oib, :aiv, :daiv, :dpcr, :spot, :htf, now())
-                ON CONFLICT (underlying, d) DO UPDATE SET
-                    ce_oi=EXCLUDED.ce_oi, pe_oi=EXCLUDED.pe_oi, pcr_oi=EXCLUDED.pcr_oi,
-                    oi_build_bias=EXCLUDED.oi_build_bias, atm_iv=EXCLUDED.atm_iv,
-                    d_atm_iv=EXCLUDED.d_atm_iv, d_pcr_oi=EXCLUDED.d_pcr_oi,
-                    spot=EXCLUDED.spot, htf_up=EXCLUDED.htf_up, updated_at=now()
-                """
-            ),
-            payload,
-        )
-        await s.commit()
-    return {"underlying": u, "stored": len(payload), "first": str(payload[0]["d"]), "last": str(payload[-1]["d"])}
 
 
 def _positioning_is_stale(row_d) -> bool:

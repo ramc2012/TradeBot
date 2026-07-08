@@ -32,17 +32,15 @@ import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveS
 import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStrategyPositionsStream";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import { createStrategySnapshotSocket } from "@/lib/websocket";
-import { LaneTerminal } from "@/components/terminal/LaneTerminal";
 import type { PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
 
 import { GannChart, type GannAngle, type GannBar, type Sq9Level, type TimeCycle, type GannAnchor } from "./GannChart";
 
 const TABS = [
-  { key: "geometry", label: "Geometry", icon: Compass },
-  { key: "terminal", label: "Terminal", icon: Radio },
-  { key: "confluence", label: "Confluence", icon: Sparkles },
   { key: "paper", label: "Performance", icon: TrendingUp },
+  { key: "geometry", label: "Geometry", icon: Compass },
+  { key: "confluence", label: "Confluence", icon: Sparkles },
   { key: "backtest", label: "Backtest", icon: Activity },
   { key: "signal-quality", label: "Signal quality", icon: Activity },
   { key: "live-stream", label: "Live stream", icon: Radio },
@@ -195,7 +193,6 @@ export default function GannDesk() {
 
       {activeTab === "confluence" ? <ConfluencePanel snap={snap} /> : null}
 
-      {activeTab === "terminal" ? <LaneTerminal underlyings={universe as unknown as string[]} positions={positions.open_positions} title="Live Terminal · Gann" /> : null}
 
       {activeTab === "paper" ? (
         <PaperPerformance summary={status?.summary as Record<string, number> | undefined} positions={positions} />

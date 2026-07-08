@@ -29,6 +29,8 @@ import {
   unrealizedOf,
 } from "@/lib/strategy-stats";
 import { CHART } from "./chartTheme";
+import { LiveMarkCell } from "@/components/terminal/LiveMarkCell";
+import { legTapeSymbol } from "@/lib/marketSymbols";
 
 function dirBadge(dir: string) {
   if (dir === "CE" || dir === "LONG" || dir === "BUY")
@@ -143,7 +145,12 @@ export function TradeBook({
                     </td>
                     <td className={`${TD} text-right font-mono`}>{formatNumber(p.confidence, 2)}</td>
                     <td className={`${TD} text-right font-mono`}>
-                      {formatNumber(p.entry_premium, 2)} → {formatNumber(p.latest_premium ?? p.exit_premium, 2)}
+                      {formatNumber(p.entry_premium, 2)} →{" "}
+                      <LiveMarkCell
+                        symbol={legTapeSymbol(p)}
+                        fallback={p.latest_premium ?? p.exit_premium}
+                        decimals={2}
+                      />
                     </td>
                     <td className={`${TD} text-right`}>
                       <PnlBar value={unrealizedOf(p)} max={maxAbsPnl} />

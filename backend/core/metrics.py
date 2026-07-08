@@ -158,6 +158,7 @@ async def run_loop_lag_monitor(interval: float = 0.1) -> None:
     data-plane/compute-plane contention identified as WS-1.1; watch its p99.
     """
     loop = asyncio.get_running_loop()
+    last_warn = 0.0
     while True:
         start = loop.time()
         try:
@@ -168,5 +169,11 @@ async def run_loop_lag_monitor(interval: float = 0.1) -> None:
         try:
             LOOP_LAG.observe(lag)
             LOOP_LAG_CURRENT.set(lag)
+            # Make wedges visible in docker logs, not just Prometheus: the
+            # 2026-07-08 8.5-minute wedge left ZERO log evidence and had to be
+            # reconstructed from metrics archaeology. Throttled to 1 line/30s.
+            if lag >= 1.0 and (start - last_warn) >= 30.0:
+                last_warn = start
+                logger.warning(f"[loop-lag] event loop blocked ~{lag:.1f}s (sleep overshoot)")
         except Exception:
             pass

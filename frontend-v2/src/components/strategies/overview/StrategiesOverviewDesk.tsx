@@ -281,6 +281,9 @@ export default function StrategiesOverviewDesk() {
     queryKey: ["overview", "fractal-summary"],
     queryFn: async () =>
       (await apiClient.get("/api/fractal-market-profile/summary")).data as FractalSummary,
+    // FMP lane parked out of production 2026-07-07 (tile removed from LANES) —
+    // keep the code but stop the polling.
+    enabled: false,
     refetchInterval: REFRESH_MS.summary,
     refetchOnWindowFocus: false,
     retry: false,
@@ -295,6 +298,7 @@ export default function StrategiesOverviewDesk() {
         })
       ).data as FractalSnapshot,
     storageKey: "overview-fractal-snap-NIFTY",
+    enabled: false, // FMP parked out of production 2026-07-07 — keep code, stop polling
     streamFactory: (onData, onStatusChange) =>
       createStrategySnapshotSocket(
         "fractal",

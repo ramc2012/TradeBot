@@ -76,7 +76,10 @@ export const LANES: LaneStatic[] = [
   { key: "nse", label: "NSE Index · MACD", href: "/strategies/nse/live" },
   { key: "directional", label: "Long Premium", href: "/strategies/directional" },
   { key: "auction", label: "Auction IQ", href: "/strategies/auction" },
-  { key: "fractal", label: "Fractal MP", href: "/strategies/fractal" },
+  // Fractal MP (FMP) parked out of production 2026-07-07 — revisit later. The
+  // LaneKey member, STREAM_KEY_BY_LANE.fractal and the desk's `case "fractal"`
+  // block stay so this file + StrategiesOverviewDesk still type-check.
+  // { key: "fractal", label: "Fractal MP", href: "/strategies/fractal" },
   { key: "gann", label: "Gann TP Delta", href: "/strategies/gann" },
   { key: "cbe", label: "CBE Scanner", href: "/strategies/cbe" },
   { key: "commodity", label: "Commodity", href: "/strategies/commodity" },

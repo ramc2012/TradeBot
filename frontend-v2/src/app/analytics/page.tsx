@@ -213,7 +213,7 @@ export default function AnalyticsPage() {
       }, onStatusChange),
     streamWhenHidden: true,
     storageKey: "analytics:app-strategy-portfolio",
-    refetchInterval: 15_000,
+    refetchInterval: 30_000,
     staleTime: 10_000,
   });
 

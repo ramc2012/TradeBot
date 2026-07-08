@@ -2212,6 +2212,11 @@ class ATMWatchlistService:
                         WHERE interval = '1minute'
                           AND underlying = ANY(:underlyings)
                           AND close IS NOT NULL
+                          -- Time floor: "latest spot" without one locks every
+                          -- hypertable chunk (~1309 → lock-table OOM 2026-07-08).
+                          -- A spot older than 7 days is useless as a reference
+                          -- anyway (median-strike fallback covers that case).
+                          AND time > now() - interval '7 days'
                         ORDER BY underlying, time DESC
                     ),
                     latest_premium_spot AS (
@@ -2224,6 +2229,7 @@ class ATMWatchlistService:
                           AND underlying = ANY(:underlyings)
                           AND underlying_price IS NOT NULL
                           AND underlying_price > 0
+                          AND time > now() - interval '7 days'
                         ORDER BY underlying, time DESC
                     ),
                     median_strikes AS (

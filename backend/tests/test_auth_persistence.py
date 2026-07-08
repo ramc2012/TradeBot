@@ -65,6 +65,7 @@ def test_persist_active_session_tokens_backfills_saved_token(monkeypatch) -> Non
 
 
 def test_load_persistent_credentials_prefers_explicit_env(monkeypatch) -> None:
+    saved_disk: list[dict] = []
     auth._broker_credentials = {
         "fyers": {
             "app_id": "FILE_APP",
@@ -87,6 +88,8 @@ def test_load_persistent_credentials_prefers_explicit_env(monkeypatch) -> None:
     )
     applied: list[tuple[str, dict]] = []
     monkeypatch.setattr(auth, "_apply_credentials_to_settings", lambda broker, creds: applied.append((broker, dict(creds))))
+    monkeypatch.setattr(auth, "_persist_active_session_tokens", lambda: None)
+    monkeypatch.setattr(auth, "_save_credentials_to_disk", lambda creds: saved_disk.append(json.loads(json.dumps(creds))))
     monkeypatch.setenv("FYERS_REDIRECT_URI", "https://env.example/callback")
 
     auth.load_persistent_credentials()
@@ -95,6 +98,31 @@ def test_load_persistent_credentials_prefers_explicit_env(monkeypatch) -> None:
     assert auth._broker_credentials["fyers"]["secret"] == "DB_SECRET"
     assert auth._broker_credentials["fyers"]["redirect_uri"] == "https://env.example/callback"
     assert applied[-1][1]["redirect_uri"] == "https://env.example/callback"
+    assert saved_disk[-1]["fyers"]["app_id"] == "DB_APP"
+    assert saved_disk[-1]["fyers"]["redirect_uri"] == "https://env.example/callback"
+
+
+def test_refresh_persistent_credentials_persists_active_session_before_db_load(monkeypatch) -> None:
+    calls: list[str] = []
+    updated_at = datetime.now(timezone.utc)
+    auth._broker_credentials = {"fyers": {"app_id": "FILE_APP"}}
+    auth._credentials_db_checked_at_monotonic = 0.0
+    auth._credentials_db_updated_at = None
+
+    monkeypatch.setattr(auth, "_persist_active_session_tokens", lambda: calls.append("active"))
+    monkeypatch.setattr(
+        auth,
+        "_load_credentials_payload_from_database",
+        lambda: ({"fyers": {"secret": "DB_SECRET"}}, updated_at),
+    )
+    monkeypatch.setattr(auth, "_apply_credentials_to_settings", lambda broker, creds: None)
+    monkeypatch.setattr(auth, "_save_credentials_to_disk", lambda creds: calls.append("disk"))
+
+    auth.refresh_persistent_credentials(force=True)
+
+    assert calls == ["active", "disk"]
+    assert auth._broker_credentials["fyers"]["app_id"] == "FILE_APP"
+    assert auth._broker_credentials["fyers"]["secret"] == "DB_SECRET"
 
 
 def test_refresh_persistent_credentials_updates_telegram_toggle(monkeypatch) -> None:
@@ -364,6 +392,47 @@ def test_ensure_fyers_session_uses_saved_refresh_token_and_pin(monkeypatch) -> N
     assert restored is True
     assert auth._active_brokers["fyers"]["token"].access_token == "REFRESHED_TOKEN"
     assert persisted[-1][0] == "fyers"
+
+
+def test_ensure_fyers_session_does_not_reaccept_cached_invalid_token(monkeypatch) -> None:
+    auth._active_brokers = {}
+    auth._broker_credentials = {
+        "fyers": {
+            "app_id": "APP",
+            "secret": "SECRET",
+            "access_token": "BAD_TOKEN",
+            "refresh_token": "REFRESH_TOKEN",
+            "pin": "1234",
+        }
+    }
+    auth._fyers_token_health_cache.update(
+        {
+            "token": "BAD_TOKEN",
+            "checked_at": datetime.now(timezone.utc),
+            "result": {"valid": False, "needs_reconnect": True},
+        }
+    )
+    refresh_attempts: list[bool] = []
+
+    async def fake_refresh() -> bool:
+        refresh_attempts.append(True)
+        return False
+
+    class _FailIfUsedAdapter:
+        async def authenticate(self, credentials: dict):
+            raise AssertionError("cached invalid access token should not be used")
+
+    async def fake_refresh_async(*, force: bool = False) -> None:
+        return None
+
+    monkeypatch.setattr(auth, "refresh_persistent_credentials_async", fake_refresh_async)
+    monkeypatch.setattr(auth, "_refresh_fyers_session_from_saved_credentials", fake_refresh)
+    monkeypatch.setattr("brokers.fyers.FyersAdapter", _FailIfUsedAdapter)
+
+    restored = asyncio.run(auth.ensure_fyers_session(force_validate=False))
+
+    assert restored is False
+    assert refresh_attempts == [True]
 
 
 def test_broker_status_avoids_forcing_credential_refresh_on_normal_poll(monkeypatch) -> None:

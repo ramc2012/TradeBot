@@ -73,9 +73,23 @@ def _parse_order(raw: str | None) -> list[str]:
 
 
 def route_order(purpose: str) -> list[str]:
-    setting_name = _PURPOSE_SETTING.get(str(purpose or "").strip().lower(), "")
+    normalized = str(purpose or "").strip().lower()
+    setting_name = _PURPOSE_SETTING.get(normalized, "")
     value = getattr(settings, setting_name, "") if setting_name else ""
-    return _parse_order(value)
+    order = _parse_order(value)
+    # Circuit-aware failover: when a broker's chain REST is circuit-OPEN
+    # (sustained 429s/errors), prefer the healthy broker. Applied HERE (not just
+    # in choose_active_adapter, which is only called for live_ticks) so the real
+    # option-chain consumers that iterate route_order() directly — the market
+    # router's chain endpoint — actually fail over. Reorder only; never drops a
+    # source, and a fully-healthy circuit leaves the order unchanged.
+    if normalized == "option_chain":
+        try:
+            from market_data.broker_circuit import broker_circuit
+            order = broker_circuit.preferred_order(order, "chain")
+        except Exception:  # noqa: BLE001
+            pass
+    return order
 
 
 def choose_active_adapter(
@@ -83,6 +97,8 @@ def choose_active_adapter(
     adapters: Mapping[str, Any],
 ) -> tuple[Any | None, str | None, list[dict[str, Any]]]:
     decisions: list[dict[str, Any]] = []
+    # route_order() already applies the circuit-aware failover reorder for
+    # option_chain, so callers here inherit it automatically.
     for source in route_order(purpose):
         adapter = adapters.get(source)
         if source in {"postgres", "upstox_analytics", "catalog"}:

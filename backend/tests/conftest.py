@@ -47,3 +47,22 @@ def _clean_nse_strategy_state_file():
     except OSError:
         pass
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_case_root(monkeypatch, tmp_path):
+    """agentic_rag.sources.collect_runtime_trade_cases() globs paper_positions.json /
+    paper_journal.jsonl out of the real backend/runtime/ tree — which the live trading
+    system rewrites continuously. Any test that aggregates runtime cases (e.g. the
+    context-gate expectancy check) would otherwise read a moving production target and
+    flake. Point RUNTIME_ROOT at an empty per-test dir so those tests see only the
+    cases they explicitly inject. No test reads real runtime data, so this is safe
+    suite-wide.
+    """
+    try:
+        import agentic_rag.sources as _rag_sources
+
+        monkeypatch.setattr(_rag_sources, "RUNTIME_ROOT", tmp_path / "runtime", raising=False)
+    except Exception:
+        pass
+    yield

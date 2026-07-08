@@ -28,7 +28,7 @@ import {
   Compass,
   Crosshair,
   FileText,
-  Fingerprint,
+  // Fingerprint — only used by the parked Fractal MP nav entry (see below).
   FlaskConical,
   Globe,
   Inbox,
@@ -72,12 +72,16 @@ const NAV_GROUPS: NavGroup[] = [
       { href: "/strategies/us-macd-refined", label: "US MACD Refined", icon: Globe, matchers: ["/strategies/us-macd-refined"] },
       { href: "/strategies/directional", label: "Long Premium", icon: Target },
       { href: "/strategies/auction", label: "Auction IQ", icon: Layers3 },
-      { href: "/strategies/fractal", label: "Fractal MP", icon: Fingerprint },
+      // Fractal MP (FMP) parked out of production 2026-07-07 — revisit later.
+      // Page + component preserved on disk; only the nav link is hidden.
+      // { href: "/strategies/fractal", label: "Fractal MP", icon: Fingerprint },
       { href: "/strategies/gann", label: "Gann TP Delta", icon: Compass },
       { href: "/strategies/mp", label: "MP Live", icon: Sigma },
       { href: "/strategies/cbe", label: "CBE Scanner", icon: Radar },
       { href: "/strategies/commodity", label: "Commodity", icon: Waves },
-      { href: "/strategies/sniper", label: "Sniper", icon: Crosshair },
+      // Sniper parked out of production 2026-07-07 — revisit later.
+      // Page + component preserved on disk; only the nav link is hidden.
+      // { href: "/strategies/sniper", label: "Sniper", icon: Crosshair },
     ],
   },
   {

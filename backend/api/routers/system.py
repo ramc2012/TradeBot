@@ -999,3 +999,38 @@ async def signal_validation() -> dict[str, Any]:
         audits,
         validated_snapshot_store.status(),
     )
+
+
+@router.get("/ws-chain-probe")
+async def ws_chain_probe_status() -> dict[str, Any]:
+    """WS-first chain design P0 probe results (empty unless WS_CHAIN_PROBE_ENABLED
+    was on for a live session). Answers: Upstox WS greeks/iv presence + unit,
+    Fyers oi/pdoi cadence. See market_data/ws_chain_probe.py."""
+    from market_data.ws_chain_probe import ws_chain_probe
+    return {
+        "enabled": settings.WS_CHAIN_PROBE_ENABLED,
+        "sources": ws_chain_probe.snapshot(),
+    }
+
+
+@router.get("/rate-budget")
+async def rate_budget_status() -> dict[str, Any]:
+    """Live broker REST rate-limiter telemetry: per-window used/allowed, day
+    count, plus admit/429/queue-wait counters and the process circuit-breaker
+    state. Makes broker-budget headroom + throttling observable at a glance."""
+    from brokers.rate_limiter import FYERS_DATA_LIMITER, UPSTOX_DATA_LIMITER
+    payload: dict[str, Any] = {
+        "fyers": FYERS_DATA_LIMITER.snapshot(),
+        "upstox": UPSTOX_DATA_LIMITER.snapshot(),
+    }
+    try:
+        from market_data.broker_circuit import broker_circuit
+        payload["circuit"] = broker_circuit.snapshot()
+    except Exception:  # noqa: BLE001 — circuit module optional / not yet imported
+        pass
+    try:
+        from market_data.chain_candle_builder import chain_candle_builder
+        payload["chain_builder"] = chain_candle_builder.status()
+    except Exception:  # noqa: BLE001
+        pass
+    return payload

@@ -70,7 +70,11 @@ class Settings(BaseSettings):
     # percent -> fraction. Cheap in steady state; gated ON.
     GREEKS_ENRICHMENT_ENABLED: bool = True
     GREEKS_ENRICHMENT_POLL_MINUTES: int = 10
-    GREEKS_ENRICHMENT_LOOKBACK_DAYS: int = 3
+    # 1 (was 3): with Timescale compression live (2026-07-07), a 3-day lookback
+    # reaches into COMPRESSED chunks and blows the tuple-decompression DML limit
+    # (15.17M vs 100k on 2026-07-08). 1 day stays inside uncompressed chunks;
+    # older gaps go through the manual backfill path instead.
+    GREEKS_ENRICHMENT_LOOKBACK_DAYS: int = 1
     # MACD diffusion — hourly CE/PE-above-zero breadth snapshot (market sentiment).
     # Reads the live watchlist's per-leg MACD; seeds history from option_premium_candles.
     MACD_DIFFUSION_ENABLED: bool = True
@@ -122,10 +126,48 @@ class Settings(BaseSettings):
     # budget enforceable; a contract that times out is skipped and retried
     # on a later cycle.
     MARKET_INTELLIGENCE_PREMIUM_CALL_TIMEOUT_SECONDS: int = 8
+    # Premium top-up concurrency: how many load_candles top-ups run in parallel
+    # per batch. Serially, a rate-limiting broker (Fyers 429) hangs each fetch
+    # to its call timeout, so a 150s budget covered only ~18 of ~434 priority
+    # contracts and the rest of the stock universe's snapshots FROZE mid-session
+    # (observed 2026-07-07: 211/216 names stopped updating, so S1 never saw
+    # later zero-crosses). Batching lets DB-fresh reads return instantly in
+    # parallel while only genuinely-stale contracts queue on the shared broker
+    # limiter — multiplying coverage per cycle at the same budget. The limiter
+    # still caps real broker calls, so this does not worsen the 429s.
+    MARKET_INTELLIGENCE_PREMIUM_CONCURRENCY: int = 6
+    # Demote the premium top-up's Pass-1 to DB-ONLY (no per-contract broker
+    # fetch), relying on chain_candle_builder for the broad 3m/30m option bars.
+    # ONLY takes effect when CHAIN_CANDLE_BUILDER_ENABLED is also True (so the
+    # replacement is guaranteed running). Default False = today's broker-fetch
+    # behaviour. Flip on AFTER a market-open verification that the builder covers
+    # the universe (GET /api/system/rate-budget → chain_builder.last_cycle).
+    MARKET_INTELLIGENCE_PREMIUM_TOPUP_GAPS_ONLY: bool = False
     # F1 feed — full-universe option-chain → 3m CE+PE OHLC builder (chain_candle_builder).
     # OFF by default: scales Fyers REST (~30k calls/day, governed by FYERS_DATA_LIMITER);
     # enable deliberately in prod after sign-off + a market-open verification.
     CHAIN_CANDLE_BUILDER_ENABLED: bool = False
+    # Also emit 30-minute fyers_chain bars from the chain builder (not just 3m).
+    # S1's entry MACD reads the interval='30minute' partition of
+    # option_premium_candles; the builder only wrote 3m, so nothing populated the
+    # series S1 actually trades off. When True the builder rolls a parallel 30m
+    # accumulator so enabling it genuinely feeds S1 (WS-first chain design P2).
+    # Only meaningful when CHAIN_CANDLE_BUILDER_ENABLED is also True.
+    CHAIN_CANDLE_BUILDER_EMIT_30M: bool = True
+    # WS-first chain design — phase-P0 empirical probe. OFF by default; enable for
+    # ONE live session to confirm Upstox WS greeks/iv payload, Fyers oi/pdoi
+    # cadence, and the Upstox iv unit via GET /api/diagnostics/ws-chain-probe.
+    WS_CHAIN_PROBE_ENABLED: bool = False
+    # Broker circuit breaker — skip a broker's data REST for a cooldown after
+    # sustained 429s/errors and prefer the healthy broker for chain failover.
+    # FAIL-OPEN: only trips on sustained failure; informs routing, never hard-
+    # blocks. Surfaced at GET /api/system/rate-budget → circuit.
+    BROKER_CIRCUIT_ENABLED: bool = True
+    # Pre-open broker token readiness sweep (07:00-09:20 IST, NSE session days):
+    # validates Fyers (auto-refresh via saved refresh token + PIN when the daily
+    # access token is dead) + checks Upstox expiry, and logs/alerts BEFORE open
+    # so a dead token is an actionable pre-open fact, not a mid-session surprise.
+    TOKEN_READINESS_AUTO_ENABLED: bool = True
     # Phase 6 — Fyers v3 TBT 50-level depth socket (FyersTbtSocket). OFF by default:
     # requires the PAID TBT entitlement on the Fyers app. When True, /ws/depth routes a
     # focused symbol through the TBT socket (50 levels + per-level order counts + seqNo)
@@ -222,7 +264,11 @@ class Settings(BaseSettings):
     # capture set so their ticks land in market_ticks. Flag-gated so it can be
     # enabled + verified during a live RTH session without risking the default.
     AUCTION_OF_BOOK_SYMBOLS: str = ""
-    FRACTAL_MARKET_PROFILE_AUTO_ENABLED: bool = True
+    # FMP lane parked out of production 2026-07-07 (owner: "remove FMP + sniper,
+    # revisit later; preserve the work"). Runner registers with enabled=False so
+    # the supervisor filters it out of every scheduling pass; the fmp_service
+    # singleton + read-only router/WS stay importable. Flip back to True to revive.
+    FRACTAL_MARKET_PROFILE_AUTO_ENABLED: bool = False
     FRACTAL_MARKET_PROFILE_AUTO_INTERVAL_SECONDS: int = 300
     DIRECTIONAL_OPTIONS_AUTO_ENABLED: bool = True
     # Strategy operates on 5- and 15-minute bars. A 300s cadence misses

@@ -3,10 +3,11 @@
 Strategy execution model: enter on a premium-MACD zero-cross (one leg per stock,
 separate CE/PE books, slot limits, daily-entry cap), then manage each position
 with a HARD stop-loss + PARTIAL profit booking ladder + a TRAILING stop on the
-runner, with a final time-based window_end exit. Fills carry round-trip slippage
-AND statutory charges (STT/brokerage/exchange/GST via paper_engine.costs), so the
-paper P&L is net-of-cost, not the optimistic raw-LTP upper bound. The hard stop
-is gap-safe: evaluated every cycle on the freshest available mark.
+runner, with a final time-based window_end exit. The primary paper P&L follows
+displayed entry/latest/exit premiums so the table math is transparent. Fills
+still carry round-trip slippage and statutory charges, exposed separately as
+net execution P&L. The hard stop is gap-safe: evaluated every cycle on the
+freshest available mark.
 
 Persisted as JSON under ``runtime/macd_refined/paper``. Summary matches the
 canonical shape the frontend portfolio panel renders.
@@ -14,6 +15,7 @@ canonical shape the frontend portfolio panel renders.
 from __future__ import annotations
 
 import json
+import math
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,8 +48,116 @@ def _round_trip_charges(symbol: str, book: str, entry: float, exit_: float, qty:
         return 0.0
 
 
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    return numeric if math.isfinite(numeric) else default
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _price_pnl(entry: float, mark: float, qty: int) -> float:
+    """Screen P&L from the displayed premiums and unit quantity."""
+    return round((float(mark) - float(entry)) * int(qty), 2)
+
+
+def _remaining_qty(position: dict[str, Any]) -> int:
+    return max(0, _as_int(position.get("quantity_units") or position.get("qty") or 0))
+
+
+def _initial_qty(position: dict[str, Any]) -> int:
+    return max(
+        0,
+        _as_int(
+            position.get("initial_qty")
+            or position.get("quantity_units")
+            or position.get("qty")
+            or 0
+        ),
+    )
+
+
+def _unrealized_pnl_gross(position: dict[str, Any]) -> float:
+    entry = _as_float(position.get("entry_premium"))
+    latest = _as_float(
+        position.get("latest_premium")
+        if position.get("latest_premium") is not None
+        else position.get("entry_premium")
+    )
+    return _price_pnl(entry, latest, _remaining_qty(position))
+
+
+def _unrealized_pnl_net(position: dict[str, Any], slip_half: float | None = None) -> float:
+    if slip_half is not None:
+        entry = _as_float(position.get("entry_premium"))
+        latest = _as_float(
+            position.get("latest_premium")
+            if position.get("latest_premium") is not None
+            else position.get("entry_premium")
+        )
+        qty = _remaining_qty(position)
+        entry_fill = entry * (1.0 + slip_half)
+        mark_fill = latest * (1.0 - slip_half)
+        return round((mark_fill - entry_fill) * qty, 2)
+    if position.get("unrealized_pnl_net") is not None:
+        return round(_as_float(position.get("unrealized_pnl_net")), 2)
+    return round(_as_float(position.get("unrealized_pnl")), 2)
+
+
+def _realized_pnl_gross(position: dict[str, Any]) -> float:
+    for key in ("realized_pnl_gross", "gross_pnl"):
+        if position.get(key) is not None:
+            return round(_as_float(position.get(key)), 2)
+    if _remaining_qty(position) <= 0 and not position.get("targets_booked"):
+        qty = _initial_qty(position)
+        entry = _as_float(position.get("entry_premium"))
+        exit_ = _as_float(
+            position.get("exit_premium")
+            if position.get("exit_premium") is not None
+            else position.get("latest_premium")
+        )
+        if qty > 0 and entry > 0 and exit_ > 0:
+            return _price_pnl(entry, exit_, qty)
+    return round(_as_float(position.get("realized_pnl")), 2)
+
+
+def _realized_pnl_net(position: dict[str, Any]) -> float:
+    for key in ("realized_pnl_net", "net_realized_pnl"):
+        if position.get(key) is not None:
+            return round(_as_float(position.get(key)), 2)
+    return round(_as_float(position.get("realized_pnl")), 2)
+
+
+def _decorate_position_for_read(position: dict[str, Any], slip_half: float | None = None) -> dict[str, Any]:
+    row = dict(position)
+    if row.get("status") == "open" or _remaining_qty(row) > 0:
+        gross = _unrealized_pnl_gross(row)
+        row["unrealized_pnl_gross"] = gross
+        row["unrealized_pnl_net"] = _unrealized_pnl_net(row, slip_half)
+        row["unrealized_pnl"] = gross
+    if row.get("status") == "closed" or row.get("closed_at") or _remaining_qty(row) <= 0:
+        gross = _realized_pnl_gross(row)
+        row["realized_pnl_gross"] = gross
+        row["realized_pnl_net"] = _realized_pnl_net(row)
+        row["realized_pnl"] = gross
+    return row
+
+
 class MacdRefinedPaperStore:
-    _EMPTY_LIFETIME = {"realized_pnl": 0.0, "wins": 0, "losses": 0, "closed_count": 0}
+    _EMPTY_LIFETIME = {
+        "realized_pnl": 0.0,
+        "realized_pnl_net": 0.0,
+        "wins": 0,
+        "losses": 0,
+        "closed_count": 0,
+    }
 
     def __init__(self, root: Path | str, *, config: dict[str, Any]):
         self.root = Path(root)
@@ -59,7 +169,7 @@ class MacdRefinedPaperStore:
         self._lock = threading.Lock()
         self.config = config
         self.initial_capital = float(config.get("risk", {}).get("starting_equity", MACD_REFINED_INITIAL_CAPITAL))
-        self._slip_half = float(config.get("execution", {}).get("round_trip_slippage_pct", 0.10)) / 2.0
+        self._slip_half = float(config.get("execution", {}).get("round_trip_slippage_pct", 0.05)) / 2.0
 
     # ── State IO ──────────────────────────────────────────────────────────
     def _load(self) -> dict[str, Any]:
@@ -105,8 +215,8 @@ class MacdRefinedPaperStore:
             "symbol_filter": norm or None,
             "status": status,
             "summary": self._summary(state["open_positions"], state["closed_positions"], state.get("lifetime")),
-            "open_positions": opens[:limit],
-            "closed_positions": closed[:limit],
+            "open_positions": [_decorate_position_for_read(p, self._slip_half) for p in opens[:limit]],
+            "closed_positions": [_decorate_position_for_read(p, self._slip_half) for p in closed[:limit]],
         }
 
     def list_journal(self, symbol: str | None = None, limit: int = 50) -> dict[str, Any]:
@@ -158,9 +268,11 @@ class MacdRefinedPaperStore:
             for p in opens:
                 pid = str(p.get("position_id") or "")
                 mark = marks.get(pid) or {}
-                fully_closed, realized_delta = self._manage(p, mark, now)
+                fully_closed, realized_delta, realized_net_delta = self._manage(p, mark, now)
                 if realized_delta:
-                    lifetime["realized_pnl"] = round(lifetime["realized_pnl"] + realized_delta, 2)
+                    lifetime["realized_pnl"] = round(_as_float(lifetime.get("realized_pnl")) + realized_delta, 2)
+                if realized_net_delta:
+                    lifetime["realized_pnl_net"] = round(_as_float(lifetime.get("realized_pnl_net")) + realized_net_delta, 2)
                 if fully_closed:
                     closed.append(p)
                     lifetime["closed_count"] += 1
@@ -228,6 +340,7 @@ class MacdRefinedPaperStore:
                     admitted += 1
                     daily_count += 1
 
+            self._refresh_lifetime(lifetime, opens, closed)
             state = {"open_positions": opens, "closed_positions": closed, "last_synced_at": now, "lifetime": lifetime}
             self._save(state)
             summary = self._summary(opens, closed, lifetime)
@@ -237,9 +350,9 @@ class MacdRefinedPaperStore:
             return summary
 
     # ── Position management: stop / partial / trail / window ──────────────
-    def _manage(self, p: dict[str, Any], mark: dict[str, Any], now: str) -> tuple[bool, float]:
+    def _manage(self, p: dict[str, Any], mark: dict[str, Any], now: str) -> tuple[bool, float, float]:
         """Mark a position and apply hard-SL / partial-book / trailing / window.
-        Returns (fully_closed, realized_delta_this_cycle)."""
+        Returns (fully_closed, gross_realized_delta, net_realized_delta)."""
         ex = self.config["exits"]
         stop_pct = float(ex.get("stop_loss_pct", 0.30))
         targets = list(ex.get("targets") or [])
@@ -247,7 +360,8 @@ class MacdRefinedPaperStore:
         trail_give = float(ex.get("trail_giveback_pct", 0.25))
 
         entry_gross = float(p.get("entry_premium") or 0.0)
-        entry_fill = float(p.get("entry_fill_premium") or entry_gross)
+        entry_fill = round(entry_gross * (1.0 + self._slip_half), 4)
+        p["entry_fill_premium"] = entry_fill
         latest = float(mark.get("premium") if mark.get("premium") is not None else p.get("latest_premium") or entry_gross)
         spot = float(mark.get("spot") or p.get("latest_spot") or p.get("entry_spot") or 0.0)
         qty = int(p.get("quantity_units") or 0)
@@ -255,19 +369,28 @@ class MacdRefinedPaperStore:
         p["latest_spot"] = spot
         p["peak_premium"] = max(float(p.get("peak_premium") or entry_gross), latest)
         p["updated_at"] = now
-        # MTM at the exit-fill-equivalent (conservative — credits exit slippage).
+        # Primary P&L follows the displayed entry/latest premiums. Execution-net
+        # P&L is retained separately so UI and reports do not mix bases.
         mark_fill = latest * (1.0 - self._slip_half)
-        p["unrealized_pnl"] = round((mark_fill - entry_fill) * qty, 2)
+        gross_unrealized = _price_pnl(entry_gross, latest, qty)
+        net_unrealized = round((mark_fill - entry_fill) * qty, 2)
+        p["unrealized_pnl"] = gross_unrealized
+        p["unrealized_pnl_gross"] = gross_unrealized
+        p["unrealized_pnl_net"] = net_unrealized
+        p["slippage_unrealized_pnl"] = round(net_unrealized - gross_unrealized, 2)
 
         if entry_gross <= 0 or qty <= 0:
-            return True, 0.0  # malformed → drop
+            return True, 0.0, 0.0  # malformed → drop
 
         realized_delta = 0.0
+        realized_net_delta = 0.0
 
         # (a) HARD STOP — gap-safe: always evaluated on the freshest mark.
         if latest <= entry_gross * (1.0 - stop_pct):
-            realized_delta += self._book(p, latest, spot, now, qty, "stop_loss")
-            return True, realized_delta
+            gross_delta, net_delta = self._book(p, latest, spot, now, qty, "stop_loss")
+            realized_delta += gross_delta
+            realized_net_delta += net_delta
+            return True, realized_delta, realized_net_delta
 
         # (b) PARTIAL BOOKING ladder — book once per target, in order.
         booked = set(int(i) for i in (p.get("targets_booked") or []))
@@ -278,7 +401,9 @@ class MacdRefinedPaperStore:
             if latest >= entry_gross * (1.0 + float(tgt.get("gain_pct", 0.0))):
                 book_qty = min(int(round(initial_qty * float(tgt.get("book_fraction", 0.0)))), int(p.get("quantity_units") or 0))
                 if book_qty > 0:
-                    realized_delta += self._book(p, latest, spot, now, book_qty, f"target_{idx+1}", partial=True)
+                    gross_delta, net_delta = self._book(p, latest, spot, now, book_qty, f"target_{idx+1}", partial=True)
+                    realized_delta += gross_delta
+                    realized_net_delta += net_delta
                 booked.add(idx)
                 p["targets_booked"] = sorted(booked)
                 if trail_on:
@@ -286,47 +411,71 @@ class MacdRefinedPaperStore:
                 # re-read remaining qty
                 qty = int(p.get("quantity_units") or 0)
                 if qty <= 0:
-                    return True, realized_delta
+                    return True, realized_delta, realized_net_delta
 
         # (c) TRAILING STOP on the runner once trailing.
         if p.get("phase") == "trailing":
             trail_level = float(p.get("peak_premium") or entry_gross) * (1.0 - trail_give)
             if latest <= trail_level:
-                realized_delta += self._book(p, latest, spot, now, int(p.get("quantity_units") or 0), "trailing_stop")
-                return True, realized_delta
+                gross_delta, net_delta = self._book(p, latest, spot, now, int(p.get("quantity_units") or 0), "trailing_stop")
+                realized_delta += gross_delta
+                realized_net_delta += net_delta
+                return True, realized_delta, realized_net_delta
 
         # (d) WINDOW END — final time-based exit on the remainder.
         if bool(mark.get("window_end_passed")):
-            realized_delta += self._book(p, latest, spot, now, int(p.get("quantity_units") or 0), "window_end")
-            return True, realized_delta
+            gross_delta, net_delta = self._book(p, latest, spot, now, int(p.get("quantity_units") or 0), "window_end")
+            realized_delta += gross_delta
+            realized_net_delta += net_delta
+            return True, realized_delta, realized_net_delta
 
-        return False, realized_delta
+        qty = int(p.get("quantity_units") or 0)
+        if qty > 0:
+            gross_unrealized = _price_pnl(entry_gross, latest, qty)
+            net_unrealized = round((mark_fill - entry_fill) * qty, 2)
+            p["unrealized_pnl"] = gross_unrealized
+            p["unrealized_pnl_gross"] = gross_unrealized
+            p["unrealized_pnl_net"] = net_unrealized
+            p["slippage_unrealized_pnl"] = round(net_unrealized - gross_unrealized, 2)
+        return False, realized_delta, realized_net_delta
 
-    def _book(self, p: dict[str, Any], exit_gross: float, spot: float, now: str, qty_close: int, reason: str, *, partial: bool = False) -> float:
-        """Realize qty_close units at exit_gross (net of slippage + charges).
-        Mutates the position (reduces quantity_units, accumulates realized_pnl).
-        Returns the net realized delta for this booking."""
+    def _book(self, p: dict[str, Any], exit_gross: float, spot: float, now: str, qty_close: int, reason: str, *, partial: bool = False) -> tuple[float, float]:
+        """Realize qty_close units at exit_gross.
+
+        ``realized_pnl`` is the screen/gross P&L from displayed premiums.
+        ``realized_pnl_net`` keeps the conservative slippage+charges result.
+        """
         qty_close = max(0, min(int(qty_close), int(p.get("quantity_units") or 0)))
         if qty_close <= 0:
-            return 0.0
+            return 0.0, 0.0
         entry_gross = float(p.get("entry_premium") or 0.0)
         entry_fill = float(p.get("entry_fill_premium") or entry_gross)
         exit_fill = exit_gross * (1.0 - self._slip_half)
-        gross = (exit_fill - entry_fill) * qty_close
+        gross = _price_pnl(entry_gross, exit_gross, qty_close)
+        fill_pnl = round((exit_fill - entry_fill) * qty_close, 2)
         charges = _round_trip_charges(
             str(p.get("trading_symbol") or p.get("underlying") or ""),
             str(p.get("book") or "CE"), entry_gross, exit_gross, qty_close,
         )
-        net = round(gross - charges, 2)
+        net = round(fill_pnl - charges, 2)
         p["quantity_units"] = int(p.get("quantity_units") or 0) - qty_close
-        p["realized_pnl"] = round(float(p.get("realized_pnl") or 0.0) + net, 2)
+        prior_gross = _as_float(p.get("realized_pnl_gross"), _as_float(p.get("gross_pnl"), _as_float(p.get("realized_pnl"))))
+        prior_net = _as_float(p.get("realized_pnl_net"), _as_float(p.get("net_realized_pnl"), _as_float(p.get("realized_pnl"))))
+        p["realized_pnl"] = round(prior_gross + gross, 2)
+        p["realized_pnl_gross"] = p["realized_pnl"]
+        p["gross_pnl"] = p["realized_pnl"]
+        p["realized_pnl_net"] = round(prior_net + net, 2)
+        p["net_realized_pnl"] = p["realized_pnl_net"]
+        p["transaction_costs"] = round(_as_float(p.get("transaction_costs")) + charges, 2)
+        p["slippage_pnl"] = round(_as_float(p.get("slippage_pnl")) + (fill_pnl - gross), 2)
         remaining = int(p.get("quantity_units") or 0)
         self._append_journal({
             "recorded_at": now, "event": ("partial_book" if partial else "close"),
             "underlying": p.get("underlying"), "book": p.get("book"), "strike": p.get("strike"),
             "expiry": p.get("expiry"), "qty_closed": qty_close, "remaining_qty": remaining,
             "entry_premium": entry_gross, "exit_premium": exit_gross, "exit_fill": round(exit_fill, 4),
-            "charges": round(charges, 2), "realized_pnl": net, "reason": reason,
+            "gross_pnl": gross, "fill_pnl": fill_pnl, "charges": round(charges, 2),
+            "realized_pnl": gross, "realized_pnl_net": net, "reason": reason,
         })
         if remaining <= 0:
             # Position fully closed.
@@ -338,9 +487,11 @@ class MacdRefinedPaperStore:
             p["latest_premium"] = exit_gross
             p["exit_spot"] = spot
             p["unrealized_pnl"] = 0.0
-            total_invested = entry_fill * int(p.get("initial_qty") or 1)
+            p["unrealized_pnl_gross"] = 0.0
+            p["unrealized_pnl_net"] = 0.0
+            total_invested = entry_gross * int(p.get("initial_qty") or 1)
             p["return_pct"] = round(float(p.get("realized_pnl") or 0.0) / total_invested * 100.0, 4) if total_invested else 0.0
-        return net
+        return gross, net
 
     # ── Account / drawdown ────────────────────────────────────────────────
     def _drawdown_incl_open(self, closed: list[dict[str, Any]], unrealized: float, lifetime: dict[str, Any] | None) -> float:
@@ -349,16 +500,26 @@ class MacdRefinedPaperStore:
         eq = self.initial_capital
         peak = eq
         for c in sorted(closed, key=lambda r: str(r.get("closed_at") or "")):
-            eq += float(c.get("realized_pnl") or 0.0)
+            eq += _realized_pnl_gross(c)
             peak = max(peak, eq)
-        # account for realized history beyond the capped closed list
-        if lifetime:
+        # Account for realized history beyond the capped closed list only once it
+        # has been written on the current gross-premium basis.
+        if lifetime and lifetime.get("pnl_basis") == "gross_premium":
             life_real = float(lifetime.get("realized_pnl") or 0.0)
             eq = self.initial_capital + life_real
             peak = max(peak, eq)
         current = eq + float(unrealized or 0.0)
         peak = max(peak, current)
         return (peak - current) / peak if peak > 0 else 0.0
+
+    def _refresh_lifetime(self, lifetime: dict[str, Any], opens: list[dict[str, Any]], closed: list[dict[str, Any]]) -> None:
+        positions = list(opens) + list(closed)
+        lifetime["pnl_basis"] = "gross_premium"
+        lifetime["realized_pnl"] = round(sum(_realized_pnl_gross(p) for p in positions), 2)
+        lifetime["realized_pnl_net"] = round(sum(_realized_pnl_net(p) for p in positions), 2)
+        lifetime["closed_count"] = len(closed)
+        lifetime["wins"] = sum(1 for p in closed if _realized_pnl_gross(p) > 0)
+        lifetime["losses"] = sum(1 for p in closed if _realized_pnl_gross(p) < 0)
 
     def reset_account(self, *, actor: str | None = None) -> dict[str, Any]:
         with self._lock:
@@ -372,31 +533,42 @@ class MacdRefinedPaperStore:
         return {"reset": True, "actor": actor, "initial_capital": self.initial_capital}
 
     def _summary(self, opens, closed, lifetime=None) -> dict[str, Any]:
-        if lifetime:
+        positions = list(opens) + list(closed)
+        if lifetime and lifetime.get("pnl_basis") == "gross_premium":
             realized = round(float(lifetime.get("realized_pnl") or 0.0), 2)
+            realized_net = round(float(lifetime.get("realized_pnl_net") or realized), 2)
             wins = int(lifetime.get("wins") or 0)
             losses = int(lifetime.get("losses") or 0)
             closed_count = int(lifetime.get("closed_count") or len(closed))
         else:
-            realized = round(sum(float(p.get("realized_pnl") or 0.0) for p in closed), 2)
-            wins = sum(1 for c in closed if float(c.get("realized_pnl") or 0.0) > 0)
-            losses = sum(1 for c in closed if float(c.get("realized_pnl") or 0.0) < 0)
+            realized = round(sum(_realized_pnl_gross(p) for p in positions), 2)
+            realized_net = round(sum(_realized_pnl_net(p) for p in positions), 2)
+            wins = sum(1 for c in closed if _realized_pnl_gross(c) > 0)
+            losses = sum(1 for c in closed if _realized_pnl_gross(c) < 0)
             closed_count = len(closed)
-        unreal = round(sum(float(p.get("unrealized_pnl") or 0.0) for p in opens), 2)
+        unreal = round(sum(_unrealized_pnl_gross(p) for p in opens), 2)
+        unreal_net = round(sum(_unrealized_pnl_net(p, self._slip_half) for p in opens), 2)
         reserved = round(sum(float(p.get("entry_fill_premium") or p.get("entry_premium") or 0.0) * float(p.get("quantity_units") or 0) for p in opens), 2)
         total_equity = round(self.initial_capital + realized + unreal, 2)
+        total_equity_net = round(self.initial_capital + realized_net + unreal_net, 2)
         available = round(self.initial_capital + realized - reserved, 2)
+        available_net = round(self.initial_capital + realized_net - reserved, 2)
         win_rate = round(wins / (wins + losses), 4) if (wins + losses) else 0.0
         return {
             "open_positions": len(opens),
             "closed_positions": closed_count,
             "realized_pnl": realized,
+            "realized_pnl_net": realized_net,
             "unrealized_pnl": unreal,
+            "unrealized_pnl_net": unreal_net,
             "total_pnl": round(realized + unreal, 2),
+            "total_pnl_net": round(realized_net + unreal_net, 2),
             "initial_capital": self.initial_capital,
             "available_capital": available,
+            "available_capital_net": available_net,
             "reserved_margin": reserved,
             "total_equity": total_equity,
+            "total_equity_net": total_equity_net,
             "total_return_pct": round((total_equity - self.initial_capital) / self.initial_capital * 100.0, 4) if self.initial_capital else 0.0,
             "max_drawdown": round(self._drawdown_incl_open(closed, unreal, lifetime), 4),
             "total_trades": wins + losses,

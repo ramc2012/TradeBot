@@ -19,8 +19,6 @@
  * the MP lane exposes a daily open-signal, not a paper-position book.
  */
 import { useMemo, useState, useTransition } from "react";
-import { Radio as TerminalRadioIcon } from "lucide-react";
-import { LaneTerminal } from "@/components/terminal/LaneTerminal";
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
@@ -261,13 +259,12 @@ const OF_SOURCE: Record<string, { label: string; variant: "success" | "warn" | "
 };
 
 const TABS = [
-  { key: "terminal", label: "Terminal", icon: TerminalRadioIcon },
+  { key: "live-stream", label: "Live stream", icon: Activity },
   { key: "live", label: "Live Profile", icon: Compass },
   { key: "structure", label: "Structure", icon: Layers3 },
   { key: "migration", label: "Value Migration", icon: TrendingUp },
   { key: "drift", label: "Drift & CVD", icon: Brain },
   { key: "signal-quality", label: "Signal quality", icon: Activity },
-  { key: "live-stream", label: "Live stream", icon: Activity },
 ];
 
 const UNDERLYINGS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "CRUDEOIL"];
@@ -277,7 +274,7 @@ const shortDate = (s?: string) => (s ? s.slice(5) : "");
 const directionVariant = (d?: string) => (d === "CE" ? "success" : d === "PE" ? "error" : "neutral");
 
 export default function MpDesk() {
-  const [activeTab, setActiveTab] = useUrlTab("live");
+  const [activeTab, setActiveTab] = useUrlTab("live-stream");
   const [, startTransition] = useTransition();
   const [underlying, setUnderlying] = useState("NIFTY");
   const [lookback, setLookback] = useState(60);
@@ -407,7 +404,6 @@ export default function MpDesk() {
         {activeTab === "signal-quality" ? (
           <SignalQualityTab laneKeys={["market_intelligence", "auction_intelligence"]} title="Market-profile signal validation" />
         ) : null}
-        {activeTab === "terminal" ? <LaneTerminal title="Live Terminal · Market Profile" /> : null}
       {activeTab === "live-stream" ? (
           <StrategyLiveStream
             title="Market Profile"

@@ -39,7 +39,6 @@ import {
 import { IndexMpOfView } from "@/components/strategies/commodity/IndexMpOfView";
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
 import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
-import { LaneTerminal } from "@/components/terminal/LaneTerminal";
 
 import {
   api as apiClient,
@@ -2948,8 +2947,10 @@ function CommodityMcxDesk({ section }: { section?: BottomTabKey | "watchlist" })
     queryKey: ["commodity-live", "audit"],
     queryFn: async () =>
       (await apiClient.get("/api/audit/events?market=commodity&limit=60")).data,
-    refetchInterval: PRIMER_POLL_MS,
-    refetchIntervalInBackground: true,
+    // 60s, foreground-only: the 5s "primer" cadence had no socket to hand off
+    // to and no step-down — one background tab hammered the DB-backed audit
+    // table ~12 req/min all day (44% of ALL frontend load on 2026-07-08).
+    refetchInterval: HEARTBEAT_POLL_MS,
   });
 
   // Mutations
@@ -3670,13 +3671,12 @@ const MPOF_TABS = [
   { key: "stats", label: "Stats", icon: BarChart3 },
   { key: "audit", label: "Audit", icon: Radio },
   { key: "instrument", label: "Instrument MP+OF", icon: LineChart },
-  { key: "terminal", label: "Terminal", icon: Radio },
   { key: "signal-quality", label: "Signal quality", icon: ShieldCheck },
   { key: "live-stream", label: "Live stream", icon: Radio },
 ];
 
 export default function MpOfDesk() {
-  const [tab, setTab] = useUrlTab("watchlist");
+  const [tab, setTab] = useUrlTab("positions");
 
   // Light overview poll just for the KPI strip + header status (the MCX desk
   // does its own socket-primary streaming when its tab is active).
@@ -3726,13 +3726,7 @@ export default function MpOfDesk() {
         </section>
       }
     >
-      {tab === "terminal" ? (
-        <LaneTerminal
-          watchlist={(status.futures_watchlist as Array<Record<string, unknown>> | undefined) ?? []}
-          positions={(status.positions as Array<Record<string, unknown>> | undefined) ?? []}
-          title="Live Terminal · Commodity"
-        />
-      ) : tab === "live-stream" ? (
+      {tab === "live-stream" ? (
         <StrategyLiveStream
           title="Commodity MP + Order Flow"
           watchlist={((status.futures_watchlist as Array<Record<string, unknown>> | undefined) ?? []).map((row) => ({

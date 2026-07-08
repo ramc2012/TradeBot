@@ -165,9 +165,13 @@ class DataRouter:
             broker_symbols = [to_broker_symbol(symbol) for symbol in full_set]
         if broker_name == "fyers":
             # Fyers adapter accepts an optional depth callback for the 5-level
-            # DepthUpdate ladder (subscribed incrementally per focused symbol).
+            # DepthUpdate ladder (subscribed incrementally per focused symbol),
+            # plus a reconnect hook that invalidates the dedupe state below.
             self._ws_client = await self._broker.subscribe_websocket(
-                broker_symbols, self._on_tick, on_depth_callback=self._on_depth
+                broker_symbols,
+                self._on_tick,
+                on_depth_callback=self._on_depth,
+                on_reconnect_callback=self._on_ws_reconnected,
             )
         else:
             self._ws_client = await self._broker.subscribe_websocket(
@@ -184,6 +188,23 @@ class DataRouter:
         logger.info(
             f"[DataRouter] Subscribed to {len(full_set)} symbols "
             f"(primary={len(symbols)} required={len(self._required_symbols)} sticky={len(sticky_extras)})"
+        )
+
+    def _on_ws_reconnected(self) -> None:
+        """Called from the Fyers SDK's WS thread on every RE-connect.
+
+        The SDK restores the socket but NOT the subscriptions. Clearing the
+        dedupe state here makes the next periodic subscribe() (the broker-
+        session refresh path calls it every ~20-30s) re-send the FULL set —
+        required indices + sticky option extras — and re-arm depth refs via the
+        normal subscribe flow. Without this, the dedupe gate skipped the
+        resubscribe after the 2026-07-08 11:14 IST drop and the tape stayed
+        blind for 4h16m. Attribute assignment is atomic (safe from the WS
+        thread); loguru is thread-safe."""
+        self._subscribed_symbols = []
+        logger.warning(
+            "[DataRouter] Fyers WS reconnected — subscription state cleared; "
+            "full resubscribe will fire on the next subscribe() pass"
         )
 
     async def add_subscriptions(self, symbols: List[str]) -> int:

@@ -395,6 +395,12 @@ class StrategyEntryMixin:
                         WHERE underlying = :underlying
                           AND interval = '30minute'
                           AND time::date BETWEEN (:from_day)::date AND (:to_day)::date
+                          -- Sargable band (chunk pruning): time::date is a STABLE
+                          -- cast the planner can't prune on → locks all ~1309
+                          -- chunks (lock-table OOM, 2026-07-08). The ::date
+                          -- predicate above still does the exact filtering.
+                          AND time >= (:from_day)::timestamptz - INTERVAL '1 day'
+                          AND time <  (:to_day)::timestamptz + INTERVAL '2 days'
                         ORDER BY time ASC
                         """
                     ),

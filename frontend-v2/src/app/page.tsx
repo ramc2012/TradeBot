@@ -13,7 +13,7 @@
  */
 import Link from "next/link";
 import { useQueries } from "@tanstack/react-query";
-import { ArrowUpRight, Banknote, Brain, Compass, Crosshair, Fingerprint, Layers3, Radar, Target, Waves } from "lucide-react";
+import { ArrowUpRight, Banknote, Brain, Compass, Crosshair, Layers3, Radar, Target, Waves } from "lucide-react";
 
 import { MetricTile, REFRESH_MS, Section, formatSignedMoney, tone } from "@/components/desk-ui";
 import { api as apiClient } from "@/lib/api";
@@ -25,7 +25,8 @@ const STRATEGY_CARDS = [
   { href: "/strategies/gann",        label: "Gann TP Delta", icon: Compass,     summaryEp: "/api/gann-tp-delta/paper-summary"            },
   { href: "/strategies/commodity",   label: "Commodity",     icon: Waves,       summaryEp: "/api/commodity-strategy/paper-summary"       },
   { href: "/strategies/auction",     label: "Auction IQ",    icon: Layers3,     summaryEp: "/api/auction-intelligence/paper-summary"     },
-  { href: "/strategies/fractal",     label: "Fractal MP",    icon: Fingerprint, summaryEp: "/api/fractal-market-profile/paper-summary"   },
+  // Fractal MP (FMP) parked out of production 2026-07-07 — revisit later.
+  // { href: "/strategies/fractal",     label: "Fractal MP",    icon: Fingerprint, summaryEp: "/api/fractal-market-profile/paper-summary"   },
   { href: "/strategies/mp",          label: "MP Live",       icon: Brain,       summaryEp: "/api/mp-intelligence/paper-summary"          },
 ];
 

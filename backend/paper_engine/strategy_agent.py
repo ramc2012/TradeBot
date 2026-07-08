@@ -1471,11 +1471,17 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         strategy2_contexts: dict[str, dict[str, Any]] = {}
         for row in index_rows:
             underlying = str(row.get("underlying") or "")
-            try:
-                context = await self._build_strategy2_signal_context(row, started_at)
-            except Exception as exc:
-                logger.warning(f"[Strategy2] closed-market context preparation failed for {underlying}: {exc}")
-                context = self._build_strategy2_preparation_failure_context(row, started_at, exc)
+            # Strategy 2 is retained only for historical state/audit surfaces.
+            # Rebuilding its MP+OF market profile while NSE is closed is pure
+            # CPU work and can block the event loop long enough to freeze
+            # websocket lanes and health checks. Defer the heavy evaluation to
+            # market-open paths; closed-market prep just advertises the lane as
+            # waiting so Strategy 1 remains responsive.
+            context = self._build_strategy2_preparation_failure_context(
+                row,
+                started_at,
+                RuntimeError("market closed; Strategy 2 MP+OF evaluation deferred"),
+            )
             signal = self._normalize_strategy2_prepared_signal(
                 dict(context.get("signal") or {}),
                 row=row,
@@ -4067,6 +4073,13 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                         SELECT close FROM underlying_spot_candles
                         WHERE underlying = :underlying AND interval = '30minute'
                           AND time::date BETWEEN (CAST(:window_start AS date) - INTERVAL '60 days')::date AND CAST(:window_end AS date)
+                          -- Sargable band: time::date is a STABLE cast, so the
+                          -- planner cannot chunk-prune on it and locks every
+                          -- hypertable chunk (~1309 → lock-table OOM, 2026-07-08).
+                          -- This redundant plain-time band restores pruning; the
+                          -- ::date predicate above still does the exact filtering.
+                          AND time >= CAST(:window_start AS timestamptz) - INTERVAL '61 days'
+                          AND time <  CAST(:window_end AS timestamptz) + INTERVAL '2 days'
                         ORDER BY time
                         """
                     ),

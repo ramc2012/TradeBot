@@ -15,6 +15,12 @@ let cachedWebSocketToken: string | null = null;
 let cachedWebSocketTokenExpiry = 0;
 let webSocketTokenPromise: Promise<string> | null = null;
 
+function invalidateWebSocketToken() {
+  cachedWebSocketToken = null;
+  cachedWebSocketTokenExpiry = 0;
+  webSocketTokenPromise = null;
+}
+
 function readCookie(name: string): string {
   if (typeof document === "undefined") {
     return "";
@@ -59,9 +65,10 @@ async function getWebSocketToken(): Promise<string> {
         throw new Error(`ws token fetch failed with ${response.status}`);
       }
       const payload = (await response.json()) as WebSocketTokenResponse;
+      const parsedExpiry = payload.expires_at ? new Date(payload.expires_at).getTime() : NaN;
       cachedWebSocketToken = payload.token;
-      cachedWebSocketTokenExpiry = payload.expires_at
-        ? new Date(payload.expires_at).getTime()
+      cachedWebSocketTokenExpiry = Number.isFinite(parsedExpiry)
+        ? parsedExpiry
         : Date.now() + 5 * 60 * 1000;
       return payload.token;
     })
@@ -113,6 +120,7 @@ function createReconnectingSocket(
 
   async function connect() {
     if (stopped) return;
+    let opened = false;
     try {
       const token = await getWebSocketToken();
       if (stopped) return;
@@ -123,6 +131,7 @@ function createReconnectingSocket(
     }
 
     ws.onopen = () => {
+      opened = true;
       retryCount = 0;
       onStatusChange?.(true);
     };
@@ -141,6 +150,9 @@ function createReconnectingSocket(
 
     ws.onclose = () => {
       if (stopped) return;
+      if (!opened) {
+        invalidateWebSocketToken();
+      }
       scheduleReconnect();
     };
   }
