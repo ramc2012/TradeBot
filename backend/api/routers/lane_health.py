@@ -72,7 +72,7 @@ async def history(lane: str, days: int = 30) -> dict[str, Any]:
                            signals_emitted, expectancy_60d, drift_pct
                     FROM lane_audit
                     WHERE lane = :lane
-                      AND audit_date >= (CURRENT_DATE - (:days || ' days')::interval)::date
+                      AND audit_date >= (CURRENT_DATE - CAST(:days AS INTEGER))
                     ORDER BY audit_date DESC
                     """
                 ),
