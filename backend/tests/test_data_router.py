@@ -100,6 +100,7 @@ def test_data_router_status_schedules_reconnect_for_stale_broker_feed(monkeypatc
     scheduled: list[bool] = []
 
     monkeypatch.setattr(router, "_schedule_reconnect", lambda: scheduled.append(True))
+    monkeypatch.setattr(router, "_is_index_market_open", lambda now=None: True)
     router._broker = type("Broker", (), {"broker_name": "fyers"})()
     router._ws_client = object()
     router._subscribed_symbols = ["NSE:NIFTY50-INDEX"]
@@ -113,6 +114,27 @@ def test_data_router_status_schedules_reconnect_for_stale_broker_feed(monkeypatc
 
     assert status["ws_connected"] is False
     assert scheduled == [True]
+
+
+def test_data_router_status_skips_reconnect_for_stale_feed_off_hours(monkeypatch) -> None:
+    router = DataRouter()
+    scheduled: list[bool] = []
+
+    monkeypatch.setattr(router, "_schedule_reconnect", lambda: scheduled.append(True))
+    monkeypatch.setattr(router, "_is_index_market_open", lambda now=None: False)
+    router._broker = type("Broker", (), {"broker_name": "fyers"})()
+    router._ws_client = object()
+    router._subscribed_symbols = ["NSE:NIFTY50-INDEX"]
+    router._tick_buffer["NSE:NIFTY50-INDEX"] = Tick(
+        symbol="NSE:NIFTY50-INDEX",
+        ltp=24050.6,
+        timestamp=datetime(2026, 4, 11, 9, 15, tzinfo=timezone.utc),
+    )
+
+    status = router.get_status()
+
+    assert status["ws_connected"] is False
+    assert scheduled == []
 
 
 def test_data_router_reconnect_schedule_is_rate_limited() -> None:

@@ -677,7 +677,12 @@ class DataRouter:
         ws_connected = bool(self._ws_client) and (
             last_tick_age_seconds is None or last_tick_age_seconds <= 30.0
         )
-        if mode == "broker" and self._subscribed_symbols and not ws_connected:
+        if (
+            mode == "broker"
+            and self._subscribed_symbols
+            and not ws_connected
+            and self._is_index_market_open()
+        ):
             self._schedule_reconnect()
 
         return {
