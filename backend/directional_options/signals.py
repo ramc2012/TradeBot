@@ -49,6 +49,14 @@ class DirectionalSignalEngine:
         range_expansion = float(row.get("range_expansion", 1.0))
         rv_pct = float(row.get("rv_percentile", 0.0))
 
+        if settings.DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED and positioning is None:
+            # MISSING positioning row (feed never wrote this underlying, DB
+            # error, table reset) fails CLOSED like the stale case — the legacy
+            # momentum fallback below is the measured-catastrophic (PF~0.2)
+            # entry this redesign replaced. No feed row -> no new entry; held
+            # positions keep their protective exits in the paper book.
+            return None
+
         positional_active = settings.DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED and positioning is not None
         if positional_active:
             # POSITIONAL view (researched edge): HTF daily direction sets the side;

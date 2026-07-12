@@ -343,6 +343,19 @@ def _cached_token_health_invalid(cache: dict, token: str) -> bool:
     )
 
 
+def _cached_token_health_valid(cache: dict, token: str) -> bool:
+    result = cache.get("result")
+    checked_at = cache.get("checked_at")
+    return (
+        bool(token)
+        and cache.get("token") == token
+        and isinstance(result, dict)
+        and result.get("valid") is True
+        and isinstance(checked_at, datetime)
+        and datetime.now(timezone.utc) - checked_at < timedelta(seconds=45)
+    )
+
+
 def _record_invalid_token_health(cache: dict, token: str) -> None:
     if not token:
         return
@@ -1262,10 +1275,15 @@ async def ensure_fyers_session(force_validate: bool = False) -> bool:
     if not saved_token:
         return await _refresh_fyers_session_from_saved_credentials()
 
-    # Don't try to restore an already-expired saved token
+    # Saved expiry metadata can drift after restarts. If the broker still accepts
+    # the token, restore it directly instead of forcing an unnecessary reconnect.
     if _token_is_expired(saved_token, expires_at=_broker_credentials.get("fyers", {}).get("expires_at")):
-        logger.info("[Fyers] Saved token is expired — re-authentication required")
-        return await _refresh_fyers_session_from_saved_credentials()
+        cached_valid = _cached_token_health_valid(_fyers_token_health_cache, saved_token)
+        if not cached_valid and not await _validate_fyers_access_token(saved_token):
+            logger.info("[Fyers] Saved token is expired — re-authentication required")
+            _record_invalid_token_health(_fyers_token_health_cache, saved_token)
+            return await _refresh_fyers_session_from_saved_credentials()
+        logger.info("[Fyers] Saved token metadata is expired, but the broker session still validates; attempting restore")
 
     if not force_validate and _cached_token_health_invalid(_fyers_token_health_cache, saved_token):
         logger.info("[Fyers] Saved token previously failed validation — trying refresh material")

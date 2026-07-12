@@ -127,6 +127,10 @@ _ENRICH_SQL = text(
               AND ocs.strike = tgt.strike
               AND ocs.option_type = tgt.option_type
               AND ocs.iv IS NOT NULL
+              -- Unit sanity: snapshots must be percent-unit (0.5%..500%).
+              -- Fraction-unit rows (a Fyers-pinned session before chain-side
+              -- normalization) would divide to iv~0.0014 — skip, don't corrupt.
+              AND ocs.iv BETWEEN 0.5 AND 500.0
               AND ocs.time BETWEEN tgt.time - make_interval(secs => :slack)
                                AND tgt.time + make_interval(secs => :bar_plus_slack)
             ORDER BY abs(extract(epoch FROM (

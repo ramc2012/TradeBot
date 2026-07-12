@@ -155,6 +155,48 @@ class OptionChainService:
             "instrument_key": entry.instrument_key,
         }
 
+    @staticmethod
+    def _normalize_iv_units(chain: OptionChain, source: str) -> None:
+        """Normalize entry IVs to PERCENT (Upstox convention), in place.
+
+        Fyers chains carry IV as a FRACTION (app-side Black-Scholes sigma,
+        e.g. 0.14) while Upstox serves broker-native PERCENT (e.g. 13.98).
+        option_chain_snapshots has no unit column and greeks_enrichment divides
+        by 100 unconditionally — so a session pinned to Fyers used to persist
+        fraction-unit rows that enrichment turned into iv≈0.0014 in candles,
+        permanently. One unit at this chokepoint, before cache + persist.
+        A magnitude guard backstops the broker rule: real IV below 3% does not
+        occur on these contracts, above 500% is garbage.
+        """
+        is_fraction_source = str(source or "").lower() == "fyers"
+        flagged = 0
+        for entry in chain.entries:
+            iv = entry.iv
+            if iv is None:
+                continue
+            try:
+                iv = float(iv)
+            except (TypeError, ValueError):
+                entry.iv = None
+                continue
+            if iv <= 0:
+                entry.iv = None
+                continue
+            if is_fraction_source:
+                iv *= 100.0
+            if 0 < iv < 3.0:
+                iv *= 100.0
+                flagged += 1
+            if iv > 500.0:
+                entry.iv = None
+                continue
+            entry.iv = round(iv, 4)
+        if flagged:
+            logger.warning(
+                f"[OC] {flagged} {source} IV values looked fraction-unit after "
+                "broker-rule normalization; magnitude guard rescaled them to percent."
+            )
+
     async def build_validated_payload(
         self,
         *,
@@ -164,6 +206,7 @@ class OptionChainService:
         source: str,
     ) -> tuple[dict[str, Any], OptionChain]:
         """Build the one canonical chain payload used by every producer."""
+        self._normalize_iv_units(chain, source)
         raw_entries = [self._serialize_entry(entry) for entry in chain.entries]
         received_at = datetime.now(timezone.utc)
         validation = validate_option_chain_rows(

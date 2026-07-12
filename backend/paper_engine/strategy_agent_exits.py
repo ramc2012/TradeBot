@@ -132,6 +132,14 @@ class StrategyExitMixin:
                 latest_close = live_ltp
             elif closes:
                 latest_close = closes[-1]
+                # A candle-close fallback is only as fresh as its own bar.
+                # Stamping now() forged freshness: it bypassed the staleness
+                # gate below exactly when the feed was degraded, and the fake
+                # timestamp then beat genuinely-fresh watchlist marks in the
+                # anti-regression check. Carry the bar's own time instead so
+                # the gate can judge it honestly.
+                if live_observed_at is None:
+                    live_observed_at = str((candles[-1] if candles else {}).get("time") or "") or None
             else:
                 continue
 

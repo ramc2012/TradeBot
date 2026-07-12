@@ -1711,10 +1711,12 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
 
     async def _restore_strategy1_positions_from_db(self, trading_day: date) -> tuple[int, int, Optional[datetime]]:
         runtime = self._strategy1
+        # Recovery replaces the OPEN book only. It must never wipe the lifetime
+        # trade ledger or the event log — a stale qty>0 DB row (a swallowed
+        # _persist_position failure days earlier) used to trigger this path and
+        # silently erase the entire in-memory trade history.
         runtime.positions.clear()
-        runtime.recent_events.clear()
         runtime.portfolio._positions.clear()
-        runtime.portfolio._trade_history.clear()
 
         async with AsyncSessionLocal() as session:
             rows = (
@@ -1842,7 +1844,8 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
 
         if runtime.positions:
             runtime.portfolio.update_prices({symbol: pos.current_price for symbol, pos in runtime.positions.items()})
-            runtime.entries = len(runtime.positions)
+            # Cumulative counter — never shrink it to the recovered subset.
+            runtime.entries = max(int(runtime.entries or 0), len(runtime.positions))
             runtime.last_scan_at = latest_seen.isoformat() if latest_seen else datetime.combine(
                 trading_day, time(15, 20), tzinfo=IST
             ).isoformat()
@@ -4722,21 +4725,25 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             return None
 
     async def _send_telegram_text(self, message: str) -> None:
+        # Trade entry/exit alerts route through the unified, instrumented
+        # telegram_agent (health/metrics/401-audit) as priority sends. They are
+        # deliberately NOT gated on TELEGRAM_REPORTS_ENABLED — that flag mutes
+        # periodic reports, never trade alerts.
         from api.routers.auth import refresh_persistent_credentials_async
+        from notifications.telegram_agent import telegram_agent
 
         await refresh_persistent_credentials_async()
-        if not settings.TELEGRAM_REPORTS_ENABLED:
-            return
-        if not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_CHAT_ID:
-            return
         text = message.strip()
         broker_status = await self._get_broker_status_summary()
         if broker_status:
             text = f"{text}\n{broker_status}"
-        url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                await client.post(url, json={"chat_id": settings.TELEGRAM_CHAT_ID, "text": text})
+            delivered = await telegram_agent.send(text, parse_mode=None, priority=True)
+            if not delivered:
+                logger.warning(
+                    "[Strategy] Telegram trade alert not delivered "
+                    f"(health: {telegram_agent.get_health()})"
+                )
         except Exception as exc:
             logger.warning(f"[Strategy] Telegram failed: {exc}")
 

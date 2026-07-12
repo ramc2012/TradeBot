@@ -66,3 +66,51 @@ def _isolate_runtime_case_root(monkeypatch, tmp_path):
     except Exception:
         pass
     yield
+
+
+@pytest.fixture(autouse=True)
+def _stub_telegram_singleton_network(request, monkeypatch):
+    """S1 trade alerts now route through the unified notifications singleton
+    (`notifications.telegram_agent.telegram_agent`). Tests that set fake bot
+    creds (e.g. auth-persistence) would otherwise make the singleton attempt a
+    REAL network post, and its accumulated failure health then leaks into the
+    system-health payload of unrelated tests. Stub the singleton's send to a
+    no-op suite-wide; tests that exercise TelegramAgent behavior construct
+    their own instances (see test_telegram_agent.py) and are unaffected.
+    Tests marked with `telegram_singleton_live` opt out (they patch httpx
+    themselves and assert on the singleton).
+    """
+    if request.node.get_closest_marker("telegram_singleton_live"):
+        yield
+        return
+    try:
+        from notifications import telegram_agent as _ta
+
+        async def _noop_send(*_a, **_k):
+            return False
+
+        # Patch the CLASS, not the instance: polluter tests leak background
+        # supervisor loops that keep sending BETWEEN tests (when an instance
+        # patch is already undone) — with fake creds those were REAL 401s to
+        # api.telegram.org that flipped the notifications health to critical
+        # mid-test. A class-level stub catches every instance on every loop.
+        monkeypatch.setattr(_ta.TelegramAgent, "send", _noop_send)
+        # Also reset the singleton's health counters: system-health tests read
+        # the REAL notifications service, so failure state leaked from any
+        # earlier test would flip their expected summary status.
+        agent = _ta.telegram_agent
+        agent._sent_ok = 0
+        agent._failed_http = 0
+        agent._failed_auth = 0
+        agent._failed_transport = 0
+        agent._suppressed_rate_limit = 0
+        agent._suppressed_dedup = 0
+        agent._suppressed_no_creds = 0
+        agent._last_success_at = None
+        agent._last_failure_at = None
+        agent._last_error_status = None
+        agent._consecutive_failures = 0
+        agent._auth_alert_date = None
+    except Exception:
+        pass
+    yield

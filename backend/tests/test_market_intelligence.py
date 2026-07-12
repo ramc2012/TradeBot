@@ -472,12 +472,19 @@ def test_option_history_uses_upstox_intraday_for_current_day_requests(monkeypatc
 
 
 def test_option_history_marks_previous_session_intraday_rows_as_stale(monkeypatch) -> None:
-    service = OptionHistoryService()
-    monkeypatch.setattr(OptionHistoryService, "_today_ist_date", staticmethod(lambda: date(2026, 4, 10)))
+    # _latest_row_is_stale_for_today reads the REAL wall clock for its
+    # intraday-freshness branch — unfrozen, this test failed whenever the
+    # suite ran between 09:15 and 15:30 IST (the "fresh" 09:20 row looked
+    # hours old). Freeze `now` just after the fixture bar.
+    from freezegun import freeze_time
 
-    stale_rows = [{"time": "2026-04-09T15:29:00+05:30", "close": 101.0}]
-    fresh_rows = [{"time": "2026-04-10T09:20:00+05:30", "close": 103.0}]
+    with freeze_time("2026-04-10 09:22:00+05:30"):
+        service = OptionHistoryService()
+        monkeypatch.setattr(OptionHistoryService, "_today_ist_date", staticmethod(lambda: date(2026, 4, 10)))
 
-    assert service._latest_row_is_stale_for_today(stale_rows, "5minute") is True
-    assert service._latest_row_is_stale_for_today(fresh_rows, "5minute") is False
-    assert service._latest_row_is_stale_for_today(stale_rows, "1day") is False
+        stale_rows = [{"time": "2026-04-09T15:29:00+05:30", "close": 101.0}]
+        fresh_rows = [{"time": "2026-04-10T09:20:00+05:30", "close": 103.0}]
+
+        assert service._latest_row_is_stale_for_today(stale_rows, "5minute") is True
+        assert service._latest_row_is_stale_for_today(fresh_rows, "5minute") is False
+        assert service._latest_row_is_stale_for_today(stale_rows, "1day") is False

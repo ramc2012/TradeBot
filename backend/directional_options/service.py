@@ -9,6 +9,7 @@ from time import monotonic
 from typing import Any, Optional
 
 import pandas as pd
+from loguru import logger
 
 from agentic_rag import ContextGateRequest, rag_service
 from analysis.signal_classifier import classify_status_bucket
@@ -465,6 +466,24 @@ class DirectionalOptionsService:
             **bucket_info,
         }
 
+    async def _loss_cap_realized(self) -> Optional[tuple[float, float]]:
+        """(today, trailing-7d) realized PnL for the risk engine's loss caps.
+
+        60s cache — one DB query per scan cycle, not per candidate. Returns
+        None on DB failure so the live path can fail SAFE (decline new
+        entries) instead of passing 0.0, which can never breach a cap.
+        """
+        cached = getattr(self, "_loss_cap_cache", None)
+        if cached is not None and monotonic() - cached[0] < 60.0:
+            return cached[1]
+        try:
+            windows = await self.paper.realized_pnl_windows()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[Directional] loss-cap realized-PnL fetch failed: {exc}")
+            windows = None
+        self._loss_cap_cache = (monotonic(), windows)
+        return windows
+
     async def _live_snapshot(
         self,
         *,
@@ -521,10 +540,14 @@ class DirectionalOptionsService:
             or strategy_health.get("watchlist_rows_latest")
             or 0
         ):
-            local_watchlist_status = await self.store.latest_live_watchlist_status(
-                underlying=underlying,
-                as_of=timestamp,
-            )
+            try:
+                local_watchlist_status = await self.store.latest_live_watchlist_status(
+                    underlying=underlying,
+                    as_of=timestamp,
+                )
+            except Exception as exc:  # noqa: BLE001 — a DB blip must not kill the cycle
+                logger.warning(f"[Directional] local watchlist status read failed: {exc}")
+                local_watchlist_status = {}
             if int(local_watchlist_status.get("rows") or 0) > 0:
                 latest_watchlist_time = local_watchlist_status.get("latest_time")
                 strategy_health = {
@@ -689,14 +712,22 @@ class DirectionalOptionsService:
             if chosen is not None:
                 candidate_payload = asdict(chosen)
                 self._attach_selected_candidate_model(candidate_payload, policy_payload)
+                loss_windows = await self._loss_cap_realized()
                 risk_payload = asdict(
                     self.risk.approve(
                         candidate=chosen,
                         signal=signal,
                         equity=float(self.config["risk"]["starting_equity"]),
                         size_multiplier=size_mult,
+                        daily_realized=loss_windows[0] if loss_windows else 0.0,
+                        weekly_realized=loss_windows[1] if loss_windows else 0.0,
                     )
                 )
+                if loss_windows is None:
+                    risk_payload["approved"] = False
+                    reasons = list(risk_payload.get("reasons") or [])
+                    reasons.append("Loss-cap state unavailable (DB error); declining new entries this cycle.")
+                    risk_payload["reasons"] = reasons
                 if not policy_act:
                     risk_payload["approved"] = False
                     reasons = list(risk_payload.get("reasons") or [])
@@ -1050,18 +1081,26 @@ class DirectionalOptionsService:
         )
         market_intelligence_ready = bool(strategy_health.get("ready", bool(watchlist_rows)))
         using_latest_session = str(strategy_health.get("readiness_mode") or "") == "latest_session"
+        # latest_session (yesterday's rows) may only bypass the staleness gates
+        # while the exchange is CLOSED. During a live-session watchlist outage
+        # the MI runtime still reports latest_session — trading on it would
+        # "fill" entries at yesterday-15:29 LTPs against today's live spot.
+        from core.trading_calendar import trading_calendar as _cal
+
+        _exchange = "BSE" if str(underlying).upper() in ("SENSEX", "BANKEX") else "NSE"
+        latest_session_ok = using_latest_session and not _cal.is_exchange_open(_exchange)
         execution_ready = bool(
             not feature_frame.empty
             and latest_spot_time
             and watchlist_rows
             and market_intelligence_ready
             and (
-                using_latest_session
+                latest_session_ok
                 or watchlist_age_seconds is None
                 or float(watchlist_age_seconds) <= stale_limit
             )
             and (
-                using_latest_session
+                latest_session_ok
                 or spot_age_seconds is None
                 or float(spot_age_seconds) <= stale_limit
             )
@@ -1075,9 +1114,11 @@ class DirectionalOptionsService:
             degraded_reason = "local_watchlist_empty"
         elif not market_intelligence_ready:
             degraded_reason = "market_intelligence_not_ready"
-        elif not using_latest_session and watchlist_age_seconds is not None and float(watchlist_age_seconds) > stale_limit:
+        elif using_latest_session and not latest_session_ok:
+            degraded_reason = "latest_session_during_live_market"
+        elif not latest_session_ok and watchlist_age_seconds is not None and float(watchlist_age_seconds) > stale_limit:
             degraded_reason = "local_watchlist_stale"
-        elif not using_latest_session and spot_age_seconds is not None and float(spot_age_seconds) > stale_limit:
+        elif not latest_session_ok and spot_age_seconds is not None and float(spot_age_seconds) > stale_limit:
             degraded_reason = "shared_spot_store_stale"
         return {
             "history_source": history_source,

@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Any, Optional
+from uuid import uuid4
 
 from loguru import logger
 from sqlalchemy.exc import ProgrammingError
@@ -738,7 +739,25 @@ class ATMWatchlistService:
                 fyers_failed = True
             return expiries
 
-        expiry_results = await asyncio.gather(*(fetch_expiries(meta) for meta in representative))
+        # One symbol's hang or exception must never abort expiry discovery for
+        # the rest of the universe (this runs ahead of the S1 watchlist write):
+        # per-symbol timeout + exception isolation, each failure logged.
+        raw_results = await asyncio.gather(
+            *(
+                asyncio.wait_for(fetch_expiries(meta), timeout=30.0)
+                for meta in representative
+            ),
+            return_exceptions=True,
+        )
+        expiry_results: list[list[str]] = []
+        for meta, result in zip(representative, raw_results):
+            if isinstance(result, BaseException):
+                logger.warning(
+                    f"[ATMWatchlist] expiry fetch failed for {meta.symbol}: {result!r}"
+                )
+                expiry_results.append([])
+            else:
+                expiry_results.append(result)
         # Map symbol → broker expiry list.
         sym_to_expiries: dict[str, list[str]] = {
             meta.symbol: exp_list
@@ -1063,11 +1082,49 @@ class ATMWatchlistService:
             all_underlyings: list,
             interim_status: str,
             detail_prefix: Optional[str],
+            build_id: str,
         ) -> None:
+            async def _lock_owner() -> Optional[str]:
+                raw = await redis.get(build_lock_key)
+                if raw is None:
+                    return None
+                return raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+
             completed = 0
             refreshed = 0
             for meta in pending_metas:
-                row = await build(meta)
+                # The lock TTL (120s) is far shorter than a full-universe build:
+                # re-arm it every row (ownership-checked) so the 15-min forced
+                # rebuild can't spawn a second concurrent build over the tail.
+                # If another build took the lock, yield to it instead of racing
+                # its cache writes with our staler prior snapshot.
+                try:
+                    owner = await _lock_owner()
+                    if owner is not None and owner != build_id:
+                        logger.info(
+                            f"[ATM watchlist] BG build {build_id[:8]} superseded by another build; stopping"
+                        )
+                        return
+                    await redis.set(build_lock_key, build_id, ex=DEFAULT_BUILD_LOCK_TTL)
+                except Exception as exc:  # noqa: BLE001 — lock upkeep must not kill the build
+                    logger.debug(f"[ATM watchlist] build-lock re-arm failed: {exc}")
+                # Hard per-row timeout: one hung broker call (chain fetch with
+                # no HTTP deadline) must never wedge the whole serial universe
+                # build — that froze S1 mid-session on 2026-07-09 (row ~36) and
+                # 2026-07-10 (row ~65): the loop sat on a single await for the
+                # rest of the session while every underlying after it starved.
+                # Skip the row and keep building; the next full-refresh cycle
+                # retries whatever was skipped.
+                try:
+                    row = await asyncio.wait_for(build(meta), timeout=75.0)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"[ATM watchlist] BG row build timed out (75s) for {meta.symbol}; skipping"
+                    )
+                    row = None
+                except Exception as exc:  # noqa: BLE001 — build() is defensive, but never trust it
+                    logger.warning(f"[ATM watchlist] BG row build failed for {meta.symbol}: {exc}")
+                    row = None
                 completed += 1
                 if row:
                     refreshed += 1
@@ -1097,7 +1154,9 @@ class ATMWatchlistService:
             build_complete = len(rows) >= len(all_underlyings) and refreshed >= len(pending_metas)
             if build_complete:
                 await redis.delete(partial_key)
-                await redis.delete(build_lock_key)
+                # Release only if still ours — a successor build may hold it.
+                if (await _lock_owner()) in (None, build_id):
+                    await redis.delete(build_lock_key)
             detail_msg = detail_prefix
             if not build_complete:
                 detail_msg = (
@@ -1161,12 +1220,29 @@ class ATMWatchlistService:
                     payload_status = "building"
                     seed_metas = pending[: min(8, len(pending))]
                     if seed_metas:
+                        # Same hard bound as the BG loop: a single hung seed
+                        # build must not wedge this gather — it runs INSIDE the
+                        # market_intelligence runner, so an un-timed hang here
+                        # rides into the supervisor's 300s kill every cycle
+                        # (2026-07-10: poison symbols like TVSMOTOR hung their
+                        # chain fetch indefinitely).
+                        seed_results = await asyncio.gather(
+                            *(
+                                asyncio.wait_for(build(meta, delay=i * 0.05), timeout=75.0)
+                                for i, meta in enumerate(seed_metas)
+                            ),
+                            return_exceptions=True,
+                        )
+                        for _meta, _res in zip(seed_metas, seed_results):
+                            if isinstance(_res, BaseException):
+                                # Keep the poison-symbol signature visible.
+                                logger.warning(
+                                    f"[ATM watchlist] seed build failed for {_meta.symbol}: {_res!r}"
+                                )
                         seed_rows = [
                             row
-                            for row in await asyncio.gather(
-                                *(build(meta, delay=i * 0.05) for i, meta in enumerate(seed_metas))
-                            )
-                            if row
+                            for row in seed_results
+                            if row and not isinstance(row, BaseException)
                         ]
                         for row in seed_rows:
                             prior_rows[row["underlying"]] = row
@@ -1188,7 +1264,8 @@ class ATMWatchlistService:
             if background_targets:
                 already_building = await redis.get(build_lock_key)
                 if not already_building:
-                    await redis.set(build_lock_key, "1", ex=DEFAULT_BUILD_LOCK_TTL)
+                    _build_id = uuid4().hex
+                    await redis.set(build_lock_key, _build_id, ex=DEFAULT_BUILD_LOCK_TTL)
                     asyncio.ensure_future(
                         _bg_build_and_cache(
                             background_targets,
@@ -1196,6 +1273,7 @@ class ATMWatchlistService:
                             underlyings,
                             "building" if payload_status == "building" else "ready",
                             background_detail_prefix,
+                            _build_id,
                         )
                     )
             partial_payload = _build_payload(rows, detail_msg, payload_status)
@@ -1204,8 +1282,20 @@ class ATMWatchlistService:
 
         priority_metas = [meta for meta in pending if meta.kind == "INDEX"]
         seed_metas = priority_metas or pending[: min(8, len(pending))]
-        seed_tasks = [build(meta, delay=i * 0.05) for i, meta in enumerate(seed_metas)]
-        seed_rows = [row for row in await asyncio.gather(*seed_tasks) if row]
+        # Hard-bounded like the BG loop / the stale-path seed gather above —
+        # this gather runs inside the market_intelligence runner and a single
+        # hung chain fetch here rode into the supervisor's 300s kill.
+        seed_results = await asyncio.gather(
+            *(
+                asyncio.wait_for(build(meta, delay=i * 0.05), timeout=75.0)
+                for i, meta in enumerate(seed_metas)
+            ),
+            return_exceptions=True,
+        )
+        for _meta, _res in zip(seed_metas, seed_results):
+            if isinstance(_res, BaseException):
+                logger.warning(f"[ATM watchlist] seed build failed for {_meta.symbol}: {_res!r}")
+        seed_rows = [row for row in seed_results if row and not isinstance(row, BaseException)]
         for row in seed_rows:
             prior_rows[row["underlying"]] = row
         rows = _sort_rows(list(prior_rows.values()))
@@ -1216,7 +1306,8 @@ class ATMWatchlistService:
         if remaining:
             already_building = await redis.get(build_lock_key)
             if not already_building:
-                await redis.set(build_lock_key, "1", ex=DEFAULT_BUILD_LOCK_TTL)
+                _build_id = uuid4().hex
+                await redis.set(build_lock_key, _build_id, ex=DEFAULT_BUILD_LOCK_TTL)
                 asyncio.ensure_future(
                     _bg_build_and_cache(
                         remaining,
@@ -1224,6 +1315,7 @@ class ATMWatchlistService:
                         underlyings,
                         "building",
                         None if fyers_adapter else "Fyers is not connected, using Upstox live chain data.",
+                        _build_id,
                     )
                 )
             detail_msg = (
@@ -1715,36 +1807,42 @@ class ATMWatchlistService:
         return normalized
 
     async def _load_persisted_expiries_for_symbol(self, symbol: str) -> list[str]:
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                text(
-                    """
-                    SELECT expiry
-                    FROM fo_expiry_catalog
-                    WHERE underlying = :underlying
-                      AND expiry >= CURRENT_DATE
-                    ORDER BY expiry ASC
-                    """
-                ),
-                {"underlying": symbol},
-            )
-            rows = [row.expiry.isoformat() for row in result.fetchall() if row.expiry is not None]
-            if rows:
-                return rows
+        # A transient DB error here must degrade to "no persisted expiries",
+        # never propagate into (and abort) the expiry-discovery gather.
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT expiry
+                        FROM fo_expiry_catalog
+                        WHERE underlying = :underlying
+                          AND expiry >= CURRENT_DATE
+                        ORDER BY expiry ASC
+                        """
+                    ),
+                    {"underlying": symbol},
+                )
+                rows = [row.expiry.isoformat() for row in result.fetchall() if row.expiry is not None]
+                if rows:
+                    return rows
 
-            result = await session.execute(
-                text(
-                    """
-                    SELECT DISTINCT expiry
-                    FROM fo_contract_catalog
-                    WHERE underlying = :underlying
-                      AND expiry >= CURRENT_DATE
-                    ORDER BY expiry ASC
-                    """
-                ),
-                {"underlying": symbol},
-            )
-            return [row.expiry.isoformat() for row in result.fetchall() if row.expiry is not None]
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT DISTINCT expiry
+                        FROM fo_contract_catalog
+                        WHERE underlying = :underlying
+                          AND expiry >= CURRENT_DATE
+                        ORDER BY expiry ASC
+                        """
+                    ),
+                    {"underlying": symbol},
+                )
+                return [row.expiry.isoformat() for row in result.fetchall() if row.expiry is not None]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[ATM watchlist] persisted-expiry read failed for {symbol}: {exc}")
+            return []
 
     async def _persist_expiries_for_symbol(self, symbol: str, expiries: list[str]) -> None:
         monthly_expiries = _monthly_expiries_from_list(expiries)
@@ -2046,14 +2144,13 @@ class ATMWatchlistService:
                     """
                     WITH latest_contracts AS (
                         SELECT DISTINCT ON (underlying, strike, option_type)
-                            time,
                             underlying,
                             expiry,
                             strike,
                             option_type,
                             instrument_key,
-                            trading_symbol,
                             time,
+                            trading_symbol,
                             close AS ltp,
                             volume,
                             oi,

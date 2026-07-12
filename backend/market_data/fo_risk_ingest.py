@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import csv
 import io
+import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Optional
@@ -38,6 +39,9 @@ from db.database import AsyncSessionLocal
 # order — first 200 with a non-empty body wins. The files refresh once
 # per trading day, usually a few minutes after the EOD calc (~18:30 IST).
 MWPL_URL_CANDIDATES = [
+    # Current NSE Clearing archive payload (2026): a zip containing the daily
+    # combined open-interest CSV with MWPL and next-day limits.
+    "https://nsearchives.nseindia.com/content/nsccl/combineoi.zip",
     # 2024+ archives host with the newer combined CSV that includes both
     # market-wide and client-wise positions.
     "https://nsearchives.nseindia.com/archives/nsccl/mwpl/combine_mwpl_cmpos.csv",
@@ -48,13 +52,13 @@ MWPL_URL_CANDIDATES = [
     "https://www.nseindia.com/content/nsccl/fao_mwpl.csv",
 ]
 SECURITY_BAN_URL_CANDIDATES = [
+    # Current NSE archive payload (2026); returns either a small CSV table or a
+    # one-line "Securities in Ban ...: NIL" banner on zero-ban days.
+    "https://nsearchives.nseindia.com/content/fo/fo_secban.csv",
     "https://nsearchives.nseindia.com/archives/fo/sec_ban/fo_secban.csv",
     "https://nsearchives.nseindia.com/content/nsccl/fao_security_ban.csv",
     "https://www.nseindia.com/content/nsccl/fao_security_ban.csv",
 ]
-# JSON fallback when the CSV endpoints all 404 (NSE's most reliable path
-# during URL transitions, but rate-limited and cookie-sensitive).
-NSE_FO_RESTRICTIONS_JSON = "https://www.nseindia.com/api/equity-fno-restrictions"
 
 # Mimic a normal browser User-Agent so NSE doesn't 403 the bot.
 _DEFAULT_HEADERS = {
@@ -190,6 +194,12 @@ def parse_ban_csv(body: str) -> list[BanRow]:
     The file is typically a single-column list of symbols under a
     "Sr.No.,Security" header. Some days it embeds a date banner first.
     """
+    stripped_body = body.strip()
+    if stripped_body:
+        headerless_rows = _parse_headerless_ban_bulletin(stripped_body)
+        if headerless_rows is not None:
+            return headerless_rows
+
     reader = csv.reader(io.StringIO(body))
     header: Optional[list[str]] = None
     rows: list[BanRow] = []
@@ -219,6 +229,31 @@ def parse_ban_csv(body: str) -> list[BanRow]:
     return rows
 
 
+def _parse_headerless_ban_bulletin(body: str) -> list[BanRow] | None:
+    """Handle NSE's newer single-line ban bulletin format.
+
+    Examples observed live:
+      * ``Securities in Ban For Trade Date 09-JUL-2026: NIL``
+      * ``Securities in Ban For Trade Date 27-APR-2026: 1,SAIL.``
+    """
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    if not lines:
+        return None
+    first = lines[0]
+    if "ban for trade date" not in first.lower() or ":" not in first:
+        return None
+    payload = first.split(":", 1)[1].strip().rstrip(".")
+    if not payload or payload.upper() == "NIL":
+        return []
+    rows: list[BanRow] = []
+    for token in csv.reader(io.StringIO(payload)).__next__():
+        symbol = str(token or "").strip().upper().rstrip(".")
+        if not symbol or symbol == "NIL" or symbol.isdigit():
+            continue
+        rows.append(BanRow(symbol=symbol, reason=None))
+    return rows
+
+
 async def _fetch_csv(url: str, *, timeout: float = 20.0, client: httpx.AsyncClient | None = None) -> str:
     """Fetch one CSV. The optional `client` is reused for cookie state
     across the candidate URL chain to avoid repeating the cookie-priming
@@ -237,44 +272,19 @@ async def _fetch_csv(url: str, *, timeout: float = 20.0, client: httpx.AsyncClie
             await http.aclose()
 
 
-async def _fetch_ban_via_json_api() -> Optional[str]:
-    """JSON-API fallback for the ban list. NSE often keeps this endpoint
-    working even when the static CSV files 404. Returns the data
-    reshaped into the same Sr.No,Security CSV format the CSV parser
-    already understands.
-    """
+def _extract_csv_from_zip(blob: bytes) -> str | None:
     try:
-        async with httpx.AsyncClient(
-            headers={**_DEFAULT_HEADERS, "Accept": "application/json"},
-            timeout=15.0,
-            follow_redirects=True,
-        ) as client:
-            await client.get("https://www.nseindia.com", timeout=8.0)
-            response = await client.get(NSE_FO_RESTRICTIONS_JSON, timeout=15.0)
-            response.raise_for_status()
-            data = response.json()
-    except Exception as exc:
-        logger.debug(f"[FoRiskIngest] JSON ban-list fallback failed: {exc}")
+        archive = zipfile.ZipFile(io.BytesIO(blob))
+    except zipfile.BadZipFile:
         return None
-    # The JSON shape we've historically seen:
-    #   {"data": [{"symbol": "IDEA", "remark": "Banned ..."}], "timestamp": "..."}
-    items = []
-    if isinstance(data, dict):
-        items = data.get("data") or data.get("fo") or []
-    elif isinstance(data, list):
-        items = data
-    if not items:
-        return None
-    lines = ["Sr.No.,Security,Remarks"]
-    for idx, item in enumerate(items, start=1):
-        if isinstance(item, dict):
-            symbol = item.get("symbol") or item.get("scrip") or item.get("security")
-            remark = item.get("remark") or item.get("reason") or ""
-        else:
-            symbol, remark = str(item), ""
-        if symbol:
-            lines.append(f"{idx},{symbol},{remark}")
-    return "\n".join(lines)
+    for name in archive.namelist():
+        if not name.lower().endswith(".csv"):
+            continue
+        try:
+            return archive.read(name).decode("utf-8", errors="replace")
+        except Exception:
+            continue
+    return None
 
 
 async def _fetch_first_available(
@@ -297,7 +307,15 @@ async def _fetch_first_available(
             errors.append(f"cookie_prime_failed: {exc}")
         for url in urls:
             try:
-                body = await _fetch_csv(url, timeout=timeout, client=client)
+                response = await client.get(url, timeout=timeout)
+                response.raise_for_status()
+                body = response.text
+                if url.lower().endswith(".zip"):
+                    extracted = _extract_csv_from_zip(response.content)
+                    if extracted is None:
+                        errors.append(f"zip_no_csv: {url}")
+                        continue
+                    body = extracted
                 if body and body.strip():
                     logger.info(f"[FoRiskIngest] {label} fetched from {url} ({len(body)} bytes)")
                     return body, errors
@@ -368,9 +386,6 @@ async def ingest_fo_risk_snapshot(
     # ── Ban list ─────────────────────────────────────────────────────
     try:
         ban_body, fetch_errors = await _fetch_first_available(SECURITY_BAN_URL_CANDIDATES, label="Ban list")
-        if ban_body is None:
-            # JSON fallback through the NSE API.
-            ban_body = await _fetch_ban_via_json_api()
         if ban_body is None:
             raise RuntimeError(f"all_candidates_failed: {fetch_errors[-3:]}")
         ban_rows = parse_ban_csv(ban_body)

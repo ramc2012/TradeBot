@@ -33,6 +33,40 @@ class _FakeRedis:
         self._values.pop(key, None)
 
 
+def test_premium_candle_fallback_selects_time_once(monkeypatch) -> None:
+    statements: list[str] = []
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+        def fetchall(self):
+            return []
+
+    class Session:
+        async def execute(self, statement, params=None):  # noqa: ANN001
+            statements.append(str(statement))
+            return Result()
+
+    class Context:
+        async def __aenter__(self):
+            return Session()
+
+        async def __aexit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return None
+
+    monkeypatch.setattr(atm_watchlist_module, "AsyncSessionLocal", Context)
+    service = ATMWatchlistService()
+    meta = UnderlyingMeta("NIFTY", "INDEX", "NSE_INDEX|NIFTY", "NSE:NIFTY50-INDEX")
+
+    asyncio.run(service._load_premium_candle_watchlist_rows("2026-07-28", [meta]))
+
+    latest_contracts = statements[0].split("latest_spot AS", 1)[0]
+    assert latest_contracts.count("time,") == 1
+
 class _FakeFyersAdapter:
     async def get_option_contracts(self, symbol: str) -> list[dict]:
         return [

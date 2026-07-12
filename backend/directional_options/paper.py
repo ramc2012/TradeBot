@@ -660,6 +660,34 @@ class DirectionalOptionsPaperStore:
             # No running event loop (e.g. unit tests) — skip event logging.
             pass
 
+    async def realized_pnl_windows(self) -> tuple[float, float]:
+        """(today_realized, trailing_7d_realized) from the durable DB book.
+
+        Feeds the daily/weekly loss caps in the risk engine — these were dead
+        code while no caller supplied realized PnL. Raises on DB failure so the
+        caller can fail SAFE (decline new entries) instead of silently passing
+        0.0 (which can never breach a cap).
+        """
+        async with AsyncSessionLocal() as session:
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT
+                            COALESCE(SUM((payload->>'realized_pnl')::float8) FILTER (
+                                WHERE timezone('Asia/Kolkata', closed_at)::date =
+                                      timezone('Asia/Kolkata', NOW())::date
+                            ), 0.0) AS today_realized,
+                            COALESCE(SUM((payload->>'realized_pnl')::float8), 0.0) AS week_realized
+                        FROM directional_paper_positions
+                        WHERE status = 'closed'
+                          AND closed_at >= NOW() - INTERVAL '7 days'
+                        """
+                    )
+                )
+            ).first()
+        return float(row.today_realized or 0.0), float(row.week_realized or 0.0)
+
     async def _summary(self, open_positions: list[dict[str, Any]], closed_positions: list[dict[str, Any]]) -> dict[str, Any]:
         # Lifetime realized from the DB-wide SUM over ALL closed positions — not the
         # capped in-memory list (LIMIT 500 on load + [-250:] on save), which silently

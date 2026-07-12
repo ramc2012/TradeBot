@@ -7,7 +7,8 @@ from market_data.greeks_enrichment import (
     DEFAULT_INTERVALS,
     INDEX_SYMBOL_MAP,
     INTERVAL_SECONDS,
-    _day_windows,
+    _WINDOW_HOURS,
+    _time_windows,
 )
 
 UTC = timezone.utc
@@ -28,28 +29,33 @@ def test_index_symbol_map_is_the_five_indices():
     assert all("-INDEX" in v for v in INDEX_SYMBOL_MAP.values())
 
 
-def test_day_windows_align_to_utc_midnight_and_are_contiguous():
+# 2026-07-08 refactor: _day_windows (UTC-midnight-aligned) became _time_windows
+# (short fixed-hour windows, default _WINDOW_HOURS) so every enrichment UPDATE
+# stays bounded and can't blow the compressed-chunk decompression limit. These
+# tests assert the new contract.
+def test_time_windows_tile_span_contiguously_and_are_bounded():
     since = datetime(2026, 6, 23, 9, 30, tzinfo=UTC)
     until = datetime(2026, 6, 26, 4, 0, tzinfo=UTC)
-    windows = _day_windows(since, until)
+    windows = _time_windows(since, until)
 
     # First window keeps the fractional start; last keeps the fractional end.
     assert windows[0][0] == since
     assert windows[-1][1] == until
-    # Interior boundaries are UTC midnight and the windows tile [since, until)
-    # with no gaps or overlaps.
+    # Windows tile [since, until) with no gaps or overlaps, and none exceeds
+    # the configured bound (that bound is the whole point of the refactor).
     for (_, end_a), (start_b, _) in zip(windows, windows[1:]):
         assert end_a == start_b
-        assert end_a.hour == 0 and end_a.minute == 0 and end_a.second == 0
-    assert len(windows) == 4  # 06-23 (partial), 06-24, 06-25, 06-26 (partial)
+    for start, end in windows:
+        assert start < end
+        assert (end - start).total_seconds() <= _WINDOW_HOURS * 3600
 
 
-def test_day_windows_single_intraday_span_is_one_window():
+def test_time_windows_short_span_is_one_window():
     since = datetime(2026, 7, 6, 3, 45, tzinfo=UTC)
-    until = datetime(2026, 7, 6, 10, 0, tzinfo=UTC)
-    assert _day_windows(since, until) == [(since, until)]
+    until = datetime(2026, 7, 6, 4, 45, tzinfo=UTC)
+    assert _time_windows(since, until) == [(since, until)]
 
 
-def test_day_windows_empty_when_until_not_after_since():
+def test_time_windows_empty_when_until_not_after_since():
     ts = datetime(2026, 7, 6, tzinfo=UTC)
-    assert _day_windows(ts, ts) == []
+    assert _time_windows(ts, ts) == []

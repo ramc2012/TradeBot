@@ -231,6 +231,9 @@ type CommodityPosition = {
   value_migration_direction?: string | null;
   value_migration_alignment?: string | null;
   value_migration_detail?: string | null;
+  rollover_from_symbol?: string | null;
+  rollover_at?: string | null;
+  rollover_count?: number | null;
 };
 
 type AuditEvent = {
@@ -1167,6 +1170,14 @@ function PositionsTab({
                   >
                     <td className="py-2.5 pl-2 pr-2 align-middle">
                       <span className="font-mono text-[13px] font-semibold text-text-primary">{sym}</span>
+                      {p.rollover_from_symbol ? (
+                        <div
+                          className="mt-0.5 text-[9px] font-medium uppercase tracking-[0.08em] text-sky-300"
+                          title={`Contract moved ${p.rollover_from_symbol} -> ${p.symbol} at ${formatIST(p.rollover_at)}`}
+                        >
+                          rolled from {String(p.rollover_from_symbol).replace(/^MCX:/, "")}
+                        </div>
+                      ) : null}
                     </td>
                     <td className="px-2 align-middle">
                       <span className={`text-[10.5px] uppercase ${side === "BUY" ? "text-emerald-300" : "text-rose-300"}`}>

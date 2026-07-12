@@ -394,6 +394,43 @@ def test_ensure_fyers_session_uses_saved_refresh_token_and_pin(monkeypatch) -> N
     assert persisted[-1][0] == "fyers"
 
 
+def test_ensure_fyers_session_restores_when_saved_expiry_is_stale_but_token_is_live(monkeypatch) -> None:
+    auth._active_brokers = {}
+    auth._broker_credentials = {
+        "fyers": {
+            "app_id": "APP",
+            "secret": "SECRET",
+            "access_token": "LIVE_TOKEN",
+            "expires_at": "2026-07-09T00:00:00+00:00",
+        }
+    }
+
+    async def fake_validate(token: str) -> bool:
+        return token == "LIVE_TOKEN"
+
+    class _FakeFyersAdapter:
+        async def authenticate(self, credentials: dict):
+            assert credentials == {"access_token": "LIVE_TOKEN"}
+            return SimpleNamespace(access_token="LIVE_TOKEN", refresh_token=None, expires_at=None)
+
+        async def get_profile(self):
+            return SimpleNamespace(user_id="FY123", name="Fyers User")
+
+    async def fake_refresh_async(*, force: bool = False) -> None:
+        return None
+
+    monkeypatch.setattr(auth, "refresh_persistent_credentials_async", fake_refresh_async)
+    monkeypatch.setattr(auth, "_validate_fyers_access_token", fake_validate)
+    monkeypatch.setattr(auth, "_persist_broker_session", lambda broker, token, connected_at=None: None)
+    monkeypatch.setattr(auth, "_sync_market_data_feed", lambda: asyncio.sleep(0))
+    monkeypatch.setattr("brokers.fyers.FyersAdapter", _FakeFyersAdapter)
+
+    restored = asyncio.run(auth.ensure_fyers_session(force_validate=False))
+
+    assert restored is True
+    assert auth._active_brokers["fyers"]["token"].access_token == "LIVE_TOKEN"
+
+
 def test_ensure_fyers_session_does_not_reaccept_cached_invalid_token(monkeypatch) -> None:
     auth._active_brokers = {}
     auth._broker_credentials = {

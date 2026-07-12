@@ -619,9 +619,15 @@ async def _strategy1_watchlist_legs() -> list[dict[str, Any]]:
                        instrument_key, trading_symbol
                 FROM atm_option_watchlist_snapshots
                 WHERE underlying = ANY(:focus)
+                  -- Sargable band beside the date filter: without it this
+                  -- 45s-loop query (and its MAX subquery) scans/locks EVERY
+                  -- 1-day chunk of the hypertable — the 2026-07-08 PG
+                  -- lock/OOM class. 7 days covers any holiday bridge.
+                  AND time >= NOW() - INTERVAL '7 days'
                   AND timezone('Asia/Kolkata', time)::date = (
                       SELECT MAX(timezone('Asia/Kolkata', time)::date)
                       FROM atm_option_watchlist_snapshots
+                      WHERE time >= NOW() - INTERVAL '7 days'
                   )
                 ORDER BY underlying, option_type, time DESC
                 """

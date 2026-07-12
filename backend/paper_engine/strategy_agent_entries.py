@@ -1030,7 +1030,14 @@ class StrategyEntryMixin:
                 )
             return
 
-        tradable_candidates = [candidate for candidate in candidates if not candidate.get("learning_blocked")]
+        tradable_candidates = []
+        for candidate in candidates:
+            if candidate.get("learning_blocked"):
+                # Tally so zero-trade forensics can SEE the learning gate —
+                # previously these drops were invisible in blocked_reasons.
+                _tally("learning_blocked", candidate.get("row") if isinstance(candidate.get("row"), dict) else None)
+            else:
+                tradable_candidates.append(candidate)
         if candidates and not tradable_candidates:
             self._append_commentary(
                 runtime.label,

@@ -60,8 +60,10 @@ from market_data.commodity_contract_specs import (
 )
 from market_data.option_history import option_history_service
 from market_data.upstox_commodity import (
+    _parse_mcx_future_symbol,
     load_upstox_mcx_quote_snapshots,
     load_upstox_mcx_quotes,
+    resolve_active_upstox_mcx_future,
     resolve_upstox_mcx_future,
 )
 from paper_engine.commodity_mp_signal import (
@@ -341,6 +343,7 @@ def _default_saved_state() -> dict[str, Any]:
             "last_stop_at": {},
             "stopped_setups": {},
             "signal_audit": [],
+            "rollover_events": [],
             "portfolio": {
                 "initial_capital": DEFAULT_COMMODITY_INITIAL_CAPITAL,
                 "available_capital": DEFAULT_COMMODITY_INITIAL_CAPITAL,
@@ -416,6 +419,9 @@ def _normalize_saved_state(payload: Optional[dict[str, Any]]) -> dict[str, Any]:
     runtime_state["signal_audit"] = [
         row for row in list(runtime_payload.get("signal_audit") or []) if isinstance(row, dict)
     ]
+    runtime_state["rollover_events"] = [
+        row for row in list(runtime_payload.get("rollover_events") or []) if isinstance(row, dict)
+    ][:40]
     portfolio_payload = runtime_payload.get("portfolio") or {}
     runtime_state["portfolio"] = {
         "initial_capital": float(portfolio_payload.get("initial_capital") or DEFAULT_COMMODITY_INITIAL_CAPITAL),
@@ -852,6 +858,12 @@ class CommodityPositionState:
     value_migration_direction: Optional[str] = None
     value_migration_alignment: Optional[str] = None
     value_migration_detail: Optional[str] = None
+    rollover_from_symbol: Optional[str] = None
+    rollover_at: Optional[str] = None
+    rollover_count: int = 0
+    # First entry of the economic position, carried across contract rolls so
+    # hold-time analytics survive (entered_at resets to the roll time).
+    original_entered_at: Optional[str] = None
 
     @property
     def unrealized_pnl(self) -> float:
@@ -876,6 +888,7 @@ class CommodityRuntime:
     futures_watchlist: list[dict[str, Any]] = field(default_factory=list)
     processed_signals: dict[str, str] = field(default_factory=dict)
     signal_audit: list[dict[str, Any]] = field(default_factory=list)
+    rollover_events: list[dict[str, Any]] = field(default_factory=list)
     # Eviction-proof cooldown timestamps (per canonical root). The `orders`
     # buffer is capped at DEFAULT_COMMODITY_ORDERS_MAX (80) rows, so on a busy
     # multi-symbol 1-min session an exit row can be evicted from the buffer while
@@ -979,6 +992,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._running = False
         self._last_data_health: dict[str, Any] = {}
         self._last_quote_snapshots: dict[str, dict[str, Any]] = {}
+        self._active_contract_metadata: dict[str, dict[str, Any]] = {}
         self._commentary: list[CommodityCommentaryEntry] = []
         self._state_synced_at: Optional[datetime] = None
         self._fyers_ltp_backoff_until: Optional[datetime] = None
@@ -1132,6 +1146,9 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     value_migration_direction=str(row.get("value_migration_direction") or "") or None,
                     value_migration_alignment=str(row.get("value_migration_alignment") or "") or None,
                     value_migration_detail=str(row.get("value_migration_detail") or "") or None,
+                    rollover_from_symbol=str(row.get("rollover_from_symbol") or "") or None,
+                    rollover_at=str(row.get("rollover_at") or "") or None,
+                    rollover_count=int(row.get("rollover_count") or 0),
                 )
             except (TypeError, ValueError):
                 continue
@@ -1157,6 +1174,9 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._runtime.signal_audit = [
             row for row in list(runtime_state.get("signal_audit") or []) if isinstance(row, dict)
         ][:DEFAULT_COMMODITY_SIGNAL_AUDIT_MAX]
+        self._runtime.rollover_events = [
+            row for row in list(runtime_state.get("rollover_events") or []) if isinstance(row, dict)
+        ][:40]
 
         self._commentary = []
         for row in list(runtime_state.get("commentary") or []):
@@ -1246,6 +1266,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     for key, timestamp in self._runtime.stopped_setups.items()
                 },
                 "signal_audit": list(self._runtime.signal_audit),
+                "rollover_events": list(self._runtime.rollover_events),
                 "portfolio": {
                     "initial_capital": float(portfolio.initial_capital),
                     "available_capital": float(portfolio.available_capital),
@@ -1373,13 +1394,50 @@ class CommodityStrategyAgent(BaseStrategyAgent):
     def get_selected_option_lookup_symbols(self) -> dict[str, str]:
         return {}
 
-    def _active_futures_symbol(self, symbol: str) -> str:
-        # No option-lookup remapping any more; configured symbol IS the
-        # tradable futures symbol.
-        return _canonicalize_symbol(symbol)
+    def _record_rollover_event(self, event: dict[str, Any]) -> None:
+        key = str(event.get("event_key") or "")
+        if key and any(str(row.get("event_key") or "") == key for row in self._runtime.rollover_events[:12]):
+            return
+        self._runtime.rollover_events.insert(0, event)
+        del self._runtime.rollover_events[40:]
 
-    def _active_futures_symbols(self) -> dict[str, str]:
-        return {symbol: self._active_futures_symbol(symbol) for symbol in self._symbols}
+    async def _active_futures_symbols(self) -> dict[str, str]:
+        now = _now_ist()
+        session_date = trading_calendar.next_exchange_open("MCX", now).date()
+        active: dict[str, str] = {}
+        metadata: dict[str, dict[str, Any]] = {}
+        for configured_symbol in self._symbols:
+            configured = _canonicalize_symbol(configured_symbol)
+            resolved = await resolve_active_upstox_mcx_future(
+                configured,
+                session_date=session_date,
+            )
+            active_symbol = _canonicalize_symbol((resolved or {}).get("symbol") or configured)
+            active[configured_symbol] = active_symbol
+            detail = {
+                **dict(resolved or {}),
+                "configured_symbol": configured_symbol,
+                "active_symbol": active_symbol,
+                "session_date": session_date.isoformat(),
+                "rollover_required": active_symbol != configured,
+            }
+            metadata[configured_symbol] = detail
+            if active_symbol != configured:
+                self._record_rollover_event(
+                    {
+                        "event_key": f"selection:{configured}:{active_symbol}:{session_date.isoformat()}",
+                        "time": now.isoformat(),
+                        "type": "contract_selection",
+                        "status": "active",
+                        "underlying": extract_commodity_root(configured),
+                        "from_symbol": configured,
+                        "to_symbol": active_symbol,
+                        "effective_session": session_date.isoformat(),
+                        "contract_expiry": detail.get("expiry"),
+                    }
+                )
+        self._active_contract_metadata = metadata
+        return active
 
     @staticmethod
     def _cvd_agrees_loose(signal: str, cvd_window) -> bool:
@@ -2546,7 +2604,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         stabilized: list[dict[str, Any]] = []
         retained_symbols: list[str] = []
         for symbol in self._symbols:
-            active_symbol = self._active_futures_symbol(symbol)
+            active_symbol = str(
+                (self._active_contract_metadata.get(symbol) or {}).get("active_symbol")
+                or _canonicalize_symbol(symbol)
+            )
             fresh = fresh_by_symbol.get(symbol) or fresh_by_symbol.get(active_symbol)
             if fresh is not None:
                 stabilized.append(fresh)
@@ -2613,7 +2674,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "No commodity broker adapter is available. Preparing from MCX futures history and cached option watchlists.",
             )
 
-        active_futures_symbols = self._active_futures_symbols()
+        active_futures_symbols = await self._active_futures_symbols()
         quote_map = await self._safe_get_ltp(adapter, sorted(set(active_futures_symbols.values())))
         futures_quote_map = dict(quote_map)
         for configured_symbol, active_symbol in active_futures_symbols.items():
@@ -2644,6 +2705,9 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             row = await self._analyze_futures_symbol(active_symbol, quote_map.get(active_symbol))
             if row:
                 row["configured_symbol"] = configured_symbol
+                contract_meta = self._active_contract_metadata.get(configured_symbol) or {}
+                row["contract_expiry"] = contract_meta.get("expiry")
+                row["rollover_effective_session"] = contract_meta.get("session_date")
                 if active_symbol != configured_symbol:
                     row["active_lookup_symbol"] = active_symbol
                     row["rollover_detail"] = f"Scanning active futures {active_symbol} for configured {configured_symbol}."
@@ -2668,6 +2732,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         }
         if latest_prices:
             self._runtime.portfolio.update_prices(latest_prices)
+
+        await self._reconcile_futures_rollovers(futures_rows)
 
         self._runtime.futures_watchlist = futures_rows
         self._last_run_at = started_at.isoformat()
@@ -2748,7 +2814,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                         "No commodity broker adapter is available. Scanning from MCX futures history and cached option watchlists.",
                     )
 
-                active_futures_symbols = self._active_futures_symbols()
+                active_futures_symbols = await self._active_futures_symbols()
                 quote_map = await self._safe_get_ltp(adapter, sorted(set(active_futures_symbols.values())))
                 futures_quote_map = dict(quote_map)
                 for configured_symbol, active_symbol in active_futures_symbols.items():
@@ -2796,6 +2862,9 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     row = await self._analyze_futures_symbol(active_symbol, quote_map.get(active_symbol))
                     if row:
                         row["configured_symbol"] = configured_symbol
+                        contract_meta = self._active_contract_metadata.get(configured_symbol) or {}
+                        row["contract_expiry"] = contract_meta.get("expiry")
+                        row["rollover_effective_session"] = contract_meta.get("session_date")
                         if active_symbol != configured_symbol:
                             row["active_lookup_symbol"] = active_symbol
                             row["rollover_detail"] = f"Scanning active futures {active_symbol} for configured {configured_symbol}."
@@ -2992,10 +3061,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         if missing_option_symbols:
             live_option_quotes.update(await self._safe_get_ltp(adapter, missing_option_symbols))
 
-        # Build a root → active-row lookup so we can detect stranded
-        # positions that survived a contract rollover (e.g. a MAY position
-        # left behind after the agent rolled to JUN). Without this they
-        # never get managed and quietly stay open forever.
+        await self._reconcile_futures_rollovers(futures_rows)
+
+        # Build a root → active-row lookup after rollover reconciliation so
+        # normal position management only sees the active contract.
         rows_by_root: dict[str, dict[str, Any]] = {}
         for row in futures_rows:
             root = (extract_commodity_root(str(row.get("symbol") or "")) or "").upper()
@@ -3015,17 +3084,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     rolled_row = rows_by_root.get(root)
                     rolled_symbol = str((rolled_row or {}).get("symbol") or "")
                     if rolled_row and rolled_symbol and rolled_symbol != position.symbol:
-                        # Close on the new active contract's latest price —
-                        # the legacy contract no longer trades, so the next
-                        # active month's mark is the best available exit.
-                        exit_price = float(rolled_row.get("price") or position.current_price or 0.0)
-                        await self._close_futures_position(
-                            position_key,
-                            position,
-                            exit_price,
-                            "expired_contract",
-                            actor="strategy_agent_rollover",
-                        )
+                        await self._roll_futures_position(position_key, position, rolled_row)
                     continue
                 current_price = float(row.get("price") or position.current_price)
                 position.current_price = current_price
@@ -3200,6 +3259,202 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             # *open* legacy option position can be manually flat-closed via
             # the reset-paper endpoint if it exists.
             continue
+
+    async def _reconcile_futures_rollovers(self, futures_rows: list[dict[str, Any]]) -> None:
+        rows_by_root = {
+            (extract_commodity_root(str(row.get("symbol") or "")) or "").upper(): row
+            for row in futures_rows
+            if extract_commodity_root(str(row.get("symbol") or ""))
+        }
+        for position_key, position in list(self._runtime.positions.items()):
+            if position.strategy_key != "commodity_futures":
+                continue
+            active_row = rows_by_root.get((extract_commodity_root(position.symbol) or "").upper())
+            active_symbol = str((active_row or {}).get("symbol") or "")
+            if active_row and active_symbol and active_symbol != position.symbol:
+                await self._roll_futures_position(position_key, position, active_row)
+
+    async def _roll_futures_position(
+        self,
+        position_key: str,
+        position: CommodityPositionState,
+        active_row: dict[str, Any],
+    ) -> None:
+        old_symbol = position.symbol
+        new_symbol = _canonicalize_symbol(active_row.get("symbol"))
+        price = float(active_row.get("price") or 0.0)
+        event_key = f"position:{position_key}:{new_symbol}"
+        if not new_symbol or new_symbol == old_symbol:
+            return
+
+        # Monotonic-expiry guard: never roll into an EARLIER contract. A failed
+        # instruments-master fetch makes the resolver fall back to the
+        # configured (older) symbol — without this guard each flap costs a full
+        # phantom round trip (backward roll, then forward again).
+        old_parsed = _parse_mcx_future_symbol(old_symbol)
+        new_parsed = _parse_mcx_future_symbol(new_symbol)
+        if old_parsed and new_parsed and (new_parsed[1], new_parsed[2]) < (old_parsed[1], old_parsed[2]):
+            logger.warning(
+                f"[CommodityStrategy] refusing backward roll {old_symbol} -> {new_symbol} "
+                "(target expiry earlier than held contract)"
+            )
+            self._record_rollover_event(
+                {
+                    "event_key": f"refused:{event_key}",
+                    "time": _now_ist().isoformat(),
+                    "type": "position_rollover",
+                    "status": "refused_backward",
+                    "underlying": position.underlying,
+                    "from_symbol": old_symbol,
+                    "to_symbol": new_symbol,
+                }
+            )
+            return
+
+        if price <= 0:
+            self._record_rollover_event(
+                {
+                    "event_key": event_key,
+                    "time": _now_ist().isoformat(),
+                    "type": "position_rollover",
+                    "status": "waiting_for_price",
+                    "underlying": position.underlying,
+                    "from_symbol": old_symbol,
+                    "to_symbol": new_symbol,
+                }
+            )
+            return
+
+        # The old leg must exit at the OLD contract's own price. Exiting at the
+        # new contract's price books the calendar-spread basis as trading PnL
+        # (signed by side × curve shape) — phantom profit/loss per roll.
+        old_exit_price = 0.0
+        try:
+            old_quotes = await self._safe_get_ltp(None, [old_symbol])
+            old_exit_price = float(old_quotes.get(old_symbol) or 0.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[CommodityStrategy] old-leg quote fetch failed for {old_symbol}: {exc}")
+        if old_exit_price <= 0:
+            snapshot = self._last_quote_snapshots.get(old_symbol) or {}
+            old_exit_price = float(snapshot.get("price") or 0.0)
+        if old_exit_price <= 0:
+            old_exit_price = float(position.current_price or 0.0)
+        if old_exit_price <= 0:
+            self._record_rollover_event(
+                {
+                    "event_key": event_key,
+                    "time": _now_ist().isoformat(),
+                    "type": "position_rollover",
+                    "status": "waiting_for_price",
+                    "underlying": position.underlying,
+                    "from_symbol": old_symbol,
+                    "to_symbol": new_symbol,
+                    "detail": "no price for expiring leg",
+                }
+            )
+            return
+        rollover_basis = round(price - old_exit_price, 4)
+
+        risk_distance = abs(position.entry_price - position.stop_price)
+        reward_distance = (
+            abs(float(position.target_price) - position.entry_price)
+            if position.target_price is not None
+            else None
+        )
+        previous_roll_count = int(position.rollover_count or 0)
+        original_entered_at = position.original_entered_at or position.entered_at
+        await self._close_futures_position(
+            position_key,
+            position,
+            old_exit_price,
+            "contract_rollover",
+            actor="strategy_agent_rollover",
+        )
+
+        order = self._runtime.order_book.place_order(
+            symbol=new_symbol,
+            action=position.action,
+            order_type="MARKET",
+            qty=position.qty,
+            instrument_type="FUT",
+            session_id=self._runtime.portfolio.session_id,
+            ltp=price,
+            setup_type=position.entry_style or position.signal_reason,
+            regime=position.regime,
+        )
+        self._record_order(
+            order,
+            "contract_rollover",
+            flow="entry",
+            lot_size=position.lot_size,
+            lots=position.lots,
+            strategy_key=position.strategy_key,
+            strategy_title=position.strategy_title,
+            entry_style=position.entry_style,
+            trade_horizon=position.trade_horizon,
+        )
+        fill_price = float(order.fill_price or price)
+        is_buy = position.action == "BUY"
+        new_stop = fill_price - risk_distance if is_buy else fill_price + risk_distance
+        new_target = None
+        if reward_distance is not None:
+            new_target = fill_price + reward_distance if is_buy else fill_price - reward_distance
+        rolled_at = _now_ist().isoformat()
+        new_key = f"commodity_futures:{new_symbol}"
+        self._runtime.positions[new_key] = CommodityPositionState(
+            **{
+                **asdict(position),
+                "position_key": new_key,
+                "symbol": new_symbol,
+                "live_symbol": new_symbol,
+                "entry_price": fill_price,
+                "current_price": fill_price,
+                "stop_price": round(new_stop, 2),
+                "target_price": round(new_target, 2) if new_target is not None else None,
+                "entered_at": rolled_at,
+                "entry_bar_time": str(active_row.get("bar_time") or rolled_at),
+                "last_reviewed_bar_time": str(active_row.get("bar_time") or rolled_at),
+                "peak_price": fill_price,
+                "rollover_from_symbol": old_symbol,
+                "rollover_at": rolled_at,
+                "rollover_count": previous_roll_count + 1,
+                "original_entered_at": original_entered_at,
+            }
+        )
+        event = {
+            "event_key": event_key,
+            "time": rolled_at,
+            "type": "position_rollover",
+            "status": "completed",
+            "underlying": position.underlying,
+            "from_symbol": old_symbol,
+            "to_symbol": new_symbol,
+            "exit_price": round(old_exit_price, 2),
+            "entry_price": round(fill_price, 2),
+            "rollover_basis": rollover_basis,
+            "lots": position.lots,
+            "side": position.action,
+            "contract_expiry": active_row.get("contract_expiry"),
+        }
+        self._record_rollover_event(event)
+        self._append_commentary(
+            "trade",
+            f"ROLLOVER {position.display_name} {old_symbol} -> {new_symbol} @ {fill_price:.2f} | "
+            f"{position.action} {position.lots} lot",
+        )
+        await record_audit_event(
+            market="commodity",
+            strategy_key=position.strategy_key,
+            event_type="contract_rollover",
+            actor="strategy_agent_rollover",
+            symbol=new_symbol,
+            underlying=position.underlying,
+            severity="trade",
+            message=f"{position.display_name} moved {old_symbol} -> {new_symbol} @ ₹{fill_price:,.2f}",
+            previous_state=old_symbol,
+            new_state=new_symbol,
+            payload={key: value for key, value in event.items() if key != "event_key"},
+        )
 
     def _record_close_to_book(self, position: "CommodityPositionState", current_price: float, reason: str) -> None:
         """Append the just-closed trade to the durable DB ledger
@@ -4037,6 +4292,11 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "commodity_high_conviction_max_poc_distance_atr": settings.COMMODITY_HIGH_CONVICTION_MAX_POC_DISTANCE_ATR,
                 "commodity_high_conviction_min_stop_distance_atr": settings.COMMODITY_HIGH_CONVICTION_MIN_STOP_DISTANCE_ATR,
             },
+            "contract_resolution": {
+                "policy": "front contract whose expiry is after the next valid MCX session date",
+                "contracts": list(self._active_contract_metadata.values()),
+                "rollover_events": list(self._runtime.rollover_events),
+            },
             "strategy_agents": [lane.build_status_payload() for lane in lane_agents],
             "strategies": self._strategy_catalog(),
             "summary": {
@@ -4079,6 +4339,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 {key: value for key, value in entry.items() if key != "audit_key"}
                 for entry in self._runtime.signal_audit
             ],
+            "rollover_events": list(self._runtime.rollover_events),
             "data_health": self._last_data_health,
         }
 

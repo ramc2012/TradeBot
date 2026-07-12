@@ -55,3 +55,15 @@ def test_normalize_upstox_candles_returns_chronological_utc_rows() -> None:
         "2026-05-30T03:46:00+00:00",
     ]
     assert rows[0]["volume"] == 100
+
+
+def test_front_month_uses_current_expiry_weekdays_where_they_diverge() -> None:
+    """July 2026: NSE last-Tuesday = Jul 28, BSE last-Thursday = Jul 30. On the
+    Wednesday between, NIFTY has already rolled to AUG while SENSEX is still in
+    JUL. The previous (inverted) weekdays got both of these wrong — subscribing
+    the auction order-flow feed to an expired NIFTY future for ~2 sessions/month
+    and rolling SENSEX ~2 days early into the thin next-month book."""
+    between = date(2026, 7, 29)
+    assert fyers_front_month_symbol("NIFTY", between) == "NSE:NIFTY26AUGFUT"
+    assert fyers_front_month_symbol("BANKNIFTY", between) == "NSE:BANKNIFTY26AUGFUT"
+    assert fyers_front_month_symbol("SENSEX", between) == "BSE:SENSEX26JULFUT"

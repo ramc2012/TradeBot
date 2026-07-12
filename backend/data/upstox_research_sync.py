@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 from loguru import logger
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from analysis.backtest import MACDBacktester, UpstoxAuthError
 from analysis.instruments import get_first_trading_day_after, get_fo_market
@@ -153,6 +154,7 @@ class UpstoxResearchSync:
     DISCOVERY_BACKLOG_FLOOR = 240
     SINGLE_CALL_30MINUTE_WINDOW_DAYS = 366
     EXPIRY_LOOKAHEAD_DAYS = 60
+    DB_WRITE_RETRIES = 3
 
     def __init__(
         self,
@@ -178,6 +180,11 @@ class UpstoxResearchSync:
     def _expired_contract_discovery_to_date(self, today: Optional[date] = None) -> date:
         reference_day = today or date.today()
         return min(self.to_date, reference_day)
+
+    @staticmethod
+    def _is_retryable_db_conflict(exc: BaseException) -> bool:
+        text_value = str(getattr(exc, "orig", exc)).lower()
+        return "deadlock detected" in text_value or "could not serialize access" in text_value
 
     async def _get_backlog_snapshot(self) -> dict[str, int]:
         async with AsyncSessionLocal() as session:
@@ -1146,19 +1153,6 @@ class UpstoxResearchSync:
             for underlying, expiry in touched_pairs:
                 await session.execute(
                     text("""
-                        DELETE FROM fo_option_chain_metrics
-                        WHERE underlying = :underlying
-                          AND expiry = :expiry
-                          AND interval = :interval
-                    """),
-                    {
-                        "underlying": underlying,
-                        "expiry": expiry,
-                        "interval": self.interval,
-                    },
-                )
-                await session.execute(
-                    text("""
                         INSERT INTO fo_option_chain_metrics (
                             time, underlying, expiry, interval,
                             ce_contracts, pe_contracts,
@@ -1198,6 +1192,17 @@ class UpstoxResearchSync:
                           AND interval = :interval
                           AND instrument_key IS NOT NULL
                         GROUP BY time, underlying, expiry, interval
+                        ON CONFLICT (underlying, expiry, interval, time) DO UPDATE
+                        SET ce_contracts = EXCLUDED.ce_contracts,
+                            pe_contracts = EXCLUDED.pe_contracts,
+                            ce_oi = EXCLUDED.ce_oi,
+                            pe_oi = EXCLUDED.pe_oi,
+                            ce_volume = EXCLUDED.ce_volume,
+                            pe_volume = EXCLUDED.pe_volume,
+                            oi_pcr = EXCLUDED.oi_pcr,
+                            volume_pcr = EXCLUDED.volume_pcr,
+                            underlying_price = EXCLUDED.underlying_price,
+                            synced_at = NOW()
                     """),
                     {
                         "underlying": underlying,
@@ -1208,6 +1213,99 @@ class UpstoxResearchSync:
                 refreshed += 1
             await session.commit()
         return refreshed
+
+    async def _persist_contract_sync_result(
+        self,
+        *,
+        row: dict[str, Any],
+        payload: list[dict[str, Any]],
+        status: str,
+        fetch_from_date: date,
+        fetch_to_date: date,
+    ) -> None:
+        ordered_payload = sorted(payload, key=lambda item: str(item.get("time") or ""))
+        for attempt in range(self.DB_WRITE_RETRIES):
+            try:
+                async with AsyncSessionLocal() as session:
+                    if ordered_payload:
+                        await session.execute(
+                            text("""
+                                INSERT INTO option_premium_candles (
+                                    time, instrument_key, trading_symbol, underlying, market,
+                                    expiry, strike, option_type, interval, open, high, low,
+                                    close, volume, oi, iv, delta, gamma, theta, vega,
+                                    underlying_price, source, synced_at, time_to_expiry_years
+                                )
+                                VALUES (
+                                    :time, :instrument_key, :trading_symbol, :underlying, :market,
+                                    :expiry, :strike, :option_type, :interval, :open, :high, :low,
+                                    :close, :volume, :oi, :iv, :delta, :gamma, :theta, :vega,
+                                    :underlying_price, :source, NOW(), :time_to_expiry_years
+                                )
+                                ON CONFLICT (instrument_key, interval, time) DO UPDATE
+                                SET trading_symbol = EXCLUDED.trading_symbol,
+                                    underlying = EXCLUDED.underlying,
+                                    market = EXCLUDED.market,
+                                    expiry = EXCLUDED.expiry,
+                                    strike = EXCLUDED.strike,
+                                    option_type = EXCLUDED.option_type,
+                                    open = EXCLUDED.open,
+                                    high = EXCLUDED.high,
+                                    low = EXCLUDED.low,
+                                    close = EXCLUDED.close,
+                                    volume = EXCLUDED.volume,
+                                    oi = EXCLUDED.oi,
+                                    iv = EXCLUDED.iv,
+                                    delta = EXCLUDED.delta,
+                                    gamma = EXCLUDED.gamma,
+                                    theta = EXCLUDED.theta,
+                                    vega = EXCLUDED.vega,
+                                    underlying_price = EXCLUDED.underlying_price,
+                                    source = EXCLUDED.source,
+                                    synced_at = NOW(),
+                                    time_to_expiry_years = EXCLUDED.time_to_expiry_years
+                            """),
+                            ordered_payload,
+                        )
+                    await session.execute(
+                        text("""
+                            UPDATE fo_contract_catalog
+                            SET sync_status = :sync_status,
+                                candle_count = :candle_count,
+                                candle_from_date = :candle_from_date,
+                                candle_to_date = :candle_to_date,
+                                first_candle_time = :first_candle_time,
+                                last_candle_time = :last_candle_time,
+                                last_synced_at = NOW(),
+                                last_error = NULL,
+                                updated_at = NOW()
+                            WHERE instrument_key = :instrument_key
+                        """),
+                        {
+                            "instrument_key": row["instrument_key"],
+                            "sync_status": status,
+                            "candle_count": len(ordered_payload),
+                            "candle_from_date": fetch_from_date,
+                            "candle_to_date": fetch_to_date,
+                            "first_candle_time": (
+                                _parse_iso_ts(ordered_payload[0]["time"]) if ordered_payload else None
+                            ),
+                            "last_candle_time": (
+                                _parse_iso_ts(ordered_payload[-1]["time"]) if ordered_payload else None
+                            ),
+                        },
+                    )
+                    await session.commit()
+                return
+            except DBAPIError as exc:
+                if not self._is_retryable_db_conflict(exc) or attempt + 1 >= self.DB_WRITE_RETRIES:
+                    raise
+                delay = 0.2 * (2**attempt)
+                logger.warning(
+                    f"Retrying contract write for {row['instrument_key']} after database conflict "
+                    f"({attempt + 1}/{self.DB_WRITE_RETRIES - 1}); sleeping {delay:.1f}s"
+                )
+                await asyncio.sleep(delay)
 
     async def _sync_contract_candles(self, limit: int) -> tuple[int, int, int, int]:
         async with AsyncSessionLocal() as session:
@@ -1359,77 +1457,13 @@ class UpstoxResearchSync:
                 )
                 status = "complete"
 
-            async with AsyncSessionLocal() as session:
-                if payload:
-                    await session.execute(
-                        text("""
-                            INSERT INTO option_premium_candles (
-                                time, instrument_key, trading_symbol, underlying, market,
-                                expiry, strike, option_type, interval, open, high, low,
-                                close, volume, oi, iv, delta, gamma, theta, vega,
-                                underlying_price, source, synced_at, time_to_expiry_years
-                            )
-                            VALUES (
-                                :time, :instrument_key, :trading_symbol, :underlying, :market,
-                                :expiry, :strike, :option_type, :interval, :open, :high, :low,
-                                :close, :volume, :oi, :iv, :delta, :gamma, :theta, :vega,
-                                :underlying_price, :source, NOW(), :time_to_expiry_years
-                            )
-                            ON CONFLICT (instrument_key, interval, time) DO UPDATE
-                            SET trading_symbol = EXCLUDED.trading_symbol,
-                                underlying = EXCLUDED.underlying,
-                                market = EXCLUDED.market,
-                                expiry = EXCLUDED.expiry,
-                                strike = EXCLUDED.strike,
-                                option_type = EXCLUDED.option_type,
-                                open = EXCLUDED.open,
-                                high = EXCLUDED.high,
-                                low = EXCLUDED.low,
-                                close = EXCLUDED.close,
-                                volume = EXCLUDED.volume,
-                                oi = EXCLUDED.oi,
-                                iv = EXCLUDED.iv,
-                                delta = EXCLUDED.delta,
-                                gamma = EXCLUDED.gamma,
-                                theta = EXCLUDED.theta,
-                                vega = EXCLUDED.vega,
-                                underlying_price = EXCLUDED.underlying_price,
-                                source = EXCLUDED.source,
-                                synced_at = NOW(),
-                                time_to_expiry_years = EXCLUDED.time_to_expiry_years
-                        """),
-                        payload,
-                    )
-
-                await session.execute(
-                    text("""
-                        UPDATE fo_contract_catalog
-                        SET sync_status = :sync_status,
-                            candle_count = :candle_count,
-                            candle_from_date = :candle_from_date,
-                            candle_to_date = :candle_to_date,
-                            first_candle_time = :first_candle_time,
-                            last_candle_time = :last_candle_time,
-                            last_synced_at = NOW(),
-                            last_error = NULL,
-                            updated_at = NOW()
-                        WHERE instrument_key = :instrument_key
-                    """),
-                    {
-                        "instrument_key": row["instrument_key"],
-                        "sync_status": status,
-                        "candle_count": len(payload),
-                        "candle_from_date": fetch_from_date,
-                        "candle_to_date": fetch_to_date,
-                        "first_candle_time": (
-                            _parse_iso_ts(payload[0]["time"]) if payload else None
-                        ),
-                        "last_candle_time": (
-                            _parse_iso_ts(payload[-1]["time"]) if payload else None
-                        ),
-                    },
-                )
-                await session.commit()
+            await self._persist_contract_sync_result(
+                row=row,
+                payload=payload,
+                status=status,
+                fetch_from_date=fetch_from_date,
+                fetch_to_date=fetch_to_date,
+            )
 
             if payload:
                 stored_rows += len(payload)
@@ -1453,26 +1487,22 @@ class UpstoxResearchSync:
             candles = await session.execute(
                 text("""
                     SELECT
-                        COUNT(*) AS option_candles,
-                        COUNT(DISTINCT o.instrument_key) AS option_contracts,
-                        COUNT(DISTINCT o.underlying) AS option_underlyings
-                    FROM option_premium_candles o
-                    JOIN fo_contract_catalog c
-                      ON c.instrument_key = o.instrument_key
-                    WHERE o.instrument_key IS NOT NULL
-                      AND c.sync_status <> 'skipped'
+                        COALESCE(SUM(candle_count) FILTER (WHERE sync_status <> 'skipped'), 0)
+                            AS option_candles,
+                        COUNT(*) FILTER (WHERE sync_status <> 'skipped') AS option_contracts,
+                        COUNT(DISTINCT underlying) FILTER (WHERE sync_status <> 'skipped')
+                            AS option_underlyings
+                    FROM fo_contract_catalog
                 """)
             )
             spot = await session.execute(
                 text("""
-                    SELECT COUNT(*) AS spot_candles
-                    FROM underlying_spot_candles
+                    SELECT approximate_row_count('underlying_spot_candles'::regclass)
                 """)
             )
             chain = await session.execute(
                 text("""
-                    SELECT COUNT(*) AS chain_rows
-                    FROM fo_option_chain_metrics
+                    SELECT approximate_row_count('fo_option_chain_metrics'::regclass)
                 """)
             )
             contract_status = await session.execute(
@@ -1491,6 +1521,7 @@ class UpstoxResearchSync:
                 "option_underlyings": int(candle_row.option_underlyings or 0),
                 "spot_candles": int(spot.scalar() or 0),
                 "chain_metric_rows": int(chain.scalar() or 0),
+                "count_mode": "catalog_and_postgres_estimates",
                 "contract_status": {
                     row.sync_status: int(row.contracts)
                     for row in contract_status.fetchall()

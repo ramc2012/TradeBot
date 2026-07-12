@@ -32,6 +32,14 @@ NSE_INDEX_SCOPE = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
 STRATEGY_LIVE_WATCHLIST_MAX_AGE_SECONDS = 10 * 60
 STRATEGY_EXECUTION_MAX_WATCHLIST_AGE_SECONDS = 36 * 60 * 60
 STRATEGY_MIN_LATEST_UNDERLYINGS = 50
+# Bounds on the index option-chain refresh step. A bare broker await here can
+# block for minutes on a saturated limiter (the acquire is unbounded) — the
+# exact defect class behind the 07-09/07-10 S1 freezes, one stage later.
+CHAIN_REFRESH_PER_PAIR_TIMEOUT_SECONDS = 20.0
+CHAIN_REFRESH_STEP_BUDGET_SECONDS = 120.0
+# Expiry discovery runs BEFORE the S1-critical watchlist write — it must never
+# be able to abort or wedge that step.
+EXPIRY_REFRESH_TIMEOUT_SECONDS = 60.0
 APP_SYMBOLS = {
     "NIFTY": "NSE:NIFTY50-INDEX",
     "BANKNIFTY": "NSE:BANKNIFTY-INDEX",
@@ -386,7 +394,30 @@ class MarketIntelligenceRuntime:
         from market_data.atm_watchlist import atm_watchlist_service
 
         now = datetime.now(IST)
-        expiry_payload = await atm_watchlist_service.get_expiries(None, live_refresh=True)
+        # Expiry discovery is broker-facing and runs BEFORE the S1-critical
+        # watchlist write: bound it, and on any failure fall back to the cached
+        # (live_refresh=False) payload — the watchlist step must always proceed.
+        try:
+            expiry_payload = await asyncio.wait_for(
+                atm_watchlist_service.get_expiries(None, live_refresh=True),
+                timeout=EXPIRY_REFRESH_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 (includes asyncio.TimeoutError)
+            logger.warning(
+                f"[MarketIntelligence] live expiry refresh failed ({exc!r}); "
+                "falling back to cached expiries."
+            )
+            try:
+                expiry_payload = await asyncio.wait_for(
+                    atm_watchlist_service.get_expiries(None, live_refresh=False),
+                    timeout=EXPIRY_REFRESH_TIMEOUT_SECONDS,
+                )
+            except Exception as fallback_exc:  # noqa: BLE001
+                logger.warning(
+                    f"[MarketIntelligence] cached expiry fallback failed ({fallback_exc!r}); "
+                    "proceeding with empty expiry payload."
+                )
+                expiry_payload = {}
         stock_monthly_expiry = str(expiry_payload.get("stock_monthly_expiry") or "").strip()
         index_expiries = sorted(
             {
@@ -562,15 +593,49 @@ class MarketIntelligenceRuntime:
                 "requests": [],
             }
 
+        # Register the cooldown BEFORE the work (mirrors the gap-fill fix): a
+        # watchdog kill mid-refresh must not cause every subsequent cycle to
+        # re-run the whole chain sweep from scratch.
+        self._last_chain_refresh_at = datetime.now(IST)
+
         requests = await self._load_chain_refresh_candidates()
         results: list[dict[str, Any]] = []
+        # Un-timed broker awaits in a serial loop are the S1-freeze defect
+        # class: bound each pair (the limiter acquire inside is unbounded) and
+        # bound the whole step so it can never ride the runner to the watchdog.
+        from time import monotonic
+
+        step_deadline = monotonic() + CHAIN_REFRESH_STEP_BUDGET_SECONDS
+        timed_out = 0
         for symbol_code, expiry_iso in requests:
-            result = await self._refresh_cached_index_option_chain(
-                symbol_code,
-                expiry_iso,
-                upstox_adapter=upstox_adapter,
-                fyers_adapter=fyers_adapter,
-            )
+            if monotonic() >= step_deadline:
+                logger.warning(
+                    "[MarketIntelligence] Option-chain refresh budget "
+                    f"({CHAIN_REFRESH_STEP_BUDGET_SECONDS:.0f}s) hit with "
+                    f"{len(requests) - len(results)} pairs remaining; deferring to next cycle."
+                )
+                break
+            try:
+                result = await asyncio.wait_for(
+                    self._refresh_cached_index_option_chain(
+                        symbol_code,
+                        expiry_iso,
+                        upstox_adapter=upstox_adapter,
+                        fyers_adapter=fyers_adapter,
+                    ),
+                    timeout=CHAIN_REFRESH_PER_PAIR_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                timed_out += 1
+                logger.warning(
+                    "[MarketIntelligence] Option-chain refresh timed out for "
+                    f"{symbol_code} {expiry_iso} "
+                    f"(> {CHAIN_REFRESH_PER_PAIR_TIMEOUT_SECONDS:.0f}s); continuing."
+                )
+                results.append(
+                    {"status": "error", "symbol": symbol_code, "expiry": expiry_iso, "detail": "timeout"}
+                )
+                continue
             if result.get("status") == "error":
                 logger.warning(
                     "[MarketIntelligence] Option-chain refresh failed for "

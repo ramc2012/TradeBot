@@ -5,6 +5,7 @@ from datetime import date
 
 from data.run_upstox_research_sync import _planned_sleep_seconds
 from analysis.backtest import UpstoxAuthError
+import data.upstox_research_sync as research_sync_module
 from data.upstox_research_sync import UpstoxResearchSync
 
 
@@ -165,3 +166,104 @@ def test_expired_contract_auth_errors_are_soft_for_discovery_only() -> None:
 
     assert UpstoxResearchSync._is_expired_contract_discovery_auth_error(soft_error) is True
     assert UpstoxResearchSync._is_expired_contract_discovery_auth_error(hard_error) is False
+
+
+def test_rebuild_chain_metrics_uses_upsert_without_delete(monkeypatch) -> None:
+    class FakeSession:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+            self.committed = False
+
+        async def execute(self, statement, params=None):  # noqa: ANN001
+            self.statements.append(str(statement))
+            return None
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    class FakeSessionContext:
+        def __init__(self, session: FakeSession) -> None:
+            self._session = session
+
+        async def __aenter__(self) -> FakeSession:
+            return self._session
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+    fake_session = FakeSession()
+    monkeypatch.setattr(
+        research_sync_module,
+        "AsyncSessionLocal",
+        lambda: FakeSessionContext(fake_session),
+    )
+
+    sync = UpstoxResearchSync(
+        access_token="token",
+        from_date=date(2025, 3, 28),
+        to_date=date(2026, 3, 29),
+        interval="30minute",
+    )
+
+    asyncio.run(sync._rebuild_chain_metrics({("INDUSTOWER", date(2026, 6, 30))}))
+
+    assert fake_session.committed is True
+    assert len(fake_session.statements) == 1
+    sql = fake_session.statements[0]
+    assert "INSERT INTO fo_option_chain_metrics" in sql
+    assert "ON CONFLICT (underlying, expiry, interval, time) DO UPDATE" in sql
+    assert "DELETE FROM fo_option_chain_metrics" not in sql
+
+
+def test_db_summary_uses_catalog_and_estimates_instead_of_hypertable_counts(monkeypatch) -> None:
+    class Result:
+        def __init__(self, *, row=None, scalar_value=None, rows=None) -> None:
+            self._row = row
+            self._scalar = scalar_value
+            self._rows = rows or []
+
+        def fetchone(self):
+            return self._row
+
+        def scalar(self):
+            return self._scalar
+
+        def fetchall(self):
+            return self._rows
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        async def execute(self, statement, params=None):  # noqa: ANN001
+            sql = str(statement)
+            self.statements.append(sql)
+            if "SUM(candle_count)" in sql:
+                return Result(row=type("Row", (), {"option_candles": 10, "option_contracts": 2, "option_underlyings": 1})())
+            if "underlying_spot_candles" in sql:
+                return Result(scalar_value=20)
+            if "fo_option_chain_metrics" in sql:
+                return Result(scalar_value=30)
+            return Result(rows=[type("Row", (), {"sync_status": "complete", "contracts": 2})()])
+
+    class Context:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return None
+
+    session = FakeSession()
+    monkeypatch.setattr(research_sync_module, "AsyncSessionLocal", Context)
+    sync = UpstoxResearchSync("token", date(2025, 1, 1), date(2026, 1, 1))
+
+    summary = asyncio.run(sync.get_db_summary())
+
+    assert summary["count_mode"] == "catalog_and_postgres_estimates"
+    assert not any("FROM option_premium_candles" in sql for sql in session.statements)
+    assert not any("COUNT(*) AS spot_candles" in sql for sql in session.statements)
+
+
+def test_deadlock_is_classified_as_retryable() -> None:
+    assert UpstoxResearchSync._is_retryable_db_conflict(RuntimeError("deadlock detected")) is True
+    assert UpstoxResearchSync._is_retryable_db_conflict(RuntimeError("connection refused")) is False

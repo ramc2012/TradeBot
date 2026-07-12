@@ -87,6 +87,11 @@ FILL_CONFIRM = Histogram(
 )
 LOOP_LAG = Histogram("nomad_event_loop_lag_seconds", "Event-loop scheduling delay", buckets=_LAG)
 LOOP_LAG_CURRENT = Gauge("nomad_event_loop_lag_seconds_current", "Most recent event-loop lag sample (seconds)")
+TELEGRAM_SENDS = Counter(
+    "nomad_telegram_sends_total",
+    "Telegram send attempts by result (ok/auth_error/http_error/transport_error/suppressed_*)",
+    ["result"],
+)
 
 
 # ── Helpers (never raise) ─────────────────────────────────────────────────────
@@ -97,6 +102,13 @@ def observe_tick(source: str, age_seconds: Optional[float]) -> None:
         TICKS_INGESTED.labels(source=src).inc()
         if age_seconds is not None and age_seconds >= 0:
             TICK_AGE.labels(source=src).observe(age_seconds)
+    except Exception:
+        pass
+
+
+def record_telegram_send(result: str) -> None:
+    try:
+        TELEGRAM_SENDS.labels(result=result or "unknown").inc()
     except Exception:
         pass
 

@@ -45,6 +45,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from loguru import logger
+
 
 CBE_INITIAL_CAPITAL: float = 1_000_000.0
 
@@ -985,29 +987,46 @@ class CBEPaperBook:
                     continue
         return records
 
+    def _empty_book(self) -> dict[str, Any]:
+        return {
+            "open_positions": [],
+            "closed_positions": [],
+            "last_synced_at": None,
+            "peak_equity": self.initial_capital,
+            "max_drawdown": 0.0,
+        }
+
     def _load_positions(self) -> dict[str, Any]:
         if not self.positions_path.exists():
-            return {
-                "open_positions": [],
-                "closed_positions": [],
-                "last_synced_at": None,
-                "peak_equity": self.initial_capital,
-                "max_drawdown": 0.0,
-            }
+            return self._empty_book()
         try:
             return json.loads(self.positions_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return {
-                "open_positions": [],
-                "closed_positions": [],
-                "last_synced_at": None,
-                "peak_equity": self.initial_capital,
-                "max_drawdown": 0.0,
-            }
+        except json.JSONDecodeError as exc:
+            # This file is the book's SOLE store — silently resetting to an
+            # empty book on a torn write erased the entire history. Preserve
+            # the corrupt file for forensics, scream, and start empty only as
+            # the last resort (the journal still holds every event).
+            corrupt_path = self.positions_path.with_name(
+                f"{self.positions_path.name}.corrupt-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+            )
+            try:
+                self.positions_path.rename(corrupt_path)
+            except OSError:
+                corrupt_path = self.positions_path
+            logger.error(
+                f"[CBE paper] positions file is corrupt ({exc}); preserved at "
+                f"{corrupt_path} — starting from an EMPTY book. Journal at "
+                f"{self.journal_path} retains full event history for manual rebuild."
+            )
+            return self._empty_book()
 
     def _save_positions(self, state: dict[str, Any]) -> None:
+        # Atomic tmp+rename (same pattern as gann/directional-policy): a crash
+        # mid-write must never leave a torn JSON that erases the book on load.
         self.root.mkdir(parents=True, exist_ok=True)
-        self.positions_path.write_text(json.dumps(state, default=str, indent=2), encoding="utf-8")
+        tmp_path = self.positions_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(state, default=str, indent=2), encoding="utf-8")
+        tmp_path.replace(self.positions_path)
 
 
 # Module-level singleton, mirrors directional_options_service / fmp_service pattern.

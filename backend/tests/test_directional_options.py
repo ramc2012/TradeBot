@@ -92,7 +92,13 @@ def test_regime_classifier_marks_chop_as_no_trade() -> None:
     assert regime.trade_allowed is False
 
 
-def test_signal_engine_generates_bullish_signal_in_trend_regime() -> None:
+def test_signal_engine_generates_bullish_signal_in_trend_regime(monkeypatch) -> None:
+    # This exercises the LEGACY momentum path, which only trades when the
+    # positional flag is OFF — with it on, a missing positioning row now fails
+    # closed (no fallback to the measured-PF-0.2 momentum entry).
+    from core.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED", False, raising=False)
     engine = DirectionalSignalEngine(clone_default_config()["signal_engine"])
     regime = RegimeSnapshot(
         label="trend",
@@ -921,6 +927,12 @@ async def test_directional_options_paper_store_reports_current_nifty_monthly_exp
 
 @pytest.mark.asyncio
 async def test_directional_options_live_snapshot_uses_local_market_intelligence(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # This asserts the LEGACY-view plumbing (signal → selection → local
+    # watchlist rows). With the positional flag on, a missing positioning
+    # feed now fails closed (no signal), so pin the flag off here.
+    from core.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED", False, raising=False)
     config = clone_default_config()
     config["paper_trading"]["journal_root"] = tmp_path / "directional-paper"
     service = DirectionalOptionsService(config)

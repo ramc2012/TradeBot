@@ -76,17 +76,33 @@ def _lane_status_payload(
     lane: dict[str, Any],
     positions: int,
     last_scan_at: str | None,
+    stale_threshold_seconds: int | None = None,
+    now_ist: datetime | None = None,
 ) -> dict[str, Any]:
+    status = lane.get("status") or ("active" if positions else "idle")
+    last_scan_dt = _parse_iso_datetime(last_scan_at)
+    last_scan_age_seconds: float | None = None
+    if last_scan_dt is not None and now_ist is not None:
+        last_scan_age_seconds = max((now_ist - last_scan_dt).total_seconds(), 0.0)
+    if (
+        status in {"active", "healthy", "ready"}
+        and stale_threshold_seconds is not None
+        and last_scan_age_seconds is not None
+        and last_scan_age_seconds > stale_threshold_seconds
+    ):
+        status = "stale"
     return {
         "key": f"{parent}:{lane.get('key')}",
         "parent": parent,
         "label": lane.get("label") or lane.get("title") or lane.get("key") or "Strategy",
-        "status": lane.get("status") or ("active" if positions else "idle"),
+        "status": status,
         "timeframe": lane.get("timeframe"),
         "scope": lane.get("scope") or lane.get("instrument"),
         "open_positions": positions,
         "last_scan_at": last_scan_at,
+        "last_scan_age_seconds": last_scan_age_seconds,
         "scan_interval_seconds": lane.get("scan_interval_seconds"),
+        "stale_threshold_seconds": stale_threshold_seconds,
         "notes": lane.get("notes"),
     }
 
@@ -107,6 +123,14 @@ def _agent_status_snapshot(agent: Any) -> dict[str, Any]:
         return agent.get_status(refresh=False)
     except TypeError:
         return agent.get_status()
+
+
+def _strategy_stale_threshold_seconds(scan_interval_seconds: Any) -> int:
+    try:
+        scan_interval = max(int(scan_interval_seconds or 0), 0)
+    except (TypeError, ValueError):
+        scan_interval = 0
+    return max(300, scan_interval * 4)
 
 
 async def _manual_book_summary() -> dict[str, Any]:
@@ -375,6 +399,31 @@ def _strategy_service(
     strategy_items = status.get("strategies") or []
     now_ist = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5, minutes=30)))
     market_open = _in_market_hours(now_ist) if key == "nse_strategy" else _in_commodity_hours(now_ist)
+    stale_threshold_seconds = _strategy_stale_threshold_seconds(status.get("scan_interval_seconds"))
+    last_run_at = status.get("last_run_at")
+    last_run_dt = _parse_iso_datetime(last_run_at)
+    last_run_age_seconds: float | None = None
+    if last_run_dt is not None:
+        last_run_age_seconds = max((now_ist - last_run_dt).total_seconds(), 0.0)
+    freshness_reference_at = last_run_at
+    freshness_age_seconds = last_run_age_seconds
+    freshness_candidates = [
+        (
+            _parse_iso_datetime(item.get("last_scan_at")),
+            item.get("last_scan_at"),
+        )
+        for item in strategy_items
+        if item.get("last_scan_at")
+    ]
+    freshness_candidates = [
+        (scan_dt, scan_at)
+        for scan_dt, scan_at in freshness_candidates
+        if scan_dt is not None
+    ]
+    if freshness_candidates:
+        freshest_dt, freshest_at = max(freshness_candidates, key=lambda item: item[0])
+        freshness_reference_at = str(freshest_at)
+        freshness_age_seconds = max((now_ist - freshest_dt).total_seconds(), 0.0)
     mode = "idle"
 
     if last_error:
@@ -401,6 +450,13 @@ def _strategy_service(
         service_status = "idle"
         mode = "market_closed"
         detail = "Market closed. Supervisor waiting for the next session."
+    elif freshness_age_seconds is not None and freshness_age_seconds > stale_threshold_seconds:
+        service_status = "degraded"
+        mode = "stale"
+        detail = (
+            f"Supervisor status is stale during market hours: latest activity "
+            f"{int(freshness_age_seconds)}s ago."
+        )
     elif loop_active:
         service_status = "healthy"
         mode = "active"
@@ -423,6 +479,8 @@ def _strategy_service(
                 lane=lane,
                 positions=positions,
                 last_scan_at=strategy.get("last_scan_at") or status.get("last_run_at"),
+                stale_threshold_seconds=stale_threshold_seconds,
+                now_ist=now_ist,
             )
         )
 
@@ -439,7 +497,11 @@ def _strategy_service(
             "mode": mode,
             "kill_switch_active": kill_switch,
             "scan_interval_seconds": status.get("scan_interval_seconds"),
-            "last_run_at": status.get("last_run_at"),
+            "last_run_at": last_run_at,
+            "last_run_age_seconds": last_run_age_seconds,
+            "freshness_reference_at": freshness_reference_at,
+            "freshness_age_seconds": freshness_age_seconds,
+            "stale_threshold_seconds": stale_threshold_seconds,
             "next_scan_at": status.get("next_scan_at"),
             "strategy_lane_count": len(lanes),
             "open_positions": sum(
@@ -579,6 +641,48 @@ async def _timed_service(
         )
 
 
+def _notifications_service() -> dict[str, Any]:
+    """Telegram delivery health — a dead bot token must show up here, not as a
+    silent zero-notification day."""
+    try:
+        from notifications.telegram_agent import telegram_agent
+
+        health = telegram_agent.get_health()
+        if health.get("auth_failed"):
+            status = "critical"
+            detail = (
+                f"Telegram bot token rejected (HTTP {health.get('last_error_status')}); "
+                "alerts are NOT being delivered."
+            )
+        elif int(health.get("consecutive_failures") or 0) >= 3:
+            status = "degraded"
+            detail = (
+                f"{health.get('consecutive_failures')} consecutive Telegram send failures "
+                f"(last status {health.get('last_error_status')})."
+            )
+        elif not health.get("last_success_at") and not health.get("last_failure_at"):
+            status = "idle"
+            detail = "No Telegram sends attempted this process lifetime."
+        else:
+            status = "healthy"
+            detail = f"Last successful Telegram delivery {health.get('last_success_at')}."
+        return _service(
+            key="notifications",
+            label="Telegram Notifications",
+            status=status,
+            detail=detail,
+            meta=health,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _service(
+            key="notifications",
+            label="Telegram Notifications",
+            status="degraded",
+            detail=f"Telegram health unavailable: {exc}",
+            meta={},
+        )
+
+
 @router.get("/health")
 async def system_health() -> dict[str, Any]:
     cached = _health_cache.get("payload")
@@ -603,6 +707,7 @@ async def system_health() -> dict[str, Any]:
         # Sync helpers run first (cheap, no I/O).
         research_sync_service = _research_sync_service(now_utc)
         market_service = _market_data_service()
+        notifications_service = _notifications_service()
         nse_strategy_service, nse_lanes = _strategy_service(
             key="nse_strategy",
             label="NSE Strategy Supervisor",
@@ -646,6 +751,7 @@ async def system_health() -> dict[str, Any]:
             commodity_strategy_service,
             auction_service,
             fractal_market_profile_service,
+            notifications_service,
         ]
 
         overall = "healthy"

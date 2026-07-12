@@ -785,6 +785,11 @@ class OptionHistoryService:
                 SELECT time, ltp, volume, oi, iv, underlying_price
                 FROM atm_option_watchlist_snapshots
                 WHERE instrument_key = :instrument_key
+                  -- Chunk-prune floor (mirrors the 180d band on the
+                  -- option_premium_candles query above): un-banded, this
+                  -- ORDER BY time DESC scans/locks every 1-day chunk and runs
+                  -- inside the concurrency-6 premium top-up.
+                  AND time >= NOW() - INTERVAL '180 days'
                 ORDER BY time DESC
                 LIMIT :limit
                 """,
@@ -803,6 +808,7 @@ class OptionHistoryService:
                   AND expiry = :expiry
                   AND strike = :strike
                   AND option_type = :option_type
+                  AND time >= NOW() - INTERVAL '180 days'
                 ORDER BY time DESC
                 LIMIT :limit
                 """,

@@ -138,9 +138,11 @@ def fyers_front_month_symbol(underlying: str, as_of: date) -> str:
 
 
 def _approx_monthly_expiry(year: int, month: int, underlying: str) -> date:
-    # NSE index futures use the last Thursday. BSE SENSEX futures currently use
-    # Tuesday expiry conventions; this is only for front-month symbol fallback.
-    weekday = 1 if underlying == "SENSEX" else 3
+    # Post-Sept-2025 SEBI expiry regime: NSE index contracts expire on the last
+    # TUESDAY; BSE (SENSEX) on the last THURSDAY. (These were previously
+    # inverted here, which subscribed the auction order-flow feed to an expired
+    # NIFTY future for ~2 sessions every month.) Monday=0 … Sunday=6.
+    weekday = 3 if underlying == "SENSEX" else 1
     next_month = date(year + int(month == 12), 1 if month == 12 else month + 1, 1)
     day = next_month - timedelta(days=1)
     while day.weekday() != weekday:

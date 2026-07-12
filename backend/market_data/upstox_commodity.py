@@ -44,6 +44,9 @@ def _parse_mcx_future_symbol(symbol: str) -> Optional[tuple[str, int, int]]:
 
 
 def _parse_expiry(value: Any) -> Optional[date]:
+    # Verified against the live master (2026-07-12): Upstox stamps MCX expiry
+    # epochs at 23:59:59 IST == 18:29:59 UTC of the SAME calendar day
+    # (epoch % 86400 == 66599), so the UTC .date() is the correct expiry date.
     if isinstance(value, (int, float)):
         try:
             return datetime.fromtimestamp(float(value) / 1000.0, tz=timezone.utc).date()
@@ -53,6 +56,73 @@ def _parse_expiry(value: Any) -> Optional[date]:
         return date.fromisoformat(str(value or "").strip())
     except ValueError:
         return None
+
+
+def _fyers_future_symbol(root: str, expiry: date) -> str:
+    return f"MCX:{canonicalize_commodity_root(root)}{expiry:%y%b}FUT".upper()
+
+
+def select_active_mcx_future_contract(
+    contracts: list[dict[str, Any]],
+    symbol_or_root: str,
+    *,
+    session_date: date,
+) -> Optional[dict[str, Any]]:
+    """Select the first contract that remains valid beyond ``session_date``.
+
+    Rolling on the first MCX session whose date reaches the current contract's
+    expiry keeps the lane out of an expiring instrument for that session. The
+    broker master is authoritative for the actual expiry date; the configured
+    symbol contributes only the commodity root.
+    """
+    parsed = _parse_mcx_future_symbol(symbol_or_root)
+    root = canonicalize_commodity_root(
+        parsed[0] if parsed else str(symbol_or_root or "").split(":")[-1]
+    )
+    candidates: list[tuple[date, dict[str, Any]]] = []
+    for raw in contracts:
+        candidate_root = canonicalize_commodity_root(
+            raw.get("underlying_symbol") or raw.get("name") or raw.get("short_name") or ""
+        )
+        expiry = _parse_expiry(raw.get("expiry"))
+        if (
+            candidate_root != root
+            or expiry is None
+            or str(raw.get("exchange") or "").upper() != "MCX"
+            or str(raw.get("segment") or "").upper() != "MCX_FO"
+            or str(raw.get("instrument_type") or "").upper() != "FUT"
+            or not str(raw.get("instrument_key") or "").strip()
+        ):
+            continue
+        candidates.append((expiry, dict(raw)))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], str(item[1].get("trading_symbol") or "")))
+    selected = next((item for item in candidates if item[0] > session_date), None)
+    if selected is None:
+        selected = next((item for item in candidates if item[0] >= session_date), candidates[-1])
+    expiry, contract = selected
+    return {
+        "symbol": _fyers_future_symbol(root, expiry),
+        "root": root,
+        "instrument_key": str(contract.get("instrument_key") or ""),
+        "trading_symbol": str(contract.get("trading_symbol") or ""),
+        "expiry": expiry.isoformat(),
+        "lot_size": int(contract.get("lot_size") or 0),
+    }
+
+
+async def resolve_active_upstox_mcx_future(
+    symbol_or_root: str,
+    *,
+    session_date: date,
+) -> Optional[dict[str, Any]]:
+    return select_active_mcx_future_contract(
+        await _load_mcx_instruments(),
+        symbol_or_root,
+        session_date=session_date,
+    )
 
 
 async def get_upstox_adapter() -> Optional[BrokerAdapter]:
@@ -141,8 +211,23 @@ async def _load_mcx_instruments() -> list[dict[str, Any]]:
         _INSTRUMENTS_CACHE = (monotonic(), rows)
         return list(rows)
     except Exception as exc:
-        logger.warning(f"[Commodity Upstox] MCX instruments download failed: {exc}")
-        return []
+        # Serve the stale cache rather than []: an empty result makes the
+        # resolver fall back to the CONFIGURED (older) contract, which can roll
+        # an already-rolled position BACKWARD — a full phantom round trip per
+        # CDN flap. Contract lists change ~monthly; stale beats empty.
+        if cached_rows:
+            age_minutes = (monotonic() - cached_at) / 60.0
+        else:
+            age_minutes = None
+        logger.warning(
+            f"[Commodity Upstox] MCX instruments download failed: {exc}"
+            + (
+                f" — serving stale cache ({len(cached_rows)} rows, {age_minutes:.0f}m old)"
+                if cached_rows
+                else " — no cache available"
+            )
+        )
+        return list(cached_rows) if cached_rows else []
 
 
 def _candidate_rank(
@@ -288,14 +373,26 @@ async def load_upstox_mcx_quote_snapshots(symbols: list[str]) -> dict[str, dict[
         return {}
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(
-                f"{getattr(adapter, 'BASE_URL')}/market-quote/quotes",
+        # Route through the adapter's rate-limited chokepoint (shared
+        # UPSTOX_DATA_LIMITER + 429/5xx retry + circuit recording). This poll
+        # runs every ~12s while MCX is open — raw httpx here was an unmetered
+        # bypass of the shared 8/s · 1800/30min budget.
+        if hasattr(adapter, "_get_data_json"):
+            payload_json = await adapter._get_data_json(  # type: ignore[attr-defined]
+                "/market-quote/quotes",
                 params={"instrument_key": ",".join(instrument_by_symbol.values())},
-                headers=adapter._headers(),  # type: ignore[attr-defined]
+                timeout=10.0,
             )
-        response.raise_for_status()
-        data = response.json().get("data", {})
+            data = (payload_json or {}).get("data", {})
+        else:  # pragma: no cover — non-Upstox adapter shape
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.get(
+                    f"{getattr(adapter, 'BASE_URL')}/market-quote/quotes",
+                    params={"instrument_key": ",".join(instrument_by_symbol.values())},
+                    headers=adapter._headers(),  # type: ignore[attr-defined]
+                )
+            response.raise_for_status()
+            data = response.json().get("data", {})
     except Exception as exc:
         logger.debug(f"[Commodity Upstox] Full quote fetch failed: {exc}")
         return {}

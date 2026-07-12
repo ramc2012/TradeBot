@@ -385,6 +385,19 @@ class MacdRefinedPaperStore:
         realized_delta = 0.0
         realized_net_delta = 0.0
 
+        # Stale-mark guard: _marks_for_open computes `fresh` (capture from
+        # today) but it was never consumed — a broker outage froze the parquet
+        # and the stop/targets/trail then fired at pre-outage premiums (or
+        # never fired while the real contract collapsed). On a stale mark,
+        # skip PRICE-based exits; the time-based window_end still runs so a
+        # position can never be immortal.
+        mark_fresh = bool(mark.get("fresh", True))
+        if not mark_fresh:
+            if bool(mark.get("window_end_passed")):
+                gross_delta, net_delta = self._book(p, latest, spot, now, qty, "window_end")
+                return True, gross_delta, net_delta
+            return False, 0.0, 0.0
+
         # (a) HARD STOP — gap-safe: always evaluated on the freshest mark.
         if latest <= entry_gross * (1.0 - stop_pct):
             gross_delta, net_delta = self._book(p, latest, spot, now, qty, "stop_loss")

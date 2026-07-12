@@ -138,8 +138,18 @@ class StrategyLearningService:
             confidence = _clamp(0.52 + score / 220.0, 0.35, 0.82)
             risk_multiplier = _clamp(1.0 + score / 220.0, 0.65, 1.25)
             size_multiplier = _clamp(1.0 + score / 260.0, 0.55, 1.20)
+            # Blocking needs a higher evidence bar than scoring: at
+            # min_trades=2 a key was PERMANENTLY dark after its first two
+            # losses (blocked keys can never trade their way back — the score
+            # only clears when the lookback ages the rows out). That silently
+            # re-capped the "uncapped" S1 signal test one key at a time.
+            block_min_trades = max(
+                int(getattr(settings, "STRATEGY_LEARNING_BLOCK_MIN_TRADES", 6) or 6),
+                min_trades,
+            )
             block_new_entries = bool(
                 settings.STRATEGY_LEARNING_BLOCK_ENTRIES_ENABLED
+                and closed >= block_min_trades
                 and win_rate is not None
                 and win_rate < 0.25
                 and (expectancy or 0.0) < 0.0
