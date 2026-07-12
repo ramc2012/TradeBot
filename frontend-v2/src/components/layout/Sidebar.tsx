@@ -78,6 +78,7 @@ const NAV_GROUPS: NavGroup[] = [
       { href: "/strategies/gann", label: "Gann TP Delta", icon: Compass },
       { href: "/strategies/mp", label: "MP Live", icon: Sigma },
       { href: "/strategies/cbe", label: "CBE Scanner", icon: Radar },
+      { href: "/strategies/institutional-convergence", label: "Convergence", icon: Network },
       { href: "/strategies/commodity", label: "Commodity", icon: Waves },
       // Sniper parked out of production 2026-07-07 — revisit later.
       // Page + component preserved on disk; only the nav link is hidden.

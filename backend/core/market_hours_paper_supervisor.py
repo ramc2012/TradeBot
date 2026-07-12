@@ -250,6 +250,7 @@ class MarketHoursPaperSupervisor:
         from gann_tp_delta.service import gann_tp_delta_service
         from macd_refined.service import macd_refined_service
         from market_data.market_intelligence_runtime import market_intelligence_runtime
+        from institutional_convergence.service import institutional_convergence_service
 
         directional_service = directional_options_service
 
@@ -262,6 +263,9 @@ class MarketHoursPaperSupervisor:
 
         async def _auction_runner() -> dict[str, Any]:
             return await run_auction_market_cycle()
+
+        async def _institutional_convergence_runner() -> dict[str, Any]:
+            return await institutional_convergence_service.run_cycle()
 
         async def _fmp_runner() -> dict[str, Any]:
             results: list[dict[str, Any]] = []
@@ -699,6 +703,17 @@ class MarketHoursPaperSupervisor:
                 # ceiling on a cold option-chain cache. Keep the timeout
                 # bounded, but let the cycle finish; the automation performs a
                 # second market-hours check before any durable trade write.
+                timeout_seconds=600.0,
+            ),
+            RunnerConfig(
+                key="institutional_convergence",
+                label="Institutional Convergence Shadow Cycle",
+                interval_seconds=settings.INSTITUTIONAL_CONVERGENCE_AUTO_INTERVAL_SECONDS,
+                callback=_institutional_convergence_runner,
+                enabled=settings.INSTITUTIONAL_CONVERGENCE_AUTO_ENABLED,
+                market_hours_fn=_in_nse_market_hours,
+                next_open_fn=_next_nse_market_open,
+                post_close_catchup=False,
                 timeout_seconds=600.0,
             ),
             RunnerConfig(
@@ -1196,6 +1211,7 @@ class MarketHoursPaperSupervisor:
     ) -> None:
         market_map = {
             "auction_intelligence": "auction_intelligence",
+            "institutional_convergence": "institutional_convergence",
             "fractal_market_profile": "fmp",
             "directional_options": "directional_options",
             "cbe_scanner": "cbe_scanner",

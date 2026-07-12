@@ -223,6 +223,10 @@ class Settings(BaseSettings):
     # it. Without this flag, learning was purely a size/confidence
     # advisor and never actually filtered bad-history setups out.
     STRATEGY_LEARNING_BLOCK_ENTRIES_ENABLED: bool = True
+    # The BLOCK decision needs more evidence than scoring: blocking on 2
+    # closed trades made 2 early losses a PERMANENT ratchet (blocked keys
+    # can never trade their way back inside the lookback window).
+    STRATEGY_LEARNING_BLOCK_MIN_TRADES: int = 6
     # S1 (NSE ATM MACD) re-entry path. When True, an underlying whose
     # 30-min MACD is already above zero (CE) or below zero (PE) can fire
     # a new entry on a fresh 15-min MACD zero-cross. Catches intraday
@@ -256,6 +260,10 @@ class Settings(BaseSettings):
     DATA_QUALITY_SCAN_GATE_ENABLED: bool = True
     AUCTION_INTELLIGENCE_AUTO_ENABLED: bool = True
     AUCTION_INTELLIGENCE_AUTO_INTERVAL_SECONDS: int = 180
+    INSTITUTIONAL_CONVERGENCE_AUTO_ENABLED: bool = True
+    INSTITUTIONAL_CONVERGENCE_AUTO_INTERVAL_SECONDS: int = 300
+    INSTITUTIONAL_CONVERGENCE_INDEX_SYMBOLS: str = "NIFTY,BANKNIFTY"
+    INSTITUTIONAL_CONVERGENCE_STOCK_COUNT: int = 10
     # Real order-flow book source (2026-06-03). Maps an index app-symbol to the
     # market_ticks symbol whose REAL order book feeds auction-intelligence order
     # flow — a front-month futures or ATM option contract, which (unlike the

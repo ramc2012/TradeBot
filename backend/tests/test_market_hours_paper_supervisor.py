@@ -50,6 +50,16 @@ def test_default_auction_runner_never_runs_post_close_catchup() -> None:
     assert runner.timeout_seconds == 600.0
 
 
+def test_default_institutional_convergence_runner_is_shadow_session_only() -> None:
+    supervisor = MarketHoursPaperSupervisor(enabled=False)
+    runner = supervisor._runners["institutional_convergence"].config
+
+    assert runner.post_close_catchup is False
+    assert runner.market_hours_fn is not None
+    assert runner.next_open_fn is not None
+    assert runner.timeout_seconds == 600.0
+
+
 def test_market_hours_supervisor_treats_reported_error_as_failure() -> None:
     now = datetime(2026, 4, 21, 9, 20, tzinfo=IST)
 

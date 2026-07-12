@@ -427,6 +427,14 @@ export const getCBEPaperJournal = (instrument?: string, limit = 100) =>
 export const resetCBEPaper = (actor?: string) =>
   api.post("/api/cbe/reset-paper", { confirm: "RESET", actor });
 
+// Institutional Convergence shadow lane
+export const getInstitutionalConvergenceStatus = () =>
+  api.get("/api/institutional-convergence/status");
+export const getInstitutionalConvergenceUniverse = () =>
+  api.get("/api/institutional-convergence/universe");
+export const runInstitutionalConvergence = () =>
+  api.post("/api/institutional-convergence/run-once", undefined, { timeout: 650_000 });
+
 // ── Directional Long Options ───────────────────────────────────────────────
 export const getDirectionalOptionsSummary = () =>
   api.get("/api/directional-options/summary");
