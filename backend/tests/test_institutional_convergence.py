@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -10,9 +10,12 @@ from api.routers import institutional_convergence as router_module
 from institutional_convergence import service as service_module
 from institutional_convergence.service import (
     InstitutionalConvergenceService,
+    _select_rule_sessions,
     evaluate_index_snapshot,
     select_diversified_stocks,
 )
+from institutional_convergence.engine import _aligned_tick_cvd, build_footprint, lots_for_risk
+from institutional_convergence.paper import ConvergencePaperBook
 from paper_engine.base_strategy_agent import IST
 
 
@@ -95,3 +98,110 @@ def test_status_route_exposes_lane(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["key"] == "institutional_convergence"
+
+
+def test_footprint_detects_three_to_one_buying_imbalance() -> None:
+    base = datetime(2026, 7, 13, 9, 18, tzinfo=IST)
+    ticks = [
+        {"time": base, "ltp": 100.0, "bid": 99.5, "ask": 100.0, "volume": 100},
+        {"time": base.replace(second=10), "ltp": 100.0, "bid": 99.5, "ask": 100.0, "volume": 400},
+        {"time": base.replace(second=20), "ltp": 99.5, "bid": 99.5, "ask": 100.0, "volume": 450},
+    ]
+
+    footprint = build_footprint(ticks, 0.5)
+
+    level = next(row for row in footprint["bars"][0]["levels"] if row["price"] == 100.0)
+    assert level["buy_ratio"] >= 3.0
+
+
+def test_risk_sizing_uses_one_percent_cap() -> None:
+    assert lots_for_risk(1_000_000, 0.01, 20, 50) == 10
+    assert lots_for_risk(1_000_000, 0.005, 20, 50) == 5
+
+
+def test_paper_book_opens_and_moves_stop_to_break_even(tmp_path) -> None:
+    book = ConvergencePaperBook(tmp_path / "paper.json")
+    now = datetime(2026, 7, 13, 10, 30, tzinfo=IST)
+    signal = {
+        "symbol": "NIFTY", "status": "actionable_paper", "action": "LONG", "spot": 100.0,
+        "risk": {"entry": 100.0, "stop": 90.0, "target1": 110.0, "target2_long": 120.0, "lot_size": 50, "risk_fraction": 0.01},
+        "cvd": {"series": [{"cvd": 1}, {"cvd": 2}]},
+    }
+    opened = book.sync([signal], now)
+    assert opened["open_count"] == 1
+    assert opened["open_positions"][0]["lots"] == 20
+
+    signal["spot"] = 110.0
+    marked = book.sync([signal], now.replace(minute=33))
+    position = marked["open_positions"][0]
+    assert position["target1_done"] is True
+    assert position["lots"] == 10
+    assert position["stop"] == 100.0
+
+
+def test_paper_book_locks_after_two_losses(tmp_path) -> None:
+    book = ConvergencePaperBook(tmp_path / "paper.json")
+    today = "2026-07-13"
+    book._save({
+        "initial_capital": 1_000_000,
+        "open_positions": [],
+        "closed_positions": [
+            {"session_date": today, "realized_pnl": -1000},
+            {"session_date": today, "realized_pnl": -1000},
+        ],
+    })
+
+    summary = book.sync([], datetime(2026, 7, 13, 11, 0, tzinfo=IST))
+
+    assert summary["circuit_breaker"]["locked"] is True
+
+
+def test_rule_sessions_ignore_weekend_and_after_hours_contamination() -> None:
+    now = datetime(2026, 7, 12, 14, 0, tzinfo=IST)
+
+    def rows(start: datetime, count: int):
+        return [{"time": start + timedelta(minutes=3 * index)} for index in range(count)]
+
+    bars = [
+        *rows(datetime(2026, 7, 9, 9, 15, tzinfo=IST), 100),
+        *rows(datetime(2026, 7, 10, 9, 15, tzinfo=IST), 126),
+        *rows(datetime(2026, 7, 10, 18, 0, tzinfo=IST), 20),
+        *rows(datetime(2026, 7, 12, 11, 0, tzinfo=IST), 6),
+    ]
+
+    current, prior, history = _select_rule_sessions(bars, now)
+
+    assert current == []
+    assert len(prior) == 126
+    assert prior[0]["time"].date().isoformat() == "2026-07-10"
+    assert len(history) == 226
+
+
+def test_rule_sessions_accept_partial_current_session_after_four_bars() -> None:
+    now = datetime(2026, 7, 13, 9, 30, tzinfo=IST)
+    prior = [{"time": datetime(2026, 7, 10, 9, 15, tzinfo=IST) + timedelta(minutes=3 * index)} for index in range(126)]
+    current_rows = [{"time": datetime(2026, 7, 13, 9, 15, tzinfo=IST) + timedelta(minutes=3 * index)} for index in range(5)]
+
+    current, selected_prior, history = _select_rule_sessions([*prior, *current_rows], now)
+
+    assert current == current_rows
+    assert selected_prior == prior
+    assert history == prior
+
+
+def test_tick_cvd_alignment_drops_unmatched_buckets() -> None:
+    bars = [
+        {"time": datetime(2026, 7, 13, 9, 15, tzinfo=IST), "close": 100.0},
+        {"time": datetime(2026, 7, 13, 9, 21, tzinfo=IST), "close": 102.0},
+    ]
+    footprint = [
+        {"time": datetime(2026, 7, 13, 3, 45, tzinfo=timezone.utc).isoformat(), "cumulative_delta": 10},
+        {"time": datetime(2026, 7, 13, 3, 48, tzinfo=timezone.utc).isoformat(), "cumulative_delta": 20},
+        {"time": datetime(2026, 7, 13, 3, 51, tzinfo=timezone.utc).isoformat(), "cumulative_delta": 30},
+    ]
+
+    aligned, cvd, series = _aligned_tick_cvd(bars, footprint)
+
+    assert aligned == bars
+    assert cvd == [10.0, 30.0]
+    assert [row["close"] for row in series] == [100.0, 102.0]

@@ -22,6 +22,19 @@ def _in_nse_market_hours(now: datetime) -> bool:
     return trading_calendar.is_exchange_open("NSE", now)
 
 
+def _in_institutional_convergence_window(now: datetime) -> bool:
+    return trading_calendar.has_exchange_session("NSE", now.date()) and time(8, 45) <= now.time() <= time(15, 30)
+
+
+def _next_institutional_convergence_open(now: datetime) -> datetime:
+    if _in_institutional_convergence_window(now):
+        return now
+    candidate = now.replace(hour=8, minute=45, second=0, microsecond=0)
+    while candidate <= now or not trading_calendar.has_exchange_session("NSE", candidate.date()):
+        candidate = (candidate + timedelta(days=1)).replace(hour=8, minute=45, second=0, microsecond=0)
+    return candidate
+
+
 def _in_mcx_market_hours(now: datetime) -> bool:
     return trading_calendar.is_exchange_open("MCX", now)
 
@@ -711,8 +724,8 @@ class MarketHoursPaperSupervisor:
                 interval_seconds=settings.INSTITUTIONAL_CONVERGENCE_AUTO_INTERVAL_SECONDS,
                 callback=_institutional_convergence_runner,
                 enabled=settings.INSTITUTIONAL_CONVERGENCE_AUTO_ENABLED,
-                market_hours_fn=_in_nse_market_hours,
-                next_open_fn=_next_nse_market_open,
+                market_hours_fn=_in_institutional_convergence_window,
+                next_open_fn=_next_institutional_convergence_open,
                 post_close_catchup=False,
                 timeout_seconds=600.0,
             ),

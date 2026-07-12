@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from institutional_convergence.service import institutional_convergence_service
+from institutional_convergence.paper import convergence_paper_book
 
 
 router = APIRouter(prefix="/api/institutional-convergence", tags=["institutional-convergence"])
@@ -21,3 +22,8 @@ async def universe() -> dict:
 @router.post("/run-once")
 async def run_once() -> dict:
     return await institutional_convergence_service.run_cycle()
+
+
+@router.get("/paper")
+async def paper() -> dict:
+    return convergence_paper_book.summary()

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,13 +11,22 @@ from auction_intelligence.live import build_live_analysis
 from cbe_scanner.repository import load_latest_scan_payload
 from core.config import settings
 from core.trading_calendar import trading_calendar
+from db.database import AsyncSessionLocal
 from market_data import data_router as market_data_router
 from paper_engine.base_strategy_agent import _now_ist
+from sqlalchemy import text
+
+from .engine import evaluate_rules
+from .paper import convergence_paper_book
 
 
 DEFAULT_INDICES = ("NIFTY", "BANKNIFTY")
 INDEX_ROOTS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "SENSEX"}
 STATE_FILE = Path(__file__).resolve().parents[1] / "runtime" / "institutional_convergence" / "state.json"
+RTH_START = time(9, 15)
+RTH_END = time(15, 30)
+MIN_COMPLETE_SESSION_BARS = 80
+_VIX_CACHE: tuple[datetime, float | None] | None = None
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -185,31 +194,62 @@ class InstitutionalConvergenceService:
 
     async def run_cycle(self) -> dict[str, Any]:
         now = _now_ist()
-        if not trading_calendar.is_exchange_open("NSE", now):
+        has_session = trading_calendar.has_exchange_session("NSE", now.date())
+        premarket = has_session and time(8, 45) <= now.time() < time(9, 15)
+        market_open = trading_calendar.is_exchange_open("NSE", now)
+        if not market_open and not premarket:
             return {
                 "status": "market_closed",
                 "next_run_at": trading_calendar.next_exchange_open("NSE", now).isoformat(),
                 "latest": self._load_state(),
             }
         universe = await self.build_universe()
-        stock_symbols = [f"NSE:{row['symbol']}-EQ" for row in universe["stocks"]]
-        if stock_symbols:
-            await market_data_router.add_subscriptions(stock_symbols)
+        from core.config import auction_front_month_book_symbols
+        from data.index_futures_backfill import fyers_front_month_symbol, month_code_for_front_contract
+
+        book_map = auction_front_month_book_symbols(now.date())
+        symbols = [*universe["indices"], *[row["symbol"] for row in universe["stocks"]]]
+        futures_map = {}
+        for symbol in symbols:
+            if symbol in INDEX_ROOTS:
+                futures_map[symbol] = book_map.get(_index_app_symbol(symbol)) or fyers_front_month_symbol(symbol, now.date())
+            else:
+                futures_map[symbol] = f"NSE:{symbol}{month_code_for_front_contract(now.date(), symbol)}FUT"
+        await market_data_router.add_subscriptions(list(futures_map.values()))
+
+        vix = await _load_india_vix()
+        if premarket:
+            prepared = []
+            for symbol in symbols:
+                inputs = await _load_rule_inputs(symbol, futures_map[symbol], now)
+                prepared.append({"symbol": symbol, "profile": inputs.get("prior_profile"), "options": inputs["options"], "futures_contract": futures_map[symbol], "data_ready": bool(inputs["prior_bars"])})
+            payload = {"status": "prepared", "mode": "paper", "paper_execution_enabled": True, "generated_at": datetime.now(timezone.utc).isoformat(), "session_date": now.date().isoformat(), "universe": universe, "pre_market": {"window": "08:45-09:15", "india_vix": vix, "instruments": prepared}, "results": [], "result_count": 0, "actionable_count": 0, "failure_count": 0, "gate_breakdown": {}}
+            await asyncio.to_thread(self._save_state, payload)
+            return payload
 
         results: list[dict[str, Any]] = []
         failures: dict[str, str] = {}
-        for symbol in universe["indices"]:
+        stock_meta = {row["symbol"]: row for row in universe["stocks"]}
+        for symbol in symbols:
             try:
-                snapshot = await asyncio.wait_for(build_live_analysis(symbol_code=symbol), timeout=240.0)
-                results.append(evaluate_index_snapshot(symbol, snapshot))
+                inputs = await _load_rule_inputs(symbol, futures_map[symbol], now)
+                result = evaluate_rules(
+                    symbol=symbol,
+                    current_bars=inputs["current_bars"], prior_bars=inputs["prior_bars"],
+                    history_bars=inputs["history_bars"], ticks=inputs["ticks"], options=inputs["options"],
+                    vix=vix, lot_size=inputs["lot_size"], tick_size=inputs["tick_size"],
+                    clock_drift_ms=inputs["clock_drift_ms"], now=now,
+                )
+                result.update({"sector": (stock_meta.get(symbol) or {}).get("sector", "INDEX"), "futures_contract": futures_map[symbol], "alpha_context": stock_meta.get(symbol)})
+                results.append(result)
             except Exception as exc:
                 failures[symbol] = str(exc)
                 results.append({"kind": "index", "symbol": symbol, "status": "error", "action": "FLAT", "blocked_reasons": ["analysis_failed"], "detail": str(exc)})
-        results.extend(evaluate_stock_context(row) for row in universe["stocks"])
+        paper = convergence_paper_book.sync(results, now)
         payload = {
             "status": "ok" if not failures else "degraded",
-            "mode": "shadow",
-            "paper_execution_enabled": False,
+            "mode": "paper",
+            "paper_execution_enabled": True,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "session_date": now.date().isoformat(),
             "universe": universe,
@@ -219,6 +259,8 @@ class InstitutionalConvergenceService:
             "failure_count": len(failures),
             "failures": failures,
             "gate_breakdown": _gate_breakdown(results),
+            "paper": paper,
+            "india_vix": vix,
         }
         await asyncio.to_thread(self._save_state, payload)
         return payload
@@ -229,12 +271,107 @@ class InstitutionalConvergenceService:
         return {
             "key": "institutional_convergence",
             "enabled": bool(getattr(settings, "INSTITUTIONAL_CONVERGENCE_AUTO_ENABLED", True)),
-            "mode": "shadow",
-            "paper_execution_enabled": False,
+            "mode": "paper",
+            "paper_execution_enabled": True,
             "market_open": trading_calendar.is_exchange_open("NSE", _now_ist()),
             "universe": universe,
             "latest": state,
+            "paper": convergence_paper_book.summary(),
         }
+
+
+def _index_app_symbol(symbol: str) -> str:
+    return {"NIFTY": "NSE:NIFTY50-INDEX", "BANKNIFTY": "NSE:BANKNIFTY-INDEX", "SENSEX": "BSE:SENSEX-INDEX"}.get(symbol, f"NSE:{symbol}-INDEX")
+
+
+async def _load_india_vix() -> float | None:
+    global _VIX_CACHE
+    cache_now = datetime.now(timezone.utc)
+    if _VIX_CACHE and cache_now - _VIX_CACHE[0] < timedelta(minutes=5):
+        return _VIX_CACHE[1]
+    try:
+        from analytics.sector import SectorRotationTracker
+        payload = await SectorRotationTracker()._get_india_vix()
+        value = _number(payload.get("price"))
+        result = value if value > 0 else None
+    except Exception:
+        result = None
+    _VIX_CACHE = (cache_now, result)
+    return result
+
+
+def _select_rule_sessions(
+    bars: list[dict[str, Any]], now: datetime
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return today's live bars, the prior complete session, and ten-session history."""
+    sessions: dict[Any, list[dict[str, Any]]] = {}
+    for row in bars:
+        timestamp = row["time"]
+        session_day = timestamp.date()
+        if (
+            not trading_calendar.has_exchange_session("NSE", session_day)
+            or not RTH_START <= timestamp.time().replace(tzinfo=None) <= RTH_END
+        ):
+            continue
+        sessions.setdefault(session_day, []).append(row)
+
+    complete_dates = sorted(
+        day
+        for day, rows in sessions.items()
+        if day < now.date() and len(rows) >= MIN_COMPLETE_SESSION_BARS
+    )
+    current_bars = sessions.get(now.date(), [])
+    if len(current_bars) < 4:
+        current_bars = []
+    prior_bars = sessions[complete_dates[-1]] if complete_dates else []
+    history = [row for day in complete_dates[-10:] for row in sessions[day]]
+    return current_bars, prior_bars, history
+
+
+async def _load_rule_inputs(symbol: str, futures_symbol: str, now: datetime) -> dict[str, Any]:
+    async with AsyncSessionLocal() as session:
+        bars_result = await session.execute(text("""
+            SELECT time, open, high, low, close, volume
+            FROM underlying_spot_candles
+            WHERE underlying=:symbol AND interval='3minute' AND time >= :since
+            ORDER BY time
+        """), {"symbol": symbol, "since": now - timedelta(days=18)})
+        bars = [{**dict(row), "time": row["time"].astimezone(now.tzinfo)} for row in bars_result.mappings().all()]
+        tick_result = await session.execute(text("""
+            SELECT time, ltp, bid, ask, bid_qty, ask_qty, volume
+            FROM market_ticks WHERE symbol=:symbol AND time >= :since ORDER BY time LIMIT 5000
+        """), {"symbol": futures_symbol, "since": now - timedelta(minutes=120)})
+        ticks = [dict(row) for row in tick_result.mappings().all()]
+        option_result = await session.execute(text("""
+            WITH latest AS (
+              SELECT DISTINCT ON (expiry,strike,option_type) expiry,strike,option_type,oi
+              FROM option_premium_candles
+              WHERE underlying=:symbol AND expiry >= CURRENT_DATE AND time >= NOW()-INTERVAL '5 days'
+              ORDER BY expiry,strike,option_type,time DESC
+            ), nearest AS (SELECT min(expiry) expiry FROM latest)
+            SELECT l.expiry,l.strike,l.option_type,l.oi FROM latest l JOIN nearest n ON n.expiry=l.expiry
+        """), {"symbol": symbol})
+        option_rows = [dict(row) for row in option_result.mappings().all()]
+        contract_result = await session.execute(text("""
+            SELECT COALESCE(max(lot_size),1) lot_size, COALESCE(max(tick_size),0.05) tick_size
+            FROM fo_contract_catalog WHERE underlying=:symbol AND expiry >= CURRENT_DATE
+        """), {"symbol": symbol})
+        contract = dict(contract_result.mappings().first() or {})
+
+    current_bars, prior_bars, history = _select_rule_sessions(bars, now)
+    calls = sorted((row for row in option_rows if row["option_type"] == "CE"), key=lambda row: _number(row.get("oi")), reverse=True)
+    puts = sorted((row for row in option_rows if row["option_type"] == "PE"), key=lambda row: _number(row.get("oi")), reverse=True)
+    options = {"expiry": str(option_rows[0]["expiry"]) if option_rows else None, "call_wall": _number(calls[0]["strike"]) if calls else None, "put_wall": _number(puts[0]["strike"]) if puts else None, "top_call_walls": [{"strike": _number(row["strike"]), "oi": _number(row["oi"])} for row in calls[:2]], "top_put_walls": [{"strike": _number(row["strike"]), "oi": _number(row["oi"])} for row in puts[:2]]}
+    last_tick = ticks[-1]["time"] if ticks else None
+    drift = (datetime.now(timezone.utc) - last_tick.astimezone(timezone.utc)).total_seconds() * 1000 if last_tick else None
+    prior_profile = None
+    if prior_bars:
+        from auction_intelligence.market_profile import MarketProfileEngine
+        from auction_intelligence.schemas import MarketBar
+        engine = MarketProfileEngine({"period_minutes": 30, "tick_size": _number(contract.get("tick_size"), .05), "initial_balance_periods": 2})
+        profile = engine.build_profile(symbol, [MarketBar(timestamp=row["time"], open=_number(row["open"]), high=_number(row["high"]), low=_number(row["low"]), close=_number(row["close"]), volume=_number(row["volume"])) for row in prior_bars])
+        prior_profile = {"vah": profile.vah, "val": profile.val, "poc": profile.poc}
+    return {"current_bars": current_bars, "prior_bars": prior_bars, "history_bars": history, "ticks": ticks, "options": options, "lot_size": int(contract.get("lot_size") or 1), "tick_size": _number(contract.get("tick_size"), .05), "clock_drift_ms": drift, "prior_profile": prior_profile}
 
 
 def _gate_breakdown(results: list[dict[str, Any]]) -> dict[str, int]:
