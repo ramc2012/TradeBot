@@ -21,10 +21,74 @@ from auction_intelligence.schemas import (
 )
 from auction_intelligence.service import AuctionIntelligenceService
 from auction_intelligence.shadow import ShadowPersistenceService
+from core.config import auction_front_month_book_symbols
+from core.trading_calendar import trading_calendar
 from loguru import logger
+from market_data import data_router as market_data_router
+from paper_engine.base_strategy_agent import _now_ist
 
 
 _shadow_store = ShadowPersistenceService()
+_active_order_flow_book_symbols: set[str] = set()
+
+
+def _nse_market_open() -> bool:
+    return trading_calendar.is_exchange_open("NSE", _now_ist())
+
+
+def _market_closed_result(symbol: str, *, stage: str) -> dict[str, Any]:
+    return {
+        "status": "market_closed",
+        "symbol_code": str(symbol or "").strip().upper(),
+        "decision_count": 0,
+        "non_flat_decision_count": 0,
+        "risk_allowed": False,
+        "risk_reasons": ["nse_market_closed"],
+        "flat_reasons": {},
+        "no_trade_gate": "nse_market_closed",
+        "execution_count": 0,
+        "journal_paths": [],
+        "journal_path_count": 0,
+        "paper_positions_summary": None,
+        "shadow_record_count": 0,
+        "shadow_storage": None,
+        "guard_stage": stage,
+        "next_market_open": trading_calendar.next_exchange_open("NSE", _now_ist()).isoformat(),
+    }
+
+
+async def _sync_order_flow_book_subscriptions() -> dict[str, Any]:
+    """Reconcile calendar-rolled book contracts without risking Upstox WS."""
+    global _active_order_flow_book_symbols
+
+    mapping = auction_front_month_book_symbols()
+    desired = {symbol for symbol in mapping.values() if symbol}
+    broker_name = str(
+        getattr(getattr(market_data_router, "_broker", None), "broker_name", "") or ""
+    ).lower()
+    if broker_name != "fyers":
+        return {
+            "status": "broker_not_supported",
+            "broker": broker_name or None,
+            "mapping": mapping,
+            "active_symbols": sorted(_active_order_flow_book_symbols),
+        }
+
+    removed = sorted(_active_order_flow_book_symbols - desired)
+    added = sorted(desired - _active_order_flow_book_symbols)
+    if removed:
+        await market_data_router.remove_subscriptions(removed)
+    if added:
+        await market_data_router.add_subscriptions(added)
+    _active_order_flow_book_symbols = desired
+    return {
+        "status": "active",
+        "broker": broker_name,
+        "mapping": mapping,
+        "added": added,
+        "removed": removed,
+        "active_symbols": sorted(desired),
+    }
 
 
 def auto_symbols() -> list[str]:
@@ -174,6 +238,15 @@ async def capture_live_paper_cycle(
     *,
     shadow_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if not _nse_market_open():
+        return _market_closed_result(symbol, stage="before_analysis")
+
+    try:
+        order_flow_subscription = await _sync_order_flow_book_subscriptions()
+    except Exception as exc:
+        logger.warning(f"auction order-flow subscription reconciliation failed: {exc}")
+        order_flow_subscription = {"status": "error", "detail": str(exc)}
+
     snapshot = await build_live_analysis(symbol_code=symbol)
     request = snapshot["request"]
     # Paper mode bypasses live-execution data-quality gates. The live-snapshot
@@ -207,7 +280,7 @@ async def capture_live_paper_cycle(
     if not portfolio_payload.get("net_liquidation") or float(portfolio_payload["net_liquidation"]) < paper_capital:
         portfolio_payload["net_liquidation"] = paper_capital
     service = AuctionIntelligenceService(paper_mode=True)
-    bundle, journal_paths, paper_positions = await service.analyze_and_record_option_paper(
+    bundle = await service.analyze_with_options(
         session=SessionContext(**session_payload),
         bars=[MarketBar(**_parse_bar(item)) for item in request.get("bars", [])],
         quote=QuoteSnapshot(**_parse_quote(request["quote"])),
@@ -217,6 +290,32 @@ async def capture_live_paper_cycle(
         portfolio=PortfolioSnapshot(**portfolio_payload),
         quote_history=[QuoteSnapshot(**_parse_quote(item)) for item in request.get("quote_history", [])],
     )
+
+    # Analysis can take several minutes on a cold chain. Re-check immediately
+    # before every durable trade write so a cycle that straddles 15:30 cannot
+    # journal or open a position against a frozen closing snapshot.
+    if not _nse_market_open():
+        result = _market_closed_result(symbol, stage="before_persist")
+        result.update(
+            {
+                "session_date": snapshot.get("session_date"),
+                "snapshot_mode": request.get("metadata", {}).get("snapshot_mode"),
+                "source": request.get("metadata", {}).get("history_source"),
+                "decision_count": len(list(bundle.agent_decisions or [])),
+                "non_flat_decision_count": sum(
+                    1 for decision in (bundle.agent_decisions or [])
+                    if getattr(decision, "action", "FLAT") != "FLAT"
+                ),
+            }
+        )
+        logger.warning(
+            "auction.cycle blocked before persist: NSE session closed during analysis "
+            f"(symbol={result['symbol_code']})"
+        )
+        return result
+
+    journal_paths = service.paper.record_analysis(bundle)
+    paper_positions = await service.paper.sync_positions(bundle)
     records = build_shadow_records_from_snapshot(snapshot, shadow_options)
     storage = await _shadow_store.record_records(records)
 
@@ -265,6 +364,9 @@ async def capture_live_paper_cycle(
         "session_date": snapshot.get("session_date"),
         "snapshot_mode": request.get("metadata", {}).get("snapshot_mode"),
         "source": request.get("metadata", {}).get("history_source"),
+        "order_flow_source": request.get("metadata", {}).get("order_flow_source"),
+        "order_flow_book_symbols": auction_front_month_book_symbols(),
+        "order_flow_subscription": order_flow_subscription,
         "decision_count": len(decisions),
         "non_flat_decision_count": len(non_flat),
         "risk_allowed": risk_allowed,
@@ -288,6 +390,21 @@ async def run_market_hours_cycle(
     from time import monotonic
 
     requested = list(dict.fromkeys(symbols or auto_symbols()))
+    if not _nse_market_open():
+        results = [_market_closed_result(symbol, stage="cycle_start") for symbol in requested]
+        return {
+            "status": "market_closed",
+            "symbols_requested": requested,
+            "symbols_completed": [],
+            "result_count": len(results),
+            "failure_count": 0,
+            "failures": {},
+            "gate_breakdown": {"nse_market_closed": len(results)},
+            "execution_total": 0,
+            "shadow_record_count": 0,
+            "journal_path_count": 0,
+            "results": results,
+        }
     results: list[dict[str, Any]] = []
     failures: dict[str, str] = {}
     _sym_timings: dict[str, float] = {}

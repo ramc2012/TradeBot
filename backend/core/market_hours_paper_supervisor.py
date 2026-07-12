@@ -690,6 +690,16 @@ class MarketHoursPaperSupervisor:
                 interval_seconds=settings.AUCTION_INTELLIGENCE_AUTO_INTERVAL_SECONDS,
                 callback=_auction_runner,
                 enabled=settings.AUCTION_INTELLIGENCE_AUTO_ENABLED,
+                # This lane can create paper positions. Never run the generic
+                # post-close recovery pass against frozen end-of-day bars.
+                market_hours_fn=_in_nse_market_hours,
+                next_open_fn=_next_nse_market_open,
+                post_close_catchup=False,
+                # The configured multi-index cycle can exceed the 300s global
+                # ceiling on a cold option-chain cache. Keep the timeout
+                # bounded, but let the cycle finish; the automation performs a
+                # second market-hours check before any durable trade write.
+                timeout_seconds=600.0,
             ),
             RunnerConfig(
                 key="fractal_market_profile",

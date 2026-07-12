@@ -40,6 +40,16 @@ def test_market_hours_supervisor_runs_due_runners_only_once_per_interval() -> No
     assert second["runners"]["auction_intelligence"]["last_success_at"] == runner["last_success_at"]
 
 
+def test_default_auction_runner_never_runs_post_close_catchup() -> None:
+    supervisor = MarketHoursPaperSupervisor(enabled=False)
+    runner = supervisor._runners["auction_intelligence"].config
+
+    assert runner.post_close_catchup is False
+    assert runner.market_hours_fn is not None
+    assert runner.next_open_fn is not None
+    assert runner.timeout_seconds == 600.0
+
+
 def test_market_hours_supervisor_treats_reported_error_as_failure() -> None:
     now = datetime(2026, 4, 21, 9, 20, tzinfo=IST)
 

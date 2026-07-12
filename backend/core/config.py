@@ -1,7 +1,9 @@
 from __future__ import annotations
+from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import List
+from zoneinfo import ZoneInfo
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -264,6 +266,10 @@ class Settings(BaseSettings):
     # capture set so their ticks land in market_ticks. Flag-gated so it can be
     # enabled + verified during a live RTH session without risking the default.
     AUCTION_OF_BOOK_SYMBOLS: str = ""
+    # Automatically map supported indices to the current Fyers front-month
+    # futures contract. Explicit AUCTION_OF_BOOK_SYMBOLS entries override the
+    # generated value per index.
+    AUCTION_OF_BOOK_AUTO_ENABLED: bool = True
     # FMP lane parked out of production 2026-07-07 (owner: "remove FMP + sniper,
     # revisit later; preserve the work"). Runner registers with enabled=False so
     # the supervisor filters it out of every scheduling pass; the fmp_service
@@ -500,3 +506,21 @@ def auction_of_book_symbols() -> dict[str, str]:
         if key and value:
             out[key] = value
     return out
+
+
+def auction_front_month_book_symbols(as_of: date | None = None) -> dict[str, str]:
+    """Return explicit book mappings plus calendar-rolled Fyers futures."""
+    explicit = auction_of_book_symbols()
+    if not settings.AUCTION_OF_BOOK_AUTO_ENABLED:
+        return explicit
+
+    from data.index_futures_backfill import fyers_front_month_symbol
+
+    contract_date = as_of or datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    generated = {
+        "NSE:NIFTY50-INDEX": fyers_front_month_symbol("NIFTY", contract_date),
+        "NSE:BANKNIFTY-INDEX": fyers_front_month_symbol("BANKNIFTY", contract_date),
+        "BSE:SENSEX-INDEX": fyers_front_month_symbol("SENSEX", contract_date),
+    }
+    generated.update(explicit)
+    return generated

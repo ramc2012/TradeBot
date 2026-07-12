@@ -57,7 +57,7 @@ from auction_intelligence.schemas import (
     TradePrint,
 )
 from brokers.base import Tick
-from core.config import auction_of_book_symbols, settings
+from core.config import auction_front_month_book_symbols, settings
 from db.database import AsyncSessionLocal
 from market_data import data_router as market_data_router
 from market_data.commodity_runtime_history import load_commodity_history_rows
@@ -399,6 +399,8 @@ async def _build_analysis_from_session_rows(
     quote_history_payload = order_flow_inputs["quote_history"]
     quote_source = str(order_flow_inputs["quote_source"])
     order_flow_source = str(order_flow_inputs["order_flow_source"])
+    order_flow_book_symbol = order_flow_inputs.get("order_flow_book_symbol")
+    order_flow_book_active = bool(order_flow_inputs.get("order_flow_book_active"))
     stale_data_seconds = float(order_flow_inputs["stale_data_seconds"])
     data_status = _build_live_data_status(
         current_rows=current_rows,
@@ -457,6 +459,8 @@ async def _build_analysis_from_session_rows(
             "history_symbol": history_symbol,
             "quote_source": quote_source,
             "order_flow_source": order_flow_source,
+            "order_flow_book_symbol": order_flow_book_symbol,
+            "order_flow_book_active": order_flow_book_active,
             "quote_event_count": len(quote_history_payload),
             "trade_print_count": len(trades_payload),
             "snapshot_mode": snapshot_mode,
@@ -1099,7 +1103,7 @@ async def _build_order_flow_inputs(
     # delivering enough sized ticks (after-hours, or no depth), fall back to
     # the index rows so behaviour degrades to the legacy path, never worse.
     snapshot_end = _row_time(current_rows[-1]).astimezone(timezone.utc)
-    book_symbol = auction_of_book_symbols().get(app_symbol)
+    book_symbol = auction_front_month_book_symbols().get(app_symbol)
     using_book = bool(book_symbol)
     recent_ticks = await _fetch_recent_tick_rows(
         book_symbol or app_symbol,
@@ -1152,6 +1156,8 @@ async def _build_order_flow_inputs(
             "quote_history": quote_history_payload,
             "quote_source": book_symbol if using_book else "market_ticks",
             "order_flow_source": "tick_reconstruction_book" if using_book else "tick_reconstruction",
+            "order_flow_book_symbol": book_symbol,
+            "order_flow_book_active": using_book,
             "stale_data_seconds": stale_data_seconds,
         }
 
@@ -1178,6 +1184,8 @@ async def _build_order_flow_inputs(
         ],
         "quote_source": quote_source,
         "order_flow_source": "bar_inference",
+        "order_flow_book_symbol": book_symbol,
+        "order_flow_book_active": False,
         "stale_data_seconds": stale_data_seconds,
     }
 

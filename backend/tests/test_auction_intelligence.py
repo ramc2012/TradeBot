@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from api.routers import auction_intelligence as auction_intelligence_router
 from api.routers.auction_intelligence import router
+from auction_intelligence import automation as auction_automation
 from auction_intelligence.config import clone_default_config
 from auction_intelligence.demo import build_demo_analysis, build_demo_validation_series
 from auction_intelligence.live import (
@@ -3028,6 +3029,123 @@ def test_paper_run_once_endpoint_runs_market_cycle(monkeypatch) -> None:
     payload = response.json()
     assert payload["symbols_requested"] == ["BANKNIFTY"]
     assert payload["failure_count"] == 0
+
+
+def test_market_cycle_skips_all_analysis_when_nse_is_closed(monkeypatch) -> None:
+    build = AsyncMock()
+    monkeypatch.setattr(auction_automation, "_nse_market_open", lambda: False)
+    monkeypatch.setattr(auction_automation, "build_live_analysis", build)
+
+    payload = asyncio.run(auction_automation.run_market_hours_cycle(["NIFTY", "BANKNIFTY"]))
+
+    assert payload["status"] == "market_closed"
+    assert payload["gate_breakdown"] == {"nse_market_closed": 2}
+    assert payload["execution_total"] == 0
+    assert payload["journal_path_count"] == 0
+    build.assert_not_awaited()
+
+
+def test_order_flow_subscription_reconciliation_rolls_contracts(monkeypatch) -> None:
+    add = AsyncMock(return_value=2)
+    remove = AsyncMock(return_value=2)
+    monkeypatch.setattr(
+        auction_automation,
+        "auction_front_month_book_symbols",
+        lambda: {
+            "NSE:NIFTY50-INDEX": "NSE:NIFTY26JULFUT",
+            "NSE:BANKNIFTY-INDEX": "NSE:BANKNIFTY26JULFUT",
+        },
+    )
+    monkeypatch.setattr(
+        auction_automation.market_data_router,
+        "_broker",
+        type("Broker", (), {"broker_name": "fyers"})(),
+    )
+    monkeypatch.setattr(auction_automation.market_data_router, "add_subscriptions", add)
+    monkeypatch.setattr(auction_automation.market_data_router, "remove_subscriptions", remove)
+    monkeypatch.setattr(
+        auction_automation,
+        "_active_order_flow_book_symbols",
+        {"NSE:NIFTY26JUNFUT", "NSE:BANKNIFTY26JUNFUT"},
+    )
+
+    payload = asyncio.run(auction_automation._sync_order_flow_book_subscriptions())
+
+    assert payload["status"] == "active"
+    assert payload["added"] == ["NSE:BANKNIFTY26JULFUT", "NSE:NIFTY26JULFUT"]
+    assert payload["removed"] == ["NSE:BANKNIFTY26JUNFUT", "NSE:NIFTY26JUNFUT"]
+    remove.assert_awaited_once_with(payload["removed"])
+    add.assert_awaited_once_with(payload["added"])
+
+
+def test_paper_cycle_rechecks_session_before_trade_writes(monkeypatch) -> None:
+    market_state = iter([True, False])
+    monkeypatch.setattr(auction_automation, "_nse_market_open", lambda: next(market_state))
+    monkeypatch.setattr(
+        auction_automation,
+        "_sync_order_flow_book_subscriptions",
+        AsyncMock(return_value={"status": "active"}),
+    )
+    monkeypatch.setattr(
+        auction_automation,
+        "build_live_analysis",
+        AsyncMock(
+            return_value={
+                "symbol_code": "NIFTY",
+                "session_date": "2026-07-10",
+                "request": {
+                    "session": {
+                        "symbol": "NIFTY FUT",
+                        "session_date": "2026-07-10",
+                        "last_price": 24200.0,
+                        "minutes_to_close": 0,
+                        "broker_connected": True,
+                        "stale_data_seconds": 0.0,
+                    },
+                    "portfolio": {"net_liquidation": 1_000_000.0},
+                    "quote": {
+                        "timestamp": "2026-07-10T15:29:59+05:30",
+                        "bid": 24199.5,
+                        "ask": 24200.5,
+                        "bid_size": 10.0,
+                        "ask_size": 10.0,
+                    },
+                    "depth": None,
+                    "quote_history": [],
+                    "bars": [],
+                    "prior_bars": [],
+                    "trades": [],
+                    "metadata": {"snapshot_mode": "live_session", "history_source": "test"},
+                },
+            }
+        ),
+    )
+
+    class _Paper:
+        record_analysis = AsyncMock()
+        sync_positions = AsyncMock()
+
+    class _Service:
+        paper = _Paper()
+
+        def __init__(self, paper_mode=False):
+            pass
+
+        async def analyze_with_options(self, **kwargs):
+            class _Bundle:
+                agent_decisions = []
+
+            return _Bundle()
+
+    monkeypatch.setattr(auction_automation, "AuctionIntelligenceService", _Service)
+
+    payload = asyncio.run(auction_automation.capture_live_paper_cycle("NIFTY"))
+
+    assert payload["status"] == "market_closed"
+    assert payload["guard_stage"] == "before_persist"
+    assert payload["journal_path_count"] == 0
+    _Service.paper.record_analysis.assert_not_called()
+    _Service.paper.sync_positions.assert_not_awaited()
 
 
 def test_mp_dashboard_endpoint_returns_aggregated_structure(monkeypatch) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
+from core.config import auction_front_month_book_symbols
 from data.index_futures_backfill import (
     chunk_dates,
     fyers_front_month_symbol,
@@ -18,6 +19,19 @@ def test_fyers_front_month_symbol_rolls_after_monthly_expiry() -> None:
     assert fyers_front_month_symbol("NIFTY", date(2026, 5, 30)) == "NSE:NIFTY26JUNFUT"
     assert fyers_front_month_symbol("BANKNIFTY", date(2026, 5, 30)) == "NSE:BANKNIFTY26JUNFUT"
     assert fyers_front_month_symbol("SENSEX", date(2026, 5, 30)) == "BSE:SENSEX26JUNFUT"
+
+
+def test_auction_order_flow_books_roll_by_calendar(monkeypatch) -> None:
+    monkeypatch.setattr("core.config.settings.AUCTION_OF_BOOK_AUTO_ENABLED", True)
+    monkeypatch.setattr("core.config.settings.AUCTION_OF_BOOK_SYMBOLS", "")
+
+    may = auction_front_month_book_symbols(date(2026, 5, 20))
+    june = auction_front_month_book_symbols(date(2026, 5, 30))
+
+    assert may["NSE:NIFTY50-INDEX"] == "NSE:NIFTY26MAYFUT"
+    assert june["NSE:NIFTY50-INDEX"] == "NSE:NIFTY26JUNFUT"
+    assert june["NSE:BANKNIFTY-INDEX"] == "NSE:BANKNIFTY26JUNFUT"
+    assert june["BSE:SENSEX-INDEX"] == "BSE:SENSEX26JUNFUT"
 
 
 def test_chunk_dates_inclusive_windows() -> None:
