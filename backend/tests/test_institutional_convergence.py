@@ -205,3 +205,143 @@ def test_tick_cvd_alignment_drops_unmatched_buckets() -> None:
     assert aligned == bars
     assert cvd == [10.0, 30.0]
     assert [row["close"] for row in series] == [100.0, 102.0]
+
+
+# ── Commodity (MCX) variant ────────────────────────────────────────────────
+
+
+def test_commodity_aggregate_bars_one_to_three_minute() -> None:
+    from institutional_convergence.commodity import aggregate_bars
+
+    base = datetime(2026, 7, 13, 9, 0, tzinfo=IST)
+    rows = [
+        {"time": base, "open": 100.0, "high": 101.0, "low": 99.5, "close": 100.5, "volume": 10},
+        {"time": base.replace(minute=1), "open": 100.5, "high": 102.0, "low": 100.0, "close": 101.5, "volume": 20},
+        {"time": base.replace(minute=2), "open": 101.5, "high": 101.8, "low": 100.8, "close": 101.0, "volume": 15},
+        {"time": base.replace(minute=3), "open": 101.0, "high": 101.2, "low": 100.5, "close": 100.7, "volume": 5},
+    ]
+
+    bars = aggregate_bars(rows, minutes=3)
+
+    assert len(bars) == 2
+    first = bars[0]
+    assert first["open"] == 100.0
+    assert first["high"] == 102.0
+    assert first["low"] == 99.5
+    assert first["close"] == 101.0
+    assert first["volume"] == 45
+    assert bars[1]["open"] == 101.0
+
+
+def test_commodity_engine_disables_nse_session_gates() -> None:
+    """At NSE noon with no VIX, the commodity variant's data gates must pass
+    (they are NSE-session concepts) while the NSE defaults block both."""
+    from institutional_convergence.engine import evaluate_rules
+
+    noon = datetime(2026, 7, 13, 12, 15, tzinfo=IST)
+    bars = [
+        {"time": noon.replace(hour=9, minute=15 + 3 * i), "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100}
+        for i in range(6)
+    ]
+
+    nse = evaluate_rules(
+        symbol="GOLD", current_bars=bars, prior_bars=bars, history_bars=bars,
+        ticks=[], options={}, vix=None, lot_size=10, tick_size=1.0,
+        clock_drift_ms=100.0, now=noon,
+    )
+    commodity = evaluate_rules(
+        symbol="GOLD", current_bars=bars, prior_bars=bars, history_bars=bars,
+        ticks=[], options={}, vix=None, lot_size=10, tick_size=1.0,
+        clock_drift_ms=100.0, now=noon,
+        noon_quarantine=False, require_vix=False, kind="commodity",
+    )
+
+    assert nse["long_gates"]["outside_noon_quarantine"] is False
+    assert nse["long_gates"]["vix_available"] is False
+    assert commodity["long_gates"]["outside_noon_quarantine"] is True
+    assert commodity["long_gates"]["vix_available"] is True
+    assert commodity["kind"] == "commodity"
+    # Honest-data gates stay identical: no real ticks -> no signal either way.
+    assert commodity["long_gates"]["real_tick_cvd"] is False
+    assert commodity["action"] == "FLAT"
+
+
+def test_commodity_paper_book_uses_evening_squareoff(tmp_path) -> None:
+    from datetime import time as dt_time
+
+    book = ConvergencePaperBook(tmp_path / "paper.json", squareoff=dt_time(23, 15), entry_quarantine=None)
+    signal = {
+        "symbol": "GOLD", "status": "actionable_paper", "action": "LONG", "spot": 100.0,
+        "risk": {"entry": 100.0, "stop": 90.0, "target1": 110.0, "target2_long": None, "lot_size": 10, "risk_fraction": 0.01},
+        "cvd": {"series": [{"cvd": 1}, {"cvd": 2}]},
+    }
+    # NSE noon does NOT quarantine the MCX book, and 16:00 (past the NSE
+    # square-off) does NOT close the evening-session position.
+    opened = book.sync([signal], datetime(2026, 7, 13, 12, 0, tzinfo=IST))
+    assert opened["open_count"] == 1
+    held = book.sync([signal], datetime(2026, 7, 13, 16, 0, tzinfo=IST))
+    assert held["open_count"] == 1
+    # 23:20 crosses the MCX square-off boundary.
+    squared = book.sync([signal], datetime(2026, 7, 13, 23, 20, tzinfo=IST))
+    assert squared["open_count"] == 0
+    assert squared["closed_positions"][-1]["exit_reason"] == "intraday_squareoff"
+
+
+def test_paper_book_squares_off_positions_whose_symbol_left_the_universe(tmp_path) -> None:
+    """A symbol that rotates out of the universe stops producing marks — its
+    position must still square off at the boundary instead of living forever."""
+    book = ConvergencePaperBook(tmp_path / "paper.json")
+    signal = {
+        "symbol": "NIFTY", "status": "actionable_paper", "action": "LONG", "spot": 100.0,
+        "risk": {"entry": 100.0, "stop": 90.0, "target1": 110.0, "target2_long": None, "lot_size": 50, "risk_fraction": 0.01},
+        "cvd": {"series": [{"cvd": 1}, {"cvd": 2}]},
+    }
+    opened = book.sync([signal], datetime(2026, 7, 13, 10, 30, tzinfo=IST))
+    assert opened["open_count"] == 1
+
+    # Symbol absent from results after universe rotation; square-off time hits.
+    squared = book.sync([], datetime(2026, 7, 13, 15, 26, tzinfo=IST))
+    assert squared["open_count"] == 0
+    assert squared["closed_positions"][-1]["exit_reason"] == "intraday_squareoff_stale_mark"
+
+
+def test_commodity_closed_cycle_does_not_build(monkeypatch) -> None:
+    import asyncio as _asyncio
+
+    from institutional_convergence import commodity as commodity_module
+
+    calls = {"universe": 0}
+
+    async def _fail_universe():
+        calls["universe"] += 1
+        raise AssertionError("universe should not build while MCX is closed")
+
+    monkeypatch.setattr(commodity_module.commodity_convergence_service, "build_universe", _fail_universe)
+    monkeypatch.setattr(
+        commodity_module,
+        "_now_ist",
+        lambda: datetime(2026, 7, 12, 3, 0, tzinfo=IST),  # Sunday, MCX closed
+    )
+
+    payload = _asyncio.run(commodity_module.commodity_convergence_service.run_cycle())
+
+    assert payload["status"] == "market_closed"
+    assert calls["universe"] == 0
+
+
+def test_commodity_configured_roots_canonicalize_and_dedupe(monkeypatch) -> None:
+    from core.config import settings as app_settings
+    from institutional_convergence.commodity import configured_roots
+
+    monkeypatch.setattr(
+        app_settings,
+        "INSTITUTIONAL_CONVERGENCE_COMMODITY_SYMBOLS",
+        "gold, MCX:CRUDEOIL26JULFUT, gold, natgas",
+        raising=False,
+    )
+
+    roots = configured_roots()
+
+    assert roots[0] == "GOLD"
+    assert "CRUDEOIL" in roots
+    assert len([r for r in roots if r == "GOLD"]) == 1

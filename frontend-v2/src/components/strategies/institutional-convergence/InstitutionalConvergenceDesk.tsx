@@ -8,7 +8,7 @@ import { CartesianGrid, Legend, Line, LineChart, ReferenceLine, ResponsiveContai
 import { DeskShell, MetricTile, REFRESH_MS, Section, StatusBadge, formatMoney, formatNumber, useUrlTab } from "@/components/desk-ui";
 import { MarketProfileChart } from "@/components/strategies/shared";
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
-import { getInstitutionalConvergenceStatus, runInstitutionalConvergence } from "@/lib/api";
+import { getCommodityInstitutionalConvergenceStatus, getInstitutionalConvergenceStatus, runCommodityInstitutionalConvergence, runInstitutionalConvergence } from "@/lib/api";
 
 type Gates = Record<string, boolean>;
 type Level = { price: number; buy: number; sell: number; buy_ratio: number; sell_ratio: number };
@@ -24,8 +24,8 @@ type Result = {
 };
 type Position = { position_id: string; symbol: string; direction: string; entry_price: number; current_price: number; stop: number; target1: number; target2?: number; lots: number; initial_lots: number; lot_size: number; target1_done: boolean; realized_pnl?: number; opened_at?: string; closed_at?: string; exit_reason?: string };
 type Payload = {
-  enabled?: boolean; mode?: string; market_open?: boolean;
-  universe?: { indices?: string[]; stocks?: Array<{ symbol: string; sector: string }>; stock_count?: number; sector_count?: number; cbe_scan_date?: string };
+  enabled?: boolean; mode?: string; market?: string; market_open?: boolean;
+  universe?: { indices?: string[]; stocks?: Array<{ symbol: string; sector: string }>; stock_count?: number; sector_count?: number; cbe_scan_date?: string; roots?: string[]; contracts?: Record<string, { symbol?: string; expiry?: string }>; resolved_count?: number; unresolved?: string[] };
   latest?: { status?: string; generated_at?: string; actionable_count?: number; result_count?: number; results?: Result[]; gate_breakdown?: Record<string, number>; india_vix?: number; pre_market?: any };
   paper?: { initial_capital?: number; equity?: number; realized_pnl?: number; open_count?: number; closed_count?: number; open_positions?: Position[]; closed_positions?: Position[]; circuit_breaker?: { locked?: boolean; consecutive_losses?: number; day_pnl?: number; loss_limit?: number } };
 };
@@ -38,31 +38,33 @@ const TABS = [
 
 export default function InstitutionalConvergenceDesk() {
   const [activeTab, setActiveTab] = useUrlTab("overview");
+  const [market, setMarket] = useState<"NSE" | "MCX">("NSE");
   const [symbol, setSymbol] = useState("NIFTY");
   const qc = useQueryClient();
   const [, startTransition] = useTransition();
-  const query = useQuery({ queryKey: ["institutional-convergence", "status"], queryFn: async () => (await getInstitutionalConvergenceStatus()).data as Payload, refetchInterval: REFRESH_MS.live });
-  const run = useMutation({ mutationFn: runInstitutionalConvergence, onSuccess: () => startTransition(() => void qc.invalidateQueries({ queryKey: ["institutional-convergence"] })) });
+  const query = useQuery({ queryKey: ["institutional-convergence", market, "status"], queryFn: async () => (await (market === "MCX" ? getCommodityInstitutionalConvergenceStatus() : getInstitutionalConvergenceStatus())).data as Payload, refetchInterval: REFRESH_MS.live });
+  const run = useMutation({ mutationFn: market === "MCX" ? runCommodityInstitutionalConvergence : runInstitutionalConvergence, onSuccess: () => startTransition(() => void qc.invalidateQueries({ queryKey: ["institutional-convergence", market] })) });
   const data = query.data; const latest = data?.latest; const paper = data?.paper; const rows = latest?.results ?? [];
   const selected = rows.find((row) => row.symbol === symbol) ?? rows[0];
-  const universe = useMemo(() => [...(data?.universe?.indices ?? []), ...(data?.universe?.stocks ?? []).map((row) => row.symbol)], [data?.universe]);
+  const universe = useMemo(() => market === "MCX" ? (data?.universe?.roots ?? []) : [...(data?.universe?.indices ?? []), ...(data?.universe?.stocks ?? []).map((row) => row.symbol)], [data?.universe, market]);
   const circuit = paper?.circuit_breaker;
+  const selectMarket = (next: "NSE" | "MCX") => { setMarket(next); setSymbol(next === "MCX" ? "GOLD" : "NIFTY"); };
 
-  return <DeskShell title="Institutional Convergence" description="Strict 3-minute NSE profile · futures CVD · footprint imbalance · OI-wall paper execution" asOf={latest?.generated_at} isFetching={query.isFetching || run.isPending} paperMode tabs={TABS} activeTab={activeTab} onTabChange={setActiveTab}
-    rightSlot={<div className="flex items-center gap-2"><select value={symbol} onChange={(e) => setSymbol(e.target.value)} className="rounded-md border border-border bg-surface px-2 py-1.5 text-xs">{universe.map((item) => <option key={item}>{item}</option>)}</select><StatusBadge label={data?.market_open ? "NSE open" : "NSE closed"} variant={data?.market_open ? "success" : "neutral"}/><StatusBadge label={circuit?.locked ? "circuit locked" : "paper armed"} variant={circuit?.locked ? "error" : "warn"}/><button disabled={!data?.market_open || run.isPending} onClick={() => run.mutate()} className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-xs disabled:opacity-40"><Play size={12}/> Run</button></div>}>
+  return <DeskShell title="Institutional Convergence" description={`Strict 3-minute ${market} profile · futures CVD · footprint imbalance · paper execution`} asOf={latest?.generated_at} isFetching={query.isFetching || run.isPending} paperMode tabs={TABS} activeTab={activeTab} onTabChange={setActiveTab}
+    rightSlot={<div className="flex flex-wrap items-center gap-2"><div className="flex rounded-md border border-border bg-surface p-0.5">{(["NSE", "MCX"] as const).map((item) => <button key={item} onClick={() => selectMarket(item)} className={`rounded px-2 py-1 text-[10px] font-semibold ${market === item ? "bg-accent-blue text-white" : "text-text-muted"}`}>{item}</button>)}</div><select value={universe.includes(symbol) ? symbol : universe[0] ?? ""} onChange={(e) => setSymbol(e.target.value)} className="rounded-md border border-border bg-surface px-2 py-1.5 text-xs">{universe.map((item) => <option key={item}>{item}</option>)}</select><StatusBadge label={`${market} ${data?.market_open ? "open" : "closed"}`} variant={data?.market_open ? "success" : "neutral"}/><StatusBadge label={circuit?.locked ? "circuit locked" : "paper armed"} variant={circuit?.locked ? "error" : "warn"}/><button disabled={!data?.market_open || run.isPending} onClick={() => run.mutate()} className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-xs disabled:opacity-40"><Play size={12}/> Run</button></div>}>
 
     {activeTab === "overview" ? <div className="space-y-4">
       <section className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
-        <MetricTile label="Universe" value={`${data?.universe?.indices?.length ?? 0}+${data?.universe?.stock_count ?? 0}`} detail={`${data?.universe?.sector_count ?? 0} sectors`}/>
+        <MetricTile label="Universe" value={market === "MCX" ? String(data?.universe?.roots?.length ?? 0) : `${data?.universe?.indices?.length ?? 0}+${data?.universe?.stock_count ?? 0}`} detail={market === "MCX" ? `${data?.universe?.resolved_count ?? 0} active contracts` : `${data?.universe?.sector_count ?? 0} sectors`}/>
         <MetricTile label="Actionable" value={String(latest?.actionable_count ?? 0)} detail={`${latest?.result_count ?? 0} evaluated`}/>
-        <MetricTile label="India VIX" value={formatNumber(latest?.india_vix, 2)} detail={selected?.vix?.value && selected.vix.value > 22 ? "3× ATR stops" : selected?.vix?.value && selected.vix.value < 11 ? "half risk" : "normal band"}/>
+        <MetricTile label={market === "MCX" ? "Volatility" : "India VIX"} value={market === "MCX" ? "ATR" : formatNumber(latest?.india_vix, 2)} detail={market === "MCX" ? "commodity-local sizing" : selected?.vix?.value && selected.vix.value > 22 ? "3× ATR stops" : selected?.vix?.value && selected.vix.value < 11 ? "half risk" : "normal band"}/>
         <MetricTile label="Clock drift" value={selected?.clock_drift_ms != null ? `${formatNumber(selected.clock_drift_ms, 0)} ms` : "—"} detail="≤1000 ms gate"/>
         <MetricTile label="Equity" value={formatMoney(paper?.equity)} detail={`initial ${formatMoney(paper?.initial_capital)}`}/>
         <MetricTile label="Day P&L" value={formatMoney(circuit?.day_pnl)} detail={`${circuit?.consecutive_losses ?? 0} losses`}/>
         <MetricTile label="Open" value={String(paper?.open_count ?? 0)} detail={`${paper?.closed_count ?? 0} closed`}/>
         <MetricTile label="Mode" value="PAPER" detail="live orders disabled"/>
       </section>
-      {latest?.pre_market ? <Section title="08:45 pre-market preparation" icon={<Clock3 size={16}/>} description={`India VIX ${formatNumber(latest.pre_market.india_vix, 2)} · previous value areas and OI walls loaded`}><div className="grid gap-2 md:grid-cols-3">{(latest.pre_market.instruments ?? []).map((row: any) => <div key={row.symbol} className="rounded-lg border border-border p-3"><div className="font-semibold">{row.symbol}</div><div className="mt-1 text-xs text-text-muted">{row.futures_contract}</div><div className="mt-2 flex gap-1"><StatusBadge label={row.data_ready ? "profile ready" : "missing profile"} variant={row.data_ready ? "success" : "warn"}/><StatusBadge label={row.options?.expiry ?? "no expiry"} variant="neutral"/></div></div>)}</div></Section> : null}
+      {latest?.pre_market ? <Section title="08:45 pre-market preparation" icon={<Clock3 size={16}/>} description={market === "MCX" ? "Previous MCX profiles and active futures contracts loaded" : `India VIX ${formatNumber(latest.pre_market.india_vix, 2)} · previous value areas and OI walls loaded`}><div className="grid gap-2 md:grid-cols-3">{(latest.pre_market.instruments ?? []).map((row: any) => <div key={row.symbol} className="rounded-lg border border-border p-3"><div className="font-semibold">{row.symbol}</div><div className="mt-1 text-xs text-text-muted">{row.futures_contract}</div><div className="mt-2 flex gap-1"><StatusBadge label={row.data_ready ? "profile ready" : "missing profile"} variant={row.data_ready ? "success" : "warn"}/><StatusBadge label={row.options?.expiry ?? "no option wall"} variant="neutral"/></div></div>)}</div></Section> : null}
       <Section title="Lane matrix" icon={<Activity size={16}/>} description="Every instrument is independently gated; no relative score can override a failed operational rule."><ResultMatrix rows={rows} selected={selected?.symbol} onSelect={setSymbol}/></Section>
       <Section title="Blocked-gate census" icon={<Gauge size={16}/>}><div className="flex flex-wrap gap-2">{Object.entries(latest?.gate_breakdown ?? {}).map(([key, count]) => <StatusBadge key={key} label={`${key} · ${count}`} variant="warn"/>)}</div></Section>
     </div> : null}
@@ -86,7 +88,7 @@ export default function InstitutionalConvergenceDesk() {
       <Section title="Open paper positions" icon={<Target size={16}/>}><PositionTable rows={paper?.open_positions ?? []}/></Section>
       <Section title="Closed trade journal" icon={<ListChecks size={16}/>}><PositionTable rows={paper?.closed_positions ?? []}/></Section>
     </div> : null}
-    {activeTab === "gates" ? <SignalQualityTab laneKeys={["institutional_convergence"]} title="Institutional Convergence validation"/> : null}
+    {activeTab === "gates" ? <SignalQualityTab laneKeys={[market === "MCX" ? "institutional_convergence_commodity" : "institutional_convergence"]} title={`${market} Institutional Convergence validation`}/> : null}
   </DeskShell>;
 }
 

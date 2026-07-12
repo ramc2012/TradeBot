@@ -27,3 +27,30 @@ async def run_once() -> dict:
 @router.get("/paper")
 async def paper() -> dict:
     return convergence_paper_book.summary()
+
+
+# ── Commodity (MCX) variant ────────────────────────────────────────────────
+from institutional_convergence.commodity import (  # noqa: E402
+    commodity_convergence_paper_book,
+    commodity_convergence_service,
+)
+
+
+@router.get("/commodity/status")
+async def commodity_status() -> dict:
+    return await commodity_convergence_service.status()
+
+
+@router.get("/commodity/universe")
+async def commodity_universe() -> dict:
+    return await commodity_convergence_service.build_universe()
+
+
+@router.post("/commodity/run-once")
+async def commodity_run_once() -> dict:
+    return await commodity_convergence_service.run_cycle()
+
+
+@router.get("/commodity/paper")
+async def commodity_paper() -> dict:
+    return commodity_convergence_paper_book.summary()

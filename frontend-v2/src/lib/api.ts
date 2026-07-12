@@ -434,6 +434,10 @@ export const getInstitutionalConvergenceUniverse = () =>
   api.get("/api/institutional-convergence/universe");
 export const runInstitutionalConvergence = () =>
   api.post("/api/institutional-convergence/run-once", undefined, { timeout: 650_000 });
+export const getCommodityInstitutionalConvergenceStatus = () =>
+  api.get("/api/institutional-convergence/commodity/status");
+export const runCommodityInstitutionalConvergence = () =>
+  api.post("/api/institutional-convergence/commodity/run-once", undefined, { timeout: 650_000 });
 
 // ── Directional Long Options ───────────────────────────────────────────────
 export const getDirectionalOptionsSummary = () =>

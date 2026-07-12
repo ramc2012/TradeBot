@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .engine import lots_for_risk
 
@@ -11,9 +11,24 @@ from .engine import lots_for_risk
 INITIAL_CAPITAL = 1_000_000.0
 
 
+def _nse_noon_quarantine(now: datetime) -> bool:
+    return now.hour == 12 or (now.hour == 11 and now.minute >= 45) or (now.hour == 13 and now.minute <= 15)
+
+
 class ConvergencePaperBook:
-    def __init__(self, path: Path):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        squareoff: time = time(15, 25),
+        entry_quarantine: Callable[[datetime], bool] | None = _nse_noon_quarantine,
+    ):
         self.path = path
+        # Intraday square-off boundary (exchange-local wall clock) and the
+        # no-new-entries window. NSE defaults preserved; the MCX book passes
+        # its evening-session equivalents.
+        self.squareoff = squareoff
+        self.entry_quarantine = entry_quarantine or (lambda _now: False)
 
     def _load(self) -> dict[str, Any]:
         try:
@@ -34,9 +49,17 @@ class ConvergencePaperBook:
         marks = {str(row.get("symbol")): row for row in results if row.get("spot")}
         today = now.date().isoformat()
 
+        squareoff_due = now.time() >= self.squareoff
         for position in list(open_positions):
             row = marks.get(str(position.get("symbol")))
             if not row:
+                # A symbol rotated out of the universe (daily CBE picks change)
+                # stops producing marks — without this branch its position was
+                # immortal: never marked, never squared off. Close it at the
+                # last known mark at the intraday boundary.
+                if squareoff_due:
+                    last_price = float(position.get("current_price") or position.get("entry_price") or 0.0)
+                    self._close(position, last_price, "intraday_squareoff_stale_mark", now, open_positions, closed_positions)
                 continue
             price = float(row["spot"])
             position["current_price"] = price
@@ -61,13 +84,13 @@ class ConvergencePaperBook:
                     self._close(position, price, "target1", now, open_positions, closed_positions)
             elif position.get("target1_done") and (wall_hit or cvd_reversal):
                 self._close(position, price, "oi_wall" if wall_hit else "cvd_reversal", now, open_positions, closed_positions)
-            elif now.hour > 15 or (now.hour == 15 and now.minute >= 25):
+            elif squareoff_due:
                 self._close(position, price, "intraday_squareoff", now, open_positions, closed_positions)
 
         circuit = self._circuit_state(closed_positions, today, state)
-        noon = now.hour == 12 or (now.hour == 11 and now.minute >= 45) or (now.hour == 13 and now.minute <= 15)
+        quarantined = self.entry_quarantine(now)
         open_symbols = {row["symbol"] for row in open_positions}
-        if not circuit["locked"] and not noon:
+        if not circuit["locked"] and not quarantined and not squareoff_due:
             capital = self._equity(state, open_positions, closed_positions)
             for row in results:
                 if row.get("status") != "actionable_paper" or row.get("action") not in {"LONG", "SHORT"} or row.get("symbol") in open_symbols:

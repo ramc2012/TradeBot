@@ -1,4 +1,4 @@
-"""Institutional Convergence shadow strategy lane."""
+"""Institutional Convergence shadow strategy lane (NSE + MCX variants)."""
 
 from .service import institutional_convergence_service
 

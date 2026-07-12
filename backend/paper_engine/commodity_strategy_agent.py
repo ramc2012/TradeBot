@@ -2733,8 +2733,6 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         if latest_prices:
             self._runtime.portfolio.update_prices(latest_prices)
 
-        await self._reconcile_futures_rollovers(futures_rows)
-
         self._runtime.futures_watchlist = futures_rows
         self._last_run_at = started_at.isoformat()
         self._last_error = None

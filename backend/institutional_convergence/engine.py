@@ -120,7 +120,14 @@ def evaluate_rules(
     tick_size: float,
     clock_drift_ms: float | None,
     now: datetime,
+    noon_quarantine: bool = True,
+    require_vix: bool = True,
+    kind: str | None = None,
 ) -> dict[str, Any]:
+    # noon_quarantine / require_vix are NSE-session concepts: the 11:45-13:15
+    # lunch-liquidity hole and India VIX conditioning don't apply to the MCX
+    # evening session, so the commodity lane disables them (the gate keys stay
+    # in the payload as True so dashboards render one uniform gate set).
     if len(current_bars) < 4 or len(prior_bars) < 4:
         return {"symbol": symbol, "status": "collecting_data", "action": "FLAT", "blocked_reasons": ["insufficient_3minute_bars"]}
     prior = _profile(symbol, prior_bars, tick_size)
@@ -145,8 +152,13 @@ def evaluate_rules(
     long_fp, long_ratio = _footprint_trigger(footprint, "LONG")
     short_fp, short_ratio = _footprint_trigger(footprint, "SHORT")
     clock_ok = clock_drift_ms is not None and abs(clock_drift_ms) <= 1000.0
-    noon = now.hour == 12 or (now.hour == 11 and now.minute >= 45) or (now.hour == 13 and now.minute <= 15)
-    data_gates = {"clock_sync": clock_ok, "real_tick_cvd": cvd_source == "market_ticks", "outside_noon_quarantine": not noon, "vix_available": vix is not None}
+    noon = noon_quarantine and (now.hour == 12 or (now.hour == 11 and now.minute >= 45) or (now.hour == 13 and now.minute <= 15))
+    data_gates = {
+        "clock_sync": clock_ok,
+        "real_tick_cvd": cvd_source == "market_ticks",
+        "outside_noon_quarantine": not noon,
+        "vix_available": vix is not None if require_vix else True,
+    }
     long_gates = {**data_gates, "structural_trap": long_structure, "bullish_cvd_divergence": long_div, "buying_footprint_3x": long_fp}
     short_gates = {**data_gates, "structural_ceiling": short_structure, "bearish_cvd_divergence": short_div, "selling_footprint_3x": short_fp}
     direction = "LONG" if all(long_gates.values()) else "SHORT" if all(short_gates.values()) else "FLAT"
@@ -159,7 +171,7 @@ def evaluate_rules(
     target1 = entry + risk_points if direction == "LONG" else entry - risk_points if direction == "SHORT" else None
     ib_mid = (_f(current.initial_balance_high) + _f(current.initial_balance_low)) / 2
     return {
-        "kind": "index" if symbol in {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"} else "stock",
+        "kind": kind or ("index" if symbol in {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"} else "stock"),
         "symbol": symbol,
         "status": "actionable_paper" if direction != "FLAT" else "blocked",
         "action": direction,

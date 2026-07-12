@@ -136,3 +136,37 @@ def test_watchlist_stabilizer_uses_resolved_active_symbol(tmp_path, monkeypatch)
 
     assert [row["symbol"] for row in rows] == ["MCX:ALUMINI26JULFUT"]
     assert retained == []
+
+
+def test_closed_market_preparation_does_not_execute_rollover(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", tmp_path / "commodity.json")
+    monkeypatch.setattr(commodity_module, "load_runtime_state", lambda _key: (None, None))
+    monkeypatch.setattr(commodity_module, "save_runtime_state", lambda _key, _payload: datetime.now(timezone.utc))
+    agent = commodity_module.CommodityStrategyAgent()
+    called: list[bool] = []
+
+    async def fake_active():
+        return {"MCX:ZINCMINI26JUNFUT": "MCX:ZINCMINI26JULFUT"}
+
+    async def fake_quotes(_adapter, _symbols):
+        return {"MCX:ZINCMINI26JULFUT": 380.0}
+
+    async def fake_analysis(symbol, _quote):
+        return {"symbol": symbol, "price": 380.0, "bar_time": "2026-07-10T23:29:00+05:30"}
+
+    async def fake_roll(_rows):
+        called.append(True)
+
+    monkeypatch.setattr(agent, "_active_futures_symbols", fake_active)
+    monkeypatch.setattr(agent, "_safe_get_ltp", fake_quotes)
+    monkeypatch.setattr(agent, "_analyze_futures_symbol", fake_analysis)
+    monkeypatch.setattr(agent, "_reconcile_futures_rollovers", fake_roll)
+    monkeypatch.setattr(commodity_module, "ensure_fyers_session", lambda **_kwargs: asyncio.sleep(0, result=True))
+    monkeypatch.setattr(commodity_module, "ensure_upstox_session", lambda **_kwargs: asyncio.sleep(0, result=True))
+    monkeypatch.setattr(commodity_module, "get_fyers_token_health", lambda **_kwargs: asyncio.sleep(0, result={"valid": True}))
+    monkeypatch.setattr(commodity_module, "get_upstox_token_health", lambda **_kwargs: asyncio.sleep(0, result={"valid": True}))
+    monkeypatch.setattr(agent, "_get_scan_adapter", lambda: asyncio.sleep(0, result=None))
+
+    asyncio.run(agent._prepare_closed_market_state(datetime(2026, 7, 12, 10, 0, tzinfo=timezone.utc)))
+
+    assert called == []

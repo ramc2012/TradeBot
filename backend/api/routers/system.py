@@ -345,7 +345,7 @@ def _market_data_service() -> dict[str, Any]:
     ws_connected = bool(status.get("ws_connected"))
     last_tick_age_seconds = status.get("last_tick_age_seconds")
     now_ist = datetime.now(timezone.utc).astimezone(IST)
-    market_open = _in_market_hours(now_ist)
+    market_open = _in_market_hours(now_ist) or _in_commodity_hours(now_ist)
 
     if mode == "mock":
         service_status = "healthy"
@@ -365,6 +365,9 @@ def _market_data_service() -> dict[str, Any]:
                 "Broker feed is subscribed, but the latest tick is stale "
                 f"({last_tick_age_seconds:.0f}s ago)."
             )
+    elif mode == "broker" and not market_open:
+        service_status = "idle"
+        detail = "Broker selected; websocket intentionally idle until the next NSE/MCX stream window."
     elif mode == "broker":
         service_status = "degraded"
         detail = "Broker selected, but no live symbol subscriptions are active."

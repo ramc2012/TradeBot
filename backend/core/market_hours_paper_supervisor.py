@@ -39,6 +39,23 @@ def _in_mcx_market_hours(now: datetime) -> bool:
     return trading_calendar.is_exchange_open("MCX", now)
 
 
+def _in_commodity_convergence_window(now: datetime) -> bool:
+    # Mirrors the NSE convergence window: a 15-minute pre-market prep slot
+    # (08:45-09:00) plus the MCX session itself.
+    return trading_calendar.has_exchange_session("MCX", now.date()) and (
+        time(8, 45) <= now.time() < time(9, 0) or trading_calendar.is_exchange_open("MCX", now)
+    )
+
+
+def _next_commodity_convergence_open(now: datetime) -> datetime:
+    if _in_commodity_convergence_window(now):
+        return now
+    candidate = now.replace(hour=8, minute=45, second=0, microsecond=0)
+    while candidate <= now or not trading_calendar.has_exchange_session("MCX", candidate.date()):
+        candidate = (candidate + timedelta(days=1)).replace(hour=8, minute=45, second=0, microsecond=0)
+    return candidate
+
+
 def _in_gann_market_hours(now: datetime) -> bool:
     return _in_nse_market_hours(now) or _in_mcx_market_hours(now)
 
@@ -279,6 +296,11 @@ class MarketHoursPaperSupervisor:
 
         async def _institutional_convergence_runner() -> dict[str, Any]:
             return await institutional_convergence_service.run_cycle()
+
+        async def _institutional_convergence_commodity_runner() -> dict[str, Any]:
+            from institutional_convergence.commodity import commodity_convergence_service
+
+            return await commodity_convergence_service.run_cycle()
 
         async def _fmp_runner() -> dict[str, Any]:
             results: list[dict[str, Any]] = []
@@ -726,6 +748,17 @@ class MarketHoursPaperSupervisor:
                 enabled=settings.INSTITUTIONAL_CONVERGENCE_AUTO_ENABLED,
                 market_hours_fn=_in_institutional_convergence_window,
                 next_open_fn=_next_institutional_convergence_open,
+                post_close_catchup=False,
+                timeout_seconds=600.0,
+            ),
+            RunnerConfig(
+                key="institutional_convergence_commodity",
+                label="Institutional Convergence Commodity Cycle",
+                interval_seconds=settings.INSTITUTIONAL_CONVERGENCE_COMMODITY_INTERVAL_SECONDS,
+                callback=_institutional_convergence_commodity_runner,
+                enabled=settings.INSTITUTIONAL_CONVERGENCE_COMMODITY_ENABLED,
+                market_hours_fn=_in_commodity_convergence_window,
+                next_open_fn=_next_commodity_convergence_open,
                 post_close_catchup=False,
                 timeout_seconds=600.0,
             ),

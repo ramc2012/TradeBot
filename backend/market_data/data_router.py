@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
 from brokers.base import BrokerAdapter, Tick
 from core.config import auction_of_book_symbols, settings
+from core.trading_calendar import trading_calendar
 from db.redis_client import get_redis
 from market_data.symbols import (
     TICK_CAPTURE_APP_SYMBOLS,
@@ -42,6 +43,7 @@ class DataRouter:
         self._ws_client: Any = None
         self._ws_broker: Optional[BrokerAdapter] = None
         self._subscribed_symbols: List[str] = []
+        self._desired_primary_symbols: List[str] = []
         # Sticky extras — symbols that the OptionWS subscription manager
         # (or any future per-strategy subscriber) pins onto the broker
         # WS regardless of who calls subscribe() afterward. Without this
@@ -143,7 +145,12 @@ class DataRouter:
         # pinned by the OptionWS subscription manager). Without this, a
         # spot-only resync from the broker-session refresh path would wipe a
         # previously-applied option subscription or drop a required index.
-        full_set = self._compose_subscription_set(symbols)
+        self._desired_primary_symbols = list(dict.fromkeys(to_app_symbol(s) for s in symbols if s))
+        full_set = self._compose_subscription_set(self._desired_primary_symbols)
+        if not self._stream_window_open():
+            await self.unsubscribe()
+            logger.debug("[DataRouter] Subscription deferred until the next NSE/MCX stream window")
+            return
         sticky_extras = [s for s in full_set if s in self._sticky_extras]
         if (
             self._ws_client is not None
@@ -224,7 +231,7 @@ class DataRouter:
         # subscribe doesn't accidentally drop spots when the caller is
         # an add path. We compute primary as anything currently
         # subscribed that isn't a sticky extra.
-        primary = [s for s in self._subscribed_symbols if s not in self._sticky_extras]
+        primary = [s for s in self._subscribed_symbols if s not in self._sticky_extras] or list(self._desired_primary_symbols)
         await self.subscribe(primary)
         logger.info(f"[DataRouter] Added {len(new)} sticky subscriptions")
         return len(new)
@@ -239,7 +246,7 @@ class DataRouter:
             return 0
         for s in drop:
             self._sticky_extras.discard(s)
-        primary = [s for s in self._subscribed_symbols if s not in self._sticky_extras and s not in drop]
+        primary = [s for s in self._subscribed_symbols if s not in self._sticky_extras and s not in drop] or list(self._desired_primary_symbols)
         await self.subscribe(primary)
         logger.info(f"[DataRouter] Removed {len(drop)} subscriptions")
         return len(drop)
@@ -256,6 +263,20 @@ class DataRouter:
             return False
         minute_of_day = now_ist.hour * 60 + now_ist.minute
         return (9 * 60 + 15) <= minute_of_day <= (15 * 60 + 30)
+
+    @staticmethod
+    def _stream_window_open(now: Optional[datetime] = None) -> bool:
+        """True from the 08:45 pre-open through either exchange's live session."""
+        now_ist = (now or datetime.now(IST)).astimezone(IST)
+        for exchange in ("NSE", "MCX"):
+            if trading_calendar.is_exchange_open(exchange, now_ist):
+                return True
+            if (
+                trading_calendar.has_exchange_session(exchange, now_ist.date())
+                and time(8, 45) <= now_ist.time().replace(tzinfo=None) < time(9, 15)
+            ):
+                return True
+        return False
 
     def _missing_required_symbols(self) -> List[str]:
         subscribed = set(self._subscribed_symbols)
@@ -281,7 +302,7 @@ class DataRouter:
         Returns True if a re-subscribe was issued. Idempotent and cheap when
         nothing is missing.
         """
-        if not self._broker:
+        if not self._broker or not self._stream_window_open():
             return False
         if not self._missing_required_symbols():
             return False
@@ -322,6 +343,14 @@ class DataRouter:
             while True:
                 await asyncio.sleep(self._watchdog_interval_seconds)
                 try:
+                    if not self._stream_window_open():
+                        if self._ws_client is not None:
+                            await self.unsubscribe()
+                            logger.info("[DataRouter] Closed websocket outside NSE/MCX stream windows")
+                        continue
+                    if self._ws_client is None and self._broker is not None:
+                        await self.subscribe(list(self._desired_primary_symbols))
+                        continue
                     # Re-subscribe anything that fell off the broker WS.
                     restored = await self.ensure_required_subscriptions()
                     if restored:
@@ -681,7 +710,7 @@ class DataRouter:
             mode == "broker"
             and self._subscribed_symbols
             and not ws_connected
-            and self._is_index_market_open()
+            and self._stream_window_open()
         ):
             self._schedule_reconnect()
 
@@ -728,7 +757,7 @@ class DataRouter:
 
     async def _reconnect_if_stale(self) -> None:
         try:
-            if not self._broker or not self._subscribed_symbols:
+            if not self._broker or not self._subscribed_symbols or not self._stream_window_open():
                 return
             logger.warning("[DataRouter] Tick feed stale. Reconnecting websocket subscription.")
             await self.unsubscribe()

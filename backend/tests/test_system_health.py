@@ -7,6 +7,21 @@ import pytest
 from api.routers import system
 
 
+def test_market_data_service_is_idle_when_all_exchanges_are_closed(monkeypatch) -> None:
+    monkeypatch.setattr(system, "_in_market_hours", lambda _now: False)
+    monkeypatch.setattr(system, "_in_commodity_hours", lambda _now: False)
+    monkeypatch.setattr(
+        system.data_router,
+        "get_status",
+        lambda: {"mode": "broker", "subscribed_symbol_count": 0, "ws_connected": False},
+    )
+
+    service = system._market_data_service()
+
+    assert service["status"] == "idle"
+    assert "intentionally idle" in service["detail"]
+
+
 @pytest.fixture(autouse=True)
 def _reset_system_route_caches() -> None:
     system._health_cache["payload"] = None

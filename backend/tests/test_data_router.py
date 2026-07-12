@@ -100,7 +100,7 @@ def test_data_router_status_schedules_reconnect_for_stale_broker_feed(monkeypatc
     scheduled: list[bool] = []
 
     monkeypatch.setattr(router, "_schedule_reconnect", lambda: scheduled.append(True))
-    monkeypatch.setattr(router, "_is_index_market_open", lambda now=None: True)
+    monkeypatch.setattr(router, "_stream_window_open", lambda now=None: True)
     router._broker = type("Broker", (), {"broker_name": "fyers"})()
     router._ws_client = object()
     router._subscribed_symbols = ["NSE:NIFTY50-INDEX"]
@@ -121,7 +121,7 @@ def test_data_router_status_skips_reconnect_for_stale_feed_off_hours(monkeypatch
     scheduled: list[bool] = []
 
     monkeypatch.setattr(router, "_schedule_reconnect", lambda: scheduled.append(True))
-    monkeypatch.setattr(router, "_is_index_market_open", lambda now=None: False)
+    monkeypatch.setattr(router, "_stream_window_open", lambda now=None: False)
     router._broker = type("Broker", (), {"broker_name": "fyers"})()
     router._ws_client = object()
     router._subscribed_symbols = ["NSE:NIFTY50-INDEX"]
@@ -167,6 +167,7 @@ def test_data_router_reconnect_schedule_is_rate_limited() -> None:
 @pytest.mark.asyncio
 async def test_data_router_keeps_required_index_capture_symbols_on_fyers_subscribe() -> None:
     router = DataRouter()
+    router._stream_window_open = lambda now=None: True  # type: ignore[method-assign]
     broker = _FakeBroker("fyers")
     router.set_broker(broker)  # type: ignore[arg-type]
 
@@ -182,6 +183,7 @@ async def test_data_router_keeps_required_index_capture_symbols_on_fyers_subscri
 @pytest.mark.asyncio
 async def test_data_router_required_symbols_survive_sticky_option_resubscribe() -> None:
     router = DataRouter()
+    router._stream_window_open = lambda now=None: True  # type: ignore[method-assign]
     broker = _FakeBroker("upstox")
     router.set_broker(broker)  # type: ignore[arg-type]
 
@@ -198,6 +200,7 @@ async def test_data_router_required_symbols_survive_sticky_option_resubscribe() 
 @pytest.mark.asyncio
 async def test_data_router_ensure_required_subscriptions_restores_missing_symbols() -> None:
     router = DataRouter()
+    router._stream_window_open = lambda now=None: True  # type: ignore[method-assign]
     broker = _FakeBroker("fyers")
     router.set_broker(broker)  # type: ignore[arg-type]
     router._subscribed_symbols = ["NSE:FINNIFTY-INDEX"]
@@ -214,3 +217,16 @@ def test_data_router_index_market_hours_gate() -> None:
 
     assert DataRouter._is_index_market_open(monday_open_ist) is True
     assert DataRouter._is_index_market_open(saturday_open_ist) is False
+
+
+@pytest.mark.asyncio
+async def test_data_router_defers_websocket_outside_exchange_windows() -> None:
+    router = DataRouter()
+    broker = _FakeBroker("fyers")
+    router.set_broker(broker)  # type: ignore[arg-type]
+    router._stream_window_open = lambda now=None: False  # type: ignore[method-assign]
+
+    await router.subscribe(["NSE:FINNIFTY-INDEX"])
+
+    assert broker.subscribe_calls == []
+    assert router._desired_primary_symbols == ["NSE:FINNIFTY-INDEX"]

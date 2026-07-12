@@ -264,6 +264,12 @@ class Settings(BaseSettings):
     INSTITUTIONAL_CONVERGENCE_AUTO_INTERVAL_SECONDS: int = 60
     INSTITUTIONAL_CONVERGENCE_INDEX_SYMBOLS: str = "NIFTY,BANKNIFTY"
     INSTITUTIONAL_CONVERGENCE_STOCK_COUNT: int = 10
+    # Commodity (MCX) variant of the convergence lane: same rules engine on
+    # the active front-month futures, evening-session square-off (23:15), no
+    # VIX / noon-quarantine gates (those are NSE-session concepts).
+    INSTITUTIONAL_CONVERGENCE_COMMODITY_ENABLED: bool = True
+    INSTITUTIONAL_CONVERGENCE_COMMODITY_INTERVAL_SECONDS: int = 60
+    INSTITUTIONAL_CONVERGENCE_COMMODITY_SYMBOLS: str = "GOLD,SILVERM,CRUDEOIL,NATURALGAS,COPPER,ALUMINI,ZINCMINI,NICKEL"
     # Real order-flow book source (2026-06-03). Maps an index app-symbol to the
     # market_ticks symbol whose REAL order book feeds auction-intelligence order
     # flow — a front-month futures or ATM option contract, which (unlike the

@@ -215,7 +215,11 @@ class InstitutionalConvergenceService:
                 futures_map[symbol] = book_map.get(_index_app_symbol(symbol)) or fyers_front_month_symbol(symbol, now.date())
             else:
                 futures_map[symbol] = f"NSE:{symbol}{month_code_for_front_contract(now.date(), symbol)}FUT"
-        await market_data_router.add_subscriptions(list(futures_map.values()))
+        spot_symbols = [
+            _index_app_symbol(symbol) if symbol in INDEX_ROOTS else f"NSE:{symbol}-EQ"
+            for symbol in symbols
+        ]
+        await market_data_router.add_subscriptions([*futures_map.values(), *spot_symbols])
 
         vix = await _load_india_vix()
         if premarket:
@@ -329,6 +333,7 @@ def _select_rule_sessions(
 
 
 async def _load_rule_inputs(symbol: str, futures_symbol: str, now: datetime) -> dict[str, Any]:
+    spot_tick_symbol = _index_app_symbol(symbol) if symbol in INDEX_ROOTS else f"NSE:{symbol}-EQ"
     async with AsyncSessionLocal() as session:
         bars_result = await session.execute(text("""
             SELECT time, open, high, low, close, volume
@@ -337,11 +342,31 @@ async def _load_rule_inputs(symbol: str, futures_symbol: str, now: datetime) -> 
             ORDER BY time
         """), {"symbol": symbol, "since": now - timedelta(days=18)})
         bars = [{**dict(row), "time": row["time"].astimezone(now.tzinfo)} for row in bars_result.mappings().all()]
+        # DESC + reverse: the cap must keep the LATEST ticks. Ascending LIMIT
+        # kept the oldest 5000 of the 2h window, so on any busy session the
+        # footprint/CVD trigger was computed on stale early-window ticks.
         tick_result = await session.execute(text("""
             SELECT time, ltp, bid, ask, bid_qty, ask_qty, volume
-            FROM market_ticks WHERE symbol=:symbol AND time >= :since ORDER BY time LIMIT 5000
+            FROM market_ticks WHERE symbol=:symbol AND time >= :since ORDER BY time DESC LIMIT 5000
         """), {"symbol": futures_symbol, "since": now - timedelta(minutes=120)})
-        ticks = [dict(row) for row in tick_result.mappings().all()]
+        ticks = [dict(row) for row in reversed(tick_result.mappings().all())]
+        current_result = await session.execute(text("""
+            SELECT time_bucket(INTERVAL '3 minutes', time) AS time,
+                   first(ltp, time) AS open, max(ltp) AS high, min(ltp) AS low,
+                   last(ltp, time) AS close,
+                   GREATEST(max(volume) - min(volume), 0) AS volume
+            FROM market_ticks
+            WHERE symbol=:symbol AND time >= :session_start AND time <= :now
+            GROUP BY 1 ORDER BY 1
+        """), {
+            "symbol": spot_tick_symbol,
+            "session_start": now.replace(hour=9, minute=15, second=0, microsecond=0),
+            "now": now,
+        })
+        current_tick_bars = [
+            {**dict(row), "time": row["time"].astimezone(now.tzinfo)}
+            for row in current_result.mappings().all()
+        ]
         option_result = await session.execute(text("""
             WITH latest AS (
               SELECT DISTINCT ON (expiry,strike,option_type) expiry,strike,option_type,oi
@@ -359,6 +384,8 @@ async def _load_rule_inputs(symbol: str, futures_symbol: str, now: datetime) -> 
         contract = dict(contract_result.mappings().first() or {})
 
     current_bars, prior_bars, history = _select_rule_sessions(bars, now)
+    if trading_calendar.has_exchange_session("NSE", now.date()) and len(current_tick_bars) >= 4:
+        current_bars = current_tick_bars
     calls = sorted((row for row in option_rows if row["option_type"] == "CE"), key=lambda row: _number(row.get("oi")), reverse=True)
     puts = sorted((row for row in option_rows if row["option_type"] == "PE"), key=lambda row: _number(row.get("oi")), reverse=True)
     options = {"expiry": str(option_rows[0]["expiry"]) if option_rows else None, "call_wall": _number(calls[0]["strike"]) if calls else None, "put_wall": _number(puts[0]["strike"]) if puts else None, "top_call_walls": [{"strike": _number(row["strike"]), "oi": _number(row["oi"])} for row in calls[:2]], "top_put_walls": [{"strike": _number(row["strike"]), "oi": _number(row["oi"])} for row in puts[:2]]}
