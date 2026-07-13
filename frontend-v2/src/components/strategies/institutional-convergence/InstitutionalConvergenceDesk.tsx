@@ -6,11 +6,11 @@ import { Activity, BarChart3, BookOpen, ChevronDown, ChevronRight, Clock3, Gauge
 import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { LastUpdated } from "@/components/common/LastUpdated";
-import { DeskShell, MetricTile, REFRESH_MS, Section, StatusBadge, formatMoney, formatNumber, useUrlTab } from "@/components/desk-ui";
+import { DeskShell, MetricTile, REFRESH_MS, Section, StatusBadge, formatIST, formatISTTime, formatMoney, formatNumber, useUrlTab } from "@/components/desk-ui";
 import { CvdPanel, FootprintGrid, GateChips, OfSourceBadge, ProfileLadder } from "@/components/mpof";
 import { MarketProfileChart } from "@/components/strategies/shared";
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
-import { getCommodityInstitutionalConvergenceStatus, getInstitutionalConvergenceStatus, runCommodityInstitutionalConvergence, runInstitutionalConvergence } from "@/lib/api";
+import { describeApiError, getCommodityInstitutionalConvergenceStatus, getInstitutionalConvergenceStatus, runCommodityInstitutionalConvergence, runInstitutionalConvergence } from "@/lib/api";
 
 type Gates = Record<string, boolean>;
 type Level = { price: number; buy: number; sell: number; buy_ratio: number; sell_ratio: number };
@@ -48,14 +48,23 @@ export default function InstitutionalConvergenceDesk() {
   const run = useMutation({ mutationFn: market === "MCX" ? runCommodityInstitutionalConvergence : runInstitutionalConvergence, onSuccess: () => startTransition(() => void qc.invalidateQueries({ queryKey: ["institutional-convergence", market] })) });
   const data = query.data; const latest = data?.latest; const paper = data?.paper; const rows = latest?.results ?? [];
   const selected = rows.find((row) => row.symbol === symbol) ?? rows[0];
-  const universe = useMemo(() => market === "MCX" ? (data?.universe?.roots ?? []) : [...(data?.universe?.indices ?? []), ...(data?.universe?.stocks ?? []).map((row) => row.symbol)], [data?.universe, market]);
+  const universe = useMemo(() => {
+    const evaluated = rows.map((row) => row.symbol).filter(Boolean);
+    if (evaluated.length) return evaluated;
+    return market === "MCX"
+      ? (data?.universe?.roots ?? [])
+      : [...(data?.universe?.indices ?? []), ...(data?.universe?.stocks ?? []).map((row) => row.symbol)];
+  }, [data?.universe, market, rows]);
   const circuit = paper?.circuit_breaker;
   const selectMarket = (next: "NSE" | "MCX") => { setMarket(next); setSymbol(next === "MCX" ? "GOLD" : "NIFTY"); };
 
   return <DeskShell title="Institutional Convergence" description={`Strict 3-minute ${market} profile · futures CVD · footprint imbalance · paper execution`} asOf={latest?.generated_at} isFetching={query.isFetching || run.isPending} paperMode tabs={TABS} activeTab={activeTab} onTabChange={setActiveTab}
     rightSlot={<div className="flex flex-wrap items-center gap-2"><div className="flex rounded-md border border-border bg-surface p-0.5">{(["NSE", "MCX"] as const).map((item) => <button key={item} onClick={() => selectMarket(item)} className={`rounded px-2 py-1 text-[10px] font-semibold ${market === item ? "bg-accent-blue text-white" : "text-text-muted"}`}>{item}</button>)}</div><select value={universe.includes(symbol) ? symbol : universe[0] ?? ""} onChange={(e) => setSymbol(e.target.value)} className="rounded-md border border-border bg-surface px-2 py-1.5 text-xs">{universe.map((item) => <option key={item}>{item}</option>)}</select><StatusBadge label={`${market} ${data?.market_open ? "open" : "closed"}`} variant={data?.market_open ? "success" : "neutral"}/><StatusBadge label={circuit?.locked ? "circuit locked" : "paper armed"} variant={circuit?.locked ? "error" : "warn"}/><button disabled={!data?.market_open || run.isPending} onClick={() => run.mutate()} className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-xs disabled:opacity-40"><Play size={12}/> Run</button></div>}>
 
-    {activeTab === "overview" ? <div className="space-y-4">
+    {query.isLoading && !data ? <Section title={`Loading ${market} Institutional Convergence`} icon={<Activity size={16}/>}><div className="py-8 text-center text-sm text-text-muted">Fetching the latest evaluated instruments and market profile data…</div></Section> : null}
+    {query.isError && !data ? <Section title={`${market} Institutional Convergence unavailable`} icon={<Activity size={16}/>}><div className="py-8 text-center text-sm text-accent-red">{describeApiError(query.error, "The lane status could not be loaded.")}</div></Section> : null}
+
+    {data && activeTab === "overview" ? <div className="space-y-4">
       <section className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
         <MetricTile label="Universe" value={market === "MCX" ? String(data?.universe?.roots?.length ?? 0) : `${data?.universe?.indices?.length ?? 0}+${data?.universe?.stock_count ?? 0}`} detail={market === "MCX" ? `${data?.universe?.resolved_count ?? 0} active contracts` : `${data?.universe?.sector_count ?? 0} sectors`}/>
         <MetricTile label="Actionable" value={String(latest?.actionable_count ?? 0)} detail={`${latest?.result_count ?? 0} evaluated`}/>
@@ -71,7 +80,7 @@ export default function InstitutionalConvergenceDesk() {
       <Section title="Blocked-gate census" icon={<Gauge size={16}/>}><div className="flex flex-wrap gap-2">{Object.entries(latest?.gate_breakdown ?? {}).map(([key, count]) => <StatusBadge key={key} label={`${key} · ${count}`} variant="warn"/>)}</div></Section>
     </div> : null}
 
-    {activeTab === "profile" ? <div className="space-y-4">
+    {data && activeTab === "profile" ? <div className="space-y-4">
       <section className="grid grid-cols-2 gap-3 md:grid-cols-6"><MetricTile label="Spot" value={formatNumber(selected?.spot, 2)}/><MetricTile label="Prior VAH" value={formatNumber(selected?.profile?.prior?.vah, 2)}/><MetricTile label="Prior VAL" value={formatNumber(selected?.profile?.prior?.val, 2)}/><MetricTile label="Prior POC" value={formatNumber(selected?.profile?.prior?.poc, 2)}/><MetricTile label="IB midpoint" value={formatNumber(selected?.risk?.ib_midpoint, 2)}/><MetricTile label="ATR 3m" value={formatNumber(selected?.risk?.atr_3m, 2)}/></section>
       <div className="grid gap-4 xl:grid-cols-[1.1fr_.9fr]">
         <Section title="Current TPO profile" icon={<BarChart3 size={16}/>} rightSlot={<LastUpdated timestamp={latest?.generated_at} label="scan"/>}><MarketProfileChart profile={selected?.profile} lastPrice={selected?.spot} height={420}/></Section>
@@ -90,7 +99,7 @@ export default function InstitutionalConvergenceDesk() {
       <Section title="Three-minute price path" icon={<Activity size={16}/>}><PriceChart result={selected}/></Section>
     </div> : null}
 
-    {activeTab === "orderflow" ? <div className="space-y-4">
+    {data && activeTab === "orderflow" ? <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2"><OfSourceBadge source={selected?.cvd?.source}/><LastUpdated timestamp={latest?.generated_at} label="scan"/></div>
       <section className="grid grid-cols-2 gap-3 md:grid-cols-6"><MetricTile label="CVD source" value={selected?.cvd?.source ?? "—"}/><MetricTile label="Divergence" value={selected?.cvd?.divergence?.kind ?? "none"}/><MetricTile label="Strength" value={formatNumber((selected?.cvd?.divergence?.strength ?? 0) * 100, 1)} detail="percent"/><MetricTile label="Ticks" value={String(selected?.footprint?.tick_count ?? 0)}/><MetricTile label="Buy ratio" value={`${formatNumber(selected?.footprint?.long_ratio, 2)}×`}/><MetricTile label="Sell ratio" value={`${formatNumber(selected?.footprint?.short_ratio, 2)}×`}/></section>
       <Section title="Price versus cumulative volume delta" icon={<Waves size={16}/>}><CvdPanel series={selected?.cvd?.series} source={selected?.cvd?.source} divergence={selected?.cvd?.divergence} height={300}/></Section>
@@ -101,13 +110,13 @@ export default function InstitutionalConvergenceDesk() {
       </div>
     </div> : null}
 
-    {activeTab === "risk" ? <div className="space-y-4">
+    {data && activeTab === "risk" ? <div className="space-y-4">
       <section className="grid grid-cols-2 gap-3 md:grid-cols-6"><MetricTile label="Entry" value={formatNumber(selected?.risk?.entry, 2)}/><MetricTile label="Stop" value={formatNumber(selected?.risk?.stop, 2)} detail={`${selected?.risk?.stop_multiplier ?? 2}× ATR`}/><MetricTile label="Target 1" value={formatNumber(selected?.risk?.target1, 2)} detail="50%, then BE"/><MetricTile label="IB midpoint" value={formatNumber(selected?.risk?.ib_midpoint, 2)}/><MetricTile label="Target 2" value={formatNumber(selected?.action === "SHORT" ? selected?.risk?.target2_short : selected?.risk?.target2_long, 2)} detail="OI wall"/><MetricTile label="Risk" value={`${formatNumber((selected?.risk?.risk_fraction ?? 0) * 100, 2)}%`} detail={`lot ${selected?.risk?.lot_size ?? "—"}`}/></section>
       <Section title="Daily circuit breaker" icon={<ShieldCheck size={16}/>}><div className="flex flex-wrap gap-2"><StatusBadge label={circuit?.locked ? "LOCKED" : "ARMED"} variant={circuit?.locked ? "error" : "success"}/><StatusBadge label={`${circuit?.consecutive_losses ?? 0}/2 consecutive losses`} variant="neutral"/><StatusBadge label={`day ${formatMoney(circuit?.day_pnl)}`} variant="neutral"/><StatusBadge label={`limit ${formatMoney(circuit?.loss_limit)}`} variant="neutral"/></div></Section>
       <Section title="Open paper positions" icon={<Target size={16}/>}><PositionTable rows={paper?.open_positions ?? []}/></Section>
       <Section title="Closed trade journal" icon={<ListChecks size={16}/>}><PositionTable rows={paper?.closed_positions ?? []}/></Section>
     </div> : null}
-    {activeTab === "gates" ? <SignalQualityTab laneKeys={[market === "MCX" ? "institutional_convergence_commodity" : "institutional_convergence"]} title={`${market} Institutional Convergence validation`}/> : null}
+    {data && activeTab === "gates" ? <SignalQualityTab laneKeys={[market === "MCX" ? "institutional_convergence_commodity" : "institutional_convergence"]} title={`${market} Institutional Convergence validation`}/> : null}
   </DeskShell>;
 }
 
@@ -137,6 +146,6 @@ function ResultMatrix({ rows, selected, onSelect, generatedAt }: { rows: Result[
     </td></tr> : null}
   </Fragment>)}</tbody></table></div>;
 }
-function PriceChart({ result }: { result?: Result }) { const rows = result?.bars ?? []; return <div className="h-[280px]"><ResponsiveContainer><LineChart data={rows}><CartesianGrid strokeDasharray="3 3" opacity={.2}/><XAxis dataKey="time" tickFormatter={(v) => String(v).slice(11,16)} minTickGap={25}/><YAxis domain={["auto","auto"]}/><Tooltip/><Line dataKey="close" stroke="#60a5fa" dot={false}/>{result?.profile?.prior?.vah ? <ReferenceLine y={result.profile.prior.vah} stroke="#ef4444" strokeDasharray="4 3" label="VAH"/> : null}{result?.profile?.prior?.val ? <ReferenceLine y={result.profile.prior.val} stroke="#22c55e" strokeDasharray="4 3" label="VAL"/> : null}</LineChart></ResponsiveContainer></div>; }
+function PriceChart({ result }: { result?: Result }) { const rows = result?.bars ?? []; return <div className="h-[280px]"><ResponsiveContainer><LineChart data={rows}><CartesianGrid strokeDasharray="3 3" opacity={.2}/><XAxis dataKey="time" tickFormatter={(v) => formatISTTime(v)} minTickGap={25}/><YAxis domain={["auto","auto"]}/><Tooltip labelFormatter={(v) => `${formatIST(v)} IST`}/><Line dataKey="close" stroke="#60a5fa" dot={false}/>{result?.profile?.prior?.vah ? <ReferenceLine y={result.profile.prior.vah} stroke="#ef4444" strokeDasharray="4 3" label="VAH"/> : null}{result?.profile?.prior?.val ? <ReferenceLine y={result.profile.prior.val} stroke="#22c55e" strokeDasharray="4 3" label="VAL"/> : null}</LineChart></ResponsiveContainer></div>; }
 function WallPanel({ result }: { result?: Result }) { return <div className="space-y-4"><div><div className="mb-2 text-xs font-semibold text-accent-red">Call resistance</div>{(result?.options?.top_call_walls ?? []).map((w) => <div key={w.strike} className="mb-1 flex justify-between rounded border border-border px-3 py-2"><span>{formatNumber(w.strike,0)}</span><span>{formatNumber(w.oi,0)} OI</span></div>)}</div><div><div className="mb-2 text-xs font-semibold text-accent-green">Put support</div>{(result?.options?.top_put_walls ?? []).map((w) => <div key={w.strike} className="mb-1 flex justify-between rounded border border-border px-3 py-2"><span>{formatNumber(w.strike,0)}</span><span>{formatNumber(w.oi,0)} OI</span></div>)}</div></div>; }
 function PositionTable({ rows }: { rows: Position[] }) { if (!rows.length) return <div className="py-8 text-center text-sm text-text-muted">No positions.</div>; return <div className="overflow-x-auto"><table className="w-full min-w-[850px] text-xs"><thead className="text-left text-text-muted"><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Current/Exit</th><th>Stop</th><th>T1</th><th>T2</th><th>Lots</th><th>P&L / reason</th></tr></thead><tbody>{rows.map((p) => <tr key={p.position_id} className="border-t border-border"><td className="py-3 font-semibold">{p.symbol}</td><td>{p.direction}</td><td>{formatNumber(p.entry_price,2)}</td><td>{formatNumber(p.current_price,2)}</td><td>{formatNumber(p.stop,2)}</td><td>{formatNumber(p.target1,2)}</td><td>{formatNumber(p.target2,2)}</td><td>{p.lots}/{p.initial_lots}</td><td>{formatMoney(p.realized_pnl)} {p.exit_reason}</td></tr>)}</tbody></table></div>; }

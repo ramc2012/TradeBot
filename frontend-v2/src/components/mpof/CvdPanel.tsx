@@ -13,7 +13,7 @@ import { useMemo } from "react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { LastUpdated } from "@/components/common/LastUpdated";
-import { StatusBadge, formatNumber } from "@/components/desk-ui";
+import { StatusBadge, formatIST, formatISTTime, formatNumber } from "@/components/desk-ui";
 
 import { OfSourceBadge } from "./OfSourceBadge";
 
@@ -64,12 +64,12 @@ export function CvdPanel({
           <ResponsiveContainer>
             <LineChart data={rows} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-              <XAxis dataKey="time" tickFormatter={(v) => String(v).slice(11, 16)} minTickGap={30} tick={{ fontSize: 10, fill: "rgba(255,255,255,0.4)" }} stroke="rgba(255,255,255,0.12)" />
+              <XAxis dataKey="time" tickFormatter={(v) => formatISTTime(v)} minTickGap={30} tick={{ fontSize: 10, fill: "rgba(255,255,255,0.4)" }} stroke="rgba(255,255,255,0.12)" />
               <YAxis yAxisId="price" domain={["auto", "auto"]} width={58} tick={{ fontSize: 10, fill: "rgba(255,255,255,0.4)" }} stroke="rgba(255,255,255,0.12)" />
               <YAxis yAxisId="cvd" orientation="right" width={52} tick={{ fontSize: 10, fill: "#ffa502" }} stroke="rgba(255,255,255,0.12)" />
               <Tooltip
                 contentStyle={{ background: "#0d1117", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8, fontSize: 11 }}
-                labelFormatter={(v) => String(v).slice(11, 19)}
+                labelFormatter={(v) => `${formatIST(v)} IST`}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 formatter={(value: any, name: any) => [formatNumber(Number(value), name === "CVD" ? 0 : 2), name]}
               />

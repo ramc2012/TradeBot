@@ -12,7 +12,7 @@
 import { useMemo } from "react";
 
 import { LastUpdated } from "@/components/common/LastUpdated";
-import { formatNumber } from "@/components/desk-ui";
+import { formatIST, formatISTTime, formatNumber } from "@/components/desk-ui";
 
 import { OfSourceBadge } from "./OfSourceBadge";
 
@@ -107,8 +107,8 @@ export function FootprintGrid({
           <div className="flex items-end gap-1 pb-1">
             <div className="w-[70px] shrink-0" />
             {shown.map((bar, i) => (
-              <div key={i} className="w-[128px] shrink-0 text-center font-mono text-[10px] text-text-muted">
-                {String(bar.time).slice(11, 16) || `bar ${i + 1}`}
+              <div key={i} className="w-[128px] shrink-0 text-center font-mono text-[10px] text-text-muted" title={`${formatIST(bar.time)} IST`}>
+                {formatISTTime(bar.time) || `bar ${i + 1}`}
                 <div className="mt-0.5 flex justify-between px-1 text-[8.5px] uppercase tracking-[0.1em]">
                   <span className="text-accent-red/80">sell</span>
                   <span className="text-accent-green/80">buy</span>

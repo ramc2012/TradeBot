@@ -86,6 +86,23 @@ export function formatIST(value?: string | number | Date | null): string {
   });
 }
 
+/** Clock-only IST timestamp — HH:mm, with optional seconds for chart tooltips. */
+export function formatISTTime(
+  value?: string | number | Date | null,
+  { seconds = false }: { seconds?: boolean } = {},
+): string {
+  if (value == null) return NA;
+  const parsed = toDate(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return parsed.toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    ...(seconds ? { second: "2-digit" } : {}),
+    hour12: false,
+    timeZone: "Asia/Kolkata",
+  });
+}
+
 /** Full timestamp incl. year — for audit feeds, journal rows. */
 export function formatTimestamp(value?: string | number | Date | null): string {
   if (value == null) return NA;

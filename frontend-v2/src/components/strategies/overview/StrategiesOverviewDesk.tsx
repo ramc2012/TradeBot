@@ -337,9 +337,7 @@ export default function StrategiesOverviewDesk() {
   const cbeQuery = useQuery({
     queryKey: ["overview", "cbe-latest"],
     queryFn: async () =>
-      (
-        await apiClient.get("/api/cbe/latest", { params: { source: "alpha_engine" } })
-      ).data as CbeScan,
+      (await apiClient.get("/api/cbe/latest")).data as CbeScan,
     refetchInterval: REFRESH_MS.slow,
     refetchOnWindowFocus: false,
     retry: false,

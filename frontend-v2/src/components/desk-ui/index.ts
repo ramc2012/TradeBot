@@ -16,6 +16,7 @@ export {
   formatSignedNumber,
   formatPct,
   formatIST,
+  formatISTTime,
   formatTimestamp,
   formatDuration,
 } from "./formatters";
