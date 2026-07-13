@@ -66,6 +66,10 @@ async def run_live_cycle(allow_entries: bool = Query(True)) -> dict[str, object]
 @router.post("/data-audit")
 async def data_audit(
     max_names: int | None = Query(None, ge=1, le=500),
+    underlyings: str | None = Query(
+        None,
+        description="Optional comma-separated priority symbols, such as current open-position names.",
+    ),
     wait: bool = Query(False, description="True = run inline and return the report (small sweeps); False = run in background, poll /data-audit-report."),
 ) -> dict[str, object]:
     """Sweep the full F&O universe: resolve current+next expiry, fetch chains,
@@ -73,9 +77,10 @@ async def data_audit(
     ATM CE+PE 30-min history for the premium-MACD. Broker-intensive (~1300 calls
     for the full universe) — default runs in the background and writes the report
     to runtime/macd_refined/data_audit_latest.json (read via /data-audit-report)."""
+    selected = _parse_underlyings(underlyings)
     if wait:
-        return await _service.data_audit(max_names=max_names)
-    asyncio.create_task(_service.data_audit(max_names=max_names))
+        return await _service.data_audit(max_names=max_names, underlyings=selected)
+    asyncio.create_task(_service.data_audit(max_names=max_names, underlyings=selected))
     return {"started": True, "background": True, "poll": "/api/macd-refined/data-audit-report"}
 
 

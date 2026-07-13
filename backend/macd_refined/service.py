@@ -39,6 +39,7 @@ class MacdRefinedService:
             "label": self.config["label"],
             "description": self.config["description"],
             "timeframe": self.config["timeframe"],
+            "live_universe_mode": self.config.get("live_universe_mode", "list"),
             "live_universe": list(self.config.get("live_universe") or []),
             "backtest_universe_size": len(available),
             "dataset": {
@@ -94,8 +95,13 @@ class MacdRefinedService:
     async def run_live_cycle(self, *, allow_entries: bool = True) -> dict[str, Any]:
         return await self.live.run_cycle(allow_entries=allow_entries)
 
-    async def data_audit(self, *, max_names: int | None = None) -> dict[str, Any]:
-        return await self.live.data_audit(max_names=max_names)
+    async def data_audit(
+        self,
+        *,
+        max_names: int | None = None,
+        underlyings: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return await self.live.data_audit(max_names=max_names, underlyings=underlyings)
 
     def signals(self, *, limit: int = 100, underlying: str | None = None) -> dict[str, Any]:
         """Recent generated premium-MACD signals (recorded with gate verdicts)."""

@@ -96,7 +96,7 @@ def test_live_cycle_processes_names_with_bounded_concurrency(tmp_path: Path, mon
     async def _universe():
         return [f"SYM{i}" for i in range(6)]
 
-    async def _evaluate(_adapter, _underlying, _expiries, diag):
+    async def _evaluate(_adapter, _underlying, _expiries, diag, _signal_updates):
         diag["legs_evaluated"] = 2
         return []
 
@@ -112,3 +112,48 @@ def test_live_cycle_processes_names_with_bounded_concurrency(tmp_path: Path, mon
     assert len(result["fetched"]) == 6
     assert result["failures"] == {}
     assert result["funnel"]["legs_evaluated"] == 12
+
+
+def test_live_cycle_commits_completed_name_before_slow_name_finishes(tmp_path: Path, monkeypatch) -> None:
+    engine = _engine(tmp_path)
+    syncs: list[list[dict]] = []
+
+    class _Paper(_PaperStub):
+        def sync_cycle(self, **kwargs):
+            syncs.append(list(kwargs.get("proposals") or []))
+            return {"open_positions": len(syncs)}
+
+    engine.paper = _Paper()
+
+    class _Adapter:
+        async def get_option_chain(self, symbol: str, _expiry: str):
+            if "SLOW" in symbol:
+                await asyncio.sleep(1.0)
+            return object()
+
+    async def _adapter():
+        return _Adapter()
+
+    async def _universe():
+        return ["FAST", "SLOW"]
+
+    async def _evaluate(_adapter, underlying, _expiries, _diag, signal_updates):
+        signal_updates[f"{underlying}|signal"] = "2026-07-13T03:30:00+00:00"
+        return [{"underlying": underlying, "option_type": "CE", "quantity_units": 1}]
+
+    monkeypatch.setattr(engine, "_adapter", _adapter)
+    monkeypatch.setattr(engine, "_resolve_universe", _universe)
+    monkeypatch.setattr(engine, "resolve_expiries", lambda *_args, **_kwargs: [date(2026, 7, 28)])
+    monkeypatch.setattr(engine, "_chain_to_rows", lambda *_args, **_kwargs: ([], []))
+    monkeypatch.setattr(engine, "_evaluate", _evaluate)
+
+    async def _run_with_timeout():
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(engine.run_cycle(allow_entries=True), timeout=0.1)
+
+    import pytest
+    asyncio.run(_run_with_timeout())
+
+    assert syncs == [[{"underlying": "FAST", "option_type": "CE", "quantity_units": 1}]]
+    assert engine._signal_state["FAST|signal"] == "2026-07-13T03:30:00+00:00"
+    assert "SLOW|signal" not in engine._signal_state

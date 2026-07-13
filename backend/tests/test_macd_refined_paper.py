@@ -71,3 +71,38 @@ def test_macd_refined_closed_pnl_matches_displayed_entry_exit(tmp_path: Path) ->
     assert row["realized_pnl_net"] < row["realized_pnl"]
     assert payload["realized_pnl"] == pytest.approx(-139_500.0)
     assert payload["realized_pnl_net"] < payload["realized_pnl"]
+
+
+def test_macd_refined_rejects_entry_that_exceeds_available_capital(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    proposal = _proposal()
+    proposal["quantity_units"] = 300_000
+
+    payload = store.sync_cycle(
+        proposals=[proposal],
+        marks={},
+        now="2026-07-13T04:00:00+00:00",
+    )
+
+    assert payload["admitted_this_cycle"] == 0
+    assert payload["capital_blocked_this_cycle"] == 1
+    assert store.list_positions(status="open")["open_positions"] == []
+    journal = store.list_journal(limit=10)["records"]
+    assert journal[0]["reason"] == "insufficient_available_capital"
+
+
+def test_incremental_sync_does_not_remark_positions_without_a_mark(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.sync_cycle(proposals=[_proposal()], marks={}, now="2026-07-07T09:21:18+00:00")
+    before = store.list_positions(status="open")["open_positions"][0]
+
+    store.sync_cycle(
+        proposals=[],
+        marks={},
+        now="2026-07-13T04:00:00+00:00",
+        allow_entries=False,
+    )
+    after = store.list_positions(status="open")["open_positions"][0]
+
+    assert after["updated_at"] == before["updated_at"]
+    assert after["latest_premium"] == before["latest_premium"]

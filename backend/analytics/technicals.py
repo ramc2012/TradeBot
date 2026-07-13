@@ -155,8 +155,14 @@ def compute_adx(
     return adx, plus_di, minus_di
 
 
+MACD_MIN_BARS = 26 + 9
+
+
 def latest_macd_rsi(closes: list[float]) -> dict[str, Any]:
-    if len(closes) < 20:
+    # MACD(12,26,9) needs the slow EMA plus signal-line warm-up.  Returning a
+    # value after only 20 closes allowed fresh-contract startup artefacts to be
+    # consumed as real S1 zero-crosses.
+    if len(closes) < MACD_MIN_BARS:
         return {
             "macd": None,
             "macd_signal": None,

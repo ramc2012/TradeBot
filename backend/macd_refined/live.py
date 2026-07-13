@@ -195,7 +195,19 @@ class MacdRefinedLiveEngine:
             from db.database import AsyncSessionLocal
             async with AsyncSessionLocal() as session:
                 res = await session.execute(
-                    text("SELECT DISTINCT symbol FROM fo_underlying_catalog WHERE symbol IS NOT NULL")
+                    text(
+                        """
+                        SELECT DISTINCT u.symbol
+                        FROM fo_underlying_catalog AS u
+                        WHERE u.symbol IS NOT NULL
+                          AND EXISTS (
+                              SELECT 1
+                              FROM fo_contract_catalog AS c
+                              WHERE c.underlying = u.symbol
+                                AND c.expiry >= CURRENT_DATE
+                          )
+                        """
+                    )
                 )
                 syms = [str(r[0]).upper() for r in res.fetchall() if r[0]]
         except Exception:
@@ -361,8 +373,6 @@ class MacdRefinedLiveEngine:
             return status
         status["storage_ready"] = True
 
-        all_proposals: list[dict[str, Any]] = []
-        marks: dict[str, dict[str, Any]] = {}
         strikes_side = int(self.config["live"].get("strikes_each_side", 3))
         # Stage funnel for observability — how many ATM contracts reach each gate.
         diag = {"legs_evaluated": 0, "macd_series_ready": 0, "fresh_cross": 0,
@@ -374,6 +384,20 @@ class MacdRefinedLiveEngine:
         # aggregate request rate.
         concurrency = max(1, int(self.config["live"].get("max_concurrent_names", 6)))
         semaphore = asyncio.Semaphore(concurrency)
+
+        # Open-position names go first.  The cycle is allowed to be interrupted
+        # by the supervisor, so risk management must not sit behind 200+ names
+        # of discovery work.
+        open_positions = self.paper.list_positions(status="open", limit=500).get("open_positions", [])
+        open_underlyings = {
+            str(position.get("underlying") or "").upper()
+            for position in open_positions
+            if position.get("underlying")
+        }
+        universe = sorted(
+            universe,
+            key=lambda name: (str(name).upper() not in open_underlyings, universe.index(name)),
+        )
 
         async def _process_underlying(underlying: str) -> dict[str, Any]:
             async with semaphore:
@@ -388,13 +412,17 @@ class MacdRefinedLiveEngine:
                 # history when live snapshots are still thin). Per-name diag is
                 # returned to the caller and folded into the aggregate funnel.
                 name_diag: dict[str, int] = {}
-                props = await self._evaluate(adapter, underlying, expiries, name_diag)
+                signal_updates: dict[str, str] = {}
+                props = await self._evaluate(
+                    adapter, underlying, expiries, name_diag, signal_updates
+                )
                 return {
                     "underlying": underlying,
                     "expiries": [e.isoformat() for e in expiries],
                     "persisted_rows": persisted_here,
                     "proposals": props,
                     "diag": name_diag,
+                    "signal_updates": signal_updates,
                 }
 
         async def _safe_process(underlying: str) -> dict[str, Any]:
@@ -403,39 +431,60 @@ class MacdRefinedLiveEngine:
             except Exception as exc:  # noqa: BLE001
                 return {"underlying": underlying, "error": str(exc)}
 
-        processed = await asyncio.gather(*(_safe_process(underlying) for underlying in universe))
-        for item in processed:
-            underlying = str(item["underlying"])
-            if item.get("error") is not None:
-                status["failures"][underlying] = str(item["error"])
-                continue
-            persisted_here = int(item.get("persisted_rows") or 0)
-            name_diag = dict(item.get("diag") or {})
-            status["fetched"][underlying] = {
-                "expiries": list(item.get("expiries") or []),
-                "persisted_rows": persisted_here,
-                "legs": name_diag.get("legs_evaluated", 0),
-                "macd_ready": name_diag.get("macd_series_ready", 0),
-            }
-            status["snapshots_persisted"] += persisted_here
-            all_proposals.extend(list(item.get("proposals") or []))
-            for k, v in name_diag.items():
-                diag[k] = diag.get(k, 0) + v
+        tasks = [asyncio.create_task(_safe_process(underlying)) for underlying in universe]
+        paper_syncs = 0
+        try:
+            # Commit every completed name independently.  Previously an outer
+            # timeout discarded every proposal and skipped all open-position
+            # marks because paper.sync_cycle lived after asyncio.gather.
+            for completed in asyncio.as_completed(tasks):
+                item = await completed
+                underlying = str(item["underlying"])
+                if item.get("error") is not None:
+                    status["failures"][underlying] = str(item["error"])
+                    continue
+                persisted_here = int(item.get("persisted_rows") or 0)
+                name_diag = dict(item.get("diag") or {})
+                proposals = list(item.get("proposals") or [])
+                signal_updates = dict(item.get("signal_updates") or {})
+                status["fetched"][underlying] = {
+                    "expiries": list(item.get("expiries") or []),
+                    "persisted_rows": persisted_here,
+                    "legs": name_diag.get("legs_evaluated", 0),
+                    "macd_ready": name_diag.get("macd_series_ready", 0),
+                }
+                status["snapshots_persisted"] += persisted_here
+                status["proposals"] += len(proposals)
+                for k, v in name_diag.items():
+                    diag[k] = diag.get(k, 0) + v
 
-        # Persist the per-contract last-signalled-bar dedup state.
-        self._save_signal_state()
-        # Build marks for open positions (latest LTP from this cycle's snapshots).
-        marks = self._marks_for_open(today)
-        status["proposals"] = len(all_proposals)
+                marks = self._marks_for_open(today, underlyings={underlying})
+                try:
+                    if marks or proposals:
+                        status["paper_summary"] = self.paper.sync_cycle(
+                            proposals=proposals,
+                            marks=marks,
+                            now=_utc_now(),
+                            allow_entries=allow_entries,
+                        )
+                        paper_syncs += 1
+                    # A signal becomes deduplicated only after the related book
+                    # update has succeeded (or no book mutation was required).
+                    self._signal_state.update(signal_updates)
+                    if signal_updates:
+                        self._save_signal_state()
+                except Exception as exc:  # noqa: BLE001
+                    status["failures"][f"paper_sync:{underlying}"] = str(exc)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        status["paper_syncs"] = paper_syncs
+        status["paper_summary"] = status.get("paper_summary") or self.paper.capital_status()
         status["funnel"] = diag
         status["signals_recorded"] = self.recent_signals(limit=1)["count"]
-        try:
-            summary = self.paper.sync_cycle(
-                proposals=all_proposals, marks=marks, now=_utc_now(), allow_entries=allow_entries
-            )
-            status["paper_summary"] = summary
-        except Exception as exc:  # noqa: BLE001
-            status["failures"]["paper_sync"] = str(exc)
         return status
 
     # ── Chain → rows ──────────────────────────────────────────────────────
@@ -572,8 +621,16 @@ class MacdRefinedLiveEngine:
             self._hist_cache[instrument_key] = (now, ser)
         return ser
 
-    async def _evaluate(self, adapter, underlying: str, expiries: list[date], diag: dict[str, int] | None = None) -> list[dict[str, Any]]:
+    async def _evaluate(
+        self,
+        adapter,
+        underlying: str,
+        expiries: list[date],
+        diag: dict[str, int] | None = None,
+        signal_updates: dict[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
         diag = diag if diag is not None else {}
+        signal_updates = signal_updates if signal_updates is not None else {}
 
         def _bump(k: str) -> None:
             diag[k] = diag.get(k, 0) + 1
@@ -585,7 +642,18 @@ class MacdRefinedLiveEngine:
         flt_cfg = self.config["filters"]
         min_bars = int(sig_cfg["macd_slow"]) + int(sig_cfg["macd_signal"])
         proposals: list[dict[str, Any]] = []
-        equity = float(self.paper.capital_status().get("total_equity") or self.config["risk"]["starting_equity"])
+        capital = self.paper.capital_status()
+        total_equity = float(
+            capital.get("total_equity_net")
+            if capital.get("total_equity_net") is not None
+            else capital.get("total_equity") or self.config["risk"]["starting_equity"]
+        )
+        available = float(
+            capital.get("available_capital_net")
+            if capital.get("available_capital_net") is not None
+            else capital.get("available_capital", total_equity)
+        )
+        equity = max(0.0, min(total_equity, available))
         today = datetime.now(timezone.utc).date()
         iv_window = int(flt_cfg["iv_rank_window_sessions"])
         baseline_sessions = int(sig_cfg["volume_baseline_sessions"])
@@ -633,7 +701,7 @@ class MacdRefinedLiveEngine:
                 # tolerance vs the cache/cycle interaction), AND newer than the
                 # last bar we already signalled for this contract (dedup, no miss).
                 ckey = f"{underlying}|{exp_iso}|{atm}|{option_type}"
-                last_sig = self._signal_state.get(ckey)  # canonical UTC ISO (migrated on load)
+                last_sig = signal_updates.get(ckey) or self._signal_state.get(ckey)
                 recent_idx = list(series.index[-2:])
                 cross_bars = [t for t, c in zip(series.index, crosses.to_numpy()) if c and t in recent_idx]
                 # Compare in canonical UTC so a +05:30 (or naive) fallback bar is
@@ -642,7 +710,7 @@ class MacdRefinedLiveEngine:
                 if not fresh:
                     continue
                 signal_bar = max(fresh, key=_utc_key)
-                self._signal_state[ckey] = _utc_key(signal_bar)
+                signal_updates[ckey] = _utc_key(signal_bar)
                 _bump("fresh_cross")
 
                 last = latest_rows[latest_rows["strike"] == atm]
@@ -725,7 +793,12 @@ class MacdRefinedLiveEngine:
                     })
         return proposals
 
-    def _marks_for_open(self, today: Optional[date]) -> dict[str, dict[str, Any]]:
+    def _marks_for_open(
+        self,
+        today: Optional[date],
+        *,
+        underlyings: set[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
         """Mark open positions off the latest persisted LTP; flag window-end."""
         from datetime import timedelta
         today = today or datetime.now(timezone.utc).date()
@@ -735,6 +808,8 @@ class MacdRefinedLiveEngine:
         cache: dict[str, pd.DataFrame] = {}
         for p in positions:
             und = str(p.get("underlying") or "")
+            if underlyings is not None and und.upper() not in underlyings:
+                continue
             if und not in cache:
                 cache[und] = self.load_tracking(und)
             df = cache[und]
@@ -761,7 +836,12 @@ class MacdRefinedLiveEngine:
             }
         return marks
 
-    async def data_audit(self, *, max_names: int | None = None) -> dict[str, Any]:
+    async def data_audit(
+        self,
+        *,
+        max_names: int | None = None,
+        underlyings: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Data-sufficiency sweep across the FULL F&O universe.
 
         For every underlying, resolve current + next monthly expiry, fetch the
@@ -802,6 +882,13 @@ class MacdRefinedLiveEngine:
         min_bars = int(sig_cfg["macd_slow"]) + int(sig_cfg["macd_signal"])
         strikes_side = int(self.config["live"].get("strikes_each_side", 3))
         universe = await self._resolve_universe()
+        if underlyings:
+            requested = {str(name).strip().upper() for name in underlyings if str(name).strip()}
+            universe = [name for name in universe if str(name).upper() in requested]
+            # Preserve explicit names temporarily missing from the catalog so
+            # open-position backfills still attempt their contracts.
+            present = {str(name).upper() for name in universe}
+            universe.extend(sorted(requested - present))
         if max_names:
             universe = universe[: int(max_names)]
         today = datetime.now(timezone.utc).date()

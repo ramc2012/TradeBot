@@ -267,6 +267,12 @@ class MacdRefinedPaperStore:
             survivors: list[dict[str, Any]] = []
             for p in opens:
                 pid = str(p.get("position_id") or "")
+                # Incremental live cycles intentionally provide marks only for
+                # the completed underlying.  Missing is not the same as fresh:
+                # leave other positions untouched until their own chain lands.
+                if pid not in marks:
+                    survivors.append(p)
+                    continue
                 mark = marks.get(pid) or {}
                 fully_closed, realized_delta, realized_net_delta = self._manage(p, mark, now)
                 if realized_delta:
@@ -295,6 +301,12 @@ class MacdRefinedPaperStore:
 
             # 3) Admit new proposals.
             admitted = 0
+            capital_blocked = 0
+            capital = self._summary(opens, closed, lifetime)
+            available_for_entries = min(
+                float(capital.get("available_capital") or 0.0),
+                float(capital.get("available_capital_net") or 0.0),
+            )
             if allow_entries and not paused:
                 for prop in proposals:
                     underlying = _norm(prop.get("underlying"))
@@ -314,6 +326,21 @@ class MacdRefinedPaperStore:
                     pid = uuid4().hex
                     entry_gross = float(prop.get("entry_premium") or 0.0)
                     entry_fill = round(entry_gross * (1.0 + self._slip_half), 4)  # pay up on entry
+                    required_capital = round(entry_fill * qty, 2)
+                    if required_capital > max(available_for_entries, 0.0):
+                        capital_blocked += 1
+                        self._append_journal({
+                            "recorded_at": now,
+                            "event": "rejected",
+                            "underlying": underlying,
+                            "book": book,
+                            "strike": prop.get("strike"),
+                            "expiry": prop.get("expiry"),
+                            "reason": "insufficient_available_capital",
+                            "required_capital": required_capital,
+                            "available_capital": round(available_for_entries, 2),
+                        })
+                        continue
                     opens.append({
                         "position_id": pid, "status": "open", "opened_at": now, "updated_at": now, "closed_at": None,
                         "underlying": underlying, "book": book, "option_type": book, "direction": book,
@@ -339,6 +366,7 @@ class MacdRefinedPaperStore:
                     })
                     admitted += 1
                     daily_count += 1
+                    available_for_entries -= required_capital
 
             self._refresh_lifetime(lifetime, opens, closed)
             state = {"open_positions": opens, "closed_positions": closed, "last_synced_at": now, "lifetime": lifetime}
@@ -347,6 +375,7 @@ class MacdRefinedPaperStore:
             summary["kill_switch_paused"] = paused
             summary["kill_switch_reason"] = pause_reason
             summary["admitted_this_cycle"] = admitted
+            summary["capital_blocked_this_cycle"] = capital_blocked
             return summary
 
     # ── Position management: stop / partial / trail / window ──────────────
