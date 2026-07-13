@@ -71,6 +71,22 @@ class MarketProfileEngine:
         highs: list[float] = []
         lows: list[float] = []
 
+        # Ladder hard cap. The GIL-bound TPO build is O(session_range /
+        # tick_size): a too-fine tick (NIFTY at 0.05) or one contaminated bar
+        # (garbage cross-symbol high/low print) used to explode this loop into
+        # hundreds of thousands of levels and seize the event loop for minutes
+        # per call (observed live 2026-07-13, commodity_index_monitor endpoint).
+        # Coarsen the tick so the whole session never exceeds MAX_LADDER_LEVELS
+        # — a wrong tick now costs profile granularity, never the process.
+        MAX_LADDER_LEVELS = 2000
+        session_span = max(
+            max(item.high for item in ordered_bars) - min(item.low for item in ordered_bars),
+            0.0,
+        )
+        ladder_tick = self.tick_size
+        if session_span > 0 and session_span / max(ladder_tick, 1e-9) > MAX_LADDER_LEVELS:
+            ladder_tick = session_span / MAX_LADDER_LEVELS
+
         for bucket, bucket_bars in sorted(period_map.items()):
             period_count += 1
             letter = period_letters[bucket % len(period_letters)]
@@ -80,7 +96,7 @@ class MarketProfileEngine:
             lows.append(period_low)
             total_volume += sum(item.volume for item in bucket_bars)
 
-            for price in _price_ladder(period_low, period_high, self.tick_size):
+            for price in _price_ladder(period_low, period_high, ladder_tick):
                 tpo_letters[price].append(letter)
 
         tpo_counts = {price: len(letters) for price, letters in tpo_letters.items()}

@@ -22,6 +22,7 @@ import {
 } from "@/lib/api";
 import { LiveMarkCell } from "@/components/terminal/LiveMarkCell";
 import { legTapeSymbol } from "@/lib/marketSymbols";
+import { LastUpdated, newestTimestamp } from "@/components/common/LastUpdated";
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
 import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 
@@ -48,7 +49,8 @@ export default function UsMacdDesk() {
   const summaryQuery = useQuery({
     queryKey: ["us-macd", "summary"],
     queryFn: () => getUsMacdSummary().then((r) => r.data),
-    refetchInterval: REFRESH_MS.summary,
+    // Live-market page → keep the header freshness poll at ≤30s.
+    refetchInterval: REFRESH_MS.snapshot,
   });
   const healthQuery = useQuery({
     queryKey: ["us-macd", "health"],
@@ -77,6 +79,14 @@ export default function UsMacdDesk() {
 
   const summary = summaryQuery.data as any;
   const params = summary?.params ?? {};
+  const automation = summary?.automation ?? {};
+
+  // Header freshness: last completed automation cycle; falls back to the
+  // fetch completion time (labelled "Fetched") when the runner never ran.
+  const automationAsOf: string | null =
+    automation?.last_success_at ?? automation?.last_finished_at ?? automation?.last_started_at ?? null;
+  const runnerInterval = Number(automation?.interval_seconds ?? 0);
+  const staleAfter = Math.max(120, runnerInterval * 2 || 0);
 
   const runCycle = () => startTransition(async () => {
     try {
@@ -92,6 +102,10 @@ export default function UsMacdDesk() {
       title="US MACD Refined"
       description="Premium-MACD zero-cross on US equity/ETF options via Alpaca — pure MACD, IV as mapping, hard SL + partial booking + trailing. Paper, USD."
       paperMode
+      asOf={automationAsOf ?? (summaryQuery.dataUpdatedAt ? new Date(summaryQuery.dataUpdatedAt) : null)}
+      asOfLabel={automationAsOf ? "Updated" : "Fetched"}
+      asOfStaleSeconds={staleAfter}
+      asOfCriticalSeconds={Math.max(600, staleAfter * 3)}
       isFetching={summaryQuery.isFetching}
       tabs={TABS}
       activeTab={activeTab}
@@ -219,7 +233,14 @@ export default function UsMacdDesk() {
                 <MetricTile label="Win rate" value={formatPct(sum.win_rate)} />
                 <MetricTile label="Max DD" value={formatPct(sum.max_drawdown)} />
               </div>
-              <Section title={`Positions (${open.length} open · ${closed.length} closed)`}>
+              <Section
+                title={`Positions (${open.length} open · ${closed.length} closed)`}
+                rightSlot={
+                  <LastUpdated
+                    timestamp={newestTimestamp(rows.map((p: any) => p.updated_at ?? p.closed_at ?? p.opened_at))}
+                  />
+                }
+              >
                 {rows.length === 0 ? (
                   <div className="rounded-xl border border-bg-border bg-bg-primary/14 p-4 text-sm text-text-muted">No US paper positions yet.</div>
                 ) : (

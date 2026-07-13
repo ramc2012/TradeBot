@@ -22,6 +22,7 @@ import {
   tone,
 } from "@/components/desk-ui";
 import type { usePaperDeskQueries } from "@/hooks/usePaperDeskQueries";
+import { LastUpdated, newestTimestamp } from "@/components/common/LastUpdated";
 import { LiveMarkCell } from "@/components/terminal/LiveMarkCell";
 import { legTapeSymbol } from "@/lib/marketSymbols";
 
@@ -41,6 +42,7 @@ type OpenPos = {
   latest_premium?: number;
   unrealized_pnl?: number;
   opened_at?: string;
+  updated_at?: string;
   policy_size_multiplier?: number;
 };
 
@@ -105,7 +107,20 @@ export default function PaperTradingTab({ symbol, paper }: { symbol?: string; pa
         </div>
       </Section>
 
-      <Section title={`Trades${symbol ? " · " + symbol : ""}`}>
+      <Section
+        title={`Trades${symbol ? " · " + symbol : ""}`}
+        rightSlot={
+          <LastUpdated
+            timestamp={newestTimestamp(
+              view === "open"
+                ? opens.map((p) => p.updated_at ?? p.opened_at)
+                : view === "closed"
+                  ? closes.map((p) => p.closed_at ?? p.updated_at ?? p.opened_at)
+                  : records.map((r) => r.recorded_at),
+            )}
+          />
+        }
+      >
         <div className="mb-3 flex items-center gap-1.5">
           {([
             { k: "open", label: `Open (${opens.length})`, icon: Layers3 },

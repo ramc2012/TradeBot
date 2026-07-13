@@ -5,6 +5,7 @@ import json
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from threading import RLock
 from typing import Dict, List, Optional
 
 from brokers.base import Tick
@@ -64,50 +65,52 @@ class MarketProfileBuilder:
         self._candle_start: Dict[str, Optional[datetime]] = {}
         self._ticks: Dict[str, "deque[Tick]"] = {}
         self._ticks_since_trim: Dict[str, int] = {}
+        self._state_lock = RLock()
 
     def on_tick(self, tick: Tick):
         sym = tick.symbol
         ts = self._ensure_utc_timestamp(tick.timestamp)
-        self._ticks.setdefault(sym, deque(maxlen=MAX_TICKS_PER_SYMBOL)).append(
-            Tick(
-                symbol=sym,
-                ltp=tick.ltp,
-                open=tick.open,
-                high=tick.high,
-                low=tick.low,
-                close=tick.close,
-                volume=tick.volume,
-                oi=tick.oi,
-                bid=tick.bid,
-                ask=tick.ask,
-                bid_qty=tick.bid_qty,
-                ask_qty=tick.ask_qty,
-                timestamp=ts,
+        with self._state_lock:
+            self._ticks.setdefault(sym, deque(maxlen=MAX_TICKS_PER_SYMBOL)).append(
+                Tick(
+                    symbol=sym,
+                    ltp=tick.ltp,
+                    open=tick.open,
+                    high=tick.high,
+                    low=tick.low,
+                    close=tick.close,
+                    volume=tick.volume,
+                    oi=tick.oi,
+                    bid=tick.bid,
+                    ask=tick.ask,
+                    bid_qty=tick.bid_qty,
+                    ask_qty=tick.ask_qty,
+                    timestamp=ts,
+                )
             )
-        )
-        self._trim_ticks(sym)
+            self._trim_ticks(sym)
 
-        candle_start = self._get_candle_start(ts)
-        if sym not in self._current_candle or self._candle_start.get(sym) != candle_start:
-            if sym in self._current_candle and self._current_candle[sym]:
-                self._finalize_candle(sym)
-            self._current_candle[sym] = TPOCandle(
-                open=tick.ltp,
-                high=tick.ltp,
-                low=tick.ltp,
-                close=tick.ltp,
-                volume=tick.volume,
-                timestamp=candle_start,
-            )
-            self._candle_start[sym] = candle_start
-            return
+            candle_start = self._get_candle_start(ts)
+            if sym not in self._current_candle or self._candle_start.get(sym) != candle_start:
+                if sym in self._current_candle and self._current_candle[sym]:
+                    self._finalize_candle(sym)
+                self._current_candle[sym] = TPOCandle(
+                    open=tick.ltp,
+                    high=tick.ltp,
+                    low=tick.ltp,
+                    close=tick.ltp,
+                    volume=tick.volume,
+                    timestamp=candle_start,
+                )
+                self._candle_start[sym] = candle_start
+                return
 
-        candle = self._current_candle[sym]
-        if candle:
-            candle.high = max(candle.high, tick.ltp)
-            candle.low = min(candle.low, tick.ltp)
-            candle.close = tick.ltp
-            candle.volume += tick.volume
+            candle = self._current_candle[sym]
+            if candle:
+                candle.high = max(candle.high, tick.ltp)
+                candle.low = min(candle.low, tick.ltp)
+                candle.close = tick.ltp
+                candle.volume += tick.volume
 
     def build_daily_profile(self, symbol: str) -> Optional[MarketProfileResult]:
         tick_rows = self.get_tick_rows(symbol)
@@ -136,7 +139,7 @@ class MarketProfileBuilder:
 
     def get_tick_rows(self, symbol: str) -> List[dict]:
         rows: List[dict] = []
-        for tick in self._ticks.get(symbol, []):
+        for tick in self._snapshot_ticks(symbol):
             ts = self._ensure_utc_timestamp(tick.timestamp)
             rows.append(
                 {
@@ -296,11 +299,12 @@ class MarketProfileBuilder:
             self._trim_candles(sym)
 
     def _candles_with_current(self, symbol: str) -> List[TPOCandle]:
-        candles = list(self._candles.get(symbol, []))
-        current = self._current_candle.get(symbol)
-        if current:
-            candles.append(current)
-        return candles
+        with self._state_lock:
+            candles = list(self._candles.get(symbol, []))
+            current = self._current_candle.get(symbol)
+            if current:
+                candles.append(current)
+            return candles
 
     def _trim_ticks(self, sym: str):
         # deque(maxlen) already evicts oldest ticks by count in O(1) on append, so
@@ -314,14 +318,24 @@ class MarketProfileBuilder:
             self._ticks_since_trim[sym] = n
             return
         self._ticks_since_trim[sym] = 0
-        ticks = self._ticks.get(sym)
-        if not ticks:
+        snapshot = self._snapshot_ticks(sym)
+        if not snapshot:
             return
         cutoff = datetime.now(timezone.utc) - timedelta(days=2)
         self._ticks[sym] = deque(
-            (tick for tick in ticks if self._ensure_utc_timestamp(tick.timestamp) >= cutoff),
+            (tick for tick in snapshot if self._ensure_utc_timestamp(tick.timestamp) >= cutoff),
             maxlen=MAX_TICKS_PER_SYMBOL,
         )
+
+    def _snapshot_ticks(self, sym: str) -> List[Tick]:
+        with self._state_lock:
+            ticks = self._ticks.get(sym)
+            if not ticks:
+                return []
+            copy_method = getattr(ticks, "copy", None)
+            if callable(copy_method):
+                return list(copy_method())
+            return list(ticks)
 
     def _trim_candles(self, sym: str):
         candles = self._candles.get(sym, [])

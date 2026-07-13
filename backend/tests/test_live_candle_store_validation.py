@@ -62,3 +62,16 @@ def test_option_premiums_exempt_from_magnitude_gate():
     assert store._validate_tick(_mk(opt, 5.0)) is True
     assert store._validate_tick(_mk(opt, 50.0)) is True       # 10x premium move is legit
     assert store._validate_tick(_mk(opt, 0.0)) is False       # structural still applies
+
+
+def test_rejects_crosswired_contract_tick_against_top_of_book():
+    store = LiveCandleStore()
+    tick = Tick(
+        symbol="MCX:CRUDEOIL26JULFUT",
+        ltp=24217.95,
+        bid=6967.0,
+        ask=6969.0,
+        volume=100,
+    )
+
+    assert store._validate_tick(tick) is False

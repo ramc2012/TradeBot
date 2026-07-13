@@ -27,6 +27,8 @@ import {
   tone,
   useUrlTab,
 } from "@/components/desk-ui";
+import { LastUpdated } from "@/components/common/LastUpdated";
+import { OfSourceBadge, ProfileLadder } from "@/components/mpof";
 import { MarketProfileChart, OrderFlowPanel, PaperPerformance } from "@/components/strategies/shared";
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
 import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
@@ -152,6 +154,7 @@ export default function AuctionDesk() {
             <StatusBadge label={streamLive ? "● live" : "polling"} variant={streamLive ? "success" : "info"} />
           ) : null}
           {ds?.snapshot_mode ? <StatusBadge label={ds.snapshot_mode.replace(/_/g, " ")} variant="info" /> : null}
+          <OfSourceBadge source={ds?.order_flow_source} size="sm" />
           <Picker label="Symbol" value={symbol} options={universe} onChange={(v) => startTransition(() => setSymbol(v))} />
         </div>
       }
@@ -201,6 +204,11 @@ function AuctionTab({
   of?: any;
 }) {
   const analysis = snap?.analysis;
+  const prior = analysis?.prior_market_profile;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const meta = (snap?.request as any)?.metadata as Record<string, any> | undefined;
+  const ofSource = (snap?.data_status?.order_flow_source as string | undefined) ?? meta?.order_flow_source;
+  const asOf = (snap?.request?.quote?.timestamp as string | undefined) ?? meta?.snapshot_time ?? null;
   return (
     <div className="space-y-4">
       <section className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
@@ -215,8 +223,19 @@ function AuctionTab({
       </section>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)]">
-        <Section title="Market profile (TPO)" icon={<Compass size={16} />} description={`${mp?.session_date || ""} · POC ${formatNumber(mp?.poc, 1)} · VA ${formatNumber(mp?.val, 0)}–${formatNumber(mp?.vah, 0)}`} rightSlot={mp?.bracket_state ? <StatusBadge label={mp.bracket_state} variant="info" /> : null}>
-          <MarketProfileChart profile={mp} lastPrice={spot} height={420} />
+        <Section title="Market profile (TPO)" icon={<Compass size={16} />} description={`${mp?.session_date || ""} · POC ${formatNumber(mp?.poc, 1)} · VA ${formatNumber(mp?.val, 0)}–${formatNumber(mp?.vah, 0)}`} rightSlot={<div className="flex flex-wrap items-center gap-2">{mp?.bracket_state ? <StatusBadge label={mp.bracket_state} variant="info" /> : null}<LastUpdated timestamp={asOf} label="snapshot" /></div>}>
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px]">
+            <MarketProfileChart profile={mp} lastPrice={spot} height={420} />
+            <ProfileLadder
+              spot={spot}
+              vah={mp?.vah} val={mp?.val} poc={mp?.poc}
+              ibHigh={mp?.initial_balance_high} ibLow={mp?.initial_balance_low}
+              dayHigh={mp?.high_price} dayLow={mp?.low_price}
+              prior={prior ? { vah: prior.vah, val: prior.val, poc: prior.poc } : null}
+              singlePrints={mp?.single_prints}
+              height={400}
+            />
+          </div>
           <div className="mt-3 grid grid-cols-2 gap-2.5 md:grid-cols-4">
             <MetricTile size="sm" label="IB range" value={formatNumber(mp?.initial_balance_range, 1)} detail="initial balance" />
             <MetricTile size="sm" label="Day range" value={formatNumber(mp?.day_range, 1)} />
@@ -228,7 +247,7 @@ function AuctionTab({
         <RegimeCard regime={regime} risk={analysis?.risk} />
       </div>
 
-      <OrderFlowPanel of={of} />
+      <OrderFlowPanel of={of} source={ofSource} asOf={asOf} />
 
       <AgentDecisions decisions={analysis?.agent_decisions} />
 

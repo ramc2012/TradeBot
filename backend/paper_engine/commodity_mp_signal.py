@@ -929,6 +929,10 @@ def evaluate_commodity_mp_signal(
         "cvd_divergence": None,
         "hvn_count": 0,
         "lvn_count": 0,
+        # Node midpoints (additive, UI-only): lets the dashboard place HVN/LVN
+        # dots on a price ladder instead of just showing counts.
+        "hvn_prices": [],
+        "lvn_prices": [],
         "ib_extended_above": False,
         "ib_extended_below": False,
         "ib_extension_pct": None,
@@ -1030,6 +1034,15 @@ def evaluate_commodity_mp_signal(
     )
     base["hvn_count"] = hvn_count
     base["lvn_count"] = lvn_count
+    # Additive UI fields: node midpoints for the price-ladder visualization.
+    base["hvn_prices"] = [
+        round((float(node["price_low"]) + float(node["price_high"])) / 2.0, 2)
+        for node in (nodes.get("hvn", []) or [])[:8]
+    ]
+    base["lvn_prices"] = [
+        round((float(node["price_low"]) + float(node["price_high"])) / 2.0, 2)
+        for node in (nodes.get("lvn", []) or [])[:8]
+    ]
     base["ib_extended_above"] = bool(ib_ext and ib_ext.extended_above)
     base["ib_extended_below"] = bool(ib_ext and ib_ext.extended_below)
     base["ib_extension_pct"] = (

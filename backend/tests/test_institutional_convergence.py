@@ -86,6 +86,58 @@ def test_closed_cycle_does_not_build_or_persist(monkeypatch, tmp_path) -> None:
     assert not service.state_file.exists()
 
 
+def test_open_cycle_offloads_rule_evaluation_from_event_loop(monkeypatch, tmp_path) -> None:
+    service = InstitutionalConvergenceService(state_file=tmp_path / "state.json")
+    now = datetime(2026, 7, 13, 10, 0, tzinfo=IST)
+    calls: list[str] = []
+
+    monkeypatch.setattr(service_module, "_now_ist", lambda: now)
+    monkeypatch.setattr(service, "build_universe", lambda: asyncio.sleep(0, result={"indices": ["NIFTY"], "stocks": []}))
+    monkeypatch.setattr(service_module, "_load_india_vix", lambda: asyncio.sleep(0, result=13.0))
+    monkeypatch.setattr(
+        service_module,
+        "_load_rule_inputs",
+        lambda symbol, futures_symbol, current_now: asyncio.sleep(
+            0,
+            result={
+                "current_bars": [{"time": now, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100}] * 4,
+                "prior_bars": [{"time": now - timedelta(days=1), "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100}] * 4,
+                "history_bars": [{"time": now - timedelta(days=2), "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 100}] * 8,
+                "ticks": [],
+                "options": {},
+                "lot_size": 50,
+                "tick_size": 0.5,
+                "clock_drift_ms": 10.0,
+            },
+        ),
+    )
+
+    async def _fake_to_thread(func, /, *args, **kwargs):
+        calls.append(func.__name__)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(service_module.asyncio, "to_thread", _fake_to_thread)
+    monkeypatch.setattr(service_module.market_data_router, "add_subscriptions", lambda symbols: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(service_module.convergence_paper_book, "sync", lambda results, current_now: {"open_count": 0, "open_positions": [], "closed_positions": []})
+    monkeypatch.setattr(service, "_save_state", lambda payload: None)
+
+    import core.config as config_module
+    import data.index_futures_backfill as backfill_module
+
+    monkeypatch.setattr(config_module, "auction_front_month_book_symbols", lambda current_date: {"NSE:NIFTY50-INDEX": "NSE:NIFTY24JULFUT"})
+    monkeypatch.setattr(backfill_module, "fyers_front_month_symbol", lambda symbol, current_date: "NSE:NIFTY24JULFUT")
+    monkeypatch.setattr(backfill_module, "month_code_for_front_contract", lambda current_date, symbol: "24JUL")
+    def _evaluate_rules(**kwargs):
+        return {"symbol": kwargs["symbol"], "status": "blocked", "action": "FLAT"}
+
+    monkeypatch.setattr(service_module, "evaluate_rules", _evaluate_rules)
+
+    payload = asyncio.run(service.run_cycle())
+
+    assert payload["status"] == "ok"
+    assert calls == ["_evaluate_rules", "<lambda>"]
+
+
 def test_status_route_exposes_lane(monkeypatch) -> None:
     async def _status():
         return {"key": "institutional_convergence", "mode": "shadow"}

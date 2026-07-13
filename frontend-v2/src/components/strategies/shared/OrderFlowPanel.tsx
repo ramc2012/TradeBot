@@ -4,10 +4,16 @@
  * Order-flow microstructure panel — shared by Auction + Fractal desks.
  * The lanes emit an identical order_flow block (CVD, imbalances, queue
  * pressure, toxicity, VWAP drift, aggressive buy/sell, fill odds).
+ *
+ * The panel header always states the tick-source honesty (REAL TICKS vs
+ * BAR PROXY / INFERRED) and the data timestamp — fabricated flow must never
+ * be readable as real.
  */
 import { Waves } from "lucide-react";
 
+import { LastUpdated } from "@/components/common/LastUpdated";
 import { MetricTile, Section, formatNumber, formatSignedNumber, formatPct, tone } from "@/components/desk-ui";
+import { OfSourceBadge } from "@/components/mpof";
 import { CHART } from "./chartTheme";
 
 export type OrderFlow = {
@@ -71,14 +77,34 @@ function Gauge({ label, value, invert = false }: { label: string; value?: number
   );
 }
 
-export function OrderFlowPanel({ of }: { of?: OrderFlow | null }) {
+export function OrderFlowPanel({
+  of,
+  source,
+  asOf,
+}: {
+  of?: OrderFlow | null;
+  /** Order-flow source honesty (e.g. tick_reconstruction_book / bar_inference). */
+  source?: string | null;
+  /** Timestamp of the snapshot feeding this block. */
+  asOf?: string | null;
+}) {
   const f = of || {};
   const aggBuy = Number(f.aggressive_buy_volume ?? 0);
   const aggSell = Number(f.aggressive_sell_volume ?? 0);
   const aggTot = aggBuy + aggSell || 1;
 
   return (
-    <Section title="Order flow" icon={<Waves size={16} />} description="Live microstructure: delta, imbalances, queue pressure, toxicity">
+    <Section
+      title="Order flow"
+      icon={<Waves size={16} />}
+      description="Live microstructure: delta, imbalances, queue pressure, toxicity"
+      rightSlot={
+        <div className="flex flex-wrap items-center gap-2">
+          <OfSourceBadge source={source ?? f.source ?? f.order_flow_source} />
+          {asOf !== undefined ? <LastUpdated timestamp={asOf} label="data" /> : null}
+        </div>
+      }
+    >
       <div className="grid gap-4 lg:grid-cols-3">
         {/* CVD + headline tiles */}
         <div className="grid grid-cols-2 gap-2.5">

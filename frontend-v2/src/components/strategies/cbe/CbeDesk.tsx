@@ -42,6 +42,7 @@ import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveS
 import { useStrategyPositionsStream, selectStrategySlice } from "@/hooks/useStrategyPositionsStream";
 import type { PaperPosition, PositionsPayload } from "@/lib/strategy-stats";
 import { api as apiClient } from "@/lib/api";
+import { LastUpdated, newestTimestamp } from "@/components/common/LastUpdated";
 import { LiveMarkCell } from "@/components/terminal/LiveMarkCell";
 import { rowTapeSymbol } from "@/lib/marketSymbols";
 
@@ -207,7 +208,8 @@ export default function CbeDesk() {
   const latestQuery = useQuery({
     queryKey: ["cbe", "latest"],
     queryFn: async () => (await apiClient.get("/api/cbe/latest")).data as ScanPayload,
-    refetchInterval: REFRESH_MS.summary,
+    // Live-market page → keep the header freshness poll at ≤30s.
+    refetchInterval: REFRESH_MS.snapshot,
     refetchOnWindowFocus: false,
   });
 
@@ -323,6 +325,10 @@ export default function CbeDesk() {
         scan?.source ?? ""
       }`}
       asOf={scan?.created_at ?? scan?.scan_date ?? undefined}
+      // CBE scans land once per session (EOD alpha-engine pass) — freshness
+      // thresholds follow that cadence, not the intraday default.
+      asOfStaleSeconds={30 * 3600}
+      asOfCriticalSeconds={54 * 3600}
       isFetching={latestQuery.isFetching}
       paperMode
       tabs={TABS}
@@ -392,6 +398,17 @@ export default function CbeDesk() {
             title="Long/short sleeves"
             icon={<Scale size={16} />}
             description="Open CBE book by side, sorted by notional risk."
+            rightSlot={
+              <LastUpdated
+                label="Marked"
+                timestamp={newestTimestamp([
+                  paperPositionsQuery.data?.last_synced_at,
+                  ...openBook.map((p) => p.mark_time),
+                ])}
+                staleAfterSeconds={120}
+                criticalAfterSeconds={900}
+              />
+            }
           >
             <div className="grid gap-3 xl:grid-cols-2">
               <SleeveTable title="Long book" side="long" positions={openBook} summary={markedPaperSum} />

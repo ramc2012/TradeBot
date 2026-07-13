@@ -64,6 +64,7 @@ import {
   tone,
   useUrlTab,
 } from "@/components/desk-ui";
+import { LastUpdated } from "@/components/common/LastUpdated";
 import { PaperPerformance } from "@/components/strategies/shared";
 import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
@@ -328,7 +329,8 @@ export default function NseDesk() {
 
   const signalsQuery = useQuery({
     queryKey: ["nse", "open-signals"],
-    queryFn: async () => (await getStrategyOpenSignals("SENSEX")).data as { strategy1_watchlist?: WatchRow[] },
+    queryFn: async () =>
+      (await getStrategyOpenSignals("SENSEX")).data as { last_run_at?: string | null; strategy1_watchlist?: WatchRow[] },
     refetchInterval: REFRESH_MS.snapshot,
     refetchOnWindowFocus: false,
   });
@@ -485,7 +487,7 @@ export default function NseDesk() {
       ) : null}
 
       {activeTab === "cockpit" ? <MacdCockpit positions={positions} watchlist={watchlist} /> : null}
-      {activeTab === "signals" ? <WatchlistTab rows={watchlist} /> : null}
+      {activeTab === "signals" ? <WatchlistTab rows={watchlist} asOf={signalsQuery.data?.last_run_at} /> : null}
       {activeTab === "sentiment" ? <SentimentTab data={diffusionQuery.data} loading={diffusionQuery.isFetching} /> : null}
       {activeTab === "positions" ? <PositionsTab rows={positions} /> : null}
       {activeTab === "performance" ? (
@@ -703,7 +705,7 @@ function makeWatchSorter(sortKey: string, sortDir: SortDir): (a: WatchRow, b: Wa
 
 type WatchSide = "CE" | "PE" | "INS";
 
-function WatchlistTab({ rows }: { rows: WatchRow[] }) {
+function WatchlistTab({ rows, asOf }: { rows: WatchRow[]; asOf?: string | null }) {
   // Default to MACD descending — the strongest-momentum legs first.
   const [sortKey, setSortKey] = useState<string>("macd");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
@@ -755,7 +757,12 @@ function WatchlistTab({ rows }: { rows: WatchRow[] }) {
       title="ATM MACD watchlist"
       icon={<ListChecks size={16} className="text-accent-blue" />}
       description="CE / PE in tabs · click a row for its OHLC chart (BB · KAMA · MACD · RSI)"
-      rightSlot={<WatchSortToolbar sortKey={sortKey} sortDir={sortDir} onSort={onSort} />}
+      rightSlot={
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <LastUpdated timestamp={asOf} />
+          <WatchSortToolbar sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+        </div>
+      }
     >
       {/* CE / PE / Pending side tabs */}
       <div className="mb-3 flex flex-wrap items-center gap-1.5">

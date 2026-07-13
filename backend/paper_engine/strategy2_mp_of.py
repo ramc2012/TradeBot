@@ -56,12 +56,17 @@ S2_EXPIRY_ROUTING: dict[str, tuple[str, ...]] = {
 # bars into TPO rows. Values match what NSE / BSE publish for the spot index
 # tick. The MP engine clamps to its own minimum so a wrong value here just
 # coarsens the profile slightly, never breaks it.
+# Index-scale TPO ticks. The old exchange-tick values (0.05 on a ~25k index)
+# made every ladder build ~4,000+ levels per period — and with one
+# contaminated bar it exploded to 100k+ levels and seized the event loop
+# (2026-07-13). The MP engine now also hard-caps the ladder; these tune
+# granularity only.
 S2_TICK_SIZE: dict[str, float] = {
-    "NIFTY":      0.05,
-    "BANKNIFTY":  0.05,
-    "FINNIFTY":   0.05,
-    "MIDCPNIFTY": 0.05,
-    "SENSEX":     0.10,
+    "NIFTY":      1.0,
+    "BANKNIFTY":  2.0,
+    "FINNIFTY":   1.0,
+    "MIDCPNIFTY": 0.5,
+    "SENSEX":     2.0,
 }
 
 # Minimum periods (30-min auction windows) before the MP engine is allowed

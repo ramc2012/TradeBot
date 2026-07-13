@@ -18,6 +18,7 @@ from market_data.symbols import (
     to_broker_symbol,
     to_fyers_symbol,
 )
+from market_data.tick_sanity import validate_structural_tick
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -444,6 +445,10 @@ class DataRouter:
         """Handle an incoming tick synchronously, publish to Redis async."""
         tick.symbol = to_app_symbol(tick.symbol)
         tick.timestamp = self._ensure_utc_timestamp(tick.timestamp)
+        reject_reason = validate_structural_tick(tick)
+        if reject_reason:
+            logger.debug(f"[DataRouter] Dropped corrupt tick for {tick.symbol}: {reject_reason}")
+            return
         self._tick_buffer[tick.symbol] = tick
         # WS-0.2 instrumentation — tick throughput + age at ingest. Fully
         # isolated: a metrics fault must never disturb the tick hot path.

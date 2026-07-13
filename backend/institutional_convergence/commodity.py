@@ -311,7 +311,12 @@ class CommodityConvergenceService:
         for root, symbol in futures_map.items():
             try:
                 inputs = await _load_rule_inputs(root, symbol, now)
-                result = evaluate_rules(
+                # to_thread — evaluate_rules is pure CPU (profiles, footprint,
+                # HVN density). Run synchronously it seized the event loop for
+                # the whole universe every cycle (2026-07-13: health checks
+                # >5s, audit writes >3s, every runner blowing its watchdog).
+                result = await asyncio.to_thread(
+                    evaluate_rules,
                     symbol=root,
                     current_bars=inputs["current_bars"],
                     prior_bars=inputs["prior_bars"],

@@ -1282,6 +1282,9 @@ async def get_open_signals(underlying: str = "SENSEX") -> dict:
 
     return {
         "as_of": _format_dateish(agent_status.get("last_run_at") or datetime.now(IST).isoformat()),
+        # Raw tz-aware timestamp (additive) — the display `as_of` above is a
+        # minute-precision naive string the UI cannot age reliably.
+        "last_run_at": agent_status.get("last_run_at"),
         "live_positions": live_positions,
         "strategy1_watchlist": strategy1_watchlist,
         "strategy2_signals": [],

@@ -16,6 +16,7 @@ import { useQueries } from "@tanstack/react-query";
 import { ArrowUpRight, Banknote, Brain, Compass, Crosshair, Layers3, Radar, Target, Waves } from "lucide-react";
 
 import { MetricTile, REFRESH_MS, Section, formatSignedMoney, tone } from "@/components/desk-ui";
+import { LastUpdated } from "@/components/common/LastUpdated";
 import { api as apiClient } from "@/lib/api";
 
 const STRATEGY_CARDS = [
@@ -50,7 +51,8 @@ export default function OverviewPage() {
           return null;
         }
       },
-      refetchInterval: REFRESH_MS.summary,
+      // Live-market landing page → keep the cross-lane poll at ≤30s.
+      refetchInterval: REFRESH_MS.snapshot,
       refetchOnWindowFocus: false,
     })),
   });
@@ -59,11 +61,17 @@ export default function OverviewPage() {
   const totalUnrealized = queries.reduce((acc, q) => acc + Number(q.data?.unrealized_pnl || 0), 0);
   const totalOpen = queries.reduce((acc, q) => acc + Number(q.data?.open_positions || 0), 0);
   const totalEquity = queries.reduce((acc, q) => acc + Number(q.data?.total_equity || 0), 0);
+  // The paper-summary payloads carry no timestamp — surface the newest fetch
+  // completion time instead (hence the "Fetched" label, not "Updated").
+  const fetchedAt = queries.reduce((acc, q) => Math.max(acc, q.dataUpdatedAt || 0), 0);
 
   return (
     <div className="space-y-4">
       <header>
-        <h1 className="text-2xl font-semibold text-text-primary">Overview</h1>
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="text-2xl font-semibold text-text-primary">Overview</h1>
+          <LastUpdated label="Fetched" timestamp={fetchedAt > 0 ? fetchedAt : null} />
+        </div>
         <p className="mt-1 text-sm text-text-muted">
           Cross-lane snapshot. Click a strategy below to jump into its desk.
         </p>

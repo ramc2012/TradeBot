@@ -307,7 +307,11 @@ export default function FractalDesk() {
             </div>
           </div>
 
-          <OrderFlowPanel of={of} />
+          <OrderFlowPanel
+            of={of}
+            source={(dataStatus?.order_flow_source as string | undefined) ?? (of?.source as string | undefined)}
+            asOf={snap?.generated_at ?? null}
+          />
         </div>
       ) : null}
 

@@ -36,6 +36,8 @@ import {
   tone,
   useUrlTab,
 } from "@/components/desk-ui";
+import { LastUpdated } from "@/components/common/LastUpdated";
+import { OfSourceBadge, ProfileLadder } from "@/components/mpof";
 import { IndexMpOfView } from "@/components/strategies/commodity/IndexMpOfView";
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
 import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
@@ -143,6 +145,14 @@ type WatchRow = {
   cvd_agrees?: boolean | null;
   cvd_block_active?: boolean | null;
   cvd_divergence?: { kind?: string; strength?: number } | null;
+  // Order-flow quality — commodity CVD is ALWAYS derived from 1m bar volume
+  // (no MCX tick tape), so the UI must brand it a bar proxy. Coverage /
+  // pressure come from the adaptive OF baseline in commodity_mp_signal.
+  of_volume_coverage?: number | null;
+  of_degraded?: boolean | null;
+  cvd_pressure_ratio?: number | null;
+  hvn_prices?: number[] | null;
+  lvn_prices?: number[] | null;
   vwap?: number | null;
   vwap_upper?: number | null;
   vwap_lower?: number | null;
@@ -2324,6 +2334,20 @@ function TodayProfileHero({
             DIV {row.cvd_divergence.kind}
           </span>
         ) : null}
+        {/* OF honesty — commodity CVD is inferred from 1m bar volume, never a tape. */}
+        <span
+          className={`rounded px-1.5 py-[1px] uppercase tracking-wide ${
+            row.of_degraded
+              ? "animate-pulse bg-rose-500/25 text-rose-200"
+              : "animate-pulse bg-amber-500/20 text-amber-200"
+          }`}
+          title={`Order flow inferred from 1-minute bar volume (bar proxy, no tick tape)${
+            row.of_volume_coverage != null ? ` · volume coverage ${(Number(row.of_volume_coverage) * 100).toFixed(0)}%` : ""
+          }${row.of_degraded ? " · DEGRADED: OF-dependent entries blocked" : ""}`}
+        >
+          bar proxy{row.of_volume_coverage != null ? ` ${(Number(row.of_volume_coverage) * 100).toFixed(0)}%` : ""}
+          {row.of_degraded ? " · degraded" : ""}
+        </span>
         {row.ib_extended_above || row.ib_extended_below ? (
           <span className="rounded bg-amber-500/20 px-1.5 py-[1px] text-amber-200">
             IB {row.ib_extended_above ? "↑" : "↓"} {row.ib_extension_pct != null ? `${(Number(row.ib_extension_pct) * 100).toFixed(0)}%` : ""}
@@ -2734,9 +2758,10 @@ function InstrumentDetailModal({
               </ul>
             )}
           </div>
-          <div className="col-span-4 rounded bg-bg-secondary/15 p-2 ring-1 ring-bg-secondary/30">
-            <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-text-muted">
-              Order-flow now
+          <div className="col-span-3 rounded bg-bg-secondary/15 p-2 ring-1 ring-bg-secondary/30">
+            <div className="mb-1 flex items-center justify-between gap-2 text-[10px] uppercase tracking-[0.14em] text-text-muted">
+              <span>Order-flow now</span>
+              <OfSourceBadge source="bar_proxy" size="sm" />
             </div>
             <div className="grid grid-cols-3 gap-y-1 text-[11px] font-mono">
               <KV label="VWAP" v={formatNumber(Number(row.vwap ?? 0), 2)} />
@@ -2746,6 +2771,22 @@ function InstrumentDetailModal({
                 tone={Number(row.cvd_session ?? row.cvd_latest ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}
               />
               <KV label="ATR(1m)" v={formatNumber(Number(row.atr ?? 0), 2)} />
+              <KV
+                label="Vol cover"
+                v={row.of_volume_coverage != null ? `${(Number(row.of_volume_coverage) * 100).toFixed(0)}%` : "—"}
+                tone={row.of_degraded ? "text-rose-300" : undefined}
+              />
+              <KV
+                label="Pressure"
+                v={row.cvd_pressure_ratio != null ? formatSigned(Number(row.cvd_pressure_ratio), 2) : "—"}
+                tone={
+                  row.cvd_pressure_ratio == null
+                    ? undefined
+                    : Number(row.cvd_pressure_ratio) >= 0
+                      ? "text-emerald-300"
+                      : "text-rose-300"
+                }
+              />
               <KV label="Regime" v={String(row.regime || "—")} />
               <KV label="Confidence" v={`${Math.round(Number(row.confidence ?? 0) * 100)}%`} />
               <KV label="Trigger" v={triggerLabel(row.entry_style)} />
@@ -2758,8 +2799,38 @@ function InstrumentDetailModal({
                 }
               />
             </div>
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              <LastUpdated timestamp={row.bar_time} label="bar" staleAfterSeconds={120} criticalAfterSeconds={600} />
+              {row.live_tick_time ? (
+                <LastUpdated timestamp={row.live_tick_time} label="tick" staleAfterSeconds={30} criticalAfterSeconds={120} />
+              ) : null}
+            </div>
           </div>
-          <div className="col-span-5 rounded bg-bg-secondary/15 p-2 ring-1 ring-bg-secondary/30">
+          <div className="col-span-3 rounded bg-bg-secondary/15 p-2 ring-1 ring-bg-secondary/30">
+            <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-text-muted">
+              Ladder · spot vs value
+            </div>
+            <ProfileLadder
+              spot={Number(row.price ?? 0) || null}
+              vah={row.mp_vah}
+              val={row.mp_val}
+              poc={row.mp_poc}
+              ibHigh={row.mp_ib_high}
+              ibLow={row.mp_ib_low}
+              dayHigh={row.mp_high}
+              dayLow={row.mp_low}
+              prior={
+                row.prior_session_profile
+                  ? { vah: row.prior_session_profile.vah, val: row.prior_session_profile.val, poc: row.prior_session_profile.poc }
+                  : null
+              }
+              hvnPrices={row.hvn_prices}
+              singlePrints={row.mp_single_prints}
+              height={190}
+              digits={2}
+            />
+          </div>
+          <div className="col-span-3 rounded bg-bg-secondary/15 p-2 ring-1 ring-bg-secondary/30">
             <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-text-muted">
               Trigger evidence
             </div>
@@ -3694,7 +3765,8 @@ export default function MpOfDesk() {
   const overviewQuery = useQuery({
     queryKey: ["mpof", "kpi-overview"],
     queryFn: async () => (await getCommodityOverview()).data as Record<string, unknown>,
-    refetchInterval: REFRESH_MS.summary,
+    // Live-market page → the header freshness pill polls at ≤30s.
+    refetchInterval: REFRESH_MS.snapshot,
     refetchOnWindowFocus: false,
   });
   const status = (overviewQuery.data?.status ?? {}) as Record<string, unknown>;

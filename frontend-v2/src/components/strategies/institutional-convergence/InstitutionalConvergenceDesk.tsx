@@ -1,11 +1,13 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { Fragment, useMemo, useState, useTransition } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, BarChart3, BookOpen, Clock3, Gauge, Layers3, ListChecks, Play, ShieldCheck, Target, Waves } from "lucide-react";
-import { CartesianGrid, Legend, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Activity, BarChart3, BookOpen, ChevronDown, ChevronRight, Clock3, Gauge, Layers3, ListChecks, Play, ShieldCheck, Target, Waves } from "lucide-react";
+import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
+import { LastUpdated } from "@/components/common/LastUpdated";
 import { DeskShell, MetricTile, REFRESH_MS, Section, StatusBadge, formatMoney, formatNumber, useUrlTab } from "@/components/desk-ui";
+import { CvdPanel, FootprintGrid, GateChips, OfSourceBadge, ProfileLadder } from "@/components/mpof";
 import { MarketProfileChart } from "@/components/strategies/shared";
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
 import { getCommodityInstitutionalConvergenceStatus, getInstitutionalConvergenceStatus, runCommodityInstitutionalConvergence, runInstitutionalConvergence } from "@/lib/api";
@@ -65,21 +67,38 @@ export default function InstitutionalConvergenceDesk() {
         <MetricTile label="Mode" value="PAPER" detail="live orders disabled"/>
       </section>
       {latest?.pre_market ? <Section title="08:45 pre-market preparation" icon={<Clock3 size={16}/>} description={market === "MCX" ? "Previous MCX profiles and active futures contracts loaded" : `India VIX ${formatNumber(latest.pre_market.india_vix, 2)} · previous value areas and OI walls loaded`}><div className="grid gap-2 md:grid-cols-3">{(latest.pre_market.instruments ?? []).map((row: any) => <div key={row.symbol} className="rounded-lg border border-border p-3"><div className="font-semibold">{row.symbol}</div><div className="mt-1 text-xs text-text-muted">{row.futures_contract}</div><div className="mt-2 flex gap-1"><StatusBadge label={row.data_ready ? "profile ready" : "missing profile"} variant={row.data_ready ? "success" : "warn"}/><StatusBadge label={row.options?.expiry ?? "no option wall"} variant="neutral"/></div></div>)}</div></Section> : null}
-      <Section title="Lane matrix" icon={<Activity size={16}/>} description="Every instrument is independently gated; no relative score can override a failed operational rule."><ResultMatrix rows={rows} selected={selected?.symbol} onSelect={setSymbol}/></Section>
+      <Section title="Lane matrix" icon={<Activity size={16}/>} description="Every instrument is independently gated; no relative score can override a failed operational rule." rightSlot={<LastUpdated timestamp={latest?.generated_at} label="scan"/>}><ResultMatrix rows={rows} selected={selected?.symbol} onSelect={setSymbol} generatedAt={latest?.generated_at}/></Section>
       <Section title="Blocked-gate census" icon={<Gauge size={16}/>}><div className="flex flex-wrap gap-2">{Object.entries(latest?.gate_breakdown ?? {}).map(([key, count]) => <StatusBadge key={key} label={`${key} · ${count}`} variant="warn"/>)}</div></Section>
     </div> : null}
 
     {activeTab === "profile" ? <div className="space-y-4">
       <section className="grid grid-cols-2 gap-3 md:grid-cols-6"><MetricTile label="Spot" value={formatNumber(selected?.spot, 2)}/><MetricTile label="Prior VAH" value={formatNumber(selected?.profile?.prior?.vah, 2)}/><MetricTile label="Prior VAL" value={formatNumber(selected?.profile?.prior?.val, 2)}/><MetricTile label="Prior POC" value={formatNumber(selected?.profile?.prior?.poc, 2)}/><MetricTile label="IB midpoint" value={formatNumber(selected?.risk?.ib_midpoint, 2)}/><MetricTile label="ATR 3m" value={formatNumber(selected?.risk?.atr_3m, 2)}/></section>
-      <div className="grid gap-4 xl:grid-cols-[1.1fr_.9fr]"><Section title="Current TPO profile" icon={<BarChart3 size={16}/>}><MarketProfileChart profile={selected?.profile} lastPrice={selected?.spot} height={420}/></Section><Section title="Historical HVN map" icon={<Target size={16}/>}><div className="space-y-2">{(selected?.profile?.hvn_prices ?? []).map((price: number) => <div key={price} className="flex items-center justify-between rounded-lg border border-border px-3 py-2"><span>High-volume node</span><span className="font-mono text-accent-amber">{formatNumber(price, 2)}</span></div>)}</div></Section></div>
+      <div className="grid gap-4 xl:grid-cols-[1.1fr_.9fr]">
+        <Section title="Current TPO profile" icon={<BarChart3 size={16}/>} rightSlot={<LastUpdated timestamp={latest?.generated_at} label="scan"/>}><MarketProfileChart profile={selected?.profile} lastPrice={selected?.spot} height={420}/></Section>
+        <Section title="Level ladder · spot vs value" icon={<Target size={16}/>} description="Today's VA/POC/IB, prior-session ghosts, HVN dots and live spot on one axis">
+          <ProfileLadder
+            spot={selected?.spot}
+            vah={selected?.profile?.vah} val={selected?.profile?.val} poc={selected?.profile?.poc}
+            ibHigh={selected?.profile?.initial_balance_high} ibLow={selected?.profile?.initial_balance_low}
+            dayHigh={selected?.profile?.high_price} dayLow={selected?.profile?.low_price}
+            prior={selected?.profile?.prior} hvnPrices={selected?.profile?.hvn_prices} singlePrints={selected?.profile?.single_prints}
+            height={340} digits={2}
+          />
+          <div className="mt-3 space-y-1.5">{(selected?.profile?.hvn_prices ?? []).map((price: number) => <div key={price} className="flex items-center justify-between rounded-lg border border-border px-3 py-1.5 text-xs"><span>High-volume node</span><span className="font-mono text-accent-amber">{formatNumber(price, 2)}</span></div>)}</div>
+        </Section>
+      </div>
       <Section title="Three-minute price path" icon={<Activity size={16}/>}><PriceChart result={selected}/></Section>
     </div> : null}
 
     {activeTab === "orderflow" ? <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2"><OfSourceBadge source={selected?.cvd?.source}/><LastUpdated timestamp={latest?.generated_at} label="scan"/></div>
       <section className="grid grid-cols-2 gap-3 md:grid-cols-6"><MetricTile label="CVD source" value={selected?.cvd?.source ?? "—"}/><MetricTile label="Divergence" value={selected?.cvd?.divergence?.kind ?? "none"}/><MetricTile label="Strength" value={formatNumber((selected?.cvd?.divergence?.strength ?? 0) * 100, 1)} detail="percent"/><MetricTile label="Ticks" value={String(selected?.footprint?.tick_count ?? 0)}/><MetricTile label="Buy ratio" value={`${formatNumber(selected?.footprint?.long_ratio, 2)}×`}/><MetricTile label="Sell ratio" value={`${formatNumber(selected?.footprint?.short_ratio, 2)}×`}/></section>
-      <Section title="Price versus cumulative volume delta" icon={<Waves size={16}/>}><CvdChart result={selected}/></Section>
-      <div className="grid gap-4 xl:grid-cols-[1.15fr_.85fr]"><Section title="Latest 3-minute footprint" icon={<BookOpen size={16}/>} description="Executed volume reconstructed at price; ≥3× imbalance is highlighted."><Footprint result={selected}/></Section><Section title="Option OI walls" icon={<Layers3 size={16}/>}><WallPanel result={selected}/></Section></div>
-      <div className="grid gap-4 lg:grid-cols-2"><GatePanel title="Long sequence" gates={selected?.long_gates}/><GatePanel title="Short sequence" gates={selected?.short_gates}/></div>
+      <Section title="Price versus cumulative volume delta" icon={<Waves size={16}/>}><CvdPanel series={selected?.cvd?.series} source={selected?.cvd?.source} divergence={selected?.cvd?.divergence} height={300}/></Section>
+      <div className="grid gap-4 xl:grid-cols-[1.15fr_.85fr]"><Section title="Recent 3-minute footprints" icon={<BookOpen size={16}/>} description="Executed volume reconstructed at price; ≥3× imbalance is highlighted."><FootprintGrid bars={selected?.footprint?.bars} source={selected?.footprint?.source} maxBars={4}/></Section><Section title="Option OI walls" icon={<Layers3 size={16}/>}><WallPanel result={selected}/></Section></div>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Section title="Long sequence" icon={<ListChecks size={16}/>}><GateChips gates={selected?.long_gates} blockedReasons={selected?.action !== "SHORT" ? selected?.blocked_reasons : undefined}/></Section>
+        <Section title="Short sequence" icon={<ListChecks size={16}/>}><GateChips gates={selected?.short_gates} blockedReasons={selected?.action === "SHORT" ? selected?.blocked_reasons : undefined}/></Section>
+      </div>
     </div> : null}
 
     {activeTab === "risk" ? <div className="space-y-4">
@@ -92,10 +111,32 @@ export default function InstitutionalConvergenceDesk() {
   </DeskShell>;
 }
 
-function ResultMatrix({ rows, selected, onSelect }: { rows: Result[]; selected?: string; onSelect: (s: string) => void }) { return <div className="overflow-x-auto"><table className="w-full min-w-[850px] text-left text-xs"><thead className="text-text-muted"><tr><th>Symbol</th><th>Sector</th><th>Contract</th><th>Action</th><th>Score</th><th>Blocked</th></tr></thead><tbody className="divide-y divide-border">{rows.map((row) => <tr key={row.symbol} onClick={() => onSelect(row.symbol)} className={`cursor-pointer ${selected === row.symbol ? "bg-accent-blue/5" : ""}`}><td className="py-3 font-semibold">{row.symbol}</td><td>{row.sector}</td><td className="font-mono text-[10px]">{row.futures_contract}</td><td><StatusBadge label={row.action} variant={row.action === "LONG" ? "success" : row.action === "SHORT" ? "error" : "neutral"}/></td><td>{formatNumber(row.score, 1)}</td><td>{(row.blocked_reasons ?? []).slice(0, 3).join(" · ")}</td></tr>)}</tbody></table></div>; }
-function GatePanel({ title, gates }: { title: string; gates?: Gates }) { return <Section title={title} icon={<ListChecks size={16}/>}><div className="space-y-2">{Object.entries(gates ?? {}).map(([key, pass]) => <div key={key} className="flex justify-between rounded-lg border border-border px-3 py-2"><span>{key.replaceAll("_", " ")}</span><StatusBadge label={pass ? "PASS" : "BLOCK"} variant={pass ? "success" : "error"}/></div>)}</div></Section>; }
+function ResultMatrix({ rows, selected, onSelect, generatedAt }: { rows: Result[]; selected?: string; onSelect: (s: string) => void; generatedAt?: string }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+  return <div className="overflow-x-auto"><table className="w-full min-w-[850px] text-left text-xs"><thead className="text-text-muted"><tr><th className="w-6"/><th>Symbol</th><th>Sector</th><th>Contract</th><th>Action</th><th>Score</th><th>OF source</th><th>Blocked</th></tr></thead><tbody className="divide-y divide-border">{rows.map((row) => <Fragment key={row.symbol}>
+    <tr onClick={() => onSelect(row.symbol)} className={`cursor-pointer ${selected === row.symbol ? "bg-accent-blue/5" : ""}`}>
+      <td className="py-3 pr-1"><button type="button" aria-label={`${expanded === row.symbol ? "Collapse" : "Expand"} ${row.symbol}`} onClick={(e) => { e.stopPropagation(); setExpanded((cur) => cur === row.symbol ? null : row.symbol); }} className="rounded p-0.5 text-text-muted hover:text-text-primary">{expanded === row.symbol ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}</button></td>
+      <td className="py-3 font-semibold">{row.symbol}</td><td>{row.sector}</td><td className="font-mono text-[10px]">{row.futures_contract}</td>
+      <td><StatusBadge label={row.action} variant={row.action === "LONG" ? "success" : row.action === "SHORT" ? "error" : "neutral"}/></td>
+      <td>{formatNumber(row.score, 1)}</td>
+      <td><OfSourceBadge source={row.cvd?.source} size="sm"/></td>
+      <td>{(row.blocked_reasons ?? []).slice(0, 3).join(" · ")}</td>
+    </tr>
+    {expanded === row.symbol ? <tr className="bg-bg-secondary/20"><td colSpan={8} className="p-3">
+      <div className="mb-2 flex flex-wrap items-center gap-2"><OfSourceBadge source={row.cvd?.source} size="sm"/><LastUpdated timestamp={row.footprint?.bars?.at(-1)?.time ?? generatedAt} label="last bar"/></div>
+      <div className="grid gap-3 xl:grid-cols-[250px_minmax(0,1fr)]">
+        <ProfileLadder spot={row.spot} vah={row.profile?.vah} val={row.profile?.val} poc={row.profile?.poc} ibHigh={row.profile?.initial_balance_high} ibLow={row.profile?.initial_balance_low} prior={row.profile?.prior} hvnPrices={row.profile?.hvn_prices} singlePrints={row.profile?.single_prints} height={230} digits={2}/>
+        <div className="space-y-3">
+          <CvdPanel series={row.cvd?.series} source={row.cvd?.source} divergence={row.cvd?.divergence} height={160} hideHeader/>
+          <div className="grid gap-3 md:grid-cols-2">
+            <GateChips title="Long gates" gates={row.long_gates} blockedReasons={row.action !== "SHORT" ? row.blocked_reasons : undefined}/>
+            <GateChips title="Short gates" gates={row.short_gates} blockedReasons={row.action === "SHORT" ? row.blocked_reasons : undefined}/>
+          </div>
+        </div>
+      </div>
+    </td></tr> : null}
+  </Fragment>)}</tbody></table></div>;
+}
 function PriceChart({ result }: { result?: Result }) { const rows = result?.bars ?? []; return <div className="h-[280px]"><ResponsiveContainer><LineChart data={rows}><CartesianGrid strokeDasharray="3 3" opacity={.2}/><XAxis dataKey="time" tickFormatter={(v) => String(v).slice(11,16)} minTickGap={25}/><YAxis domain={["auto","auto"]}/><Tooltip/><Line dataKey="close" stroke="#60a5fa" dot={false}/>{result?.profile?.prior?.vah ? <ReferenceLine y={result.profile.prior.vah} stroke="#ef4444" strokeDasharray="4 3" label="VAH"/> : null}{result?.profile?.prior?.val ? <ReferenceLine y={result.profile.prior.val} stroke="#22c55e" strokeDasharray="4 3" label="VAL"/> : null}</LineChart></ResponsiveContainer></div>; }
-function CvdChart({ result }: { result?: Result }) { const rows = result?.cvd?.series ?? []; return <div className="h-[300px]"><ResponsiveContainer><LineChart data={rows}><CartesianGrid strokeDasharray="3 3" opacity={.2}/><XAxis dataKey="time" tickFormatter={(v) => String(v).slice(11,16)}/><YAxis yAxisId="price" domain={["auto","auto"]}/><YAxis yAxisId="cvd" orientation="right"/><Tooltip/><Legend/><Line yAxisId="price" dataKey="close" name="Price" stroke="#60a5fa" dot={false}/><Line yAxisId="cvd" dataKey="cvd" name="CVD" stroke="#f59e0b" dot={false}/></LineChart></ResponsiveContainer></div>; }
-function Footprint({ result }: { result?: Result }) { const bar = result?.footprint?.bars?.at(-1); if (!bar) return <div className="py-8 text-center text-sm text-text-muted">No genuine futures tick footprint yet.</div>; return <div><div className="mb-2 flex justify-between text-xs text-text-muted"><span>{bar.time}</span><span>Δ {formatNumber(bar.delta,0)} · CVD {formatNumber(bar.cumulative_delta,0)}</span></div><div className="max-h-[430px] overflow-y-auto">{[...bar.levels].reverse().map((level) => { const buy = level.buy_ratio >= 3, sell = level.sell_ratio >= 3; return <div key={level.price} className="grid grid-cols-[1fr_90px_1fr] gap-2 border-b border-border/50 py-1 font-mono text-xs"><span className={`text-right ${sell ? "bg-accent-red/20 text-accent-red" : ""}`}>{formatNumber(level.sell,0)}</span><span className="text-center text-text-primary">{formatNumber(level.price,2)}</span><span className={buy ? "bg-accent-green/20 text-accent-green" : ""}>{formatNumber(level.buy,0)}</span></div>; })}</div></div>; }
 function WallPanel({ result }: { result?: Result }) { return <div className="space-y-4"><div><div className="mb-2 text-xs font-semibold text-accent-red">Call resistance</div>{(result?.options?.top_call_walls ?? []).map((w) => <div key={w.strike} className="mb-1 flex justify-between rounded border border-border px-3 py-2"><span>{formatNumber(w.strike,0)}</span><span>{formatNumber(w.oi,0)} OI</span></div>)}</div><div><div className="mb-2 text-xs font-semibold text-accent-green">Put support</div>{(result?.options?.top_put_walls ?? []).map((w) => <div key={w.strike} className="mb-1 flex justify-between rounded border border-border px-3 py-2"><span>{formatNumber(w.strike,0)}</span><span>{formatNumber(w.oi,0)} OI</span></div>)}</div></div>; }
 function PositionTable({ rows }: { rows: Position[] }) { if (!rows.length) return <div className="py-8 text-center text-sm text-text-muted">No positions.</div>; return <div className="overflow-x-auto"><table className="w-full min-w-[850px] text-xs"><thead className="text-left text-text-muted"><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Current/Exit</th><th>Stop</th><th>T1</th><th>T2</th><th>Lots</th><th>P&L / reason</th></tr></thead><tbody>{rows.map((p) => <tr key={p.position_id} className="border-t border-border"><td className="py-3 font-semibold">{p.symbol}</td><td>{p.direction}</td><td>{formatNumber(p.entry_price,2)}</td><td>{formatNumber(p.current_price,2)}</td><td>{formatNumber(p.stop,2)}</td><td>{formatNumber(p.target1,2)}</td><td>{formatNumber(p.target2,2)}</td><td>{p.lots}/{p.initial_lots}</td><td>{formatMoney(p.realized_pnl)} {p.exit_reason}</td></tr>)}</tbody></table></div>; }

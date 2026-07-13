@@ -40,6 +40,7 @@ import {
 } from "@/lib/api";
 import { LiveMarkCell } from "@/components/terminal/LiveMarkCell";
 import { legTapeSymbol } from "@/lib/marketSymbols";
+import { LastUpdated, newestTimestamp } from "@/components/common/LastUpdated";
 import { OptionChartModal, type OptionChartContract } from "@/components/strategies/nse/OptionChartModal";
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
 import { selectStrategySlice, useStrategyPositionsStream } from "@/hooks/useStrategyPositionsStream";
@@ -217,7 +218,8 @@ export default function MacdRefinedDesk() {
   const summaryQuery = useQuery({
     queryKey: ["macd-refined", "summary"],
     queryFn: () => getMacdRefinedSummary().then((r) => r.data),
-    refetchInterval: REFRESH_MS.summary,
+    // Live-market page → keep the header freshness poll at ≤30s.
+    refetchInterval: REFRESH_MS.snapshot,
   });
   const backtestQuery = useQuery({
     queryKey: ["macd-refined", "backtest-compare"],
@@ -252,6 +254,14 @@ export default function MacdRefinedDesk() {
     || automation?.last_result_meta?.message
     || automation?.last_message;
 
+  // Header freshness: the automation runner's last completed cycle is the real
+  // "data as of" time. Fall back to the fetch completion time (labelled
+  // "Fetched") when the runner has never reported.
+  const automationAsOf: string | null =
+    automation?.last_success_at ?? automation?.last_finished_at ?? automation?.last_started_at ?? null;
+  const runnerInterval = Number(automation?.interval_seconds ?? 0);
+  const staleAfter = Math.max(120, runnerInterval * 2 || 0);
+
   const runCycle = () => {
     startTransition(async () => {
       try {
@@ -278,7 +288,10 @@ export default function MacdRefinedDesk() {
       title="MACD Refined"
       description="Premium-MACD entry with IV-regime mapping and liquidity gates — separate capped CE/PE books, ATM, held to expiry−7d."
       paperMode
-      asOf={summary?.paper_summary ? new Date() : null}
+      asOf={automationAsOf ?? (summaryQuery.dataUpdatedAt ? new Date(summaryQuery.dataUpdatedAt) : null)}
+      asOfLabel={automationAsOf ? "Updated" : "Fetched"}
+      asOfStaleSeconds={staleAfter}
+      asOfCriticalSeconds={Math.max(600, staleAfter * 3)}
       isFetching={summaryQuery.isFetching}
       tabs={TABS}
       activeTab={activeTab}
@@ -463,6 +476,11 @@ function PaperBook({ data }: { data: any }) {
         description={bookTab === "open" ? "Open positions stream from the positions-overview socket when available." : "Closed trades are kept on the stable REST snapshot."}
         rightSlot={
           <div className="flex flex-wrap items-center justify-end gap-2">
+            <LastUpdated
+              timestamp={newestTimestamp(
+                (bookTab === "open" ? open : closed).map((p) => p.updated_at ?? p.closed_at ?? p.opened_at),
+              )}
+            />
             {bookTab === "open" ? (
               <StatusBadge
                 label={positionsStream.isStreamConnected && streamUsingOpenRows ? "stream live" : "poll fallback"}

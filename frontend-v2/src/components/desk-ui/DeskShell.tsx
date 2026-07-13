@@ -18,7 +18,7 @@ import { useCallback } from "react";
 import { Activity } from "lucide-react";
 
 import { StatusBadge } from "./StatusBadge";
-import { formatIST, toDate } from "./formatters";
+import { LastUpdated } from "@/components/common/LastUpdated";
 
 export type DeskTab = {
   key: string;
@@ -31,6 +31,9 @@ export function DeskShell({
   title,
   description,
   asOf,
+  asOfLabel,
+  asOfStaleSeconds,
+  asOfCriticalSeconds,
   isLive,
   isFetching,
   paperMode,
@@ -45,6 +48,12 @@ export function DeskShell({
   title: string;
   description?: string;
   asOf?: string | Date | null;
+  /** Freshness badge prefix — "Updated" (payload time, default) or "Fetched" (client fetch time). */
+  asOfLabel?: string;
+  /** Override the green→amber cutoff for lanes with a slower natural cadence (e.g. daily scans). */
+  asOfStaleSeconds?: number;
+  /** Override the amber→red cutoff. */
+  asOfCriticalSeconds?: number;
   isLive?: boolean;
   isFetching?: boolean;
   paperMode?: boolean;
@@ -83,19 +92,12 @@ export function DeskShell({
                 <Activity size={12} className={isFetching ? "animate-pulse text-accent-blue" : undefined} />
                 {isFetching ? "Refreshing" : "Idle"}
               </span>
-              {asOf ? (
-                (() => {
-                  const ageSec = Math.max(0, (Date.now() - toDate(asOf).getTime()) / 1000);
-                  const stale = ageSec > 90;
-                  return (
-                    <span className={clsx("inline-flex items-center gap-1.5", stale && "text-accent-amber")}>
-                      {stale ? <span className="h-1.5 w-1.5 rounded-full bg-accent-amber" /> : null}
-                      As of {formatIST(asOf)}
-                      {stale ? ` · ${Math.round(ageSec)}s stale` : ""}
-                    </span>
-                  );
-                })()
-              ) : null}
+              <LastUpdated
+                timestamp={asOf ?? null}
+                label={asOfLabel ?? "Updated"}
+                staleAfterSeconds={asOfStaleSeconds}
+                criticalAfterSeconds={asOfCriticalSeconds}
+              />
             </div>
           </div>
           <div className="flex items-center gap-2">

@@ -29,6 +29,7 @@ import {
   unrealizedOf,
 } from "@/lib/strategy-stats";
 import { CHART } from "./chartTheme";
+import { LastUpdated, newestTimestamp } from "@/components/common/LastUpdated";
 import { LiveMarkCell } from "@/components/terminal/LiveMarkCell";
 import { legTapeSymbol } from "@/lib/marketSymbols";
 
@@ -110,9 +111,21 @@ export function TradeBook({
       title={title}
       icon={<BookOpen size={16} />}
       rightSlot={
-        <div className="flex items-center gap-1">
-          {tabBtn("open", "Open", open.length)}
-          {tabBtn("closed", "Closed", closed.length)}
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {view === "open" ? (
+            <LastUpdated timestamp={newestTimestamp(open.map((p) => p.mark_time ?? p.opened_at))} label="Marked" />
+          ) : (
+            <LastUpdated
+              timestamp={newestTimestamp(closed.map((p) => p.closed_at ?? p.mark_time ?? p.opened_at))}
+              label="Last close"
+              staleAfterSeconds={24 * 3600}
+              criticalAfterSeconds={5 * 24 * 3600}
+            />
+          )}
+          <div className="flex items-center gap-1">
+            {tabBtn("open", "Open", open.length)}
+            {tabBtn("closed", "Closed", closed.length)}
+          </div>
         </div>
       }
     >

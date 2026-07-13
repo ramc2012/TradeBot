@@ -237,12 +237,19 @@ class InstitutionalConvergenceService:
         for symbol in symbols:
             try:
                 inputs = await _load_rule_inputs(symbol, futures_map[symbol], now)
-                result = evaluate_rules(
+                result = await asyncio.to_thread(
+                    evaluate_rules,
                     symbol=symbol,
-                    current_bars=inputs["current_bars"], prior_bars=inputs["prior_bars"],
-                    history_bars=inputs["history_bars"], ticks=inputs["ticks"], options=inputs["options"],
-                    vix=vix, lot_size=inputs["lot_size"], tick_size=inputs["tick_size"],
-                    clock_drift_ms=inputs["clock_drift_ms"], now=now,
+                    current_bars=inputs["current_bars"],
+                    prior_bars=inputs["prior_bars"],
+                    history_bars=inputs["history_bars"],
+                    ticks=inputs["ticks"],
+                    options=inputs["options"],
+                    vix=vix,
+                    lot_size=inputs["lot_size"],
+                    tick_size=inputs["tick_size"],
+                    clock_drift_ms=inputs["clock_drift_ms"],
+                    now=now,
                 )
                 result.update({"sector": (stock_meta.get(symbol) or {}).get("sector", "INDEX"), "futures_contract": futures_map[symbol], "alpha_context": stock_meta.get(symbol)})
                 results.append(result)

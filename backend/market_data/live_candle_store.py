@@ -17,6 +17,7 @@ from brokers.base import Tick
 from db.database import AsyncSessionLocal
 from market_data.candle_timeframes import CANDLE_INTERVALS_MINUTES, floor_timestamp
 from market_data.symbols import DISPLAY_NAMES
+from market_data.tick_sanity import validate_structural_tick
 
 try:  # WS-0.1a — reject counter; must never block ingest
     from core.metrics import record_reject as _record_reject
@@ -157,15 +158,14 @@ class LiveCandleStore:
         except (TypeError, ValueError):
             _record_reject("non_numeric_price")
             return False
-        if not math.isfinite(ltp) or ltp <= 0:
+
+        if not math.isfinite(ltp):
             _record_reject("nonpositive_price")
             return False
-        try:
-            if int(tick.volume or 0) < 0:
-                _record_reject("negative_volume")
-                return False
-        except (TypeError, ValueError):
-            _record_reject("non_numeric_volume")
+
+        reject_reason = validate_structural_tick(tick)
+        if reject_reason:
+            _record_reject(reject_reason)
             return False
 
         # Magnitude guard — index spot only (options legitimately move multiples).

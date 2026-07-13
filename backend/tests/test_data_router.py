@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -77,6 +78,31 @@ def test_market_profile_builder_accepts_timezone_aware_ticks_without_type_errors
     assert rows[1]["time"].endswith("+00:00")
 
 
+def test_market_profile_builder_snapshots_live_deque_before_iterating() -> None:
+    class _ExplodingDeque(deque):
+        def __iter__(self):
+            raise RuntimeError("deque mutated during iteration")
+
+        def copy(self):
+            return deque(deque.__iter__(self))
+
+    builder = MarketProfileBuilder()
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    live_ticks = _ExplodingDeque(
+        [
+            Tick(symbol="NSE:NIFTY50-INDEX", ltp=24050.6, volume=100, timestamp=now),
+            Tick(symbol="NSE:NIFTY50-INDEX", ltp=24062.4, volume=120, timestamp=now + timedelta(minutes=1)),
+        ]
+    )
+    builder._ticks["NSE:NIFTY50-INDEX"] = live_ticks
+
+    rows = builder.get_tick_rows("NSE:NIFTY50-INDEX")
+
+    assert len(rows) == 2
+    assert rows[0]["close"] == pytest.approx(24050.6)
+    assert rows[1]["close"] == pytest.approx(24062.4)
+
+
 def test_data_router_global_callbacks_receive_ticks() -> None:
     router = DataRouter()
     captured: list[Tick] = []
@@ -93,6 +119,25 @@ def test_data_router_global_callbacks_receive_ticks() -> None:
     assert len(captured) == 1
     assert captured[0].symbol == "NSE:NIFTY50-INDEX"
     assert captured[0].timestamp is not None
+
+
+def test_data_router_drops_crosswired_book_tick_before_callbacks() -> None:
+    router = DataRouter()
+    captured: list[Tick] = []
+
+    router.register_global_callback(captured.append)
+    router._on_tick(
+        Tick(
+            symbol="MCX:CRUDEOIL26JULFUT",
+            ltp=24217.95,
+            bid=6967.0,
+            ask=6969.0,
+            timestamp=datetime(2026, 7, 13, 9, 15, tzinfo=timezone.utc),
+        )
+    )
+
+    assert captured == []
+    assert router.get_latest_tick("MCX:CRUDEOIL26JULFUT") is None
 
 
 def test_data_router_status_schedules_reconnect_for_stale_broker_feed(monkeypatch) -> None:
