@@ -133,6 +133,43 @@ def _strategy_stale_threshold_seconds(scan_interval_seconds: Any) -> int:
     return max(300, scan_interval * 4)
 
 
+def _collect_strategy_freshness_candidates(
+    *,
+    key: str,
+    status: dict[str, Any],
+    strategy_items: list[dict[str, Any]],
+) -> list[tuple[datetime, str]]:
+    candidates: list[tuple[datetime, str]] = []
+    for strategy in strategy_items:
+        raw_scan = strategy.get("last_scan_at")
+        parsed_scan = _parse_iso_datetime(raw_scan)
+        if parsed_scan is not None and raw_scan:
+            candidates.append((parsed_scan, str(raw_scan)))
+
+    if key != "commodity_strategy":
+        return candidates
+
+    for position in list(status.get("positions") or []):
+        raw_review = position.get("last_reviewed_bar_time") or position.get("updated_at")
+        parsed_review = _parse_iso_datetime(raw_review)
+        if parsed_review is not None and raw_review:
+            candidates.append((parsed_review, str(raw_review)))
+
+    for row in list(status.get("futures_watchlist") or status.get("watchlist") or []):
+        raw_bar = row.get("last_reviewed_bar_time") or row.get("bar_time") or row.get("as_of")
+        parsed_bar = _parse_iso_datetime(raw_bar)
+        if parsed_bar is not None and raw_bar:
+            candidates.append((parsed_bar, str(raw_bar)))
+
+    for row in list(status.get("signal_audit") or []):
+        raw_time = row.get("time")
+        parsed_time = _parse_iso_datetime(raw_time)
+        if parsed_time is not None and raw_time:
+            candidates.append((parsed_time, str(raw_time)))
+
+    return candidates
+
+
 async def _manual_book_summary() -> dict[str, Any]:
     _, _, portfolio = await _get_or_create_paper_session()
     trades = [
@@ -410,19 +447,11 @@ def _strategy_service(
         last_run_age_seconds = max((now_ist - last_run_dt).total_seconds(), 0.0)
     freshness_reference_at = last_run_at
     freshness_age_seconds = last_run_age_seconds
-    freshness_candidates = [
-        (
-            _parse_iso_datetime(item.get("last_scan_at")),
-            item.get("last_scan_at"),
-        )
-        for item in strategy_items
-        if item.get("last_scan_at")
-    ]
-    freshness_candidates = [
-        (scan_dt, scan_at)
-        for scan_dt, scan_at in freshness_candidates
-        if scan_dt is not None
-    ]
+    freshness_candidates = _collect_strategy_freshness_candidates(
+        key=key,
+        status=status,
+        strategy_items=strategy_items,
+    )
     if freshness_candidates:
         freshest_dt, freshest_at = max(freshness_candidates, key=lambda item: item[0])
         freshness_reference_at = str(freshest_at)
@@ -476,12 +505,15 @@ def _strategy_service(
     lanes: list[dict[str, Any]] = []
     for lane, strategy in zip(lane_payloads, strategy_items):
         positions = int(_strategy_metric(strategy, "open_positions", 0))
+        lane_last_scan_at = strategy.get("last_scan_at")
+        if not lane_last_scan_at and key == "commodity_strategy":
+            lane_last_scan_at = freshness_reference_at or status.get("last_run_at")
         lanes.append(
             _lane_status_payload(
                 parent=key,
                 lane=lane,
                 positions=positions,
-                last_scan_at=strategy.get("last_scan_at") or status.get("last_run_at"),
+                last_scan_at=lane_last_scan_at or status.get("last_run_at"),
                 stale_threshold_seconds=stale_threshold_seconds,
                 now_ist=now_ist,
             )
