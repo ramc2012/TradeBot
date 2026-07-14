@@ -84,6 +84,29 @@ def _ensure_runtime_state_table(cur) -> None:
     _runtime_state_table_ready = True
 
 
+def _rollback_quietly(conn) -> None:
+    if conn is None:
+        return
+    try:
+        conn.rollback()
+    except Exception as exc:
+        logger.debug(f"Runtime-state rollback skipped: {exc}")
+
+
+def _return_connection(pool: ThreadedConnectionPool, conn) -> None:
+    if conn is None:
+        return
+    try:
+        if hasattr(conn, "autocommit"):
+            conn.autocommit = False
+    except Exception:
+        pass
+    try:
+        pool.putconn(conn, close=bool(getattr(conn, "closed", 0)))
+    except Exception as exc:
+        logger.debug(f"Runtime-state pool return skipped: {exc}")
+
+
 _trade_book_table_ready = False
 
 
@@ -197,13 +220,12 @@ def record_paper_trade(
         return True
     except Exception as exc:
         if conn is not None:
-            conn.rollback()
+            _rollback_quietly(conn)
         logger.warning(f"Could not record paper trade ({market} {symbol}): {exc}")
         return False
     finally:
         if conn is not None:
-            conn.autocommit = False
-            pool.putconn(conn)
+            _return_connection(pool, conn)
 
 
 def load_paper_trade_book(
@@ -256,12 +278,12 @@ def load_paper_trade_book(
         return rows
     except Exception as exc:
         if conn is not None:
-            conn.rollback()
+            _rollback_quietly(conn)
         logger.warning(f"Could not load paper trade book: {exc}")
         return []
     finally:
         if conn is not None:
-            pool.putconn(conn)
+            _return_connection(pool, conn)
 
 
 def load_runtime_state(state_key: str) -> tuple[Any | None, datetime | None]:
@@ -290,7 +312,7 @@ def load_runtime_state(state_key: str) -> tuple[Any | None, datetime | None]:
         return row[0], row[1]
     except Exception as exc:
         if conn is not None:
-            conn.rollback()
+            _rollback_quietly(conn)
         cached = _get_cached_runtime_state(state_key, allow_stale=True)
         if cached is not None:
             logger.warning(f"Could not load runtime state {state_key}; serving stale cached value: {exc}")
@@ -299,7 +321,7 @@ def load_runtime_state(state_key: str) -> tuple[Any | None, datetime | None]:
         return None, None
     finally:
         if conn is not None:
-            pool.putconn(conn)
+            _return_connection(pool, conn)
 
 
 def save_runtime_state(state_key: str, payload: Any) -> datetime | None:
@@ -331,10 +353,9 @@ def save_runtime_state(state_key: str, payload: Any) -> datetime | None:
         return updated_at
     except Exception as exc:
         if conn is not None:
-            conn.rollback()
+            _rollback_quietly(conn)
         logger.warning(f"Could not persist runtime state {state_key}: {exc}")
         return None
     finally:
         if conn is not None:
-            conn.autocommit = False
-            pool.putconn(conn)
+            _return_connection(pool, conn)
