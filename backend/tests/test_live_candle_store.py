@@ -100,6 +100,34 @@ async def test_live_candle_store_persists_spot_and_option_buckets(monkeypatch: p
     assert option_payload[0]["underlying_price"] == 24050.0
 
 
+@pytest.mark.asyncio
+async def test_resolve_symbol_metadata_maps_mcx_future_to_spot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LiveCandleStore()
+
+    async def _resolve_future(symbol: str):
+        assert symbol == "MCX:GOLD26AUGFUT"
+        return {
+            "instrument_key": "MCX_FO|466583",
+            "trading_symbol": "GOLD FUT 05 AUG 26",
+            "expiry": "2026-08-05",
+        }
+
+    monkeypatch.setattr(
+        "market_data.live_candle_store.resolve_upstox_mcx_future",
+        _resolve_future,
+    )
+
+    metadata = await store._resolve_symbol_metadata("MCX:GOLD26AUGFUT")
+
+    assert metadata == {
+        "kind": "spot",
+        "underlying": "GOLD",
+        "instrument_key": "MCX_FO|466583",
+    }
+
+
 class _FailingThenOkSession:
     """Fails the first N commits, then succeeds — simulates a transient DB blip."""
 

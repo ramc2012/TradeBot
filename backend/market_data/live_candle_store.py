@@ -16,8 +16,10 @@ from sqlalchemy import text
 from brokers.base import Tick
 from db.database import AsyncSessionLocal
 from market_data.candle_timeframes import CANDLE_INTERVALS_MINUTES, floor_timestamp
+from market_data.commodity_contract_specs import extract_commodity_root
 from market_data.symbols import DISPLAY_NAMES
 from market_data.tick_sanity import validate_structural_tick
+from market_data.upstox_commodity import resolve_upstox_mcx_future
 
 try:  # WS-0.1a — reject counter; must never block ingest
     from core.metrics import record_reject as _record_reject
@@ -605,6 +607,16 @@ class LiveCandleStore:
                     "underlying": underlying,
                     "instrument_key": str(getattr(row, "spot_instrument_key", None) or symbol),
                 }
+            elif symbol.startswith("MCX:") and symbol.endswith("FUT"):
+                resolved = await resolve_upstox_mcx_future(symbol)
+                instrument_key = str((resolved or {}).get("instrument_key") or "")
+                underlying = extract_commodity_root(symbol)
+                if instrument_key and underlying:
+                    metadata = {
+                        "kind": "spot",
+                        "underlying": underlying,
+                        "instrument_key": instrument_key,
+                    }
             else:
                 result = await session.execute(
                     text(
