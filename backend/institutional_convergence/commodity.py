@@ -41,7 +41,7 @@ from market_data.upstox_commodity import resolve_active_upstox_mcx_future
 from paper_engine.base_strategy_agent import _now_ist
 from sqlalchemy import text
 
-from .engine import evaluate_rules
+from .engine import evaluate_rules, tick_clock_drift_ms
 from .paper import ConvergencePaperBook
 
 
@@ -170,6 +170,19 @@ async def _load_rule_inputs(root: str, futures_symbol: str, now: datetime) -> di
             {"symbol": futures_symbol, "since": now - timedelta(minutes=120)},
         )
         ticks = [dict(row) for row in reversed(tick_result.mappings().all())]
+        # Pipeline reference clock for the tick_fresh drift: the newest tick
+        # ANY symbol got through the shared batched flush (single index probe).
+        # See engine.tick_clock_drift_ms for why wall-clock drift is wrong here.
+        pipeline_result = await session.execute(
+            text(
+                """
+                SELECT time FROM market_ticks WHERE time >= :since
+                ORDER BY time DESC LIMIT 1
+                """
+            ),
+            {"since": now - timedelta(minutes=120)},
+        )
+        pipeline_last = pipeline_result.scalar()
         option_result = await session.execute(
             text(
                 """
@@ -199,11 +212,7 @@ async def _load_rule_inputs(root: str, futures_symbol: str, now: datetime) -> di
         "top_put_walls": [{"strike": _number(row["strike"]), "oi": _number(row["oi"])} for row in puts[:2]],
     }
     last_tick = ticks[-1]["time"] if ticks else None
-    drift = (
-        (datetime.now(timezone.utc) - last_tick.astimezone(timezone.utc)).total_seconds() * 1000
-        if last_tick
-        else None
-    )
+    drift = tick_clock_drift_ms(last_tick, pipeline_last, datetime.now(timezone.utc))
     return {
         "current_bars": current_bars,
         "prior_bars": prior_bars,

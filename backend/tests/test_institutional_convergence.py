@@ -23,6 +23,7 @@ from institutional_convergence.engine import (
     build_footprint,
     evaluate_rules,
     lots_for_risk,
+    tick_clock_drift_ms,
 )
 from institutional_convergence.paper import ConvergencePaperBook
 from paper_engine.base_strategy_agent import IST
@@ -181,6 +182,110 @@ def test_three_minute_lane_uses_adaptive_tick_freshness() -> None:
     ticks = [{"time": base + timedelta(seconds=index * 2)} for index in range(10)]
 
     assert _freshness_limit_ms(ticks) == 45_000.0
+
+
+def test_tick_drift_cancels_shared_flush_lag_on_a_fresh_tape() -> None:
+    """Repro of 2026-07-15 21:18 IST tick_fresh 5/8: the batched tick flush ran
+    ~50s behind the wall clock while every MCX root ticked seconds-fresh.
+    Wall-clock drift blamed the symbols; pipeline-referenced drift must not."""
+    wall_now = datetime(2026, 7, 15, 21, 18, 0, tzinfo=IST)
+    pipeline_last = wall_now - timedelta(seconds=50)  # newest visible tick anywhere
+    fresh_root_last = pipeline_last - timedelta(seconds=4)  # e.g. COPPER, 4s behind GOLD
+
+    drift = tick_clock_drift_ms(fresh_root_last, pipeline_last, wall_now)
+
+    assert drift == 4_000.0  # tape staleness only — not 54s of shared write lag
+
+
+def test_tick_drift_still_flags_a_genuinely_sparse_symbol() -> None:
+    wall_now = datetime(2026, 7, 15, 21, 18, 0, tzinfo=IST)
+    pipeline_last = wall_now - timedelta(seconds=10)
+    sparse_last = pipeline_last - timedelta(seconds=95)  # e.g. NICKEL, tape truly quiet
+
+    drift = tick_clock_drift_ms(sparse_last, pipeline_last, wall_now)
+
+    assert drift == 95_000.0  # above the 90s adaptive cap -> gate blocks
+
+
+def test_tick_drift_falls_back_to_wall_clock_when_the_pipeline_stalls() -> None:
+    """If the WHOLE store goes quiet the pipeline reference must not make every
+    symbol pass with ~0 drift — a dead feed still blocks."""
+    wall_now = datetime(2026, 7, 15, 21, 18, 0, tzinfo=IST)
+    pipeline_last = wall_now - timedelta(seconds=300)
+    last_tick = pipeline_last  # this symbol owns the newest (stale) tick
+
+    drift = tick_clock_drift_ms(last_tick, pipeline_last, wall_now)
+
+    assert drift == 300_000.0  # wall-clock fallback -> tick_fresh fails
+
+
+def test_tick_drift_handles_missing_ticks_and_missing_pipeline() -> None:
+    wall_now = datetime(2026, 7, 15, 21, 18, 0, tzinfo=IST)
+
+    assert tick_clock_drift_ms(None, wall_now, wall_now) is None
+    # No pipeline reference at all (empty store) -> wall clock is the reference.
+    assert tick_clock_drift_ms(wall_now - timedelta(seconds=7), None, wall_now) == 7_000.0
+    # A symbol owning the newest tick can never be negative-drift.
+    assert tick_clock_drift_ms(wall_now, wall_now - timedelta(seconds=1), wall_now) == 0.0
+
+
+def test_commodity_loader_measures_drift_against_the_pipeline_reference(monkeypatch) -> None:
+    """_load_rule_inputs must compute clock_drift_ms from the newest tick the
+    shared flush pipeline produced (root tick vs store-wide tick), not the wall
+    clock — otherwise flush lag masquerades as tape staleness."""
+    from institutional_convergence import commodity as commodity_module
+
+    wall_anchor = datetime.now(timezone.utc)
+    root_last = wall_anchor - timedelta(seconds=60)
+    pipeline_last = root_last + timedelta(seconds=46)
+
+    class _Rows:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class _Result:
+        def __init__(self, rows=None, scalar=None):
+            self._rows = rows or []
+            self._scalar = scalar
+
+        def mappings(self):
+            return _Rows(self._rows)
+
+        def scalar(self):
+            return self._scalar
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def execute(self, statement, params=None):
+            sql = str(statement)
+            if "underlying_spot_candles" in sql:
+                return _Result(rows=[])
+            if "option_premium_candles" in sql:
+                return _Result(rows=[])
+            if "market_ticks" in sql and params and "symbol" in params:
+                return _Result(rows=[{"time": root_last, "ltp": 100.0, "bid": 99.9,
+                                      "ask": 100.1, "bid_qty": 1, "ask_qty": 1, "volume": 10}])
+            if "market_ticks" in sql:
+                return _Result(scalar=pipeline_last)
+            raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(commodity_module, "AsyncSessionLocal", _Session)
+
+    inputs = asyncio.run(
+        commodity_module._load_rule_inputs(
+            "GOLD", "MCX:GOLD26AUGFUT", datetime.now(IST)
+        )
+    )
+
+    assert inputs["clock_drift_ms"] == 46_000.0  # tape gap only, no flush lag
 
 
 def test_structural_reclaim_stays_armed_for_five_bars_then_expires() -> None:

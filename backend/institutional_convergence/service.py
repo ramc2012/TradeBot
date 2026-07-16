@@ -16,7 +16,7 @@ from market_data import data_router as market_data_router
 from paper_engine.base_strategy_agent import _now_ist
 from sqlalchemy import text
 
-from .engine import evaluate_rules
+from .engine import evaluate_rules, tick_clock_drift_ms
 from .paper import convergence_paper_book
 
 
@@ -363,6 +363,12 @@ async def _load_rule_inputs(symbol: str, futures_symbol: str, now: datetime) -> 
             FROM market_ticks WHERE symbol=:symbol AND time >= :since ORDER BY time DESC LIMIT 5000
         """), {"symbol": futures_symbol, "since": now - timedelta(minutes=120)})
         ticks = [dict(row) for row in reversed(tick_result.mappings().all())]
+        # Pipeline reference clock for the tick_fresh drift (single index
+        # probe); see engine.tick_clock_drift_ms for why wall-clock is wrong.
+        pipeline_result = await session.execute(text("""
+            SELECT time FROM market_ticks WHERE time >= :since ORDER BY time DESC LIMIT 1
+        """), {"since": now - timedelta(minutes=120)})
+        pipeline_last = pipeline_result.scalar()
         current_result = await session.execute(text("""
             SELECT time_bucket(INTERVAL '3 minutes', time) AS time,
                    first(ltp, time) AS open, max(ltp) AS high, min(ltp) AS low,
@@ -403,7 +409,7 @@ async def _load_rule_inputs(symbol: str, futures_symbol: str, now: datetime) -> 
     puts = sorted((row for row in option_rows if row["option_type"] == "PE"), key=lambda row: _number(row.get("oi")), reverse=True)
     options = {"expiry": str(option_rows[0]["expiry"]) if option_rows else None, "call_wall": _number(calls[0]["strike"]) if calls else None, "put_wall": _number(puts[0]["strike"]) if puts else None, "top_call_walls": [{"strike": _number(row["strike"]), "oi": _number(row["oi"])} for row in calls[:2]], "top_put_walls": [{"strike": _number(row["strike"]), "oi": _number(row["oi"])} for row in puts[:2]]}
     last_tick = ticks[-1]["time"] if ticks else None
-    drift = (datetime.now(timezone.utc) - last_tick.astimezone(timezone.utc)).total_seconds() * 1000 if last_tick else None
+    drift = tick_clock_drift_ms(last_tick, pipeline_last, datetime.now(timezone.utc))
     prior_profile = None
     if prior_bars:
         from auction_intelligence.market_profile import MarketProfileEngine

@@ -149,6 +149,12 @@ _ENRICH_SQL = text(
     WHERE opc.instrument_key = matched.instrument_key
       AND opc.interval = matched.interval
       AND opc.time = matched.time
+      -- Redundant with matched.time by construction, but REQUIRED for plan-time
+      -- chunk pruning: without it the UPDATE join appends scans over every
+      -- hypertable chunk (compressed chunks lack the btree index -> seq scans)
+      -- and a single 15-minute window blows any statement timeout (>240s
+      -- observed 2026-07-16 on 1315 chunks). With it: one chunk, <1s.
+      AND opc.time >= :since AND opc.time < :until
     """
 )
 

@@ -116,6 +116,47 @@ def _freshness_limit_ms(ticks: list[dict[str, Any]]) -> float:
     return min(90_000.0, max(45_000.0, adaptive))
 
 
+# If the newest tick across the WHOLE store is older than this vs the wall
+# clock, the shared flush pipeline itself is considered stalled and drift falls
+# back to wall-clock measurement (so a dead feed still blocks every symbol).
+PIPELINE_STALL_GUARD_SECONDS = 180.0
+
+
+def tick_clock_drift_ms(
+    last_tick_at: datetime | None,
+    pipeline_last_at: datetime | None,
+    wall_now: datetime,
+    *,
+    stall_guard_seconds: float = PIPELINE_STALL_GUARD_SECONDS,
+) -> float | None:
+    """Per-symbol tape staleness for the tick_fresh gate.
+
+    Measured against the newest tick across the ENTIRE tick store (the shared
+    batched flush pipeline), not the wall clock. market_ticks is written by
+    live_candle_store's queue+flush worker (5s cadence, 30s failure backoff);
+    under evening load its visibility lag reached a uniform ~19-22s on
+    subsecond-fresh tapes and >45s around 21:18 IST 2026-07-15 — wall-clock
+    drift then failed tick_fresh on 5/8 MCX roots whose tape was seconds
+    fresh (the sparser roots first, since their inter-tick gap stacks on top
+    of the shared lag). Comparing each symbol's newest tick to the newest
+    tick ANY symbol got through the same pipeline cancels the shared write
+    lag and leaves only genuine per-symbol tape staleness.
+
+    Fail-safe: if the pipeline reference is itself older than the stall
+    guard (or absent), the whole store is quiet — fall back to wall-clock so
+    a dead feed still blocks instead of every symbol passing with ~0 drift.
+    """
+    if last_tick_at is None:
+        return None
+    last_utc = last_tick_at.astimezone(timezone.utc)
+    reference = (
+        pipeline_last_at.astimezone(timezone.utc) if pipeline_last_at is not None else wall_now
+    )
+    if (wall_now - reference).total_seconds() > stall_guard_seconds:
+        reference = wall_now
+    return max(0.0, (reference - last_utc).total_seconds() * 1000.0)
+
+
 def _structural_setup(
     bars: list[dict[str, Any]],
     levels: list[float],
