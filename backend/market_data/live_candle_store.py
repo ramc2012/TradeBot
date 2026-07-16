@@ -4,10 +4,8 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from statistics import median
 from typing import Any, Optional
 
 from loguru import logger
@@ -15,6 +13,7 @@ from sqlalchemy import text
 
 from brokers.base import Tick
 from db.database import AsyncSessionLocal
+from market_data import index_band_guard
 from market_data.candle_timeframes import CANDLE_INTERVALS_MINUTES, floor_timestamp
 from market_data.commodity_contract_specs import extract_commodity_root
 from market_data.symbols import DISPLAY_NAMES
@@ -84,16 +83,13 @@ class LiveCandleStore:
     MAX_PENDING_TICKS = 20_000
     FLUSH_BACKOFF_MAX_SECONDS = 30.0
     METADATA_NEGATIVE_TTL_SECONDS = 600.0
-    # WS-0.1a ingest validation — magnitude guard for index spot (where the
-    # documented cross-symbol contamination lands, e.g. NIFTY prints at 53k/75k vs
-    # ~23k spot). The reference is a rolling median (robust to a minority of bad
-    # prints); ±50% is far outside any legit index intraday move yet catches the
-    # documented 2.3-3.3x contamination with margin. Options are exempt (premiums
-    # legitimately move multiples). Conservative by design — watch
-    # nomad_ingest_rejected_total{reason} before tightening.
-    SPOT_DEVIATION_THRESHOLD = 0.5
-    SPOT_REF_WINDOW = 30
-    SPOT_REF_WARMUP = 5
+    # WS-0.1b ingest validation — magnitude guard for index spot (where the
+    # documented cross-symbol contamination lands, e.g. NIFTY prints at ~57.8k /
+    # ~12.5k vs ~24k spot). The reference is an ABSOLUTE per-index band plus an
+    # optional prior-session-close band (see market_data.index_band_guard) — NOT
+    # a self-referential rolling median, which a clustered contaminating burst
+    # could drag until the guard inverted. Coverage now includes the NSE sector
+    # indices too. Options/stocks/commodities are exempt (own price scale).
 
     def __init__(self) -> None:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -104,7 +100,6 @@ class LiveCandleStore:
         self._metadata_cache: dict[str, Optional[dict[str, Any]]] = {}
         self._metadata_none_at: dict[str, float] = {}
         self._latest_spot: dict[str, float] = {}
-        self._spot_window: dict[str, deque] = {}  # WS-0.1a rolling spot reference
         # Persistence health — a dead flush path must be a visible fact.
         self._ticks_persisted = 0
         self._ticks_dropped = 0
@@ -170,17 +165,14 @@ class LiveCandleStore:
             _record_reject(reject_reason)
             return False
 
-        # Magnitude guard — index spot only (options legitimately move multiples).
-        if tick.symbol in DISPLAY_NAMES:
-            window = self._spot_window.setdefault(
-                tick.symbol, deque(maxlen=self.SPOT_REF_WINDOW)
-            )
-            window.append(ltp)
-            if len(window) >= self.SPOT_REF_WARMUP:
-                ref = median(window)
-                if ref > 0 and abs(ltp - ref) / ref > self.SPOT_DEVIATION_THRESHOLD:
-                    _record_reject("spot_magnitude")
-                    return False
+        # Magnitude guard — index spot + NSE sector indices only (options /
+        # stocks / commodities move on their own scale). Absolute band + optional
+        # prior-session-close band; poison-proof (the reference never comes from
+        # the live tape). is_guarded() returns False for everything else.
+        if index_band_guard.is_guarded(tick.symbol):
+            if not index_band_guard.passes(tick.symbol, ltp):
+                _record_reject("spot_magnitude")
+                return False
         return True
 
     def on_tick(self, tick: Tick) -> None:
@@ -238,12 +230,14 @@ class LiveCandleStore:
                         timeout=self.FLUSH_INTERVAL_SECONDS,
                     )
                 except asyncio.TimeoutError:
+                    await self._refresh_index_reference_closes()
                     await self._flush_pending()
                     continue
 
                 self._tick_batch.append(tick)
                 self._update_buckets(tick)
                 if len(self._tick_batch) >= self.BATCH_SIZE:
+                    await self._refresh_index_reference_closes()
                     await self._flush_pending()
             except asyncio.CancelledError:
                 try:
@@ -256,6 +250,18 @@ class LiveCandleStore:
                 # Belt-and-braces: _flush_pending contains its own guards, so
                 # anything landing here is unexpected — log and keep serving.
                 logger.error(f"[LiveCandleStore] worker iteration failed (continuing): {exc}")
+
+    async def _refresh_index_reference_closes(self) -> None:
+        """TTL-gated seed of the index magnitude guard's prior-session anchor.
+
+        Best-effort and non-fatal — a DB blip leaves the absolute band in force.
+        The guard's own TTL means this is a cheap monotonic-clock compare on all
+        but a few calls per day.
+        """
+        try:
+            await index_band_guard.maybe_refresh_reference_closes(AsyncSessionLocal)
+        except Exception as exc:  # noqa: BLE001 — must never disturb ingest
+            logger.debug(f"[LiveCandleStore] index reference refresh skipped: {exc}")
 
     async def _drain_queue(self) -> None:
         while not self._queue.empty():
@@ -493,6 +499,25 @@ class LiveCandleStore:
                     "source": "live_tick",
                 }
             )
+
+        # Candle-write guard: even though ingress already drops contaminated
+        # index ticks, re-check assembled spot bars against the absolute band so
+        # a bar can never be persisted with a cross-symbol O/H/L/C. Rows dropped
+        # here are still marked flushed (never retried), mirroring the no-arb path.
+        if spot_rows:
+            _kept_spot = [
+                r for r in spot_rows
+                if index_band_guard.check_ohlc(
+                    index_band_guard.app_symbol_for_underlying(r["underlying"]) or "",
+                    r["open"], r["high"], r["low"], r["close"],
+                )
+            ]
+            if len(_kept_spot) != len(spot_rows):
+                logger.warning(
+                    "[live_candle_store] dropped {n} out-of-band index spot bars at write",
+                    n=len(spot_rows) - len(_kept_spot),
+                )
+                spot_rows = _kept_spot
 
         async with AsyncSessionLocal() as session:
             if spot_rows:

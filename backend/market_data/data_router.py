@@ -12,6 +12,7 @@ from brokers.base import BrokerAdapter, Tick
 from core.config import auction_of_book_symbols, settings
 from core.trading_calendar import trading_calendar
 from db.redis_client import get_redis
+from market_data import index_band_guard
 from market_data.symbols import (
     TICK_CAPTURE_APP_SYMBOLS,
     to_app_symbol,
@@ -448,6 +449,18 @@ class DataRouter:
         reject_reason = validate_structural_tick(tick)
         if reject_reason:
             logger.debug(f"[DataRouter] Dropped corrupt tick for {tick.symbol}: {reject_reason}")
+            return
+        # Cross-symbol contamination guard (WS-0.1b): a misrouted frame carries
+        # another index's whole-frame OHLC under this symbol. Drop it here — the
+        # single choke point upstream of the tick buffer (live marks), the Redis
+        # hot-cache, every callback (market_ticks / MP builder) and the sector
+        # tape — so a contaminated 57.8k print can never mark a 24k index.
+        if index_band_guard.is_guarded(tick.symbol) and not index_band_guard.passes(
+            tick.symbol, getattr(tick, "ltp", 0.0)
+        ):
+            logger.debug(
+                f"[DataRouter] Dropped out-of-band tick for {tick.symbol}: ltp={getattr(tick, 'ltp', None)}"
+            )
             return
         self._tick_buffer[tick.symbol] = tick
         # WS-0.2 instrumentation — tick throughput + age at ingest. Fully

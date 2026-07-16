@@ -491,6 +491,27 @@ class FyersAdapter(BrokerAdapter):
             rows = [row for row in rows if row.get("expiry") == expiry]
         return rows
 
+    @staticmethod
+    def _reset_sdk_topic_maps(client: Any) -> None:
+        """Clear the Fyers SDK's topic_id→symbol resolution maps on reconnect.
+
+        The SDK resolves lightweight update frames (which carry only a
+        server-assigned uint16 topic_id) back to a symbol via ``index_sym`` /
+        ``scrips_sym`` / ``dp_sym`` and accumulates fields in ``resp``. These are
+        never cleared across a reconnect, so a reused topic_id misresolves to the
+        prior session's symbol — the cross-symbol contamination root cause. We
+        clear them at reconnect (before any new frame is parsed) so stale
+        topic_ids resolve to nothing until a fresh snapshot rebuilds the map.
+        Best-effort and fully guarded — the WS thread must never die here.
+        """
+        for attr in ("index_sym", "scrips_sym", "dp_sym", "resp"):
+            try:
+                mapping = getattr(client, attr, None)
+                if hasattr(mapping, "clear"):
+                    mapping.clear()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"Fyers WS map reset ({attr}) skipped: {exc}")
+
     async def subscribe_websocket(
         self,
         symbols: list[str],
@@ -525,6 +546,20 @@ class FyersAdapter(BrokerAdapter):
                     logger.info("Fyers WS connected")
                     return
                 logger.warning("Fyers WS RE-connected — subscriptions must be re-sent")
+                # ROUTING FIX (cross-symbol contamination root cause): the SDK's
+                # topic_id→symbol maps (index_sym/scrips_sym/dp_sym) and the resp
+                # accumulator are built once and survive reconnect — the SDK's
+                # __on_close resets only symbol_token. The server reassigns
+                # topic_ids on the fresh session, so any lightweight update frame
+                # (type 85/76) that references a REUSED topic_id before its
+                # corrective snapshot (type 83) arrives resolves against the STALE
+                # entry and emits one instrument's OHLC under another's symbol.
+                # Clear the maps here — on_connect fires at the end of connect(),
+                # BEFORE re-subscription and any new frames — so a topic_id that
+                # is not yet re-snapshotted resolves to nothing (frame dropped)
+                # instead of the previous occupant's symbol. This runs on every
+                # reconnect for the in-place reconnect=True socket.
+                self._reset_sdk_topic_maps(client)
                 if on_reconnect_callback is not None:
                     try:
                         on_reconnect_callback()

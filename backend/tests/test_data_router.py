@@ -275,3 +275,21 @@ async def test_data_router_defers_websocket_outside_exchange_windows() -> None:
 
     assert broker.subscribe_calls == []
     assert router._desired_primary_symbols == ["NSE:FINNIFTY-INDEX"]
+
+
+def test_data_router_drops_out_of_band_index_tick() -> None:
+    from market_data import index_band_guard
+
+    index_band_guard.clear_reference_closes()
+    router = DataRouter()
+    # A whole-frame NIFTY value (~24k) misrouted under BANKNIFTY must never reach
+    # the tick buffer (live marks) — BANKNIFTY's absolute floor is 28k.
+    router._on_tick(Tick(symbol="NSE:BANKNIFTY-INDEX", ltp=24089.0))
+    assert "NSE:BANKNIFTY-INDEX" not in router._tick_buffer
+    assert router.get_ltp("NSE:BANKNIFTY-INDEX") == 0.0
+    # The real level is accepted.
+    router._on_tick(Tick(symbol="NSE:BANKNIFTY-INDEX", ltp=57582.0))
+    assert router.get_ltp("NSE:BANKNIFTY-INDEX") == 57582.0
+    # REALTY 908 into every index is also rejected (sector coverage).
+    router._on_tick(Tick(symbol="NSE:NIFTY50-INDEX", ltp=906.0))
+    assert "NSE:NIFTY50-INDEX" not in router._tick_buffer

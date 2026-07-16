@@ -31,13 +31,19 @@ def test_rejects_cross_symbol_contamination_for_index_spot():
     assert store._validate_tick(_mk(sym, 75831.0)) is False
 
 
-def test_reference_not_poisoned_by_rejected_prints():
+def test_reference_not_poisoned_by_run_of_bad_prints():
     store = LiveCandleStore()
     sym = _index_symbol()
     _warmup(store, sym)
-    assert store._validate_tick(_mk(sym, 60000.0)) is False  # rejected
-    # A legit price right after is still accepted — the rolling median held.
+    # A sustained BURST of contaminating prints (the recorded signature: NIFTY
+    # ~57.8k for many consecutive ticks). The old self-referential rolling median
+    # would flip once such a burst won a majority of its window and INVERT the
+    # guard. The absolute band has no window to poison — every one is rejected...
+    for _ in range(50):
+        assert store._validate_tick(_mk(sym, 57800.0)) is False
+    # ...and a legit price right after is still accepted.
     assert store._validate_tick(_mk(sym, 23100.0)) is True
+    assert store._validate_tick(_mk(sym, 24075.0)) is True
 
 
 def test_accepts_legit_index_intraday_moves():
