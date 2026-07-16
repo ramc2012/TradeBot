@@ -571,7 +571,18 @@ class FyersAdapter(BrokerAdapter):
                 log_path="",
                 litemode=False,
                 write_to_file=False,
-                reconnect=True,
+                # reconnect=False: the router owns reconnection (_reconnect_if_stale
+                # + the required-feed watchdog), and it rebuilds a BRAND-NEW socket
+                # (unsubscribe -> fresh subscribe_websocket) with empty topic_id maps
+                # — the clean path that cannot misroute. The SDK's own in-place
+                # reconnect=True kept the never-cleared topic_id maps (the
+                # cross-symbol contamination root cause) AND, when we cleared them
+                # in-place on reconnect, left the SDK unable to re-route frames so
+                # the feed went SILENT after a reconnect (observed 2026-07-16 22:12
+                # IST: 8/8 MCX roots stale, 0 ticks). Delegating reconnect to the
+                # router eliminates both failure modes; cost is ~one watchdog
+                # interval of reconnect latency, acceptable for a paper system.
+                reconnect=False,
                 on_connect=_on_connect,
                 on_close=lambda *_a: logger.warning("Fyers WS closed"),
                 on_error=lambda *_a: logger.error(f"Fyers WS error: {_a[0] if _a else ''}"),

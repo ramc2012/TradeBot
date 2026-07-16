@@ -80,3 +80,37 @@ async def test_reconnect_clears_maps_and_fires_callback(monkeypatch: pytest.Monk
     assert client.dp_sym == {}
     assert client.resp == {}
     assert reconnects == [1]
+
+
+def test_socket_uses_router_owned_reconnect_not_sdk_inplace(monkeypatch):
+    """reconnect=False so the SDK never reconnects in place: the data_router
+    rebuilds a fresh socket (empty topic maps) on staleness. An in-place SDK
+    reconnect both kept the stale topic_id maps (contamination) AND — once we
+    cleared them in-place — left the SDK unable to route frames, killing the
+    feed (2026-07-16 22:12 IST). Guard the constructor flag against regression."""
+    import brokers.fyers as fy
+
+    captured = {}
+
+    class _FakeSocket:
+        def __init__(self, **kw):
+            captured.update(kw)
+        def connect(self):
+            pass
+        def subscribe(self, **kw):
+            pass
+
+    import types
+    fake_mod = types.SimpleNamespace(FyersDataSocket=_FakeSocket)
+    monkeypatch.setitem(__import__("sys").modules, "fyers_apiv3.FyersWebsocket.data_ws", fake_mod)
+    # Route the late `from fyers_apiv3.FyersWebsocket import data_ws` import.
+    monkeypatch.setattr("fyers_apiv3.FyersWebsocket.data_ws", fake_mod, raising=False)
+
+    import asyncio
+    adapter = fy.FyersAdapter.__new__(fy.FyersAdapter)
+    adapter._access_token = "tok"
+    adapter._on_depth_callback = None
+    asyncio.get_event_loop().run_until_complete(
+        adapter.subscribe_websocket(["NSE:NIFTY50-INDEX"], lambda _t: None)
+    )
+    assert captured.get("reconnect") is False
