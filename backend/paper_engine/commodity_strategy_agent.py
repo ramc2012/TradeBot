@@ -1,6 +1,7 @@
 """Paper runtime for the commodity desk — MCX futures, MP + Order-Flow entries.
 
-Single sleeve only: 1-minute closes drive the Market-Profile + Order-Flow evaluator.
+Single sleeve only: 3-minute closes drive the Market-Profile + Order-Flow evaluator
+(tick-first CVD/footprint from market_ticks, bar-inference fallback flagged via of_source).
 Execution admits the cost-validated compressed-IB-expansion setup; other evaluator
 triggers remain observable context. Value migration manages open positions and is
 never an entry. The existing structural risk sizing, 2R runner, ATR trail, event
@@ -69,18 +70,22 @@ from market_data.upstox_commodity import (
 from paper_engine.commodity_mp_signal import (
     _compute_atr as _compute_atr_series,
     evaluate_commodity_mp_signal,
+    tick_signed_volume_overrides,
 )
 from paper_engine.base_strategy_agent import (
     BaseStrategyAgent,
     IST,
+    PERSIST_EQUITY_CURVE_MAX_POINTS,
     _deserialize_trade_history,
     _latest_session_rows,
     _now_ist,
     _parse_iso_timestamp,
+    _restore_archived_trade_summary,
     _round_or_none,
     _serialize_trade_history,
     _sort_trades_recent_first,
     _split_today_history,
+    _trade_history_persist_payload,
 )
 from paper_engine.order_book import PaperOrder, PaperOrderBook
 from paper_engine.portfolio import PaperPortfolio, VirtualPosition
@@ -105,8 +110,14 @@ DEFAULT_COMMODITY_SIGNAL_AUDIT_MAX = 600
 DEFAULT_COMMODITY_INITIAL_CAPITAL = 5_000_000.0  # ₹50L paper capital (user, 2026-06-04)
 DEFAULT_COMMODITY_ARCHIVE_DIR = Path(__file__).resolve().parent.parent / "runtime" / "commodity_archive"
 DEFAULT_COMMODITY_SCAN_TIMEOUT_SECONDS = 120
+DEFAULT_COMMODITY_SYMBOL_SCAN_TIMEOUT_SECONDS = 12
+DEFAULT_COMMODITY_SCAN_TIMEOUT_HEADROOM_SECONDS = 60
 
-FUTURES_TIMEFRAME = "1minute"  # signal evaluator runs on closed 1-min bars
+# FAST-lane timeframe policy (2026-07-15): the signal evaluator runs on closed
+# 3-minute bars (was 1-minute). MP TPO construction (15-min periods) and the
+# unified 1-minute store writes are unchanged — only the SIGNAL bars moved.
+FUTURES_TIMEFRAME = "3minute"
+FUTURES_TIMEFRAME_MINUTES = 3
 FUTURES_MP_PERIOD_MINUTES = 15  # canonical TPO period (60-min IB)
 FUTURES_CVD_ANCHOR_HOUR_IST = 9
 FUTURES_MAX_POSITIONS = 1000  # no practical position cap (user 2026-06-04); margin/capital is the real limit
@@ -233,7 +244,16 @@ def _repair_portfolio_ledger(portfolio: PaperPortfolio) -> None:
 
     repaired_history.sort(key=lambda item: item.exit_time)
     portfolio._trade_history = repaired_history
+    # Rebuild the daily buckets from the kept trades, but PRESERVE restored
+    # buckets for days older than the oldest kept trade — the F-18 persist
+    # trim archives trades beyond the last-500 window, so a full rebuild
+    # would silently zero those days' realized P&L on every restore.
+    prior_daily = dict(getattr(portfolio, "_daily_pnl", {}) or {})
+    oldest_kept = repaired_history[0].exit_time.date() if repaired_history else None
     portfolio._daily_pnl = defaultdict(float)
+    for day, pnl in prior_daily.items():
+        if oldest_kept is None or day < oldest_kept:
+            portfolio._daily_pnl[day] = float(pnl)
     for trade in repaired_history:
         portfolio._daily_pnl[trade.exit_time.date()] += float(trade.pnl)
     portfolio.reconcile_available_capital()
@@ -429,6 +449,14 @@ def _normalize_saved_state(payload: Optional[dict[str, Any]]) -> dict[str, Any]:
         "trade_history": [
             row for row in list(portfolio_payload.get("trade_history") or []) if isinstance(row, dict)
         ],
+        # F-18 trim: aggregate of trades older than the persisted last-500
+        # window. Optional (absent in pre-trim payloads) — must survive
+        # normalization or the archive would reset on every restore.
+        "trade_history_summary": (
+            dict(portfolio_payload["trade_history_summary"])
+            if isinstance(portfolio_payload.get("trade_history_summary"), dict)
+            else None
+        ),
         "daily_pnl": {
             str(day): float(value or 0.0)
             for day, value in dict(portfolio_payload.get("daily_pnl") or {}).items()
@@ -949,7 +977,7 @@ class _CommodityFuturesLaneAgent(_BaseCommodityLaneAgent):
         key="commodity_futures",
         title="MP+OF Futures",
         timeframe=FUTURES_TIMEFRAME,
-        instrument_scope="MCX futures · MP+OF on 1-min",
+        instrument_scope="MCX futures · MP+OF on 3-min",
         execution_mode="paper_execution",
         position_cap=FUTURES_MAX_POSITIONS,
     )
@@ -1196,6 +1224,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         portfolio = self._runtime.portfolio
         portfolio.available_capital = float(portfolio_payload.get("available_capital") or portfolio.initial_capital)
         portfolio._trade_history = _deserialize_trade_history(list(portfolio_payload.get("trade_history") or []))
+        _restore_archived_trade_summary(portfolio, dict(portfolio_payload))
         portfolio._daily_pnl = defaultdict(float)
         for day_text, pnl in dict(portfolio_payload.get("daily_pnl") or {}).items():
             try:
@@ -1232,6 +1261,11 @@ class CommodityStrategyAgent(BaseStrategyAgent):
 
     def _build_saved_state(self) -> dict[str, Any]:
         portfolio = self._runtime.portfolio
+        # F-18 payload trim: equity curve last 2000 points, trades last 500 +
+        # rolling summary — the persisted blob must stay bounded (it is decoded
+        # on the event loop on every restore). Full per-trade history lives in
+        # the append-only paper_trade_book table.
+        trade_rows, trade_summary = _trade_history_persist_payload(portfolio)
         return {
             "config": {
                 "symbols": list(self._symbols),
@@ -1270,11 +1304,12 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "portfolio": {
                     "initial_capital": float(portfolio.initial_capital),
                     "available_capital": float(portfolio.available_capital),
-                    "trade_history": _serialize_trade_history(portfolio),
+                    "trade_history": trade_rows,
+                    "trade_history_summary": trade_summary,
                     "daily_pnl": {day.isoformat(): float(pnl) for day, pnl in getattr(portfolio, "_daily_pnl", {}).items()},
                     "equity_curve": [
                         {"time": timestamp.isoformat(), "equity": float(equity)}
-                        for timestamp, equity in getattr(portfolio, "_equity_curve", [])
+                        for timestamp, equity in getattr(portfolio, "_equity_curve", [])[-PERSIST_EQUITY_CURVE_MAX_POINTS:]
                     ],
                     "peak_equity": float(getattr(portfolio, "_peak_equity", portfolio.initial_capital)),
                 },
@@ -1282,7 +1317,21 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         }
 
     def _persist_state(self) -> None:
+        # Synchronous persist — retained for the sync/operator callers
+        # (update_symbols, kill switch, start/stop). _save_state blocks on a
+        # psycopg2 INSERT; hot async paths must use _apersist_state instead.
         self._state_synced_at = _save_state(self._build_saved_state()) or self._state_synced_at
+
+    async def _apersist_state(self) -> None:
+        # Async persist for hot async paths (the per-scan cycle): build the
+        # payload on the loop (pure dict/list work over instance state), then
+        # offload the blocking json.dumps + sync psycopg2 INSERT to a worker
+        # thread — mirrors S1's _apersist_state (strategy_agent.py). F-18:
+        # the sync persist of a growing state blob on the event loop is a
+        # per-scan loop seizure that worsens every day.
+        payload = self._build_saved_state()
+        updated_at = await asyncio.to_thread(_save_state, payload)
+        self._state_synced_at = updated_at or self._state_synced_at
 
     def _loop_active(self) -> bool:
         return self._task is not None and not self._task.done()
@@ -1863,7 +1912,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             f"the {COMMODITY_MAX_DRAWDOWN_PCT:.1f}% cap. Entries remain blocked by risk rules; "
             "the kill switch is reserved for manual operator action."
         )
-        self._persist_state()
+        await self._apersist_state()
         await record_audit_event(
             market="commodity",
             event_type="risk_block_observed",
@@ -1888,7 +1937,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             f"the {COMMODITY_MAX_DRAWDOWN_PCT:.1f}% cap. Manual restart is required."
         )
         self._append_commentary("warning", self._last_message)
-        self._persist_state()
+        await self._apersist_state()
         return state
 
     def _strategy_catalog(self) -> list[dict[str, Any]]:
@@ -1900,7 +1949,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "title": "MP+OF Futures",
                 "agent": lane_map["commodity_futures"].build_status_payload(),
                 "status": "paper_execution" if self._symbols else "idle",
-                "instrument": "MCX futures · MP+OF on 1-min closes",
+                "instrument": "MCX futures · MP+OF on 3-min closes",
                 "tracked_symbols": len(self._symbols),
                 "open_positions": futures_positions,
                 "timeframe": lane_map["commodity_futures"].descriptor.timeframe,
@@ -1909,7 +1958,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 "lots_per_trade": self._lots_per_trade,
                 "broker": "upstox primary · fyers fallback",
                 "notes": (
-                    "Entries are driven by the Market-Profile + Order-Flow evaluator on closed 1-minute bars. "
+                    "Entries are driven by the Market-Profile + Order-Flow evaluator on closed 3-minute bars. "
                     "Execution accepts the high-conviction compressed IB expansion only: trend-day IB break, "
                     "within 3× causal 15-minute ATR(14) of POC, with the existing planned invalidation at least "
                     "3× ATR away. Stops are never widened to qualify. Confirmed value "
@@ -1962,11 +2011,11 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             validation = "waiting_trigger"
             validation_detail = (
                 "Awaiting an MP+OF trigger (open_drive, ib_break, failed_auction, "
-                "or lvn_fade) on the next closed 1-minute bar. Value migration is context-only."
+                "or lvn_fade) on the next closed 3-minute bar. Value migration is context-only."
             )
             if row.get("reason") == "insufficient_data":
                 validation = "warming_up"
-                validation_detail = "More 1-minute candles required before MP+OF triggers can evaluate."
+                validation_detail = "More 3-minute candles required before MP+OF triggers can evaluate."
             elif row.get("mp_status") == "warming_up":
                 validation = "mp_warming_up"
                 validation_detail = (
@@ -1975,7 +2024,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 )
             elif signal in {"BUY", "SELL"} and (price <= 0 or float(row.get("atr") or 0.0) <= 0):
                 validation = "price_unavailable"
-                validation_detail = "Trigger fired, but price or 1-min ATR is missing — entry blocked."
+                validation_detail = "Trigger fired, but price or signal-bar ATR is missing — entry blocked."
             elif signal in {"BUY", "SELL"} and self._kill_switch_active:
                 validation = "blocked_kill_switch"
                 validation_detail = "Kill switch is active. Trigger recorded but the execution lane is paused."
@@ -2000,7 +2049,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 validation_detail = str(high_conviction.get("detail") or "High-conviction gate blocked entry.")
             elif signal in {"BUY", "SELL"} and self._runtime.processed_signals.get(f"commodity_futures:{symbol}") == bar_time:
                 validation = "bar_consumed"
-                validation_detail = "This 1-minute bar already triggered an entry."
+                validation_detail = "This 3-minute bar already triggered an entry."
             elif signal in {"BUY", "SELL"} and at_capacity:
                 validation = "max_positions"
                 validation_detail = "The futures sleeve is already at max open-position capacity."
@@ -2068,25 +2117,39 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         # call site that survived the refactor. Always returns an empty list.
         return []
 
+    def _scan_timeout_seconds(self) -> int:
+        # The full scan can legitimately approach the per-symbol timeout budget
+        # during live MCX sessions when multiple symbols fall back to store
+        # history. Keep a fixed floor, but scale the overall timeout with the
+        # configured commodity universe so the loop does not cancel otherwise
+        # recoverable scans mid-pass.
+        symbol_count = max(len(self._symbols), 1)
+        scaled_timeout = (
+            symbol_count * DEFAULT_COMMODITY_SYMBOL_SCAN_TIMEOUT_SECONDS
+            + DEFAULT_COMMODITY_SCAN_TIMEOUT_HEADROOM_SECONDS
+        )
+        return max(DEFAULT_COMMODITY_SCAN_TIMEOUT_SECONDS, scaled_timeout)
+
     async def _loop(self) -> None:
         try:
             while self._enabled and not self._kill_switch_active and not self._start_required:
+                scan_timeout_seconds = self._scan_timeout_seconds()
                 try:
                     await asyncio.wait_for(
                         self.run_once(force=False),
-                        timeout=DEFAULT_COMMODITY_SCAN_TIMEOUT_SECONDS,
+                        timeout=scan_timeout_seconds,
                     )
                 except asyncio.CancelledError:
                     raise
                 except asyncio.TimeoutError:
                     self._last_error = (
-                        f"Commodity strategy scan exceeded {DEFAULT_COMMODITY_SCAN_TIMEOUT_SECONDS}s and was cancelled."
+                        f"Commodity strategy scan exceeded {scan_timeout_seconds}s and was cancelled."
                     )
                     self._last_message = (
                         "Commodity strategy scan timed out; the loop will retry on the next cycle."
                     )
                     self._append_commentary("warning", self._last_message)
-                    self._persist_state()
+                    await self._apersist_state()
                     logger.warning("[CommodityStrategy] scan timed out; retrying next cycle")
                 except Exception as exc:
                     self._last_error = str(exc)
@@ -2277,50 +2340,167 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         interval: str,
         lookback_days: int = DEFAULT_COMMODITY_HISTORY_DAYS,
     ) -> list[dict[str, Any]]:
+        async def _fetch_broker_rows(*, instrument_key: str, candle_interval: str) -> list[dict[str, Any]]:
+            try:
+                return await asyncio.wait_for(
+                    option_history_service._fetch_broker_candles(
+                        instrument_key=instrument_key,
+                        from_date=fetch_from,
+                        to_date=fetch_to,
+                        interval=candle_interval,
+                    ),
+                    timeout=DEFAULT_COMMODITY_SYMBOL_SCAN_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[CommodityStrategy] history fetch timed out for {instrument_key} ({candle_interval}); "
+                    "falling back to underlying_spot_candles"
+                )
+                return []
+
         fetch_from = _now_ist().date() - timedelta(days=lookback_days)
         fetch_to = _now_ist().date()
         rows: list[dict[str, Any]] = []
+        # Intervals derived by aggregating broker 1-minute rows app-side.
+        # 3minute is aggregate-only: _fetch_broker_candles maps "3minute" to a
+        # 1-minute broker resolution WITHOUT re-bucketing, so a direct fetch
+        # would return mislabelled 1-minute rows.
+        aggregate_bucket: Optional[int] = (
+            int(interval.removesuffix("minute"))
+            if interval in {"3minute", "5minute", "15minute"}
+            else None
+        )
         resolved_upstox = await resolve_upstox_mcx_future(symbol)
         upstox_key = str((resolved_upstox or {}).get("instrument_key") or "")
         if upstox_key:
-            if interval in {"5minute", "15minute"}:
-                minute_rows = await option_history_service._fetch_broker_candles(
+            if aggregate_bucket:
+                minute_rows = await _fetch_broker_rows(
                     instrument_key=upstox_key,
-                    from_date=fetch_from,
-                    to_date=fetch_to,
-                    interval="1minute",
+                    candle_interval="1minute",
                 )
                 if minute_rows:
                     rows = option_history_service._aggregate_rows(
                         minute_rows,
-                        15 if interval == "15minute" else 5,
+                        aggregate_bucket,
                     )
             else:
-                rows = await option_history_service._fetch_broker_candles(
+                rows = await _fetch_broker_rows(
                     instrument_key=upstox_key,
-                    from_date=fetch_from,
-                    to_date=fetch_to,
-                    interval=interval,
+                    candle_interval=interval,
                 )
-        if not rows:
-            rows = await option_history_service._fetch_broker_candles(
+        if not rows and interval != "3minute":
+            rows = await _fetch_broker_rows(
                 instrument_key=symbol,
-                from_date=fetch_from,
-                to_date=fetch_to,
-                interval=interval,
+                candle_interval=interval,
             )
-        if not rows and interval in {"5minute", "15minute"}:
-            minute_rows = await option_history_service._fetch_broker_candles(
+        if not rows and aggregate_bucket:
+            minute_rows = await _fetch_broker_rows(
                 instrument_key=symbol,
-                from_date=fetch_from,
-                to_date=fetch_to,
-                interval="1minute",
+                candle_interval="1minute",
             )
             if minute_rows:
                 rows = option_history_service._aggregate_rows(
                     minute_rows,
-                    15 if interval == "15minute" else 5,
+                    aggregate_bucket,
                 )
+        if rows:
+            return rows
+        return await self._load_history_from_store(
+            symbol,
+            interval=interval,
+            lookback_days=lookback_days,
+        )
+
+    async def _load_history_from_store(
+        self,
+        symbol: str,
+        *,
+        interval: str,
+        lookback_days: int,
+    ) -> list[dict[str, Any]]:
+        underlying = extract_commodity_root(symbol)
+        if not underlying:
+            return []
+
+        source_interval = interval
+        bucket_minutes: Optional[int] = None
+        if interval in {"3minute", "5minute", "15minute", "30minute"}:
+            # The unified commodity store persists 1-minute bars; everything
+            # coarser is bucketed app-side (the 1m writes stay unchanged).
+            source_interval = "1minute"
+            bucket_minutes = int(interval.removesuffix("minute"))
+
+        try:
+            from sqlalchemy import text
+
+            from db.database import AsyncSessionLocal
+
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    text(
+                        """
+                        WITH ranked AS (
+                            SELECT
+                                time,
+                                open,
+                                high,
+                                low,
+                                close,
+                                COALESCE(volume, 0) AS volume,
+                                COALESCE(oi, 0) AS oi,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY time
+                                    ORDER BY
+                                        CASE
+                                            WHEN source = 'live_tick' THEN 0
+                                            WHEN source = 'commodity_broker_history' THEN 1
+                                            WHEN source = 'fyers_mcx_cont' THEN 2
+                                            ELSE 3
+                                        END,
+                                        instrument_key DESC
+                                ) AS row_rank
+                            FROM underlying_spot_candles
+                            WHERE underlying = :underlying
+                              AND interval = :interval
+                              AND time >= NOW() - (:lookback_days * INTERVAL '1 day')
+                        )
+                        SELECT time, open, high, low, close, volume, oi
+                        FROM ranked
+                        WHERE row_rank = 1
+                        ORDER BY time
+                        """
+                    ),
+                    {
+                        "underlying": underlying,
+                        "interval": source_interval,
+                        "lookback_days": int(lookback_days),
+                    },
+                )
+                db_rows = result.fetchall()
+        except Exception as exc:
+            logger.debug(
+                f"[CommodityStrategy] local history fallback failed for {symbol} ({interval}): {exc}"
+            )
+            return []
+
+        rows: list[dict[str, Any]] = []
+        for row in db_rows:
+            try:
+                rows.append(
+                    {
+                        "time": row.time,
+                        "open": float(row.open),
+                        "high": float(row.high),
+                        "low": float(row.low),
+                        "close": float(row.close),
+                        "volume": int(row.volume or 0),
+                        "oi": int(row.oi or 0),
+                    }
+                )
+            except (AttributeError, TypeError, ValueError):
+                continue
+        if bucket_minutes and rows:
+            return option_history_service._aggregate_rows(rows, bucket_minutes)
         return rows
 
     def _build_market_profile(self, symbol: str, rows: list[dict[str, Any]]):
@@ -2435,6 +2615,37 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         self._prior_mp_cache[cache_key] = prior_profile
         return prior_profile
 
+    async def _load_recent_market_ticks(self, symbol: str) -> list[dict[str, Any]]:
+        """Latest MCX futures ticks (L1 + cumulative volume) for tick-first OF.
+
+        DESC + reverse so a busy window keeps the NEWEST 5000 ticks. Quietly
+        returns [] on any storage error — the evaluator then falls back to
+        bar-inference CVD with the visible `of_source` flag.
+        """
+        try:
+            from sqlalchemy import text
+
+            from db.database import AsyncSessionLocal
+
+            since = datetime.now(timezone.utc) - timedelta(minutes=120)
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT time, ltp, bid, ask, bid_qty, ask_qty, volume
+                        FROM market_ticks
+                        WHERE symbol = :symbol AND time >= :since
+                        ORDER BY time DESC
+                        LIMIT 5000
+                        """
+                    ),
+                    {"symbol": symbol, "since": since},
+                )
+                return [dict(row) for row in reversed(result.mappings().all())]
+        except Exception as exc:
+            logger.debug(f"[CommodityStrategy] tick window load skipped for {symbol}: {exc}")
+            return []
+
     async def _analyze_futures_symbol(
         self,
         symbol: str,
@@ -2443,7 +2654,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         spec = get_commodity_contract_spec(symbol)
         candles = await self._load_history(symbol, interval=FUTURES_TIMEFRAME, lookback_days=2)
         if not candles:
-            self._append_commentary("warning", f"{symbol}: no 1-min futures candles returned by broker.")
+            self._append_commentary(
+                "warning",
+                f"{symbol}: no {FUTURES_TIMEFRAME} futures candles returned by broker.",
+            )
             return None
 
         closed = _filter_closed_interval_rows(candles, interval=FUTURES_TIMEFRAME)
@@ -2470,6 +2684,17 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         atr_1m = _compute_atr_series(closed, period=14)
         atr_15m = _completed_15m_atr(closed, period=14)
 
+        # Tick-first order flow: PREFER the real market_ticks tape for the
+        # footprint/CVD (MCX futures ticks now stream on the shared WS
+        # router); the evaluator falls back to bar-inference — flagged via
+        # `of_source` — only for bars the tick window does not cover.
+        ticks = await self._load_recent_market_ticks(symbol)
+        tick_overrides = (
+            tick_signed_volume_overrides(ticks, closed, bar_minutes=FUTURES_TIMEFRAME_MINUTES)
+            if ticks
+            else None
+        )
+
         result = evaluate_commodity_mp_signal(
             closed,
             symbol=symbol,
@@ -2477,6 +2702,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             prior_profile=prior_profile,
             cvd_anchor_index=cvd_anchor_index,
             atr_1m=atr_1m,
+            bar_minutes=FUTURES_TIMEFRAME_MINUTES,
+            tick_signed_volumes=tick_overrides,
         )
 
         # Persist daily snapshots so the historical timeline grows on its own.
@@ -2702,7 +2929,20 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         )
         futures_rows: list[dict[str, Any]] = []
         for configured_symbol, active_symbol in active_futures_symbols.items():
-            row = await self._analyze_futures_symbol(active_symbol, quote_map.get(active_symbol))
+            try:
+                row = await asyncio.wait_for(
+                    self._analyze_futures_symbol(active_symbol, quote_map.get(active_symbol)),
+                    timeout=DEFAULT_COMMODITY_SYMBOL_SCAN_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[CommodityStrategy] symbol scan timed out for {active_symbol}; retaining the last good snapshot"
+                )
+                self._append_commentary(
+                    "warning",
+                    f"{active_symbol}: scan exceeded {DEFAULT_COMMODITY_SYMBOL_SCAN_TIMEOUT_SECONDS}s; retaining the last good snapshot.",
+                )
+                continue
             if row:
                 row["configured_symbol"] = configured_symbol
                 contract_meta = self._active_contract_metadata.get(configured_symbol) or {}
@@ -2857,7 +3097,20 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     return self.get_status(refresh=False)
                 futures_rows: list[dict[str, Any]] = []
                 for configured_symbol, active_symbol in active_futures_symbols.items():
-                    row = await self._analyze_futures_symbol(active_symbol, quote_map.get(active_symbol))
+                    try:
+                        row = await asyncio.wait_for(
+                            self._analyze_futures_symbol(active_symbol, quote_map.get(active_symbol)),
+                            timeout=DEFAULT_COMMODITY_SYMBOL_SCAN_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            f"[CommodityStrategy] symbol scan timed out for {active_symbol}; retaining the last good snapshot"
+                        )
+                        self._append_commentary(
+                            "warning",
+                            f"{active_symbol}: scan exceeded {DEFAULT_COMMODITY_SYMBOL_SCAN_TIMEOUT_SECONDS}s; retaining the last good snapshot.",
+                        )
+                        continue
                     if row:
                         row["configured_symbol"] = configured_symbol
                         contract_meta = self._active_contract_metadata.get(configured_symbol) or {}
@@ -2876,7 +3129,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 # Persist immediately so concurrent get_status refreshes from
                 # the API (e.g. dashboard polling) cannot reload an older DB
                 # snapshot and wipe the audit additions we just made.
-                self._persist_state()
+                # (to_thread: the per-scan persist must not block the loop.)
+                await self._apersist_state()
                 # Unified commodity data path: every scan, push fresh 1-minute
                 # bars for each configured commodity into underlying_spot_candles
                 # so every downstream strategy (directional long options, MP,
@@ -2986,7 +3240,9 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 raise
             finally:
                 self._running = False
-                self._persist_state()
+                # to_thread: the per-scan persist is THE hot path (every ~30s
+                # while MCX is open) — never block the event loop on it.
+                await self._apersist_state()
 
     async def _safe_get_ltp(self, adapter: Optional[BrokerAdapter], symbols: list[str]) -> dict[str, float]:
         try:
@@ -3016,7 +3272,18 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         if self._fyers_ltp_backoff_until is not None and now < self._fyers_ltp_backoff_until:
             return quotes
         try:
-            payload = await adapter.get_ltp(remaining_symbols)
+            # CLASS_CRITICAL + PRIORITY_HIGH: these LTPs mark HELD positions
+            # (stops/targets act on them) — they draw from the reserved 40%
+            # broker share so bulk sweeps can never starve position marks.
+            from brokers.rate_limiter import (
+                CLASS_CRITICAL,
+                PRIORITY_HIGH,
+                broker_class,
+                broker_priority,
+            )
+
+            with broker_priority(PRIORITY_HIGH), broker_class(CLASS_CRITICAL):
+                payload = await adapter.get_ltp(remaining_symbols)
         except Exception as exc:
             if _is_rate_limit_error(exc):
                 self._fyers_ltp_backoff_until = now + timedelta(

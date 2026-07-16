@@ -59,7 +59,11 @@ def _connection_pool() -> ThreadedConnectionPool | None:
             return None
         if _runtime_state_pool is None:
             try:
-                _runtime_state_pool = ThreadedConnectionPool(minconn=1, maxconn=2, dsn=db_url)
+                # maxconn 2→8 (2026-07-15): with persists offloaded to worker
+                # threads (S1 + commodity _apersist_state) plus trade-book
+                # writes and API status reads sharing this pool, 2 connections
+                # serialized every caller behind the slowest write.
+                _runtime_state_pool = ThreadedConnectionPool(minconn=1, maxconn=8, dsn=db_url)
                 _runtime_state_pool_retry_at = 0.0
             except Exception as exc:
                 _runtime_state_pool_retry_at = monotonic() + _RUNTIME_STATE_POOL_RETRY_SECONDS

@@ -250,6 +250,11 @@ class InstitutionalConvergenceService:
                     tick_size=inputs["tick_size"],
                     clock_drift_ms=inputs["clock_drift_ms"],
                     now=now,
+                    directional_bias=(stock_meta.get(symbol) or {}).get("directional_bias"),
+                    setup_window_bars=int(getattr(settings, "INSTITUTIONAL_CONVERGENCE_SETUP_WINDOW_BARS", 5)),
+                    min_confirmations=int(getattr(settings, "INSTITUTIONAL_CONVERGENCE_MIN_CONFIRMATIONS", 2)),
+                    max_chase_atr=float(getattr(settings, "INSTITUTIONAL_CONVERGENCE_MAX_CHASE_ATR", 0.5)),
+                    min_reward_risk=float(getattr(settings, "INSTITUTIONAL_CONVERGENCE_MIN_REWARD_RISK", 1.5)),
                 )
                 result.update({"sector": (stock_meta.get(symbol) or {}).get("sector", "INDEX"), "futures_contract": futures_map[symbol], "alpha_context": stock_meta.get(symbol)})
                 results.append(result)
@@ -266,7 +271,7 @@ class InstitutionalConvergenceService:
             "universe": universe,
             "results": results,
             "result_count": len(results),
-            "actionable_count": sum(1 for row in results if row.get("status") == "actionable_shadow"),
+            "actionable_count": sum(1 for row in results if row.get("status") == "actionable_paper"),
             "failure_count": len(failures),
             "failures": failures,
             "gate_breakdown": _gate_breakdown(results),
@@ -288,6 +293,7 @@ class InstitutionalConvergenceService:
             "universe": universe,
             "latest": state,
             "paper": convergence_paper_book.summary(),
+            "paper_statistics": convergence_paper_book.statistics(),
         }
 
 

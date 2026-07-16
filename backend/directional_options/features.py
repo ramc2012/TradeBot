@@ -14,6 +14,7 @@ from directional_options.schemas import FeatureSnapshot
 
 TIMEFRAME_TO_PANDAS = {
     "1minute": "1min",
+    "3minute": "3min",
     "5minute": "5min",
     "15minute": "15min",
     "30minute": "30min",
@@ -28,6 +29,7 @@ SESSION_MINUTES = ((MARKET_CLOSE.hour * 60) + MARKET_CLOSE.minute) - ((MARKET_OP
 def timeframe_minutes(timeframe: str) -> int:
     mapping = {
         "1minute": 1,
+        "3minute": 3,
         "5minute": 5,
         "15minute": 15,
         "30minute": 30,

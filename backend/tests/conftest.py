@@ -69,6 +69,23 @@ def _isolate_runtime_case_root(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _atm_live_refresh_window_not_enforced(monkeypatch):
+    """The ATM watchlist demotes live_refresh → cached outside 07:00–16:35 IST
+    on NSE session days (the 2026-07-16 overnight-rebuild fix). Left enforced,
+    every live_refresh=True test would silently flip behavior depending on the
+    wall-clock the suite runs at. Disable enforcement suite-wide; the window
+    tests exercise `_live_refresh_allowed` with explicit datetimes by turning
+    the flag back on via monkeypatch."""
+    try:
+        import market_data.atm_watchlist as _atm
+
+        monkeypatch.setattr(_atm, "_LIVE_REFRESH_WINDOW_ENFORCED", False, raising=False)
+    except Exception:
+        pass
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _stub_telegram_singleton_network(request, monkeypatch):
     """S1 trade alerts now route through the unified notifications singleton
     (`notifications.telegram_agent.telegram_agent`). Tests that set fake bot

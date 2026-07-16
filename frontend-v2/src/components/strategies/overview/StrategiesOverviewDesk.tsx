@@ -236,7 +236,7 @@ export default function StrategiesOverviewDesk() {
       createStrategySnapshotSocket(
         "directional",
         "NIFTY",
-        "5minute",
+        "3minute",
         (d) => onData(d as DirectionalSnapshot),
         onStatusChange,
       ),

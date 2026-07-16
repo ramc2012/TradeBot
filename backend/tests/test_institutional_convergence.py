@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI
@@ -14,7 +15,15 @@ from institutional_convergence.service import (
     evaluate_index_snapshot,
     select_diversified_stocks,
 )
-from institutional_convergence.engine import _aligned_tick_cvd, build_footprint, lots_for_risk
+from institutional_convergence.engine import (
+    _aligned_tick_cvd,
+    _freshness_limit_ms,
+    _risk_plan,
+    _structural_setup,
+    build_footprint,
+    evaluate_rules,
+    lots_for_risk,
+)
 from institutional_convergence.paper import ConvergencePaperBook
 from paper_engine.base_strategy_agent import IST
 
@@ -128,13 +137,14 @@ def test_open_cycle_offloads_rule_evaluation_from_event_loop(monkeypatch, tmp_pa
     monkeypatch.setattr(backfill_module, "fyers_front_month_symbol", lambda symbol, current_date: "NSE:NIFTY24JULFUT")
     monkeypatch.setattr(backfill_module, "month_code_for_front_contract", lambda current_date, symbol: "24JUL")
     def _evaluate_rules(**kwargs):
-        return {"symbol": kwargs["symbol"], "status": "blocked", "action": "FLAT"}
+        return {"symbol": kwargs["symbol"], "status": "actionable_paper", "action": "LONG"}
 
     monkeypatch.setattr(service_module, "evaluate_rules", _evaluate_rules)
 
     payload = asyncio.run(service.run_cycle())
 
     assert payload["status"] == "ok"
+    assert payload["actionable_count"] == 1
     assert calls == ["_evaluate_rules", "<lambda>"]
 
 
@@ -166,6 +176,91 @@ def test_footprint_detects_three_to_one_buying_imbalance() -> None:
     assert level["buy_ratio"] >= 3.0
 
 
+def test_three_minute_lane_uses_adaptive_tick_freshness() -> None:
+    base = datetime(2026, 7, 13, 10, 0, tzinfo=IST)
+    ticks = [{"time": base + timedelta(seconds=index * 2)} for index in range(10)]
+
+    assert _freshness_limit_ms(ticks) == 45_000.0
+
+
+def test_structural_reclaim_stays_armed_for_five_bars_then_expires() -> None:
+    base = datetime(2026, 7, 13, 10, 0, tzinfo=IST)
+    reclaim = {"time": base, "open": 99.5, "high": 100.5, "low": 99.0, "close": 100.2}
+    follow = [
+        {"time": base + timedelta(minutes=3 * index), "open": 100.3, "high": 100.7, "low": 100.3, "close": 100.5}
+        for index in range(1, 6)
+    ]
+
+    armed = _structural_setup([reclaim, *follow[:4]], [100.0], "LONG", 0.2, active_window_bars=5)
+    expired = _structural_setup([reclaim, *follow], [100.0], "LONG", 0.2, active_window_bars=5)
+
+    assert armed["state"] == "ARMED"
+    assert armed["age_bars"] == 4
+    assert expired["state"] == "EXPIRED"
+
+
+def test_risk_plan_rejects_a_chased_entry() -> None:
+    plan = _risk_plan(
+        direction="LONG",
+        entry=102.0,
+        setup={"active": True, "level": 100.0, "extreme": 99.0},
+        atr_value=1.0,
+        targets=[108.0],
+        max_chase_atr=0.5,
+        min_reward_risk=1.5,
+    )
+
+    assert plan["not_chasing"] is False
+    assert plan["reward_risk_valid"] is True
+
+
+def test_two_of_three_confirmations_can_enter_at_reduced_risk(monkeypatch) -> None:
+    from institutional_convergence import engine as engine_module
+
+    @dataclass
+    class Profile:
+        val: float
+        vah: float
+        poc: float
+        initial_balance_range: float = 2.0
+        initial_balance_high: float = 104.0
+        initial_balance_low: float = 100.0
+
+    now = datetime(2026, 7, 13, 10, 30, tzinfo=IST)
+    bars = [
+        {"time": now - timedelta(minutes=15 - 3 * index), "open": 100.5, "high": 101.0, "low": 100.0, "close": 100.5, "volume": 100}
+        for index in range(5)
+    ]
+    bars[-1] = {"time": now - timedelta(minutes=3), "open": 99.6, "high": 100.4, "low": 99.0, "close": 100.2, "volume": 100}
+    prior_profile = Profile(val=100.0, vah=110.0, poc=106.0)
+    current_profile = Profile(val=99.0, vah=104.0, poc=103.0, initial_balance_high=100.0, initial_balance_low=99.0)
+    monkeypatch.setattr(engine_module, "_profile", lambda symbol, rows, tick_size, prior=None: prior_profile if prior is None else current_profile)
+    monkeypatch.setattr(engine_module, "volume_node_density", lambda rows, bins: [])
+    monkeypatch.setattr(engine_module, "hvn_lvn", lambda histogram: {"hvn": [], "lvn": []})
+    monkeypatch.setattr(engine_module, "build_footprint", lambda ticks, tick_size: {"bars": [], "tick_count": len(ticks), "source": "market_ticks"})
+    cvd = [0.0, 10.0, 20.0, 40.0]
+    series = [{"time": row["time"].isoformat(), "cvd": value, "close": row["close"]} for row, value in zip(bars[-4:], cvd)]
+    monkeypatch.setattr(engine_module, "_aligned_tick_cvd", lambda current, footprint: (current[-4:], cvd, series))
+    monkeypatch.setattr(engine_module, "cvd_divergence", lambda candles, values, lookback=20: None)
+    ticks = [{"time": now - timedelta(seconds=20 - index)} for index in range(8)]
+
+    result = evaluate_rules(
+        symbol="TEST", current_bars=bars, prior_bars=bars, history_bars=bars,
+        ticks=ticks, options={}, vix=14.0, lot_size=10, tick_size=0.1,
+        clock_drift_ms=20_000.0, now=now, directional_bias="bullish",
+    )
+
+    assert result["action"] == "LONG", result
+    assert result["confirmation_count"] == 2
+    assert result["long_confirmations"] == {
+        "cvd_confirmation": True,
+        "buying_footprint_3x_recent": False,
+        "price_reclaim": True,
+    }
+    assert result["risk"]["risk_fraction"] == 0.005
+    assert result["setup_state"] == "CONFIRMED"
+
+
 def test_risk_sizing_uses_one_percent_cap() -> None:
     assert lots_for_risk(1_000_000, 0.01, 20, 50) == 10
     assert lots_for_risk(1_000_000, 0.005, 20, 50) == 5
@@ -190,6 +285,18 @@ def test_paper_book_opens_and_moves_stop_to_break_even(tmp_path) -> None:
     assert position["lots"] == 10
     assert position["stop"] == 100.0
 
+    # One adverse CVD observation is noise and must not kill the runner.
+    signal["spot"] = 111.0
+    signal["cvd"]["series"] = [{"cvd": 1}, {"cvd": 3}, {"cvd": 2}]
+    held = book.sync([signal], now.replace(minute=36))
+    assert held["open_count"] == 1
+
+    # Two consecutive adverse observations confirm the reversal.
+    signal["cvd"]["series"] = [{"cvd": 3}, {"cvd": 2}, {"cvd": 1}]
+    closed = book.sync([signal], now.replace(minute=39))
+    assert closed["open_count"] == 0
+    assert closed["closed_positions"][-1]["exit_reason"] == "cvd_reversal"
+
 
 def test_paper_book_locks_after_two_losses(tmp_path) -> None:
     book = ConvergencePaperBook(tmp_path / "paper.json")
@@ -206,6 +313,24 @@ def test_paper_book_locks_after_two_losses(tmp_path) -> None:
     summary = book.sync([], datetime(2026, 7, 13, 11, 0, tzinfo=IST))
 
     assert summary["circuit_breaker"]["locked"] is True
+
+
+def test_paper_book_consumes_setup_once_and_does_not_reenter(tmp_path) -> None:
+    book = ConvergencePaperBook(tmp_path / "paper.json")
+    now = datetime(2026, 7, 13, 10, 30, tzinfo=IST)
+    signal = {
+        "symbol": "NIFTY", "status": "actionable_paper", "action": "LONG", "spot": 100.0,
+        "long_setup": {"bar_time": "2026-07-13T10:27:00+05:30"},
+        "risk": {"entry": 100.0, "stop": 99.0, "target1": 101.0, "target2_long": 103.0, "lot_size": 50, "risk_fraction": 0.005},
+        "cvd": {"series": [{"cvd": 1}, {"cvd": 2}, {"cvd": 3}]},
+    }
+
+    assert book.sync([signal], now)["open_count"] == 1
+    signal["spot"] = 98.5
+    stopped = book.sync([signal], now + timedelta(minutes=1))
+    assert stopped["open_count"] == 0
+    signal["spot"] = 100.0
+    assert book.sync([signal], now + timedelta(minutes=2))["open_count"] == 0
 
 
 def test_rule_sessions_ignore_weekend_and_after_hours_contamination() -> None:

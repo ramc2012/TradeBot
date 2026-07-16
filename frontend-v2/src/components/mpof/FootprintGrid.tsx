@@ -1,12 +1,14 @@
 "use client";
 
 /**
- * FootprintGrid — the last few footprint bars as a price × (sell|buy) grid.
+ * FootprintGrid — the last few footprint bars as a price × (bid|ask) grid.
  *
  * One shared price axis (union of all shown bars' levels, descending) with a
- * sell/buy cell pair per bar. Cells shade with imbalance intensity; a ratio
- * ≥ ratioHighlight (default 3×) gets a hard ring so the trigger condition is
- * visible at a glance. Per-bar Δ and cumulative delta run underneath, and the
+ * sell@bid / buy@ask cell pair per bar. Cells shade with imbalance intensity;
+ * a ratio ≥ ratioHighlight (default 3×) gets a hard ring so the trigger
+ * condition is visible at a glance. Each bar's volume POC row is outlined
+ * amber. Per-bar Δ / cumulative delta / volume run underneath along with a
+ * stacked imbalance summary (buy- vs sell-imbalanced level counts), and the
  * header carries the tick-source honesty badge + the last bar's timestamp.
  */
 import { useMemo } from "react";
@@ -33,6 +35,14 @@ const compact = (v?: number | null): string => {
   if (abs >= 10_000) return `${(n / 1_000).toFixed(0)}k`;
   if (abs >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return n.toFixed(0);
+};
+
+const ratioOf = (level: FootprintLevel, side: "buy" | "sell"): number => {
+  const own = Number(side === "buy" ? level.buy : level.sell) || 0;
+  const other = Number(side === "buy" ? level.sell : level.buy) || 0;
+  const explicit = side === "buy" ? level.buy_ratio : level.sell_ratio;
+  if (explicit != null && Number.isFinite(Number(explicit))) return Number(explicit);
+  return other > 0 ? own / other : own > 0 ? 99 : 0;
 };
 
 export function FootprintGrid({
@@ -76,6 +86,25 @@ export function FootprintGrid({
     return max;
   }, [shown]);
 
+  /** Per-bar volume POC (price key with max buy+sell) + imbalance level counts. */
+  const barMeta = useMemo(() => {
+    return shown.map((bar) => {
+      let pocKey: string | null = null;
+      let pocVol = -1;
+      let buyHot = 0;
+      let sellHot = 0;
+      for (const level of bar.levels ?? []) {
+        if (!Number.isFinite(Number(level.price))) continue;
+        const key = Number(level.price).toFixed(6);
+        const total = (Number(level.buy) || 0) + (Number(level.sell) || 0);
+        if (total > pocVol) { pocVol = total; pocKey = key; }
+        if (ratioOf(level, "buy") >= ratioHighlight) buyHot += 1;
+        if (ratioOf(level, "sell") >= ratioHighlight) sellHot += 1;
+      }
+      return { pocKey, buyHot, sellHot, levelCount: (bar.levels ?? []).length };
+    });
+  }, [shown, ratioHighlight]);
+
   const lastTime = shown.at(-1)?.time ?? null;
 
   if (!shown.length || !prices.length) {
@@ -93,9 +122,11 @@ export function FootprintGrid({
     <div className="w-full">
       {!hideHeader ? (
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <OfSourceBadge source={source} />
             <span className="text-[10px] uppercase tracking-[0.12em] text-text-muted">≥{ratioHighlight}× imbalance ringed</span>
+            <span className="text-[10px] uppercase tracking-[0.12em] text-text-muted"><span className="text-accent-red/80">sell @ bid</span> · <span className="text-accent-green/80">buy @ ask</span></span>
+            <span className="rounded border border-accent-amber/60 px-1 text-[9px] uppercase tracking-[0.1em] text-accent-amber">bar POC outlined</span>
           </div>
           <LastUpdated timestamp={lastTime} label="last bar" />
         </div>
@@ -103,15 +134,15 @@ export function FootprintGrid({
 
       <div className="overflow-x-auto">
         <div className="min-w-fit">
-          {/* header row: bar times */}
+          {/* header row: bar times + bid/ask column labels */}
           <div className="flex items-end gap-1 pb-1">
             <div className="w-[70px] shrink-0" />
             {shown.map((bar, i) => (
               <div key={i} className="w-[128px] shrink-0 text-center font-mono text-[10px] text-text-muted" title={`${formatIST(bar.time)} IST`}>
                 {formatISTTime(bar.time) || `bar ${i + 1}`}
                 <div className="mt-0.5 flex justify-between px-1 text-[8.5px] uppercase tracking-[0.1em]">
-                  <span className="text-accent-red/80">sell</span>
-                  <span className="text-accent-green/80">buy</span>
+                  <span className="text-accent-red/80" title="sell volume executed at the bid">bid ×</span>
+                  <span className="text-accent-green/80" title="buy volume executed at the ask">× ask</span>
                 </div>
               </div>
             ))}
@@ -129,25 +160,30 @@ export function FootprintGrid({
                   if (!level) {
                     return <div key={barIdx} className="w-[128px] shrink-0 bg-bg-secondary/10" />;
                   }
-                  const sellRatio = Number(level.sell_ratio ?? (Number(level.buy) > 0 ? Number(level.sell) / Number(level.buy) : Number(level.sell) > 0 ? 99 : 0));
-                  const buyRatio = Number(level.buy_ratio ?? (Number(level.sell) > 0 ? Number(level.buy) / Number(level.sell) : Number(level.buy) > 0 ? 99 : 0));
+                  const isPoc = barMeta[barIdx]?.pocKey === key;
+                  const sellRatio = ratioOf(level, "sell");
+                  const buyRatio = ratioOf(level, "buy");
                   const sellHot = sellRatio >= ratioHighlight;
                   const buyHot = buyRatio >= ratioHighlight;
                   const sellAlpha = 0.08 + 0.5 * Math.min(1, (Number(level.sell) || 0) / maxVol);
                   const buyAlpha = 0.08 + 0.5 * Math.min(1, (Number(level.buy) || 0) / maxVol);
                   return (
-                    <div key={barIdx} className="flex w-[128px] shrink-0">
+                    <div
+                      key={barIdx}
+                      className={`flex w-[128px] shrink-0 ${isPoc ? "outline outline-1 -outline-offset-1 outline-accent-amber/80" : ""}`}
+                      title={isPoc ? `bar POC · ${formatNumber(price, digits)}` : undefined}
+                    >
                       <div
                         className={`flex h-[19px] w-1/2 items-center justify-end pr-1 font-mono text-[10px] ${sellHot ? "font-bold text-accent-red ring-1 ring-inset ring-accent-red/80" : "text-text-secondary"}`}
                         style={{ backgroundColor: `rgba(255,71,87,${sellAlpha.toFixed(3)})` }}
-                        title={`sell ${formatNumber(Number(level.sell), 0)} · ${formatNumber(sellRatio, 1)}×`}
+                        title={`sell @ bid ${formatNumber(Number(level.sell), 0)} · ${formatNumber(sellRatio, 1)}×`}
                       >
                         {compact(level.sell)}
                       </div>
                       <div
                         className={`flex h-[19px] w-1/2 items-center pl-1 font-mono text-[10px] ${buyHot ? "font-bold text-accent-green ring-1 ring-inset ring-accent-green/80" : "text-text-secondary"}`}
                         style={{ backgroundColor: `rgba(0,212,163,${buyAlpha.toFixed(3)})` }}
-                        title={`buy ${formatNumber(Number(level.buy), 0)} · ${formatNumber(buyRatio, 1)}×`}
+                        title={`buy @ ask ${formatNumber(Number(level.buy), 0)} · ${formatNumber(buyRatio, 1)}×`}
                       >
                         {compact(level.buy)}
                       </div>
@@ -158,16 +194,19 @@ export function FootprintGrid({
             ))}
           </div>
 
-          {/* per-bar delta + cumulative delta footer */}
+          {/* per-bar delta + cumulative delta + volume + imbalance summary footer */}
           <div className="mt-1 flex items-start gap-1 border-t border-bg-border/50 pt-1">
             <div className="flex w-[70px] shrink-0 flex-col items-end pr-1.5 font-mono text-[9.5px] text-text-muted">
               <span>Δ</span>
               <span>CVD</span>
               <span>vol</span>
+              <span className="mt-0.5">imb</span>
             </div>
             {shown.map((bar, i) => {
               const delta = Number(bar.delta ?? 0);
               const cvd = Number(bar.cumulative_delta ?? 0);
+              const meta = barMeta[i];
+              const hotTotal = (meta?.buyHot ?? 0) + (meta?.sellHot ?? 0);
               return (
                 <div key={i} className="flex w-[128px] shrink-0 flex-col items-center font-mono text-[10px]">
                   <span className={delta > 0 ? "text-accent-green" : delta < 0 ? "text-accent-red" : "text-text-muted"}>
@@ -177,6 +216,21 @@ export function FootprintGrid({
                     {cvd > 0 ? "+" : ""}{compact(cvd)}
                   </span>
                   <span className="text-text-muted">{compact(bar.volume)}</span>
+                  {/* stacked imbalance summary: sell-imbalanced vs buy-imbalanced level counts */}
+                  <div className="mt-0.5 w-full px-1" title={`${meta?.sellHot ?? 0} sell-imbalanced · ${meta?.buyHot ?? 0} buy-imbalanced levels (of ${meta?.levelCount ?? 0})`}>
+                    {hotTotal > 0 ? (
+                      <div className="flex h-[7px] w-full overflow-hidden rounded-sm bg-bg-secondary/40">
+                        <div className="h-full bg-accent-red/75" style={{ width: `${((meta.sellHot / hotTotal) * 100).toFixed(1)}%` }} />
+                        <div className="h-full bg-accent-green/75" style={{ width: `${((meta.buyHot / hotTotal) * 100).toFixed(1)}%` }} />
+                      </div>
+                    ) : (
+                      <div className="h-[7px] w-full rounded-sm bg-bg-secondary/30" />
+                    )}
+                    <div className="mt-px flex justify-between text-[8px] leading-none">
+                      <span className={meta?.sellHot ? "text-accent-red/90" : "text-text-muted"}>{meta?.sellHot ?? 0}S</span>
+                      <span className={meta?.buyHot ? "text-accent-green/90" : "text-text-muted"}>{meta?.buyHot ?? 0}B</span>
+                    </div>
+                  </div>
                 </div>
               );
             })}

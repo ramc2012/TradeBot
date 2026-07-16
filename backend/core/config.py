@@ -261,14 +261,22 @@ class Settings(BaseSettings):
     AUCTION_INTELLIGENCE_AUTO_ENABLED: bool = True
     AUCTION_INTELLIGENCE_AUTO_INTERVAL_SECONDS: int = 180
     INSTITUTIONAL_CONVERGENCE_AUTO_ENABLED: bool = True
-    INSTITUTIONAL_CONVERGENCE_AUTO_INTERVAL_SECONDS: int = 60
+    # FAST-lane cadence (timeframe policy 2026-07-15): the convergence rules
+    # evaluate closed 3-minute bars, so scans align to 3m bar closes (180s)
+    # instead of re-running mid-bar every 60s.
+    INSTITUTIONAL_CONVERGENCE_AUTO_INTERVAL_SECONDS: int = 180
     INSTITUTIONAL_CONVERGENCE_INDEX_SYMBOLS: str = "NIFTY,BANKNIFTY"
     INSTITUTIONAL_CONVERGENCE_STOCK_COUNT: int = 10
+    INSTITUTIONAL_CONVERGENCE_SETUP_WINDOW_BARS: int = 5
+    INSTITUTIONAL_CONVERGENCE_MIN_CONFIRMATIONS: int = 2
+    INSTITUTIONAL_CONVERGENCE_MAX_CHASE_ATR: float = 0.5
+    INSTITUTIONAL_CONVERGENCE_MIN_REWARD_RISK: float = 1.5
     # Commodity (MCX) variant of the convergence lane: same rules engine on
     # the active front-month futures, evening-session square-off (23:15), no
     # VIX / noon-quarantine gates (those are NSE-session concepts).
     INSTITUTIONAL_CONVERGENCE_COMMODITY_ENABLED: bool = True
-    INSTITUTIONAL_CONVERGENCE_COMMODITY_INTERVAL_SECONDS: int = 60
+    # 3-minute bars → 180s scans aligned to bar closes (timeframe policy).
+    INSTITUTIONAL_CONVERGENCE_COMMODITY_INTERVAL_SECONDS: int = 180
     INSTITUTIONAL_CONVERGENCE_COMMODITY_SYMBOLS: str = "GOLD,SILVERM,CRUDEOIL,NATURALGAS,COPPER,ALUMINI,ZINCMINI,NICKEL"
     # Real order-flow book source (2026-06-03). Maps an index app-symbol to the
     # market_ticks symbol whose REAL order book feeds auction-intelligence order
@@ -291,12 +299,11 @@ class Settings(BaseSettings):
     FRACTAL_MARKET_PROFILE_AUTO_ENABLED: bool = False
     FRACTAL_MARKET_PROFILE_AUTO_INTERVAL_SECONDS: int = 300
     DIRECTIONAL_OPTIONS_AUTO_ENABLED: bool = True
-    # Strategy operates on 5- and 15-minute bars. A 300s cadence misses
-    # the close of a fresh 5-min bar by up to 4 minutes and produces stale
-    # decisions on 15-min bars. 60s ensures every fresh bar is evaluated
-    # within one cycle of its close, which the broker quote refresh rate
-    # comfortably supports.
-    DIRECTIONAL_OPTIONS_AUTO_INTERVAL_SECONDS: int = 60
+    # FAST-lane cadence (timeframe policy 2026-07-15): the strategy's default
+    # timeframe is now 3-minute bars (5m/15m stay selectable via the API), so
+    # the runner fires every 180s — aligned to 3m bar closes. Every fresh bar
+    # is evaluated exactly once per close instead of re-scanning mid-bar.
+    DIRECTIONAL_OPTIONS_AUTO_INTERVAL_SECONDS: int = 180
     # POSITIONAL options strategy (2026-06-28): the researched directional edge —
     # multi-day hold, MONTHLY ATM contract, HTF-direction backbone CONFIRMED by
     # option positioning (oi_build / PCR from directional_positioning_daily), with

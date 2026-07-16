@@ -1726,3 +1726,79 @@ def test_load_candles_appends_newer_atm_watchlist_snapshot(monkeypatch) -> None:
     )
     assert rows[-1]["close"] == 943.75
     assert rows[-1]["source"] == "atm_watchlist_snapshot"
+
+
+# ── Closed-market prep discipline (2026-07-16) ───────────────────────────────
+# The own-loop used to run `_prepare_closed_market_state` on EVERY closed
+# scan cycle: overnight that meant repeated live watchlist/expiry work, and
+# after midnight the stale-row check kicked full-universe broker rebuilds
+# hourly (observed 2026-07-16 00:00–05:30 IST, 216 underlyings/hour). The
+# prep now runs once per closed stretch, with bounded retries while it
+# yields no rows.
+
+
+def _closed_market_agent(monkeypatch, prep_results: list[bool], prep_calls: list[int]):
+    agent = PaperStrategyAgent()
+
+    async def fake_market_intelligence_health():
+        return {"ready": True, "execution_ready": False}
+
+    async def fake_broker_snapshot(*, force_validate: bool = False):
+        return {"broker_ready": False, "fyers_ready": False, "upstox_ready": False}
+
+    async def fake_prepare(started_at, **_kwargs) -> bool:
+        prep_calls.append(1)
+        return prep_results[min(len(prep_calls), len(prep_results)) - 1]
+
+    monkeypatch.setattr(strategy_agent_module, "_in_market_hours", lambda _: False)
+    monkeypatch.setattr(
+        strategy_agent_module.market_intelligence_runtime,
+        "get_strategy_health",
+        fake_market_intelligence_health,
+    )
+    monkeypatch.setattr(strategy_agent_module, "get_broker_connection_snapshot", fake_broker_snapshot)
+    monkeypatch.setattr(agent, "_prepare_closed_market_state", fake_prepare)
+    monkeypatch.setattr(strategy_agent_module.option_history_service, "reset_health", lambda: None)
+    monkeypatch.setattr(strategy_agent_module.option_history_service, "get_health_snapshot", lambda: {})
+    return agent
+
+
+def test_closed_market_prep_runs_once_per_closed_stretch(monkeypatch) -> None:
+    prep_calls: list[int] = []
+    agent = _closed_market_agent(monkeypatch, prep_results=[True], prep_calls=prep_calls)
+
+    for _ in range(4):
+        asyncio.run(agent.run_once(force=False))
+
+    assert len(prep_calls) == 1
+    assert agent._closed_prep_done is True
+
+
+def test_closed_market_prep_force_runs_again(monkeypatch) -> None:
+    prep_calls: list[int] = []
+    agent = _closed_market_agent(monkeypatch, prep_results=[True, True], prep_calls=prep_calls)
+
+    asyncio.run(agent.run_once(force=False))
+    asyncio.run(agent.run_once(force=False))
+    assert len(prep_calls) == 1
+
+    # Manual "run now" always re-preps.
+    asyncio.run(agent.run_once(force=True))
+    assert len(prep_calls) == 2
+
+
+def test_closed_market_prep_empty_watchlist_retries_are_bounded(monkeypatch) -> None:
+    from paper_engine.strategy_agent import CLOSED_PREP_MAX_ATTEMPTS
+
+    prep_calls: list[int] = []
+    agent = _closed_market_agent(
+        monkeypatch,
+        prep_results=[False],  # every prep yields 0 rows
+        prep_calls=prep_calls,
+    )
+
+    for _ in range(CLOSED_PREP_MAX_ATTEMPTS + 4):
+        asyncio.run(agent.run_once(force=False))
+
+    assert len(prep_calls) == CLOSED_PREP_MAX_ATTEMPTS
+    assert agent._closed_prep_done is False

@@ -57,7 +57,9 @@ import PolicyLearningTab from "./PolicyLearningTab";
 import OptionAnalyticsPanel from "./OptionAnalyticsPanel";
 
 const DEFAULT_UNDERLYING = "NIFTY";
-const DEFAULT_TIMEFRAME = "5minute";
+// FAST-lane timeframe policy (2026-07-15): the desk mirrors the lane's
+// 3-minute scan bars (5m/15m remain selectable via the API param).
+const DEFAULT_TIMEFRAME = "3minute";
 const DEFAULT_LOOKBACK = 16;
 
 const TABS = [

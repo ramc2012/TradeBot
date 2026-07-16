@@ -1245,3 +1245,254 @@ def test_extended_strike_window_picks_atm_when_not_in_list():
     atm_rows = [w for w in window if w["is_atm"]]
     assert len(atm_rows) == 1
     assert atm_rows[0]["strike"] == 24000.0
+
+
+# ── Row-build admission fix (2026-07-15) ─────────────────────────────────────
+# Tuesday 2026-07-14 stall: the per-row wait_for(75s) wrapped build() itself,
+# so the deadline burned on OUR OWN chain-semaphore + rate-limiter queue waits
+# and cancelled healthy-but-queued rows after their broker quota was already
+# spent. The fix starts the deadline only AFTER semaphore admission and runs
+# the row's broker calls at PRIORITY_HIGH. These tests pin that behaviour.
+
+
+def _row_fix_scaffold(monkeypatch, service, redis, build_row):
+    async def fake_get_expiries(_expiry=None, *, live_refresh=False):
+        return {"default_expiry": "2026-04-28"}
+
+    async def fake_load_underlyings():
+        return [
+            UnderlyingMeta("NIFTY", "INDEX", "NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty 50"),
+            UnderlyingMeta("BANKNIFTY", "INDEX", "NSE_INDEX|Nifty Bank", "NSE_INDEX|Nifty Bank"),
+            UnderlyingMeta("RELIANCE", "STOCK", "NSE_EQ|RELIANCE", "NSE_EQ|RELIANCE"),
+        ]
+
+    async def fake_get_upstox_adapter():
+        return None
+
+    def fake_ensure_future(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(atm_watchlist_module, "get_redis", lambda: _fake_get_redis(redis))
+    monkeypatch.setattr(
+        atm_watchlist_module,
+        "get_active_adapter",
+        lambda broker: _FakeFyersAdapter() if broker == "fyers" else None,
+    )
+    monkeypatch.setattr(atm_watchlist_module.asyncio, "ensure_future", fake_ensure_future)
+    monkeypatch.setattr(service, "get_expiries", fake_get_expiries)
+    monkeypatch.setattr(service, "_load_underlyings", fake_load_underlyings)
+    monkeypatch.setattr(service, "_get_upstox_adapter", fake_get_upstox_adapter)
+    monkeypatch.setattr(
+        service, "_load_persisted_watchlist_rows", lambda expiry, underlyings: _async_payload([])
+    )
+    monkeypatch.setattr(service, "_build_row", build_row)
+
+
+def _fake_row(meta: UnderlyingMeta, expiry: str) -> dict:
+    return {
+        "underlying": meta.symbol,
+        "kind": meta.kind,
+        "spot_price": 100.0,
+        "expiry": expiry,
+        "atm_strike": 100.0,
+        "live_source": "fyers",
+        "ce": {"instrument_key": f"{meta.symbol}-CE", "option_type": "CE", "strike": 100.0, "ltp": 10.0, "oi": 1, "volume": 1},
+        "pe": {"instrument_key": f"{meta.symbol}-PE", "option_type": "PE", "strike": 100.0, "ltp": 10.0, "oi": 1, "volume": 1},
+    }
+
+
+def test_row_build_deadline_excludes_semaphore_wait(monkeypatch) -> None:
+    """A row that waits LONGER than the row deadline for semaphore admission
+    but builds quickly once admitted must SUCCEED (the old shape cancelled it
+    while it was still queued behind our own semaphore)."""
+    service = ATMWatchlistService()
+    redis = _FakeRedis()
+    monkeypatch.setattr(atm_watchlist_module, "ROW_BUILD_TIMEOUT_SECONDS", 0.4)
+    monkeypatch.setattr(atm_watchlist_module, "SEED_PHASE_TIMEOUT_SECONDS", 10.0)
+
+    async def fast_build_row(meta, expiry, expiry_date, upstox_adapter, fyers_adapter):
+        await asyncio.sleep(0.05)
+        return _fake_row(meta, expiry)
+
+    _row_fix_scaffold(monkeypatch, service, redis, fast_build_row)
+
+    async def scenario():
+        # Fresh semaphore bound to THIS loop; hold both permits well past the
+        # 0.4s row deadline so every seed has to queue for admission first.
+        semaphore = asyncio.Semaphore(2)
+        monkeypatch.setattr(ATMWatchlistService, "_chain_semaphore", semaphore)
+        await semaphore.acquire()
+        await semaphore.acquire()
+
+        async def release_later():
+            await asyncio.sleep(0.9)
+            semaphore.release()
+            semaphore.release()
+
+        # NB: the scaffold monkeypatches asyncio.ensure_future globally (to
+        # swallow the BG build), so the holder task must use create_task.
+        release_task = asyncio.get_running_loop().create_task(release_later())
+        try:
+            return await service.get_watchlist("2026-04-28", live_refresh=True)
+        finally:
+            await release_task
+
+    payload = asyncio.run(scenario())
+    built = {row["underlying"] for row in payload["rows"]}
+    assert built == {"NIFTY", "BANKNIFTY"}  # both index seeds survived the queue wait
+
+
+def test_row_build_timeout_applies_post_admission_and_skips_row(monkeypatch) -> None:
+    """Once admitted, a row that overruns ROW_BUILD_TIMEOUT_SECONDS is skipped
+    (returns None) without failing the build or poisoning other rows."""
+    service = ATMWatchlistService()
+    redis = _FakeRedis()
+    monkeypatch.setattr(atm_watchlist_module, "ROW_BUILD_TIMEOUT_SECONDS", 0.15)
+    monkeypatch.setattr(atm_watchlist_module, "SEED_PHASE_TIMEOUT_SECONDS", 10.0)
+
+    async def mixed_build_row(meta, expiry, expiry_date, upstox_adapter, fyers_adapter):
+        if meta.symbol == "NIFTY":
+            await asyncio.sleep(1.0)  # hung row — must be bounded post-admission
+        return _fake_row(meta, expiry)
+
+    _row_fix_scaffold(monkeypatch, service, redis, mixed_build_row)
+
+    async def scenario():
+        monkeypatch.setattr(ATMWatchlistService, "_chain_semaphore", asyncio.Semaphore(2))
+        return await service.get_watchlist("2026-04-28", live_refresh=True)
+
+    payload = asyncio.run(scenario())
+    built = {row["underlying"] for row in payload["rows"]}
+    assert built == {"BANKNIFTY"}  # NIFTY skipped, build carried on
+
+
+def test_row_build_runs_at_high_broker_priority(monkeypatch) -> None:
+    """Broker calls under _build_row must inherit PRIORITY_HIGH so the serial
+    universe build out-ranks bulk premium-top-up/chain-sweep tickets."""
+    from brokers.rate_limiter import PRIORITY_HIGH, _request_priority
+
+    service = ATMWatchlistService()
+    redis = _FakeRedis()
+    seen: list[float] = []
+
+    async def recording_build_row(meta, expiry, expiry_date, upstox_adapter, fyers_adapter):
+        seen.append(_request_priority.get())
+        return _fake_row(meta, expiry)
+
+    _row_fix_scaffold(monkeypatch, service, redis, recording_build_row)
+
+    async def scenario():
+        monkeypatch.setattr(ATMWatchlistService, "_chain_semaphore", asyncio.Semaphore(2))
+        return await service.get_watchlist("2026-04-28", live_refresh=True)
+
+    asyncio.run(scenario())
+    assert seen and all(prio == PRIORITY_HIGH for prio in seen)
+
+
+def test_seed_phase_deadline_keeps_completed_rows(monkeypatch) -> None:
+    """The seed phase is bounded as a WHOLE; rows that completed before the
+    phase deadline are kept, unfinished seeds are cancelled (and left for the
+    background build), and the call returns promptly for the MI runner."""
+    import time as _time
+
+    service = ATMWatchlistService()
+    redis = _FakeRedis()
+    monkeypatch.setattr(atm_watchlist_module, "ROW_BUILD_TIMEOUT_SECONDS", 10.0)
+    monkeypatch.setattr(atm_watchlist_module, "SEED_PHASE_TIMEOUT_SECONDS", 0.3)
+
+    async def mixed_build_row(meta, expiry, expiry_date, upstox_adapter, fyers_adapter):
+        if meta.symbol == "NIFTY":
+            await asyncio.sleep(5.0)  # would blow the MI runner budget
+        return _fake_row(meta, expiry)
+
+    _row_fix_scaffold(monkeypatch, service, redis, mixed_build_row)
+
+    async def scenario():
+        monkeypatch.setattr(ATMWatchlistService, "_chain_semaphore", asyncio.Semaphore(2))
+        return await service.get_watchlist("2026-04-28", live_refresh=True)
+
+    started = _time.monotonic()
+    payload = asyncio.run(scenario())
+    elapsed = _time.monotonic() - started
+
+    built = {row["underlying"] for row in payload["rows"]}
+    assert built == {"BANKNIFTY"}  # completed seed preserved, hung seed dropped
+    assert elapsed < 2.0  # phase bound respected (nowhere near the 5s hang)
+
+
+# ── Live-refresh window (2026-07-16) ─────────────────────────────────────────
+# Outside 07:00–16:35 IST on NSE session days every live_refresh degrades to
+# cached/DB reads, so no caller (S1 closed-market prep, UI polls, …) can kick
+# overnight full-universe broker rebuilds. NOTE: conftest disables the window
+# suite-wide (`_LIVE_REFRESH_WINDOW_ENFORCED = False`) so the other
+# live_refresh tests stay wall-clock independent — these tests re-enable it.
+
+
+def test_live_refresh_allowed_window(monkeypatch) -> None:
+    from datetime import timedelta as _td
+    from datetime import timezone as _tz
+
+    monkeypatch.setattr(atm_watchlist_module, "_LIVE_REFRESH_WINDOW_ENFORCED", True)
+    ist = _tz(_td(hours=5, minutes=30))
+
+    def _at(y, m, d, hh, mm):
+        return atm_watchlist_module._live_refresh_allowed(datetime(y, m, d, hh, mm, tzinfo=ist))
+
+    # Tue 2026-07-14 is an NSE session day.
+    assert _at(2026, 7, 14, 11, 0) is True     # in session
+    assert _at(2026, 7, 14, 7, 30) is True     # pre-open prep band
+    assert _at(2026, 7, 14, 16, 20) is True    # post-close catch-up grace
+    assert _at(2026, 7, 14, 6, 59) is False    # before the prep band
+    assert _at(2026, 7, 14, 16, 40) is False   # evening
+    assert _at(2026, 7, 14, 2, 0) is False     # overnight (the 00:00–05:30 storm)
+    # Sat 2026-07-18: never.
+    assert _at(2026, 7, 18, 11, 0) is False
+
+
+def test_live_refresh_window_not_enforced_flag(monkeypatch) -> None:
+    monkeypatch.setattr(atm_watchlist_module, "_LIVE_REFRESH_WINDOW_ENFORCED", False)
+    from datetime import timedelta as _td
+    from datetime import timezone as _tz
+
+    ist = _tz(_td(hours=5, minutes=30))
+    assert atm_watchlist_module._live_refresh_allowed(datetime(2026, 7, 18, 2, 0, tzinfo=ist)) is True
+
+
+@freeze_time(_EXPIRY_LADDER_TODAY)
+def test_get_expiries_demotes_live_refresh_outside_window(monkeypatch) -> None:
+    """With the window closed, live_refresh=True must never touch a broker
+    adapter — the build serves persisted/cached data instead."""
+    service = ATMWatchlistService()
+    redis = _FakeRedis()
+    adapter_requests: list[str] = []
+
+    def spy_get_active_adapter(broker: str):
+        adapter_requests.append(broker)
+        return None
+
+    async def fake_load_underlyings() -> list[UnderlyingMeta]:
+        return [
+            UnderlyingMeta("NIFTY", "INDEX", "NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty 50"),
+        ]
+
+    async def fake_load_persisted(symbol: str) -> list[str]:
+        return ["2026-05-26", "2026-06-30"]
+
+    monkeypatch.setattr(atm_watchlist_module, "_LIVE_REFRESH_WINDOW_ENFORCED", True)
+    monkeypatch.setattr(atm_watchlist_module, "_live_refresh_allowed", lambda now=None: False)
+    monkeypatch.setattr(atm_watchlist_module, "get_redis", lambda: _fake_get_redis(redis))
+    monkeypatch.setattr(atm_watchlist_module, "get_active_adapter", spy_get_active_adapter)
+    monkeypatch.setattr(
+        atm_watchlist_module,
+        "ensure_fyers_session",
+        lambda *args, **kwargs: _async_payload(False),
+    )
+    monkeypatch.setattr(service, "_load_underlyings", fake_load_underlyings)
+    monkeypatch.setattr(service, "_load_persisted_expiries_for_symbol", fake_load_persisted)
+    monkeypatch.setattr(service, "_get_upstox_adapter", lambda: _async_payload(None))
+
+    payload = asyncio.run(service.get_expiries(live_refresh=True))
+
+    assert adapter_requests == []  # no broker adapter acquisition attempted
+    assert payload["default_expiry"] == "2026-05-26"

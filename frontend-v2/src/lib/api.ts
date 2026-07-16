@@ -438,6 +438,14 @@ export const getCommodityInstitutionalConvergenceStatus = () =>
   api.get("/api/institutional-convergence/commodity/status");
 export const runCommodityInstitutionalConvergence = () =>
   api.post("/api/institutional-convergence/commodity/run-once", undefined, { timeout: 650_000 });
+// Execution/analytics endpoints (deployed separately from the desk — the UI
+// must tolerate 404s until the backend routes land; see ExecutionPanels.tsx).
+export const getInstitutionalConvergenceTrades = (market?: "NSE" | "MCX") =>
+  api.get(`/api/institutional-convergence${market === "MCX" ? "/commodity" : ""}/trades`);
+export const getInstitutionalConvergenceOrders = (market?: "NSE" | "MCX") =>
+  api.get(`/api/institutional-convergence${market === "MCX" ? "/commodity" : ""}/orders`);
+export const getInstitutionalConvergenceStatistics = (market?: "NSE" | "MCX") =>
+  api.get(`/api/institutional-convergence${market === "MCX" ? "/commodity" : ""}/statistics`);
 
 // ── Directional Long Options ───────────────────────────────────────────────
 export const getDirectionalOptionsSummary = () =>

@@ -100,6 +100,12 @@ class PaperPortfolio:
         self._daily_pnl: Dict[date, float] = defaultdict(float)
         self._equity_curve: List[tuple[datetime, float]] = []
         self._peak_equity = initial_capital
+        # F-18 persist trim (2026-07-15): aggregate of trades ARCHIVED out of
+        # the persisted payload (older than the last-500 window), restored by
+        # _restore_archived_trade_summary. Its `pnl` must keep counting toward
+        # realized_pnl or reconcile_available_capital() would silently erase
+        # the archived trades' cash on the first post-restore reconcile.
+        self._archived_trade_summary: Optional[dict] = None
 
     # ── Position Management ──────────────────────────────────────────────────
 
@@ -341,7 +347,18 @@ class PaperPortfolio:
 
     @property
     def realized_pnl(self) -> float:
-        return sum(t.pnl for t in self._trade_history)
+        # Lifetime realized P&L = trades still held in memory + the aggregate
+        # of trades archived out of the persisted payload by the F-18 trim.
+        # Folding the archive here keeps every consumer honest — most load-
+        # bearing: reconcile_available_capital(), which REBUILDS cash from this
+        # property (get_summary() calls it on every dashboard read, and the
+        # commodity restore calls it via _repair_portfolio_ledger).
+        archived = getattr(self, "_archived_trade_summary", None) or {}
+        try:
+            archived_pnl = float(archived.get("pnl") or 0.0)
+        except (TypeError, ValueError, AttributeError):
+            archived_pnl = 0.0
+        return archived_pnl + sum(t.pnl for t in self._trade_history)
 
     @property
     def day_realized_pnl(self) -> float:

@@ -140,14 +140,14 @@ def _collect_strategy_freshness_candidates(
     strategy_items: list[dict[str, Any]],
 ) -> list[tuple[datetime, str]]:
     candidates: list[tuple[datetime, str]] = []
+    if key != "commodity_strategy":
+        return candidates
+
     for strategy in strategy_items:
         raw_scan = strategy.get("last_scan_at")
         parsed_scan = _parse_iso_datetime(raw_scan)
         if parsed_scan is not None and raw_scan:
             candidates.append((parsed_scan, str(raw_scan)))
-
-    if key != "commodity_strategy":
-        return candidates
 
     for position in list(status.get("positions") or []):
         raw_review = position.get("last_reviewed_bar_time") or position.get("updated_at")

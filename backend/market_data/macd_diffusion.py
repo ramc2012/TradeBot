@@ -10,9 +10,11 @@ how many PE legs have MACD > 0. The reading is a diffusion/breadth index:
 number in [-1, 1].
 
 Two write paths:
-  • compute_and_store()    — the live hourly snapshot, reads the freshest per-leg
-                             MACD from atm_option_watchlist_snapshots (which only
-                             retains ~1 day) and upserts the current hour bucket.
+  • compute_and_store()    — the live hourly snapshot, reads the freshest MACD of
+                             each CURRENT ATM watchlist leg (latest CE + PE per
+                             underlying) from atm_option_watchlist_snapshots and
+                             upserts the current hour bucket. NSE-session gated
+                             via run_daemon.
   • backfill_from_candles()— seeds history by recomputing each currently-tracked
                              leg's 30m premium MACD from option_premium_candles
                              and bucketing the signs by hour. Fills empty buckets
@@ -22,14 +24,58 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 from typing import Any
 
 from loguru import logger
 from sqlalchemy import text
 
 from analysis.macd_engine import compute_macd
+from core.trading_calendar import trading_calendar
 from db.database import AsyncSessionLocal
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+# How far back a leg's freshest snapshot may be and still count as part of the
+# CURRENT watchlist (3 days survives a weekend; the daemon only snapshots
+# in-session anyway, so this mostly guards restarts/holiday edges).
+WATCHLIST_FRESHNESS_DAYS = 3
+
+# SEMANTIC CHANGE (2026-07-16): breadth is computed from the CURRENT ATM
+# WATCHLIST legs ONLY — per underlying, the most recently tracked CE and PE ATM
+# leg (DISTINCT ON (underlying, option_type) … ORDER BY time DESC, live
+# unexpired contracts, fresh within WATCHLIST_FRESHNESS_DAYS). Previously the
+# DISTINCT ON key was (underlying, expiry, strike, option_type) over the WHOLE
+# snapshot table, so every strike/expiry ever snapshotted (~4.5k legs across
+# 26 days of retention, incl. rotated-out and expired contracts) polluted the
+# denominator instead of the ~2×universe tracked ATM legs. Table shape is
+# unchanged; only the leg-selection semantics (and therefore the counts)
+# changed.
+_CURRENT_ATM_LEGS_SQL = """
+    SELECT DISTINCT ON (underlying, option_type)
+           underlying, expiry, strike, option_type, macd
+    FROM atm_option_watchlist_snapshots
+    WHERE macd IS NOT NULL
+      AND expiry >= CURRENT_DATE
+      AND time >= now() - make_interval(days => :freshness_days)
+    ORDER BY underlying, option_type, time DESC
+"""
+
+
+def _in_snapshot_window(now: datetime | None = None) -> bool:
+    """NSE-session gate for the LIVE hourly snapshot.
+
+    True only 09:15–16:00 IST on NSE session days (the ≤16:00 tail lets the
+    final in-session tick land in the 15:00 bucket — one catch-up pass, then
+    idle). The daemon previously wrote a stale 'live' row every hour through
+    the night and weekend (2026-07-15 evidence: identical frozen breadth in
+    buckets 21:30 → 05:30 IST), which is an NSE-scoped lane updating after
+    the 15:30 close.
+    """
+    current = (now or datetime.now(IST)).astimezone(IST)
+    if not trading_calendar.has_exchange_session("NSE", current.date()):
+        return False
+    return dt_time(9, 15) <= current.time() <= dt_time(16, 0)
 
 
 def _pcts(ce_total: int, ce_above: int, pe_total: int, pe_above: int) -> tuple[float | None, float | None, float | None]:
@@ -76,13 +122,9 @@ async def compute_and_store(*, market: str = "NSE", bucket: datetime | None = No
         row = (
             await session.execute(
                 text(
-                    """
+                    f"""
                     WITH latest AS (
-                        SELECT DISTINCT ON (underlying, expiry, strike, option_type)
-                               option_type, macd
-                        FROM atm_option_watchlist_snapshots
-                        WHERE macd IS NOT NULL
-                        ORDER BY underlying, expiry, strike, option_type, time DESC
+                        {_CURRENT_ATM_LEGS_SQL}
                     )
                     SELECT
                         COUNT(*) FILTER (WHERE option_type = 'CE')                AS ce_total,
@@ -91,7 +133,8 @@ async def compute_and_store(*, market: str = "NSE", bucket: datetime | None = No
                         COUNT(*) FILTER (WHERE option_type = 'PE' AND macd > 0)   AS pe_above
                     FROM latest
                     """
-                )
+                ),
+                {"freshness_days": WATCHLIST_FRESHNESS_DAYS},
             )
         ).first()
         ce_total = int(row.ce_total or 0)
@@ -127,17 +170,27 @@ async def backfill_from_candles(*, market: str = "NSE", days: int = 21) -> int:
     For each currently-tracked ATM leg, recompute the 30m premium MACD and, per
     hour, take the latest bar's MACD sign; aggregate the CE/PE counts across legs
     into hourly buckets. Pure DB reads (no broker calls). Returns buckets filled.
+
+    SEMANTIC CHANGE (2026-07-16): "currently-tracked" now means the CURRENT ATM
+    watchlist set — per underlying, the latest tracked CE and PE leg — instead of
+    every unexpired (underlying, expiry, strike, option_type) ever snapshotted
+    (which, with ~26 days of snapshot retention, dragged thousands of rotated-out
+    strikes into the breadth denominator).
     """
     async with AsyncSessionLocal() as session:
         legs = (
             await session.execute(
                 text(
                     """
-                    SELECT DISTINCT underlying, expiry, strike, option_type
+                    SELECT DISTINCT ON (underlying, option_type)
+                           underlying, expiry, strike, option_type
                     FROM atm_option_watchlist_snapshots
                     WHERE expiry >= CURRENT_DATE
+                      AND time >= now() - make_interval(days => :freshness_days)
+                    ORDER BY underlying, option_type, time DESC
                     """
-                )
+                ),
+                {"freshness_days": WATCHLIST_FRESHNESS_DAYS},
             )
         ).all()
 
@@ -206,7 +259,13 @@ async def backfill_from_candles(*, market: str = "NSE", days: int = 21) -> int:
 
 
 async def run_daemon(*, poll_minutes: int = 60, backfill_days: int = 21) -> None:
-    """Backfill once at startup, then snapshot the live breadth every hour."""
+    """Backfill once at startup, then snapshot the live breadth every hour.
+
+    Live snapshots are gated to the NSE session (see _in_snapshot_window) so the
+    lane goes idle after the 15:30 close instead of upserting a frozen 'live'
+    row every hour all night. The startup backfill is DB-only and runs once
+    regardless of the clock.
+    """
     logger.info(f"[MACDDiffusion] daemon starting (poll={poll_minutes}m, backfill={backfill_days}d)")
     try:
         await backfill_from_candles(days=backfill_days)
@@ -214,7 +273,10 @@ async def run_daemon(*, poll_minutes: int = 60, backfill_days: int = 21) -> None
         logger.warning(f"[MACDDiffusion] startup backfill skipped: {exc}")
     while True:
         try:
-            await compute_and_store()
+            if _in_snapshot_window():
+                await compute_and_store()
+            else:
+                logger.debug("[MACDDiffusion] NSE closed — skipping live snapshot")
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001

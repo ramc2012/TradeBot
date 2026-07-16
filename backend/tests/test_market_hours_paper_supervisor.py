@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 from core.market_hours_paper_supervisor import MarketHoursPaperSupervisor, RunnerConfig
 from paper_engine.base_strategy_agent import IST
@@ -197,6 +197,213 @@ def test_runner_specific_market_hours_can_run_when_primary_market_closed() -> No
     assert runner["last_success_at"] is not None
 
 
+def test_open_stagger_delays_first_start_after_open() -> None:
+    clock = {"now": datetime(2026, 4, 21, 9, 15, tzinfo=IST)}
+    calls: list[str] = []
+
+    async def _runner() -> dict[str, object]:
+        calls.append("auction")
+        return {"result_count": 1}
+
+    supervisor = MarketHoursPaperSupervisor(
+        enabled=True,
+        runners=[
+            RunnerConfig(
+                key="auction_intelligence",
+                label="Auction",
+                interval_seconds=60,
+                callback=_runner,
+                start_offset_seconds=90.0,
+            )
+        ],
+        now_fn=lambda: clock["now"],
+        market_hours_fn=lambda _current: True,
+        next_open_fn=lambda current: current + timedelta(days=1),
+    )
+
+    # First pass AT the open stamps market_open_since and holds the lane.
+    status = asyncio.run(supervisor.run_due_once())
+    assert calls == []
+    runner = status["runners"]["auction_intelligence"]
+    assert runner["market_open_since"] == clock["now"].isoformat()
+    assert runner["next_run_at"] == (clock["now"] + timedelta(seconds=90)).isoformat()
+    assert runner["stale"] is False
+
+    # Still inside the stagger window → still held.
+    clock["now"] += timedelta(seconds=60)
+    asyncio.run(supervisor.run_due_once())
+    assert calls == []
+
+    # Past the offset → the lane starts.
+    clock["now"] += timedelta(seconds=31)
+    asyncio.run(supervisor.run_due_once())
+    assert calls == ["auction"]
+
+
+def test_no_start_before_guard_holds_lane_until_wall_clock() -> None:
+    clock = {"now": datetime(2026, 4, 21, 9, 20, tzinfo=IST)}
+    calls: list[str] = []
+
+    async def _runner() -> dict[str, object]:
+        calls.append("macd")
+        return {"result_count": 1}
+
+    supervisor = MarketHoursPaperSupervisor(
+        enabled=True,
+        runners=[
+            RunnerConfig(
+                key="macd_refined",
+                label="MACD Refined",
+                interval_seconds=1800,
+                callback=_runner,
+                no_start_before=time(9, 45),
+            )
+        ],
+        now_fn=lambda: clock["now"],
+        market_hours_fn=lambda _current: True,
+        next_open_fn=lambda current: current + timedelta(days=1),
+    )
+
+    status = asyncio.run(supervisor.run_due_once())
+    assert calls == []
+    runner = status["runners"]["macd_refined"]
+    assert runner["next_run_at"] == clock["now"].replace(hour=9, minute=45, second=0, microsecond=0).isoformat()
+
+    clock["now"] = clock["now"].replace(hour=9, minute=46)
+    asyncio.run(supervisor.run_due_once())
+    assert calls == ["macd"]
+
+
+def test_force_run_bypasses_open_stagger() -> None:
+    now = datetime(2026, 4, 21, 9, 15, tzinfo=IST)
+    calls: list[str] = []
+
+    async def _runner() -> dict[str, object]:
+        calls.append("auction")
+        return {"result_count": 1}
+
+    supervisor = MarketHoursPaperSupervisor(
+        enabled=True,
+        runners=[
+            RunnerConfig(
+                key="auction_intelligence",
+                label="Auction",
+                interval_seconds=60,
+                callback=_runner,
+                start_offset_seconds=90.0,
+                no_start_before=time(9, 45),
+            )
+        ],
+        now_fn=lambda: now,
+        market_hours_fn=lambda _current: True,
+        next_open_fn=lambda current: current + timedelta(days=1),
+    )
+
+    asyncio.run(supervisor.run_due_once(force=True))
+    assert calls == ["auction"]
+
+
+def test_open_stagger_rearms_after_each_market_open() -> None:
+    clock = {"now": datetime(2026, 4, 21, 9, 15, tzinfo=IST)}
+    market = {"open": True}
+    calls: list[str] = []
+
+    async def _runner() -> dict[str, object]:
+        calls.append("auction")
+        return {"result_count": 1}
+
+    supervisor = MarketHoursPaperSupervisor(
+        enabled=True,
+        runners=[
+            RunnerConfig(
+                key="auction_intelligence",
+                label="Auction",
+                interval_seconds=60,
+                callback=_runner,
+                start_offset_seconds=90.0,
+                post_close_catchup=False,
+            )
+        ],
+        now_fn=lambda: clock["now"],
+        market_hours_fn=lambda _current: market["open"],
+        next_open_fn=lambda current: current + timedelta(days=1),
+    )
+
+    asyncio.run(supervisor.run_due_once())          # stamps the open, held
+    clock["now"] += timedelta(seconds=91)
+    asyncio.run(supervisor.run_due_once())          # past the offset → runs
+    assert calls == ["auction"]
+
+    # Market closes → the open stamp resets.
+    market["open"] = False
+    clock["now"] += timedelta(hours=7)
+    status = asyncio.run(supervisor.run_due_once())
+    assert status["runners"]["auction_intelligence"]["market_open_since"] is None
+
+    # Next session: the stagger applies AGAIN from the new open.
+    market["open"] = True
+    clock["now"] += timedelta(hours=17)
+    asyncio.run(supervisor.run_due_once())          # re-stamps, held
+    assert calls == ["auction"]
+    clock["now"] += timedelta(seconds=91)
+    asyncio.run(supervisor.run_due_once())
+    assert calls == ["auction", "auction"]
+
+
+def test_open_stagger_does_not_delay_post_close_catchup() -> None:
+    # ADVERSARIAL: a lane with the heaviest stagger (30min offset + wall-clock
+    # guard) that never got to run in-session must STILL fire its post-close
+    # catch-up pass — the stagger gates only the in-session due path.
+    # 2026-04-21 is a Tuesday (NSE session), post-close window opens 15:35.
+    clock = {"now": datetime(2026, 4, 21, 15, 40, tzinfo=IST)}
+    calls: list[str] = []
+
+    async def _runner() -> dict[str, object]:
+        calls.append("macd")
+        return {"result_count": 1}
+
+    supervisor = MarketHoursPaperSupervisor(
+        enabled=True,
+        runners=[
+            RunnerConfig(
+                key="macd_refined",
+                label="MACD Refined",
+                interval_seconds=1800,
+                callback=_runner,
+                start_offset_seconds=1800.0,
+                no_start_before=time(9, 45),
+                post_close_catchup=True,
+            )
+        ],
+        now_fn=lambda: clock["now"],
+        market_hours_fn=lambda _current: False,  # market CLOSED
+        next_open_fn=lambda current: current + timedelta(days=1),
+    )
+
+    status = asyncio.run(supervisor.run_due_once())
+    # market_open_since is None (closed) and the offset window never elapsed —
+    # the catch-up path must not consult either.
+    assert calls == ["macd"]
+    runner = status["runners"]["macd_refined"]
+    assert runner["market_open_since"] is None
+
+
+def test_default_runner_stagger_configuration() -> None:
+    supervisor = MarketHoursPaperSupervisor(enabled=False)
+
+    assert supervisor._runners["market_intelligence"].config.start_offset_seconds == 0.0
+    for key in (
+        "auction_intelligence",
+        "directional_options",
+        "institutional_convergence",
+        "institutional_convergence_commodity",
+    ):
+        assert supervisor._runners[key].config.start_offset_seconds == 90.0, key
+    macd = supervisor._runners["macd_refined"].config
+    assert macd.start_offset_seconds == 1800.0
+    assert macd.no_start_before == time(9, 45)
+
+
 def test_background_scheduler_does_not_let_slow_lane_starve_fast_lane() -> None:
     async def _scenario() -> None:
         now = datetime(2026, 4, 21, 9, 20, tzinfo=IST)
@@ -232,3 +439,196 @@ def test_background_scheduler_does_not_let_slow_lane_starve_fast_lane() -> None:
         await asyncio.gather(*running_tasks)
 
     asyncio.run(_scenario())
+
+# ── Post-close catch-up discipline (2026-07-16) ──────────────────────────────
+# NSE lanes must go idle after the close with AT MOST one catch-up pass per
+# session. On 2026-07-15 the catch-up (a) double-fired force_daily runners
+# while a slower batch peer was still running (lane_audit + directional_
+# positioning both ran twice within a minute of 15:35 IST) and (b) re-fired
+# in full after every backend restart (16:16, 16:20 and 22:26 IST) because
+# the "done for today" marker only lived in memory.
+
+
+def _post_close_supervisor(runners, *, now, state_path=None):
+    return MarketHoursPaperSupervisor(
+        enabled=True,
+        runners=runners,
+        now_fn=lambda: now,
+        market_hours_fn=lambda _current: False,
+        next_open_fn=lambda current: current + timedelta(days=1),
+        catchup_state_path=state_path,
+    )
+
+
+def test_token_readiness_default_never_runs_post_close_catchup() -> None:
+    supervisor = MarketHoursPaperSupervisor(enabled=False)
+    runner = supervisor._runners["token_readiness"].config
+
+    assert runner.post_close_catchup is False
+    assert runner.market_hours_fn is not None
+    assert runner.next_open_fn is not None
+
+
+def test_post_close_catchup_does_not_double_fire_while_batch_peer_running() -> None:
+    async def _scenario() -> None:
+        now = datetime(2026, 4, 20, 16, 0, tzinfo=IST)
+        calls: list[str] = []
+        release_slow = asyncio.Event()
+        fast_done = asyncio.Event()
+
+        async def _fast() -> dict[str, object]:
+            calls.append("fast")
+            fast_done.set()
+            return {"result_count": 1}
+
+        async def _slow() -> dict[str, object]:
+            calls.append("slow")
+            await release_slow.wait()
+            return {"result_count": 1}
+
+        supervisor = _post_close_supervisor(
+            [
+                RunnerConfig(
+                    key="fast_eod",
+                    label="Fast EOD",
+                    interval_seconds=60,
+                    callback=_fast,
+                    post_close_force_daily=True,
+                ),
+                RunnerConfig(
+                    key="slow_eod",
+                    label="Slow EOD",
+                    interval_seconds=60,
+                    callback=_slow,
+                    post_close_force_daily=True,
+                ),
+            ],
+            now=now,
+        )
+
+        await supervisor._schedule_due_once()
+        await asyncio.wait_for(fast_done.wait(), timeout=0.5)
+        # Give the fast runner's done-callback a beat to clear `running`,
+        # mimicking the production window where the batch gather is still
+        # waiting on the slow peer.
+        await asyncio.sleep(0.05)
+
+        # Second scheduler pass while the slow peer is still running: the fast
+        # runner already succeeded and MUST NOT be re-dispatched.
+        await supervisor._schedule_due_once()
+        await asyncio.sleep(0.05)
+        assert calls.count("fast") == 1
+
+        fast_runtime = supervisor._runners["fast_eod"]
+        assert fast_runtime.last_post_close_success_date == now.date()
+
+        release_slow.set()
+        for _ in range(100):
+            if not supervisor._runner_tasks and not supervisor._maintenance_tasks:
+                break
+            await asyncio.sleep(0.01)
+        assert calls == ["fast", "slow"]
+
+    asyncio.run(_scenario())
+
+
+def test_post_close_catchup_success_persists_across_restarts(tmp_path) -> None:
+    now = datetime(2026, 4, 20, 16, 0, tzinfo=IST)
+    state_path = tmp_path / "post_close_catchup.json"
+    calls: list[str] = []
+
+    def _make_runner() -> RunnerConfig:
+        async def _runner() -> dict[str, object]:
+            calls.append("cbe")
+            return {"result_count": 1}
+
+        return RunnerConfig(
+            key="cbe_scanner",
+            label="CBE",
+            interval_seconds=60,
+            callback=_runner,
+            post_close_force_daily=True,
+        )
+
+    first = _post_close_supervisor([_make_runner()], now=now, state_path=state_path)
+    asyncio.run(first.run_due_once())
+    assert calls == ["cbe"]
+    assert state_path.exists()
+
+    # Simulated backend restart: a brand-new supervisor instance sharing the
+    # state file must NOT re-fire the already-captured catch-up.
+    second = _post_close_supervisor([_make_runner()], now=now, state_path=state_path)
+    asyncio.run(second.run_due_once())
+    assert calls == ["cbe"]
+
+    # The next session is a fresh date — the pass fires again.
+    next_day = datetime(2026, 4, 21, 16, 0, tzinfo=IST)
+    third = _post_close_supervisor([_make_runner()], now=next_day, state_path=state_path)
+    asyncio.run(third.run_due_once())
+    assert calls == ["cbe", "cbe"]
+
+
+def test_post_close_catchup_gates_recovery_runners_across_restarts(tmp_path) -> None:
+    """post_close_catchup (non-force) runners are also restart-proof."""
+    now = datetime(2026, 4, 20, 16, 0, tzinfo=IST)
+    state_path = tmp_path / "post_close_catchup.json"
+    calls: list[str] = []
+
+    def _make_runner() -> RunnerConfig:
+        async def _runner() -> dict[str, object]:
+            calls.append("mi")
+            return {"result_count": 1}
+
+        return RunnerConfig(
+            key="market_intelligence",
+            label="MI",
+            interval_seconds=60,
+            callback=_runner,
+        )
+
+    first = _post_close_supervisor([_make_runner()], now=now, state_path=state_path)
+    asyncio.run(first.run_due_once())
+    second = _post_close_supervisor([_make_runner()], now=now, state_path=state_path)
+    asyncio.run(second.run_due_once())
+
+    assert calls == ["mi"]
+
+
+def test_post_close_catchup_failed_attempts_are_bounded() -> None:
+    from core.market_hours_paper_supervisor import POST_CLOSE_MAX_ATTEMPTS_PER_SESSION
+
+    now = datetime(2026, 4, 20, 16, 0, tzinfo=IST)
+    calls: list[str] = []
+
+    async def _failing() -> dict[str, object]:
+        calls.append("boom")
+        raise RuntimeError("broker offline")
+
+    supervisor = _post_close_supervisor(
+        [
+            RunnerConfig(
+                key="lane_audit",
+                label="Lane Audit",
+                interval_seconds=60,
+                callback=_failing,
+                post_close_force_daily=True,
+            )
+        ],
+        now=now,
+    )
+
+    for _ in range(POST_CLOSE_MAX_ATTEMPTS_PER_SESSION + 3):
+        asyncio.run(supervisor.run_due_once())
+
+    assert len(calls) == POST_CLOSE_MAX_ATTEMPTS_PER_SESSION
+
+
+def test_should_run_post_close_catchup_window() -> None:
+    from core.market_hours_paper_supervisor import _should_run_post_close_catchup
+
+    # Session day (Mon 2026-04-20): only after the 15:35 grace cutoff.
+    assert _should_run_post_close_catchup(datetime(2026, 4, 20, 15, 20, tzinfo=IST)) is False
+    assert _should_run_post_close_catchup(datetime(2026, 4, 20, 15, 35, tzinfo=IST)) is True
+    assert _should_run_post_close_catchup(datetime(2026, 4, 20, 22, 30, tzinfo=IST)) is True
+    # Weekend: never.
+    assert _should_run_post_close_catchup(datetime(2026, 4, 19, 16, 0, tzinfo=IST)) is False

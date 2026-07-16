@@ -406,7 +406,7 @@ class DirectionalOptionsDataStore:
         # stored at 1-minute resolution, but MCX commodity options only land
         # at 30-minute — so the previous hard-coded 1minute lookup returned
         # nothing for GOLD/CRUDE/etc., and exit_premium fell back to entry.
-        for interval in ("1minute", "5minute", "15minute", "30minute"):
+        for interval in ("1minute", "3minute", "5minute", "15minute", "30minute"):
             candles = await option_history_service.load_candles(
                 underlying=underlying.upper(),
                 expiry=params["expiry"],

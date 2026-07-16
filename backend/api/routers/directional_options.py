@@ -26,7 +26,7 @@ async def summary() -> dict[str, object]:
 @router.get("/workspace")
 async def workspace(
     underlying: str = Query("NIFTY"),
-    timeframe: str = Query("5minute"),
+    timeframe: str = Query("3minute"),
     lookback_sessions: int = Query(16, ge=4, le=90),
 ) -> dict[str, object]:
     return await asyncio.to_thread(_service.workspace, underlying, timeframe, lookback_sessions)
@@ -35,7 +35,7 @@ async def workspace(
 @router.get("/live-snapshot")
 async def live_snapshot(
     underlying: str = Query("NIFTY"),
-    timeframe: str = Query("5minute"),
+    timeframe: str = Query("3minute"),
     lookback_sessions: int = Query(16, ge=4, le=90),
 ) -> dict[str, object]:
     return await _service.live_snapshot(underlying, timeframe, lookback_sessions)
@@ -44,7 +44,7 @@ async def live_snapshot(
 @router.post("/paper-proposal")
 async def paper_proposal(
     underlying: str = Query("NIFTY"),
-    timeframe: str = Query("5minute"),
+    timeframe: str = Query("3minute"),
     lookback_sessions: int = Query(16, ge=4, le=90),
 ) -> dict[str, object]:
     return await _service.record_paper_snapshot(underlying, timeframe, lookback_sessions)
@@ -89,7 +89,7 @@ async def reset_paper_account(body: DirectionalResetRequest) -> dict[str, object
 @router.get("/backtest")
 async def backtest(
     underlying: str = Query("NIFTY"),
-    timeframe: str = Query("5minute"),
+    timeframe: str = Query("3minute"),
     lookback_sessions: int = Query(16, ge=4, le=90),
 ) -> dict[str, object]:
     payload = await asyncio.to_thread(_service.workspace, underlying, timeframe, lookback_sessions)

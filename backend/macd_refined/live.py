@@ -431,7 +431,16 @@ class MacdRefinedLiveEngine:
             except Exception as exc:  # noqa: BLE001
                 return {"underlying": underlying, "error": str(exc)}
 
-        tasks = [asyncio.create_task(_safe_process(underlying)) for underlying in universe]
+        # CLASS_BULK: the full-universe chain sweep is the single biggest bulk
+        # consumer of the shared broker budget. Hard-capped at 25% of every
+        # limiter window and yields instantly while CRITICAL work (watchlist
+        # rows, index chain refresh, held-position marks) is queued.
+        # Contextvars copy into the created tasks, so every broker call under
+        # _process_underlying inherits the class.
+        from brokers.rate_limiter import CLASS_BULK, broker_class
+
+        with broker_class(CLASS_BULK):
+            tasks = [asyncio.create_task(_safe_process(underlying)) for underlying in universe]
         paper_syncs = 0
         try:
             # Commit every completed name independently.  Previously an outer

@@ -19,6 +19,7 @@ export {
   formatISTTime,
   formatTimestamp,
   formatDuration,
+  toDate,
 } from "./formatters";
 
 export {

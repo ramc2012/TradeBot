@@ -327,7 +327,12 @@ async def load_upstox_mcx_quotes(symbols: list[str]) -> dict[str, float]:
         return {}
 
     try:
-        payload = await adapter.get_ltp(list(instrument_by_symbol.values()))
+        # CLASS_STANDARD: commodity quote poll — guaranteed ≥35% band, never
+        # dips into the CRITICAL reservation.
+        from brokers.rate_limiter import CLASS_STANDARD, broker_class
+
+        with broker_class(CLASS_STANDARD):
+            payload = await adapter.get_ltp(list(instrument_by_symbol.values()))
     except Exception as exc:
         logger.warning(f"[Commodity Upstox] LTP fetch failed: {exc}")
         return {}
@@ -378,11 +383,17 @@ async def load_upstox_mcx_quote_snapshots(symbols: list[str]) -> dict[str, dict[
         # runs every ~12s while MCX is open — raw httpx here was an unmetered
         # bypass of the shared 8/s · 1800/30min budget.
         if hasattr(adapter, "_get_data_json"):
-            payload_json = await adapter._get_data_json(  # type: ignore[attr-defined]
-                "/market-quote/quotes",
-                params={"instrument_key": ",".join(instrument_by_symbol.values())},
-                timeout=10.0,
-            )
+            # CLASS_STANDARD: the ~12s commodity quote poll rides the
+            # guaranteed ≥35% band — above BULK backfills, outside the
+            # CRITICAL reservation.
+            from brokers.rate_limiter import CLASS_STANDARD, broker_class
+
+            with broker_class(CLASS_STANDARD):
+                payload_json = await adapter._get_data_json(  # type: ignore[attr-defined]
+                    "/market-quote/quotes",
+                    params={"instrument_key": ",".join(instrument_by_symbol.values())},
+                    timeout=10.0,
+                )
             data = (payload_json or {}).get("data", {})
         else:  # pragma: no cover — non-Upstox adapter shape
             async with httpx.AsyncClient(timeout=10) as client:

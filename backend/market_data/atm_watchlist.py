@@ -24,6 +24,13 @@ from analysis.instruments import (
 )
 from api.routers.auth import ensure_fyers_session, ensure_upstox_session, get_active_adapter, get_broker_token
 from brokers.base import BrokerAdapter, OptionChain, OptionChainEntry
+from brokers.rate_limiter import (
+    CLASS_CRITICAL,
+    CLASS_STANDARD,
+    PRIORITY_HIGH,
+    broker_class,
+    broker_priority,
+)
 from brokers.upstox import UpstoxAdapter
 from db.database import AsyncSessionLocal
 from db.redis_client import get_redis
@@ -40,6 +47,44 @@ DEFAULT_BUILD_LOCK_TTL = 120
 WATCHLIST_CACHE_VERSION = "v12"
 SYMBOL_EXPIRY_CACHE_VERSION = "v2"
 PERSISTED_WATCHLIST_FRESH_SECONDS = 36 * 60 * 60
+# Per-row build deadline, started only AFTER admission through the chain
+# semaphore (see build() in get_watchlist). It no longer has to absorb our own
+# semaphore/limiter queue waits — those were what burned the old 75s bound and
+# cancelled healthy rows on 2026-07-14 — so it only needs to cover the actual
+# broker round-trips of one row (each already HTTP-bounded at 15s inside
+# `_get_data_json`); 180s is a generous envelope for the worst multi-call row.
+ROW_BUILD_TIMEOUT_SECONDS = 180.0
+# Bound for the synchronous seed phase (runs INSIDE the market_intelligence
+# runner, whose supervisor watchdog kills at 300s). Seeds that miss the phase
+# deadline are cancelled and retried by the background build loop.
+SEED_PHASE_TIMEOUT_SECONDS = 120.0
+
+# ── Live-refresh window (2026-07-16) ─────────────────────────────────────────
+# NSE-scoped live (broker) builds are only allowed 07:00–16:35 IST on NSE
+# session days: the pre-open prep band, the session, and the post-close
+# catch-up grace. Outside that band EVERY live_refresh degrades to cached/DB
+# reads. Evidence for the guard: overnight 2026-07-15→16 the closed-market
+# prep + UI polls kept passing live_refresh=True; at midnight the stale-row
+# check (rows older than "today 09:15") marked the whole prior session stale
+# and full-universe broker rebuilds ran hourly from 00:00–05:30 IST (216
+# underlyings/hour of junk snapshot writes + expiry fetch timeouts).
+LIVE_REFRESH_WINDOW_START = dt_time(7, 0)
+LIVE_REFRESH_WINDOW_END = dt_time(16, 35)
+# Tests flip this off (conftest autouse) so live_refresh behavior stays
+# deterministic regardless of when the suite runs.
+_LIVE_REFRESH_WINDOW_ENFORCED = True
+
+
+def _live_refresh_allowed(now: Optional[datetime] = None) -> bool:
+    """Whether a live (broker-hitting) watchlist/expiry build may run now."""
+    if not _LIVE_REFRESH_WINDOW_ENFORCED:
+        return True
+    from core.trading_calendar import trading_calendar
+
+    current = (now or datetime.now(IST)).astimezone(IST)
+    if not trading_calendar.has_exchange_session("NSE", current.date()):
+        return False
+    return LIVE_REFRESH_WINDOW_START <= current.time() <= LIVE_REFRESH_WINDOW_END
 
 # ── NSE expiry rules ──────────────────────────────────────────────────────────
 # NSE index contracts currently share the same Tuesday expiry ladder. Stocks
@@ -675,6 +720,8 @@ class ATMWatchlistService:
         *,
         live_refresh: bool = False,
     ) -> dict[str, Any]:
+        if live_refresh and not _live_refresh_allowed():
+            live_refresh = False
         redis = await get_redis()
         mode_key = _cache_mode_key(live_refresh=live_refresh)
         cache_key = f"atm_watchlist:expiries:{WATCHLIST_CACHE_VERSION}:{mode_key}:{selected_expiry or 'default'}"
@@ -852,6 +899,11 @@ class ATMWatchlistService:
         live_refresh: bool = False,
         force_rebuild: bool = False,
     ) -> dict[str, Any]:
+        if live_refresh and not _live_refresh_allowed():
+            # Outside the NSE prep/session/catch-up band a live build would
+            # only fetch frozen data (and, after midnight, trigger a pointless
+            # full-universe rebuild via the stale-row check). Serve cached.
+            live_refresh = False
         expiry_payload = await self.get_expiries(expiry, live_refresh=live_refresh)
         selected_expiry = expiry or expiry_payload.get("default_expiry")
         selected_expiry_date = self._parse_expiry(selected_expiry)
@@ -1063,18 +1115,81 @@ class ATMWatchlistService:
         async def build(meta: UnderlyingMeta, delay: float = 0.0) -> Optional[dict[str, Any]]:
             if delay:
                 await asyncio.sleep(delay)
+            # ORDERING IS THE FIX (2026-07-14 watchlist stall): the per-row
+            # deadline starts only AFTER admission through the class-wide
+            # chain semaphore, and the row's broker calls run under ELEVATED
+            # limiter priority. The old shape (callers wrapping this whole
+            # coroutine in wait_for(75s)) burned the deadline on OUR OWN
+            # queues — semaphore wait + UPSTOX_DATA_LIMITER backlog — and
+            # cancelled healthy-but-queued rows after their quota was already
+            # spent (negative feedback: every timeout re-queued work behind
+            # the same backlog). The deadline now covers only the actual row
+            # build; per-call HTTP deadlines (upstox `_get_data_json`
+            # timeout=15s) still bound any single hung broker read, and
+            # PRIORITY_HIGH lets the serial universe build out-rank the bulk
+            # premium-top-up / chain-sweep tickets instead of dying behind
+            # them.
             async with ATMWatchlistService._chain_semaphore:
                 try:
-                    return await self._build_row(
-                        meta,
-                        selected_expiry,
-                        selected_expiry_date,
-                        upstox_adapter,
-                        fyers_adapter,
+                    # CLASS_CRITICAL: the watchlist row build owns the 40%
+                    # reserved broker share — bulk sweeps/backfills can never
+                    # consume it, and queued rows push BULK out instantly.
+                    with broker_priority(PRIORITY_HIGH), broker_class(CLASS_CRITICAL):
+                        return await asyncio.wait_for(
+                            self._build_row(
+                                meta,
+                                selected_expiry,
+                                selected_expiry_date,
+                                upstox_adapter,
+                                fyers_adapter,
+                            ),
+                            timeout=ROW_BUILD_TIMEOUT_SECONDS,
+                        )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"[ATM watchlist] row build timed out "
+                        f"({ROW_BUILD_TIMEOUT_SECONDS:.0f}s post-admission) for {meta.symbol}; skipping"
                     )
+                    return None
                 except Exception as exc:
                     logger.warning(f"[ATM watchlist] Failed to build {meta.symbol}: {exc}")
                     return None
+
+        async def seed_gather(seed_metas: list) -> list[Any]:
+            """Run the synchronous seed builds with a PHASE deadline instead of
+            a per-coroutine wait_for. The old per-seed wait_for(75s) wrapped
+            build() itself, so the deadline burned on semaphore/limiter queue
+            waits and cancelled healthy-but-queued seeds (Tuesday stall). The
+            phase bound keeps the market_intelligence runner comfortably under
+            its 300s supervisor watchdog; seeds cancelled at the phase deadline
+            stay in `pending` and are retried by the background build loop.
+            Completed rows are preserved (asyncio.wait, not a gather cancel)."""
+            if not seed_metas:
+                return []
+            tasks = [
+                asyncio.create_task(build(meta, delay=i * 0.05))
+                for i, meta in enumerate(seed_metas)
+            ]
+            done, not_done = await asyncio.wait(tasks, timeout=SEED_PHASE_TIMEOUT_SECONDS)
+            for task in not_done:
+                task.cancel()
+            if not_done:
+                # Let cancellations unwind so the semaphore is released cleanly.
+                await asyncio.gather(*not_done, return_exceptions=True)
+            results: list[Any] = []
+            for task in tasks:
+                if task in done:
+                    try:
+                        results.append(task.result())
+                    except BaseException as exc:  # noqa: BLE001 — surfaced to caller like gather(return_exceptions=True)
+                        results.append(exc)
+                else:
+                    results.append(
+                        asyncio.TimeoutError(
+                            f"seed phase deadline ({SEED_PHASE_TIMEOUT_SECONDS:.0f}s) hit before this row was admitted"
+                        )
+                    )
+            return results
 
         async def _bg_build_and_cache(
             pending_metas: list,
@@ -1108,20 +1223,17 @@ class ATMWatchlistService:
                     await redis.set(build_lock_key, build_id, ex=DEFAULT_BUILD_LOCK_TTL)
                 except Exception as exc:  # noqa: BLE001 — lock upkeep must not kill the build
                     logger.debug(f"[ATM watchlist] build-lock re-arm failed: {exc}")
-                # Hard per-row timeout: one hung broker call (chain fetch with
-                # no HTTP deadline) must never wedge the whole serial universe
-                # build — that froze S1 mid-session on 2026-07-09 (row ~36) and
-                # 2026-07-10 (row ~65): the loop sat on a single await for the
-                # rest of the session while every underlying after it starved.
-                # Skip the row and keep building; the next full-refresh cycle
-                # retries whatever was skipped.
+                # Per-row deadline now lives INSIDE build(), where it starts
+                # only after semaphore admission and runs the row's broker
+                # calls at PRIORITY_HIGH. Wrapping build() itself in wait_for
+                # here (the pre-2026-07-15 shape) counted our own semaphore +
+                # limiter queue waits against the row and cancelled healthy
+                # rows whose quota was already spent — the Tuesday 5.5h
+                # watchlist stall. A hung broker call still cannot wedge the
+                # loop: every broker read under _build_row carries a 15s HTTP
+                # deadline and the post-admission row bound caps the rest.
                 try:
-                    row = await asyncio.wait_for(build(meta), timeout=75.0)
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        f"[ATM watchlist] BG row build timed out (75s) for {meta.symbol}; skipping"
-                    )
-                    row = None
+                    row = await build(meta)
                 except Exception as exc:  # noqa: BLE001 — build() is defensive, but never trust it
                     logger.warning(f"[ATM watchlist] BG row build failed for {meta.symbol}: {exc}")
                     row = None
@@ -1220,19 +1332,17 @@ class ATMWatchlistService:
                     payload_status = "building"
                     seed_metas = pending[: min(8, len(pending))]
                     if seed_metas:
-                        # Same hard bound as the BG loop: a single hung seed
-                        # build must not wedge this gather — it runs INSIDE the
-                        # market_intelligence runner, so an un-timed hang here
-                        # rides into the supervisor's 300s kill every cycle
-                        # (2026-07-10: poison symbols like TVSMOTOR hung their
-                        # chain fetch indefinitely).
-                        seed_results = await asyncio.gather(
-                            *(
-                                asyncio.wait_for(build(meta, delay=i * 0.05), timeout=75.0)
-                                for i, meta in enumerate(seed_metas)
-                            ),
-                            return_exceptions=True,
-                        )
+                        # Phase-bounded (not per-coroutine wait_for around
+                        # build(), which counted our own semaphore/limiter
+                        # queue waits and cancelled healthy seeds — the
+                        # 2026-07-14 stall). Runs INSIDE the
+                        # market_intelligence runner, so the phase bound keeps
+                        # it under the supervisor's 300s kill; a hung broker
+                        # call is still capped by the 15s HTTP deadline + the
+                        # post-admission row bound inside build() (2026-07-10:
+                        # poison symbols like TVSMOTOR hung their chain fetch
+                        # indefinitely).
+                        seed_results = await seed_gather(seed_metas)
                         for _meta, _res in zip(seed_metas, seed_results):
                             if isinstance(_res, BaseException):
                                 # Keep the poison-symbol signature visible.
@@ -1282,16 +1392,12 @@ class ATMWatchlistService:
 
         priority_metas = [meta for meta in pending if meta.kind == "INDEX"]
         seed_metas = priority_metas or pending[: min(8, len(pending))]
-        # Hard-bounded like the BG loop / the stale-path seed gather above —
-        # this gather runs inside the market_intelligence runner and a single
-        # hung chain fetch here rode into the supervisor's 300s kill.
-        seed_results = await asyncio.gather(
-            *(
-                asyncio.wait_for(build(meta, delay=i * 0.05), timeout=75.0)
-                for i, meta in enumerate(seed_metas)
-            ),
-            return_exceptions=True,
-        )
+        # Phase-bounded like the stale-path seed gather above — this runs
+        # inside the market_intelligence runner and must stay under the
+        # supervisor's 300s kill; per-seed deadlines now start only after
+        # semaphore admission (inside build()), so queued-but-healthy seeds
+        # are no longer cancelled for waiting on our own backlog.
+        seed_results = await seed_gather(seed_metas)
         for _meta, _res in zip(seed_metas, seed_results):
             if isinstance(_res, BaseException):
                 logger.warning(f"[ATM watchlist] seed build failed for {_meta.symbol}: {_res!r}")
@@ -3011,13 +3117,17 @@ class ATMWatchlistService:
                     spot_instrument_key="",
                     underlying_key="",
                 )
-            resolutions[su] = await self._resolve_expiry_from_master(
-                meta=meta,
-                profile=profile,
-                today=today,
-                upstox_adapter=upstox_adapter,
-                fyers_adapter=fyers_adapter,
-            )
+            # CLASS_STANDARD: strategy-profile expiry resolution is interactive
+            # strategy support — above BULK sweeps, below the CRITICAL
+            # watchlist row builds (which re-elevate themselves in build()).
+            with broker_class(CLASS_STANDARD):
+                resolutions[su] = await self._resolve_expiry_from_master(
+                    meta=meta,
+                    profile=profile,
+                    today=today,
+                    upstox_adapter=upstox_adapter,
+                    fyers_adapter=fyers_adapter,
+                )
         # Bucket by expiry so we hit the broker per-expiry, not per-symbol.
         by_expiry: dict[str, list[str]] = {}
         unresolved: list[str] = []
@@ -3036,18 +3146,21 @@ class ATMWatchlistService:
             }
 
         # Issue parallel watchlist requests, one per resolved expiry.
+        # CLASS_STANDARD (contextvars copy into the gathered tasks); the
+        # per-row builds inside get_watchlist re-elevate to CRITICAL.
         import asyncio as _asyncio
-        payloads = await _asyncio.gather(
-            *(
-                self.get_watchlist(
-                    expiry=exp_iso,
-                    symbols=sym_list,
-                    live_refresh=live_refresh,
-                )
-                for exp_iso, sym_list in by_expiry.items()
-            ),
-            return_exceptions=True,
-        )
+        with broker_class(CLASS_STANDARD):
+            payloads = await _asyncio.gather(
+                *(
+                    self.get_watchlist(
+                        expiry=exp_iso,
+                        symbols=sym_list,
+                        live_refresh=live_refresh,
+                    )
+                    for exp_iso, sym_list in by_expiry.items()
+                ),
+                return_exceptions=True,
+            )
 
         # Merge rows, tagging each with the profile + resolved expiry.
         merged_rows: list[dict[str, Any]] = []
@@ -3075,11 +3188,12 @@ class ATMWatchlistService:
         ]
         if missing_symbols:
             try:
-                fallback_payload = await self.get_watchlist(
-                    expiry=None,
-                    symbols=missing_symbols,
-                    live_refresh=live_refresh,
-                )
+                with broker_class(CLASS_STANDARD):
+                    fallback_payload = await self.get_watchlist(
+                        expiry=None,
+                        symbols=missing_symbols,
+                        live_refresh=live_refresh,
+                    )
                 for row in list((fallback_payload or {}).get("rows") or []):
                     underlying = str(row.get("underlying") or "").upper()
                     if underlying not in set(missing_symbols):

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from loguru import logger
@@ -80,6 +82,12 @@ def _should_run_post_close_catchup(now: datetime) -> bool:
     return trading_calendar.has_exchange_session("NSE", now.date()) and now.time() >= time(15, 35)
 
 
+# A failed post-close catch-up may retry, but only this many attempts per
+# session — a persistently failing runner must not spin against the broker
+# every scheduler tick for the rest of the evening.
+POST_CLOSE_MAX_ATTEMPTS_PER_SESSION = 3
+
+
 def _in_token_readiness_window(now: datetime) -> bool:
     """Pre-open sweep window: 07:00–09:20 IST on NSE session days. Both brokers
     expire tokens daily (Upstox 03:30 IST); this window validates/refreshes
@@ -125,6 +133,19 @@ class RunnerConfig:
     # WS-0.5a — per-runner hard timeout (seconds). None → use the global
     # settings.MARKET_HOURS_SUPERVISOR_RUNNER_TIMEOUT_SECONDS ceiling.
     timeout_seconds: float | None = None
+    # Open stagger (2026-07-15): delay this runner's FIRST start by this many
+    # seconds after each observed closed→open transition of ITS market window,
+    # so every lane doesn't slam the shared broker budget at 09:15 in one
+    # thundering herd. Applied per open (the marker resets when the window
+    # closes); after a mid-session backend restart the offset re-arms from the
+    # restart — deliberate, a restart IS the same herd moment. Does not gate
+    # the post-close catch-up pass or a forced run_due_once(force=True).
+    start_offset_seconds: float = 0.0
+    # Wall-clock guard (IST): never start before this time of day, regardless
+    # of when the open was observed. Session-anchored complement to the
+    # transition-anchored offset (e.g. macd_refined must not start before
+    # 09:45 even if the backend restarts at 09:20 and re-stamps the open).
+    no_start_before: time | None = None
 
 
 @dataclass
@@ -139,16 +160,75 @@ class RunnerRuntime:
     last_result_meta: dict[str, Any] = field(default_factory=dict)
     cycle_history: list[dict[str, Any]] = field(default_factory=list)
     # Session date of the most recent SUCCESSFUL post-close catch-up run.
-    # Gates post_close_force_daily runners so the guaranteed EOD pass fires
-    # exactly once per session regardless of in-session successes.
+    # Gates EVERY post_close_catchup runner (loaded from the persisted state
+    # file at startup so a backend restart doesn't re-fire the pass — on
+    # 2026-07-15 three post-close restarts re-ran the full catch-up batch at
+    # 16:16, 16:20 and 22:26 IST because this only lived in memory).
     last_post_close_success_date: date | None = None
+    # Attempt tracking for the post-close catch-up: stamped at DISPATCH time so
+    # the background scheduler can never launch the same runner's catch-up
+    # twice while a batch peer is still finishing (2026-07-15: lane_audit and
+    # directional_positioning both fired twice within a minute at 15:35 IST
+    # because the success date was only stamped after the whole batch's
+    # gather). Failures may retry up to POST_CLOSE_MAX_ATTEMPTS_PER_SESSION.
+    last_post_close_attempt_date: date | None = None
+    post_close_attempts: int = 0
+    # When the supervisor first OBSERVED this runner's market window open
+    # (reset to None while closed). Anchors start_offset_seconds.
+    market_open_since: datetime | None = None
+
+    def note_post_close_attempt(self, session_date: date) -> None:
+        if self.last_post_close_attempt_date != session_date:
+            self.last_post_close_attempt_date = session_date
+            self.post_close_attempts = 0
+        self.post_close_attempts += 1
+
+    def stagger_clear(self, now: datetime) -> bool:
+        """Whether the open stagger (start_offset_seconds + no_start_before)
+        permits a start at `now`. Only consulted on the in-session due path —
+        post-close catch-up and forced runs are exempt."""
+        no_start_before = self.config.no_start_before
+        if no_start_before is not None and now.time() < no_start_before:
+            return False
+        offset = float(self.config.start_offset_seconds or 0.0)
+        if offset > 0.0:
+            if self.market_open_since is None:
+                # Open not observed yet (first pass stamps it before is_due
+                # runs) — hold rather than start unstaggered.
+                return False
+            if (now - self.market_open_since).total_seconds() < offset:
+                return False
+        return True
 
     def is_due(self, now: datetime) -> bool:
         if not self.config.enabled or self.running:
             return False
+        if not self.stagger_clear(now):
+            return False
         if self.last_started_at is None:
             return True
         return (now - self.last_started_at).total_seconds() >= max(int(self.config.interval_seconds), 1)
+
+    def _stagger_gate_at(self, now: datetime) -> datetime | None:
+        """Earliest moment the open stagger would allow a start (None when the
+        stagger imposes no bound that is still in the future)."""
+        candidates: list[datetime] = []
+        no_start_before = self.config.no_start_before
+        if no_start_before is not None and now.time() < no_start_before:
+            candidates.append(
+                now.replace(
+                    hour=no_start_before.hour,
+                    minute=no_start_before.minute,
+                    second=no_start_before.second,
+                    microsecond=0,
+                )
+            )
+        offset = float(self.config.start_offset_seconds or 0.0)
+        if offset > 0.0 and self.market_open_since is not None:
+            candidates.append(self.market_open_since + timedelta(seconds=offset))
+        if not candidates:
+            return None
+        return max(candidates)
 
     def next_run_at(
         self,
@@ -162,8 +242,13 @@ class RunnerRuntime:
         if not market_hours_fn(now):
             return next_open_fn(now)
         if self.last_started_at is None:
-            return now
-        return self.last_started_at + timedelta(seconds=max(int(self.config.interval_seconds), 1))
+            base = now
+        else:
+            base = self.last_started_at + timedelta(seconds=max(int(self.config.interval_seconds), 1))
+        gate = self._stagger_gate_at(now)
+        if gate is not None and gate > base:
+            return gate
+        return base
 
     def serialize(
         self,
@@ -203,7 +288,14 @@ class RunnerRuntime:
         # restart (all last_error None) even when nothing had run.
         stale = False
         market_open_now = market_hours_fn(now)
-        if self.config.enabled and market_open_now and loop_active and not self.running:
+        if (
+            self.config.enabled
+            and market_open_now
+            and loop_active
+            and not self.running
+            # A lane held by the open stagger is deliberately idle, not dead.
+            and self.stagger_clear(now)
+        ):
             overdue = max(self.config.interval_seconds * 3, 300)
             if self.last_success_at is not None:
                 stale = (now - self.last_success_at).total_seconds() > overdue
@@ -216,6 +308,9 @@ class RunnerRuntime:
             "label": self.config.label,
             "enabled": self.config.enabled,
             "interval_seconds": self.config.interval_seconds,
+            "start_offset_seconds": self.config.start_offset_seconds,
+            "no_start_before": self.config.no_start_before.isoformat() if self.config.no_start_before else None,
+            "market_open_since": self.market_open_since.isoformat() if self.market_open_since else None,
             "loop_active": loop_active,
             "running": self.running,
             "stale": stale,
@@ -252,6 +347,7 @@ class MarketHoursPaperSupervisor:
         now_fn: NowFn | None = None,
         market_hours_fn: MarketHoursFn | None = None,
         next_open_fn: NextOpenFn | None = None,
+        catchup_state_path: Path | None = None,
     ) -> None:
         self._enabled = settings.MARKET_HOURS_PAPER_SUPERVISOR_ENABLED if enabled is None else bool(enabled)
         self._now_fn = now_fn or _now_ist
@@ -267,10 +363,85 @@ class MarketHoursPaperSupervisor:
         # leave the loud audit/log trail instead of hammering.
         self._loop_crash_count = 0
         self._loop_max_restarts = 5
+        # Durable "which session already got its post-close catch-up" marker
+        # ({runner_key: "YYYY-MM-DD"}). Without it every backend restart after
+        # 15:35 re-fired the whole catch-up batch (observed 3× on 2026-07-15).
+        # None (the default, used by tests) keeps the state in-memory only.
+        self._catchup_state_path = catchup_state_path
         self._runners: dict[str, RunnerRuntime] = {
             runner.key: RunnerRuntime(config=runner)
             for runner in (runners or self._default_runners())
         }
+        self._load_catchup_state()
+
+    def _load_catchup_state(self) -> None:
+        if self._catchup_state_path is None:
+            return
+        try:
+            raw = json.loads(self._catchup_state_path.read_text())
+        except FileNotFoundError:
+            return
+        except Exception as exc:  # noqa: BLE001 — a corrupt marker file must never block startup
+            logger.warning("[MarketHoursSupervisor] catch-up state unreadable: {}", exc)
+            return
+        for key, value in (raw or {}).items():
+            runtime = self._runners.get(str(key))
+            if runtime is None:
+                continue
+            try:
+                runtime.last_post_close_success_date = date.fromisoformat(str(value))
+            except (TypeError, ValueError):
+                continue
+
+    def _persist_catchup_state(self) -> None:
+        if self._catchup_state_path is None:
+            return
+        payload = {
+            key: runtime.last_post_close_success_date.isoformat()
+            for key, runtime in self._runners.items()
+            if runtime.last_post_close_success_date is not None
+        }
+        try:
+            self._catchup_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._catchup_state_path.write_text(json.dumps(payload, indent=0, sort_keys=True))
+        except Exception as exc:  # noqa: BLE001 — persistence is best-effort
+            logger.warning("[MarketHoursSupervisor] catch-up state persist failed: {}", exc)
+
+    def _post_close_catchup_eligible(
+        self,
+        runtime: RunnerRuntime,
+        *,
+        now: datetime,
+        session_date: date,
+        market_open: bool,
+    ) -> bool:
+        """One post-close catch-up pass max per NSE session.
+
+        Success is stamped per-runner the moment its catch-up run finishes (not
+        after the batch gather) and persisted, so neither a slow batch peer nor
+        a backend restart re-fires it. Failed attempts may retry, bounded by
+        POST_CLOSE_MAX_ATTEMPTS_PER_SESSION.
+        """
+        if not runtime.config.post_close_catchup or market_open:
+            return False
+        if not _should_run_post_close_catchup(now):
+            return False
+        if (
+            runtime.last_post_close_success_date is not None
+            and runtime.last_post_close_success_date >= session_date
+        ):
+            return False
+        if not runtime.config.post_close_force_daily:
+            # Recovery-only runners skip the pass when an in-session run
+            # already succeeded today.
+            if runtime.last_success_at is not None and runtime.last_success_at.date() >= session_date:
+                return False
+        if (
+            runtime.last_post_close_attempt_date == session_date
+            and runtime.post_close_attempts >= POST_CLOSE_MAX_ATTEMPTS_PER_SESSION
+        ):
+            return False
+        return True
 
     def _default_runners(self) -> list[RunnerConfig]:
         from auction_intelligence.automation import run_market_hours_cycle as run_auction_market_cycle
@@ -715,6 +886,12 @@ class MarketHoursPaperSupervisor:
                 enabled=getattr(settings, "TOKEN_READINESS_AUTO_ENABLED", True),
                 market_hours_fn=_in_token_readiness_window,
                 next_open_fn=_next_token_readiness_open,
+                # The sweep only means anything BEFORE the 09:15 open — brokers
+                # expire tokens daily (Upstox 03:30 IST), so a post-close
+                # "catch-up" validation at 15:35+/22:26 is a false all-clear.
+                # Observed running post-close 3× on 2026-07-15 via the generic
+                # catch-up path; this pins it to its pre-open window only.
+                post_close_catchup=False,
             ),
             RunnerConfig(
                 key="market_intelligence",
@@ -739,6 +916,9 @@ class MarketHoursPaperSupervisor:
                 # bounded, but let the cycle finish; the automation performs a
                 # second market-hours check before any durable trade write.
                 timeout_seconds=600.0,
+                # Open stagger: let market_intelligence (offset 0) claim the
+                # broker budget for the watchlist build before this lane joins.
+                start_offset_seconds=90.0,
             ),
             RunnerConfig(
                 key="institutional_convergence",
@@ -750,6 +930,7 @@ class MarketHoursPaperSupervisor:
                 next_open_fn=_next_institutional_convergence_open,
                 post_close_catchup=False,
                 timeout_seconds=600.0,
+                start_offset_seconds=90.0,
             ),
             RunnerConfig(
                 key="institutional_convergence_commodity",
@@ -761,6 +942,7 @@ class MarketHoursPaperSupervisor:
                 next_open_fn=_next_commodity_convergence_open,
                 post_close_catchup=False,
                 timeout_seconds=600.0,
+                start_offset_seconds=90.0,
             ),
             RunnerConfig(
                 key="fractal_market_profile",
@@ -783,6 +965,7 @@ class MarketHoursPaperSupervisor:
                 market_hours_fn=_in_nse_market_hours,
                 next_open_fn=_next_nse_market_open,
                 post_close_catchup=False,
+                start_offset_seconds=90.0,
             ),
             RunnerConfig(
                 key="directional_positioning",
@@ -831,6 +1014,12 @@ class MarketHoursPaperSupervisor:
                 market_hours_fn=_in_nse_market_hours,
                 next_open_fn=_next_nse_market_open,
                 post_close_catchup=False,
+                # The heaviest bulk sweep gets the longest stagger: 30 min
+                # after the observed open AND never before 09:45 IST, so the
+                # watchlist build + first S1 scans own the open window (the
+                # BULK quota class caps it after that).
+                start_offset_seconds=1800.0,
+                no_start_before=time(9, 45),
             ),
             RunnerConfig(
                 key="cbe_scanner",
@@ -975,12 +1164,27 @@ class MarketHoursPaperSupervisor:
             logger.exception(f"[MarketHoursSupervisor] loop failed: {exc}")
             raise
 
+    def _note_market_transitions(self, now: datetime) -> None:
+        """Stamp each runner's closed→open transition so start_offset_seconds
+        has an anchor; reset the stamp while the runner's window is closed so
+        the stagger re-applies after EVERY market open."""
+        for runtime in self._runners.values():
+            if not runtime.config.enabled:
+                runtime.market_open_since = None
+                continue
+            if self._runtime_market_open(runtime, now):
+                if runtime.market_open_since is None:
+                    runtime.market_open_since = now
+            else:
+                runtime.market_open_since = None
+
     async def _schedule_due_once(self) -> None:
         """Launch due lanes independently and return without awaiting scans."""
         if not self._enabled:
             return
         async with self._lock:
             now = self._now_fn()
+            self._note_market_transitions(now)
             due_runners: list[RunnerRuntime] = []
             catchup_runners: list[RunnerRuntime] = []
             catchup_session_date = now.date()
@@ -994,29 +1198,31 @@ class MarketHoursPaperSupervisor:
                 runtime_market_open = self._runtime_market_open(runtime, now)
                 if runtime_market_open and runtime.is_due(now):
                     due_runners.append(runtime)
-                elif (
-                    runtime.config.post_close_catchup
-                    and not runtime_market_open
-                    and _should_run_post_close_catchup(now)
-                    and (
-                        (
-                            runtime.last_post_close_success_date is None
-                            or runtime.last_post_close_success_date < catchup_session_date
-                        )
-                        if runtime.config.post_close_force_daily
-                        else (
-                            runtime.last_success_at is None
-                            or runtime.last_success_at.date() < catchup_session_date
-                        )
-                    )
+                elif self._post_close_catchup_eligible(
+                    runtime,
+                    now=now,
+                    session_date=catchup_session_date,
+                    market_open=runtime_market_open,
                 ):
                     catchup_runners.append(runtime)
 
+            catchup_ids = {id(runtime) for runtime in catchup_runners}
             catchup_tasks: list[tuple[RunnerRuntime, asyncio.Task]] = []
             for runtime in due_runners + catchup_runners:
                 runtime.running = True
+                is_catchup = id(runtime) in catchup_ids
+                if is_catchup:
+                    # Stamp the attempt at DISPATCH so the next scheduler pass
+                    # can never double-launch this catch-up while a slower
+                    # batch peer is still running.
+                    runtime.note_post_close_attempt(catchup_session_date)
+                    coro = self._run_catchup_runner(
+                        runtime, now=now, session_date=catchup_session_date
+                    )
+                else:
+                    coro = self._run_runner(runtime, now=now)
                 task = asyncio.create_task(
-                    self._run_runner(runtime, now=now),
+                    coro,
                     name=f"paper-lane-{runtime.config.key}",
                 )
                 self._runner_tasks[runtime.config.key] = task
@@ -1032,7 +1238,7 @@ class MarketHoursPaperSupervisor:
                         self._runner_tasks.pop(key, None)
 
                 task.add_done_callback(_cleanup)
-                if runtime in catchup_runners:
+                if is_catchup:
                     catchup_tasks.append((runtime, task))
 
             if catchup_tasks:
@@ -1052,6 +1258,29 @@ class MarketHoursPaperSupervisor:
                 ):
                     runtime.last_message = "Armed for the next market session."
 
+    async def _run_catchup_runner(
+        self,
+        runtime: RunnerRuntime,
+        *,
+        now: datetime,
+        session_date: date,
+    ) -> None:
+        """Run one post-close catch-up and stamp its success IMMEDIATELY.
+
+        Stamping (and persisting) as soon as THIS runner finishes — instead of
+        after the whole batch's gather — closes the window where a fast runner
+        finished, its `running` flag cleared, and the next scheduler pass
+        re-launched it because the batch was still waiting on a slower peer.
+        """
+        await self._run_runner(runtime, now=now)
+        if runtime.last_error is None:
+            runtime.last_post_close_success_date = session_date
+            runtime.last_result_meta.setdefault("catchup_session_date", session_date.isoformat())
+            runtime.last_message = (
+                f"{runtime.last_message} Catch-up captured for {session_date.isoformat()}."
+            )
+            self._persist_catchup_state()
+
     async def _finalize_background_catchup(
         self,
         catchup_tasks: list[tuple[RunnerRuntime, asyncio.Task]],
@@ -1059,12 +1288,6 @@ class MarketHoursPaperSupervisor:
     ) -> None:
         await asyncio.gather(*(task for _, task in catchup_tasks), return_exceptions=True)
         successful = [runtime for runtime, _ in catchup_tasks if runtime.last_error is None]
-        for runtime in successful:
-            runtime.last_post_close_success_date = session_date
-            runtime.last_result_meta.setdefault("catchup_session_date", session_date.isoformat())
-            runtime.last_message = (
-                f"{runtime.last_message} Catch-up captured for {session_date.isoformat()}."
-            )
         if successful:
             try:
                 from core.paper_trade_recorder import paper_trade_recorder
@@ -1078,6 +1301,7 @@ class MarketHoursPaperSupervisor:
 
         async with self._lock:
             now = self._now_fn()
+            self._note_market_transitions(now)
             due_runners: list[RunnerRuntime] = []
             catchup_runners: list[RunnerRuntime] = []
             catchup_session_date = now.date()
@@ -1092,34 +1316,27 @@ class MarketHoursPaperSupervisor:
                 if force or (runtime_market_open and runtime.is_due(now)):
                     due_runners.append(runtime)
                     continue
-                if (
-                    not force
-                    and runtime.config.post_close_catchup
-                    and not runtime_market_open
-                    and _should_run_post_close_catchup(now)
-                    and (
-                        # Guaranteed once-a-day EOD pass: fire after 15:35
-                        # regardless of in-session successes, tracked by its
-                        # own post-close date so it runs exactly once.
-                        (
-                            runtime.last_post_close_success_date is None
-                            or runtime.last_post_close_success_date < catchup_session_date
-                        )
-                        if runtime.config.post_close_force_daily
-                        # Recovery-only (default): only if no in-session pass
-                        # succeeded for today's session.
-                        else (
-                            runtime.last_success_at is None
-                            or runtime.last_success_at.date() < catchup_session_date
-                        )
-                    )
+                if not force and self._post_close_catchup_eligible(
+                    runtime,
+                    now=now,
+                    session_date=catchup_session_date,
+                    market_open=runtime_market_open,
                 ):
                     catchup_runners.append(runtime)
 
             if due_runners:
                 await self._run_due_runners(due_runners, now=now)
             if catchup_runners:
-                await self._run_due_runners(catchup_runners, now=now)
+                for runtime in catchup_runners:
+                    runtime.note_post_close_attempt(catchup_session_date)
+                await asyncio.gather(
+                    *(
+                        self._run_catchup_runner(
+                            runtime, now=now, session_date=catchup_session_date
+                        )
+                        for runtime in catchup_runners
+                    )
+                )
                 # End-of-session portfolio reconciliation snapshot.
                 try:
                     from core.paper_trade_recorder import paper_trade_recorder
@@ -1131,17 +1348,6 @@ class MarketHoursPaperSupervisor:
                     logger.warning(
                         "[MarketHoursSupervisor] portfolio snapshot failed: {}", exc
                     )
-                for runtime in catchup_runners:
-                    if runtime.last_error is None:
-                        runtime.last_post_close_success_date = catchup_session_date
-                        runtime.last_result_meta.setdefault(
-                            "catchup_session_date",
-                            catchup_session_date.isoformat(),
-                        )
-                        runtime.last_message = (
-                            f"{runtime.last_message} Catch-up captured for "
-                            f"{catchup_session_date.isoformat()}."
-                        )
             for runtime in self._runners.values():
                 if (
                     runtime.config.enabled
@@ -1432,4 +1638,9 @@ class MarketHoursPaperSupervisor:
         }
 
 
-market_hours_paper_supervisor = MarketHoursPaperSupervisor()
+# The live singleton persists its post-close catch-up markers so a backend
+# restart after 15:35 IST cannot re-run the "once per session" passes. Tests
+# construct their own instances without a path (in-memory only).
+_CATCHUP_STATE_PATH = Path(__file__).resolve().parents[1] / "runtime" / "supervisor" / "post_close_catchup.json"
+
+market_hours_paper_supervisor = MarketHoursPaperSupervisor(catchup_state_path=_CATCHUP_STATE_PATH)

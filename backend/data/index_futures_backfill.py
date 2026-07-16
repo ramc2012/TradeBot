@@ -528,16 +528,21 @@ async def backfill_fyers_symbol(
     )
     summary = SymbolBackfillSummary(underlying=underlying, source=instrument.source, instruments=1)
     resolution = "1" if interval == "1minute" else interval.replace("minute", "")
+    # CLASS_BULK: historical backfill — hard-capped at 25% of the shared broker
+    # budget and yields instantly to queued CRITICAL work.
+    from brokers.rate_limiter import CLASS_BULK, broker_class
+
     for start, end in chunk_dates(from_date, to_date, chunk_days):
         logger.info(f"[fyers {underlying}] {symbol} {interval} {start} -> {end}")
         try:
-            candles = await adapter.get_historical_candles(
-                symbol,
-                resolution,
-                start.isoformat(),
-                end.isoformat(),
-                cont_flag=1,
-            )
+            with broker_class(CLASS_BULK):
+                candles = await adapter.get_historical_candles(
+                    symbol,
+                    resolution,
+                    start.isoformat(),
+                    end.isoformat(),
+                    cont_flag=1,
+                )
         except Exception as exc:
             summary.errors.append(f"{start}->{end}: {exc}")
             logger.warning(f"[fyers {underlying}] failed {start}->{end}: {exc}")
@@ -594,12 +599,16 @@ async def backfill_upstox_symbol(
                 f"{interval} {start} -> {end} expired={instrument.expired}"
             )
             try:
-                candles = await client.fetch_candles(
-                    instrument,
-                    interval=interval,
-                    start=start,
-                    end=end,
-                )
+                # CLASS_BULK: historical backfill — capped, yields to CRITICAL.
+                from brokers.rate_limiter import CLASS_BULK, broker_class
+
+                with broker_class(CLASS_BULK):
+                    candles = await client.fetch_candles(
+                        instrument,
+                        interval=interval,
+                        start=start,
+                        end=end,
+                    )
             except Exception as exc:
                 summary.errors.append(f"{instrument.trading_symbol} {start}->{end}: {exc}")
                 logger.warning(f"[upstox {underlying}] failed {start}->{end}: {exc}")

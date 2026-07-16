@@ -35,6 +35,7 @@ from paper_engine.commodity_strategy_agent import (
     FUTURES_MAX_POSITIONS,
     FUTURES_MIN_STOP_PCT,
     FUTURES_TIMEFRAME,
+    FUTURES_TIMEFRAME_MINUTES,
     FUTURES_TRAIL_ATR_MULTIPLIER,
     COMMODITY_THESIS_FAILURE_EXIT_REASONS,
     COMMODITY_SCALP_ENTRY_STYLES,
@@ -167,6 +168,9 @@ def _evaluate_mp(
         prior_profile=prior_profile,
         cvd_anchor_index=cvd_anchor_index,
         atr_1m=atr_1m,
+        # Match the live lane's signal-bar size so the replay windows
+        # (MP-period buckets, value-migration CVD window) stay in parity.
+        bar_minutes=FUTURES_TIMEFRAME_MINUTES,
     )
 
 

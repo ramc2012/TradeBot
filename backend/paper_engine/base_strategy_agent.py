@@ -10,6 +10,20 @@ from paper_engine.portfolio import PaperPortfolio, TradeRecord
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
+# ── Persist-payload bounds (F-18, 2026-07-15) ─────────────────────────────────
+# The app_runtime_state JSONB blobs grow DAILY (equity curve points every scan,
+# a full trade row per closed trade, events) and the blob is json-decoded on
+# the event loop on every restore/refresh — py-spy caught MainThread seized
+# decoding a giant state blob, the prime "stales later each day" mechanism.
+# Persisted payloads are therefore TRIMMED at these bounds; anything older is
+# folded into a compact aggregate (trades) or dropped (curve/events). The
+# durable per-trade record lives in the append-only paper_trade_book table,
+# so nothing is lost — only the hot blob stays bounded.
+PERSIST_EQUITY_CURVE_MAX_POINTS = 2000
+PERSIST_RECENT_EVENTS_MAX = 200
+PERSIST_TRADE_HISTORY_MAX_ROWS = 500
+
+
 def _now_ist() -> datetime:
     return datetime.now(IST)
 
@@ -145,6 +159,83 @@ def _split_today_history(
     return _sort_trades_recent_first(today), _sort_trades_recent_first(history)
 
 
+def _summarize_trade_rows(
+    rows: Sequence[dict[str, Any]],
+    prior: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Fold serialized trade rows into a compact aggregate, optionally on top
+    of a prior summary (the one restored from the last persisted payload)."""
+    summary: dict[str, Any] = {
+        "trades": 0,
+        "wins": 0,
+        "losses": 0,
+        "pnl": 0.0,
+        "first_entry_time": None,
+        "last_exit_time": None,
+    }
+    if isinstance(prior, dict):
+        for key in ("trades", "wins", "losses"):
+            try:
+                summary[key] = int(prior.get(key) or 0)
+            except (TypeError, ValueError):
+                pass
+        try:
+            summary["pnl"] = float(prior.get("pnl") or 0.0)
+        except (TypeError, ValueError):
+            pass
+        summary["first_entry_time"] = prior.get("first_entry_time")
+        summary["last_exit_time"] = prior.get("last_exit_time")
+    for row in rows:
+        try:
+            pnl = float(row.get("pnl") or 0.0)
+        except (TypeError, ValueError):
+            pnl = 0.0
+        summary["trades"] += 1
+        if pnl > 0:
+            summary["wins"] += 1
+        elif pnl < 0:
+            summary["losses"] += 1
+        summary["pnl"] = round(float(summary["pnl"]) + pnl, 2)
+        entry_time = str(row.get("entry_time") or "") or None
+        exit_time = str(row.get("exit_time") or "") or None
+        if entry_time and (summary["first_entry_time"] is None or entry_time < summary["first_entry_time"]):
+            summary["first_entry_time"] = entry_time
+        if exit_time and (summary["last_exit_time"] is None or exit_time > summary["last_exit_time"]):
+            summary["last_exit_time"] = exit_time
+    return summary
+
+
+def _trade_history_persist_payload(
+    portfolio: PaperPortfolio,
+    *,
+    max_rows: int = PERSIST_TRADE_HISTORY_MAX_ROWS,
+) -> tuple[list[dict[str, Any]], Optional[dict[str, Any]]]:
+    """(rows, summary) for the persisted payload: the last `max_rows` trades
+    verbatim, everything older folded into a summary on top of the archive
+    summary restored at load time (``portfolio._archived_trade_summary``).
+
+    Pure/idempotent per persist: the summary is recomputed from the immutable
+    restored base + the CURRENT in-memory overflow, so repeated persists never
+    double-count a trade. Backward-compatible both ways — old payloads simply
+    have no ``trade_history_summary`` (base None) and old readers ignore the
+    extra key."""
+    rows = _serialize_trade_history(portfolio)
+    base = getattr(portfolio, "_archived_trade_summary", None)
+    if len(rows) <= max_rows:
+        return rows, (dict(base) if isinstance(base, dict) else None)
+    overflow, kept = rows[:-max_rows], rows[-max_rows:]
+    return kept, _summarize_trade_rows(overflow, prior=base)
+
+
+def _restore_archived_trade_summary(
+    portfolio: PaperPortfolio, portfolio_payload: dict[str, Any]
+) -> None:
+    """Stash the persisted trade-history summary on the portfolio so the next
+    persist folds new overflow on top of it instead of losing the aggregate."""
+    summary = portfolio_payload.get("trade_history_summary")
+    portfolio._archived_trade_summary = dict(summary) if isinstance(summary, dict) else None
+
+
 def _deserialize_trade_history(rows: Sequence[dict[str, Any]]) -> list[TradeRecord]:
     trades: list[TradeRecord] = []
     for row in rows:
@@ -178,10 +269,20 @@ def _deserialize_trade_history(rows: Sequence[dict[str, Any]]) -> list[TradeReco
     return trades
 
 
-def _serialize_equity_curve(portfolio: PaperPortfolio) -> list[dict[str, Any]]:
+def _serialize_equity_curve(
+    portfolio: PaperPortfolio,
+    *,
+    max_points: int = PERSIST_EQUITY_CURVE_MAX_POINTS,
+) -> list[dict[str, Any]]:
+    # Persist only the most recent `max_points` — the curve grows per scan and
+    # is the biggest single contributor to the F-18 state-blob bloat (matches
+    # the portfolio's own Redis snapshot bound of 2000 points).
+    curve = getattr(portfolio, "_equity_curve", [])
+    if max_points and max_points > 0:
+        curve = curve[-max_points:]
     return [
         {"time": timestamp.isoformat(), "equity": float(equity)}
-        for timestamp, equity in getattr(portfolio, "_equity_curve", [])
+        for timestamp, equity in curve
     ]
 
 
@@ -212,3 +313,6 @@ class BaseStrategyAgent:
     _deserialize_trade_history = staticmethod(_deserialize_trade_history)
     _serialize_equity_curve = staticmethod(_serialize_equity_curve)
     _deserialize_equity_curve = staticmethod(_deserialize_equity_curve)
+    _trade_history_persist_payload = staticmethod(_trade_history_persist_payload)
+    _summarize_trade_rows = staticmethod(_summarize_trade_rows)
+    _restore_archived_trade_summary = staticmethod(_restore_archived_trade_summary)

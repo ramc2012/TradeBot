@@ -2,9 +2,14 @@
 
 Replaces the 15-minute MACD trigger that previously drove
 `commodity_strategy_agent._analyze_futures_symbol`. The canonical
-auction entries are evaluated on 1-minute closed bars; the highest-
-priority non-`None` trigger wins. The output shape mirrors what the
-old MACD evaluator emitted so the surrounding harness
+auction entries are evaluated on closed signal bars (3-minute since the
+2026-07-15 timeframe policy; the `bar_minutes` parameter scales every
+minute-denominated window). Order flow is TICK-FIRST: when MCX futures
+ticks stream into `market_ticks`, per-bar signed volume comes from the
+real tape (`tick_signed_volume_overrides`); bars without tick coverage
+fall back to bar-inference with the fallback surfaced via `of_source`.
+The highest-priority non-`None` trigger wins. The output shape mirrors
+what the old MACD evaluator emitted so the surrounding harness
 (`_open_new_futures_positions`, decorators, audit, UI table) keeps
 working unchanged.
 
@@ -41,6 +46,7 @@ from __future__ import annotations
 
 import statistics
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from analytics.market_profile_ext import (
@@ -50,8 +56,7 @@ from analytics.market_profile_ext import (
     value_area_overlap as compute_value_area_overlap,
 )
 from analytics.orderflow import (
-    anchored_cvd,
-    bar_cvd,
+    bar_signed_volume,
     cvd_agrees_with,
     cvd_divergence,
     hvn_lvn,
@@ -66,9 +71,15 @@ from paper_engine.commodity_volume_baseline import (
     pressure_ratio as _vb_pressure_ratio,
 )
 
-# 1-min bars per MP period (15-min TPO) — the granularity at which per-instrument
-# volume baselines and the OF quality reads are computed (1-min is too sparse).
+# Canonical MP TPO period in minutes — the granularity at which per-instrument
+# volume baselines and the OF quality reads are computed (single bars are too
+# sparse). Bars-per-period is derived from the evaluator's `bar_minutes`.
+_MP_PERIOD_MINUTES = 15
+# Legacy alias: bars per MP period at the historical 1-minute bar size.
 _MP_PERIOD_BARS = 15
+# Minimum tick-covered signal bars before the CVD source is trusted as real
+# order flow (mirrors the convergence lane's build_footprint threshold).
+_MIN_TICK_COVERED_BARS = 4
 
 
 # Corrected `lvn_fade` absorption thresholds — used ONLY when
@@ -221,7 +232,117 @@ def _round(value: Optional[float], decimals: int = 4) -> Optional[float]:
         return None
 
 
-# ─── ATR (1-min, 14 by default) ────────────────────────────────────────────
+# ─── Tick-first order flow (footprint/CVD) ─────────────────────────────────
+
+
+def _parse_bar_time(value: Any) -> Optional[datetime]:
+    """Parse a bar/tick timestamp (datetime or ISO string) to aware UTC."""
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _cumsum(values: list[float]) -> list[float]:
+    out: list[float] = []
+    running = 0.0
+    for value in values:
+        running += value
+        out.append(running)
+    return out
+
+
+def tick_signed_volume_overrides(
+    ticks: list[dict[str, Any]],
+    closed_bars: list[dict[str, Any]],
+    *,
+    bar_minutes: int = 1,
+) -> list[Optional[float]]:
+    """Per-bar signed-volume deltas from REAL market ticks, aligned to bars.
+
+    MCX futures ticks now stream into `market_ticks` (cumulative session
+    volume + L1 bid/ask), so the lane's footprint/CVD can be sourced from the
+    real tape instead of bar-inference. Each tick's traded-volume delta is
+    aggressor-signed (at/above ask = buy, at/below bid = sell, else tick
+    rule vs the prior print) and summed into the enclosing signal-bar bucket.
+
+    Returns a list aligned with ``closed_bars``: a float delta where the bar
+    is fully covered by the tick window, ``None`` where it is not (caller
+    falls back to bar-inference for those bars). The bucket containing the
+    FIRST tick is dropped as partial, so a mid-bar tick window can never
+    contribute a truncated delta.
+    """
+    if not ticks or not closed_bars:
+        return [None] * len(closed_bars)
+    minutes = max(int(bar_minutes), 1)
+
+    deltas: dict[datetime, float] = {}
+    first_bucket: Optional[datetime] = None
+    last_bucket: Optional[datetime] = None
+    previous: Optional[dict[str, Any]] = None
+    for tick in ticks:
+        ts = _parse_bar_time(tick.get("time"))
+        if ts is None:
+            continue
+        bucket = ts.replace(minute=(ts.minute // minutes) * minutes, second=0, microsecond=0)
+        if first_bucket is None:
+            first_bucket = bucket
+        if last_bucket is None or bucket > last_bucket:
+            last_bucket = bucket
+        price = _safe_float(tick.get("ltp")) or 0.0
+        if price <= 0:
+            continue
+        volume_delta = max(
+            (_safe_float(tick.get("volume")) or 0.0)
+            - (_safe_float((previous or {}).get("volume")) or 0.0),
+            0.0,
+        )
+        if volume_delta <= 0:
+            previous = tick
+            continue
+        bid = _safe_float(tick.get("bid")) or 0.0
+        ask = _safe_float(tick.get("ask")) or 0.0
+        prev_price = _safe_float((previous or {}).get("ltp")) or price
+        if ask > 0 and price >= ask:
+            side = 1.0
+        elif bid > 0 and price <= bid:
+            side = -1.0
+        else:
+            side = 1.0 if price >= prev_price else -1.0
+        deltas[bucket] = deltas.get(bucket, 0.0) + side * volume_delta
+        previous = tick
+
+    overrides: list[Optional[float]] = []
+    for bar in closed_bars:
+        bar_ts = _parse_bar_time(bar.get("time"))
+        if bar_ts is None:
+            overrides.append(None)
+            continue
+        bucket = bar_ts.replace(
+            minute=(bar_ts.minute // minutes) * minutes, second=0, microsecond=0
+        )
+        if first_bucket is None or last_bucket is None or bucket <= first_bucket or bucket >= last_bucket:
+            # Partial / pre-window / beyond-the-tape coverage — bar-inference.
+            # (`>= last_bucket` keeps a bar honest when the tape died mid-bar;
+            # on a live tape the forming bar's ticks sit in a LATER bucket, so
+            # every closed bar inside the window stays tick-sourced.)
+            overrides.append(None)
+            continue
+        # A silent-but-covered bucket genuinely traded nothing: delta 0.0.
+        overrides.append(deltas.get(bucket, 0.0))
+    return overrides
+
+
+# ─── ATR (signal-bar, 14 by default) ────────────────────────────────────────
 
 
 def _compute_atr(candles: list[dict[str, Any]], period: int = 14) -> Optional[float]:
@@ -512,6 +633,7 @@ def _assess_value_migration(
     cvd_anchored: list[float],
     vwap_last: Optional[float],
     of_degraded: bool = False,
+    window_bars: int = _MP_PERIOD_BARS,
 ) -> dict[str, Any]:
     """Describe developing/confirmed value migration without authorizing entry.
 
@@ -610,9 +732,12 @@ def _assess_value_migration(
         return context
 
     # Value migration is acceptance, not merely a shifted developing POC. Two
-    # closes beyond prior value plus fresh (15-minute) directional CVD prevent a
-    # session-old cumulative CVD sign from repeatedly re-authorizing the setup.
-    cvd_window = cvd_anchored[-15:] if len(cvd_anchored) >= 15 else cvd_anchored
+    # closes beyond prior value plus fresh (one MP period ≈ 15-minute)
+    # directional CVD prevent a session-old cumulative CVD sign from
+    # repeatedly re-authorizing the setup. `window_bars` scales the window to
+    # the signal-bar size (15 bars at 1m, 5 bars at 3m).
+    window = max(int(window_bars), 2)
+    cvd_window = cvd_anchored[-window:] if len(cvd_anchored) >= window else cvd_anchored
     cvd_delta = cvd_window[-1] - cvd_window[0]
     accepted = (
         previous_close > pvah and last_close > max(today_poc, pvah)
@@ -675,6 +800,7 @@ def _trigger_va_migration(
     cvd_anchored: list[float],
     vwap_last: Optional[float],
     of_degraded: bool = False,
+    window_bars: int = _MP_PERIOD_BARS,
 ) -> Optional[TriggerResult]:
     """Compatibility wrapper returning only a *confirmed context* result.
 
@@ -688,6 +814,7 @@ def _trigger_va_migration(
         cvd_anchored=cvd_anchored,
         vwap_last=vwap_last,
         of_degraded=of_degraded,
+        window_bars=window_bars,
     )
     if context.get("state") != "confirmed" or context.get("signal") not in {"BUY", "SELL"}:
         return None
@@ -863,15 +990,26 @@ def evaluate_commodity_mp_signal(
     prior_profile: Optional[Any] = None,
     cvd_anchor_index: Optional[int] = None,
     atr_1m: Optional[float] = None,
+    bar_minutes: int = 1,
+    tick_signed_volumes: Optional[list[Optional[float]]] = None,
 ) -> dict[str, Any]:
     """Evaluate MP+OF entries and value-migration context against the latest
-    closed 1-min bar and return a row matching the shape today's MACD
+    closed signal bar and return a row matching the shape today's MACD
     evaluator emits.
+
+    ``closed_1m`` carries the closed signal bars (historically 1-minute; the
+    live lane now scans 3-minute bars — ``bar_minutes`` scales every
+    minute-denominated window such as the 15-minute MP-period bucket).
+    ``tick_signed_volumes`` (from :func:`tick_signed_volume_overrides`)
+    supplies REAL tick-tape signed volume per bar where MCX ticks stream;
+    covered bars use the real footprint/CVD and only uncovered bars fall
+    back to bar-inference, with the fallback surfaced via ``of_source``.
 
     The caller (`_analyze_futures_symbol`) decorates this with symbol-
     specific fields (price, lot_size, change_pct, etc.); we only own the
     signal-decision portion.
     """
+    period_bars = max(1, _MP_PERIOD_MINUTES // max(int(bar_minutes), 1))
     last_bar_time = str(closed_1m[-1].get("time") or "") if closed_1m else ""
     base: dict[str, Any] = {
         "signal": None,
@@ -889,7 +1027,9 @@ def evaluate_commodity_mp_signal(
         "prev_macd_histogram": None,
         "atr": _round(atr_1m, 4),
         "bar_time": last_bar_time,
-        "indicator_timeframe": "1minute",
+        "indicator_timeframe": f"{max(int(bar_minutes), 1)}minute",
+        "of_source": "bar_inference",
+        "of_tick_covered_bars": 0,
         "stop_hint": None,
         "target_hint": None,
         "confidence": 0.0,
@@ -958,9 +1098,27 @@ def evaluate_commodity_mp_signal(
     # LVN fade after a roll.  Keep long history for trailing quality checks, but
     # scope the session profile and absorption CVD to the 09:00 IST anchor.
     session_1m = closed_1m[anchor:]
-    cvd_total = bar_cvd(closed_1m)
-    cvd_anc = anchored_cvd(closed_1m, anchor_index=anchor)
-    session_cvd = bar_cvd(session_1m)
+    # Tick-first CVD: PREFER real market_ticks signed volume per bar (MCX
+    # futures ticks now stream); only bars without tick coverage fall back to
+    # the bar-inference (Lee-Ready-on-bars) approximation.
+    signed_volumes = bar_signed_volume(closed_1m)
+    tick_covered = 0
+    if tick_signed_volumes:
+        for index, override in enumerate(tick_signed_volumes[: len(signed_volumes)]):
+            if override is None:
+                continue
+            signed_volumes[index] = float(override)
+            tick_covered += 1
+    of_source = "market_ticks" if tick_covered >= _MIN_TICK_COVERED_BARS else "bar_inference"
+    base["of_source"] = of_source
+    base["of_tick_covered_bars"] = tick_covered
+    cvd_total = _cumsum(signed_volumes)
+    cvd_anc = [0.0] * len(signed_volumes)
+    running = 0.0
+    for index in range(anchor, len(signed_volumes)):
+        running += signed_volumes[index]
+        cvd_anc[index] = running
+    session_cvd = _cumsum(signed_volumes[anchor:])
     bands = vwap_bands(closed_1m, anchor_index=anchor)
     vwap_last = bands["vwap"][-1] if bands["vwap"] else None
     vwap_upper_last = bands["upper"][-1] if bands["upper"] else None
@@ -1073,10 +1231,10 @@ def evaluate_commodity_mp_signal(
         try:
             root = extract_commodity_root(symbol) if ":" in str(symbol) else str(symbol or "").strip().upper()
             vol_baseline = _vb_load_baseline(root)
-            mp_bucket = closed_1m[-_MP_PERIOD_BARS:]
+            mp_bucket = closed_1m[-period_bars:]
             current_mp_volume = sum(max(float(b.get("volume") or 0.0), 0.0) for b in mp_bucket)
             if len(cvd_total) >= 2:
-                k = min(_MP_PERIOD_BARS, len(cvd_total) - 1)
+                k = min(period_bars, len(cvd_total) - 1)
                 current_mp_signed = cvd_total[-1] - cvd_total[-1 - k]
             base["vol_baseline_ready"] = bool(vol_baseline and vol_baseline.ready)
             base["vol_baseline_median"] = _round(getattr(vol_baseline, "median", None), 0) if vol_baseline else None
@@ -1086,10 +1244,15 @@ def evaluate_commodity_mp_signal(
             vol_baseline = None
 
     # A historical scale baseline cannot rescue missing observations. When the
-    # recent MP buckets lack usable volume, OF-dependent entries are blocked.
-    volume_coverage = _of_volume_coverage(closed_1m)
+    # recent MP buckets lack usable volume, OF-dependent entries are blocked —
+    # but only on the BAR-INFERENCE path. The R0 gate exists because sparse
+    # bar-OHLCV volume makes inferred CVD noise; real tick-tape CVD
+    # (of_source == "market_ticks") is measured flow, not inference, so the
+    # gate does not apply there.
+    volume_coverage = _of_volume_coverage(closed_1m, period_bars=period_bars)
     of_degraded = (
         settings.COMMODITY_OF_QUALITY_GATE_ENABLED
+        and of_source != "market_ticks"
         and volume_coverage < float(settings.COMMODITY_OF_MIN_VOL_COVERAGE)
     )
     base["of_degraded"] = bool(of_degraded)
@@ -1133,6 +1296,7 @@ def evaluate_commodity_mp_signal(
         cvd_anchored=cvd_anc,
         vwap_last=vwap_last,
         of_degraded=of_degraded,
+        window_bars=period_bars,
     )
     base["value_migration_state"] = value_migration.get("state")
     base["value_migration_direction"] = value_migration.get("direction")
@@ -1264,5 +1428,6 @@ def evaluate_commodity_mp_signal(
 __all__ = [
     "TriggerResult",
     "evaluate_commodity_mp_signal",
+    "tick_signed_volume_overrides",
     "_compute_atr",
 ]

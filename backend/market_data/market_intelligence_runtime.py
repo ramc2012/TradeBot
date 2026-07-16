@@ -14,7 +14,14 @@ from sqlalchemy import text
 
 from api.routers.auth import ensure_fyers_session, ensure_upstox_session, get_active_adapter
 from db.redis_client import get_redis
-from brokers.rate_limiter import PRIORITY_BULK, broker_priority
+from brokers.rate_limiter import (
+    CLASS_BULK,
+    CLASS_CRITICAL,
+    CLASS_STANDARD,
+    PRIORITY_BULK,
+    broker_class,
+    broker_priority,
+)
 from core.config import settings
 from core.trading_calendar import trading_calendar
 from db.database import AsyncSessionLocal
@@ -350,11 +357,15 @@ class MarketIntelligenceRuntime:
 
         for symbol in requested:
             try:
-                rows, source, history_symbol = await _fetch_recent_minute_rows(
-                    symbol,
-                    lookback_days=lookback_days,
-                    allow_live_broker_refresh=True,
-                )
+                # CLASS_BULK: a 10-day broker backfill is reconciliation, not
+                # a live need — hard-capped at 25% of the broker budget and
+                # yields instantly to queued CRITICAL work.
+                with broker_class(CLASS_BULK):
+                    rows, source, history_symbol = await _fetch_recent_minute_rows(
+                        symbol,
+                        lookback_days=lookback_days,
+                        allow_live_broker_refresh=True,
+                    )
                 stored = await self._upsert_spot_rows(
                     symbol_code=symbol,
                     history_symbol=history_symbol,
@@ -616,15 +627,19 @@ class MarketIntelligenceRuntime:
                 )
                 break
             try:
-                result = await asyncio.wait_for(
-                    self._refresh_cached_index_option_chain(
-                        symbol_code,
-                        expiry_iso,
-                        upstox_adapter=upstox_adapter,
-                        fyers_adapter=fyers_adapter,
-                    ),
-                    timeout=CHAIN_REFRESH_PER_PAIR_TIMEOUT_SECONDS,
-                )
+                # CLASS_CRITICAL: the index chain refresh feeds S1's live
+                # decisions — it draws from the reserved 40% broker share so
+                # bulk sweeps/backfills can never queue ahead of it.
+                with broker_class(CLASS_CRITICAL):
+                    result = await asyncio.wait_for(
+                        self._refresh_cached_index_option_chain(
+                            symbol_code,
+                            expiry_iso,
+                            upstox_adapter=upstox_adapter,
+                            fyers_adapter=fyers_adapter,
+                        ),
+                        timeout=CHAIN_REFRESH_PER_PAIR_TIMEOUT_SECONDS,
+                    )
             except asyncio.TimeoutError:
                 timed_out += 1
                 logger.warning(
@@ -980,10 +995,14 @@ class MarketIntelligenceRuntime:
                 i = (i + len(batch)) % n
             return covered, i
 
-        # BULK priority: this is background broad-universe coverage — it must
-        # yield the shared broker budget to interactive reads and live marks
-        # under load (fair-share aging still guarantees it isn't starved).
-        with broker_priority(PRIORITY_BULK):
+        # BULK priority within the STANDARD quota class: the premium top-up is
+        # background broad-universe coverage — it must yield the shared broker
+        # budget to interactive reads and live marks under load (fair-share
+        # aging still guarantees it isn't starved), but as CLASS_STANDARD it
+        # shares the guaranteed ≥35% band rather than the 25%-capped BULK band
+        # (gap-fill/backfills/chain-builder) so held-strike premium coverage
+        # keeps flowing even while a backfill saturates the bulk cap.
+        with broker_priority(PRIORITY_BULK), broker_class(CLASS_STANDARD):
             # Pass 1 — current ATM picks, rotated from the fairness cursor so a
             # budget-starved tail is refreshed on a later cycle rather than never.
             # Broker-allowed unless demoted to gaps-only (chain_builder feeds them).

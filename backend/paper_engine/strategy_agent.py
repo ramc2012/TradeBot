@@ -86,15 +86,18 @@ from paper_engine import strategy_agent_state as strategy_state_module
 from paper_engine.base_strategy_agent import (
     BaseStrategyAgent,
     IST,
+    PERSIST_RECENT_EVENTS_MAX,
     _ensure_ist_datetime,
     _latest_runtime_day,
     _latest_session_rows,
     _now_ist,
     _parse_iso_timestamp,
+    _restore_archived_trade_summary,
     _round_or_none,
     _serialize_equity_curve,
     _serialize_trade_history,
     _split_today_history,
+    _trade_history_persist_payload,
     _deserialize_equity_curve,
     _deserialize_trade_history,
 )
@@ -117,6 +120,13 @@ from paper_engine.strategy_agent_state import (
 
 def _in_market_hours(now: Optional[datetime] = None) -> bool:
     return trading_calendar.is_exchange_open("NSE", now or _now_ist())
+
+
+# Closed-market prep may retry while it keeps yielding an empty watchlist
+# (e.g. brokers flapping right after the close), but never more than this many
+# times per closed stretch — after that the agent idles until the next open.
+CLOSED_PREP_MAX_ATTEMPTS = 5
+
 
 def _looks_like_stale_blocking_message(message: Optional[str]) -> bool:
     text = str(message or "").lower()
@@ -714,6 +724,15 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         self._strategy2_spot_cache: dict[str, tuple[datetime, list[dict[str, Any]], str]] = {}
         self._last_data_health: dict[str, Any] = {}
         self._historical_recovery_attempted = False
+        # Closed-market prep gate: `_prepare_closed_market_state` runs ONCE per
+        # closed stretch (bounded retries while it yields 0 rows), then the
+        # loop idles until the next open. Before 2026-07-16 it re-ran EVERY
+        # scan cycle all night — at midnight the watchlist stale-marker flags
+        # all of yesterday's rows (older than "today 09:15") and each prep
+        # kicked a full-universe broker rebuild (observed 2026-07-16: 216
+        # underlyings/hour of snapshot writes from 00:00 to 05:30 IST).
+        self._closed_prep_done = False
+        self._closed_prep_attempts = 0
         self._state_synced_at: Optional[datetime] = None
         saved_state, saved_updated_at = _load_saved_strategy_state()
         self._restore_saved_state(saved_state)
@@ -830,6 +849,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         runtime.portfolio._trade_history = _deserialize_trade_history(
             [row for row in list(portfolio_payload.get("trade_history") or []) if isinstance(row, dict)]
         )
+        _restore_archived_trade_summary(runtime.portfolio, portfolio_payload)
         runtime.portfolio._daily_pnl.clear()
         for raw_day, pnl in dict(portfolio_payload.get("daily_pnl") or {}).items():
             try:
@@ -905,6 +925,11 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             runtime.portfolio.update_prices({symbol: pos.current_price for symbol, pos in runtime.positions.items()})
 
     def _serialize_runtime_state(self, runtime: StrategyRuntime) -> dict[str, Any]:
+        # F-18 payload trim: equity curve last 2000 points, events last 200,
+        # trades last 500 + rolling summary. The blob is decoded on the event
+        # loop on every restore — unbounded growth is the "stales later each
+        # day" mechanism. Full per-trade history stays in paper_trade_book.
+        trade_rows, trade_summary = _trade_history_persist_payload(runtime.portfolio)
         return {
             "entries": runtime.entries,
             "exits": runtime.exits,
@@ -913,13 +938,16 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             "processed_signals": runtime.processed_signals,
             "signal_lane": runtime.signal_lane,
             "meta": runtime.meta,
-            "recent_events": [asdict(event) for event in runtime.recent_events],
+            "recent_events": [
+                asdict(event) for event in runtime.recent_events[:PERSIST_RECENT_EVENTS_MAX]
+            ],
             "positions": [asdict(position) for position in runtime.positions.values()],
             "portfolio": {
                 "initial_capital": runtime.portfolio.initial_capital,
                 "available_capital": runtime.portfolio.available_capital,
                 "peak_equity": getattr(runtime.portfolio, "_peak_equity", runtime.portfolio.initial_capital),
-                "trade_history": _serialize_trade_history(runtime.portfolio),
+                "trade_history": trade_rows,
+                "trade_history_summary": trade_summary,
                 "daily_pnl": {str(day): pnl for day, pnl in getattr(runtime.portfolio, "_daily_pnl", {}).items()},
                 "equity_curve": _serialize_equity_curve(runtime.portfolio),
             },
@@ -1349,7 +1377,12 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         market_intelligence_health: dict[str, Any],
         broker_snapshot: Optional[dict[str, Any]],
         local_only_mode: bool,
-    ) -> None:
+    ) -> bool:
+        """Prepare the closed-market display/recovery state.
+
+        Returns True when a non-empty watchlist was prepared — the caller uses
+        that to mark the once-per-closed-stretch prep as done.
+        """
         rows: list[dict[str, Any]] = []
         watchlist_detail: Optional[str] = None
         broker_ready = bool((broker_snapshot or {}).get("broker_ready"))
@@ -1411,7 +1444,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                 if _looks_like_stale_blocking_message(lane.runtime.last_message):
                     lane.runtime.last_message = self._last_message
             self._append_commentary("System", self._last_message, tone="idle")
-            return
+            return False
 
         all_underlyings = [
             str(row.get("underlying") or "").strip()
@@ -1569,6 +1602,7 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             f"Upstox={'ready' if (broker_snapshot or {}).get('upstox_ready') else 'not ready'}."
         )
         self._append_commentary("System", self._last_message, tone="info")
+        return True
 
     async def _load_strategy2_native_watchlist_rows(
         self,
@@ -2245,13 +2279,31 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                         "data_quality": data_quality_snapshot,
                         "option_history": option_history_service.get_health_snapshot(),
                     }
-                    if market_intelligence_health.get("ready") or (broker_snapshot or {}).get("broker_ready"):
-                        await self._prepare_closed_market_state(
+                    data_ready_for_prep = bool(
+                        market_intelligence_health.get("ready")
+                        or (broker_snapshot or {}).get("broker_ready")
+                    )
+                    prep_pending = force or (
+                        not self._closed_prep_done
+                        and self._closed_prep_attempts < CLOSED_PREP_MAX_ATTEMPTS
+                    )
+                    if data_ready_for_prep and prep_pending:
+                        # ONE catch-up/prep pass per closed stretch (see
+                        # __init__). force=True (manual run-now) always preps.
+                        self._closed_prep_attempts += 1
+                        prepared_rows = await self._prepare_closed_market_state(
                             started_at,
                             market_intelligence_health=market_intelligence_health,
                             broker_snapshot=broker_snapshot,
                             local_only_mode=local_only_mode,
                         )
+                        if prepared_rows:
+                            self._closed_prep_done = True
+                    elif data_ready_for_prep:
+                        # Prep already captured for this closed stretch — hold
+                        # the prepared state and stay idle (no watchlist /
+                        # expiry / broker work while NSE is closed).
+                        pass
                     else:
                         last_live_scan = self._last_run_at or self._strategy2.last_scan_at or self._strategy1.last_scan_at
                         self._last_message = (
@@ -2265,6 +2317,11 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
                                 lane.runtime.last_message = self._last_message
                         self._append_commentary("System", "Market closed. Agent idle.", tone="idle")
                     return await self._status_with_risk_snapshot()
+
+                # Market is open — re-arm the closed-market prep gate so the
+                # next close gets exactly one fresh catch-up pass.
+                self._closed_prep_done = False
+                self._closed_prep_attempts = 0
 
                 local_only_mode = settings.MARKET_INTELLIGENCE_STRATEGY_LOCAL_ONLY or settings.PAPER_TRADING_ONLY
                 broker_snapshot: dict[str, Any] | None = None

@@ -238,8 +238,15 @@ class ChainCandleBuilder:
                 # Empty expiry → Fyers returns the NEAREST-expiry band (front month).
                 # CHAIN_BUILDER priority — ahead of the bulk premium top-up, behind
                 # interactive reads/live marks (contextvar → limiter.acquire()).
-                from brokers.rate_limiter import PRIORITY_CHAIN_BUILDER, broker_priority
-                with broker_priority(PRIORITY_CHAIN_BUILDER):
+                # CLASS_BULK: broad-universe sweep — hard-capped at 25% of the
+                # broker budget, yields instantly to queued CRITICAL work.
+                from brokers.rate_limiter import (
+                    CLASS_BULK,
+                    PRIORITY_CHAIN_BUILDER,
+                    broker_class,
+                    broker_priority,
+                )
+                with broker_priority(PRIORITY_CHAIN_BUILDER), broker_class(CLASS_BULK):
                     chain = await adapter.get_option_chain(self._fyers_symbol(meta), "")
             except Exception as exc:  # noqa: BLE001 - isolate one bad name from the sweep
                 logger.debug(f"[chain-builder] {meta.symbol} chain fetch failed: {exc}")

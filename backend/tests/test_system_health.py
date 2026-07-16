@@ -444,6 +444,128 @@ async def test_system_health_marks_stale_supervisor_degraded(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
+async def test_system_health_ignores_nse_lane_start_time_without_a_fresh_top_level_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+
+    monkeypatch.setattr(system, "AsyncSessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(system, "get_redis", lambda: _async_value(_FakeRedis()))
+    monkeypatch.setattr(system, "_load_research_sync_runtime_state", lambda: {})
+    monkeypatch.setattr(system, "_in_market_hours", lambda _now: True)
+    monkeypatch.setattr(system, "_in_commodity_hours", lambda _now: False)
+    monkeypatch.setattr(
+        system,
+        "get_broker_connection_snapshot",
+        lambda force_validate=False: _async_result(
+            {
+                "connected_brokers": ["fyers"],
+                "broker_ready": True,
+                "upstox_ready": False,
+                "fyers_ready": True,
+                "upstox_token_health": {"status": "missing", "valid": False},
+                "fyers_token_health": {"status": "valid_session", "valid": True},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        system.data_router,
+        "get_status",
+        lambda: {
+            "mode": "broker",
+            "broker": "fyers",
+            "subscribed_symbols": ["NIFTY"],
+            "subscribed_symbol_count": 1,
+            "tick_buffer_size": 1,
+            "callback_count": 1,
+            "ws_connected": True,
+            "mock_running": False,
+            "last_tick_at": now.isoformat(),
+        },
+    )
+    stale_run = now - timedelta(minutes=12)
+    fresh_lane_start = now - timedelta(seconds=20)
+    monkeypatch.setattr(
+        system,
+        "paper_strategy_agent",
+        _FakeStrategySupervisor(
+            {
+                "enabled": True,
+                "running": True,
+                "loop_active": True,
+                "auto_run_enabled": True,
+                "kill_switch_active": False,
+                "scan_interval_seconds": 60,
+                "last_run_at": stale_run.isoformat(),
+                "next_scan_at": (stale_run + timedelta(minutes=1)).isoformat(),
+                "last_message": "Scan loop healthy.",
+                "strategy_agents": [
+                    {"key": "macd_strategy", "label": "ATM MACD", "timeframe": "30minute", "scope": "ATM options"}
+                ],
+                "strategies": [
+                    {
+                        "key": "macd_strategy",
+                        "label": "ATM MACD",
+                        "summary": {"open_positions": 1},
+                        "last_scan_at": fresh_lane_start.isoformat(),
+                    }
+                ],
+                "data_health": {"broker_snapshot": {"broker_ready": True}},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        system,
+        "commodity_strategy_agent",
+        _FakeStrategySupervisor(
+            {
+                "enabled": True,
+                "running": False,
+                "loop_active": False,
+                "auto_run_enabled": True,
+                "kill_switch_active": False,
+                "scan_interval_seconds": 30,
+                "last_run_at": now.isoformat(),
+                "strategies": [],
+                "strategy_agents": [],
+                "data_health": {},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        system,
+        "auction_intelligence_summary",
+        lambda: _async_result(
+            {
+                "connected_brokers": ["fyers"],
+                "live_ready": True,
+                "deployable_first_sleeve": "swing",
+                "validation_gates": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        system,
+        "_fractal_market_profile_service",
+        lambda: _async_result(
+            {
+                "key": "fractal_market_profile",
+                "label": "Fractal Market Profile",
+                "status": "healthy",
+                "detail": "Recent minute history is available.",
+                "meta": {"symbol_code": "NIFTY", "session_count": 2},
+            }
+        ),
+    )
+
+    payload = await system.system_health()
+
+    nse_service = next(service for service in payload["services"] if service["key"] == "nse_strategy")
+    assert nse_service["status"] == "degraded"
+    assert nse_service["meta"]["freshness_reference_at"] == stale_run.isoformat()
+
+
+@pytest.mark.asyncio
 async def test_system_health_uses_recent_commodity_position_review_for_freshness(monkeypatch: pytest.MonkeyPatch) -> None:
     now = datetime.now(timezone.utc)
 

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from math import floor
+from statistics import median
 from typing import Any
 
 from analytics.orderflow import bar_cvd, cvd_divergence, hvn_lvn, volume_node_density
@@ -65,18 +66,156 @@ def build_footprint(ticks: list[dict[str, Any]], tick_size: float) -> dict[str, 
     return {"bars": rows, "tick_count": len(ticks), "source": "market_ticks" if len(rows) >= 4 else "insufficient_ticks"}
 
 
-def _footprint_trigger(footprint: dict[str, Any], direction: str) -> tuple[bool, float]:
-    rows = footprint.get("bars") or []
+def _footprint_trigger(
+    footprint: dict[str, Any],
+    direction: str,
+    *,
+    now: datetime | None = None,
+    lookback_bars: int = 2,
+) -> tuple[bool, float]:
+    rows = list(footprint.get("bars") or [])
+    if now is not None:
+        completed: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                timestamp = datetime.fromisoformat(str(row["time"]))
+                if timestamp + timedelta(minutes=3) <= now:
+                    completed.append(row)
+            except (KeyError, TypeError, ValueError):
+                continue
+        rows = completed
     if not rows:
         return False, 0.0
-    levels = rows[-1].get("levels") or []
-    if not levels:
-        return False, 0.0
-    span = max(1, len(levels) // 3)
-    tail = levels[:span] if direction == "LONG" else levels[-span:]
     key = "buy_ratio" if direction == "LONG" else "sell_ratio"
-    ratio = max((_f(row.get(key)) for row in tail), default=0.0)
+    ratio = 0.0
+    for bar in rows[-max(1, lookback_bars):]:
+        levels = bar.get("levels") or []
+        if not levels:
+            continue
+        span = max(1, len(levels) // 3)
+        tail = levels[:span] if direction == "LONG" else levels[-span:]
+        ratio = max(ratio, max((_f(row.get(key)) for row in tail), default=0.0))
     return ratio >= 3.0, ratio
+
+
+def _freshness_limit_ms(ticks: list[dict[str, Any]]) -> float:
+    """Adaptive tape freshness for a three-minute strategy.
+
+    A fixed one-second limit made a 60-second runner reject healthy tapes. Use
+    three times the observed inter-tick cadence, bounded to 45-90 seconds.
+    """
+    gaps: list[float] = []
+    for previous, current in zip(ticks[-51:-1], ticks[-50:]):
+        try:
+            gap = (current["time"] - previous["time"]).total_seconds() * 1000.0
+        except (KeyError, TypeError, AttributeError):
+            continue
+        if gap > 0:
+            gaps.append(gap)
+    adaptive = median(gaps) * 3.0 if gaps else 45_000.0
+    return min(90_000.0, max(45_000.0, adaptive))
+
+
+def _structural_setup(
+    bars: list[dict[str, Any]],
+    levels: list[float],
+    direction: str,
+    tolerance: float,
+    *,
+    active_window_bars: int = 5,
+    search_window_bars: int = 10,
+) -> dict[str, Any]:
+    """Find the latest sweep/rejection and keep it armed for several bars."""
+    latest: dict[str, Any] | None = None
+    start = max(0, len(bars) - max(active_window_bars, search_window_bars))
+    for index in range(start, len(bars)):
+        bar = bars[index]
+        open_, high, low, close = (_f(bar.get(key)) for key in ("open", "high", "low", "close"))
+        candidates: list[tuple[float, str]] = []
+        for level in levels:
+            if level <= 0:
+                continue
+            if direction == "LONG":
+                sweep = low < level and close >= level
+                rejection = abs(low - level) <= tolerance * 0.25 and close >= level and close > open_
+            else:
+                sweep = high > level and close <= level
+                rejection = abs(high - level) <= tolerance * 0.25 and close <= level and close < open_
+            if sweep or rejection:
+                candidates.append((level, "sweep_reclaim" if sweep else "rejection"))
+        if candidates:
+            level, event = min(candidates, key=lambda item: abs(close - item[0]))
+            latest = {
+                "direction": direction,
+                "event": event,
+                "level": level,
+                "extreme": low if direction == "LONG" else high,
+                "bar_time": bar["time"].isoformat() if hasattr(bar.get("time"), "isoformat") else str(bar.get("time")),
+                "bar_index": index,
+            }
+    if latest is None:
+        return {"direction": direction, "state": "WATCHING", "active": False, "age_bars": None}
+    age = len(bars) - 1 - int(latest["bar_index"])
+    active = age < max(1, active_window_bars)
+    latest.update({"age_bars": age, "active": active, "state": "ARMED" if active else "EXPIRED"})
+    latest.pop("bar_index", None)
+    return latest
+
+
+def _cvd_impulse(cvd: list[float], direction: str) -> bool:
+    if len(cvd) < 3:
+        return False
+    recent = cvd[-7:]
+    changes = [current - previous for previous, current in zip(recent, recent[1:])]
+    if not changes:
+        return False
+    latest = changes[-1]
+    baseline = median(abs(change) for change in changes)
+    return latest >= baseline and latest > 0 if direction == "LONG" else latest <= -baseline and latest < 0
+
+
+def _price_confirmation(bars: list[dict[str, Any]], setup: dict[str, Any], direction: str) -> bool:
+    if not setup.get("active") or not bars:
+        return False
+    latest = bars[-1]
+    open_, close = _f(latest.get("open")), _f(latest.get("close"))
+    level = _f(setup.get("level"))
+    if direction == "LONG":
+        return close >= level and (close > open_ or (len(bars) >= 2 and close > _f(bars[-2].get("high"))))
+    return close <= level and (close < open_ or (len(bars) >= 2 and close < _f(bars[-2].get("low"))))
+
+
+def _risk_plan(
+    *,
+    direction: str,
+    entry: float,
+    setup: dict[str, Any],
+    atr_value: float,
+    targets: list[float],
+    max_chase_atr: float,
+    min_reward_risk: float,
+) -> dict[str, Any]:
+    if not setup.get("active") or entry <= 0 or atr_value <= 0:
+        return {"not_chasing": False, "reward_risk_valid": False, "reward_risk": 0.0, "stop": None, "target1": None, "target2": None}
+    level = _f(setup.get("level"))
+    extreme = _f(setup.get("extreme"), entry)
+    stop = extreme - 0.25 * atr_value if direction == "LONG" else extreme + 0.25 * atr_value
+    risk_points = abs(entry - stop)
+    not_chasing = abs(entry - level) <= max_chase_atr * atr_value
+    favorable = sorted(
+        {target for target in targets if target > entry} if direction == "LONG" else {target for target in targets if 0 < target < entry},
+        reverse=direction == "SHORT",
+    )
+    target2 = favorable[0] if favorable else None
+    reward_risk = abs(target2 - entry) / risk_points if target2 is not None and risk_points > 0 else 0.0
+    return {
+        "not_chasing": not_chasing,
+        "reward_risk_valid": reward_risk >= min_reward_risk,
+        "reward_risk": reward_risk,
+        "stop": stop,
+        "target1": entry + risk_points if direction == "LONG" else entry - risk_points,
+        "target2": target2,
+    }
 
 
 def _aligned_tick_cvd(
@@ -123,6 +262,11 @@ def evaluate_rules(
     noon_quarantine: bool = True,
     require_vix: bool = True,
     kind: str | None = None,
+    directional_bias: str | None = None,
+    setup_window_bars: int = 5,
+    min_confirmations: int = 2,
+    max_chase_atr: float = 0.5,
+    min_reward_risk: float = 1.5,
 ) -> dict[str, Any]:
     # noon_quarantine / require_vix are NSE-session concepts: the 11:45-13:15
     # lunch-liquidity hole and India VIX conditioning don't apply to the MCX
@@ -144,50 +288,126 @@ def evaluate_rules(
     hvn_prices = [(_f(row["price_low"]) + _f(row["price_high"])) / 2 for row in hvns]
     spot = _f(current_bars[-1]["close"])
     tolerance = max(spot * 0.0015, _f(current.initial_balance_range) * 0.25)
-    near_hvn = any(abs(spot - level) <= tolerance for level in hvn_prices)
-    long_structure = spot <= _f(prior.val) + tolerance or near_hvn
-    short_structure = spot >= _f(prior.vah) - tolerance or abs(spot - _f(prior.poc)) <= tolerance
+    long_setup = _structural_setup(current_bars, [_f(prior.val), *hvn_prices], "LONG", tolerance, active_window_bars=setup_window_bars)
+    short_setup = _structural_setup(current_bars, [_f(prior.vah), *hvn_prices], "SHORT", tolerance, active_window_bars=setup_window_bars)
     long_div = divergence is not None and divergence.kind == "bullish" and cvd_source == "market_ticks"
     short_div = divergence is not None and divergence.kind == "bearish" and cvd_source == "market_ticks"
-    long_fp, long_ratio = _footprint_trigger(footprint, "LONG")
-    short_fp, short_ratio = _footprint_trigger(footprint, "SHORT")
-    clock_ok = clock_drift_ms is not None and abs(clock_drift_ms) <= 1000.0
+    long_cvd = long_div or (cvd_source == "market_ticks" and _cvd_impulse(cvd, "LONG"))
+    short_cvd = short_div or (cvd_source == "market_ticks" and _cvd_impulse(cvd, "SHORT"))
+    long_fp, long_ratio = _footprint_trigger(footprint, "LONG", now=now, lookback_bars=2)
+    short_fp, short_ratio = _footprint_trigger(footprint, "SHORT", now=now, lookback_bars=2)
+    long_price = _price_confirmation(current_bars, long_setup, "LONG")
+    short_price = _price_confirmation(current_bars, short_setup, "SHORT")
+    long_confirmations = {"cvd_confirmation": long_cvd, "buying_footprint_3x_recent": long_fp, "price_reclaim": long_price}
+    short_confirmations = {"cvd_confirmation": short_cvd, "selling_footprint_3x_recent": short_fp, "price_reclaim": short_price}
+    long_confirmation_count = sum(long_confirmations.values())
+    short_confirmation_count = sum(short_confirmations.values())
+    freshness_limit_ms = _freshness_limit_ms(ticks)
+    # abs(): tick timestamps come from DB writes whose clock can sit a few ms
+    # AHEAD of the app clock — requiring drift >= 0 made this gate fail on all
+    # 8 MCX roots while ticks were second-fresh (observed live 2026-07-15
+    # 16:18 IST, gate_breakdown tick_fresh:8). Magnitude is what matters.
+    tick_fresh = clock_drift_ms is not None and abs(clock_drift_ms) <= freshness_limit_ms
     noon = noon_quarantine and (now.hour == 12 or (now.hour == 11 and now.minute >= 45) or (now.hour == 13 and now.minute <= 15))
-    data_gates = {
-        "clock_sync": clock_ok,
+    readiness_gates = {
+        "tick_fresh": tick_fresh,
         "real_tick_cvd": cvd_source == "market_ticks",
         "outside_noon_quarantine": not noon,
         "vix_available": vix is not None if require_vix else True,
     }
-    long_gates = {**data_gates, "structural_trap": long_structure, "bullish_cvd_divergence": long_div, "buying_footprint_3x": long_fp}
-    short_gates = {**data_gates, "structural_ceiling": short_structure, "bearish_cvd_divergence": short_div, "selling_footprint_3x": short_fp}
-    direction = "LONG" if all(long_gates.values()) else "SHORT" if all(short_gates.values()) else "FLAT"
-    trigger = current_bars[-1]
     atr_value = atr(current_bars)
-    stop_mult = 3.0 if vix is not None and vix > 22 else 2.0
-    stop = _f(trigger["low"]) - stop_mult * atr_value if direction == "LONG" else _f(trigger["high"]) + stop_mult * atr_value if direction == "SHORT" else None
-    entry = spot
-    risk_points = abs(entry - stop) if stop is not None else 0.0
-    target1 = entry + risk_points if direction == "LONG" else entry - risk_points if direction == "SHORT" else None
     ib_mid = (_f(current.initial_balance_high) + _f(current.initial_balance_low)) / 2
+    long_targets = [_f(current.poc), _f(current.vah), ib_mid, _f(prior.poc), _f(prior.vah), _f(options.get("call_wall"))]
+    short_targets = [_f(current.poc), _f(current.val), ib_mid, _f(prior.poc), _f(prior.val), _f(options.get("put_wall"))]
+    long_risk = _risk_plan(direction="LONG", entry=spot, setup=long_setup, atr_value=atr_value, targets=long_targets, max_chase_atr=max_chase_atr, min_reward_risk=min_reward_risk)
+    short_risk = _risk_plan(direction="SHORT", entry=spot, setup=short_setup, atr_value=atr_value, targets=short_targets, max_chase_atr=max_chase_atr, min_reward_risk=min_reward_risk)
+    bias = str(directional_bias or "neutral").lower()
+    long_bias_ok = bias in {"neutral", "bullish", "long", "none", ""}
+    short_bias_ok = bias in {"neutral", "bearish", "short", "none", ""}
+    long_gates = {
+        **readiness_gates,
+        "directional_bias_aligned": long_bias_ok,
+        "structural_setup_armed": bool(long_setup.get("active")),
+        "confirmation_2_of_3": long_confirmation_count >= min_confirmations,
+        "not_chasing": bool(long_risk["not_chasing"]),
+        "reward_risk_1_5": bool(long_risk["reward_risk_valid"]),
+    }
+    short_gates = {
+        **readiness_gates,
+        "directional_bias_aligned": short_bias_ok,
+        "structural_setup_armed": bool(short_setup.get("active")),
+        "confirmation_2_of_3": short_confirmation_count >= min_confirmations,
+        "not_chasing": bool(short_risk["not_chasing"]),
+        "reward_risk_1_5": bool(short_risk["reward_risk_valid"]),
+    }
+    long_actionable = all(long_gates.values())
+    short_actionable = all(short_gates.values())
+    long_score = 35 * int(bool(long_setup.get("active"))) + 15 * long_confirmation_count + 10 * int(bool(long_risk["not_chasing"])) + 10 * int(bool(long_risk["reward_risk_valid"]))
+    short_score = 35 * int(bool(short_setup.get("active"))) + 15 * short_confirmation_count + 10 * int(bool(short_risk["not_chasing"])) + 10 * int(bool(short_risk["reward_risk_valid"]))
+    direction_conflict = long_actionable and short_actionable and long_score == short_score
+    if direction_conflict:
+        long_gates["unambiguous_direction"] = False
+        short_gates["unambiguous_direction"] = False
+        direction = "FLAT"
+    elif long_actionable and short_actionable:
+        direction = "LONG" if long_score > short_score else "SHORT" if short_score > long_score else "FLAT"
+    else:
+        direction = "LONG" if long_actionable else "SHORT" if short_actionable else "FLAT"
+    preferred = direction if direction != "FLAT" else ("LONG" if long_score >= short_score else "SHORT")
+    preferred_setup = long_setup if preferred == "LONG" else short_setup
+    preferred_gates = long_gates if preferred == "LONG" else short_gates
+    preferred_count = long_confirmation_count if preferred == "LONG" else short_confirmation_count
+    preferred_risk = long_risk if preferred == "LONG" else short_risk
+    if direction_conflict:
+        setup_state = "CONFLICT"
+    elif direction != "FLAT":
+        setup_state = "CONFIRMED"
+    elif preferred_setup.get("state") == "EXPIRED":
+        setup_state = "EXPIRED"
+    elif not preferred_setup.get("active"):
+        setup_state = "WATCHING"
+    elif preferred_count < min_confirmations:
+        setup_state = "ARMED"
+    elif not preferred_risk["not_chasing"]:
+        setup_state = "MISSED_NO_CHASE"
+    else:
+        setup_state = "CONFIRMED_BLOCKED"
+    chosen_risk = long_risk if direction == "LONG" else short_risk if direction == "SHORT" else preferred_risk
+    confirmation_count = long_confirmation_count if direction == "LONG" else short_confirmation_count if direction == "SHORT" else preferred_count
+    base_risk_fraction = 0.01 if confirmation_count == 3 else 0.005
+    if vix is not None and vix < 11:
+        base_risk_fraction *= 0.5
+    quality = "A+" if confirmation_count == 3 and direction != "FLAT" else "VALID" if direction != "FLAT" else setup_state
     return {
         "kind": kind or ("index" if symbol in {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"} else "stock"),
         "symbol": symbol,
-        "status": "actionable_paper" if direction != "FLAT" else "blocked",
+        "status": "actionable_paper" if direction != "FLAT" else setup_state.lower(),
         "action": direction,
+        "preferred_direction": preferred,
+        "setup_state": setup_state,
+        "quality": quality,
         "spot": spot,
-        "score": round(max(sum(long_gates.values()), sum(short_gates.values())) / len(long_gates) * 100, 2),
-        "gates": long_gates if direction != "SHORT" else short_gates,
+        "score": round(max(long_score, short_score), 2),
+        "readiness_gates": readiness_gates,
+        "gates": preferred_gates,
         "long_gates": long_gates,
         "short_gates": short_gates,
-        "blocked_reasons": [key for key, value in (long_gates if direction != "SHORT" else short_gates).items() if not value],
+        "long_confirmations": long_confirmations,
+        "short_confirmations": short_confirmations,
+        "confirmation_count": confirmation_count,
+        "confirmation_required": min_confirmations,
+        "long_setup": long_setup,
+        "short_setup": short_setup,
+        "blocked_reasons": [key for key, value in preferred_gates.items() if not value],
         "profile": {**asdict(current), "prior": {"vah": prior.vah, "val": prior.val, "poc": prior.poc}, "hvn_prices": [round(value, 2) for value in hvn_prices[:8]]},
         "cvd": {"source": cvd_source, "series": cvd_series, "divergence": asdict(divergence) if divergence else None},
         "footprint": {**footprint, "long_ratio": long_ratio, "short_ratio": short_ratio},
         "options": options,
-        "risk": {"entry": entry, "atr_3m": atr_value, "stop_multiplier": stop_mult, "stop": stop, "target1": target1, "ib_midpoint": ib_mid, "target2_long": options.get("call_wall"), "target2_short": options.get("put_wall"), "lot_size": lot_size, "risk_fraction": 0.005 if vix is not None and vix < 11 else 0.01},
-        "vix": {"value": vix, "size_multiplier": 0.5 if vix is not None and vix < 11 else 1.0, "stop_multiplier": stop_mult},
+        "risk": {"entry": spot, "atr_3m": atr_value, "stop": chosen_risk["stop"] if direction != "FLAT" else None, "target1": chosen_risk["target1"] if direction != "FLAT" else None, "target2_long": long_risk["target2"], "target2_short": short_risk["target2"], "reward_risk": chosen_risk["reward_risk"], "ib_midpoint": ib_mid, "lot_size": lot_size, "risk_fraction": base_risk_fraction},
+        "vix": {"value": vix, "size_multiplier": 0.5 if vix is not None and vix < 11 else 1.0},
         "clock_drift_ms": clock_drift_ms,
+        "tick_age_ms": clock_drift_ms,
+        "tick_freshness_limit_ms": freshness_limit_ms,
         "bars": bar_series,
     }
 

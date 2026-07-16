@@ -29,9 +29,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "data_root": DATA_ROOT,
     "runtime_root": RUNTIME_ROOT,
     "universe": ["NIFTY", "BANKNIFTY", "SENSEX"],
-    "timeframes": ["5minute", "15minute"],
+    # FAST-lane timeframe policy (2026-07-15): default scan bars are 3-minute;
+    # 5m/15m remain selectable via the API `timeframe` query param.
+    "timeframes": ["3minute", "5minute", "15minute"],
     "default_underlying": "NIFTY",
-    "default_timeframe": "5minute",
+    "default_timeframe": "3minute",
     "feature_engine": {
         "ema_fast": 8,
         "ema_slow": 21,

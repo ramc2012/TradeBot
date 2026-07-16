@@ -31,7 +31,8 @@ class RegimeClassifier:
         range_expansion = float(row.get("range_expansion", 1.0))
         ema_spread = float(row.get("ema_spread_pct", 0.0))
         tf = str(timeframe or "").lower()
-        is_fast = tf.startswith("5")
+        # Fast intraday tape = 3-minute (new FAST-lane default) or 5-minute.
+        is_fast = tf.startswith(("3", "5"))
 
         reasons: list[str] = []
         if rv_pct >= 0.9 and range_expansion >= 1.9:
@@ -87,11 +88,11 @@ class RegimeClassifier:
             )
 
         if is_fast and adx >= 12.0 and abs(ema_spread) >= 0.0003:
-            # 5-minute tape can support tradable micro-trends even when the
-            # higher-timeframe ADX is suppressed. Threshold lowered so a
-            # genuinely-moving instrument on 5-min bars isn't mislabelled
+            # Fast (3/5-minute) tape can support tradable micro-trends even
+            # when the higher-timeframe ADX is suppressed. Threshold lowered
+            # so a genuinely-moving instrument on fast bars isn't mislabelled
             # chop just because the 14-bar ADX hasn't crossed 14 yet.
-            reasons.append("micro trend bias on 5-minute timeframe")
+            reasons.append("micro trend bias on fast intraday timeframe")
             reasons.append("adx/ema spread cleared fast-tape hurdle")
             return RegimeSnapshot(
                 label="micro_trend",

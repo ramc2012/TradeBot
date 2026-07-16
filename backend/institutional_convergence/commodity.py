@@ -331,6 +331,10 @@ class CommodityConvergenceService:
                     noon_quarantine=False,
                     require_vix=False,
                     kind="commodity",
+                    setup_window_bars=int(getattr(settings, "INSTITUTIONAL_CONVERGENCE_SETUP_WINDOW_BARS", 5)),
+                    min_confirmations=int(getattr(settings, "INSTITUTIONAL_CONVERGENCE_MIN_CONFIRMATIONS", 2)),
+                    max_chase_atr=float(getattr(settings, "INSTITUTIONAL_CONVERGENCE_MAX_CHASE_ATR", 0.5)),
+                    min_reward_risk=float(getattr(settings, "INSTITUTIONAL_CONVERGENCE_MIN_REWARD_RISK", 1.5)),
                 )
                 result.update({"sector": "COMMODITY", "futures_contract": symbol})
                 results.append(result)
@@ -390,6 +394,7 @@ class CommodityConvergenceService:
             "universe": universe,
             "latest": state,
             "paper": commodity_convergence_paper_book.summary(),
+            "paper_statistics": commodity_convergence_paper_book.statistics(),
         }
 
 

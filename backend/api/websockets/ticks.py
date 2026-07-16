@@ -881,7 +881,9 @@ async def ws_strategy_snapshot(websocket: WebSocket):
     async def payload_factory():
         if desk == "directional":
             from directional_options.service import directional_options_service
-            return await directional_options_service.live_snapshot(symbol, timeframe or "5minute", 16)
+            # Default follows the lane's FAST-lane 3-minute timeframe; 5m/15m
+            # stay selectable via the ?timeframe= query param.
+            return await directional_options_service.live_snapshot(symbol, timeframe or "3minute", 16)
         if desk == "gann":
             from gann_tp_delta.service import gann_tp_delta_service
             return await gann_tp_delta_service.live_snapshot(
