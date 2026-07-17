@@ -561,6 +561,60 @@ def _filter_closed_interval_rows(
     return filtered
 
 
+def _sanitize_commodity_history(
+    candles: list[dict[str, Any]],
+    *,
+    max_deviation: float = 0.35,
+) -> list[dict[str, Any]]:
+    """Remove cross-symbol OHLC rows using the clean recent tail as anchor.
+
+    The live feed can carry several commodity price scales at once if a retired
+    websocket callback survives a subscription replacement. The current tail
+    is the safest local reference because MCX contracts do not move 35% within
+    the two-to-five-day history window, while the contaminated rows jump by
+    multiples (GOLD at NICKEL/GAS/SILVER prices). A new contract has a new
+    symbol, so legitimate rollover gaps are not compared across symbols.
+    """
+    structurally_valid: list[dict[str, Any]] = []
+    for candle in candles:
+        try:
+            open_price = float(candle.get("open"))
+            high = float(candle.get("high"))
+            low = float(candle.get("low"))
+            close = float(candle.get("close"))
+        except (TypeError, ValueError):
+            continue
+        values = (open_price, high, low, close)
+        if any(value <= 0 or value != value for value in values):
+            continue
+        if high < max(open_price, close, low) or low > min(open_price, close, high):
+            continue
+        structurally_valid.append(candle)
+
+    if len(structurally_valid) < 3:
+        return structurally_valid
+
+    tail_closes = sorted(
+        float(candle["close"]) for candle in structurally_valid[-30:]
+    )
+    midpoint = len(tail_closes) // 2
+    reference = (
+        tail_closes[midpoint]
+        if len(tail_closes) % 2
+        else (tail_closes[midpoint - 1] + tail_closes[midpoint]) / 2.0
+    )
+    lower = reference * (1.0 - max_deviation)
+    upper = reference * (1.0 + max_deviation)
+    return [
+        candle
+        for candle in structurally_valid
+        if all(
+            lower <= float(candle[field]) <= upper
+            for field in ("open", "high", "low", "close")
+        )
+    ]
+
+
 def _bars_between(
     start_time: Optional[str],
     end_time: Optional[str],
@@ -2350,7 +2404,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             lookback_days=lookback_days,
         )
         if self._store_history_is_fresh(store_rows, interval=interval):
-            return store_rows
+            return _sanitize_commodity_history(store_rows)
 
         async def _fetch_broker_rows(*, instrument_key: str, candle_interval: str) -> list[dict[str, Any]]:
             try:
@@ -2416,8 +2470,8 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                     aggregate_bucket,
                 )
         if rows:
-            return rows
-        return store_rows
+            return _sanitize_commodity_history(rows)
+        return _sanitize_commodity_history(store_rows)
 
     def _store_history_is_fresh(self, rows: list[dict[str, Any]], *, interval: str) -> bool:
         if not rows or not _in_commodity_hours():
@@ -2429,7 +2483,14 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             interval_minutes = max(int(str(interval).removesuffix("minute")), 1)
         except ValueError:
             interval_minutes = 1
-        tolerance = timedelta(minutes=max(interval_minutes + 1, 3))
+        # A broker-history request is bounded by the same per-symbol deadline
+        # as the whole MP+OF analysis. If local persistence is only one or two
+        # 3-minute bars behind, spending that entire deadline on broker REST
+        # leaves the corrupt/stale previous snapshot on screen. Accept up to
+        # three missing bars (minimum 10 minutes) as the local-first fallback;
+        # quote marks still stream independently and lane health reports the
+        # candle frontier, so this does not masquerade as tick freshness.
+        tolerance = timedelta(minutes=max((interval_minutes * 3) + 1, 10))
         return (_now_ist() - latest_time.astimezone(IST)) <= tolerance
 
     async def _load_history_from_store(

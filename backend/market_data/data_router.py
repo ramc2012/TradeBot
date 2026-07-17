@@ -44,6 +44,16 @@ class DataRouter:
         self._broker: Optional[BrokerAdapter] = None
         self._ws_client: Any = None
         self._ws_broker: Optional[BrokerAdapter] = None
+        # Subscription replacement is a single-writer operation. Several
+        # strategy/watchlist boot tasks add symbols concurrently; without a
+        # lock they can each create a socket and overwrite ``_ws_client``,
+        # leaving the older socket alive and still dispatching ticks.
+        self._subscription_lock = asyncio.Lock()
+        # Every socket callback captures the generation that created it.
+        # Incrementing this before teardown immediately fences a socket whose
+        # close hangs, so an abandoned SDK thread cannot contaminate the active
+        # quote stream with stale topic-id mappings.
+        self._ws_generation = 0
         self._subscribed_symbols: List[str] = []
         self._desired_primary_symbols: List[str] = []
         # Sticky extras — symbols that the OptionWS subscription manager
@@ -140,6 +150,10 @@ class DataRouter:
         return out
 
     async def subscribe(self, symbols: List[str]):
+        async with self._subscription_lock:
+            await self._subscribe_unlocked(symbols)
+
+    async def _subscribe_unlocked(self, symbols: List[str]):
         if not self._broker:
             logger.warning("[DataRouter] No broker set — cannot subscribe")
             return
@@ -150,7 +164,7 @@ class DataRouter:
         self._desired_primary_symbols = list(dict.fromkeys(to_app_symbol(s) for s in symbols if s))
         full_set = self._compose_subscription_set(self._desired_primary_symbols)
         if not self._stream_window_open():
-            await self.unsubscribe()
+            await self._unsubscribe_unlocked()
             logger.debug("[DataRouter] Subscription deferred until the next NSE/MCX stream window")
             return
         sticky_extras = [s for s in full_set if s in self._sticky_extras]
@@ -164,9 +178,26 @@ class DataRouter:
             )
             return
         await self.stop_mock_feed()
-        await self.unsubscribe()
+        await self._unsubscribe_unlocked()
         self._loop = asyncio.get_running_loop()
         self._subscribed_symbols = full_set
+        generation = self._ws_generation
+
+        def _on_tick_if_current(tick: Tick) -> None:
+            if generation != self._ws_generation:
+                return
+            self._on_tick(tick)
+
+        def _on_depth_if_current(depth: dict) -> None:
+            if generation != self._ws_generation:
+                return
+            self._on_depth(depth)
+
+        def _on_reconnect_if_current() -> None:
+            if generation != self._ws_generation:
+                return
+            self._on_ws_reconnected()
+
         broker_name = getattr(self._broker, "broker_name", "")
         if broker_name == "fyers":
             broker_symbols = [to_fyers_symbol(symbol) for symbol in full_set]
@@ -178,13 +209,13 @@ class DataRouter:
             # plus a reconnect hook that invalidates the dedupe state below.
             self._ws_client = await self._broker.subscribe_websocket(
                 broker_symbols,
-                self._on_tick,
-                on_depth_callback=self._on_depth,
-                on_reconnect_callback=self._on_ws_reconnected,
+                _on_tick_if_current,
+                on_depth_callback=_on_depth_if_current,
+                on_reconnect_callback=_on_reconnect_if_current,
             )
         else:
             self._ws_client = await self._broker.subscribe_websocket(
-                broker_symbols, self._on_tick
+                broker_symbols, _on_tick_if_current
             )
         self._ws_broker = self._broker
         # Re-arm any depth subscriptions that were active before a resubscribe.
@@ -401,6 +432,27 @@ class DataRouter:
             pass
 
     async def unsubscribe(self):
+        async with self._subscription_lock:
+            await self._unsubscribe_unlocked()
+
+    async def _unsubscribe_unlocked(self):
+        # Fence callbacks before attempting a potentially blocking SDK close.
+        self._ws_generation += 1
+        retired_symbols = list(self._subscribed_symbols)
+        # A quote accepted by the old generation must not remain visible after
+        # replacement. This matters when the broker sent one cross-wired
+        # snapshot before the socket was retired and the real instrument is
+        # subsequently quiet: without clearing both caches, that bad mark stays
+        # on screen for the full Redis TTL.
+        self._tick_buffer.clear()
+        if retired_symbols:
+            try:
+                redis = await get_redis()
+                await redis.delete(
+                    *(f"{LATEST_TICK_KEY_PREFIX}{symbol}" for symbol in retired_symbols)
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[DataRouter] retired tick-cache cleanup failed: {exc}")
         client = self._ws_client
         self._ws_client = None
         self._ws_broker = None
@@ -778,13 +830,11 @@ class DataRouter:
             if not self._broker or not self._subscribed_symbols or not self._stream_window_open():
                 return
             logger.warning("[DataRouter] Tick feed stale. Reconnecting websocket subscription.")
-            await self.unsubscribe()
-            broker_name = getattr(self._broker, "broker_name", "")
-            if broker_name == "fyers":
-                broker_symbols = [to_fyers_symbol(symbol) for symbol in self._subscribed_symbols]
-            else:
-                broker_symbols = [to_broker_symbol(symbol) for symbol in self._subscribed_symbols]
-            self._ws_client = await self._broker.subscribe_websocket(broker_symbols, self._on_tick)
+            # Use the normal serialized replacement path so reconnects get the
+            # same stale-callback fence, depth hooks and broker bookkeeping as
+            # watchlist-driven subscription changes.
+            self._subscribed_symbols = []
+            await self.subscribe(list(self._desired_primary_symbols))
             self._reconnect_failures = 0  # success → reset backoff to fast-retry
         except Exception as exc:
             self._reconnect_failures = min(self._reconnect_failures + 1, 8)  # escalate (cap exponent)

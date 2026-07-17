@@ -11,6 +11,7 @@ from api.routers import institutional_convergence as router_module
 from institutional_convergence import service as service_module
 from institutional_convergence.service import (
     InstitutionalConvergenceService,
+    _filter_session_ohlc,
     _select_rule_sessions,
     evaluate_index_snapshot,
     select_diversified_stocks,
@@ -469,6 +470,35 @@ def test_rule_sessions_accept_partial_current_session_after_four_bars() -> None:
     assert current == current_rows
     assert selected_prior == prior
     assert history == prior
+
+
+def test_session_ohlc_filter_rejects_mixed_instrument_extremes() -> None:
+    start = datetime(2026, 7, 17, 9, 15, tzinfo=IST)
+    rows = [
+        {
+            "time": start + timedelta(minutes=3 * index),
+            "open": 24200.0 + index,
+            "high": 24208.0 + index,
+            "low": 24194.0 + index,
+            "close": 24203.0 + index,
+        }
+        for index in range(6)
+    ]
+    rows.insert(
+        2,
+        {
+            "time": start + timedelta(minutes=6),
+            "open": 24202.0,
+            "high": 26850.0,
+            "low": 24198.0,
+            "close": 24204.0,
+        },
+    )
+
+    clean = _filter_session_ohlc(rows, relative_tolerance=0.08)
+
+    assert len(clean) == 6
+    assert max(row["high"] for row in clean) < 25000.0
 
 
 def test_tick_cvd_alignment_drops_unmatched_buckets() -> None:

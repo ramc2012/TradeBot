@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
@@ -30,6 +31,62 @@ class _FakeBroker:
         # real adapter signature (brokers/fyers.py subscribe_websocket).
         self.subscribe_calls.append(list(symbols))
         return _FakeWs()
+
+
+@pytest.mark.asyncio
+async def test_data_router_fences_ticks_from_replaced_socket() -> None:
+    callbacks = []
+
+    class _CapturingBroker(_FakeBroker):
+        async def subscribe_websocket(self, symbols, callback, on_depth_callback=None, **kwargs):
+            self.subscribe_calls.append(list(symbols))
+            callbacks.append(callback)
+            return _FakeWs()
+
+    router = DataRouter()
+    router._stream_window_open = lambda now=None: True  # type: ignore[method-assign]
+    router.set_required_symbols([])
+    router.set_broker(_CapturingBroker())  # type: ignore[arg-type]
+
+    await router.subscribe(["NSE:NIFTY26JUL24000CE"])
+    await router.subscribe(["MCX:CRUDEOIL26JULFUT"])
+
+    callbacks[0](Tick(symbol="MCX:CRUDEOIL26JULFUT", ltp=140_000.0))
+    assert router.get_latest_tick("MCX:CRUDEOIL26JULFUT") is None
+
+    callbacks[1](Tick(symbol="MCX:CRUDEOIL26JULFUT", ltp=7_685.0))
+    assert router.get_ltp("MCX:CRUDEOIL26JULFUT") == pytest.approx(7_685.0)
+
+
+@pytest.mark.asyncio
+async def test_data_router_serializes_concurrent_subscription_replacement() -> None:
+    class _SlowBroker(_FakeBroker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active_subscribes = 0
+            self.max_active_subscribes = 0
+
+        async def subscribe_websocket(self, symbols, callback, on_depth_callback=None, **kwargs):
+            self.active_subscribes += 1
+            self.max_active_subscribes = max(self.max_active_subscribes, self.active_subscribes)
+            await asyncio.sleep(0.01)
+            self.subscribe_calls.append(list(symbols))
+            self.active_subscribes -= 1
+            return _FakeWs()
+
+    broker = _SlowBroker()
+    router = DataRouter()
+    router._stream_window_open = lambda now=None: True  # type: ignore[method-assign]
+    router.set_required_symbols([])
+    router.set_broker(broker)  # type: ignore[arg-type]
+
+    await asyncio.gather(
+        router.subscribe(["NSE:NIFTY26JUL24000CE"]),
+        router.subscribe(["MCX:CRUDEOIL26JULFUT"]),
+    )
+
+    assert broker.max_active_subscribes == 1
+    assert router._subscribed_symbols == ["MCX:CRUDEOIL26JULFUT"]
 
 
 def test_data_router_normalizes_naive_tick_timestamps_to_utc() -> None:

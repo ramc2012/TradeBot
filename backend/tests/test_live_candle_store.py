@@ -159,6 +159,15 @@ def _tick(symbol: str, ltp: float, volume: int, ts: datetime):
     return Tick(symbol=symbol, ltp=ltp, volume=volume, timestamp=ts)
 
 
+def test_mcx_cross_symbol_print_is_rejected_before_persistence() -> None:
+    store = LiveCandleStore()
+    now = datetime(2026, 7, 17, 9, 15, tzinfo=timezone.utc)
+
+    assert store._validate_tick(_tick("MCX:GOLD26AUGFUT", 140_600.0, 100, now)) is True
+    assert store._validate_tick(_tick("MCX:GOLD26AUGFUT", 1_615.0, 101, now)) is False
+    assert store._validate_tick(_tick("MCX:GOLD26AUGFUT", 140_650.0, 102, now)) is True
+
+
 @pytest.mark.asyncio
 async def test_flush_failure_retains_ticks_and_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
     """P0 fix: a transient DB error must not lose the batch or kill persistence."""

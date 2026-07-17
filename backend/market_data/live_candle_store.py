@@ -100,6 +100,12 @@ class LiveCandleStore:
         self._metadata_cache: dict[str, Optional[dict[str, Any]]] = {}
         self._metadata_none_at: dict[str, float] = {}
         self._latest_spot: dict[str, float] = {}
+        # Last accepted MCX futures price per contract. A stale websocket
+        # generation previously cross-wired GOLD/NICKEL/GAS prints under the
+        # same app symbol; bid/ask stayed internally consistent, so structural
+        # validation alone could not catch it. Active contracts cannot jump
+        # 35% between adjacent prints, while a rollover gets a new symbol key.
+        self._latest_mcx_price: dict[str, float] = {}
         # Persistence health — a dead flush path must be a visible fact.
         self._ticks_persisted = 0
         self._ticks_dropped = 0
@@ -173,6 +179,12 @@ class LiveCandleStore:
             if not index_band_guard.passes(tick.symbol, ltp):
                 _record_reject("spot_magnitude")
                 return False
+        elif tick.symbol.startswith("MCX:") and tick.symbol.endswith("FUT"):
+            anchor = self._latest_mcx_price.get(tick.symbol)
+            if anchor and not (anchor * 0.65 <= ltp <= anchor * 1.35):
+                _record_reject("commodity_cross_symbol")
+                return False
+            self._latest_mcx_price[tick.symbol] = ltp
         return True
 
     def on_tick(self, tick: Tick) -> None:

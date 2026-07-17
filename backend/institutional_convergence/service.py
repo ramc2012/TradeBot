@@ -36,6 +36,42 @@ def _number(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _filter_session_ohlc(
+    rows: list[dict[str, Any]],
+    *,
+    relative_tolerance: float,
+) -> list[dict[str, Any]]:
+    """Drop contaminated candles against each session's median close."""
+    sessions: dict[Any, list[dict[str, Any]]] = {}
+    for row in rows:
+        timestamp = row.get("time")
+        session_day = timestamp.date() if isinstance(timestamp, datetime) else None
+        sessions.setdefault(session_day, []).append(row)
+
+    clean: list[dict[str, Any]] = []
+    for session_rows in sessions.values():
+        closes = sorted(
+            _number(row.get("close"))
+            for row in session_rows
+            if _number(row.get("close")) > 0
+        )
+        if len(closes) < 3:
+            clean.extend(session_rows)
+            continue
+        reference = closes[len(closes) // 2]
+        lower = reference * (1.0 - relative_tolerance)
+        upper = reference * (1.0 + relative_tolerance)
+        for row in session_rows:
+            values = [_number(row.get(key)) for key in ("open", "high", "low", "close")]
+            if (
+                all(lower <= value <= upper for value in values)
+                and values[1] >= values[2]
+            ):
+                clean.append(row)
+    clean.sort(key=lambda row: row["time"])
+    return clean
+
+
 def configured_indices() -> list[str]:
     raw = str(getattr(settings, "INSTITUTIONAL_CONVERGENCE_INDEX_SYMBOLS", "NIFTY,BANKNIFTY"))
     values = [item.strip().upper() for item in raw.split(",") if item.strip()]
@@ -355,12 +391,28 @@ async def _load_rule_inputs(symbol: str, futures_symbol: str, now: datetime) -> 
             ORDER BY time
         """), {"symbol": symbol, "since": now - timedelta(days=18)})
         bars = [{**dict(row), "time": row["time"].astimezone(now.tzinfo)} for row in bars_result.mappings().all()]
+        bars = _filter_session_ohlc(
+            bars,
+            relative_tolerance=0.08 if symbol in INDEX_ROOTS else 0.20,
+        )
         # DESC + reverse: the cap must keep the LATEST ticks. Ascending LIMIT
         # kept the oldest 5000 of the 2h window, so on any busy session the
         # footprint/CVD trigger was computed on stale early-window ticks.
         tick_result = await session.execute(text("""
-            SELECT time, ltp, bid, ask, bid_qty, ask_qty, volume
-            FROM market_ticks WHERE symbol=:symbol AND time >= :since ORDER BY time DESC LIMIT 5000
+            WITH recent AS (
+              SELECT time, ltp, bid, ask, bid_qty, ask_qty, volume
+              FROM market_ticks
+              WHERE symbol=:symbol AND time >= :since AND ltp > 0
+            ), reference AS (
+              SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY ltp) AS median_ltp
+              FROM recent
+            )
+            SELECT r.time, r.ltp, r.bid, r.ask, r.bid_qty, r.ask_qty, r.volume
+            FROM recent r CROSS JOIN reference p
+            WHERE p.median_ltp IS NOT NULL
+              AND r.ltp BETWEEN p.median_ltp * 0.97 AND p.median_ltp * 1.03
+            ORDER BY r.time DESC
+            LIMIT 5000
         """), {"symbol": futures_symbol, "since": now - timedelta(minutes=120)})
         ticks = [dict(row) for row in reversed(tick_result.mappings().all())]
         # Pipeline reference clock for the tick_fresh drift (single index
@@ -370,12 +422,25 @@ async def _load_rule_inputs(symbol: str, futures_symbol: str, now: datetime) -> 
         """), {"since": now - timedelta(minutes=120)})
         pipeline_last = pipeline_result.scalar()
         current_result = await session.execute(text("""
+            WITH recent AS (
+              SELECT time, ltp, volume
+              FROM market_ticks
+              WHERE symbol=:symbol AND time >= :session_start AND time <= :now
+                AND ltp > 0
+            ), reference AS (
+              SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY ltp) AS median_ltp
+              FROM recent
+            ), clean AS (
+              SELECT r.*
+              FROM recent r CROSS JOIN reference p
+              WHERE p.median_ltp IS NOT NULL
+                AND r.ltp BETWEEN p.median_ltp * 0.97 AND p.median_ltp * 1.03
+            )
             SELECT time_bucket(INTERVAL '3 minutes', time) AS time,
                    first(ltp, time) AS open, max(ltp) AS high, min(ltp) AS low,
                    last(ltp, time) AS close,
                    GREATEST(max(volume) - min(volume), 0) AS volume
-            FROM market_ticks
-            WHERE symbol=:symbol AND time >= :session_start AND time <= :now
+            FROM clean
             GROUP BY 1 ORDER BY 1
         """), {
             "symbol": spot_tick_symbol,
