@@ -119,6 +119,22 @@ def _normal_expected_payoff(mean: float, stdev: float, strike: float, option_typ
     return max(0.0, (strike - mean) * _norm_cdf(-d) + stdev * _norm_pdf(d))
 
 
+def _iv_as_fraction(value: float) -> float:
+    """Normalize a broker IV to a fraction.
+
+    atm_option_watchlist_snapshots.iv is MIXED-UNIT by source broker
+    (verified live 2026-07-17: upstox rows ≈ 11–16 = PERCENT, fyers rows
+    ≈ 0.14 = fraction). Left raw, a percent-unit IV (12.3) sails past the
+    sigma ceiling (0.62) and every greek/distributional metric silently
+    prices the contract at 62% vol. Index IV as a fraction never exceeds
+    ~0.62 and as a percent never drops below ~5, so 1.5 is an unambiguous
+    split point.
+    """
+    if value > 1.5:
+        return value / 100.0
+    return value
+
+
 def _delta_bucket(delta_abs: float) -> str:
     if delta_abs < 0.25:
         return "lottery"
@@ -637,7 +653,10 @@ class OptionSelectionEngine:
         days_to_expiry = max((expiry_date - timestamp.date()).days + (1.0 - float(timestamp.hour / 24.0)), 0.25)
         time_to_expiry_years = max(days_to_expiry / 365.0, 1.0 / 3650.0)
         sigma = min(
-            max(float(snapshot.get("iv") or default_sigma or 0.0), float(self.config["sigma_floor"])),
+            max(
+                _iv_as_fraction(float(snapshot.get("iv") or default_sigma or 0.0)),
+                float(self.config["sigma_floor"]),
+            ),
             float(self.config["sigma_ceiling"]),
         )
         delta, gamma, theta, vega = _black_scholes_greeks(
@@ -806,7 +825,7 @@ class OptionSelectionEngine:
 
     def _estimate_snapshot_atm_iv(self, snapshot_rows: list[dict[str, Any]], spot_price: float, fallback: float) -> float:
         valid = [
-            (abs(float(row.get("strike") or 0.0) - spot_price), float(row.get("iv") or 0.0))
+            (abs(float(row.get("strike") or 0.0) - spot_price), _iv_as_fraction(float(row.get("iv") or 0.0)))
             for row in snapshot_rows
             if float(row.get("iv") or 0.0) > 0.0 and float(row.get("strike") or 0.0) > 0.0
         ]

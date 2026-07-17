@@ -25,6 +25,9 @@ MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
 SESSION_MINUTES = ((MARKET_CLOSE.hour * 60) + MARKET_CLOSE.minute) - ((MARKET_OPEN.hour * 60) + MARKET_OPEN.minute)
 
+# IST wall-clock offset for the naive-UTC → IST clock-basis correction below.
+_IST_OFFSET = pd.Timedelta(hours=5, minutes=30)
+
 
 def timeframe_minutes(timeframe: str) -> int:
     mapping = {
@@ -81,6 +84,37 @@ def _session_progress(timestamp: pd.Timestamp) -> float:
     session_open = (MARKET_OPEN.hour * 60) + MARKET_OPEN.minute
     progress = (current - session_open) / max(SESSION_MINUTES, 1)
     return float(min(max(progress, 0.0), 1.0))
+
+
+def _times_on_ist_basis(times: pd.Series) -> pd.Series:
+    """Return `times` shifted onto an IST wall-clock basis for session math.
+
+    The lane feeds two tz-naive clock bases into build_frame:
+      * LIVE frames — `data._frame_from_rows` normalizes to naive **UTC**
+        (`utc=True → tz_convert(None)`), so an NSE session spans 03:45–10:00.
+      * Persisted research CSVs — naive **IST**, spanning 09:15–15:30.
+
+    `_session_progress` compares against IST wall-clock constants
+    (MARKET_OPEN 09:15), so a naive-UTC frame reads ~0 all day and the
+    late-session blockers downstream (ai_model `late_session_expiry_risk`,
+    `execution_timing` close penalty) can never fire. Detect the basis from
+    the frame's hour distribution — IST Indian-market bars never occur
+    before 09:00 local, while the same session in naive-UTC always includes
+    pre-09:00 hours (NSE/BSE open = 03:45 UTC):
+
+      * any bar hour ≤ 8  → naive-UTC basis → shift +05:30
+      * else               → already IST     → unchanged
+
+    A frame consisting solely of 09:00–10:59 bars is theoretically
+    ambiguous, but live frames carry a multi-day lookback (so the UTC case
+    always contains ≤ 08:xx bars) — the ambiguous slice only arises for
+    IST research frames, for which "unchanged" is correct.
+    """
+    if times.empty:
+        return times
+    if (times.dt.hour <= 8).any():
+        return times + _IST_OFFSET
+    return times
 
 
 def _bounded_zscore(series: pd.Series, window: int) -> pd.Series:
@@ -168,7 +202,11 @@ class FeatureEngine:
         ).fillna(1.0)
         frame["momentum_3"] = frame["close"].pct_change(3).fillna(0.0)
         frame["momentum_8"] = frame["close"].pct_change(8).fillna(0.0)
-        frame["session_progress"] = frame["time"].map(_session_progress)
+        # Clock-basis-corrected: live frames are naive-UTC, research frames
+        # naive-IST — _times_on_ist_basis puts both on IST wall-clock so
+        # session_progress is honest (the naive-UTC basis previously pinned
+        # it near 0 all day, disabling every late-session guard downstream).
+        frame["session_progress"] = _times_on_ist_basis(frame["time"]).map(_session_progress)
         opening_bars = max(
             1,
             int(math.ceil(float(period_cfg.get("opening_range_minutes", 30)) / max(timeframe_minutes(timeframe), 1))),

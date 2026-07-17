@@ -493,13 +493,23 @@ class DirectionalOptionsPaperStore:
                 ai_model_payload = dict(contract.get("ai_model") or {})
                 if self.policy is not None:
                     try:
+                        # register_open expects the BASE risk budget (before
+                        # the policy's size multiplier) — record_close
+                        # denominates R by risk_budget × size_multiplier.
+                        # risk.approve() returns the budget ALREADY scaled
+                        # by the multiplier, so passing it raw double-counted
+                        # the multiplier (R ∝ 1/mult²): 0.5× rewards were
+                        # inflated 2× and 2.0× rewards deflated 2×, biasing
+                        # the size buckets toward small trades. De-scale here.
+                        scaled_budget = float(risk.get("risk_budget") or 0.0)
+                        base_budget = scaled_budget / max(size_multiplier, 1e-9)
                         self.policy.register_open(
                             position_id=new_position_id,
                             signal=signal,
                             candidate=contract,
                             regime=dict(snapshot.get("regime") or {}),
                             size_multiplier=size_multiplier,
-                            risk_budget=float(risk.get("risk_budget") or 0.0),
+                            risk_budget=base_budget,
                             chain=dict(snapshot.get("chain_analytics") or {}) or None,
                         )
                     except Exception:

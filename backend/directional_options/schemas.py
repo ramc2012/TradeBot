@@ -153,6 +153,11 @@ class ContractCandidate:
     selected: bool = False
     instrument_key: Optional[str] = None
     price_source: str = "runtime_dataset"
+    # spread_pct is NOT a quoted bid/ask spread — the watchlist snapshots
+    # carry LTP only, so it is estimated from volume/OI/moneyness in the
+    # selector. Labeled here so every payload (journal, UI, policy
+    # features) is honest about the lineage.
+    spread_source: str = "synthetic_volume_oi_moneyness"
 
 
 @dataclass(frozen=True)

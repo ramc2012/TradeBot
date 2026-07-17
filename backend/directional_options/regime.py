@@ -32,7 +32,10 @@ class RegimeClassifier:
         ema_spread = float(row.get("ema_spread_pct", 0.0))
         tf = str(timeframe or "").lower()
         # Fast intraday tape = 3-minute (new FAST-lane default) or 5-minute.
-        is_fast = tf.startswith(("3", "5"))
+        # Exact-match set: the previous startswith(("3", "5")) also caught
+        # "30minute", silently applying fast-tape breakout/micro-trend
+        # hurdles to the slow tape.
+        is_fast = tf in {"3minute", "5minute", "3min", "5min", "3m", "5m"}
 
         reasons: list[str] = []
         if rv_pct >= 0.9 and range_expansion >= 1.9:
