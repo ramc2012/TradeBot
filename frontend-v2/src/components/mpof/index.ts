@@ -9,5 +9,7 @@
 export { ProfileLadder, type ProfileLadderProps } from "./ProfileLadder";
 export { CvdPanel, type CvdPoint, type CvdDivergence } from "./CvdPanel";
 export { FootprintGrid, type FootprintBar, type FootprintLevel } from "./FootprintGrid";
+export { OrderFlowPulse, type FlowTrade } from "./OrderFlowPulse";
+export { LiveOrderFlowTape } from "./LiveOrderFlowTape";
 export { GateChips } from "./GateChips";
 export { OfSourceBadge, classifyOfSource, type OfSourceKind } from "./OfSourceBadge";

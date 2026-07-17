@@ -70,9 +70,11 @@ import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveS
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
 import { OptionChartModal, type OptionChartContract } from "@/components/strategies/nse/OptionChartModal";
 import { MacdCockpit } from "@/components/strategies/nse/MacdCockpit";
+import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
 import { useStrategyPositionsStream } from "@/hooks/useStrategyPositionsStream";
 import { LiveMarkCell } from "@/components/terminal/LiveMarkCell";
 import { legTapeSymbol } from "@/lib/marketSymbols";
+import { createStrategyOverviewSocket } from "@/lib/websocket";
 import type { PaperPosition, PaperSummary, PositionsPayload } from "@/lib/strategy-stats";
 import {
   api as apiClient,
@@ -327,12 +329,27 @@ export default function NseDesk() {
     refetchOnWindowFocus: false,
   });
 
-  const signalsQuery = useQuery({
+  const signalsQuery = useLiveSnapshotQuery<{
+    last_run_at?: string | null;
+    strategy1_watchlist?: WatchRow[];
+  }>({
     queryKey: ["nse", "open-signals"],
     queryFn: async () =>
       (await getStrategyOpenSignals("SENSEX")).data as { last_run_at?: string | null; strategy1_watchlist?: WatchRow[] },
-    refetchInterval: REFRESH_MS.snapshot,
-    refetchOnWindowFocus: false,
+    streamFactory: (onData, onStatusChange) =>
+      createStrategyOverviewSocket(
+        (payload) => {
+          const openSignals = (payload as { open_signals?: unknown }).open_signals;
+          if (openSignals && typeof openSignals === "object") {
+            onData(openSignals as { last_run_at?: string | null; strategy1_watchlist?: WatchRow[] });
+          }
+        },
+        onStatusChange,
+      ),
+    storageKey: "nse:open-signals",
+    streamWhenHidden: true,
+    refetchInterval: REFRESH_MS.summary,
+    refetchIntervalInBackground: true,
   });
 
   const killQuery = useQuery({
@@ -623,7 +640,7 @@ function OverviewTab({
             s.underlying || "—",
             <DirBadge key="d" direction={s.direction} />,
             formatNumber(s.strike ?? s.atm_strike, 0),
-            formatNumber(s.ltp, 1),
+            <LiveMarkCell key="ltp" symbol={legTapeSymbol(s)} fallback={s.ltp} decimals={1} />,
             <StatusBadge key="s" label={prettify(s.status)} variant={statusVariant(s.status)} />,
             formatNumber(s.priority_score, 1),
             <span key="r" className="text-text-secondary">{s.reason ? prettify(s.reason) : "—"}</span>,

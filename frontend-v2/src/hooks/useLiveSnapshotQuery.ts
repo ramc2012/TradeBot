@@ -99,6 +99,7 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
     typeof document === "undefined" ? true : document.visibilityState === "visible",
   );
   const [isStreamConnected, setIsStreamConnected] = useState(false);
+  const [hasStreamPayload, setHasStreamPayload] = useState(false);
   const [allowQueryFallback, setAllowQueryFallback] = useState(
     () => !streamFactory || !preferStream,
   );
@@ -106,6 +107,7 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
   useEffect(() => {
     const nextSnapshot = loadSnapshot<TData>(storageKey);
     setSnapshot(nextSnapshot);
+    setHasStreamPayload(false);
     setAllowQueryFallback(!hasStreamFactory || !preferStream || !nextSnapshot);
   }, [storageKey, preferStream, hasStreamFactory]);
 
@@ -119,7 +121,7 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
       return undefined;
     }
 
-    if (isStreamConnected) {
+    if (isStreamConnected && hasStreamPayload) {
       setAllowQueryFallback(false);
       return undefined;
     }
@@ -134,7 +136,15 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
       setAllowQueryFallback(true);
     }, delayMs);
     return () => window.clearTimeout(timeout);
-  }, [hasStreamFactory, isStreamConnected, options.enabled, preferStream, queryKeyHash, snapshot?.savedAt]);
+  }, [
+    hasStreamFactory,
+    hasStreamPayload,
+    isStreamConnected,
+    options.enabled,
+    preferStream,
+    queryKeyHash,
+    snapshot?.savedAt,
+  ]);
 
   const query = useQuery<TData, TError, TData, QueryKey>({
     ...options,
@@ -146,10 +156,10 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
   });
 
   useEffect(() => {
-    if (hasStreamFactory && preferStream && isStreamConnected && query.isSuccess) {
+    if (hasStreamFactory && preferStream && isStreamConnected && hasStreamPayload) {
       setAllowQueryFallback(false);
     }
-  }, [hasStreamFactory, isStreamConnected, preferStream, query.isSuccess]);
+  }, [hasStreamFactory, hasStreamPayload, isStreamConnected, preferStream]);
 
   useEffect(() => {
     if (typeof document === "undefined") return undefined;
@@ -164,6 +174,11 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
 
   useEffect(() => {
     if (query.isSuccess && query.data !== undefined) {
+      const savedAtMs = snapshot ? new Date(snapshot.savedAt).getTime() : 0;
+      // Hydrated initialData is already persisted. Writing it again with "now"
+      // made an old market payload immortal every time a desk mounted, masking
+      // a stalled live endpoint behind an apparently recent local snapshot.
+      if (snapshot && query.dataUpdatedAt <= savedAtMs) return;
       const nextSnapshot = {
         data: query.data,
         savedAt: new Date().toISOString(),
@@ -171,7 +186,7 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
       setSnapshot(nextSnapshot);
       persistSnapshot(storageKey, nextSnapshot);
     }
-  }, [query.data, query.dataUpdatedAt, query.isSuccess, storageKey]);
+  }, [query.data, query.dataUpdatedAt, query.isSuccess, snapshot, storageKey]);
 
   useEffect(() => {
     const activeStreamFactory = streamFactoryRef.current;
@@ -186,6 +201,7 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
     }
 
     const socket = activeStreamFactory((nextData) => {
+      setHasStreamPayload(true);
       queryClient.setQueryData(queryKey, nextData);
       if (storageKey) {
         const nextSnapshot = {
@@ -195,10 +211,14 @@ export function useLiveSnapshotQuery<TData, TError = Error>({
         setSnapshot(nextSnapshot);
         persistSnapshot(storageKey, nextSnapshot);
       }
-    }, setIsStreamConnected);
+    }, (connected) => {
+      setIsStreamConnected(connected);
+      if (!connected) setHasStreamPayload(false);
+    });
 
     return () => {
       setIsStreamConnected(false);
+      setHasStreamPayload(false);
       socket.close();
     };
   }, [isVisible, options.enabled, queryClient, queryKeyHash, storageKey, streamWhenHidden]);

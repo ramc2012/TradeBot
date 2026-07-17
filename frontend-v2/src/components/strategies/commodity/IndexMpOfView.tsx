@@ -13,8 +13,10 @@ import { useQuery } from "@tanstack/react-query";
 import { Activity, BarChart3, CandlestickChart } from "lucide-react";
 
 import { MetricTile, REFRESH_MS, Section, StatusBadge, formatIST, formatNumber, tone } from "@/components/desk-ui";
+import { LiveOrderFlowTape } from "@/components/mpof";
 import { CandleChart, CHART, type CandleBar, type ChartPriceLine } from "@/components/strategies/shared";
 import { getCommodityIndexMpof } from "@/lib/api";
+import { underlyingToTapeSymbol } from "@/lib/marketSymbols";
 
 type Bar = { time: string; open: number; high: number; low: number; close: number; volume: number };
 type TpoRow = { price: number; count: number };
@@ -124,10 +126,20 @@ export function IndexMpOfView({ symbol }: { symbol: string }) {
         </Section>
       </div>
 
-      <div className="flex items-center gap-2 rounded-xl border border-bg-border bg-bg-primary/15 px-4 py-2.5 text-[12px] text-text-muted">
-        <Activity size={14} className="text-text-muted" />
-        Order Flow (CVD / VWAP) for {symbol} needs index-futures volume — index spot carries none. Coming once index_futures_candles is backfilled.
-      </div>
+      <Section
+        title={`${symbol} · streaming order flow`}
+        icon={<Activity size={16} />}
+        description="Live bid/ask and signed quote-volume changes between completed profile bars."
+      >
+        <LiveOrderFlowTape symbol={underlyingToTapeSymbol(symbol) ?? symbol} />
+      </Section>
+
+      {!d?.orderflow?.available ? (
+        <div className="flex items-center gap-2 rounded-xl border border-accent-amber/30 bg-accent-amber/5 px-4 py-2.5 text-[12px] text-text-muted">
+          <Activity size={14} className="text-accent-amber" />
+          Historical CVD/VWAP remains unavailable when {symbol} spot candles carry no volume. The live panel above is explicitly a quote-tape proxy, not a fabricated footprint.
+        </div>
+      ) : null}
     </div>
   );
 }

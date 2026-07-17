@@ -7,10 +7,11 @@ import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Too
 
 import { LastUpdated } from "@/components/common/LastUpdated";
 import { DeskShell, MetricTile, REFRESH_MS, Section, StatusBadge, formatIST, formatISTTime, formatMoney, formatNumber, useUrlTab } from "@/components/desk-ui";
-import { CvdPanel, FootprintGrid, GateChips, OfSourceBadge, ProfileLadder } from "@/components/mpof";
+import { CvdPanel, FootprintGrid, GateChips, LiveOrderFlowTape, OfSourceBadge, OrderFlowPulse, ProfileLadder } from "@/components/mpof";
 import { MarketProfileChart } from "@/components/strategies/shared";
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
 import { describeApiError, getCommodityInstitutionalConvergenceStatus, getInstitutionalConvergenceStatus, runCommodityInstitutionalConvergence, runInstitutionalConvergence } from "@/lib/api";
+import { underlyingToTapeSymbol } from "@/lib/marketSymbols";
 
 import {
   type ConvergenceTrade,
@@ -131,8 +132,10 @@ export default function InstitutionalConvergenceDesk() {
 
     {data && activeTab === "orderflow" ? <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2"><OfSourceBadge source={selected?.cvd?.source}/><StatusBadge label={selected?.setup_state ?? "WATCHING"} variant={selected?.setup_state === "CONFIRMED" ? "success" : selected?.setup_state === "MISSED_NO_CHASE" ? "warn" : "neutral"}/><LastUpdated timestamp={latest?.generated_at} label="scan"/></div>
+      <LiveOrderFlowTape symbol={(selected?.futures_contract?.includes(":") || selected?.futures_contract?.includes("|")) ? selected.futures_contract : underlyingToTapeSymbol(selected?.symbol) ?? selected?.symbol} title={`${selected?.symbol ?? market} · live microstructure`} />
       <section className="grid grid-cols-2 gap-3 md:grid-cols-6"><MetricTile label="Stage" value={selected?.setup_state ?? "LEGACY"} detail={selected?.preferred_direction ? `${selected.preferred_direction} candidate` : "awaiting next staged scan"}/><MetricTile label="Confirmations" value={selected?.confirmation_count != null ? `${selected.confirmation_count}/${selected.confirmation_required ?? 2}` : "—"} detail={selected?.quality ?? "legacy snapshot"}/><MetricTile label="CVD" value={selected?.cvd?.divergence?.kind ?? "impulse/none"} detail={selected?.cvd?.source ?? "—"}/><MetricTile label="Ticks" value={String(selected?.footprint?.tick_count ?? 0)}/><MetricTile label="Buy ratio" value={`${formatNumber(selected?.footprint?.long_ratio, 2)}×`}/><MetricTile label="Sell ratio" value={`${formatNumber(selected?.footprint?.short_ratio, 2)}×`}/></section>
       <Section title="Price versus cumulative volume delta" icon={<Waves size={16}/>}><CvdPanel series={selected?.cvd?.series} source={selected?.cvd?.source} divergence={selected?.cvd?.divergence} height={300}/></Section>
+      <Section title="Aggression, initiative & absorption" icon={<Activity size={16}/>} description="Signed aggressive volume by three-minute bar; pressure beyond ±60% marks initiative, while amber points flag high-volume absorption."><OrderFlowPulse bars={selected?.footprint?.bars} source={selected?.footprint?.source ?? selected?.cvd?.source} asOf={selected?.footprint?.bars?.at(-1)?.time ?? latest?.generated_at}/></Section>
       <div className="grid gap-4 xl:grid-cols-[1.15fr_.85fr]"><Section title="Recent 3-minute footprints" icon={<BookOpen size={16}/>} description="Executed volume reconstructed at price; ≥3× imbalance is highlighted."><FootprintGrid bars={selected?.footprint?.bars} source={selected?.footprint?.source} maxBars={4}/></Section><Section title="Option OI walls" icon={<Layers3 size={16}/>}><WallPanel result={selected}/></Section></div>
       <div className="grid gap-4 lg:grid-cols-2">
         <Section title="Long sequence" icon={<ListChecks size={16}/>}><div className="space-y-3"><GateChips title="Entry and safety" gates={selected?.long_gates} blockedReasons={selected?.preferred_direction !== "SHORT" ? selected?.blocked_reasons : undefined}/><GateChips title="Evidence · need any 2" gates={selected?.long_confirmations}/></div></Section>

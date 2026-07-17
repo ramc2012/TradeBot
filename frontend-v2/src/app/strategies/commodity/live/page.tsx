@@ -55,8 +55,8 @@ import {
 import {
   createCommodityOverviewSocket,
   createCommodityWatchlistSocket,
-  createTickSocket,
 } from "@/lib/websocket";
+import { quoteStore, type Quote } from "@/hooks/useQuoteStore";
 
 // ─── Polling cadence ───────────────────────────────────────────────────────
 // The sockets push immediately on bar close / position change. Polls are a
@@ -288,6 +288,18 @@ type LatestTickSnapshot = {
   timestamp?: string | null;
   source?: string | null;
 };
+
+function quoteToTick(symbol: string, quote: Quote | undefined): LatestTickSnapshot | null {
+  if (!quote || quote.ltp == null || !Number.isFinite(quote.ltp) || quote.ltp <= 0) return null;
+  return {
+    symbol,
+    ltp: quote.ltp,
+    stale: Date.now() - quote.rxAt > 15_000,
+    stale_seconds: Math.max(0, (Date.now() - quote.rxAt) / 1000),
+    timestamp: new Date(quote.ts).toISOString(),
+    source: "shared_quote_tape",
+  };
+}
 
 type StatusPayload = {
   enabled?: boolean;
@@ -798,9 +810,9 @@ function PositionChip({ position }: { position?: CommodityPosition }) {
 
 // ─── Tick stream hook ──────────────────────────────────────────────────────
 /**
- * Subscribe one socket per configured MCX symbol. The page passes the live
- * tick values down into each row so the price column updates faster than
- * the agent's 30s scan cadence.
+ * Subscribe each configured MCX symbol to the one shared /ws/quotes store.
+ * This is the same stream used by the working Live Stream tab; the store
+ * keeps one socket and notifies only the symbols whose quote changed.
  */
 function useCommodityTickStreams(symbols: string[]): Record<string, LatestTickSnapshot> {
   const [ticks, setTicks] = useState<Record<string, LatestTickSnapshot>>({});
@@ -812,28 +824,19 @@ function useCommodityTickStreams(symbols: string[]): Record<string, LatestTickSn
       return;
     }
     let active = true;
-    const sockets = list.map((symbol) =>
-      createTickSocket(symbol, (raw) => {
-        if (!active) return;
-        const data = raw as Record<string, unknown>;
-        const ltp = Number(data.ltp ?? data.last_price ?? data.price ?? data.close);
-        if (!Number.isFinite(ltp) || ltp <= 0) return;
-        const snapshot: LatestTickSnapshot = {
-          symbol,
-          ltp,
-          stale: Boolean(data.stale),
-          stale_seconds: Number.isFinite(Number(data.stale_seconds))
-            ? Number(data.stale_seconds)
-            : null,
-          timestamp: String(data.timestamp || new Date().toISOString()),
-          source: String(data.source || "tick_stream"),
-        };
-        setTicks((cur) => ({ ...cur, [symbol]: snapshot }));
-      }),
-    );
+    const ingest = (symbol: string) => {
+      if (!active) return;
+      const snapshot = quoteToTick(symbol, quoteStore.get(symbol));
+      if (snapshot) setTicks((cur) => ({ ...cur, [symbol]: snapshot }));
+    };
+    const unsubscribers = list.map((symbol) => {
+      const unsubscribe = quoteStore.subscribe(symbol, () => ingest(symbol));
+      ingest(symbol);
+      return unsubscribe;
+    });
     return () => {
       active = false;
-      sockets.forEach((s) => s.close());
+      unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
   }, [key]);
   return ticks;
@@ -1003,9 +1006,16 @@ function ActionQueue({
                   </span>
                   <TriggerBadge row={row} />
                 </div>
-                <span className="shrink-0 font-mono text-[10.5px] text-text-muted">
-                  stop {row.stop_hint != null ? formatNumber(Number(row.stop_hint), 2) : "—"}
-                </span>
+                <div className="flex shrink-0 items-center gap-2 font-mono text-[10.5px]">
+                  <span className="text-text-primary">
+                    {formatNumber(Number(row.price ?? 0), 2)}
+                    {row.live_tick_source ? <span className="ml-1 text-emerald-400">●</span> : null}
+                  </span>
+                  <CVDChip row={row} />
+                  <span className="text-text-muted">
+                    stop {row.stop_hint != null ? formatNumber(Number(row.stop_hint), 2) : "—"}
+                  </span>
+                </div>
               </li>
             );
           })}
@@ -3763,7 +3773,10 @@ export default function MpOfDesk() {
   // Light overview poll just for the KPI strip + header status (the MCX desk
   // does its own socket-primary streaming when its tab is active).
   const overviewQuery = useQuery({
-    queryKey: ["mpof", "kpi-overview"],
+    // AppWideStreamBridge writes the commodity socket into this canonical
+    // cache key. The header, signals and Live Stream symbol list therefore
+    // update from the same 2s stream as the desk instead of a separate poll.
+    queryKey: ["commodity-live", "overview"],
     queryFn: async () => (await getCommodityOverview()).data as Record<string, unknown>,
     // Live-market page → the header freshness pill polls at ≤30s.
     refetchInterval: REFRESH_MS.snapshot,

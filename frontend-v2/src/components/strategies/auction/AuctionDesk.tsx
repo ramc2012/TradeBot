@@ -28,7 +28,7 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { LastUpdated } from "@/components/common/LastUpdated";
-import { OfSourceBadge, ProfileLadder } from "@/components/mpof";
+import { OfSourceBadge, OrderFlowPulse, ProfileLadder, type FlowTrade } from "@/components/mpof";
 import { MarketProfileChart, OrderFlowPanel, PaperPerformance } from "@/components/strategies/shared";
 import { SignalQualityTab } from "@/components/strategies/overview/SignalQualityTab";
 import { StrategyLiveStream } from "@/components/strategies/shared/StrategyLiveStream";
@@ -248,6 +248,9 @@ function AuctionTab({
       </div>
 
       <OrderFlowPanel of={of} source={ofSource} asOf={asOf} />
+      <Section title="Tape aggression & absorption" icon={<Waves size={16} />} description="Three-minute aggressive buy/sell pulses from the same clean tape used by the auction decision; low-efficiency high-volume bars are marked as absorption.">
+        <OrderFlowPulse trades={(snap?.request?.trades ?? []) as FlowTrade[]} source={ofSource} asOf={asOf} />
+      </Section>
 
       <AgentDecisions decisions={analysis?.agent_decisions} />
 
