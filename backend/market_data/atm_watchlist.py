@@ -2648,6 +2648,106 @@ class ATMWatchlistService:
             )
             await session.commit()
 
+    async def refresh_stock_snapshot_rows(
+        self,
+        symbols: list[str],
+        *,
+        budget_seconds: float = 90.0,
+        concurrency: int = 3,
+    ) -> dict[str, str]:
+        """Targeted just-in-time snapshot refresh for STOCK underlyings.
+
+        (2026-07-17 directional NIFTY-50 expansion) The background universe
+        build rotates all ~217 F&O names over HOURS, so stock rows in
+        atm_option_watchlist_snapshots age far past the directional lane's
+        quote-honesty bound (day-one telemetry: every stock skipped as
+        option_quotes_stale at 2.6-3.4h while spot was live). This refreshes
+        ONLY the caller's symbols — the ~25-name directional cycle batch —
+        via the same per-row build/persist unit the universe build uses.
+
+        Load contract: CLASS_STANDARD (never the 40% CRITICAL share the index
+        watchlist owns), admission through the class-wide chain semaphore, a
+        short post-admission per-row deadline (the 2026-07-14 stall lesson:
+        deadlines must not burn on our own queues), and a whole-call budget.
+        Rows not admitted inside the budget report "budget" and stay stale —
+        the caller's post-refresh honesty gate keeps them skipped.
+
+        Returns per-symbol status: refreshed | timeout | budget |
+        unknown_symbol | error:<detail>.
+        """
+        wanted: list[str] = []
+        seen: set[str] = set()
+        for symbol in symbols:
+            normalized = str(symbol or "").upper().strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                wanted.append(normalized)
+        if not wanted:
+            return {}
+
+        metas = [
+            meta
+            for meta in await self._load_underlyings()
+            if meta.kind != "INDEX" and meta.symbol.upper() in seen
+        ]
+        report: dict[str, str] = {symbol: "unknown_symbol" for symbol in wanted}
+        for meta in metas:
+            report[meta.symbol.upper()] = "budget"
+        if not metas:
+            return report
+
+        fyers_adapter: Optional[BrokerAdapter] = None
+        upstox_adapter: Optional[BrokerAdapter] = None
+        try:
+            fyers_adapter = get_active_adapter("fyers")
+        except Exception:  # noqa: BLE001
+            fyers_adapter = None
+        try:
+            upstox_adapter = await self._get_upstox_adapter()
+        except Exception:  # noqa: BLE001
+            upstox_adapter = None
+        if fyers_adapter is None and upstox_adapter is None:
+            for meta in metas:
+                report[meta.symbol.upper()] = "error:no_active_broker"
+            return report
+
+        # _build_row self-resolves the stock monthly expiry from any
+        # same-month date, so "today" is a valid selector for every stock.
+        today = datetime.now(UTC).date()
+        local_slots = asyncio.Semaphore(max(1, int(concurrency)))
+
+        async def _one(meta: UnderlyingMeta) -> None:
+            async with local_slots:
+                async with ATMWatchlistService._chain_semaphore:
+                    try:
+                        with broker_class(CLASS_STANDARD):
+                            row = await asyncio.wait_for(
+                                self._build_row(
+                                    meta,
+                                    today.isoformat(),
+                                    today,
+                                    upstox_adapter,
+                                    fyers_adapter,
+                                ),
+                                timeout=min(30.0, ROW_BUILD_TIMEOUT_SECONDS),
+                            )
+                        report[meta.symbol.upper()] = (
+                            "refreshed" if row is not None else "error:build_returned_none"
+                        )
+                    except asyncio.TimeoutError:
+                        report[meta.symbol.upper()] = "timeout"
+                    except Exception as exc:  # noqa: BLE001 — per-symbol isolation
+                        report[meta.symbol.upper()] = f"error:{str(exc)[:80]}"
+
+        tasks = [asyncio.create_task(_one(meta)) for meta in metas]
+        done, not_done = await asyncio.wait(tasks, timeout=max(1.0, float(budget_seconds)))
+        for task in not_done:
+            task.cancel()
+        if not_done:
+            # Let cancellations unwind so both semaphores release cleanly.
+            await asyncio.gather(*not_done, return_exceptions=True)
+        return report
+
     async def _archive_expired_contracts(self) -> None:
         async with AsyncSessionLocal() as session:
             await session.execute(

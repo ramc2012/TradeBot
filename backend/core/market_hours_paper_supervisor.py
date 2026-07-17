@@ -562,8 +562,10 @@ class MarketHoursPaperSupervisor:
                 then a rotating batch runs under an asyncio.Semaphore with a
                 short per-symbol wait_for. Feature builds / selector / policy
                 already run in asyncio.to_thread inside the service.
-            Worst case ≈ 3×75s + ceil(25/5)×20s ≈ 325s < the 600s runner
-            timeout; a typical pass is well under one cadence interval.
+            Worst case ≈ 3×75s (indices) + 90s (batch watchlist refresh
+            budget) + 2×15s (readiness passes) + ceil(25/5)×20s (scans)
+            ≈ 445s < the 600s runner timeout; a typical pass is well under
+            one cadence interval.
             """
             results: list[dict[str, Any]] = []
             failures: dict[str, str] = {}
@@ -633,10 +635,101 @@ class MarketHoursPaperSupervisor:
 
             stock_batch: list[str] = []
             skipped_unready: dict[str, str] = {}
-            ready_stocks: list[str] = []
+            candidate_stocks: list[str] = []
+            refresh_counts: dict[str, int] = {}
             if stocks:
-                ready_stocks, skipped_unready = await directional_service.filter_ready_stock_symbols(stocks)
-                stock_batch = directional_service.next_stock_batch(ready_stocks)
+                # Pass 1 — SPOT freshness decides batch candidacy only. The BG
+                # watchlist build rotates all ~217 F&O names over hours, so
+                # requiring a young snapshot row up front skipped ALL 50 stocks
+                # on day one (option_quotes_stale_9000-12000s with live spot).
+                # Option-quote honesty is enforced in pass 2, AFTER the batch's
+                # rows are refreshed just-in-time.
+                spot_limit = float(directional_service.config["paper_trading"]["stale_watchlist_seconds"])
+                quote_limit = float(settings.DIRECTIONAL_STOCK_WATCHLIST_MAX_AGE_SECONDS)
+                pre: dict[str, dict[str, Any]] | None
+                try:
+                    pre = await asyncio.wait_for(
+                        directional_service.store.stock_readiness(
+                            stocks,
+                            spot_max_age_seconds=spot_limit,
+                            watchlist_max_age_seconds=quote_limit,
+                        ),
+                        timeout=15.0,
+                    )
+                except Exception as exc:  # noqa: BLE001 — fail closed for stocks only
+                    pre = None
+                    skipped_unready = {s: f"readiness_check_failed: {exc}" for s in stocks}
+                if pre is not None:
+                    for symbol in stocks:
+                        info = pre.get(str(symbol).upper()) or {}
+                        if not info.get("latest_spot_time"):
+                            skipped_unready[symbol] = "no_recent_spot_bars"
+                        elif not info.get("spot_fresh"):
+                            skipped_unready[symbol] = f"spot_stale_{int(info.get('spot_age_seconds') or 0)}s"
+                        else:
+                            candidate_stocks.append(symbol)
+                    stock_batch = directional_service.next_stock_batch(candidate_stocks)
+                if stock_batch and pre is not None:
+                    refresh_age = float(settings.DIRECTIONAL_STOCK_WATCHLIST_REFRESH_AGE_SECONDS)
+                    need_refresh = []
+                    for symbol in stock_batch:
+                        age = (pre.get(str(symbol).upper()) or {}).get("watchlist_age_seconds")
+                        if age is None or float(age) > refresh_age:
+                            need_refresh.append(symbol)
+                    refresh_report: dict[str, str] = {}
+                    if need_refresh:
+                        try:
+                            from market_data.atm_watchlist import atm_watchlist_service
+
+                            refresh_report = await atm_watchlist_service.refresh_stock_snapshot_rows(
+                                need_refresh,
+                                budget_seconds=float(
+                                    settings.DIRECTIONAL_STOCK_WATCHLIST_REFRESH_BUDGET_SECONDS
+                                ),
+                                concurrency=int(
+                                    settings.DIRECTIONAL_STOCK_WATCHLIST_REFRESH_CONCURRENCY
+                                ),
+                            )
+                        except Exception as exc:  # noqa: BLE001 — refresh is best-effort; pass 2 still gates
+                            refresh_report = {s: f"error:{str(exc)[:80]}" for s in need_refresh}
+                    from collections import Counter as _RefreshCounter
+
+                    refresh_counts = dict(_RefreshCounter(refresh_report.values()))
+                    # Pass 2 — the honesty gate proper, batch-only. Symbols whose
+                    # rows are STILL stale (refresh timeout/budget/error) are
+                    # skipped-and-reported, never evaluated against old quotes.
+                    try:
+                        post = await asyncio.wait_for(
+                            directional_service.store.stock_readiness(
+                                stock_batch,
+                                spot_max_age_seconds=spot_limit,
+                                watchlist_max_age_seconds=quote_limit,
+                            ),
+                            timeout=15.0,
+                        )
+                    except Exception as exc:  # noqa: BLE001 — fail closed
+                        post = None
+                        for symbol in stock_batch:
+                            skipped_unready[symbol] = f"readiness_check_failed: {exc}"
+                        stock_batch = []
+                    if post is not None:
+                        evaluable: list[str] = []
+                        for symbol in stock_batch:
+                            info = post.get(str(symbol).upper()) or {}
+                            if info.get("spot_fresh") and info.get("watchlist_fresh"):
+                                evaluable.append(symbol)
+                                continue
+                            if not info.get("latest_spot_time"):
+                                base = "no_recent_spot_bars"
+                            elif not info.get("spot_fresh"):
+                                base = f"spot_stale_{int(info.get('spot_age_seconds') or 0)}s"
+                            elif not int(info.get("watchlist_rows") or 0):
+                                base = "no_atm_watchlist_rows"
+                            else:
+                                base = f"option_quotes_stale_{int(info.get('watchlist_age_seconds') or 0)}s"
+                            note = refresh_report.get(symbol)
+                            skipped_unready[symbol] = f"{base} (refresh={note})" if note else base
+                        stock_batch = evaluable
                 if stock_batch:
                     semaphore = asyncio.Semaphore(max(1, int(settings.DIRECTIONAL_STOCK_SCAN_CONCURRENCY)))
                     stock_timeout = float(settings.DIRECTIONAL_STOCK_SYMBOL_TIMEOUT_SECONDS)
@@ -674,9 +767,13 @@ class MarketHoursPaperSupervisor:
                 "stock_universe": {
                     "source": universe.get("stock_universe_source"),
                     "total": len(stocks),
-                    "ready": len(ready_stocks),
+                    # candidates = spot-fresh names eligible for batch rotation;
+                    # option-quote honesty is enforced per-batch AFTER the
+                    # just-in-time refresh (see refresh_counts).
+                    "candidates": len(candidate_stocks),
                     "batch": stock_batch,
                     "batch_size": len(stock_batch),
+                    "refresh_counts": refresh_counts,
                     "skipped_unready_count": len(skipped_unready),
                     "skipped_reason_counts": dict(skip_reason_counts.most_common(10)),
                 },
