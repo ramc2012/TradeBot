@@ -355,9 +355,11 @@ class Settings(BaseSettings):
     # a single position per underlying and a 30% hard stop. Default OFF; when on,
     # predict() uses the positioning-confirmed positional view instead of the
     # legacy momentum sum. Edge measured small + cost-sensitive on indices, so
-    # this is a forward PAPER A/B. Vol gate (d_atm_iv>=0) sourced live where
-    # history is null. pcr_low/high = the call-heavy / put-heavy confirmation
-    # thresholds for CE / PE.
+    # this is a forward PAPER A/B. IV state SIZES the entry, never vetoes it
+    # (2026-07-17 owner directive) — signals.compute_iv_sizing_factor scales
+    # the base risk budget from d_atm_iv / ATM-IV percentile; the former
+    # d_atm_iv>=0 hard gate is retired. pcr_low/high = the call-heavy /
+    # put-heavy confirmation thresholds for CE / PE.
     DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED: bool = False
     DIRECTIONAL_POSITIONAL_PCR_LOW: float = 0.9
     DIRECTIONAL_POSITIONAL_PCR_HIGH: float = 1.2
@@ -411,6 +413,23 @@ class Settings(BaseSettings):
     DIRECTIONAL_STOCK_WATCHLIST_REFRESH_AGE_SECONDS: float = 180.0
     DIRECTIONAL_STOCK_WATCHLIST_REFRESH_BUDGET_SECONDS: float = 90.0
     DIRECTIONAL_STOCK_WATCHLIST_REFRESH_CONCURRENCY: int = 3
+    # ── Directional anti-churn re-entry cooldowns (2026-07-17) ─────────────
+    # OWNER DIRECTIVE (~13:40 IST): "uncap signals, no hard gate. but see
+    # that the lane has sane strategy instead of just opening and closing
+    # posiitons." Signal generation stays UNCAPPED — every cycle journals a
+    # signal; discipline lives in the EXECUTION layer only. After a close on
+    # an underlying, NEW entries on that same underlying wait out a cooldown
+    # (proposals during the window are journaled as status=cooldown_skip with
+    # seconds remaining — visible, never silently dropped, and never counted
+    # as a policy act). Flat/flip/target/DTE closes use the FLAT window
+    # (900s = 5 bars at the 3m cadence); a stop-out means the thesis was
+    # FALSIFIED, so immediate re-entry is churn — it waits the longer STOP
+    # window. Protective exits (stop/target/DTE/expiry) are NEVER delayed by
+    # cooldowns. A confirmed close-and-reverse flip is one atomic decision
+    # and opens its reverse leg in the same cycle (the 2-cycle flip
+    # confirmation in paper.py is what stops single-cycle whipsaws).
+    DIRECTIONAL_REENTRY_COOLDOWN_FLAT_SECONDS: float = 900.0
+    DIRECTIONAL_REENTRY_COOLDOWN_STOP_SECONDS: float = 1800.0
     # CBE alpha engine runs at EOD. Cadence = 1 hour: during market hours
     # the daily MACD/RSI indicators use completed sessions only, so re-running
     # intra-day is idempotent. A post-close catch-up after the ingestion grace

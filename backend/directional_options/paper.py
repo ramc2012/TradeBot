@@ -12,6 +12,7 @@ from loguru import logger
 from sqlalchemy import text
 
 from analysis.instruments import normalize_index_contract_expiry
+from core.config import settings
 from core.paper_trade_recorder import paper_trade_recorder
 from db.database import AsyncSessionLocal
 from directional_options.config import DIRECTIONAL_INITIAL_CAPITAL
@@ -161,6 +162,14 @@ class DirectionalOptionsPaperStore:
         self.planned_stop_pct = float(planned_stop_pct)
         self.profit_target_pct = float(profit_target_pct)
         self.expiry_guard_days = float(expiry_guard_days)
+        # NOTE 2026-07-17: max_open_positions / max_reserved_premium_pct
+        # portfolio caps were added and reversed the same day (owner: "uncap
+        # signals, no hard gate"). Anti-churn discipline is the per-underlying
+        # re-entry cooldowns + flip confirmation below instead.
+        #
+        # Churn telemetry: cooldown-skip counter keyed by IST date (in-memory,
+        # per-process; the journal carries the durable cooldown_skip records).
+        self._cooldown_skips_by_day: dict[str, int] = {}
 
     async def list_journal(self, symbol: str | None = None, limit: int = 50) -> dict[str, Any]:
         records = await self._load_journal()
@@ -232,6 +241,73 @@ class DirectionalOptionsPaperStore:
             "closed_positions": closed_positions[:limit],
         }
 
+    # ── Anti-churn: per-underlying re-entry cooldown (2026-07-17) ────────────
+    # OWNER DIRECTIVE: "uncap signals, no hard gate. but see that the lane has
+    # sane strategy instead of just opening and closing posiitons." This is
+    # EXECUTION-layer cadence discipline only — signals still generate and
+    # journal every cycle; the book just doesn't thrash (2026-05-20 history:
+    # 71 opens / 64 closes in one session). A blocked proposal is journaled as
+    # status=cooldown_skip with seconds remaining (visible, honest) and is NOT
+    # a policy act (register_open is never called for it). Exits are NEVER
+    # cooldown-delayed — this touches only the NEW-entry path.
+
+    @staticmethod
+    def _reentry_cooldown_remaining(
+        underlying: str,
+        closed_positions: list[dict[str, Any]],
+        now_dt: datetime,
+    ) -> tuple[float, str | None]:
+        """Seconds left before `underlying` may open a NEW position, plus the
+        close reason that started the window (None when clear).
+
+        Windows differentiate by how the last position on this underlying
+        closed: stop_loss = the thesis was FALSIFIED, so re-entry waits the
+        longer DIRECTIONAL_REENTRY_COOLDOWN_STOP_SECONDS; flat_signal /
+        signal_flip / profit_target / expiry-DTE closes wait
+        DIRECTIONAL_REENTRY_COOLDOWN_FLAT_SECONDS (5 bars at the 3m cadence).
+        """
+        last_close_dt: datetime | None = None
+        last_reason: str | None = None
+        normalized = _normalize_symbol(underlying)
+        for row in closed_positions:
+            if _normalize_symbol(row.get("underlying")) != normalized:
+                continue
+            closed_dt = _parse_iso(row.get("closed_at") or row.get("updated_at"))
+            if closed_dt is None:
+                continue
+            if last_close_dt is None or closed_dt > last_close_dt:
+                last_close_dt = closed_dt
+                last_reason = str(row.get("close_reason") or "")
+        if last_close_dt is None:
+            return 0.0, None
+        if last_reason == "stop_loss":
+            window = float(settings.DIRECTIONAL_REENTRY_COOLDOWN_STOP_SECONDS)
+        else:
+            window = float(settings.DIRECTIONAL_REENTRY_COOLDOWN_FLAT_SECONDS)
+        remaining = window - (now_dt - last_close_dt).total_seconds()
+        if remaining <= 0:
+            return 0.0, None
+        return remaining, last_reason
+
+    @staticmethod
+    def _ist_day_key(now_dt: datetime | None = None) -> str:
+        base = now_dt or datetime.now(timezone.utc)
+        if base.tzinfo is None:
+            base = base.replace(tzinfo=timezone.utc)
+        return (base.astimezone(timezone.utc) + timedelta(hours=5, minutes=30)).date().isoformat()
+
+    def _note_cooldown_skip(self) -> None:
+        key = self._ist_day_key()
+        self._cooldown_skips_by_day[key] = self._cooldown_skips_by_day.get(key, 0) + 1
+        if len(self._cooldown_skips_by_day) > 3:
+            for stale in sorted(self._cooldown_skips_by_day)[:-2]:
+                self._cooldown_skips_by_day.pop(stale, None)
+
+    @staticmethod
+    def _clear_pending_flip(row: dict[str, Any]) -> None:
+        row.pop("pending_flip_direction", None)
+        row.pop("pending_flip_at", None)
+
     async def sync_snapshot(
         self,
         snapshot_payload: dict[str, Any],
@@ -267,6 +343,9 @@ class DirectionalOptionsPaperStore:
             "confidence": signal.get("confidence"),
             "expected_move": signal.get("expected_move"),
             "expected_horizon_bars": signal.get("expected_horizon_bars"),
+            # IV-conditioned sizing factor (2026-07-17: IV sizes, never vetoes)
+            # — surfaced so the journal/UI shows WHY a position was small.
+            "iv_sizing_factor": signal.get("iv_sizing_factor"),
             "selection_reason": snapshot.get("selection_reason"),
             "approved": bool(risk.get("approved")),
             "execution_ready": execution_ready,
@@ -311,6 +390,12 @@ class DirectionalOptionsPaperStore:
             # had no bounded exit. Runs before the actionable branches so a stop
             # still fires on a flat / no-signal / data-gap cycle (with no fresh
             # mark, latest≈entry → ret≈0 → no false trigger).
+            # PROTECTIVE EXITS ARE NEVER BLOCKED (2026-07-17): no fresh-mark
+            # precondition here. Without a fresh mark latest≈entry → ret≈0, so
+            # a stop/target cannot FALSE-fire off a carried premium — but the
+            # DTE/expiry pass below must still close the book even on a cycle
+            # with no mark (a fresh-mark guard here made near-expiry positions
+            # immortal whenever their contract fell off the feed).
             for row in list(matching):
                 entry_premium = float(row.get("entry_premium") or 0.0)
                 if entry_premium <= 0:
@@ -361,6 +446,17 @@ class DirectionalOptionsPaperStore:
                 now_dt = datetime.now(timezone.utc)
                 position_timeframe = str(selection.get("timeframe") or "")
                 for row in list(matching):
+                    # A flat evaluation breaks a pending flip's "two
+                    # CONSECUTIVE evaluations" streak (flip confirmation,
+                    # 2026-07-17 anti-churn).
+                    self._clear_pending_flip(row)
+                    row_mark = marks.get(str(row.get("position_id") or "")) or {}
+                    if not row_mark:
+                        # HONEST FILLS: a flat_signal close is not a protective
+                        # exit — without a current price for the held leg it
+                        # waits for the next marked cycle instead of fabricating
+                        # a fill from a carried-forward premium.
+                        continue
                     if row.get("positional"):
                         # Positional book is HELD through flat signals — it exits
                         # only on the protective stop / target / DTE pass above,
@@ -385,7 +481,7 @@ class DirectionalOptionsPaperStore:
                             continue
                     self._close_position(
                         row,
-                        mark=marks.get(str(row.get("position_id") or "")) or {},
+                        mark=row_mark,
                         close_time=recorded_at,
                         close_reason="flat_signal",
                     )
@@ -401,9 +497,18 @@ class DirectionalOptionsPaperStore:
                 return await self._summary(open_positions, closed_positions)
 
             refreshed = False
+            # Set when a held row is closed in THIS pass to make way for the
+            # incoming contract (confirmed direction flip or same-direction
+            # contract rotation). That close+open is ONE atomic decision, so
+            # the re-entry cooldown does not apply to its own replacement leg
+            # — it gates fresh entries after closes from EARLIER cycles.
+            replaced_this_cycle = False
             position_timeframe = str(selection.get("timeframe") or "")
             for row in list(matching):
                 if _same_contract(row, contract) and str(row.get("direction") or "") == str(signal.get("direction") or ""):
+                    # Same contract + direction re-affirmed — any pending flip
+                    # was a one-cycle whipsaw; drop it.
+                    self._clear_pending_flip(row)
                     row["updated_at"] = recorded_at
                     # Mark this cycle as green-lit so the flat-signal
                     # confirmation timer above resets every time we get a
@@ -434,14 +539,38 @@ class DirectionalOptionsPaperStore:
                     # Held too briefly — keep position open through a single
                     # noisy regime flip. Will reassess on the next bar.
                     continue
+                incoming_direction = str(signal.get("direction") or "")
+                held_direction = str(row.get("direction") or "")
+                if incoming_direction and held_direction and incoming_direction != held_direction:
+                    # FLIP CONFIRMATION (2026-07-17 anti-churn): a direction
+                    # flip (held CE, signal says PE or vice versa) must persist
+                    # across TWO consecutive actionable evaluations before the
+                    # close-and-reverse fires — a single-cycle whipsaw must not
+                    # round-trip the book. Mirrors the FLAT_CONFIRMATION
+                    # pattern; the pending state is cleared by a re-affirming
+                    # refresh or by a flat evaluation in between.
+                    if str(row.get("pending_flip_direction") or "") != incoming_direction:
+                        row["pending_flip_direction"] = incoming_direction
+                        row["pending_flip_at"] = recorded_at
+                        # First sighting — hold. The new open below is
+                        # suppressed by the one-position-per-symbol guard.
+                        continue
+                row_mark = marks.get(str(row.get("position_id") or "")) or {}
+                if not row_mark:
+                    # HONEST FILLS: a flip/rotation close is not a protective
+                    # exit — wait for a marked cycle rather than fabricate a
+                    # fill price. Pending-flip state persists, so the close
+                    # fires on the next marked confirming cycle.
+                    continue
                 self._close_position(
                     row,
-                    mark=marks.get(str(row.get("position_id") or "")) or {},
+                    mark=row_mark,
                     close_time=recorded_at,
                     close_reason="signal_flip",
                 )
                 open_positions.remove(row)
                 closed_positions.append(row)
+                replaced_this_cycle = True
 
             # Hard one-position-per-symbol guard. If the existing position
             # on this symbol was REFRESHED above (same contract+direction)
@@ -464,6 +593,51 @@ class DirectionalOptionsPaperStore:
                 return await self._summary(open_positions, closed_positions)
 
             if not refreshed and allow_entries:
+                # PER-UNDERLYING RE-ENTRY COOLDOWN (2026-07-17 anti-churn):
+                # after a close on this underlying, new entries wait out the
+                # reason-differentiated window (stop_loss = longer; flat/flip/
+                # target/DTE = 5 bars at 3m). The proposal is JOURNALED as
+                # cooldown_skip with seconds remaining — never silently
+                # dropped — and is NOT a policy act (no register_open, so the
+                # bandit's posterior never sees a phantom skip). A confirmed
+                # close-and-reverse this same cycle bypasses this check (one
+                # atomic decision); protective exits are never touched here.
+                if not replaced_this_cycle:
+                    cooldown_remaining, cooldown_close_reason = self._reentry_cooldown_remaining(
+                        underlying, closed_positions, datetime.now(timezone.utc)
+                    )
+                    if cooldown_remaining > 0:
+                        self._note_cooldown_skip()
+                        try:
+                            await self._append_journal(
+                                {
+                                    "recorded_at": recorded_at,
+                                    "underlying": underlying,
+                                    "status": "cooldown_skip",
+                                    "cooldown_seconds_remaining": round(cooldown_remaining, 1),
+                                    "cooldown_close_reason": cooldown_close_reason,
+                                    "direction": signal.get("direction"),
+                                    "confidence": signal.get("confidence"),
+                                    "trading_symbol": contract.get("trading_symbol"),
+                                    "instrument_key": contract.get("instrument_key"),
+                                    "approved": False,
+                                    "execution_ready": execution_ready,
+                                    "selection_reason": (
+                                        f"reentry_cooldown_active ({cooldown_close_reason or 'close'}: "
+                                        f"{cooldown_remaining:.0f}s remaining)"
+                                    ),
+                                }
+                            )
+                        except Exception:  # noqa: BLE001 — telemetry must not block the sync
+                            pass
+                        await self._save_positions(
+                            {
+                                "last_synced_at": recorded_at,
+                                "open_positions": open_positions,
+                                "closed_positions": closed_positions[-250:],
+                            }
+                        )
+                        return await self._summary(open_positions, closed_positions)
                 new_position_id = uuid4().hex
                 try:
                     await paper_trade_recorder.record_event(
@@ -555,7 +729,7 @@ class DirectionalOptionsPaperStore:
                         "selection_reason": snapshot.get("selection_reason"),
                         "rag_context": rag_context,
                         "price_source": contract.get("price_source") or "local_watchlist",
-                        "mark_time": recorded_at,
+                        "mark_time": contract.get("quote_time") or recorded_at,
                         "policy_size_multiplier": size_multiplier,
                         "policy_sampled_value": policy_payload.get("sampled_value"),
                         "policy_n_seen_at_open": policy_payload.get("n_seen"),
@@ -771,9 +945,29 @@ class DirectionalOptionsPaperStore:
 
         win_rate = (wins / (wins + losses)) if (wins + losses) else 0.0
 
+        # Churn telemetry (2026-07-17 anti-churn): "sane strategy" must be
+        # OBSERVABLE. Counted over the IST session date from the in-memory
+        # lists (cheap — closed list is already capped); cooldown skips come
+        # from the per-process counter (the journal carries the durable
+        # cooldown_skip records).
+        today_key = self._ist_day_key()
+        opens_today = 0
+        for row in [*open_positions, *closed_positions]:
+            opened_dt = _parse_iso(row.get("opened_at"))
+            if opened_dt is not None and self._ist_day_key(opened_dt) == today_key:
+                opens_today += 1
+        closes_today = 0
+        for row in closed_positions:
+            closed_dt = _parse_iso(row.get("closed_at"))
+            if closed_dt is not None and self._ist_day_key(closed_dt) == today_key:
+                closes_today += 1
+
         return {
             "open_positions": len(open_positions),
             "closed_positions": len(closed_positions),
+            "opens_today": opens_today,
+            "closes_today": closes_today,
+            "cooldown_skips_today": self._cooldown_skips_by_day.get(today_key, 0),
             "realized_pnl": realized,
             "unrealized_pnl": unrealized,
             "total_pnl": round(realized + unrealized, 2),

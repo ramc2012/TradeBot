@@ -50,17 +50,32 @@ class DirectionalOptionsRiskEngine:
         weekly_realized: float = 0.0,
     ) -> RiskDecision:
         risk_pct = float(self.config["risk_pct"])
-        base_risk_budget = equity * risk_pct
+        # Unconditioned per-trade risk unit — the loss caps below stay
+        # denominated in THIS so "R-multiples of typical trade risk" doesn't
+        # wobble with the day's IV state.
+        unit_risk_budget = equity * risk_pct
+        # IV-conditioned BASE budget (2026-07-17 owner directive: "position
+        # has to be sized as per IV it cannot prevent a trade"). The signal's
+        # iv_sizing_factor ∈ [floor, 1.0] shrinks the BASE — not the policy
+        # multiplier — so the RL reward stays R-per-intended-risk INCLUDING
+        # the IV conditioning (paper.register_open de-scales risk_budget by
+        # the policy multiplier only, leaving base × iv_factor as the R
+        # denominator).
+        iv_factor = float(getattr(signal, "iv_sizing_factor", 1.0) or 1.0)
+        iv_factor = min(max(iv_factor, 0.0), 1.0)
+        base_risk_budget = unit_risk_budget * iv_factor
         risk_budget = base_risk_budget * float(size_multiplier)
 
         # Premium cap is intentionally unbounded per the "no size limit"
         # directive — only the per-lot risk budget gates quantity now.
+        # When configured, it scales with the same IV factor so both sizing
+        # bounds express the identical IV-conditioned intent.
         premium_cap_cfg = self.config.get("premium_cap_pct")
         premium_cap: Optional[float]
         if premium_cap_cfg is None:
             premium_cap = None
         else:
-            premium_cap = equity * float(premium_cap_cfg) * float(size_multiplier)
+            premium_cap = equity * float(premium_cap_cfg) * iv_factor * float(size_multiplier)
 
         planned_stop_pct = float(self.config["planned_stop_pct"])
         fee_per_unit = 0.45
@@ -76,12 +91,33 @@ class DirectionalOptionsRiskEngine:
         else:
             qty_lots = max(0, max_lots_by_risk)
 
+        if qty_lots < 1 and iv_factor < 1.0:
+            # The IV factor must SIZE the trade, never prevent it (2026-07-17
+            # owner directive). If the shrink alone rounded the lot count to
+            # zero — i.e. the UN-conditioned budget (iv_factor = 1.0) would
+            # have bought at least one lot — take the 1-lot minimum instead
+            # of letting the sizing floor become a de-facto veto. A 0-lot
+            # result that exists even WITHOUT the IV shrink (budget simply
+            # too small for the contract) still rejects below, unchanged.
+            unconditioned_lots = math.floor(
+                (unit_risk_budget * float(size_multiplier)) / lot_risk
+            )
+            if premium_cap_cfg is not None:
+                unconditioned_premium_cap = equity * float(premium_cap_cfg) * float(size_multiplier)
+                unconditioned_lots = min(
+                    unconditioned_lots,
+                    math.floor(unconditioned_premium_cap / max(lot_premium, 1.0)),
+                )
+            if unconditioned_lots >= 1:
+                qty_lots = 1
+
         reasons: list[str] = []
 
         # Capital-safety caps — NOT a strategy gate, a stop-trading rule.
-        # Comparing against base_risk_budget (not the scaled one) means
-        # the cap is in "R-multiples of typical trade risk" — consistent
-        # across trades regardless of the policy's chosen multiplier.
+        # Comparing against unit_risk_budget (neither policy-multiplier- nor
+        # IV-factor-scaled) means the cap is in "R-multiples of typical trade
+        # risk" — consistent across trades regardless of the policy's chosen
+        # multiplier or the day's IV state.
         daily_cap_R = float(self.config.get("daily_loss_cap_r", 4.0))
         weekly_cap_R = float(self.config.get("weekly_loss_cap_r", 10.0))
         # OWNER DIRECTIVE 2026-07-17 (signal validation, paper-only): skip
@@ -89,15 +125,15 @@ class DirectionalOptionsRiskEngine:
         # Sizing math, policy act/skip and the RAG gate are untouched; set
         # SIGNAL_VALIDATION_UNCAPPED=False to restore the caps.
         if not settings.SIGNAL_VALIDATION_UNCAPPED:
-            if daily_realized <= -(base_risk_budget * daily_cap_R):
+            if daily_realized <= -(unit_risk_budget * daily_cap_R):
                 reasons.append(
                     f"Daily loss cap breached (realized {daily_realized:.0f} ≤ "
-                    f"-{base_risk_budget * daily_cap_R:.0f}); trading paused for the session."
+                    f"-{unit_risk_budget * daily_cap_R:.0f}); trading paused for the session."
                 )
-            if weekly_realized <= -(base_risk_budget * weekly_cap_R):
+            if weekly_realized <= -(unit_risk_budget * weekly_cap_R):
                 reasons.append(
                     f"Weekly loss cap breached (realized {weekly_realized:.0f} ≤ "
-                    f"-{base_risk_budget * weekly_cap_R:.0f}); trading paused for the week."
+                    f"-{unit_risk_budget * weekly_cap_R:.0f}); trading paused for the week."
                 )
         if qty_lots < 1:
             reasons.append(

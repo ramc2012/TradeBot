@@ -386,9 +386,13 @@ def _stock_live_fixture(service: DirectionalOptionsService, monkeypatch: pytest.
     async def fake_loss_windows():
         return (0.0, 0.0)
 
+    async def fake_latest_local_option_mark(**_kwargs):
+        return 32.0, quote_time.isoformat(), "local_watchlist"
+
     monkeypatch.setattr(service.store, "load_live_spot_frame", fake_load_live_spot_frame)
     monkeypatch.setattr(service.feature_engine, "build_frame", lambda *_a, **_k: feature_frame)
     monkeypatch.setattr(service.store, "list_live_contract_snapshots", fake_list_live_contract_snapshots)
+    monkeypatch.setattr(service.store, "latest_local_option_mark", fake_latest_local_option_mark)
     monkeypatch.setattr(service, "_loss_cap_realized", fake_loss_windows)
     monkeypatch.setattr(
         "directional_options.service.market_intelligence_runtime.get_strategy_health",

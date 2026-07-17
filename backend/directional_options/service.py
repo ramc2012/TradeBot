@@ -53,6 +53,20 @@ def rotate_batch(symbols: list[str], cursor: int, batch_size: int) -> tuple[list
     return batch, end % total
 
 
+def _fresh_quote_time(value: object, *, max_age_seconds: float) -> bool:
+    """Return True only for a parseable, current market quote timestamp."""
+    if not value:
+        return False
+    try:
+        quote_time = pd.Timestamp(value)
+        if quote_time.tzinfo is None:
+            quote_time = quote_time.tz_localize("UTC")
+        age = (pd.Timestamp.now(tz="UTC") - quote_time.tz_convert("UTC")).total_seconds()
+        return 0.0 <= age <= max_age_seconds
+    except Exception:
+        return False
+
+
 class DirectionalOptionsService:
     """Expose research, live snapshot, and paper-trading surfaces."""
 
@@ -433,6 +447,41 @@ class DirectionalOptionsService:
         lookback_sessions: int,
     ) -> dict[str, object]:
         payload = await self.live_snapshot(underlying, timeframe, lookback_sessions)
+        selected = dict(payload.get("snapshot", {}).get("selected_contract") or {})
+        if selected:
+            entry_premium, entry_mark_time, entry_source = await self.store.latest_local_option_mark(
+                underlying=str(underlying),
+                expiry=str(selected.get("expiry") or ""),
+                strike=float(selected.get("strike") or 0.0),
+                option_type=str(selected.get("option_type") or ""),
+                instrument_key=str(selected.get("instrument_key") or "") or None,
+                allow_history_fallback=False,
+            )
+            max_entry_age = float(
+                settings.DIRECTIONAL_STOCK_WATCHLIST_MAX_AGE_SECONDS
+                if not self.is_index_underlying(underlying)
+                else self.config["paper_trading"]["stale_watchlist_seconds"]
+            )
+            if (
+                entry_premium is None
+                or entry_premium <= 0
+                or not _fresh_quote_time(entry_mark_time, max_age_seconds=max_entry_age)
+            ):
+                snapshot = payload["snapshot"]
+                snapshot["data_status"]["execution_ready"] = False
+                snapshot["data_status"]["degraded_reason"] = "selected_contract_quote_stale"
+                if snapshot.get("risk"):
+                    snapshot["risk"]["approved"] = False
+                    reasons = list(snapshot["risk"].get("reasons") or [])
+                    reasons.append("Exact selected contract has no fresh executable quote.")
+                    snapshot["risk"]["reasons"] = reasons
+                snapshot["selection_reason"] = "Exact selected contract has no fresh executable quote."
+            else:
+                selected["option_price"] = float(entry_premium)
+                selected["price_source"] = entry_source
+                selected["quote_time"] = entry_mark_time
+                payload["snapshot"]["selected_contract"] = selected
+
         open_positions = await self.paper.list_positions(symbol=underlying, status="open", limit=50)
         position_marks: dict[str, dict[str, object]] = {}
         for row in open_positions.get("open_positions", []):
@@ -446,23 +495,36 @@ class DirectionalOptionsService:
                 strike=row_strike,
                 option_type=row_otype,
                 instrument_key=str(row.get("instrument_key") or "") or None,
+                allow_history_fallback=False,
             )
-            if premium is None:
-                # The held contract often isn't on the WS premium feed (e.g. a
-                # monthly strike), so latest_local_option_mark returns nothing
-                # and the position's mark FREEZES at entry — every trade then
-                # closes at exit==entry == ₹0 realized P&L (27 such ₹0 trades
-                # on 2026-06-04). Fall back to the option-chain cache, which
-                # carries every strike's LTP (~30s fresh), so positions are
-                # marked-to-market and closes realize real P&L.
+            max_mark_age = float(
+                settings.DIRECTIONAL_STOCK_WATCHLIST_MAX_AGE_SECONDS
+                if not self.is_index_underlying(row_underlying)
+                else self.config["paper_trading"]["stale_watchlist_seconds"]
+            )
+            if (
+                premium is None
+                or premium <= 0
+                or not _fresh_quote_time(mark_time, max_age_seconds=max_mark_age)
+            ):
+                # The held contract often isn't on the fresh WS watchlist feed
+                # (e.g. a monthly strike rotated out), so the local mark is
+                # missing or stale. Fall back to the option-chain cache, which
+                # carries every strike's LTP (~30s fresh — LIVE data, unlike
+                # the history fallback excluded above). Without this the
+                # position's mark FREEZES at entry — every trade then closes
+                # at exit==entry == ₹0 realized P&L (27 such ₹0 trades on
+                # 2026-06-04) and the protective stop/target can never fire.
                 from directional_options.chain_analytics import chain_strike_mark
-                chain_mark = await chain_strike_mark(row_underlying, row_expiry, row_strike, row_otype)
-                if chain_mark is not None and chain_mark > 0:
-                    premium = chain_mark
-                    mark_time = None
-                    price_source = "chain_cache_live"
-            if premium is None:
-                continue
+                try:
+                    chain_mark = await chain_strike_mark(row_underlying, row_expiry, row_strike, row_otype)
+                except Exception:  # noqa: BLE001
+                    chain_mark = None
+                if chain_mark is None or chain_mark <= 0:
+                    continue
+                premium = float(chain_mark)
+                mark_time = None
+                price_source = "chain_cache_live"
             position_marks[str(row.get("position_id") or "")] = {
                 "premium": premium,
                 "spot": float(payload["snapshot"].get("spot_price") or row.get("latest_spot") or 0.0),

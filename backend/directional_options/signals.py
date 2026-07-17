@@ -7,6 +7,14 @@ learns its own trade/skip threshold from realised R-multiples. Only an
 empty / zero-direction-score signal is filtered here, because feeding
 those into the policy would just teach it that flat tape doesn't pay
 (wasting model capacity).
+
+2026-07-17 NOTE: a same-day experiment re-introduced structural fail-closed
+gates here (allowed_regimes / min_confidence / raised direction-score
+floor). REVERSED same day by owner directive ("uncap signals, no hard
+gate") — regimes are FEATURES the policy sees as a one-hot, never
+barriers, and IV state SIZES positions via compute_iv_sizing_factor()
+instead of vetoing them. Cadence discipline lives in the EXECUTION layer
+(paper.py: re-entry cooldowns, flip confirmation, min-hold), not here.
 """
 from __future__ import annotations
 
@@ -22,6 +30,65 @@ from directional_options.schemas import DirectionalSignal, RegimeSnapshot
 # engines agree on the upper bound; the risk allocator uses this value as
 # its 100% point on the confidence-to-size curve.
 MAX_SIGNAL_CONFIDENCE = 0.85
+
+# ── IV sizing curve (2026-07-17) ─────────────────────────────────────────────
+# OWNER DIRECTIVE: "position has to be sized as per IV it cannot prevent a
+# trade." The former positional vol gate (vol_ok = d_atm_iv >= 0, hard veto)
+# is replaced by a monotone sizing factor in [IV_SIZING_FLOOR, 1.0] applied to
+# the BASE risk budget in risk.approve().
+#
+# RESEARCH GROUNDING (2026-06-28 vol-state, measured): IV-percentile LOW
+# favors long premium — fwd ATM straddle IC −0.305 (t=−13.2): HIGH IV level
+# LOSES for long premium. So: low/falling IV ⇒ full size (1.0); high/rising
+# IV ⇒ shrink toward the floor. LEVEL (percentile of the ATM IV level within
+# the positioning panel's trailing window) is the primary conditioner, a
+# rising d_atm_iv (day-over-day ATM IV change, IV points) the secondary one.
+IV_SIZING_FLOOR = 0.25
+# d_atm_iv is NULL when the feed could not invert an ATM IV for today or
+# yesterday (missing chain premium, series start). We still trade — the veto
+# is gone — but SMALL: without an IV trend we cannot claim the favorable
+# (low/falling) state that justifies full size, so take the conservative
+# midpoint of the sizing range instead.
+IV_SIZING_NEUTRAL = 0.5
+# Rising-IV shrink saturates at +3 IV points/day (observed d_atm_iv magnitudes
+# run ≈ −1.5…+0.3; +3 in a day is a violent vol spike — floor-size territory).
+IV_RISE_SATURATION_POINTS = 3.0
+# ATM-IV-level percentile above which the level component starts shrinking
+# (median and below = full size; the measured harm concentrates in HIGH IV).
+IV_PCTILE_SHRINK_START = 0.5
+
+
+def compute_iv_sizing_factor(
+    d_atm_iv: float | None,
+    atm_iv_pctile: float | None = None,
+    *,
+    floor: float = IV_SIZING_FLOOR,
+) -> float:
+    """IV-state position-size factor in [floor, 1.0] — NEVER a trade veto.
+
+    * ``d_atm_iv`` (IV points/day): falling/flat ⇒ trend component 1.0;
+      rising shrinks linearly, saturating at IV_RISE_SATURATION_POINTS.
+    * ``atm_iv_pctile`` (0..1 rank of today's ATM IV level in the positioning
+      panel's trailing window; None when the feed lacks history): ≤ median ⇒
+      level component 1.0; above the median it shrinks linearly to the floor
+      at the 100th percentile. LEVEL is the primary researched conditioner.
+    * ``d_atm_iv is None`` ⇒ conservative neutral IV_SIZING_NEUTRAL (feed
+      could not compute an ATM IV trend — trade, but small).
+
+    Monotone: non-increasing in both d_atm_iv and atm_iv_pctile.
+    """
+    if d_atm_iv is None:
+        return IV_SIZING_NEUTRAL
+    rise = max(float(d_atm_iv), 0.0)
+    trend_component = 1.0 - (1.0 - floor) * min(rise / IV_RISE_SATURATION_POINTS, 1.0)
+    level_component = 1.0
+    if atm_iv_pctile is not None:
+        pctile = min(max(float(atm_iv_pctile), 0.0), 1.0)
+        if pctile > IV_PCTILE_SHRINK_START:
+            level_component = 1.0 - (1.0 - floor) * (
+                (pctile - IV_PCTILE_SHRINK_START) / (1.0 - IV_PCTILE_SHRINK_START)
+            )
+    return max(floor, min(1.0, trend_component * level_component))
 
 
 class DirectionalSignalEngine:
@@ -45,7 +112,9 @@ class DirectionalSignalEngine:
         # stop choosing them — but it needs to SEE them first. Without
         # this, the policy never gets called on any session whose
         # regime is currently chop / risk_off, and the UI shows "no
-        # signal" indefinitely.
+        # signal" indefinitely. (An allowed_regimes hard gate briefly
+        # returned on 2026-07-17 and was reversed the same day by owner
+        # directive.)
         ema_spread = float(row.get("ema_spread_pct", 0.0))
         breakout_up = max(float(row.get("breakout_up", 0.0)), 0.0)
         breakout_down = max(float(row.get("breakout_down", 0.0)), 0.0)
@@ -80,11 +149,12 @@ class DirectionalSignalEngine:
         positional_active = (
             settings.DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED and index_scope and positioning is not None
         )
+        iv_sizing = 1.0
         if positional_active:
             # POSITIONAL view (researched edge): HTF daily direction sets the side;
             # OPTION POSITIONING must CONFIRM it (call-OI building / low PCR for CE;
-            # put-side for PE) and the vol gate (d_atm_iv>=0) must pass — else no
-            # trade. Trend alone is anti-predictive; the positioning is the edge.
+            # put-side for PE) — else no trade. Trend alone is anti-predictive;
+            # the positioning is the edge.
             if positioning.get("is_stale"):
                 # Stale positioning feed → take NO new positional entries. Do NOT
                 # fall through to legacy intraday momentum (that is the churn the
@@ -100,14 +170,19 @@ class DirectionalSignalEngine:
                 confirm = (oib is not None and float(oib) > 0.0) or (pcr is not None and float(pcr) < settings.DIRECTIONAL_POSITIONAL_PCR_LOW)
             else:
                 confirm = (oib is not None and float(oib) < 0.0) or (pcr is not None and float(pcr) > settings.DIRECTIONAL_POSITIONAL_PCR_HIGH)
-            # MANDATORY vol gate — FAILS CLOSED. d_atm_iv is the researched
-            # long-premium conditioner (2026-06-28: high/rising IV-pct is the
-            # strongest negative for long premium); a NULL means the feed could
-            # not compute ATM IV, and passing on NULL silently disabled the
-            # gate for weeks. No IV trend -> no new positional entry.
-            vol_ok = daiv is not None and float(daiv) >= 0.0
-            if not confirm or not vol_ok:
+            if not confirm:
                 return None
+            # IV state SIZES the trade — it never vetoes it (2026-07-17 owner
+            # directive: "position has to be sized as per IV it cannot prevent
+            # a trade"). The former vol_ok hard gate is replaced by
+            # compute_iv_sizing_factor(): low/falling IV ⇒ 1.0 (full base
+            # budget), high/rising IV ⇒ monotone shrink toward IV_SIZING_FLOOR,
+            # NULL d_atm_iv ⇒ conservative IV_SIZING_NEUTRAL. risk.approve()
+            # scales the BASE risk budget by this factor.
+            iv_sizing = compute_iv_sizing_factor(
+                None if daiv is None else float(daiv),
+                positioning.get("atm_iv_pctile"),
+            )
             direction_score = 0.5
             confidence = min(MAX_SIGNAL_CONFIDENCE, 0.60)
         else:
@@ -131,7 +206,8 @@ class DirectionalSignalEngine:
             )
         # NOTE: no hard min_confidence cutoff anymore. Low-confidence
         # signals pass through to the policy, which decides act/skip from
-        # the learned R-multiple posterior.
+        # the learned R-multiple posterior. (A 0.60 cutoff briefly returned
+        # on 2026-07-17; reversed same day by owner directive.)
 
         if regime.label == "breakout":
             horizon_bars = int(self.config["short_horizon_bars"])
@@ -199,6 +275,7 @@ class DirectionalSignalEngine:
 
         return DirectionalSignal(
             positional=positional_active,
+            iv_sizing_factor=round(iv_sizing, 4),
             direction=direction,
             confidence=round(confidence, 4),
             expected_move=round(expected_move, 2),

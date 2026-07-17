@@ -266,11 +266,23 @@ def _positioning_is_stale(row_d) -> bool:
         return True
 
 
+# Minimum trailing sessions with a computed ATM IV before the level
+# percentile is meaningful; below this `atm_iv_pctile` is None and the IV
+# sizing curve falls back to the d_atm_iv trend component alone.
+_ATM_IV_PCTILE_MIN_SESSIONS = 20
+# Trailing window for the percentile — matches the panel's lookback_sessions.
+_ATM_IV_PCTILE_WINDOW_SESSIONS = 120
+
+
 async def latest(underlying: str) -> dict | None:
     """Latest stored positioning row for `underlying` (for the live decision path).
 
     Carries `is_stale` so the signal layer can decline NEW positional entries on
-    a stale feed WITHOUT silently reverting to legacy intraday momentum.
+    a stale feed WITHOUT silently reverting to legacy intraday momentum, and
+    `atm_iv_pctile` — the rank (0..1) of the latest ATM IV LEVEL within the
+    trailing stored window — the primary conditioner of the IV sizing factor
+    (2026-06-28 research: HIGH IV level loses for long premium; 2026-07-17
+    owner directive: IV sizes the position, it never vetoes the trade).
     """
     async with AsyncSessionLocal() as s:
         row = (await s.execute(text(
@@ -279,10 +291,32 @@ async def latest(underlying: str) -> dict | None:
             FROM directional_positioning_daily WHERE underlying = :u ORDER BY d DESC LIMIT 1
             """
         ), {"u": underlying.upper()})).first()
+        atm_iv_pctile = None
+        if row is not None and row.atm_iv is not None:
+            try:
+                stats = (await s.execute(text(
+                    """
+                    SELECT count(*) FILTER (WHERE atm_iv < :v) AS below, count(*) AS total
+                    FROM (
+                        SELECT atm_iv FROM directional_positioning_daily
+                        WHERE underlying = :u AND atm_iv IS NOT NULL
+                        ORDER BY d DESC LIMIT :w
+                    ) window_rows
+                    """
+                ), {"u": underlying.upper(), "v": float(row.atm_iv),
+                    "w": _ATM_IV_PCTILE_WINDOW_SESSIONS})).first()
+                total = int(stats.total or 0)
+                if total >= _ATM_IV_PCTILE_MIN_SESSIONS:
+                    atm_iv_pctile = round(min(1.0, max(0.0, float(stats.below) / float(total - 1))), 4)
+            except Exception:
+                # Percentile is a sizing refinement, not a gate — on any error
+                # fall back to trend-only sizing rather than failing the row.
+                atm_iv_pctile = None
     if row is None:
         return None
     return {"d": row.d.isoformat(), "pcr_oi": row.pcr_oi, "oi_build_bias": row.oi_build_bias,
             "atm_iv": row.atm_iv, "d_atm_iv": row.d_atm_iv, "d_pcr_oi": row.d_pcr_oi, "htf_up": row.htf_up,
+            "atm_iv_pctile": atm_iv_pctile,
             "is_stale": _positioning_is_stale(row.d)}
 
 

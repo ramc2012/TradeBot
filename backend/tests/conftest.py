@@ -21,6 +21,18 @@ Test-harness hygiene handled here:
    (``test_cbe_paper_book`` and ``test_live_marks_guard``) now own a dedicated
    persistent loop, so each is self-isolating without a global fixture that could
    fight pytest-asyncio's own loop management.
+
+3. OpenBLAS single-thread + main-thread LAPACK warm-up.
+   numpy links a pthread-based OpenBLAS whose worker-pool initialisation can
+   deadlock when the process's *first* LAPACK call happens on a non-main thread.
+   The directional-options service runs its policy pick via ``asyncio.to_thread``
+   → ``np.linalg.inv``, so ``tests/test_directional_options.py`` hung forever when
+   run standalone (nothing had touched BLAS yet when the worker thread called
+   ``inv``), while the full suite passed only because earlier test files happened
+   to do main-thread linear algebra first. Pin OpenBLAS to one thread (no worker
+   pool at all — the suite's matrices are tiny, threading only adds overhead) and
+   do a trivial ``inv`` on the main thread at conftest import, so a single-file
+   run initialises BLAS exactly like the full suite does.
 """
 from __future__ import annotations
 
@@ -34,7 +46,17 @@ _TEST_STATE_DIR = Path(tempfile.mkdtemp(prefix="tradebot-test-state-"))
 _TEST_NSE_STATE_FILE = _TEST_STATE_DIR / "nse_strategy_state.json"
 os.environ["NSE_STRATEGY_STATE_FILE"] = str(_TEST_NSE_STATE_FILE)
 
+# NOTE: must be set before numpy is first imported anywhere in the process —
+# OpenBLAS reads it once, when the shared library initialises (see docstring #3).
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
+import numpy as _np
 import pytest
+
+# Main-thread BLAS/LAPACK warm-up (docstring #3): harmless when OpenBLAS is
+# single-threaded, and the safety net if OPENBLAS_NUM_THREADS was overridden or
+# numpy was already imported before the env var above could take effect.
+_np.linalg.inv(_np.eye(2))
 
 
 @pytest.fixture(autouse=True)

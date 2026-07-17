@@ -97,6 +97,13 @@ class DirectionalSignal:
     # view — the selector must then pick the MONTHLY contract in the validated
     # DTE window, not the regime's intraday weekly preference.
     positional: bool = False
+    # IV-conditioned position-size factor in [IV_SIZING_FLOOR, 1.0]
+    # (2026-07-17 owner directive: "position has to be sized as per IV it
+    # cannot prevent a trade"). 1.0 = favorable IV (low level, falling/flat
+    # trend) = full base risk budget; adverse IV shrinks the BASE risk budget
+    # monotonically toward the floor instead of vetoing the entry. Default 1.0
+    # so stock / legacy-momentum signals and older callers are unchanged.
+    iv_sizing_factor: float = 1.0
 
 
 @dataclass(frozen=True)

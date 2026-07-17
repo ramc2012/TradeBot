@@ -94,7 +94,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # (every momentum / breakout / DI input exactly 0). Every other
         # bar — including chop — produces a signal that flows to the
         # policy. The policy will learn from realised R-multiples that
-        # chop trades bleed theta and skip them.
+        # chop trades bleed theta and skip them. (allowed_regimes /
+        # min_confidence gates briefly returned 2026-07-17; reversed the
+        # same day by owner directive: "uncap signals, no hard gate".)
         "min_direction_score_floor": 0.001,
         "breakout_confidence_bonus": 0.06,
         "expected_move_atr_multiplier": 1.25,
@@ -174,7 +176,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # NO premium cap — user directive: "without any limit on size".
         # The risk_pct × size_multiplier path is the only sizing gate.
         # Capital safety still comes from one-position-per-symbol and the
-        # daily/weekly loss caps below.
+        # daily/weekly loss caps below. (A 0.05 cap briefly returned
+        # 2026-07-17; reversed the same day by owner directive.)
         "premium_cap_pct": None,
         # 30% hard stop (owner directive for the positional ATM book).
         "planned_stop_pct": 0.30,
@@ -210,6 +213,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # second position. (Refresh / signal-flip on the SAME symbol is
         # handled by the existing _same_contract path.)
         "one_position_per_symbol": True,
+        # NOTE 2026-07-17: max_open_positions / max_reserved_premium_pct
+        # portfolio caps were added and REVERSED the same day (owner:
+        # "uncap signals, no hard gate"). Cadence discipline is the
+        # per-underlying re-entry cooldowns + flip confirmation in
+        # paper.py (settings.DIRECTIONAL_REENTRY_COOLDOWN_*), which delay
+        # churn without capping the book.
     },
     "rl_policy": {
         # Persistent posterior lives next to the paper book.

@@ -454,6 +454,7 @@ class DirectionalOptionsDataStore:
         strike: float,
         option_type: str,
         instrument_key: str | None = None,
+        allow_history_fallback: bool = True,
     ) -> tuple[Optional[float], Optional[str], str]:
         params = {
             "underlying": underlying.upper(),
@@ -499,6 +500,8 @@ class DirectionalOptionsDataStore:
             row = result.first()
             if row is not None:
                 return float(row.ltp), _parse_ts(row.time).isoformat(), "local_watchlist"
+        if not allow_history_fallback:
+            return None, None, "local_watchlist_missing"
         # Try several intervals in priority order. Index options are usually
         # stored at 1-minute resolution, but MCX commodity options only land
         # at 30-minute — so the previous hard-coded 1minute lookup returned

@@ -108,6 +108,11 @@ def _backtest(df: pd.DataFrame, u: str, *, use_positioning: bool, moneyness: str
         htf_up = u_row["ema20"] > u_row["ema50"]
         oib = posn["oi_build"].get(day, 0.0)
         div = d_atm_iv.get(day, np.nan)
+        # RESEARCH HARNESS ONLY — kept as the 2026-06-28-validated variant for
+        # reproducibility. The LIVE lane diverged 2026-07-17 (owner directive:
+        # "position has to be sized as per IV it cannot prevent a trade"):
+        # signals.compute_iv_sizing_factor() now SIZES the entry instead of
+        # this veto. Re-validations of the live behaviour must mirror that.
         if pd.isna(div) or div < 0:   # mandatory vol gate
             continue
         side = None
