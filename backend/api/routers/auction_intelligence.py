@@ -20,6 +20,14 @@ from auction_intelligence.automation import (
     run_market_hours_cycle,
 )
 from auction_intelligence.analytics import MPAnalyticsEngine
+from auction_intelligence.commodity import (
+    build_commodity_auction_snapshot,
+    commodity_auction_paper_book,
+    commodity_auction_status,
+    configured_commodity_auction_roots,
+    resolve_commodity_auction_universe,
+    run_commodity_market_hours_cycle,
+)
 from auction_intelligence.config import clone_default_config
 from auction_intelligence.demo import (
     available_scenarios as get_available_demo_scenarios,
@@ -356,6 +364,12 @@ async def summary() -> dict:
             "/api/auction-intelligence/paper-status",
             "/api/auction-intelligence/paper-journal",
             "/api/auction-intelligence/paper-positions",
+            "/api/auction-intelligence/commodity/status",
+            "/api/auction-intelligence/commodity/universe",
+            "/api/auction-intelligence/commodity/paper",
+            "/api/auction-intelligence/commodity/paper-trades",
+            "/api/auction-intelligence/commodity/snapshot",
+            "/api/auction-intelligence/commodity/run-once",
             "/api/auction-intelligence/validate-gate-a",
             "/api/auction-intelligence/validate-gate-b",
             "/api/auction-intelligence/shadow-record-live",
@@ -543,6 +557,63 @@ async def paper_run_once(symbol: str | None = Query(None)) -> dict:
     symbols = [_normalize_symbol_filter(symbol)] if _normalize_symbol_filter(symbol) else None
     try:
         return await run_market_hours_cycle(symbols=symbols)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+# ── Commodity auction sleeve (MCX evening / extended session) ────────────────
+#  Same MP+order-flow auction machinery over liquid MCX roots (default GOLD,
+#  SILVERM, CRUDEOIL) during 09:00-23:30 IST — the hours NSE is closed. Trades
+#  the active front-month futures directly into a SEPARATE paper book so the NSE
+#  index auction book and the commodity book never collide.
+
+
+@router.get("/commodity/status")
+async def commodity_status() -> dict:
+    return await commodity_auction_status()
+
+
+@router.get("/commodity/universe")
+async def commodity_universe() -> dict:
+    return await resolve_commodity_auction_universe()
+
+
+@router.get("/commodity/paper")
+async def commodity_paper(limit: int = 200) -> dict:
+    payload = commodity_auction_paper_book.summary()
+    payload["orders"] = commodity_auction_paper_book.orders(limit=limit).get("orders", [])
+    payload["statistics"] = commodity_auction_paper_book.statistics()
+    return payload
+
+
+@router.get("/commodity/paper-trades")
+async def commodity_paper_trades() -> dict:
+    return commodity_auction_paper_book.trades()
+
+
+@router.get("/commodity/snapshot")
+async def commodity_snapshot(symbol: str = "GOLD") -> dict:
+    try:
+        return await build_commodity_auction_snapshot(symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/commodity/run-once")
+async def commodity_run_once(symbol: str | None = Query(None)) -> dict:
+    roots = None
+    if symbol:
+        normalized = _normalize_symbol_filter(symbol)
+        roots = [normalized] if normalized else None
+        if roots is None or roots[0] not in configured_commodity_auction_roots():
+            # Allow any configured root; fall back to a bare canonical root.
+            roots = [str(symbol).strip().upper()] if symbol else None
+    try:
+        return await run_commodity_market_hours_cycle(roots=roots)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:

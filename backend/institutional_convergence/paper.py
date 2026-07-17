@@ -5,6 +5,8 @@ from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from core.config import settings
+
 from .engine import lots_for_risk
 from .stats import compute_statistics, open_position_detail, trade_records
 
@@ -119,7 +121,14 @@ class ConvergencePaperBook:
         circuit = self._circuit_state(closed_positions, today, state)
         quarantined = self.entry_quarantine(now)
         open_symbols = {row["symbol"] for row in open_positions}
-        if not circuit["locked"] and not quarantined and not squareoff_due:
+        # OWNER DIRECTIVE 2026-07-17 (signal validation, paper-only): the
+        # 2-consecutive-loss / −3%-day circuit breaker still REPORTS its state
+        # (persisted below as `circuit_breaker`) but does not LOCK entries
+        # while validating signals — both the NSE and MCX book instances of
+        # this class. Quarantine window, squareoff and all protective exits
+        # (stop / target / wall / CVD-reversal) stay fully active.
+        circuit_locks_entries = circuit["locked"] and not settings.SIGNAL_VALIDATION_UNCAPPED
+        if not circuit_locks_entries and not quarantined and not squareoff_due:
             capital = self._equity(state, open_positions, closed_positions)
             for row in results:
                 if row.get("status") != "actionable_paper" or row.get("action") not in {"LONG", "SHORT"} or row.get("symbol") in open_symbols or str(row.get("symbol")) in closed_this_cycle:

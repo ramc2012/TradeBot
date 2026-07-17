@@ -413,11 +413,16 @@ def test_service_policy_pick_exposes_hybrid_model_payload(tmp_path) -> None:
         reset_policy_for_tests()
 
 
-def test_risk_engine_caps_size_on_daily_loss_breach() -> None:
+def test_risk_engine_caps_size_on_daily_loss_breach(monkeypatch) -> None:
     """Edge hurdles were retired with the RL refactor — risk only enforces
     capital-safety caps (daily/weekly loss budget, sane lot count). This
     test now verifies that the daily loss cap blocks new opens after the
-    desk's loss budget is exhausted."""
+    desk's loss budget is exhausted. (Pinned SIGNAL_VALIDATION_UNCAPPED=False
+    — the validation-mode bypass is covered in
+    tests/test_signal_validation_uncapped.py.)"""
+    from core.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "SIGNAL_VALIDATION_UNCAPPED", False)
     engine = DirectionalOptionsRiskEngine(clone_default_config()["risk"])
     candidate = ContractCandidate(
         trading_symbol="NIFTY TEST CE",

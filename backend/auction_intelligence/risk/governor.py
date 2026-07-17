@@ -5,6 +5,7 @@ from typing import Any
 from loguru import logger
 
 from auction_intelligence.schemas import AgentDecision, PortfolioSnapshot, RiskDecision, SessionContext
+from core.config import settings
 
 
 class RiskGovernor:
@@ -40,6 +41,17 @@ class RiskGovernor:
             "paper_mode": self.paper_mode,
         }
 
+        # OWNER DIRECTIVE 2026-07-17 (signal validation, PAPER mode only):
+        # the governor's CAPITAL / LOSS / DRAWDOWN entry caps — daily-loss,
+        # per-agent drawdown, symbol/projected-margin exposure and
+        # correlated-exposure — are skipped while validating signals so
+        # 'risk_blocked: projected margin exposure would exceed cap' never
+        # suppresses a strategy signal. KEPT: broker/stale-data infra checks,
+        # max-concurrent-positions, model-confidence floor, the 15-min
+        # session-close buffer, and every regime/setup/scalp gate upstream.
+        # Live mode (paper_mode=False) is entirely unaffected.
+        validation_uncapped = bool(settings.SIGNAL_VALIDATION_UNCAPPED and self.paper_mode)
+
         if not session.broker_connected and not self.paper_mode:
             reasons.append("Broker connectivity unavailable.")
         if session.stale_data_seconds > self.stale_data_seconds and not self.paper_mode:
@@ -51,7 +63,9 @@ class RiskGovernor:
         # auction book bleed ~Rs35L (one day's losses never stopped new entries).
         # We still gate the hard kill_switch (below) on live mode so paper just
         # pauses entries for the day rather than requiring a manual reset.
-        if portfolio.daily_realized_pnl <= -abs(self.max_daily_loss):
+        # (Suspended under SIGNAL_VALIDATION_UNCAPPED per the 2026-07-17 owner
+        # directive — validation wants uncapped losses, honest exits.)
+        if portfolio.daily_realized_pnl <= -abs(self.max_daily_loss) and not validation_uncapped:
             reasons.append("Daily loss limit breached.")
         if portfolio.open_positions >= self.max_concurrent_positions and any(
             decision.action != "FLAT" for decision in decisions
@@ -65,7 +79,7 @@ class RiskGovernor:
             portfolio.correlated_exposure,
             portfolio.net_liquidation,
         )
-        if correlated_exposure >= self.max_correlated_exposure:
+        if correlated_exposure >= self.max_correlated_exposure and not validation_uncapped:
             reasons.append("Correlated exposure cap reached.")
 
         for decision in decisions:
@@ -73,8 +87,13 @@ class RiskGovernor:
                 continue
             if decision.confidence < self.min_model_confidence:
                 reasons.append(f"{decision.agent_name} confidence below threshold.")
-            if portfolio.agent_drawdowns.get(decision.agent_name, 0.0) >= self.max_agent_drawdown:
+            if (
+                portfolio.agent_drawdowns.get(decision.agent_name, 0.0) >= self.max_agent_drawdown
+                and not validation_uncapped
+            ):
                 reasons.append(f"{decision.agent_name} drawdown cap reached.")
+            if validation_uncapped:
+                continue
             symbol_exposure = self._normalize_symbol_exposure(
                 portfolio.symbol_exposure.get(session.symbol, 0.0),
                 session.symbol,

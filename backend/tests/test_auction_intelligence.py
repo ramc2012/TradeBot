@@ -1676,11 +1676,16 @@ def test_risk_governor_blocks_stale_and_loss_breach() -> None:
     assert "Daily loss limit breached." in blocked.reasons
 
 
-def test_risk_governor_daily_loss_halts_entries_in_paper_mode() -> None:
+def test_risk_governor_daily_loss_halts_entries_in_paper_mode(monkeypatch) -> None:
     """The daily-loss circuit breaker MUST block new entries in PAPER mode too.
     The old `and not paper_mode` guard bypassed it in the mode actually running,
     which let the auction book bleed ~Rs35L (a bad day never stopped new entries).
-    Paper pauses entries for the day but does NOT trip the hard kill_switch."""
+    Paper pauses entries for the day but does NOT trip the hard kill_switch.
+    (Pinned SIGNAL_VALIDATION_UNCAPPED=False — the validation-mode bypass is
+    covered in tests/test_signal_validation_uncapped.py.)"""
+    from core.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "SIGNAL_VALIDATION_UNCAPPED", False)
     config = clone_default_config()
     governor = RiskGovernor({**config["risk"], "paper_mode": True})
     decision = AgentDecision(

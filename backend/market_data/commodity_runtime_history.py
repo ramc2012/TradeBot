@@ -201,7 +201,13 @@ async def load_commodity_history_rows(
 
     agent = CommodityStrategyAgent()
     configured_symbols = agent.get_symbols()
+    active_futures_symbols = await agent._active_futures_symbols()  # noqa: SLF001 - shared runtime bridge.
     candidate_symbols: list[str] = []
+    candidate_symbols.extend(
+        active_symbol
+        for configured_symbol, active_symbol in active_futures_symbols.items()
+        if extract_commodity_root(configured_symbol) == normalized_root
+    )
     candidate_symbols.extend(
         symbol
         for symbol in configured_symbols

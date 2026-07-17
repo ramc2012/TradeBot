@@ -723,7 +723,12 @@ class DirectionalOptionsService:
                         weekly_realized=loss_windows[1] if loss_windows else 0.0,
                     )
                 )
-                if loss_windows is None:
+                # OWNER DIRECTIVE 2026-07-17 (signal validation, paper-only):
+                # with the loss caps themselves skipped in risk.approve(),
+                # failing CLOSED on a loss-cap DB fetch error is pointless —
+                # don't decline. Set SIGNAL_VALIDATION_UNCAPPED=False to
+                # restore the fail-safe decline together with the caps.
+                if loss_windows is None and not settings.SIGNAL_VALIDATION_UNCAPPED:
                     risk_payload["approved"] = False
                     reasons = list(risk_payload.get("reasons") or [])
                     reasons.append("Loss-cap state unavailable (DB error); declining new entries this cycle.")

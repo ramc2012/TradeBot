@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 
 from analysis.instruments import ALL_FO_INDICES
+from core.config import settings
 from macd_refined.indicators import compute_macd, iv_rank, turnover_rupees, zero_cross_up
 from macd_refined.risk import size_position
 
@@ -662,7 +663,16 @@ class MacdRefinedLiveEngine:
             if capital.get("available_capital_net") is not None
             else capital.get("available_capital", total_equity)
         )
-        equity = max(0.0, min(total_equity, available))
+        if settings.SIGNAL_VALIDATION_UNCAPPED:
+            # OWNER DIRECTIVE 2026-07-17 (signal validation, paper-only): pin
+            # the sizing base to max(starting_equity, total_equity_net) —
+            # mirrors S1's MACD_STRATEGY_UNCAPPED_CAPITAL — so the drawn-down
+            # book (−33.7%, available ₹23.5k) can never shrink the equity cap
+            # below the ₹50k min-ticket floor and brick the lane. min_ticket,
+            # turnover floors and all exits stay active.
+            equity = max(float(self.config["risk"]["starting_equity"]), total_equity)
+        else:
+            equity = max(0.0, min(total_equity, available))
         today = datetime.now(timezone.utc).date()
         iv_window = int(flt_cfg["iv_rank_window_sessions"])
         baseline_sessions = int(sig_cfg["volume_baseline_sessions"])

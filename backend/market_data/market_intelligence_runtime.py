@@ -56,16 +56,40 @@ APP_SYMBOLS = {
 }
 
 
-def _drop_contaminated_spot_rows(rows: list[dict[str, Any]], *, band: float = 0.5) -> list[dict[str, Any]]:
+def _drop_contaminated_spot_rows(
+    rows: list[dict[str, Any]],
+    *,
+    symbol_code: str | None = None,
+    band: float = 0.5,
+) -> list[dict[str, Any]]:
     """Drop cross-symbol-contaminated OHLC rows from a spot-history payload.
 
-    The underlying_spot_candles feed occasionally carries a garbage print (e.g. a
-    NIFTY minute whose high is ~54k while close ~23.4k). Such a row explodes any
-    downstream TPO price-ladder build (low->high in tick steps) into thousands of
-    levels, and the GIL-bound profile compute then stalls the event loop. Reject
-    rows whose O/H/L/C falls outside +/-band of the median close. Over a 10-day
-    index window even a wide ``band`` (default 50%) only ever trims contamination.
+    The underlying_spot_candles feed carries garbage prints from the documented
+    WS misrouting (e.g. a NIFTY minute whose O/H/L/C is really a BANKNIFTY ~57.8k
+    frame, or a MIDCPNIFTY ~14.8k frame). Such a row explodes any downstream TPO
+    price-ladder build into thousands of levels and stalls the event loop.
+
+    This is the backfill-path guard the live-tick path was missing. For a known
+    index ``symbol_code`` it applies the poison-proof ABSOLUTE band (plus the
+    prior-session-close band when seeded) from ``index_band_guard`` — which,
+    unlike the self-referential median below, a >50%-contaminated payload cannot
+    drag. The median-of-close band is kept as an additional net (and as the only
+    filter when the symbol is unknown/unguarded).
     """
+    from market_data import index_band_guard
+
+    app_symbol = index_band_guard.app_symbol_for_underlying(symbol_code or "")
+    guarded = bool(app_symbol) and index_band_guard.is_guarded(app_symbol)
+
+    if guarded:
+        rows = [
+            r
+            for r in rows
+            if index_band_guard.check_ohlc(
+                app_symbol, r.get("open"), r.get("high"), r.get("low"), r.get("close")
+            )
+        ]
+
     if len(rows) < 3:
         return rows
     closes = sorted(float(r["close"]) for r in rows if r.get("close") and float(r["close"]) > 0)
@@ -259,7 +283,7 @@ class MarketIntelligenceRuntime:
             }
             for row in rows
         ]
-        payload = _drop_contaminated_spot_rows(payload)
+        payload = _drop_contaminated_spot_rows(payload, symbol_code=symbol_code)
         if payload:
             validated = validate_candle_rows(
                 payload,
@@ -305,7 +329,7 @@ class MarketIntelligenceRuntime:
                     }
                 )
         validated = validate_candle_rows(
-            _drop_contaminated_spot_rows(local_rows),
+            _drop_contaminated_spot_rows(local_rows, symbol_code=symbol_code),
             symbol=symbol_code,
             source="local_csv_spot",
             interval="1minute",
@@ -1461,6 +1485,29 @@ class MarketIntelligenceRuntime:
                     "source": source,
                 }
             )
+        if not payload:
+            return 0
+
+        # Candle-write guard: reject any cross-symbol-contaminated bar at the
+        # final write boundary regardless of caller (gap-fill from broker etc.).
+        from market_data import index_band_guard
+
+        app_symbol = index_band_guard.app_symbol_for_underlying(symbol_code or "")
+        if app_symbol and index_band_guard.is_guarded(app_symbol):
+            kept = [
+                p
+                for p in payload
+                if index_band_guard.check_ohlc(
+                    app_symbol, p["open"], p["high"], p["low"], p["close"]
+                )
+            ]
+            if len(kept) != len(payload):
+                logger.warning(
+                    "[market_intelligence] dropped {n} out-of-band {sym} spot bars at backfill write",
+                    n=len(payload) - len(kept),
+                    sym=symbol_code,
+                )
+            payload = kept
         if not payload:
             return 0
 

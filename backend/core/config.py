@@ -105,6 +105,40 @@ class Settings(BaseSettings):
     # cash/margin reject in the paper book, so this is the only place capital
     # could otherwise cap trading. Set False to restore equity-tracking sizing.
     MACD_STRATEGY_UNCAPPED_CAPITAL: bool = True
+    # ═══════════════════════════════════════════════════════════════════════
+    # SIGNAL-VALIDATION MODE — OWNER DIRECTIVE 2026-07-17: "we are currently
+    # validating signals, hence no limit on loss/capital — allow lanes to
+    # trade fully as per strategy."  PAPER LANES ONLY.
+    #
+    # When True, every PAPER lane's CAPITAL / LOSS / DRAWDOWN /
+    # CIRCUIT-BREAKER **entry** block is bypassed (mirrors S1's
+    # MACD_STRATEGY_UNCAPPED_CAPITAL pin above) so every strategy signal
+    # converts to a paper trade and signal→trade reconciles ~1:1:
+    #   * macd_refined            — sizing base pinned to starting equity;
+    #                               paper-book cash gate allows negative
+    #                               available cash; drawdown/win-rate kill
+    #                               switch REPORTS but no longer pauses entries
+    #   * directional_options     — daily/weekly loss caps skipped; the
+    #                               fail-closed decline when the loss-cap DB
+    #                               fetch fails is skipped too (pointless with
+    #                               caps off)
+    #   * commodity agent         — 15% drawdown entry block skipped
+    #                               (stop/re-entry cooldowns + operator kill
+    #                               switch still honored)
+    #   * institutional_convergence — 2-consecutive-loss / −3%-day circuit
+    #                               breaker REPORTS but does not lock entries
+    #                               (NSE + MCX books)
+    #   * auction_intelligence    — governor margin/symbol/correlated exposure
+    #                               caps, daily-loss cap and per-agent drawdown
+    #                               cap skipped (paper mode only)
+    #
+    # KEPT under the flag: ALL strategy gates (regime, liquidity/turnover
+    # floors, MP/OF gates, RL policy act/skip, RAG) and ALL protective EXITS
+    # (stops, targets, trailing, squareoff, expiry/window exits) — validation
+    # needs honest exits. The live_engine / risk_manager live-order path is
+    # UNTOUCHED. Set False to restore every capital/loss/drawdown risk gate.
+    # ═══════════════════════════════════════════════════════════════════════
+    SIGNAL_VALIDATION_UNCAPPED: bool = True
     # Per-cycle time budget (seconds) for the ATM premium-candle top-up inside
     # refresh_nse_runtime. The recorded set spans ~4k contracts (ATM + the
     # extended 10-strike window across ~217 names); at 0.1s/contract a full
@@ -278,6 +312,17 @@ class Settings(BaseSettings):
     # 3-minute bars → 180s scans aligned to bar closes (timeframe policy).
     INSTITUTIONAL_CONVERGENCE_COMMODITY_INTERVAL_SECONDS: int = 180
     INSTITUTIONAL_CONVERGENCE_COMMODITY_SYMBOLS: str = "GOLD,SILVERM,CRUDEOIL,NATURALGAS,COPPER,ALUMINI,ZINCMINI,NICKEL"
+    # Auction-Intelligence COMMODITY sleeve (2026-07-16): the same MP+order-flow
+    # auction machinery (market profile from the unified 1-minute MCX store
+    # aggregated to 30-minute auction bars + real MCX tick-tape order flow) run
+    # over a small set of liquid MCX roots during the EVENING/extended MCX
+    # session (09:00-23:30) when NSE is closed. Trades the ACTIVE front-month
+    # futures directly (no options remap) into a SEPARATE paper book so the NSE
+    # index auction book and the commodity book never collide. Default roots are
+    # the most liquid three; widen via env. Interval mirrors the NSE lane.
+    AUCTION_INTELLIGENCE_COMMODITY_ENABLED: bool = True
+    AUCTION_INTELLIGENCE_COMMODITY_INTERVAL_SECONDS: int = 180
+    AUCTION_INTELLIGENCE_COMMODITY_SYMBOLS: str = "GOLD,SILVERM,CRUDEOIL"
     # Real order-flow book source (2026-06-03). Maps an index app-symbol to the
     # market_ticks symbol whose REAL order book feeds auction-intelligence order
     # flow — a front-month futures or ATM option contract, which (unlike the

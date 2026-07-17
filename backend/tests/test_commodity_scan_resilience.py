@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -81,6 +81,42 @@ def test_load_history_uses_local_store_when_broker_fetch_times_out(monkeypatch) 
     rows = asyncio.run(agent._load_history("MCX:GOLD26AUGFUT", interval="1minute", lookback_days=1))
 
     assert rows == fallback_rows
+
+
+def test_load_history_prefers_fresh_local_store_during_live_session(monkeypatch) -> None:
+    async def fake_resolve(_symbol: str):
+        return {}
+
+    async def fake_fetch(**_kwargs):
+        raise AssertionError("broker fetch should be skipped when the local store is fresh")
+
+    fresh_rows = [
+        {
+            "time": (datetime.now(commodity_module.IST) - timedelta(minutes=1)).isoformat(),
+            "open": 141000.0,
+            "high": 141120.0,
+            "low": 140980.0,
+            "close": 141015.0,
+            "volume": 10,
+            "oi": 0,
+        }
+    ]
+
+    async def fake_local_history(self, symbol: str, *, interval: str, lookback_days: int):
+        assert symbol == "MCX:GOLD26AUGFUT"
+        assert interval == "1minute"
+        assert lookback_days == 1
+        return list(fresh_rows)
+
+    monkeypatch.setattr(commodity_module, "resolve_upstox_mcx_future", fake_resolve)
+    monkeypatch.setattr(commodity_module, "_in_commodity_hours", lambda _now=None: True)
+    monkeypatch.setattr(commodity_module.option_history_service, "_fetch_broker_candles", fake_fetch)
+    monkeypatch.setattr(CommodityStrategyAgent, "_load_history_from_store", fake_local_history)
+
+    agent = CommodityStrategyAgent()
+    rows = asyncio.run(agent._load_history("MCX:GOLD26AUGFUT", interval="1minute", lookback_days=1))
+
+    assert rows == fresh_rows
 
 
 def test_run_once_retains_previous_row_when_symbol_scan_times_out(monkeypatch) -> None:
@@ -170,11 +206,14 @@ def test_run_once_retains_previous_row_when_symbol_scan_times_out(monkeypatch) -
 
     retained_row = next(row for row in status["futures_watchlist"] if row["symbol"] == "MCX:NICKEL26JULFUT")
     fresh_row = next(row for row in status["futures_watchlist"] if row["symbol"] == "MCX:GOLD26AUGFUT")
+    refreshed = agent.get_status(refresh=True)
 
     assert status["last_run_at"] is not None
     assert retained_row["runtime_retained"] is True
     assert fresh_row.get("runtime_retained") is not True
     assert "retained 1 futures rows" in status["last_message"]
+    assert refreshed["last_run_at"] == status["last_run_at"]
+    assert refreshed["last_message"] == status["last_message"]
 
 
 def test_scan_timeout_scales_with_symbol_count(monkeypatch) -> None:
@@ -200,3 +239,21 @@ def test_scan_timeout_scales_with_symbol_count(monkeypatch) -> None:
 
     agent.update_symbols(["MCX:GOLD26AUGFUT"])
     assert agent._scan_timeout_seconds() == 120
+
+
+def test_get_status_does_not_refresh_store_while_scan_running() -> None:
+    agent = CommodityStrategyAgent()
+    agent.update_symbols(["MCX:GOLD26AUGFUT"])
+    agent._last_run_at = "2026-07-16T14:57:02+05:30"
+    agent._last_message = "Commodity agent running continuously."
+    agent._running = True
+
+    stale_state = commodity_module._default_saved_state()
+    stale_state["control"]["last_run_at"] = "2026-07-16T13:52:42+05:30"
+    stale_state["control"]["last_message"] = "Stale saved state"
+    commodity_module._save_state(stale_state)
+
+    status = agent.get_status(refresh=True)
+
+    assert status["last_run_at"] == "2026-07-16T14:57:02+05:30"
+    assert status["last_message"] == "Commodity agent running continuously."

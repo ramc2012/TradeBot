@@ -1832,6 +1832,11 @@ def test_option_watchlist_blocks_vol_spike_entries(tmp_path: Path, monkeypatch) 
 def test_entry_risk_block_triggers_on_cumulative_drawdown(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "commodity_strategy.json"
     monkeypatch.setattr(commodity_module, "_COMMODITY_CONFIG_FILE", config_path)
+    # With SIGNAL_VALIDATION_UNCAPPED=False the drawdown block is ENFORCED
+    # (the bypass path is covered in tests/test_signal_validation_uncapped.py).
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "SIGNAL_VALIDATION_UNCAPPED", False)
 
     agent = CommodityStrategyAgent()
     agent._runtime.portfolio.available_capital = 418_501.60  # type: ignore[attr-defined]

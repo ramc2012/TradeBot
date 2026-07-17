@@ -1865,7 +1865,11 @@ class CommodityStrategyAgent(BaseStrategyAgent):
     def _entry_risk_block(self, underlying: str, now: Optional[datetime] = None) -> Optional[dict[str, str]]:
         current = now or _now_ist()
         drawdown_pct = self._current_drawdown_pct()
-        if drawdown_pct >= COMMODITY_MAX_DRAWDOWN_PCT:
+        # OWNER DIRECTIVE 2026-07-17 (signal validation, paper-only): the 15%
+        # drawdown ENTRY block is skipped while validating signals. The
+        # stop/re-entry cooldowns below (anti-churn = strategy) and the
+        # operator kill switch stay honored; all protective exits unchanged.
+        if drawdown_pct >= COMMODITY_MAX_DRAWDOWN_PCT and not settings.SIGNAL_VALIDATION_UNCAPPED:
             return {
                 "code": "max_drawdown_limit",
                 "detail": (
@@ -2340,6 +2344,14 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         interval: str,
         lookback_days: int = DEFAULT_COMMODITY_HISTORY_DAYS,
     ) -> list[dict[str, Any]]:
+        store_rows = await self._load_history_from_store(
+            symbol,
+            interval=interval,
+            lookback_days=lookback_days,
+        )
+        if self._store_history_is_fresh(store_rows, interval=interval):
+            return store_rows
+
         async def _fetch_broker_rows(*, instrument_key: str, candle_interval: str) -> list[dict[str, Any]]:
             try:
                 return await asyncio.wait_for(
@@ -2405,11 +2417,20 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 )
         if rows:
             return rows
-        return await self._load_history_from_store(
-            symbol,
-            interval=interval,
-            lookback_days=lookback_days,
-        )
+        return store_rows
+
+    def _store_history_is_fresh(self, rows: list[dict[str, Any]], *, interval: str) -> bool:
+        if not rows or not _in_commodity_hours():
+            return False
+        latest_time = _parse_iso_timestamp(rows[-1].get("time"))
+        if latest_time is None:
+            return False
+        try:
+            interval_minutes = max(int(str(interval).removesuffix("minute")), 1)
+        except ValueError:
+            interval_minutes = 1
+        tolerance = timedelta(minutes=max(interval_minutes + 1, 3))
+        return (_now_ist() - latest_time.astimezone(IST)) <= tolerance
 
     async def _load_history_from_store(
         self,
@@ -3231,6 +3252,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
                 if health_warning:
                     tone = "warning"
                 self._append_commentary(tone, self._last_message)
+                # Persist the finalized control metadata before any concurrent
+                # status refresh can reload an older snapshot and make this
+                # successful scan look stale.
+                await self._apersist_state()
                 self._append_report()
                 return self.get_status(refresh=False)
             except Exception as exc:
@@ -4498,7 +4523,7 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         return rows
 
     def get_status(self, *, refresh: bool = True) -> dict[str, Any]:
-        if refresh:
+        if refresh and not self._running and not self._lock.locked():
             self._refresh_state_from_store()
         summary = self._runtime.portfolio.get_summary()
         lane_agents = self._strategy_agents()

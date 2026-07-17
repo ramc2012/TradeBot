@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from core.config import settings
 from macd_refined.config import MACD_REFINED_INITIAL_CAPITAL
 from macd_refined.risk import kill_switch_state
 
@@ -307,7 +308,14 @@ class MacdRefinedPaperStore:
                 float(capital.get("available_capital") or 0.0),
                 float(capital.get("available_capital_net") or 0.0),
             )
-            if allow_entries and not paused:
+            # OWNER DIRECTIVE 2026-07-17 (signal validation, paper-only):
+            # capital/loss/drawdown ENTRY blocks are bypassed — the
+            # drawdown/win-rate kill switch still REPORTS (summary below) but
+            # no longer pauses entries, and the cash gate no longer rejects
+            # (available cash may go negative, like S1's book). All protective
+            # EXITS (_manage: stop/partials/trail/window) stay fully active.
+            uncapped = bool(settings.SIGNAL_VALIDATION_UNCAPPED)
+            if allow_entries and (uncapped or not paused):
                 for prop in proposals:
                     underlying = _norm(prop.get("underlying"))
                     book = str(prop.get("option_type") or "").upper()
@@ -327,7 +335,7 @@ class MacdRefinedPaperStore:
                     entry_gross = float(prop.get("entry_premium") or 0.0)
                     entry_fill = round(entry_gross * (1.0 + self._slip_half), 4)  # pay up on entry
                     required_capital = round(entry_fill * qty, 2)
-                    if required_capital > max(available_for_entries, 0.0):
+                    if not uncapped and required_capital > max(available_for_entries, 0.0):
                         capital_blocked += 1
                         self._append_journal({
                             "recorded_at": now,

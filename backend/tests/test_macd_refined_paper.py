@@ -73,7 +73,12 @@ def test_macd_refined_closed_pnl_matches_displayed_entry_exit(tmp_path: Path) ->
     assert payload["realized_pnl_net"] < payload["realized_pnl"]
 
 
-def test_macd_refined_rejects_entry_that_exceeds_available_capital(tmp_path: Path) -> None:
+def test_macd_refined_rejects_entry_that_exceeds_available_capital(tmp_path: Path, monkeypatch) -> None:
+    # With SIGNAL_VALIDATION_UNCAPPED=False the cash gate is ENFORCED (the
+    # bypass path is covered in tests/test_signal_validation_uncapped.py).
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "SIGNAL_VALIDATION_UNCAPPED", False)
     store = _store(tmp_path)
     proposal = _proposal()
     proposal["quantity_units"] = 300_000

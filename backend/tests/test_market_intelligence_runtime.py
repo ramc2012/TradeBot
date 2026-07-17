@@ -323,3 +323,39 @@ def test_index_spot_readiness_requires_fresh_index_rows_during_market_hours() ->
     assert blocked["index_spot_ready"] is False
     assert blocked["index_spot_missing"] == ["SENSEX"]
     assert "NIFTY" in blocked["index_spot_stale"]
+
+
+def test_drop_contaminated_spot_rows_drops_out_of_band_backfill_rows() -> None:
+    from market_data import index_band_guard
+
+    index_band_guard.clear_reference_closes()
+    drop = market_intelligence_module._drop_contaminated_spot_rows
+    rows = [
+        {"time": "t1", "open": 24050.0, "high": 24090.0, "low": 24010.0, "close": 24075.0},
+        # whole-frame BANKNIFTY contamination misrouted under NIFTY
+        {"time": "t2", "open": 57800.0, "high": 57840.0, "low": 57770.0, "close": 57831.0},
+        {"time": "t3", "open": 24080.0, "high": 24120.0, "low": 24060.0, "close": 24100.0},
+        # clean close but a contaminated intra-minute HIGH
+        {"time": "t4", "open": 24070.0, "high": 57826.0, "low": 24050.0, "close": 24090.0},
+        {"time": "t5", "open": 24065.0, "high": 24110.0, "low": 24040.0, "close": 24088.0},
+    ]
+    cleaned = drop(rows, symbol_code="NIFTY")
+    closes = {r["close"] for r in cleaned}
+    assert 57831.0 not in closes           # gross cross-symbol frame dropped
+    assert 24090.0 not in closes           # contaminated-high bar dropped
+    assert {24075.0, 24100.0, 24088.0} <= closes
+
+
+def test_drop_contaminated_spot_rows_survives_majority_contamination() -> None:
+    # A payload that is MOSTLY BANKNIFTY contamination: the poisonable median
+    # would move onto 57.8k and start dropping the real NIFTY rows. The absolute
+    # band anchors on the true level regardless of the contamination fraction.
+    from market_data import index_band_guard
+
+    index_band_guard.clear_reference_closes()
+    drop = market_intelligence_module._drop_contaminated_spot_rows
+    rows = [{"time": f"c{i}", "open": 57800.0, "high": 57840.0, "low": 57770.0, "close": 57831.0} for i in range(8)]
+    rows += [{"time": f"n{i}", "open": 24050.0, "high": 24090.0, "low": 24010.0, "close": 24075.0} for i in range(3)]
+    cleaned = drop(rows, symbol_code="NIFTY")
+    assert cleaned, "real NIFTY rows must survive a contaminated-majority payload"
+    assert all(r["close"] == 24075.0 for r in cleaned)

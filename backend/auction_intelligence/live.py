@@ -131,8 +131,27 @@ def available_live_symbols() -> list[str]:
     return list(SYMBOL_MAP.keys())
 
 
+def _is_commodity_symbol_code(symbol_code: str | None) -> bool:
+    """True when the code is an MCX commodity root (GOLD/SILVERM/CRUDEOIL/…).
+
+    Generalises the old CRUDEOIL-only check so the auction commodity sleeve can
+    reuse the shared session-grouping / aggregation / order-flow helpers for any
+    configured MCX root. Import is local to avoid a module import cycle."""
+    code = str(symbol_code or "").strip().upper()
+    if not code:
+        return False
+    if code == "CRUDEOIL":
+        return True
+    try:
+        from market_data.commodity_contract_specs import COMMODITY_CONTRACT_SPECS
+
+        return code in COMMODITY_CONTRACT_SPECS
+    except Exception:
+        return False
+
+
 def _session_bounds(symbol_code: str | None = None) -> tuple[time, time]:
-    if str(symbol_code or "").upper() == "CRUDEOIL":
+    if _is_commodity_symbol_code(symbol_code):
         return COMMODITY_SESSION_OPEN, COMMODITY_SESSION_CLOSE
     return SESSION_OPEN, SESSION_CLOSE
 

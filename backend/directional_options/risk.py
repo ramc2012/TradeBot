@@ -29,6 +29,7 @@ from __future__ import annotations
 import math
 from typing import Any, Optional
 
+from core.config import settings
 from directional_options.schemas import ContractCandidate, DirectionalSignal, RiskDecision
 
 
@@ -83,16 +84,21 @@ class DirectionalOptionsRiskEngine:
         # across trades regardless of the policy's chosen multiplier.
         daily_cap_R = float(self.config.get("daily_loss_cap_r", 4.0))
         weekly_cap_R = float(self.config.get("weekly_loss_cap_r", 10.0))
-        if daily_realized <= -(base_risk_budget * daily_cap_R):
-            reasons.append(
-                f"Daily loss cap breached (realized {daily_realized:.0f} ≤ "
-                f"-{base_risk_budget * daily_cap_R:.0f}); trading paused for the session."
-            )
-        if weekly_realized <= -(base_risk_budget * weekly_cap_R):
-            reasons.append(
-                f"Weekly loss cap breached (realized {weekly_realized:.0f} ≤ "
-                f"-{base_risk_budget * weekly_cap_R:.0f}); trading paused for the week."
-            )
+        # OWNER DIRECTIVE 2026-07-17 (signal validation, paper-only): skip
+        # the daily/weekly loss-cap entry blocks while validating signals.
+        # Sizing math, policy act/skip and the RAG gate are untouched; set
+        # SIGNAL_VALIDATION_UNCAPPED=False to restore the caps.
+        if not settings.SIGNAL_VALIDATION_UNCAPPED:
+            if daily_realized <= -(base_risk_budget * daily_cap_R):
+                reasons.append(
+                    f"Daily loss cap breached (realized {daily_realized:.0f} ≤ "
+                    f"-{base_risk_budget * daily_cap_R:.0f}); trading paused for the session."
+                )
+            if weekly_realized <= -(base_risk_budget * weekly_cap_R):
+                reasons.append(
+                    f"Weekly loss cap breached (realized {weekly_realized:.0f} ≤ "
+                    f"-{base_risk_budget * weekly_cap_R:.0f}); trading paused for the week."
+                )
         if qty_lots < 1:
             reasons.append(
                 f"Sizing produced 0 lots at multiplier {size_multiplier:.2f}× "

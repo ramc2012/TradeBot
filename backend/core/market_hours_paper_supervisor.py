@@ -465,6 +465,11 @@ class MarketHoursPaperSupervisor:
         async def _auction_runner() -> dict[str, Any]:
             return await run_auction_market_cycle()
 
+        async def _auction_commodity_runner() -> dict[str, Any]:
+            from auction_intelligence.commodity import run_commodity_market_hours_cycle
+
+            return await run_commodity_market_hours_cycle()
+
         async def _institutional_convergence_runner() -> dict[str, Any]:
             return await institutional_convergence_service.run_cycle()
 
@@ -918,6 +923,29 @@ class MarketHoursPaperSupervisor:
                 timeout_seconds=600.0,
                 # Open stagger: let market_intelligence (offset 0) claim the
                 # broker budget for the watchlist build before this lane joins.
+                start_offset_seconds=90.0,
+            ),
+            RunnerConfig(
+                key="auction_intelligence_commodity",
+                label="Auction Intelligence Commodity Cycle",
+                interval_seconds=settings.AUCTION_INTELLIGENCE_COMMODITY_INTERVAL_SECONDS,
+                callback=_auction_commodity_runner,
+                enabled=settings.AUCTION_INTELLIGENCE_COMMODITY_ENABLED,
+                # Same MP+OF machinery as the NSE index lane, but over the MCX
+                # session (09:00-23:30) — the evening/extended hours when NSE is
+                # closed. Creates commodity-futures paper positions in a SEPARATE
+                # book; never runs the post-close recovery pass against frozen
+                # end-of-session bars. Per-symbol MP CPU runs in asyncio.to_thread
+                # inside the service, so this cannot seize the event loop.
+                market_hours_fn=_in_mcx_market_hours,
+                next_open_fn=_next_mcx_market_open,
+                post_close_catchup=False,
+                # The 3-root cycle can exceed the 300s global ceiling on a cold
+                # commodity-store fetch; keep the timeout bounded but generous,
+                # and the automation re-checks the MCX session before any write.
+                timeout_seconds=600.0,
+                # Let the IC-commodity lane (offset 0) claim the broker budget for
+                # its universe resolution before this lane joins the MCX open.
                 start_offset_seconds=90.0,
             ),
             RunnerConfig(
@@ -1463,6 +1491,7 @@ class MarketHoursPaperSupervisor:
     ) -> None:
         market_map = {
             "auction_intelligence": "auction_intelligence",
+            "auction_intelligence_commodity": "auction_intelligence",
             "institutional_convergence": "institutional_convergence",
             "fractal_market_profile": "fmp",
             "directional_options": "directional_options",
