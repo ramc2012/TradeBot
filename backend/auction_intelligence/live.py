@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi.encoders import jsonable_encoder
+from loguru import logger
 from sqlalchemy import text
 
 from analysis.signal_classifier import classify_status_bucket
@@ -74,6 +75,8 @@ CONTRACT_SPECS = DEFAULT_CONFIG.get("contract_specs", {})
 _LIVE_ANALYSIS_CACHE_TTL_SECONDS = 30.0
 _LIVE_ANALYSIS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _LIVE_ANALYSIS_LOCKS: dict[str, asyncio.Lock] = {}
+MIN_LIVE_SESSION_MINUTE_ROWS = 30
+MIN_LIVE_PROFILE_BARS = 2
 SYMBOL_MAP = {
     "NIFTY": {
         "app_symbol": "NSE:NIFTY50-INDEX",
@@ -129,6 +132,36 @@ INDEX_PRICE_BANDS: dict[str, tuple[float, float]] = {
 
 def available_live_symbols() -> list[str]:
     return list(SYMBOL_MAP.keys())
+
+
+def _filter_tick_rows_near_median(
+    rows: list[dict[str, Any]],
+    *,
+    relative_tolerance: float = 0.03,
+) -> list[dict[str, Any]]:
+    """Reject cross-symbol tape prints before quote/footprint construction.
+
+    The source routing fix prevents new contamination, but an in-progress
+    session can still contain older bad rows. A short-window median is a stable
+    anchor because the intended instrument remains the dominant cluster. We
+    never fall back to rejected rows: insufficient clean tape must degrade to
+    bar inference rather than present another instrument as real order flow.
+    """
+    prices = sorted(
+        float(row.get("ltp") or 0.0)
+        for row in rows
+        if float(row.get("ltp") or 0.0) > 0.0
+    )
+    if len(prices) < 4:
+        return rows
+    reference = prices[len(prices) // 2]
+    lower = reference * (1.0 - relative_tolerance)
+    upper = reference * (1.0 + relative_tolerance)
+    return [
+        row
+        for row in rows
+        if lower <= float(row.get("ltp") or 0.0) <= upper
+    ]
 
 
 def _is_commodity_symbol_code(symbol_code: str | None) -> bool:
@@ -385,7 +418,12 @@ async def _build_analysis_from_session_rows(
         snapshot_cutoff=snapshot_cutoff,
         symbol_code=normalized_symbol,
     )
-    if len(current_rows) < 120:
+    min_rows = (
+        MIN_LIVE_SESSION_MINUTE_ROWS
+        if snapshot_mode == "live_session"
+        else 120
+    )
+    if len(current_rows) < min_rows:
         raise RuntimeError("The selected live snapshot does not have enough minute history yet.")
 
     current_bars = _aggregate_rows(
@@ -398,7 +436,12 @@ async def _build_analysis_from_session_rows(
         interval_minutes=30,
         session_open=session_open,
     )
-    if len(current_bars) < 4 or len(prior_bars) < 4:
+    min_current_bars = (
+        MIN_LIVE_PROFILE_BARS
+        if snapshot_mode == "live_session"
+        else 4
+    )
+    if len(current_bars) < min_current_bars or len(prior_bars) < 4:
         raise RuntimeError("Insufficient 30-minute bars were built from the broker history.")
 
     current_quote_tick = market_data_router.get_latest_tick(app_symbol)
@@ -434,7 +477,28 @@ async def _build_analysis_from_session_rows(
         stale_limit = float(DEFAULT_CONFIG.get("risk", {}).get("stale_data_seconds", 10))
         stale_data_seconds = max(stale_data_seconds, stale_limit + 1.0)
         data_status["effective_stale_data_seconds"] = round(stale_data_seconds, 3)
-    portfolio_payload = portfolio_payload or await _load_portfolio_snapshot(session_symbol=session_symbol)
+    if portfolio_payload is None:
+        portfolio_timeout_seconds = float(
+            DEFAULT_CONFIG.get("live_snapshot", {}).get(
+                "portfolio_timeout_seconds",
+                1.5,
+            )
+        )
+        try:
+            portfolio_payload = await asyncio.wait_for(
+                _load_portfolio_snapshot(session_symbol=session_symbol),
+                timeout=portfolio_timeout_seconds,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.warning(
+                "[AuctionIQ] portfolio enrichment exceeded {:.1f}s; "
+                "using a zero-capacity snapshot for this live view.",
+                portfolio_timeout_seconds,
+            )
+            portfolio_payload = {
+                **PortfolioSnapshot(net_liquidation=1.0).__dict__,
+                "symbol_exposure": {session_symbol: 0.0},
+            }
 
     request = {
         "session": {
@@ -492,6 +556,12 @@ async def _build_analysis_from_session_rows(
     }
 
     service = AuctionIntelligenceService()
+    enrichment_timeout_seconds = float(
+        DEFAULT_CONFIG.get("options_mapping", {}).get(
+            "live_enrichment_timeout_seconds",
+            2.0,
+        )
+    )
     bundle = await service.analyze_with_options(
         session=SessionContext(**request["session"]),
         bars=[MarketBar(**_parse_bar(item)) for item in request["bars"]],
@@ -505,6 +575,7 @@ async def _build_analysis_from_session_rows(
         ),
         portfolio=PortfolioSnapshot(**request["portfolio"]),
         quote_history=[QuoteSnapshot(**_parse_quote(item)) for item in quote_history_payload],
+        enrichment_timeout_seconds=enrichment_timeout_seconds,
     )
     return {
         "mode": "live",
@@ -559,8 +630,9 @@ async def _fetch_recent_minute_rows(
         # thousands of levels and the GIL-bound profile build then stalls the loop.
         closes = sorted(float(r.get("close") or 0.0) for r in rows if (r.get("close") or 0) > 0)
         median_close = closes[len(closes) // 2] if closes else 0.0
-        rel_lo = median_close * 0.6 if median_close > 0 else 0.0
-        rel_hi = median_close * 1.4 if median_close > 0 else float("inf")
+        relative_tolerance = 0.08 if symbol_code.upper() in INDEX_PRICE_BANDS else 0.25
+        rel_lo = median_close * (1.0 - relative_tolerance) if median_close > 0 else 0.0
+        rel_hi = median_close * (1.0 + relative_tolerance) if median_close > 0 else float("inf")
         filtered: list[dict[str, Any]] = []
         for row in rows:
             open_price = row.get("open", row.get("close"))
@@ -777,7 +849,7 @@ async def _fetch_persisted_spot_rows(
         result = await session.execute(
             text(
                 """
-                SELECT time, open, high, low, close, volume
+                SELECT time, open, high, low, close, volume, source, synced_at
                 FROM underlying_spot_candles
                 WHERE underlying = :underlying
                   AND interval = '1minute'
@@ -806,6 +878,12 @@ async def _fetch_persisted_spot_rows(
             "low": float(row["low"] or row["close"] or 0.0),
             "close": float(row["close"] or 0.0),
             "volume": int(row["volume"] or 0),
+            "source": str(row.get("source") or ""),
+            "synced_at": (
+                row.get("synced_at").astimezone(timezone.utc).isoformat()
+                if isinstance(row.get("synced_at"), datetime) and row.get("synced_at").tzinfo is not None
+                else str(row.get("synced_at") or "")
+            ),
         }
         for row in rows
     ]
@@ -953,24 +1031,49 @@ def _group_rows_by_session(
     symbol_code: str | None = None,
 ) -> dict[date, list[dict[str, Any]]]:
     session_open, session_close = _session_bounds(symbol_code)
-    sessions: dict[date, list[dict[str, Any]]] = {}
+    # The same candle can be persisted by the live-tick builder and the broker
+    # history sync. Counting both rows made the 30-minute live threshold pass
+    # with as few as 15 actual minutes, and whichever duplicate sorted last
+    # could provide an incomplete close. Build one canonical candle per minute:
+    # preserve the full observed high/low, prefer live-tick OHLC/close, and do
+    # not double-count volume.
+    session_minutes: dict[date, dict[datetime, dict[str, Any]]] = {}
     for row in rows:
         timestamp = _row_time(row)
         local_time = timestamp.astimezone(IST)
         if local_time.time() < session_open or local_time.time() > session_close:
             continue
+        minute = local_time.replace(second=0, microsecond=0)
+        source = str(row.get("source") or "").strip().lower()
+        source_priority = 2 if source == "live_tick" else 1
         normalized = {
-            "time": local_time.isoformat(),
+            "time": minute.isoformat(),
             "open": float(row.get("open", row.get("close", 0.0)) or 0.0),
             "high": float(row.get("high", row.get("close", 0.0)) or 0.0),
             "low": float(row.get("low", row.get("close", 0.0)) or 0.0),
             "close": float(row.get("close", 0.0) or 0.0),
             "volume": float(row.get("volume", 0.0) or 0.0),
+            "_source_priority": source_priority,
         }
-        sessions.setdefault(local_time.date(), []).append(normalized)
+        existing = session_minutes.setdefault(local_time.date(), {}).get(minute)
+        if existing is None:
+            session_minutes[local_time.date()][minute] = normalized
+            continue
+        existing["high"] = max(float(existing["high"]), float(normalized["high"]))
+        existing["low"] = min(float(existing["low"]), float(normalized["low"]))
+        existing["volume"] = max(float(existing["volume"]), float(normalized["volume"]))
+        if source_priority >= int(existing.get("_source_priority") or 0):
+            existing["open"] = normalized["open"]
+            existing["close"] = normalized["close"]
+            existing["_source_priority"] = source_priority
 
-    for session_rows in sessions.values():
-        session_rows.sort(key=lambda item: item["time"])
+    sessions: dict[date, list[dict[str, Any]]] = {
+        session_date: [
+            {key: value for key, value in candle.items() if not key.startswith("_")}
+            for _, candle in sorted(minutes.items())
+        ]
+        for session_date, minutes in session_minutes.items()
+    }
     now_ist = datetime.now(IST)
     return {
         key: value
@@ -980,7 +1083,7 @@ def _group_rows_by_session(
             allow_partial_live_session
             and key == now_ist.date()
             and session_open <= now_ist.time() < session_close
-            and len(value) >= 120
+            and len(value) >= MIN_LIVE_SESSION_MINUTE_ROWS
         )
     }
 
@@ -1121,7 +1224,15 @@ async def _build_order_flow_inputs(
     # from THAT contract's rows instead. Graceful: if the book contract isn't
     # delivering enough sized ticks (after-hours, or no depth), fall back to
     # the index rows so behaviour degrades to the legacy path, never worse.
-    snapshot_end = _row_time(current_rows[-1]).astimezone(timezone.utc)
+    # A persisted minute candle naturally trails the websocket by up to a
+    # bucket/flush interval. Capping a live book query at that candle timestamp
+    # made the quote and OF tape look stale even while fresh ticks were present.
+    # Historical replays remain strictly bounded by their selected row.
+    snapshot_end = (
+        datetime.now(timezone.utc)
+        if snapshot_mode == "live_session"
+        else _row_time(current_rows[-1]).astimezone(timezone.utc)
+    )
     book_symbol = auction_front_month_book_symbols().get(app_symbol)
     using_book = bool(book_symbol)
     recent_ticks = await _fetch_recent_tick_rows(
@@ -1134,7 +1245,11 @@ async def _build_order_flow_inputs(
             1 for r in recent_ticks
             if (r.get("bid_qty") or 0) > 0 and (r.get("ask_qty") or 0) > 0
         )
-        if real_sized < 4:
+        book_fresh = bool(recent_ticks) and (
+            datetime.now(timezone.utc)
+            - _row_time_from_value(recent_ticks[-1]["timestamp"]).astimezone(timezone.utc)
+        ).total_seconds() <= 30.0
+        if real_sized < 4 or not book_fresh:
             using_book = False
             recent_ticks = await _fetch_recent_tick_rows(
                 app_symbol,
@@ -1231,7 +1346,7 @@ async def _fetch_recent_tick_rows(
                 WHERE symbol = :symbol
                   AND time >= :from_time
                   AND time <= :snapshot_end
-                ORDER BY time ASC
+                ORDER BY time DESC
                 LIMIT 600
                 """
             ),
@@ -1243,7 +1358,7 @@ async def _fetch_recent_tick_rows(
         )
         rows = result.mappings().all()
 
-    return [
+    normalized = [
         {
             "timestamp": _row_time_from_value(row["time"]).astimezone(timezone.utc),
             "ltp": float(row["ltp"] or 0.0),
@@ -1256,8 +1371,9 @@ async def _fetch_recent_tick_rows(
             "volume": float(row["volume"] or 0.0),
             "oi": float(row["oi"] or 0.0),
         }
-        for row in rows
+        for row in reversed(rows)
     ]
+    return _filter_tick_rows_near_median(normalized)
 
 
 def _append_live_tick_row(
@@ -1560,7 +1676,7 @@ def _build_live_data_status(
     if live_mode and minute_history_age_seconds is not None:
         minute_history_ready = minute_history_age_seconds <= 180.0
     tick_ready = (not live_mode) or (
-        order_flow_source == "tick_reconstruction"
+        order_flow_source in {"tick_reconstruction", "tick_reconstruction_book"}
         and len(quote_history_payload) >= 4
         and len(trades_payload) >= 1
     )
@@ -1568,7 +1684,10 @@ def _build_live_data_status(
         "market_ticks",
         "websocket_tick",
         "rest_quote",
-    }
+    } or (
+        order_flow_source == "tick_reconstruction_book"
+        and bool(str(quote_source or "").strip())
+    )
     execution_ready = (
         minute_history_ready
         and tick_ready
@@ -1595,7 +1714,11 @@ def _build_live_data_status(
         ),
         "quote_source": quote_source,
         "order_flow_source": order_flow_source,
-        "tick_history_count": len(quote_history_payload) if order_flow_source == "tick_reconstruction" else 0,
+        "tick_history_count": (
+            len(quote_history_payload)
+            if order_flow_source in {"tick_reconstruction", "tick_reconstruction_book"}
+            else 0
+        ),
         "trade_print_count": len(trades_payload),
         "stale_data_seconds": round(float(stale_data_seconds), 3),
         "tick_ready": bool(tick_ready),

@@ -50,6 +50,9 @@ class RiskGovernor:
         # max-concurrent-positions, model-confidence floor, the 15-min
         # session-close buffer, and every regime/setup/scalp gate upstream.
         # Live mode (paper_mode=False) is entirely unaffected.
+        # (Hard-set to False in a 2026-07-17 experiment; restored the same
+        # day by owner directive — the flag-driven paper-only bypass IS the
+        # standing validation doctrine, see core/config.py.)
         validation_uncapped = bool(settings.SIGNAL_VALIDATION_UNCAPPED and self.paper_mode)
 
         if not session.broker_connected and not self.paper_mode:

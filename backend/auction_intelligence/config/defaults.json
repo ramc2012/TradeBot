@@ -146,13 +146,19 @@
   "position_limits": {
     "one_position_per_symbol": true,
     "max_symbol_capital_fraction": 0.1,
-    "hard_stop_premium_fraction": 0.25
+    "hard_stop_premium_fraction": 0.25,
+    "min_hold_seconds": 900,
+    "exit_confirmation_cycles": 2
   },
   "paper_trading": {
     "journal_root": "runtime/auction_intelligence",
     "shadow_net_liquidation": 5000000.0,
     "slippage_bps": 1.0,
     "fees_per_order": 20.0
+  },
+  "live_snapshot": {
+    "portfolio_timeout_seconds": 1.5,
+    "rag_timeout_seconds": 0.75
   },
   "sniper_overlay": {
     "enabled": false,
@@ -168,6 +174,7 @@
   },
   "options_mapping": {
     "enabled": true,
+    "live_enrichment_timeout_seconds": 1.0,
     "min_premium": 2.0,
     "max_premium": 500.0,
     "history_interval": "5minute",

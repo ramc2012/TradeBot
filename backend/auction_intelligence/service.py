@@ -164,8 +164,22 @@ class AuctionIntelligenceService:
         depth: DepthSnapshot | None = None,
         portfolio: PortfolioSnapshot | None = None,
         quote_history: list[QuoteSnapshot] | None = None,
+        enrichment_timeout_seconds: float | None = None,
     ) -> AnalysisBundle:
-        ntm_volx = await self.options.build_ntm_volx(session=session)
+        try:
+            ntm_volx = await asyncio.wait_for(
+                self.options.build_ntm_volx(session=session),
+                timeout=enrichment_timeout_seconds,
+            ) if enrichment_timeout_seconds is not None else await self.options.build_ntm_volx(
+                session=session
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.warning(
+                "[AuctionIQ] NTM VolX enrichment exceeded {:.1f}s; "
+                "serving the core auction analysis without it.",
+                enrichment_timeout_seconds,
+            )
+            ntm_volx = None
         # CPU-bulkhead: analyze() is a pure synchronous CPU block (no awaits) —
         # market-profile/order-flow/regime/agents/meta/risk/execution loops over
         # the passed-in bars/quote/trades. Offload it to a worker thread so the
@@ -185,12 +199,24 @@ class AuctionIntelligenceService:
                 ntm_volx=ntm_volx,
             )
         )
-        bundle.execution_plan = await self.options.map_execution_plan(
-            session=session,
-            decisions=bundle.agent_decisions,
-            execution_plan=bundle.execution_plan,
-            ntm_volx=bundle.ntm_volx,
-        )
+        try:
+            mapped_plan = self.options.map_execution_plan(
+                session=session,
+                decisions=bundle.agent_decisions,
+                execution_plan=bundle.execution_plan,
+                ntm_volx=bundle.ntm_volx,
+            )
+            bundle.execution_plan = await asyncio.wait_for(
+                mapped_plan,
+                timeout=enrichment_timeout_seconds,
+            ) if enrichment_timeout_seconds is not None else await mapped_plan
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.warning(
+                "[AuctionIQ] option execution mapping exceeded {:.1f}s; "
+                "suppressing the incomplete live mapping.",
+                enrichment_timeout_seconds,
+            )
+            bundle.execution_plan = []
         return bundle
 
     async def analyze_and_record_option_paper(

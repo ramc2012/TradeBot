@@ -19,11 +19,13 @@ from auction_intelligence import automation as auction_automation
 from auction_intelligence.config import clone_default_config
 from auction_intelligence.demo import build_demo_analysis, build_demo_validation_series
 from auction_intelligence.live import (
+    _build_live_data_status,
     _build_quote_history_from_ticks,
     _build_trade_prints_from_ticks,
     _build_quote_from_snapshot,
     build_live_analysis,
     _fetch_recent_minute_rows,
+    _filter_tick_rows_near_median,
     _group_rows_by_session,
     _load_portfolio_snapshot,
     _normalize_portfolio_symbol,
@@ -1166,6 +1168,9 @@ def test_service_records_option_paper_proposal(tmp_path, monkeypatch) -> None:
 
 def test_paper_position_book_closes_open_position_on_flat_signal(tmp_path, monkeypatch) -> None:
     service = PaperTradingService(str(tmp_path))
+    service.book.limits.update(
+        {"min_hold_seconds": 0, "exit_confirmation_cycles": 2}
+    )
 
     async def _fake_latest_option_candle(**kwargs):
         return [{"close": 92.0}]
@@ -1250,6 +1255,8 @@ def test_paper_position_book_closes_open_position_on_flat_signal(tmp_path, monke
         execution_plan=[],
     )
 
+    first_flat_summary = asyncio.run(service.sync_positions(flat_bundle))
+    assert first_flat_summary["open_count"] == 1
     close_summary = asyncio.run(service.sync_positions(flat_bundle))
     state = asyncio.run(service.book.list_positions(symbol="NIFTY"))
 
@@ -1873,6 +1880,135 @@ def test_group_rows_by_session_keeps_partial_live_session_when_requested(monkeyp
     assert date(2026, 4, 16) not in dropped
     assert date(2026, 4, 16) in kept
     assert len(kept[date(2026, 4, 16)]) == 130
+
+
+def test_group_rows_by_session_keeps_developing_profile_after_thirty_minutes(monkeypatch) -> None:
+    ist = timezone(timedelta(hours=5, minutes=30))
+    fixed_now = datetime(2026, 4, 16, 10, 0, tzinfo=ist)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now.replace(tzinfo=None) if tz is None else fixed_now.astimezone(tz)
+
+    monkeypatch.setattr("auction_intelligence.live.datetime", _FixedDateTime)
+    rows = [
+        {
+            "time": (datetime(2026, 4, 16, 3, 45, tzinfo=timezone.utc) + timedelta(minutes=index)).isoformat(),
+            "open": 24200.0,
+            "high": 24201.0,
+            "low": 24199.0,
+            "close": 24200.5,
+            "volume": 1000,
+        }
+        for index in range(30)
+    ]
+
+    kept = _group_rows_by_session(rows, allow_partial_live_session=True)
+
+    assert len(kept[date(2026, 4, 16)]) == 30
+
+
+def test_group_rows_by_session_counts_unique_minutes_and_prefers_live_tick(monkeypatch) -> None:
+    ist = timezone(timedelta(hours=5, minutes=30))
+    fixed_now = datetime(2026, 4, 20, 10, 0, tzinfo=ist)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now.replace(tzinfo=None) if tz is None else fixed_now.astimezone(tz)
+
+    rows = []
+    for minute in range(30):
+        candle_time = datetime(2026, 4, 20, 9, 15, tzinfo=ist) + timedelta(minutes=minute)
+        rows.extend(
+            [
+                {
+                    "time": candle_time.isoformat(),
+                    "open": 24100.0 + minute,
+                    "high": 24102.0 + minute,
+                    "low": 24099.0 + minute,
+                    "close": 24101.0 + minute,
+                    "volume": 100.0,
+                    "source": "timescaledb_spot_1minute",
+                },
+                {
+                    "time": candle_time.isoformat(),
+                    "open": 24100.0 + minute,
+                    "high": 24103.0 + minute,
+                    "low": 24098.0 + minute,
+                    "close": 24102.0 + minute,
+                    "volume": 110.0,
+                    "source": "live_tick",
+                },
+            ]
+        )
+
+    monkeypatch.setattr("auction_intelligence.live.datetime", _FixedDateTime)
+
+    kept = _group_rows_by_session(rows, allow_partial_live_session=True)
+
+    assert len(kept[date(2026, 4, 20)]) == 30
+    assert kept[date(2026, 4, 20)][0] == {
+        "time": "2026-04-20T09:15:00+05:30",
+        "open": 24100.0,
+        "high": 24103.0,
+        "low": 24098.0,
+        "close": 24102.0,
+        "volume": 110.0,
+    }
+
+
+def test_live_data_status_accepts_fresh_futures_book_reconstruction() -> None:
+    now = datetime.now(timezone.utc)
+    rows = [
+        {
+            "time": now.isoformat(),
+            "open": 24200.0,
+            "high": 24201.0,
+            "low": 24199.0,
+            "close": 24200.5,
+            "volume": 100.0,
+        }
+    ]
+    quote_history = [
+        {
+            "timestamp": now.isoformat(),
+            "bid": 24200.0,
+            "ask": 24200.5,
+            "bid_size": 10.0,
+            "ask_size": 12.0,
+        }
+        for _ in range(4)
+    ]
+
+    status = _build_live_data_status(
+        current_rows=rows,
+        snapshot_mode="live_session",
+        quote_source="NSE:NIFTY26JULFUT",
+        order_flow_source="tick_reconstruction_book",
+        quote_history_payload=quote_history,
+        trades_payload=[{"price": 24200.5}],
+        stale_data_seconds=0.5,
+    )
+
+    assert status["tick_ready"] is True
+    assert status["tick_history_count"] == 4
+    assert status["execution_ready"] is True
+
+
+def test_orderflow_tape_filter_drops_cross_symbol_price_clusters() -> None:
+    rows = [
+        *({"ltp": 24200.0 + index} for index in range(10)),
+        {"ltp": 837.0},
+        {"ltp": 57950.0},
+        {"ltp": 26850.0},
+    ]
+
+    clean = _filter_tick_rows_near_median(rows)
+
+    assert len(clean) == 10
+    assert all(24000.0 < row["ltp"] < 25000.0 for row in clean)
 
 
 def test_normalize_portfolio_symbol_maps_index_and_futures_aliases() -> None:

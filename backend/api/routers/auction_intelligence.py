@@ -69,6 +69,9 @@ _shadow_store = ShadowPersistenceService()
 _paper_journal = JournalReader(clone_default_config()["paper_trading"]["journal_root"])
 _paper_book = PaperPositionBook(clone_default_config()["paper_trading"]["journal_root"])
 _paper_service = PaperTradingService(clone_default_config()["paper_trading"]["journal_root"])
+_LIVE_RAG_TIMEOUT_SECONDS = float(
+    clone_default_config().get("live_snapshot", {}).get("rag_timeout_seconds", 0.75)
+)
 
 
 class SniperSignalPayload(BaseModel):
@@ -271,7 +274,10 @@ def _shadow_records_from_snapshot(snapshot: dict, options: ShadowCaptureOptions)
 
 async def _safe_context_gate(request: ContextGateRequest) -> dict:
     try:
-        result = await asyncio.to_thread(rag_service.context_gate, request)
+        result = await asyncio.wait_for(
+            asyncio.to_thread(rag_service.context_gate, request),
+            timeout=_LIVE_RAG_TIMEOUT_SECONDS,
+        )
         return result.model_dump()
     except Exception as exc:
         return {

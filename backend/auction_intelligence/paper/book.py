@@ -60,6 +60,16 @@ def _as_float(value: Any) -> Optional[float]:
         return None
 
 
+def _parse_time(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
 class PaperPositionBook:
     def __init__(self, root: Path | str, *, limits: dict[str, Any] | None = None):
         self.root = resolve_journal_root(root)
@@ -79,6 +89,27 @@ class PaperPositionBook:
         #   max_symbol_capital_fraction -> clamp qty so premium outgo <= frac * capital.
         #   hard_stop_premium_fraction  -> exit when the option premium falls this far.
         self.limits = dict(limits or {})
+
+    def _exit_signal_confirmed(self, position: dict[str, Any], action: str, *, now: str) -> bool:
+        """Require minimum hold time and repeated flat/flip observations."""
+        opened = _parse_time(position.get("opened_at"))
+        current = _parse_time(now) or datetime.now(timezone.utc)
+        min_hold = max(0.0, float(self.limits.get("min_hold_seconds", 900) or 0))
+        if opened is not None and (current - opened).total_seconds() < min_hold:
+            return False
+
+        normalized = str(action or "").upper()
+        prior = str(position.get("pending_exit_action") or "").upper()
+        count = int(position.get("pending_exit_count") or 0) + 1 if prior == normalized else 1
+        position["pending_exit_action"] = normalized
+        position["pending_exit_count"] = count
+        required = max(1, int(self.limits.get("exit_confirmation_cycles", 2) or 1))
+        return count >= required
+
+    @staticmethod
+    def _clear_pending_exit(position: dict[str, Any]) -> None:
+        position.pop("pending_exit_action", None)
+        position.pop("pending_exit_count", None)
 
     async def list_positions(
         self,
@@ -239,6 +270,19 @@ class PaperPositionBook:
         # We already hold a position on this underlying.
         if chosen_decision is None:
             if best_any is not None and best_any.action == "FLAT":
+                await self._refresh_open_position(
+                    position=primary, bundle=bundle, decision=best_any, now=now, execution=None
+                )
+                if not self._exit_signal_confirmed(primary, "FLAT", now=now):
+                    await self._maybe_exit(
+                        primary,
+                        bundle=bundle,
+                        now=now,
+                        execution=None,
+                        open_positions=open_positions,
+                        closed_positions=closed_positions,
+                    )
+                    return
                 await self._close_position(
                     position=primary, bundle=bundle, now=now, reason="flat_signal", execution=None
                 )
@@ -262,6 +306,7 @@ class PaperPositionBook:
 
         if str(primary.get("signal_action") or "").upper() == str(chosen_decision.action or "").upper():
             # SAME direction → HOLD the single position (no roll → no churn, no CE+PE).
+            self._clear_pending_exit(primary)
             await self._refresh_open_position(
                 position=primary,
                 bundle=bundle,
@@ -280,6 +325,23 @@ class PaperPositionBook:
             return
 
         # OPPOSITE direction → FLIP (close the existing leg, open the other side).
+        await self._refresh_open_position(
+            position=primary,
+            bundle=bundle,
+            decision=chosen_decision,
+            now=now,
+            execution=chosen_execution,
+        )
+        if not self._exit_signal_confirmed(primary, str(chosen_decision.action), now=now):
+            await self._maybe_exit(
+                primary,
+                bundle=bundle,
+                now=now,
+                execution=chosen_execution,
+                open_positions=open_positions,
+                closed_positions=closed_positions,
+            )
+            return
         await self._close_position(
             position=primary, bundle=bundle, now=now, reason="signal_flip", execution=None
         )
