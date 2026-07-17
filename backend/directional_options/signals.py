@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from core.config import settings
+from directional_options.config import INDEX_UNIVERSE
 from directional_options.features import timeframe_minutes
 from directional_options.schemas import DirectionalSignal, RegimeSnapshot
 
@@ -29,7 +30,14 @@ class DirectionalSignalEngine:
     def __init__(self, config: dict[str, Any]):
         self.config = config
 
-    def predict(self, row, regime: RegimeSnapshot, timeframe: str, positioning: dict | None = None) -> Optional[DirectionalSignal]:
+    def predict(
+        self,
+        row,
+        regime: RegimeSnapshot,
+        timeframe: str,
+        positioning: dict | None = None,
+        underlying: str | None = None,
+    ) -> Optional[DirectionalSignal]:
         # NOTE: the `regime.trade_allowed` gate was removed in the RL
         # refactor. Per the design directive, regimes are FEATURES (the
         # policy sees the label as a one-hot), not barriers. The bandit
@@ -49,7 +57,19 @@ class DirectionalSignalEngine:
         range_expansion = float(row.get("range_expansion", 1.0))
         rv_pct = float(row.get("rv_percentile", 0.0))
 
-        if settings.DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED and positioning is None:
+        # ── UNIVERSE SPLIT (2026-07-17, NIFTY-50 expansion) ───────────────
+        # The positional-confirmation view and its fail-closed positioning
+        # gate are INDEX-ONLY: the positioning feed (directional_positioning
+        # _daily) is researched and populated for indices, and the researched
+        # confirmation edge is index-specific (BANKNIFTY OI-build alignment).
+        # STOCKS must not be silently killed by a missing index-only feed row
+        # — they route through the standard signal engine below (regime +
+        # momentum/fade features). `underlying=None` (older callers /
+        # backtester) conservatively keeps the index-scope fail-closed
+        # behaviour unchanged.
+        index_scope = underlying is None or str(underlying).upper().strip() in INDEX_UNIVERSE
+
+        if settings.DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED and index_scope and positioning is None:
             # MISSING positioning row (feed never wrote this underlying, DB
             # error, table reset) fails CLOSED like the stale case — the legacy
             # momentum fallback below is the measured-catastrophic (PF~0.2)
@@ -57,7 +77,9 @@ class DirectionalSignalEngine:
             # positions keep their protective exits in the paper book.
             return None
 
-        positional_active = settings.DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED and positioning is not None
+        positional_active = (
+            settings.DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED and index_scope and positioning is not None
+        )
         if positional_active:
             # POSITIONAL view (researched edge): HTF daily direction sets the side;
             # OPTION POSITIONING must CONFIRM it (call-OI building / low PCR for CE;

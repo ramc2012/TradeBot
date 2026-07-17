@@ -642,6 +642,34 @@ class LiveCandleStore:
                         "underlying": underlying,
                         "instrument_key": instrument_key,
                     }
+            elif symbol.startswith("NSE:") and symbol.endswith("-EQ"):
+                # NSE equity spot (2026-07-17, directional NIFTY-50 expansion):
+                # WS-subscribed stock ticks persist as underlying_spot_candles
+                # bars, same as index spots. Catalog membership is the gate —
+                # an -EQ symbol without an F&O catalog row is not persisted
+                # (negative TTL cache retries if the catalog fills in later).
+                underlying = symbol[len("NSE:"):-len("-EQ")].strip().upper()
+                if underlying:
+                    result = await session.execute(
+                        text(
+                            """
+                            SELECT symbol, spot_instrument_key
+                            FROM fo_underlying_catalog
+                            WHERE symbol = :underlying
+                            LIMIT 1
+                            """
+                        ),
+                        {"underlying": underlying},
+                    )
+                    row = result.first()
+                    if row is not None:
+                        metadata = {
+                            "kind": "spot",
+                            "underlying": underlying,
+                            "instrument_key": str(
+                                getattr(row, "spot_instrument_key", None) or symbol
+                            ),
+                        }
             else:
                 result = await session.execute(
                     text(

@@ -29,6 +29,30 @@ from directional_options.signals import DirectionalSignalEngine
 from market_data.market_intelligence_runtime import market_intelligence_runtime
 
 
+def rotate_batch(symbols: list[str], cursor: int, batch_size: int) -> tuple[list[str], int]:
+    """Pick the next rotating batch from `symbols` starting at `cursor`.
+
+    Returns (batch, next_cursor). Wraps around the end of the list so every
+    symbol is visited once per ceil(len/batch_size) cycles regardless of
+    where the cursor sits. Degenerate inputs (empty list / non-positive
+    batch size) return an empty batch and cursor 0. When batch_size >= len,
+    the whole list is returned and the cursor stays at 0 (single-batch
+    universe — no rotation needed).
+    """
+    if not symbols or batch_size <= 0:
+        return [], 0
+    total = len(symbols)
+    if batch_size >= total:
+        return list(symbols), 0
+    start = int(cursor) % total
+    end = start + batch_size
+    if end <= total:
+        batch = list(symbols[start:end])
+    else:
+        batch = list(symbols[start:]) + list(symbols[: end - total])
+    return batch, end % total
+
+
 class DirectionalOptionsService:
     """Expose research, live snapshot, and paper-trading surfaces."""
 
@@ -71,6 +95,124 @@ class DirectionalOptionsService:
         self._summary_cache_ttl_seconds = 60.0
         self._live_cache: dict[tuple[str, str, int], tuple[float, dict[str, object]]] = {}
         self._live_locks: dict[tuple[str, str, int], asyncio.Lock] = {}
+        # NIFTY-50 stock expansion (2026-07-17): resolved stock universe cache
+        # (static constituents ∩ live F&O catalog) + the rotating scan cursor.
+        self._stock_universe_cache: tuple[float, list[str], str] | None = None
+        self._stock_universe_cache_ttl_seconds = 3600.0
+        self._stock_scan_cursor = 0
+
+    # ── NIFTY-50 stock expansion helpers (2026-07-17) ────────────────────────
+    #
+    # UNIVERSE SPLIT: indices (config["universe"]) keep the positional-
+    # confirmation path (positioning_feed + fail-closed gate). Stocks come
+    # from config["stock_universe"] (static dated NIFTY-50 list) intersected
+    # with fo_underlying_catalog so every name has listed options, and are
+    # evaluated by the standard signal engine only.
+
+    def is_index_underlying(self, underlying: str | None) -> bool:
+        return str(underlying or "").upper().strip() in {
+            str(item).upper() for item in self.config["universe"]
+        }
+
+    async def resolve_runner_universe(self) -> dict[str, Any]:
+        """Universe for the supervisor runner: indices + (flag-gated) stocks."""
+        indices = [str(item).upper() for item in self.config["universe"]]
+        if not settings.DIRECTIONAL_INCLUDE_STOCK_UNIVERSE:
+            return {"indices": indices, "stocks": [], "stock_universe_source": "disabled"}
+        stocks, source = await self._resolve_stock_universe()
+        return {"indices": indices, "stocks": stocks, "stock_universe_source": source}
+
+    async def _resolve_stock_universe(self) -> tuple[list[str], str]:
+        """Static NIFTY-50 constituents ∩ live F&O catalog (TTL-cached).
+
+        On a catalog read failure the static list is used as-is: every name
+        is still protected downstream by the per-symbol readiness guard
+        (no watchlist rows -> skip), so a fail-open trade on an optionless
+        symbol is impossible either way.
+        """
+        cached = self._stock_universe_cache
+        if cached is not None and cached[0] > monotonic():
+            return list(cached[1]), cached[2]
+        indices = {str(item).upper() for item in self.config["universe"]}
+        static_list = [
+            str(item).upper().strip()
+            for item in (self.config.get("stock_universe") or [])
+            if str(item).strip() and str(item).upper().strip() not in indices
+        ]
+        # De-dupe, keep order.
+        static_list = list(dict.fromkeys(static_list))
+        source = "static_nifty50"
+        resolved = static_list
+        try:
+            catalog = await asyncio.wait_for(self.store.list_fo_stock_symbols(), timeout=10.0)
+            if catalog:
+                resolved = [symbol for symbol in static_list if symbol in catalog]
+                source = "static_nifty50 ∩ fo_underlying_catalog"
+        except Exception as exc:  # noqa: BLE001 — catalog outage must not kill the lane
+            logger.warning(f"[Directional] F&O catalog intersection unavailable, using static list: {exc}")
+            source = "static_nifty50 (catalog_unavailable)"
+        self._stock_universe_cache = (
+            monotonic() + self._stock_universe_cache_ttl_seconds,
+            list(resolved),
+            source,
+        )
+        return list(resolved), source
+
+    async def filter_ready_stock_symbols(
+        self, symbols: list[str]
+    ) -> tuple[list[str], dict[str, str]]:
+        """Split stocks into (ready, skipped{symbol: reason}).
+
+        Ready = fresh 1-minute spot bars AND a live ATM watchlist row inside
+        the stock quote-honesty window. A readiness DB failure fails CLOSED:
+        every symbol is skipped-and-reported for the cycle (indices are
+        unaffected — they don't pass through this filter).
+        """
+        if not symbols:
+            return [], {}
+        spot_limit = float(self.config["paper_trading"]["stale_watchlist_seconds"])
+        quote_limit = float(settings.DIRECTIONAL_STOCK_WATCHLIST_MAX_AGE_SECONDS)
+        try:
+            readiness = await asyncio.wait_for(
+                self.store.stock_readiness(
+                    symbols,
+                    spot_max_age_seconds=spot_limit,
+                    watchlist_max_age_seconds=quote_limit,
+                ),
+                timeout=15.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[Directional] stock readiness query failed; skipping stock batch: {exc}")
+            return [], {str(symbol).upper(): f"readiness_check_failed: {exc}" for symbol in symbols}
+        ready: list[str] = []
+        skipped: dict[str, str] = {}
+        for symbol in symbols:
+            info = readiness.get(str(symbol).upper()) or {}
+            if not info.get("latest_spot_time"):
+                skipped[symbol] = "no_recent_spot_bars"
+            elif not info.get("spot_fresh"):
+                skipped[symbol] = f"spot_stale_{int(info.get('spot_age_seconds') or 0)}s"
+            elif not int(info.get("watchlist_rows") or 0):
+                skipped[symbol] = "no_atm_watchlist_rows"
+            elif not info.get("watchlist_fresh"):
+                skipped[symbol] = f"option_quotes_stale_{int(info.get('watchlist_age_seconds') or 0)}s"
+            else:
+                ready.append(symbol)
+        return ready, skipped
+
+    def next_stock_batch(self, ready_symbols: list[str]) -> list[str]:
+        """Rotating per-cycle batch over the READY stocks.
+
+        Membership can change between cycles (readiness is re-evaluated each
+        pass); the cursor simply advances modulo the current list length so
+        every ready name is visited within ceil(len/batch) cycles.
+        """
+        batch, self._stock_scan_cursor = rotate_batch(
+            ready_symbols,
+            self._stock_scan_cursor,
+            int(settings.DIRECTIONAL_STOCK_BATCH_SIZE),
+        )
+        return batch
 
     def summary(self) -> dict[str, object]:
         cached_payload = self._summary_cache.get("payload")
@@ -97,6 +239,13 @@ class DirectionalOptionsService:
             "auto_started": bool(automation.get("enabled") and automation.get("loop_active")),
             "automation": automation,
             "coverage": [self.store.coverage_summary(underlying) for underlying in available],
+            # NIFTY-50 stock expansion metadata (2026-07-17). The static list
+            # here is pre-intersection; the runner resolves the tradable set
+            # (∩ F&O catalog + per-symbol readiness) each cycle.
+            "stock_universe": {
+                "enabled": bool(settings.DIRECTIONAL_INCLUDE_STOCK_UNIVERSE),
+                "static_size": len(self.config.get("stock_universe") or []),
+            },
         }
         self._summary_cache = {
             "payload": payload,
@@ -377,7 +526,11 @@ class DirectionalOptionsService:
         spot_price = float(row["close"])
         feature_snapshot = self.feature_engine.snapshot(row)
         regime = self.regime.classify(row, timeframe=timeframe)
-        signal = self.signals.predict(row, regime, timeframe)
+        # Research/workspace path: no positioning feed here, so with the
+        # positional flag ON the index-scoped fail-closed gate yields no
+        # signal for indices (unchanged); stocks route through the standard
+        # engine (2026-07-17 NIFTY-50 expansion).
+        signal = self.signals.predict(row, regime, timeframe, underlying=underlying)
 
         selection_reason = "Regime is not tradeable."
         candidate_payload: dict[str, object] | None = None
@@ -525,16 +678,19 @@ class DirectionalOptionsService:
         feature_snapshot = self.feature_engine.snapshot(row)
         regime = self.regime.classify(row, timeframe=timeframe)
         positioning = None
-        if settings.DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED:
+        if settings.DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED and self.is_index_underlying(underlying):
             # Daily option-positioning context (PCR / oi_build / HTF / vol) that the
-            # positional view confirms its side with. None → predict falls back to
-            # the legacy view, so a missing feed never crashes the live cycle.
+            # positional view confirms its side with — INDEX-ONLY by design: the
+            # feed is index-scoped and the fail-closed missing-row gate must not
+            # silently kill stock underlyings (they use the standard engine).
             try:
                 from directional_options.positioning_feed import latest as _positioning_latest
                 positioning = await _positioning_latest(underlying)
             except Exception:
                 positioning = None
-        signal = self.signals.predict(row, regime, timeframe, positioning=positioning)
+        signal = self.signals.predict(
+            row, regime, timeframe, positioning=positioning, underlying=underlying
+        )
         if signal is None and not int(
             strategy_health.get("watchlist_rows_today")
             or strategy_health.get("watchlist_rows_latest")
@@ -629,6 +785,35 @@ class DirectionalOptionsService:
                             "degraded_reason": None,
                         }
                     )
+            if (
+                snapshot_rows
+                and not self.is_index_underlying(underlying)
+                and bool(data_status.get("execution_ready"))
+            ):
+                # STOCK quote-honesty guard (2026-07-17): the global MI health
+                # metrics that feed execution_ready are dominated by the ~35s
+                # index watchlist refresh, but each STOCK's own rows only
+                # refresh via the round-robin premium top-up. Never open a
+                # stock entry against an option quote older than the stock
+                # freshness bound — fail CLOSED for this cycle instead.
+                quote_limit = float(settings.DIRECTIONAL_STOCK_WATCHLIST_MAX_AGE_SECONDS)
+                latest_option_time = max(str(item.get("time") or "") for item in snapshot_rows)
+                stock_quotes_fresh = False
+                try:
+                    latest_dt = pd.Timestamp(latest_option_time)
+                    if latest_dt.tzinfo is None:
+                        latest_dt = latest_dt.tz_localize("UTC")
+                    age = (pd.Timestamp.now(tz="UTC") - latest_dt.tz_convert("UTC")).total_seconds()
+                    stock_quotes_fresh = 0 <= age <= quote_limit
+                except Exception:
+                    stock_quotes_fresh = False
+                if not stock_quotes_fresh:
+                    data_status.update(
+                        {
+                            "execution_ready": False,
+                            "degraded_reason": "stock_option_quotes_stale",
+                        }
+                    )
 
         if not bool(data_status.get("execution_ready")):
             selection_reason = (
@@ -662,8 +847,16 @@ class DirectionalOptionsService:
             # tolerate-failure: a missing chain payload just means the
             # policy gets sentinel zeros for chain features and falls
             # back to signal+candidate context alone.
+            #
+            # INDEX-ONLY (2026-07-17): registering every NIFTY-50 stock with
+            # the option_chain_service poll loop would add ~50 broker chain
+            # fetches per 30s — the exact REST-starvation class the broker
+            # fail-safe work removed. Stocks run without chain analytics
+            # (policy sees sentinel zeros, same as any chain-cache miss).
             try:
                 chain_expiry = None
+                if not self.is_index_underlying(underlying):
+                    raise LookupError("chain analytics is index-only")
                 best_cand = selection.get("best")
                 if best_cand is not None:
                     chain_expiry = getattr(best_cand, "expiry", None)

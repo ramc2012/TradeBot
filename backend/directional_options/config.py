@@ -18,6 +18,40 @@ DATA_ROOT = PACKAGE_ROOT.parent / "runtime" / "index_analytics_data"
 # Funded equity anchor for paper-trading capital accounting.
 DIRECTIONAL_INITIAL_CAPITAL: float = 3_000_000.0
 
+# Index universe. These three KEEP the positional-confirmation path
+# (positioning_feed daily rows + fail-closed gate in signals.py). Stocks are
+# NEVER routed through that gate — see DIRECTIONAL_STOCK_UNIVERSE below.
+INDEX_UNIVERSE: tuple[str, ...] = ("NIFTY", "BANKNIFTY", "SENSEX")
+
+# ── NIFTY-50 STOCK UNIVERSE ─────────────────────────────────────────────────
+# Added 2026-07-17 (owner: "include Nifty 50 stocks — it lacks proper signal
+# generation"; SIGNAL VALIDATION mode wants more honest signal surfaces).
+#
+# Static constituent list as of 2026-07-17. There is no NIFTY-50 membership
+# source in the repo (fo_underlying_catalog has no index-membership column),
+# so this is a dated snapshot of the constituents. Symbols use the app/Fyers
+# convention exactly as stored in fo_underlying_catalog (M&M, BAJAJ-AUTO,
+# ETERNAL for the renamed Zomato, TMPV for the demerged Tata Motors PV,
+# INDIGO / MAXHEALTH from the Sep-2025 reshuffle).
+#
+# SAFETY: this list is intersected at runtime with fo_underlying_catalog
+# (kind='STOCK') by DirectionalOptionsService._resolve_stock_universe(), so a
+# stale constituent that leaves the F&O segment simply drops out; it can
+# never crash the lane or trade an optionless name. Per-symbol data-readiness
+# guards (fresh spot bars + live ATM watchlist rows) gate actual evaluation.
+DIRECTIONAL_STOCK_UNIVERSE: tuple[str, ...] = (
+    "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK",
+    "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", "BEL", "BHARTIARTL",
+    "CIPLA", "COALINDIA", "DRREDDY", "EICHERMOT", "ETERNAL",
+    "GRASIM", "HCLTECH", "HDFCBANK", "HDFCLIFE", "HINDALCO",
+    "HINDUNILVR", "ICICIBANK", "INDIGO", "INFY", "ITC",
+    "JIOFIN", "JSWSTEEL", "KOTAKBANK", "LT", "M&M",
+    "MARUTI", "MAXHEALTH", "NESTLEIND", "NTPC", "ONGC",
+    "POWERGRID", "RELIANCE", "SBILIFE", "SBIN", "SHRIRAMFIN",
+    "SUNPHARMA", "TATACONSUM", "TATASTEEL", "TCS", "TECHM",
+    "TITAN", "TMPV", "TRENT", "ULTRACEMCO", "WIPRO",
+)
+
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "label": "Directional Long Options",
@@ -28,7 +62,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     ),
     "data_root": DATA_ROOT,
     "runtime_root": RUNTIME_ROOT,
-    "universe": ["NIFTY", "BANKNIFTY", "SENSEX"],
+    # Index universe — the positional-confirmation path applies ONLY to these.
+    "universe": list(INDEX_UNIVERSE),
+    # NIFTY-50 stock expansion (2026-07-17): evaluated through the STANDARD
+    # signal engine (regime + momentum/fade features), never the index-only
+    # positioning gate. Enabled/disabled with the single settings flag
+    # DIRECTIONAL_INCLUDE_STOCK_UNIVERSE (core.config) — one-flag revertible.
+    "stock_universe": list(DIRECTIONAL_STOCK_UNIVERSE),
     # FAST-lane timeframe policy (2026-07-15): default scan bars are 3-minute;
     # 5m/15m remain selectable via the API `timeframe` query param.
     "timeframes": ["3minute", "5minute", "15minute"],

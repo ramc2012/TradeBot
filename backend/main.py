@@ -191,6 +191,22 @@ async def lifespan(app: FastAPI):
                 logger.info(f"Stock WS subscriptions enabled: +{added} sector constituents")
             except Exception as exc:
                 logger.warning(f"Stock WS subscription failed: {exc}")
+        # Directional NIFTY-50 universe (2026-07-17): stream the 50 stock spots
+        # so live_candle_store writes their 1m/3m bars — the directional stock
+        # readiness gate requires fresh underlying_spot_candles, and the 1m spot
+        # collector otherwise only covers MI ATM-rotation names. 50 symbols on a
+        # 5000-symbol WS cap, zero broker REST load. Pinned sticky via
+        # add_subscriptions so an auth resync doesn't drop them.
+        if getattr(settings, "DIRECTIONAL_INCLUDE_STOCK_UNIVERSE", False):
+            try:
+                from directional_options.config import DIRECTIONAL_STOCK_UNIVERSE
+                directional_syms = [f"NSE:{s}-EQ" for s in DIRECTIONAL_STOCK_UNIVERSE]
+                added = await market_data_router.add_subscriptions(directional_syms)
+                logger.info(
+                    f"Directional stock-universe WS subscriptions: +{added} NIFTY-50 spots"
+                )
+            except Exception as exc:
+                logger.warning(f"Directional stock WS subscription failed: {exc}")
     else:
         await market_data_router.stop_mock_feed()
         await market_data_router.unsubscribe()

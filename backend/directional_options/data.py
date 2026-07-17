@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from analysis.instruments import get_index_monthly_expiry, get_monthly_expiry
 from db.database import AsyncSessionLocal
@@ -302,6 +302,103 @@ class DirectionalOptionsDataStore:
             limit=limit,
         )
         return commodity_payload
+
+    async def list_fo_stock_symbols(self) -> set[str]:
+        """Live F&O stock underlyings from fo_underlying_catalog.
+
+        Used to intersect the static NIFTY-50 constituent list so every
+        directional stock underlying is guaranteed to have listed options.
+        """
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("SELECT symbol FROM fo_underlying_catalog WHERE kind = 'STOCK'")
+            )
+            return {str(row[0]).upper().strip() for row in result.fetchall() if row[0]}
+
+    async def stock_readiness(
+        self,
+        symbols: list[str],
+        *,
+        spot_max_age_seconds: float,
+        watchlist_max_age_seconds: float,
+    ) -> dict[str, dict[str, Any]]:
+        """Per-symbol data readiness for the stock expansion — TWO grouped
+        queries for the whole batch (not 2×N), so 50 symbols cost the same
+        round-trips as one.
+
+        Ready means BOTH:
+          (a) fresh spot bars in underlying_spot_candles (1minute), and
+          (b) a live ATM watchlist row (contract + quote for the selector).
+
+        Callers skip-and-report symbols that miss either — no crashes, no
+        fail-open entries against stale premiums.
+        """
+        wanted = [str(s).upper().strip() for s in symbols if str(s).strip()]
+        if not wanted:
+            return {}
+        now_utc = pd.Timestamp.now(tz="UTC")
+        out: dict[str, dict[str, Any]] = {
+            symbol: {
+                "latest_spot_time": None,
+                "spot_age_seconds": None,
+                "spot_fresh": False,
+                "latest_watchlist_time": None,
+                "watchlist_age_seconds": None,
+                "watchlist_rows": 0,
+                "watchlist_fresh": False,
+            }
+            for symbol in wanted
+        }
+        spot_sql = text(
+            """
+            SELECT underlying, MAX(time) AS latest_time
+            FROM underlying_spot_candles
+            WHERE underlying IN :symbols
+              AND interval = '1minute'
+              AND time >= NOW() - INTERVAL '2 days'
+            GROUP BY underlying
+            """
+        ).bindparams(bindparam("symbols", expanding=True))
+        watchlist_sql = text(
+            """
+            SELECT underlying, MAX(time) AS latest_time, COUNT(*) AS rows
+            FROM atm_option_watchlist_snapshots
+            WHERE underlying IN :symbols
+              AND expiry >= CURRENT_DATE
+              AND ltp IS NOT NULL
+              AND time >= NOW() - INTERVAL '2 days'
+            GROUP BY underlying
+            """
+        ).bindparams(bindparam("symbols", expanding=True))
+        async with AsyncSessionLocal() as session:
+            spot_rows = (await session.execute(spot_sql, {"symbols": wanted})).fetchall()
+            watchlist_rows = (await session.execute(watchlist_sql, {"symbols": wanted})).fetchall()
+        for row in spot_rows:
+            symbol = str(row.underlying or "").upper()
+            info = out.get(symbol)
+            if info is None or row.latest_time is None:
+                continue
+            latest = _parse_ts(row.latest_time)
+            if latest.tzinfo is None:
+                latest = latest.tz_localize("UTC")
+            age = max(0.0, (now_utc - latest.tz_convert("UTC")).total_seconds())
+            info["latest_spot_time"] = latest.isoformat()
+            info["spot_age_seconds"] = age
+            info["spot_fresh"] = age <= float(spot_max_age_seconds)
+        for row in watchlist_rows:
+            symbol = str(row.underlying or "").upper()
+            info = out.get(symbol)
+            if info is None or row.latest_time is None:
+                continue
+            latest = _parse_ts(row.latest_time)
+            if latest.tzinfo is None:
+                latest = latest.tz_localize("UTC")
+            age = max(0.0, (now_utc - latest.tz_convert("UTC")).total_seconds())
+            info["latest_watchlist_time"] = latest.isoformat()
+            info["watchlist_age_seconds"] = age
+            info["watchlist_rows"] = int(row.rows or 0)
+            info["watchlist_fresh"] = age <= float(watchlist_max_age_seconds) and int(row.rows or 0) > 0
+        return out
 
     async def latest_live_watchlist_status(
         self,

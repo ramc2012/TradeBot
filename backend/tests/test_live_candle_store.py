@@ -249,3 +249,103 @@ def test_queue_overflow_drops_with_counter() -> None:
     # Freshest ticks won (oldest dropped first).
     kept = [store._queue.get_nowait().ltp for _ in range(2)]
     assert kept == [102.0, 103.0]
+
+
+class _CatalogRowSession:
+    """Fake session whose SELECT returns a fo_underlying_catalog-style row."""
+
+    def __init__(self, row) -> None:
+        self._row = row
+        self.queries: list[tuple[str, object]] = []
+
+    async def __aenter__(self) -> "_CatalogRowSession":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    async def execute(self, stmt, params=None):
+        self.queries.append((str(stmt), params))
+
+        class _Result:
+            def __init__(self, row):
+                self._row = row
+
+            def first(self):
+                return self._row
+
+        return _Result(self._row)
+
+
+@pytest.mark.asyncio
+async def test_resolve_symbol_metadata_maps_nse_equity_to_spot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NSE:XXX-EQ symbols resolve to stock spot metadata off the F&O catalog
+    (2026-07-17 directional NIFTY-50 expansion): live stock ticks persist as
+    underlying_spot_candles bars keyed by the catalog spot_instrument_key."""
+    store = LiveCandleStore()
+
+    class _Row:
+        symbol = "RELIANCE"
+        spot_instrument_key = "NSE_EQ|INE002A01018"
+
+    session = _CatalogRowSession(_Row())
+    monkeypatch.setattr(
+        "market_data.live_candle_store.AsyncSessionLocal", lambda: session
+    )
+
+    metadata = await store._resolve_symbol_metadata("NSE:RELIANCE-EQ")
+
+    assert metadata == {
+        "kind": "spot",
+        "underlying": "RELIANCE",
+        "instrument_key": "NSE_EQ|INE002A01018",
+    }
+    # The lookup hit fo_underlying_catalog with the parsed stock name.
+    sql, params = session.queries[0]
+    assert "fo_underlying_catalog" in sql
+    assert params == {"underlying": "RELIANCE"}
+
+
+@pytest.mark.asyncio
+async def test_resolve_symbol_metadata_equity_not_in_catalog_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An -EQ symbol with no F&O catalog row must NOT persist (fail-closed);
+    the negative result is TTL-cached like other unmapped symbols."""
+    store = LiveCandleStore()
+    session = _CatalogRowSession(None)
+    monkeypatch.setattr(
+        "market_data.live_candle_store.AsyncSessionLocal", lambda: session
+    )
+
+    metadata = await store._resolve_symbol_metadata("NSE:NOTALISTEDCO-EQ")
+
+    assert metadata is None
+    assert store._metadata_cache["NSE:NOTALISTEDCO-EQ"] is None
+    assert "NSE:NOTALISTEDCO-EQ" in store._metadata_none_at
+
+
+@pytest.mark.asyncio
+async def test_resolve_symbol_metadata_equity_hyphenated_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hyphenated NIFTY-50 names (BAJAJ-AUTO, M&M) parse correctly — only the
+    trailing -EQ is stripped."""
+    store = LiveCandleStore()
+
+    class _Row:
+        symbol = "BAJAJ-AUTO"
+        spot_instrument_key = "NSE_EQ|INE917I01010"
+
+    session = _CatalogRowSession(_Row())
+    monkeypatch.setattr(
+        "market_data.live_candle_store.AsyncSessionLocal", lambda: session
+    )
+
+    metadata = await store._resolve_symbol_metadata("NSE:BAJAJ-AUTO-EQ")
+
+    assert metadata is not None
+    assert metadata["underlying"] == "BAJAJ-AUTO"
+    assert session.queries[0][1] == {"underlying": "BAJAJ-AUTO"}

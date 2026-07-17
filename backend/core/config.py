@@ -376,6 +376,29 @@ class Settings(BaseSettings):
     DIRECTIONAL_POSITIONAL_DTE_MAX: int = 22
     # Once-per-session post-close refresh of directional_positioning_daily.
     DIRECTIONAL_POSITIONING_REFRESH_INTERVAL_SECONDS: int = 3600
+    # ── NIFTY-50 stock expansion of the directional universe (2026-07-17) ──
+    # Owner: "include Nifty 50 stocks — it lacks proper signal generation."
+    # Indices (NIFTY/BANKNIFTY/SENSEX) keep the positional-confirmation path;
+    # stocks route through the standard signal engine and are hard-guarded by
+    # per-symbol data readiness (fresh spot bars + live ATM watchlist rows).
+    # Single-flag revert: set False to restore the 3-index universe.
+    DIRECTIONAL_INCLUDE_STOCK_UNIVERSE: bool = True
+    # Per-cycle stock scan load bounds: the runner scans indices serially,
+    # then a ROTATING batch of ready stocks under a concurrency semaphore
+    # with a per-symbol wait_for. Full NIFTY-50 rotation completes in
+    # ceil(ready/batch) cycles (2 cycles at the defaults) — bounded worst
+    # case ≈ 3×75s (indices) + ceil(25/5)×20s (stocks) ≈ 325s < the 600s
+    # runner timeout, and typically well under one 180s cadence interval.
+    DIRECTIONAL_STOCK_SCAN_CONCURRENCY: int = 5
+    DIRECTIONAL_STOCK_SYMBOL_TIMEOUT_SECONDS: float = 20.0
+    DIRECTIONAL_STOCK_BATCH_SIZE: int = 25
+    DIRECTIONAL_INDEX_SYMBOL_TIMEOUT_SECONDS: float = 75.0
+    # Honesty bound for stock option quotes: the stock ATM watchlist rows
+    # refresh via the round-robin premium top-up (~minutes per name, unlike
+    # the ~35s index refresh). A stock is only evaluated when its freshest
+    # watchlist row is younger than this; older quotes = skip-and-report
+    # (no fail-open entries against stale premiums).
+    DIRECTIONAL_STOCK_WATCHLIST_MAX_AGE_SECONDS: int = 1200
     # CBE alpha engine runs at EOD. Cadence = 1 hour: during market hours
     # the daily MACD/RSI indicators use completed sessions only, so re-running
     # intra-day is idempotent. A post-close catch-up after the ingestion grace

@@ -551,63 +551,109 @@ class MarketHoursPaperSupervisor:
             }
 
         async def _directional_runner() -> dict[str, Any]:
+            """Directional paper cycle: 3 indices + a rotating NIFTY-50 batch.
+
+            LOAD DESIGN (2026-07-17 stock expansion): 53 symbols at a 180s
+            cadence must never seize the loop or the broker budget —
+              * indices scan serially first (unchanged semantics), each under
+                a generous per-symbol wait_for;
+              * stocks are pre-filtered by data readiness (ONE grouped DB
+                query — unready names are skipped-and-reported, not crashed),
+                then a rotating batch runs under an asyncio.Semaphore with a
+                short per-symbol wait_for. Feature builds / selector / policy
+                already run in asyncio.to_thread inside the service.
+            Worst case ≈ 3×75s + ceil(25/5)×20s ≈ 325s < the 600s runner
+            timeout; a typical pass is well under one cadence interval.
+            """
             results: list[dict[str, Any]] = []
             failures: dict[str, str] = {}
             default_timeframe = str(directional_service.config["default_timeframe"])
             lookback_sessions = int(directional_service.config["backtest"]["lookback_sessions"])
-            for underlying in list(directional_service.config["universe"]):
+
+            def _result_row(underlying: str, snapshot: dict[str, Any], kind: str) -> dict[str, Any]:
+                current_snapshot = dict(snapshot.get("snapshot") or {})
+                signal = current_snapshot.get("signal") or {}
+                risk = current_snapshot.get("risk") or {}
+                data_status = current_snapshot.get("data_status") or {}
+                regime = current_snapshot.get("regime") or {}
+                contract = current_snapshot.get("selected_contract") or {}
+                approved = bool(risk.get("approved"))
+                execution_ready = bool(data_status.get("execution_ready"))
+                # Surface the *why-not* so the summary view is self-explanatory
+                # instead of "signal=None actionable=False" for every desk.
+                rejection_reasons = list(risk.get("reasons") or [])
+                if not execution_ready:
+                    rejection_reasons.insert(
+                        0,
+                        f"data_status not ready: {data_status.get('degraded_reason') or 'unknown'}",
+                    )
+                return {
+                    "underlying": underlying,
+                    "kind": kind,
+                    "as_of": current_snapshot.get("as_of"),
+                    "spot_price": current_snapshot.get("spot_price"),
+                    "direction": signal.get("direction"),
+                    "confidence": signal.get("confidence"),
+                    "expected_move": signal.get("expected_move"),
+                    "expected_move_pct": signal.get("expected_move_pct"),
+                    "sleeve": signal.get("sleeve"),
+                    "thesis": signal.get("thesis"),
+                    "regime_label": regime.get("label"),
+                    "regime_confidence": regime.get("confidence"),
+                    "approved": approved,
+                    "actionable": approved and execution_ready and signal.get("direction") is not None,
+                    "execution_ready": execution_ready,
+                    "selection_reason": current_snapshot.get("selection_reason"),
+                    "rejection_reasons": rejection_reasons,
+                    "trading_symbol": contract.get("trading_symbol"),
+                    "bucket": current_snapshot.get("bucket"),
+                }
+
+            async def _scan(underlying: str, *, kind: str, timeout_s: float) -> None:
                 try:
-                    snapshot = await directional_service.record_paper_snapshot(
-                        underlying,
-                        default_timeframe,
-                        lookback_sessions,
+                    snapshot = await asyncio.wait_for(
+                        directional_service.record_paper_snapshot(
+                            underlying,
+                            default_timeframe,
+                            lookback_sessions,
+                        ),
+                        timeout=timeout_s,
                     )
-                    current_snapshot = dict(snapshot.get("snapshot") or {})
-                    signal = current_snapshot.get("signal") or {}
-                    risk = current_snapshot.get("risk") or {}
-                    data_status = current_snapshot.get("data_status") or {}
-                    regime = current_snapshot.get("regime") or {}
-                    contract = current_snapshot.get("selected_contract") or {}
-                    approved = bool(risk.get("approved"))
-                    execution_ready = bool(data_status.get("execution_ready"))
-                    # Surface the *why-not* so the summary view is self-explanatory
-                    # instead of "signal=None actionable=False" for every desk.
-                    rejection_reasons = list(risk.get("reasons") or [])
-                    if not execution_ready:
-                        rejection_reasons.insert(
-                            0,
-                            f"data_status not ready: {data_status.get('degraded_reason') or 'unknown'}",
-                        )
-                    results.append(
-                        {
-                            "underlying": underlying,
-                            "as_of": current_snapshot.get("as_of"),
-                            "spot_price": current_snapshot.get("spot_price"),
-                            "direction": signal.get("direction"),
-                            "confidence": signal.get("confidence"),
-                            "expected_move": signal.get("expected_move"),
-                            "expected_move_pct": signal.get("expected_move_pct"),
-                            "sleeve": signal.get("sleeve"),
-                            "thesis": signal.get("thesis"),
-                            "regime_label": regime.get("label"),
-                            "regime_confidence": regime.get("confidence"),
-                            "approved": approved,
-                            "actionable": approved and execution_ready and signal.get("direction") is not None,
-                            "execution_ready": execution_ready,
-                            "selection_reason": current_snapshot.get("selection_reason"),
-                            "rejection_reasons": rejection_reasons,
-                            "trading_symbol": contract.get("trading_symbol"),
-                            "bucket": current_snapshot.get("bucket"),
-                        }
-                    )
-                except Exception as exc:
+                    results.append(_result_row(underlying, snapshot, kind))
+                except Exception as exc:  # noqa: BLE001 — per-symbol isolation
                     failures[underlying] = str(exc)
+
+            universe = await directional_service.resolve_runner_universe()
+            indices = list(universe.get("indices") or [])
+            stocks = list(universe.get("stocks") or [])
+
+            index_timeout = float(settings.DIRECTIONAL_INDEX_SYMBOL_TIMEOUT_SECONDS)
+            for underlying in indices:
+                await _scan(underlying, kind="index", timeout_s=index_timeout)
+
+            stock_batch: list[str] = []
+            skipped_unready: dict[str, str] = {}
+            ready_stocks: list[str] = []
+            if stocks:
+                ready_stocks, skipped_unready = await directional_service.filter_ready_stock_symbols(stocks)
+                stock_batch = directional_service.next_stock_batch(ready_stocks)
+                if stock_batch:
+                    semaphore = asyncio.Semaphore(max(1, int(settings.DIRECTIONAL_STOCK_SCAN_CONCURRENCY)))
+                    stock_timeout = float(settings.DIRECTIONAL_STOCK_SYMBOL_TIMEOUT_SECONDS)
+
+                    async def _bounded_scan(symbol: str) -> None:
+                        async with semaphore:
+                            await _scan(symbol, kind="stock", timeout_s=stock_timeout)
+
+                    await asyncio.gather(*(_bounded_scan(symbol) for symbol in stock_batch))
+
             if not results and failures:
                 joined = "; ".join(f"{symbol}: {detail}" for symbol, detail in failures.items())
                 raise RuntimeError(f"Directional options paper cycle failed: {joined}")
             from collections import Counter as _Counter
 
             rejection_counts: _Counter = _Counter()
+            skip_reason_counts: _Counter = _Counter()
             actionable_count = 0
             for item in results:
                 if item.get("actionable"):
@@ -615,14 +661,25 @@ class MarketHoursPaperSupervisor:
                 else:
                     for reason in item.get("rejection_reasons") or []:
                         rejection_counts[str(reason)[:80]] += 1
+            for reason in skipped_unready.values():
+                skip_reason_counts[str(reason)[:60]] += 1
             return {
-                "symbols_requested": list(directional_service.config["universe"]),
+                "symbols_requested": indices + stock_batch,
                 "symbols_completed": [item.get("underlying") for item in results],
                 "result_count": len(results),
                 "actionable_count": actionable_count,
                 "rejection_counts": dict(rejection_counts.most_common(10)),
                 "failure_count": len(failures),
                 "failures": failures,
+                "stock_universe": {
+                    "source": universe.get("stock_universe_source"),
+                    "total": len(stocks),
+                    "ready": len(ready_stocks),
+                    "batch": stock_batch,
+                    "batch_size": len(stock_batch),
+                    "skipped_unready_count": len(skipped_unready),
+                    "skipped_reason_counts": dict(skip_reason_counts.most_common(10)),
+                },
                 "results": results,
             }
 
@@ -987,12 +1044,17 @@ class MarketHoursPaperSupervisor:
                 interval_seconds=settings.DIRECTIONAL_OPTIONS_AUTO_INTERVAL_SECONDS,
                 callback=_directional_runner,
                 enabled=settings.DIRECTIONAL_OPTIONS_AUTO_ENABLED,
-                # NSE index options only — trade during the session, never on the
-                # post-close frozen `live_tick` heartbeat (last price re-stamped
-                # with 0 volume after 15:30 IST). No after-hours catch-up either.
+                # NSE index + NIFTY-50 stock options — trade during the session,
+                # never on the post-close frozen `live_tick` heartbeat (last
+                # price re-stamped with 0 volume after 15:30 IST). No
+                # after-hours catch-up either.
                 market_hours_fn=_in_nse_market_hours,
                 next_open_fn=_next_nse_market_open,
                 post_close_catchup=False,
+                # 2026-07-17 NIFTY-50 expansion: worst case index-serial +
+                # stock-batch pass ≈ 325s, above the 300s global ceiling.
+                # Typical passes stay well under one 180s cadence interval.
+                timeout_seconds=600.0,
                 start_offset_seconds=90.0,
             ),
             RunnerConfig(
