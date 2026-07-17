@@ -28,6 +28,17 @@ PERSIST_INTERVAL = 120
 class OptionChainService:
     """Periodically polls option chain, calculates analytics, stores in Redis."""
 
+    # Consecutive-failure eviction (2026-07-17): a permanently-failing tracked
+    # pair — e.g. a stock underlying whose Upstox chain call rejects the
+    # instrument key with a hard 400 every poll — otherwise retries every
+    # POLL_INTERVAL forever. 50 such stock pairs (pinned via the ad-hoc
+    # /market/option-chain endpoint) burned ~83% of the entire Upstox
+    # 1800/30min budget on 2026-07-17 and starved the S1 stock universe from
+    # 10:30 IST. Evict after this many consecutive failures; the periodic
+    # re-track paths (S2 session pick, directional per-cycle ensure) restore
+    # a healthy index pair automatically after a transient outage.
+    EVICT_AFTER_CONSECUTIVE_FAILURES = 10
+
     def __init__(self):
         self._broker: Optional[BrokerAdapter] = None
         self._tracked: List[tuple[str, str]] = []  # (symbol, expiry) pairs
@@ -35,6 +46,8 @@ class OptionChainService:
         # Last DB-persist time per (symbol, expiry) — throttles the durable
         # option_chain_snapshots write to PERSIST_INTERVAL.
         self._last_persist: Dict[tuple[str, str], datetime] = {}
+        # Consecutive refresh failures per (symbol, expiry) — see eviction note.
+        self._refresh_failures: Dict[tuple[str, str], int] = {}
 
     def set_broker(self, broker: BrokerAdapter):
         self._broker = broker
@@ -42,6 +55,8 @@ class OptionChainService:
     def track(self, symbol: str, expiry: str):
         if (symbol, expiry) not in self._tracked:
             self._tracked.append((symbol, expiry))
+            # A deliberate re-track after an eviction starts with a clean slate.
+            self._refresh_failures.pop((symbol, expiry), None)
 
     async def start(self):
         self._task = asyncio.create_task(self._poll_loop())
@@ -106,6 +121,7 @@ class OptionChainService:
             )
             redis = await get_redis()
             await redis.set(f"oc:{symbol}:{expiry}", json.dumps(payload), ex=OC_TTL)
+            self._refresh_failures.pop((symbol, expiry), None)
             logger.debug(f"[OC] Refreshed {symbol} {expiry}")
 
             # Durable persistence for analysis (2026-06-04). The Redis cache is
@@ -123,7 +139,18 @@ class OptionChainService:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(f"[OC] persist failed {symbol}/{expiry}: {exc}")
         except Exception as e:
-            logger.error(f"[OC] Refresh failed {symbol}/{expiry}: {e}")
+            key = (symbol, expiry)
+            count = self._refresh_failures.get(key, 0) + 1
+            self._refresh_failures[key] = count
+            if count >= self.EVICT_AFTER_CONSECUTIVE_FAILURES and key in self._tracked:
+                self._tracked.remove(key)
+                self._refresh_failures.pop(key, None)
+                logger.warning(
+                    f"[OC] Evicted {symbol}/{expiry} after {count} consecutive refresh "
+                    f"failures — re-track to resume polling. Last error: {e}"
+                )
+            else:
+                logger.error(f"[OC] Refresh failed {symbol}/{expiry}: {e}")
 
     @staticmethod
     def _serialize_entry(entry: Any) -> dict[str, Any]:

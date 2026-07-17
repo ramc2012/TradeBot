@@ -1022,7 +1022,14 @@ async def get_option_chain(symbol: str, expiry: Optional[str] = Query(None)):
 
     if adapter:
         option_chain_service.set_broker(adapter)
-        option_chain_service.track(market_symbol.app_symbol, expiry)
+        # INDEX-ONLY pinning (2026-07-17): track() adds the pair to the 30s
+        # poll loop PERMANENTLY. Ad-hoc stock requests through this endpoint
+        # pinned 50 NIFTY-50 chains whose Upstox refresh 400s every poll
+        # ("Invalid Instrument key"), burning ~83% of the Upstox 30-min
+        # budget and starving S1 from 10:30 IST. Stocks still get a one-shot
+        # refresh below (60s Redis cache) — they just don't join the poll set.
+        if market_symbol.app_symbol.endswith("-INDEX"):
+            option_chain_service.track(market_symbol.app_symbol, expiry)
         await option_chain_service._refresh(market_symbol.app_symbol, expiry)
         cached = await option_chain_service.get_cached(market_symbol.app_symbol, expiry)
         if cached:

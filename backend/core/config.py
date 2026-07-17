@@ -399,6 +399,18 @@ class Settings(BaseSettings):
     # watchlist row is younger than this; older quotes = skip-and-report
     # (no fail-open entries against stale premiums).
     DIRECTIONAL_STOCK_WATCHLIST_MAX_AGE_SECONDS: int = 1200
+    # Just-in-time watchlist refresh for the directional stock batch
+    # (2026-07-17): the BG universe build rotates all ~217 F&O names over
+    # HOURS, so stock snapshot rows aged far past the 1200s bound on day one
+    # (telemetry: ready=0, option_quotes_stale_9000-12000s on all 50 names
+    # while their spot streams were current). The runner now refreshes ONLY
+    # its ~25-name cycle batch just-in-time (CLASS_STANDARD, chain-semaphore
+    # admitted, hard budget) and re-checks honesty afterwards — refresh
+    # failures stay skipped, never fail-open. Rows younger than the REFRESH
+    # age are not re-fetched (they're already honest enough to trade).
+    DIRECTIONAL_STOCK_WATCHLIST_REFRESH_AGE_SECONDS: float = 180.0
+    DIRECTIONAL_STOCK_WATCHLIST_REFRESH_BUDGET_SECONDS: float = 90.0
+    DIRECTIONAL_STOCK_WATCHLIST_REFRESH_CONCURRENCY: int = 3
     # CBE alpha engine runs at EOD. Cadence = 1 hour: during market hours
     # the daily MACD/RSI indicators use completed sessions only, so re-running
     # intra-day is idempotent. A post-close catch-up after the ingestion grace
