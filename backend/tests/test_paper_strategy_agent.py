@@ -1602,6 +1602,18 @@ def test_manage_exits_closes_after_pullback_ignore_window(monkeypatch) -> None:
 
 
 def test_manage_exits_uses_latest_contract_quote_for_mark(monkeypatch) -> None:
+    # Pin the clock inside the test's own synthetic session (2026-05-20,
+    # NSE open, quote 35s old). Without this the test is time-of-day flaky:
+    # run during REAL market hours months later, the mark-staleness gate
+    # (age > _MARK_STALE_SECONDS while the exchange is open) suppresses the
+    # price-based hard_stop and the window_end backstop closes instead.
+    from freezegun import freeze_time
+
+    with freeze_time("2026-05-20T11:20:00+05:30"):
+        _run_manage_exits_uses_latest_contract_quote_for_mark(monkeypatch)
+
+
+def _run_manage_exits_uses_latest_contract_quote_for_mark(monkeypatch) -> None:
     agent = PaperStrategyAgent()
     runtime = agent._strategy1
     runtime.positions.clear()
