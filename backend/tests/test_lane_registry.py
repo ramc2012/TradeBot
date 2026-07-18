@@ -15,10 +15,12 @@ import pytest
 
 from core import lane_registry
 from core.lane_registry import (
+    EXPECTED_LANE_TOTAL,
     LaneSpec,
     build_lane_snapshot,
     build_lane_snapshots,
     get_registry,
+    registry_counts,
     summarize,
     supervisor_runner_keys,
 )
@@ -185,3 +187,302 @@ def test_summarize_counts() -> None:
     assert summary["by_status"] == {"running": 2, "disabled": 1}
     assert summary["by_execution_mode"] == {"none": 2, "paper": 1}
     assert summary["audit_covered"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Count reconciliation (assembler 32 vs stale "31" note) — the ONE total
+# ---------------------------------------------------------------------------
+
+def test_registry_count_is_internally_consistent() -> None:
+    counts = registry_counts()
+    specs = get_registry()
+    # Buckets partition the registry → they sum to the total exactly (proves no
+    # entry counted twice).
+    assert counts["supervisor"] + counts["own_loop"] + counts["product_daemon"] == counts["total"]
+    assert counts["total"] == len(specs) == EXPECTED_LANE_TOTAL == 32
+    # No lane key is ALSO another lane's runner_key (no two-bucket duplicate).
+    assert counts["key_runnerkey_collisions"] == 0
+
+
+@pytest.mark.asyncio
+async def test_registry_summary_total_matches_expected() -> None:
+    snaps = await build_lane_snapshots()
+    assert summarize(snaps)["total"] == EXPECTED_LANE_TOTAL
+
+
+# ---------------------------------------------------------------------------
+# Metadata correctness (Task 2)
+# ---------------------------------------------------------------------------
+
+def test_s1_broker_profile_matches_slow_seam() -> None:
+    s1 = next(s for s in get_registry() if s.key == "s1_atm_30m_macd")
+    # Own-loop seam wraps run_once in lane_broker_profile(LANE_PROFILE_SLOW).
+    assert s1.broker_profile == "slow"
+
+
+def test_no_advertised_status_endpoint_is_a_known_404() -> None:
+    # The three paths the second review flagged as 404 must never appear.
+    dead = {"/api/strategy/status", "/api/cbe/summary", "/api/institutional-convergence/summary"}
+    advertised = {s.status_endpoint for s in get_registry() if s.status_endpoint}
+    assert advertised.isdisjoint(dead), advertised & dead
+
+
+def test_corrected_status_endpoints_point_at_served_paths() -> None:
+    by_key = {s.key: s for s in get_registry()}
+    assert by_key["s1_atm_30m_macd"].status_endpoint == "/api/trading/strategy-agent/status"
+    assert by_key["s2_index_mp_macd"].status_endpoint == "/api/trading/strategy-agent/status"
+    assert by_key["cbe_scanner"].status_endpoint == "/api/cbe/paper-summary"
+    assert by_key["cbe_marks"].status_endpoint == "/api/cbe/paper-summary"
+    assert by_key["institutional_convergence"].status_endpoint == "/api/institutional-convergence/status"
+    assert (
+        by_key["institutional_convergence_commodity"].status_endpoint
+        == "/api/institutional-convergence/commodity/status"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Honest status: config-on-but-unprobed = "enabled", not "ready"
+# ---------------------------------------------------------------------------
+
+def test_derive_status_unprobed_reports_enabled_not_ready() -> None:
+    derive = lane_registry._derive_status
+    assert derive(enabled=True, running=None, stale=None, last_error=None, execution_mode="none", probed=False) == "enabled"
+    assert derive(enabled=True, running=False, stale=False, last_error=None, execution_mode="paper", probed=True) == "ready"
+    assert derive(enabled=False, running=None, stale=None, last_error=None, execution_mode="none", probed=False) == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_flag_only_and_always_on_never_claim_ready() -> None:
+    snapshots = await build_lane_snapshots()
+    by_key = {s["key"]: s for s in snapshots}
+    # greeks_enrichment is flag_only; held_position_marks_refresh is always_on.
+    for key in ("greeks_enrichment", "held_position_marks_refresh"):
+        assert by_key[key]["status"] in {"enabled", "disabled"}, (key, by_key[key]["status"])
+        assert by_key[key]["status"] != "ready"
+
+
+# ---------------------------------------------------------------------------
+# Foreign-plane staleness propagation (Task 1)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_foreign_plane_snapshot_stale_downgrades_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.market_hours_paper_supervisor import market_hours_paper_supervisor
+
+    # A dead strategy container still publishes running=True from a frozen
+    # snapshot; snapshot_stale=True must fold into effective staleness.
+    def _fake_status(key: str) -> dict:
+        return {
+            "key": key,
+            "enabled": True,
+            "running": True,
+            "stale": False,  # the frozen snapshot's own field lies
+            "last_error": None,
+            "loop_active": True,
+            "plane": "strategies",
+            "foreign": True,
+            "snapshot_stale": True,
+            "snapshot_age_seconds": 900.0,
+        }
+
+    monkeypatch.setattr(market_hours_paper_supervisor, "get_runner_status", _fake_status)
+    spec = next(s for s in get_registry() if s.status_source == "supervisor")
+    snap = await build_lane_snapshot(spec)
+    assert snap["status"] == "stale", snap
+    assert snap["snapshot_stale"] is True
+    assert snap["snapshot_age_seconds"] == 900.0
+    assert snap["plane"] == "strategies"
+    assert snap["foreign_plane"] is True
+
+
+@pytest.mark.asyncio
+async def test_local_runner_fresh_snapshot_stays_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.market_hours_paper_supervisor import market_hours_paper_supervisor
+
+    def _fake_status(key: str) -> dict:
+        return {
+            "key": key,
+            "enabled": True,
+            "running": False,
+            "stale": False,
+            "last_error": None,
+            "loop_active": True,
+            # local runner: no snapshot_stale key
+        }
+
+    monkeypatch.setattr(market_hours_paper_supervisor, "get_runner_status", _fake_status)
+    spec = next(s for s in get_registry() if s.status_source == "supervisor" and s.execution_mode != "parked")
+    snap = await build_lane_snapshot(spec)
+    assert snap["status"] == "ready"
+    assert snap["snapshot_stale"] is None
+
+
+# ---------------------------------------------------------------------------
+# Own-loop liveness (Task 1) + parked-lane state borrowing (Task 2c)
+# ---------------------------------------------------------------------------
+
+class _FakeAgent:
+    def __init__(self, status: dict) -> None:
+        self._status = status
+
+    def get_status(self, *, refresh: bool = True) -> dict:
+        return self._status
+
+
+def test_agent_dead_loop_reads_stale() -> None:
+    agent = _FakeAgent(
+        {
+            "enabled": True,
+            "running": True,  # persisted state says running
+            "loop_active": False,  # but the own-loop is dead
+            "last_error": None,
+            "last_run_at": "2026-07-18T10:00:00+05:30",
+            "strategies": [{"key": "macd_strategy", "summary": {"open_positions": 0}}],
+        }
+    )
+    state = lane_registry._agent_state(agent, "macd_strategy")
+    assert state["stale"] is True
+    assert state["loop_active"] is False
+
+
+def test_agent_live_loop_not_stale() -> None:
+    agent = _FakeAgent(
+        {
+            "enabled": True,
+            "running": False,
+            "loop_active": True,
+            "last_error": None,
+            "strategies": [{"key": "macd_strategy", "summary": {"open_positions": 1}}],
+        }
+    )
+    state = lane_registry._agent_state(agent, "macd_strategy")
+    assert state["stale"] is None
+
+
+def test_parked_strategy_never_borrows_live_agent_state() -> None:
+    # The live agent is enabled/running with a fresh last_run_at and a message,
+    # but the requested (deleted) strategy is ABSENT from strategies[].
+    agent = _FakeAgent(
+        {
+            "enabled": True,
+            "running": True,
+            "loop_active": True,
+            "last_error": None,
+            "last_run_at": "2026-07-18T10:00:00+05:30",
+            "last_message": "S1 scanned 217 names",
+            "strategies": [{"key": "macd_strategy", "summary": {"open_positions": 3}}],
+        }
+    )
+    state = lane_registry._agent_state(agent, "index_mp_strategy")  # deleted s2
+    assert state["running"] is False
+    assert state["enabled"] is False
+    assert state["last_success_at"] is None
+    assert state["book"] is None
+    assert "borrowed" in state["last_message"].lower() or "parked" in state["last_message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Risk-breach VISIBILITY (Task 3) — flag only, never enforcement, never raises
+# ---------------------------------------------------------------------------
+
+def test_risk_breach_from_book_flags_negative_capital_and_drawdown() -> None:
+    breach, reason = lane_registry._risk_breach_from_book(
+        {"initial_capital": 1_000_000, "available_capital": -1_363_960, "max_drawdown": 0.5}
+    )
+    assert breach is True
+    assert "available_capital negative" in reason
+    assert "drawdown" in reason
+
+
+def test_risk_breach_healthy_book_is_false_not_none() -> None:
+    breach, reason = lane_registry._risk_breach_from_book(
+        {"initial_capital": 5_000_000, "available_capital": 4_600_000, "max_drawdown": 0.05}
+    )
+    assert breach is False
+    assert reason is None
+
+
+def test_risk_breach_unknown_when_no_book() -> None:
+    assert lane_registry._risk_breach_from_book(None) == (None, None)
+    assert lane_registry._risk_breach_from_book({}) == (None, None)
+    # Book dict with only unrelated keys → still unknown.
+    assert lane_registry._risk_breach_from_book({"foo": 1}) == (None, None)
+
+
+def test_risk_breach_drawdown_threshold_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    book = {"available_capital": 100.0, "max_drawdown": 0.2}
+    # Default 0.30 → 20% drawdown does not breach.
+    assert lane_registry._risk_breach_from_book(book)[0] is False
+    # Tighten the surfacing threshold (config-driven; default patched here since
+    # the Settings model is frozen) → the same book now breaches.
+    monkeypatch.setattr(lane_registry, "_DEFAULT_DRAWDOWN_SURFACING_PCT", 0.15)
+    assert lane_registry._risk_breach_from_book(book)[0] is True
+
+
+@pytest.mark.asyncio
+async def test_s1_snapshot_surfaces_breach_visibility_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    # S1's served book is deep-negative; the snapshot must SURFACE risk_breach
+    # without any status becoming a block (visibility only).
+    async def _fake_s1_state(spec: LaneSpec) -> dict:
+        return {
+            "enabled": True,
+            "running": True,
+            "stale": None,
+            "last_error": None,
+            "loop_active": True,
+            "book": {"initial_capital": 1_000_000, "available_capital": -1_363_960, "max_drawdown": 0.5},
+            "probed": True,
+        }
+
+    monkeypatch.setitem(lane_registry._SOURCES, "nse_agent", _fake_s1_state)
+    spec = next(s for s in get_registry() if s.key == "s1_atm_30m_macd")
+    snap = await build_lane_snapshot(spec)
+    assert snap["risk_breach"] is True
+    assert snap["risk_breach_reason"]
+    # Visibility only: status is the ordinary running state, NOT a block.
+    assert snap["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_risk_book_probe_used_for_supervisor_paper_lane(monkeypatch: pytest.MonkeyPatch) -> None:
+    # macd_refined is supervisor-scheduled (no book in runner status); its
+    # declared risk_book_source probe supplies the book best-effort.
+    async def _fake_probe() -> dict:
+        return {"initial_capital": 5_000_000, "available_capital": -2_714_266, "max_drawdown": 0.375}
+
+    monkeypatch.setitem(lane_registry._BOOK_PROBES, "macd_refined_paper", _fake_probe)
+
+    async def _fake_supervisor(spec: LaneSpec) -> dict:
+        return {"enabled": True, "running": True, "stale": False, "last_error": None, "probed": True}
+
+    monkeypatch.setitem(lane_registry._SOURCES, "supervisor", _fake_supervisor)
+    spec = next(s for s in get_registry() if s.key == "macd_refined")
+    snap = await build_lane_snapshot(spec)
+    assert snap["risk_breach"] is True
+    assert "available_capital negative" in snap["risk_breach_reason"]
+
+
+@pytest.mark.asyncio
+async def test_risk_probe_failure_leaves_breach_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _boom() -> dict:
+        raise RuntimeError("service down")
+
+    monkeypatch.setitem(lane_registry._BOOK_PROBES, "macd_refined_paper", _boom)
+
+    async def _fake_supervisor(spec: LaneSpec) -> dict:
+        return {"enabled": True, "running": True, "stale": False, "last_error": None, "probed": True}
+
+    monkeypatch.setitem(lane_registry._SOURCES, "supervisor", _fake_supervisor)
+    spec = next(s for s in get_registry() if s.key == "macd_refined")
+    snap = await build_lane_snapshot(spec)
+    # Best-effort: a dead probe never raises and never fabricates → unknown.
+    assert snap["risk_breach"] is None
+    assert snap["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_full_snapshot_pass_includes_risk_fields() -> None:
+    snapshots = await build_lane_snapshots()
+    for snap in snapshots:
+        assert "risk_breach" in snap  # True / False / None on every lane
+        assert "risk_breach_reason" in snap

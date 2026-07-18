@@ -88,6 +88,15 @@ class Settings(BaseSettings):
     # db.database.disable_default_statement_timeout() at process start, so its
     # multi-hour contract sweeps are exempt even though it shares database.py.
     DB_STATEMENT_TIMEOUT_SECONDS: int = 60
+    # Negative-readiness backoff (seconds). Once a broker's saved session is
+    # known expired-and-unrefreshable (SEBI daily-OAuth flow: Fyers no longer
+    # issues durable refresh material, so the "refresh" attempt is pure churn —
+    # a forced DB/disk credential reload + a warning line, observed ~45x/10min
+    # and doubling under the LANESET process split), stop re-attempting the
+    # refresh and collapse the log to ONE throttled line per this window until
+    # the owner supplies a fresh token (which clears the backoff via the token
+    # persistence path). Never gates the owner's manual reconnect. 0 disables.
+    BROKER_NEGATIVE_READINESS_BACKOFF_SECONDS: int = 300
     REDIS_URL: str = "redis://localhost:6383/0"
     # DEPRECATED (2026-07-18): the single 1000-cap client pool is replaced by the
     # two bounded blocking pools below. Kept so stale env overrides don't crash.
