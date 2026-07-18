@@ -572,6 +572,15 @@ async def run_daemon_from_env() -> None:
 
 async def _run() -> int:
     _configure_logging()
+    # Task D (2026-07-18): this STANDALONE container shares db/database.py with
+    # the main app, but its multi-hour research sweeps must not inherit the
+    # app's default 60s statement_timeout. Process-wide opt-out, called before
+    # the first DB connection is created (connections are lazy). The EMBEDDED
+    # mode (run_daemon_from_env, inside the app process) deliberately does NOT
+    # opt out — that would strip the whole app's timeout.
+    from db.database import disable_default_statement_timeout
+
+    disable_default_statement_timeout("research_sync standalone container")
     return await _run_with_args(_parse_args())
 
 

@@ -55,6 +55,14 @@ class Settings(BaseSettings):
     DATABASE_MAX_OVERFLOW: int = 0
     DATABASE_POOL_TIMEOUT_SECONDS: int = 15
     DATABASE_POOL_RECYCLE_SECONDS: int = 900
+    # Task D (2026-07-18): default per-statement timeout applied to every NEW
+    # connection of the MAIN app engine (SET statement_timeout on connect).
+    # 0 disables entirely. Legitimate long-runners (backfills / aggregations)
+    # must use db.database.long_query_session() instead of lowering this.
+    # The standalone research_sync container calls
+    # db.database.disable_default_statement_timeout() at process start, so its
+    # multi-hour contract sweeps are exempt even though it shares database.py.
+    DB_STATEMENT_TIMEOUT_SECONDS: int = 60
     REDIS_URL: str = "redis://localhost:6383/0"
     # DEPRECATED (2026-07-18): the single 1000-cap client pool is replaced by the
     # two bounded blocking pools below. Kept so stale env overrides don't crash.

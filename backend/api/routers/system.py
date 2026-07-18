@@ -1186,7 +1186,7 @@ async def connection_pools() -> dict[str, Any]:
     connection demand observable instead of a mystery "Too many connections"
     storm. Postgres: the SQLAlchemy engine pool's checked-out/size/overflow.
     """
-    from db.database import engine
+    from db.database import engine, statement_timeout_status
     from db.redis_client import redis_pool_stats
 
     payload: dict[str, Any] = {"redis": redis_pool_stats()}
@@ -1197,7 +1197,26 @@ async def connection_pools() -> dict[str, Any]:
             "checked_out": pool.checkedout(),
             "checked_in": pool.checkedin(),
             "overflow": pool.overflow(),
+            # Task D: connect-time default statement_timeout visibility.
+            "statement_timeout": statement_timeout_status(),
         }
     except Exception as exc:  # noqa: BLE001 — telemetry must never 500
         payload["database"] = {"error": str(exc)}
     return payload
+
+
+@router.get("/lanes")
+async def lane_snapshots() -> dict[str, Any]:
+    """The ONE lane inventory (Task C, 2026-07-18): every supervisor runner,
+    own-loop strategy agent, daemon, and parked product lane from the
+    declarative registry in core/lane_registry.py, each joined with its
+    CURRENT runtime state. Additive — health/overview keep their shapes
+    (Phase 2 consolidation needs owner sign-off).
+
+    ``audit_coverage`` is honest: True only for lanes registered in
+    audits.lanes (s1 today) — the visible gap is the point.
+    """
+    from core.lane_registry import build_lane_snapshots, summarize
+
+    snapshots = await build_lane_snapshots()
+    return {"lanes": snapshots, "summary": summarize(snapshots)}

@@ -177,7 +177,12 @@ async def backfill_from_candles(*, market: str = "NSE", days: int = 21) -> int:
     (which, with ~26 days of snapshot retention, dragged thousands of rotated-out
     strikes into the breadth denominator).
     """
-    async with AsyncSessionLocal() as session:
+    # Task D (2026-07-18): 21-day MACD recompute across every tracked leg is a
+    # legitimate long-runner — exempt from the app-default 60s statement_timeout.
+    # session_factory=this module's AsyncSessionLocal keeps the test seam.
+    from db.database import long_query_session
+
+    async with long_query_session(session_factory=lambda: AsyncSessionLocal()) as session:
         legs = (
             await session.execute(
                 text(
