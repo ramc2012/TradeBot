@@ -151,13 +151,28 @@ def _load_saved_strategy_state() -> tuple[dict[str, Any], Optional[datetime]]:
     return {}, updated_at
 
 
-def _save_strategy_state(payload: dict[str, Any]) -> Optional[datetime]:
+# Phase-2 ITEM 3: control flags owned by the operator control endpoints
+# (set_kill_switch / set_auto_run / engage_manual_kill_switch). The scan loop
+# owns control.loop_heartbeat_at. See core.runtime_state.save_runtime_state_control_merged.
+_NSE_CONTROL_FLAG_KEYS = ("auto_run_enabled", "kill_switch_active", "manual_restart_required")
+
+
+def _save_strategy_state(
+    payload: dict[str, Any], *, owns_control_flags: bool = True
+) -> Optional[datetime]:
     try:
         _NSE_STRATEGY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         _NSE_STRATEGY_STATE_FILE.write_text(json.dumps(payload, indent=2))
     except Exception as exc:
         logger.warning(f"[Strategy] Failed to persist {_NSE_STRATEGY_STATE_FILE}: {exc}")
-    return save_runtime_state(_NSE_STRATEGY_STATE_DB_KEY, payload)
+    from core.runtime_state import save_runtime_state_control_merged
+
+    return save_runtime_state_control_merged(
+        _NSE_STRATEGY_STATE_DB_KEY,
+        payload,
+        owns_control_flags=owns_control_flags,
+        flag_keys=_NSE_CONTROL_FLAG_KEYS,
+    )
 
 
 __all__ = [

@@ -82,6 +82,36 @@ def _should_run_post_close_catchup(now: datetime) -> bool:
     return trading_calendar.has_exchange_session("NSE", now.date()) and now.time() >= time(15, 35)
 
 
+async def _dispatch_strategy_command(action: str, args: dict) -> dict:
+    """Phase-2 ITEM 2: execute a proxied strategy command IN the strategy plane.
+
+    Runs the same in-process agent method the core-plane router would have run
+    single-process. Unknown actions raise (the consumer returns the error to the
+    core caller, which surfaces a 502)."""
+    args = args or {}
+    if action == "nse_run_once":
+        from paper_engine.strategy_agent import paper_strategy_agent
+
+        return await paper_strategy_agent.run_once(force=bool(args.get("force", True)))
+    if action == "nse_close_position":
+        from paper_engine.strategy_agent import paper_strategy_agent
+
+        return await paper_strategy_agent.operator_close_position(
+            strategy_key=args.get("strategy_key"),
+            symbol=args.get("symbol"),
+            reason=args.get("reason"),
+        )
+    if action == "commodity_start":
+        from paper_engine.commodity_strategy_agent import commodity_strategy_agent
+
+        return await commodity_strategy_agent.start_loop()
+    if action == "commodity_run_once":
+        from paper_engine.commodity_strategy_agent import commodity_strategy_agent
+
+        return await commodity_strategy_agent.run_once(force=bool(args.get("force", True)))
+    raise ValueError(f"unknown strategy command action: {action!r}")
+
+
 # A failed post-close catch-up may retry, but only this many attempts per
 # session — a persistently failing runner must not spin against the broker
 # every scheduler tick for the rest of the evening.
@@ -385,6 +415,9 @@ class MarketHoursPaperSupervisor:
         self._lock = asyncio.Lock()
         self._runner_tasks: dict[str, asyncio.Task] = {}
         self._maintenance_tasks: set[asyncio.Task] = set()
+        # Phase-2 ITEM 2: strategy-command proxy consumer (split strategy plane
+        # only). None in single-process / core plane.
+        self._proxy_consumer_task: asyncio.Task | None = None
         # Crash watchdog: if the scheduling loop ever raises it would otherwise
         # stop ALL lanes silently forever. Auto-restart, bounded so a hard crash
         # loop can't spin — after this many consecutive crashes we give up and
@@ -1402,7 +1435,32 @@ class MarketHoursPaperSupervisor:
             return
         self._task = asyncio.create_task(self._loop(), name="market-hours-paper-supervisor")
         self._task.add_done_callback(self._on_loop_done)
+        self._maybe_start_strategy_proxy_consumer()
         logger.info("[MarketHoursSupervisor] started")
+
+    def _maybe_start_strategy_proxy_consumer(self) -> None:
+        """Phase-2 ITEM 2: on the STRATEGY plane of a split boot, run the Redis
+        command consumer so the core plane's proxied run-once / close /
+        commodity-start calls reach the in-process agents. Started ONLY when
+        is_split() and boots_strategies() and the proxy flag is on — so it never
+        starts in the single-process boot (LANESET=all) nor on the core plane."""
+        from core.laneset import boots_strategies, is_split
+
+        if not (is_split() and boots_strategies()):
+            return
+        if not getattr(settings, "STRATEGY_PROXY_ENABLED", True):
+            return
+        if getattr(self, "_proxy_consumer_task", None) and not self._proxy_consumer_task.done():
+            return
+        from db.redis_client import consume_strategy_commands
+
+        task = asyncio.create_task(
+            consume_strategy_commands(_dispatch_strategy_command),
+            name="strategy-proxy-consumer",
+        )
+        self._proxy_consumer_task = task
+        self._maintenance_tasks.add(task)
+        logger.info("[MarketHoursSupervisor] strategy-proxy consumer started (split strategy plane)")
 
     def _on_loop_done(self, task: asyncio.Task) -> None:
         # Runs when the scheduling loop task ends. A clean end or a deliberate

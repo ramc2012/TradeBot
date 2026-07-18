@@ -503,13 +503,25 @@ def _load_saved_state() -> tuple[dict[str, Any], Optional[datetime]]:
     return normalized, updated_at
 
 
-def _save_state(state: dict[str, Any]) -> Optional[datetime]:
+# Phase-2 ITEM 3: control flags owned by the operator control endpoints
+# (set_kill_switch / start / stop). The scan loop owns control.loop_heartbeat_at.
+_COMMODITY_CONTROL_FLAG_KEYS = ("kill_switch_active", "start_required", "manual_restart_required")
+
+
+def _save_state(state: dict[str, Any], *, owns_control_flags: bool = True) -> Optional[datetime]:
     try:
         _COMMODITY_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         _COMMODITY_CONFIG_FILE.write_text(json.dumps(state, indent=2))
     except Exception as exc:
         logger.warning(f"[CommodityStrategy] Failed to persist {_COMMODITY_CONFIG_FILE}: {exc}")
-    return save_runtime_state(_COMMODITY_STATE_DB_KEY, state)
+    from core.runtime_state import save_runtime_state_control_merged
+
+    return save_runtime_state_control_merged(
+        _COMMODITY_STATE_DB_KEY,
+        state,
+        owns_control_flags=owns_control_flags,
+        flag_keys=_COMMODITY_CONTROL_FLAG_KEYS,
+    )
 
 
 def _compute_atr(candles: list[dict[str, Any]], period: int) -> list[Optional[float]]:
@@ -1402,8 +1414,10 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         # thread — mirrors S1's _apersist_state (strategy_agent.py). F-18:
         # the sync persist of a growing state blob on the event loop is a
         # per-scan loop seizure that worsens every day.
+        # Phase-2 ITEM 3: scan persist does NOT own control flags — a concurrent
+        # operator toggle must survive (see save_runtime_state_control_merged).
         payload = self._build_saved_state()
-        updated_at = await asyncio.to_thread(_save_state, payload)
+        updated_at = await asyncio.to_thread(_save_state, payload, owns_control_flags=False)
         self._state_synced_at = updated_at or self._state_synced_at
 
     def _loop_active(self) -> bool:

@@ -1202,6 +1202,14 @@ async def connection_pools() -> dict[str, Any]:
         }
     except Exception as exc:  # noqa: BLE001 — telemetry must never 500
         payload["database"] = {"error": str(exc)}
+    # Phase-2 split: cross-process shared broker REST budget (Redis token
+    # bucket) + per-plane fallback mode. mode="fallback" means Redis was
+    # unreachable and each plane is self-capping on its in-process limiter.
+    try:
+        from brokers.rate_limiter import shared_budget_status
+        payload["broker_budget"] = await shared_budget_status()
+    except Exception as exc:  # noqa: BLE001 — telemetry must never 500
+        payload["broker_budget"] = {"error": str(exc)}
     return payload
 
 

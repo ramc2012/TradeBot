@@ -1006,8 +1006,14 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
         # build the payload on the loop, then offload only the blocking
         # json.dumps + file write + DB INSERT to a worker thread so a slow disk
         # / DB (observed spiking to ~2s) cannot freeze the event loop.
+        # Phase-2 ITEM 3: the scan persist does NOT own the control flags — a
+        # concurrent operator toggle (kill/auto-run) on the other plane (or, in a
+        # single process, between this build and the threaded write) must survive.
+        # owns_control_flags=False makes the merged save preserve the stored flags.
         payload = self._build_state_payload()
-        updated_at = await asyncio.to_thread(_save_strategy_state, payload)
+        updated_at = await asyncio.to_thread(
+            _save_strategy_state, payload, owns_control_flags=False
+        )
         if updated_at is not None:
             self._state_synced_at = updated_at
 

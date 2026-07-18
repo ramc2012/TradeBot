@@ -16,6 +16,35 @@ from paper_engine.strategy_agent import paper_strategy_agent
 
 router = APIRouter(prefix="/api/trading", tags=["trading"])
 
+
+async def _proxy_to_strategy_plane(action: str, args: dict) -> dict:
+    """Phase-2 ITEM 2: forward a strategy-mutating call from the CORE plane to
+    the strategy plane over Redis and translate the ack into an HTTP result.
+
+    Only reached when ``is_core_only()`` and the proxy is enabled — when
+    LANESET=all/strategies the caller runs the agent in-process instead (no
+    proxy path), so this is provably inert in the single-process boot."""
+    from db.redis_client import PROXY_ERROR, PROXY_TIMEOUT, proxy_strategy_command
+
+    timeout = float(getattr(settings, "STRATEGY_PROXY_TIMEOUT_SECONDS", 140.0) or 140.0)
+    try:
+        ack = await proxy_strategy_command(action, args, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 — Redis publish failed: surface, never drop
+        raise HTTPException(
+            503, f"strategy proxy unavailable (Redis publish failed): {exc}"
+        ) from exc
+    if ack.get(PROXY_TIMEOUT):
+        raise HTTPException(
+            504,
+            f"strategy plane did not ack '{action}' within {int(timeout)}s "
+            "(strategy plane unreachable or busy)",
+        )
+    if ack.get(PROXY_ERROR):
+        raise HTTPException(502, f"strategy proxy error: {ack.get(PROXY_ERROR)}")
+    if ack.get("error"):
+        raise HTTPException(502, f"strategy plane error: {ack.get('error')}")
+    return ack.get("result")
+
 # ── State ────────────────────────────────────────────────────────────────────
 _mode = "paper"
 _active_broker = "fyers"
@@ -534,18 +563,26 @@ async def strategy_equity_history():
 @router.post("/strategy-agent/run-once")
 async def run_strategy_agent_once(force: bool = True):
     # Split boot: a run-once on the CORE plane would scan/trade in the WRONG
-    # process (the agent loop lives in backend-strategies) → 409. Inert when
-    # LANESET=all. Phase 2 may proxy to the strategy plane's internal port.
-    from core.laneset import require_strategy_plane
+    # process (the agent loop lives in backend-strategies). Phase-2 ITEM 2
+    # proxies it to the strategy plane over Redis instead of 409-ing. Inert
+    # when LANESET=all (is_core_only() False → in-process path below).
+    from core.laneset import is_core_only, require_strategy_plane
 
+    if is_core_only() and getattr(settings, "STRATEGY_PROXY_ENABLED", True):
+        return await _proxy_to_strategy_plane("nse_run_once", {"force": force})
     require_strategy_plane("strategy-agent run-once")
     return await paper_strategy_agent.run_once(force=force)
 
 
 @router.post("/strategy-agent/positions/close")
 async def close_strategy_agent_position(req: StrategyPositionCloseRequest):
-    from core.laneset import require_strategy_plane
+    from core.laneset import is_core_only, require_strategy_plane
 
+    if is_core_only() and getattr(settings, "STRATEGY_PROXY_ENABLED", True):
+        return await _proxy_to_strategy_plane(
+            "nse_close_position",
+            {"strategy_key": req.strategy_key, "symbol": req.symbol, "reason": req.reason},
+        )
     require_strategy_plane("strategy-agent position close")
     try:
         return await paper_strategy_agent.operator_close_position(

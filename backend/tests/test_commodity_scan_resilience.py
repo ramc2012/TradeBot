@@ -32,7 +32,8 @@ def _isolated_state(monkeypatch, tmp_path: Path):
     def _load_saved_state_from_database():
         return None, None
 
-    def _save_state(payload: dict):
+    def _save_state(payload: dict, **_kwargs):
+        # **kwargs absorbs the Phase-2 ITEM 3 owns_control_flags flag.
         store["payload"] = copy.deepcopy(payload)
         store["updated_at"] = datetime.now(UTC)
         return store["updated_at"]

@@ -199,7 +199,8 @@ def test_commodity_apersist_state_offloads_to_a_worker_thread(monkeypatch, tmp_p
     csa, agent, _store = _commodity_agent(monkeypatch, tmp_path)
     seen: dict[str, object] = {}
 
-    def _fake_save_state(payload):
+    def _fake_save_state(payload, **_kwargs):
+        # **kwargs absorbs the Phase-2 ITEM 3 owns_control_flags flag.
         seen["thread"] = threading.current_thread()
         seen["payload"] = payload
         return datetime.now(timezone.utc)

@@ -23,6 +23,34 @@ from paper_engine.commodity_strategy_agent import commodity_strategy_agent
 router = APIRouter(prefix="/api/commodity", tags=["commodity"])
 
 
+async def _proxy_to_strategy_plane(action: str, args: dict) -> dict:
+    """Phase-2 ITEM 2: forward a commodity strategy-mutating call from the CORE
+    plane to the strategy plane over Redis. Only reached when ``is_core_only()``
+    and the proxy is enabled; inert in the single-process boot (LANESET=all runs
+    the agent in-process below)."""
+    from core.config import settings
+    from db.redis_client import PROXY_ERROR, PROXY_TIMEOUT, proxy_strategy_command
+
+    timeout = float(getattr(settings, "STRATEGY_PROXY_TIMEOUT_SECONDS", 140.0) or 140.0)
+    try:
+        ack = await proxy_strategy_command(action, args, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 — Redis publish failed: surface, never drop
+        raise HTTPException(
+            503, f"strategy proxy unavailable (Redis publish failed): {exc}"
+        ) from exc
+    if ack.get(PROXY_TIMEOUT):
+        raise HTTPException(
+            504,
+            f"strategy plane did not ack '{action}' within {int(timeout)}s "
+            "(strategy plane unreachable or busy)",
+        )
+    if ack.get(PROXY_ERROR):
+        raise HTTPException(502, f"strategy proxy error: {ack.get(PROXY_ERROR)}")
+    if ack.get("error"):
+        raise HTTPException(502, f"strategy plane error: {ack.get('error')}")
+    return ack.get("result")
+
+
 def _normalized_symbols(symbols: list[str]) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -127,6 +155,14 @@ def _slim_agent_status(status: dict) -> dict:
     slim = dict(status or {})
     slim.pop("watchlist", None)  # exact duplicate of futures_watchlist
     slim.pop("historical_trades", None)  # duplicate slice of trade_history
+    # IDEMPOTENT (Phase-2 ITEM 4): once the counters are present the payload is
+    # already slimmed — re-slimming must NOT recompute signal_audit_total from
+    # the already-capped list (that would report the cap, e.g. 50, as the true
+    # total and flip signal_audit_capped to False). The commodity WS socket
+    # applies this helper on the already-slimmed REST status, so this guard
+    # keeps the WS counters truthful.
+    if "signal_audit_total" in slim:
+        return slim
     audit = slim.get("signal_audit")
     if isinstance(audit, list):
         slim["signal_audit_total"] = len(audit)
@@ -165,18 +201,25 @@ async def commodity_overview():
 @router.post("/strategy-agent/start")
 async def start_commodity_strategy_agent():
     # Split boot: starting the commodity loop on the CORE plane would run the
-    # agent in the WRONG process (it lives in backend-strategies) → 409.
-    # Inert when LANESET=all.
-    from core.laneset import require_strategy_plane
+    # agent in the WRONG process (it lives in backend-strategies). Phase-2
+    # ITEM 2 proxies it to the strategy plane over Redis. Inert when
+    # LANESET=all (is_core_only() False → in-process path below).
+    from core.config import settings
+    from core.laneset import is_core_only, require_strategy_plane
 
+    if is_core_only() and getattr(settings, "STRATEGY_PROXY_ENABLED", True):
+        return await _proxy_to_strategy_plane("commodity_start", {})
     require_strategy_plane("commodity strategy-agent start")
     return await commodity_strategy_agent.start_loop()
 
 
 @router.post("/strategy-agent/run-once")
 async def run_commodity_strategy_once(force: bool = True):
-    from core.laneset import require_strategy_plane
+    from core.config import settings
+    from core.laneset import is_core_only, require_strategy_plane
 
+    if is_core_only() and getattr(settings, "STRATEGY_PROXY_ENABLED", True):
+        return await _proxy_to_strategy_plane("commodity_run_once", {"force": force})
     require_strategy_plane("commodity strategy-agent run-once")
     return await commodity_strategy_agent.run_once(force=force)
 

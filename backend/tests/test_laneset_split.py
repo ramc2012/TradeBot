@@ -321,13 +321,17 @@ def test_supervisor_merges_foreign_plane_status(monkeypatch):
 # ── 8. 409 guards on in-process strategy endpoints (core plane only) ─────────
 
 
-def test_strategy_mutating_endpoints_409_on_core(monkeypatch):
+def test_strategy_mutating_endpoints_409_on_core_when_proxy_disabled(monkeypatch):
+    # Phase-2 ITEM 2: the proxy REPLACES the 409, but with the proxy flag off
+    # the endpoints still fail closed with the 409 guard (never misfire on the
+    # wrong process).
     from fastapi import HTTPException
 
     from api.routers import commodity as commodity_router
     from api.routers import trading as trading_router
 
     monkeypatch.setattr(settings, "LANESET", "core", raising=False)
+    monkeypatch.setattr(settings, "STRATEGY_PROXY_ENABLED", False, raising=False)
     with pytest.raises(HTTPException) as excinfo:
         asyncio.run(trading_router.run_strategy_agent_once())
     assert excinfo.value.status_code == 409
@@ -339,6 +343,34 @@ def test_strategy_mutating_endpoints_409_on_core(monkeypatch):
     with pytest.raises(HTTPException) as excinfo:
         asyncio.run(commodity_router.run_commodity_strategy_once())
     assert excinfo.value.status_code == 409
+
+
+def test_strategy_mutating_endpoints_proxy_on_core_when_enabled(monkeypatch):
+    # With the proxy enabled the core plane forwards to the strategy plane
+    # instead of 409-ing.
+    from api.routers import commodity as commodity_router
+    from api.routers import trading as trading_router
+
+    monkeypatch.setattr(settings, "LANESET", "core", raising=False)
+    monkeypatch.setattr(settings, "STRATEGY_PROXY_ENABLED", True, raising=False)
+
+    calls: list[str] = []
+
+    async def _fake_trading_proxy(action, args):
+        calls.append(action)
+        return {"proxied": action}
+
+    async def _fake_commodity_proxy(action, args):
+        calls.append(action)
+        return {"proxied": action}
+
+    monkeypatch.setattr(trading_router, "_proxy_to_strategy_plane", _fake_trading_proxy)
+    monkeypatch.setattr(commodity_router, "_proxy_to_strategy_plane", _fake_commodity_proxy)
+
+    assert asyncio.run(trading_router.run_strategy_agent_once()) == {"proxied": "nse_run_once"}
+    assert asyncio.run(commodity_router.start_commodity_strategy_agent()) == {"proxied": "commodity_start"}
+    assert asyncio.run(commodity_router.run_commodity_strategy_once()) == {"proxied": "commodity_run_once"}
+    assert calls == ["nse_run_once", "commodity_start", "commodity_run_once"]
 
 
 def test_run_once_endpoint_passes_through_when_all(monkeypatch):

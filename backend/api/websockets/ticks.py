@@ -722,14 +722,23 @@ async def ws_commodity_overview(websocket: WebSocket):
             await commodity_positions(),
             side_field="action",
         )
-        status = await commodity_strategy_status()
+        # Phase-2 ITEM 4: the payload arrives ALREADY slimmed — commodity_strategy_status()
+        # runs it through commodity._slim_agent_status (drops the `watchlist` /
+        # `historical_trades` duplicates and caps signal_audit to 50 + emits the
+        # additive signal_audit_total / signal_audit_capped counters). We apply
+        # the shared helper here too, so the WS slim can never silently drift from
+        # the REST slim even if the router path changes. Then the WS layers its
+        # heavier 2s-channel strips on top.
+        from api.routers.commodity import _slim_agent_status
 
-        # Slim the status dict before streaming it.
-        #
+        status = _slim_agent_status(await commodity_strategy_status())
+
         # 1. Strip heavy per-row fields from watchlist arrays — these are
         #    served by the 8s watchlist socket and merged back on the client.
         #    "watchlist" is an alias for "futures_watchlist"; only keep one key
-        #    to avoid shipping the same ~645 KB blob twice.
+        #    to avoid shipping the same ~645 KB blob twice. (signal_audit_total /
+        #    signal_audit_capped are separate keys and survive the pops below, so
+        #    a consumer can still detect the cap.)
         status["futures_watchlist"] = _slim_watchlist_rows(
             status.get("futures_watchlist") or status.get("watchlist") or []
         )

@@ -74,6 +74,28 @@ class Settings(BaseSettings):
     # Phase 2 replaces this with a shared Redis token bucket.
     BROKER_REST_BUDGET_FRACTION: float = 1.0
 
+    # ── Phase-2 split hardening (2026-07-18) ──────────────────────────────────
+    # ITEM 1 — Shared Redis REST token-bucket. When this process is a SPLIT half
+    # (LANESET != all) and this flag is on, every broker REST acquire also draws
+    # from a Redis sliding-window budget keyed per broker+span, so BOTH planes
+    # jointly stay under the ONE per-TOKEN cap (Fyers 9/s+190/60s, Upstox
+    # 8/s+1800/30min). Layered ON TOP of the in-process AsyncRateLimiter (which
+    # still owns priority + CRITICAL/BULK class geometry). LANESET=all never
+    # consults it — provable no-op. Redis unreachable → FAIL OPEN to the
+    # in-process limiter (BROKER_REST_BUDGET_FRACTION stays the degraded
+    # divisor). The shared layer enforces only the aggregate token count; class
+    # fairness stays per-process (documented Phase-2b follow-up).
+    SHARED_REST_BUDGET_ENABLED: bool = True
+    SHARED_REST_BUDGET_KEY_PREFIX: str = "rlb"       # Redis key namespace
+    SHARED_REST_BUDGET_MAX_WAIT_SECONDS: float = 5.0  # per-acquire ceiling before fail-open grant
+    # ITEM 2 — run-once / close-position proxy (core plane → strategy plane) via
+    # a Redis request/ack command channel. Only the LANESET=core plane ever
+    # publishes; the strategy plane runs a consumer. LANESET=all runs the action
+    # in-process exactly as today (no proxy). Bounded timeout → honest 504.
+    STRATEGY_PROXY_ENABLED: bool = True
+    STRATEGY_PROXY_TIMEOUT_SECONDS: float = 140.0     # ≥ commodity scan budget (120s) + headroom
+    STRATEGY_PROXY_REQUEST_KEY: str = "strat:cmd:req"
+
     # DB / Redis
     DATABASE_URL: str = "postgresql+asyncpg://nomadcurie:nomadcurie@localhost:5433/nomadcurie"
     DATABASE_POOL_SIZE: int = 0

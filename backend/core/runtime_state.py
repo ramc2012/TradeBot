@@ -85,6 +85,14 @@ def _ensure_runtime_state_table(cur) -> None:
         )
         """
     )
+    # Phase-2 ITEM 3: optimistic-concurrency version for compare-and-set writes
+    # on the control-state persistence path (live-safe nullable-with-default add;
+    # existing rows backfill to 0). Callers that don't pass expected_version keep
+    # the unconditional upsert semantics — strictly additive.
+    cur.execute(
+        "ALTER TABLE app_runtime_state "
+        "ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 0"
+    )
     _runtime_state_table_ready = True
 
 
@@ -341,11 +349,12 @@ def save_runtime_state(state_key: str, payload: Any) -> datetime | None:
             _ensure_runtime_state_table(cur)
             cur.execute(
                 """
-                INSERT INTO app_runtime_state (state_key, payload, updated_at)
-                VALUES (%s, %s, NOW())
+                INSERT INTO app_runtime_state (state_key, payload, updated_at, version)
+                VALUES (%s, %s, NOW(), 1)
                 ON CONFLICT (state_key) DO UPDATE SET
                     payload = EXCLUDED.payload,
-                    updated_at = NOW()
+                    updated_at = NOW(),
+                    version = app_runtime_state.version + 1
                 RETURNING updated_at
                 """,
                 (state_key, Json(payload)),
@@ -363,3 +372,168 @@ def save_runtime_state(state_key: str, payload: Any) -> datetime | None:
     finally:
         if conn is not None:
             _return_connection(pool, conn)
+
+
+def load_runtime_state_versioned(
+    state_key: str,
+) -> tuple[Any | None, datetime | None, int | None]:
+    """Like load_runtime_state but also returns the row's optimistic version.
+
+    version is None when the row is absent or the version could not be read
+    (older schema / DB down); callers must then fall back to an unconditional
+    save. Never raises."""
+    pool = _connection_pool()
+    if pool is None:
+        return None, None, None
+    conn = None
+    try:
+        conn = pool.getconn()
+        with conn.cursor() as cur:
+            _ensure_runtime_state_table(cur)
+            cur.execute(
+                "SELECT payload, updated_at, version FROM app_runtime_state WHERE state_key = %s",
+                (state_key,),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        if not row:
+            return None, None, None
+        return row[0], row[1], row[2]
+    except Exception as exc:  # noqa: BLE001
+        if conn is not None:
+            _rollback_quietly(conn)
+        logger.warning(f"Could not load versioned runtime state {state_key}: {exc}")
+        return None, None, None
+    finally:
+        if conn is not None:
+            _return_connection(pool, conn)
+
+
+def save_runtime_state_cas(
+    state_key: str, payload: Any, expected_version: int | None
+) -> tuple[bool, datetime | None, int | None]:
+    """Compare-and-set write: only persist when the stored version still equals
+    ``expected_version`` (a concurrent writer bumping it => conflict). Returns
+    (committed, updated_at, new_version).
+
+    ``expected_version is None`` means "row absent" — insert with version 1 and
+    fail (committed=False) if a row already exists (another writer won the
+    insert race)."""
+    pool = _connection_pool()
+    if pool is None:
+        return False, None, None
+    conn = None
+    try:
+        conn = pool.getconn()
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            _ensure_runtime_state_table(cur)
+            if expected_version is None:
+                cur.execute(
+                    """
+                    INSERT INTO app_runtime_state (state_key, payload, updated_at, version)
+                    VALUES (%s, %s, NOW(), 1)
+                    ON CONFLICT (state_key) DO NOTHING
+                    RETURNING updated_at, version
+                    """,
+                    (state_key, Json(payload)),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE app_runtime_state
+                    SET payload = %s, updated_at = NOW(), version = version + 1
+                    WHERE state_key = %s AND version = %s
+                    RETURNING updated_at, version
+                    """,
+                    (Json(payload), state_key, int(expected_version)),
+                )
+            row = cur.fetchone()
+        conn.commit()
+        if not row:
+            return False, None, None  # version moved under us → conflict
+        updated_at, new_version = row[0], row[1]
+        _cache_runtime_state(state_key, payload, updated_at)
+        return True, updated_at, new_version
+    except Exception as exc:  # noqa: BLE001
+        if conn is not None:
+            _rollback_quietly(conn)
+        logger.warning(f"CAS persist failed for runtime state {state_key}: {exc}")
+        return False, None, None
+    finally:
+        if conn is not None:
+            _return_connection(pool, conn)
+
+
+def _merge_control_state(
+    stored: Any,
+    payload: dict,
+    *,
+    owns_control_flags: bool,
+    flag_keys: tuple[str, ...],
+    heartbeat_key: str,
+) -> dict:
+    """Field-ownership merge that makes control writes and scan persists commute.
+
+    Ownership rule:
+      * control writers own ``flag_keys`` (kill/auto-run/manual-restart …);
+      * the scan loop owns ``heartbeat_key`` (+ all runtime/strategy subtrees).
+
+    A scan persist (``owns_control_flags=False``) keeps the STORED flag values so
+    a concurrent operator toggle is never clobbered; a control write
+    (``owns_control_flags=True``) keeps the STORED heartbeat (and every other
+    stored subtree) so the scan's fresh loop state is never rolled back. Only the
+    ``control`` subtree is reconciled; the owning writer's copy wins elsewhere."""
+    import copy
+
+    merged = copy.deepcopy(payload) if isinstance(payload, dict) else {}
+    stored_dict = stored if isinstance(stored, dict) else {}
+    stored_control = stored_dict.get("control") if isinstance(stored_dict.get("control"), dict) else {}
+    merged_control = merged.get("control") if isinstance(merged.get("control"), dict) else {}
+
+    if owns_control_flags:
+        # Control write: preserve the scan-owned heartbeat (take the newer of the
+        # two, string ISO compare — same-format IST/UTC stamps sort correctly).
+        hb_stored = stored_control.get(heartbeat_key)
+        hb_ours = merged_control.get(heartbeat_key)
+        if hb_stored and (not hb_ours or str(hb_stored) > str(hb_ours)):
+            merged_control[heartbeat_key] = hb_stored
+    else:
+        # Scan persist: preserve the control-owned flags from the store.
+        for key in flag_keys:
+            if key in stored_control:
+                merged_control[key] = stored_control[key]
+
+    if merged_control or "control" in merged:
+        merged["control"] = merged_control
+    return merged
+
+
+def save_runtime_state_control_merged(
+    state_key: str,
+    payload: dict,
+    *,
+    owns_control_flags: bool,
+    flag_keys: tuple[str, ...],
+    heartbeat_key: str = "loop_heartbeat_at",
+    max_retries: int = 3,
+) -> datetime | None:
+    """Persist ``payload`` under optimistic concurrency with a control-subtree
+    merge (Phase-2 ITEM 3), so a control toggle and a concurrent scan persist can
+    never clobber each other. Falls back to an unconditional
+    :func:`save_runtime_state` when versioning is unavailable or the CAS retries
+    are exhausted (favor never losing a control toggle over strict versioning)."""
+    for _attempt in range(max(1, int(max_retries))):
+        stored, _updated_at, version = load_runtime_state_versioned(state_key)
+        merged = _merge_control_state(
+            stored,
+            payload,
+            owns_control_flags=owns_control_flags,
+            flag_keys=flag_keys,
+            heartbeat_key=heartbeat_key,
+        )
+        committed, cas_updated_at, _new_version = save_runtime_state_cas(state_key, merged, version)
+        if committed:
+            return cas_updated_at
+    # Retries exhausted (or CAS unsupported) — best-effort unconditional write.
+    return save_runtime_state(state_key, payload)

@@ -61,6 +61,7 @@ import asyncio
 import contextlib
 import contextvars
 import json as _json
+import os
 import time
 from collections import deque
 from typing import Optional
@@ -242,6 +243,7 @@ class AsyncRateLimiter:
         aging_step_seconds: float = 2.0,
         critical_reserved_fraction: float = CRITICAL_RESERVED_FRACTION,
         bulk_cap_fraction: float = BULK_CAP_FRACTION,
+        shared_budget: "Optional[SharedRestBudget]" = None,
     ):
         # Each window tracked by its own deque of (monotonic ts, class) tuples
         # with incrementally-maintained per-class counters (see _Window).
@@ -255,6 +257,10 @@ class AsyncRateLimiter:
         ]
         self.per_day = int(per_day) if per_day else None
         self.name = name
+        # Phase-2 ITEM 1: optional Redis cross-process aggregate budget. Layered
+        # on top of local admission; consulted only in a split boot with the
+        # flag on (see acquire()). None in single-process → provable no-op.
+        self._shared = shared_budget
         # Priority-aware admission monitor. One private Event per waiter — no
         # shared lock, so cancellation can never strand a lock re-acquire
         # (the Condition-based predecessor wedged ALL Upstox REST when a
@@ -405,6 +411,15 @@ class AsyncRateLimiter:
                     if waited_any:
                         self._wait_events += 1
                         self._wait_total += now - started
+                    # Phase-2 ITEM 1 — shared cross-process aggregate gate.
+                    # Consulted ONLY in a split boot with the flag on; the local
+                    # slot is already reserved above (conservative), and reserve
+                    # fail-opens on any Redis error so a blip never blocks a
+                    # trade. LANESET=all: is_split() False → branch skipped →
+                    # this acquire() executes the identical instruction stream as
+                    # before this change (provable no-op).
+                    if self._shared is not None and _shared_budget_active():
+                        await self._shared.reserve(cls)
                     # Wake the rest so the next-best re-ranks and proceeds
                     # (the departing `finally` also wakes, but be explicit).
                     return
@@ -474,6 +489,194 @@ class AsyncRateLimiter:
         }
 
 
+def _shared_budget_active() -> bool:
+    """True only when this process is a split half AND the shared bucket is on.
+
+    Single-process (LANESET=all) → is_split() False → always False, so the
+    shared-budget branch in acquire() is never entered (the no-op guarantee).
+    Any import/config hiccup fails to False (in-process limiter alone)."""
+    try:
+        from core import laneset
+        from core.config import settings
+
+        return bool(laneset.is_split()) and bool(
+            getattr(settings, "SHARED_REST_BUDGET_ENABLED", True)
+        )
+    except Exception:  # noqa: BLE001 — never let a config/import issue block a trade
+        return False
+
+
+class SharedRestBudget:
+    """Redis sliding-window budget shared across split planes (Phase-2 ITEM 1).
+
+    Layered ON TOP of :class:`AsyncRateLimiter`: the local limiter still owns
+    priority + CRITICAL/BULK class geometry; this only enforces the AGGREGATE
+    per-token count across processes so core+strategies jointly stay under ONE
+    cap. Design notes:
+
+    * Consulted only when ``laneset.is_split()`` and
+      ``settings.SHARED_REST_BUDGET_ENABLED`` (see ``_shared_budget_active``).
+    * Windows mirror the hard TOKEN caps (NOT the BROKER_REST_BUDGET_FRACTION
+      -scaled counts) — the shared bucket is the authoritative aggregate ceiling
+      while Redis is reachable.
+    * FAIL OPEN: any Redis error grants immediately and falls back to the
+      in-process limiter (never block trading on a Redis blip). On sustained
+      contention a per-acquire ceiling (SHARED_REST_BUDGET_MAX_WAIT_SECONDS)
+      also grants rather than hang.
+    * Day caps stay LOCAL to the AsyncRateLimiter (rare; a Lua decrement dance
+      is not worth it). Class fairness stays per-process (Phase-2b follow-up).
+    """
+
+    # Atomic multi-window sliding-window check-and-admit. KEYS = one ZSET per
+    # window; ARGV = now_ms, member, then (span_ms, cap) pairs. Returns 0 when
+    # admitted (member appended to EVERY window) or the ms until the tightest
+    # window frees a slot (nothing added — all-or-nothing).
+    _LUA = """
+    local now = tonumber(ARGV[1])
+    local member = ARGV[2]
+    local n = #KEYS
+    local max_wait = 0
+    for i=1,n do
+      local span = tonumber(ARGV[2 + (i-1)*2 + 1])
+      local cap = tonumber(ARGV[2 + (i-1)*2 + 2])
+      redis.call('ZREMRANGEBYSCORE', KEYS[i], 0, now - span)
+      local cnt = redis.call('ZCARD', KEYS[i])
+      if cnt >= cap then
+        local oldest = redis.call('ZRANGE', KEYS[i], 0, 0, 'WITHSCORES')
+        if oldest[2] then
+          local w = span - (now - tonumber(oldest[2]))
+          if w > max_wait then max_wait = w end
+        end
+      end
+    end
+    if max_wait > 0 then
+      return math.ceil(max_wait)
+    end
+    for i=1,n do
+      local span = tonumber(ARGV[2 + (i-1)*2 + 1])
+      redis.call('ZADD', KEYS[i], now, member)
+      redis.call('PEXPIRE', KEYS[i], math.floor(span) + 1000)
+    end
+    return 0
+    """
+
+    def __init__(
+        self,
+        *,
+        broker: str,
+        windows: list[tuple[int, float]],
+        key_prefix: Optional[str] = None,
+    ) -> None:
+        self._broker = str(broker)
+        # windows: (cap, span_seconds) mirroring AsyncRateLimiter → store as
+        # (span_ms, cap).
+        self._windows = [(float(span) * 1000.0, int(count)) for count, span in windows]
+        self._key_prefix = key_prefix
+        self._pid = os.getpid()
+        self._seq = 0
+        self._redis_ok = True  # observability; flips on the first Redis error
+
+    def _prefix(self) -> str:
+        if self._key_prefix:
+            return self._key_prefix
+        try:
+            from core.config import settings
+
+            return str(getattr(settings, "SHARED_REST_BUDGET_KEY_PREFIX", "rlb") or "rlb")
+        except Exception:  # noqa: BLE001
+            return "rlb"
+
+    def keys(self) -> list[str]:
+        p = self._prefix()
+        return [f"{p}:{self._broker}:{int(span_ms)}" for span_ms, _cap in self._windows]
+
+    async def reserve(self, request_class: Optional[str] = None) -> None:
+        """Reserve one aggregate token across all windows (bounded, fail-open).
+
+        ``request_class`` is accepted for future class-aware fairness but is
+        intentionally unused today — class geometry stays per-process."""
+        from db.redis_client import get_redis
+
+        try:
+            from core.config import settings
+
+            max_wait = float(
+                getattr(settings, "SHARED_REST_BUDGET_MAX_WAIT_SECONDS", 5.0) or 5.0
+            )
+        except Exception:  # noqa: BLE001
+            max_wait = 5.0
+        deadline = time.monotonic() + max_wait
+        keys = self.keys()
+        numkeys = len(keys)
+        while True:
+            self._seq += 1
+            now_ms = int(time.time() * 1000)
+            member = f"{now_ms}:{self._pid}:{self._seq}"
+            argv: list = [now_ms, member]
+            for span_ms, cap in self._windows:
+                argv.append(int(span_ms))
+                argv.append(int(cap))
+            try:
+                redis = await get_redis()
+                wait_ms = await redis.eval(self._LUA, numkeys, *keys, *argv)
+                self._redis_ok = True
+            except Exception as exc:  # noqa: BLE001 — FAIL OPEN
+                if self._redis_ok:
+                    logger.warning(
+                        f"[SharedRestBudget:{self._broker}] Redis unavailable — "
+                        f"failing OPEN to the in-process limiter: {exc}"
+                    )
+                self._redis_ok = False
+                return
+            wait = float(wait_ms or 0) / 1000.0
+            if wait <= 0:
+                return  # admitted into every window
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Bounded ceiling reached — grant rather than hang. Slight
+                # aggregate over-shoot is preferred to a stalled trade; the
+                # local limiter still gates the per-process rate.
+                return
+            await asyncio.sleep(min(wait, remaining, 0.25))
+
+    async def window_usage(self) -> dict:
+        """Live per-window {cap, used} (best-effort; never raises)."""
+        from db.redis_client import get_redis
+
+        rows: list[dict] = []
+        try:
+            redis = await get_redis()
+            now_ms = int(time.time() * 1000)
+            for (span_ms, cap), key in zip(self._windows, self.keys()):
+                await redis.zremrangebyscore(key, 0, now_ms - span_ms)
+                used = await redis.zcard(key)
+                rows.append({"span_ms": int(span_ms), "cap": int(cap), "used": int(used)})
+            self._redis_ok = True
+        except Exception:  # noqa: BLE001
+            self._redis_ok = False
+        return {"redis_ok": self._redis_ok, "windows": rows}
+
+
+async def shared_budget_status() -> dict:
+    """Telemetry getter for /api/system/pools (the one-UI workflow wires it).
+
+    Returns the shared-budget mode + per-broker live usage. Never raises — a
+    telemetry read must never break the pools endpoint. When this process is
+    single-process (LANESET=all) or the flag is off, ``active`` is False and no
+    Redis call is made."""
+    active = _shared_budget_active()
+    out: dict = {"mode": "shared" if active else "local", "active": active, "brokers": {}}
+    for name, budget in (
+        ("fyers", _FYERS_SHARED_BUDGET),
+        ("upstox", _UPSTOX_SHARED_BUDGET),
+    ):
+        if active:
+            out["brokers"][name] = await budget.window_usage()
+        else:
+            out["brokers"][name] = {"redis_ok": budget._redis_ok, "windows": []}
+    return out
+
+
 def parse_first_json(text_body: str):
     """Parse the FIRST JSON object from a possibly concatenated response body.
 
@@ -509,12 +712,25 @@ def _budget_scaled(count: int | None) -> int | None:
     return max(1, int(count * fraction))
 
 
+# Phase-2 ITEM 1: the shared Redis budgets mirror the HARD per-token caps (NOT
+# the fraction-scaled counts) — while Redis is up they are the authoritative
+# aggregate ceiling across both split planes. They are attached to the limiters
+# below and consulted only in a split boot (see acquire / _shared_budget_active).
+_FYERS_SHARED_BUDGET = SharedRestBudget(
+    broker="fyers", windows=[(9, 1.0), (190, 60.0)],
+)
+_UPSTOX_SHARED_BUDGET = SharedRestBudget(
+    broker="upstox", windows=[(8, 1.0), (1800, 1800.0)],
+)
+
 FYERS_DATA_LIMITER = AsyncRateLimiter(
     windows=[(_budget_scaled(9), 1.0), (_budget_scaled(190), 60.0)],
     per_day=_budget_scaled(95_000), name="fyers-rest",
+    shared_budget=_FYERS_SHARED_BUDGET,
 )
 # Upstox: 50/s, 2000/30min. Keep well under both (8/s, 1800/30min) for off-hours backfill.
 UPSTOX_DATA_LIMITER = AsyncRateLimiter(
     windows=[(_budget_scaled(8), 1.0), (_budget_scaled(1800), 1800.0)],
     per_day=None, name="upstox-rest",
+    shared_budget=_UPSTOX_SHARED_BUDGET,
 )
