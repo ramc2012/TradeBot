@@ -32,16 +32,19 @@ import {
   useUrlTab,
 } from "@/components/desk-ui";
 import { useLiveSnapshotQuery } from "@/hooks/useLiveSnapshotQuery";
+import { useLaneRegistry } from "@/hooks/useLaneRegistry";
 import {
   selectStrategySlice,
   useStrategyPositionsStream,
 } from "@/hooks/useStrategyPositionsStream";
 import { createStrategySnapshotSocket } from "@/lib/websocket";
 import { api as apiClient } from "@/lib/api";
+import { buildStrategyBookSummaries } from "@/lib/strategy-position-ledger";
 import type { Snapshot as AuctionSnapshot } from "@/components/strategies/auction/types";
 
 import { LaneSummaryCard } from "./LaneSummaryCard";
 import { LaneInventoryTab } from "./LaneInventoryTab";
+import { PortfolioReconciliation } from "./PortfolioReconciliation";
 import { SignalBoardTab } from "./SignalBoardTab";
 import { MarketStructureTab } from "./MarketStructureTab";
 import { SignalQualityTab } from "./SignalQualityTab";
@@ -202,6 +205,11 @@ export default function StrategiesOverviewDesk() {
   // open/closed/P&L marks stay fresh on every tab.
   const posStream = useStrategyPositionsStream();
   const streamLive = posStream.isStreamConnected;
+
+  // Lane registry — shares LaneInventoryTab's single react-query fetch (same
+  // key), so reading it here for the inventory-tab timestamp costs no extra
+  // request. Its summary.generated_at is the honest "as of" for that tab.
+  const laneReg = useLaneRegistry();
 
   // ── Per-lane status / summary queries (slow-ish, summary cadence) ──────────
   // Each is independent + tolerant: a 404 / network error just yields no data
@@ -458,7 +466,15 @@ export default function StrategiesOverviewDesk() {
 
   // ── Portfolio-level roll-ups for the KPI strip ─────────────────────────────
   const runningCount = lanes.filter((l) => l.running).length;
-  const totalOpen = lanes.reduce((acc, l) => acc + (l.openCount ?? 0), 0);
+  // The old 6-lane reduce (stream/summary mix) — kept ONLY to show the Overview
+  // surface's own number inside the reconciliation panel, not as the headline.
+  const overviewScopeOpen = lanes.reduce((acc, l) => acc + (l.openCount ?? 0), 0);
+  // Canonical open count — one source of truth across all 9 strategy books.
+  const bookSummaries = useMemo(
+    () => buildStrategyBookSummaries(posStream.data),
+    [posStream.data],
+  );
+  const totalOpen = bookSummaries.reduce((acc, b) => acc + b.openPositions, 0);
   const totalUnreal = lanes.reduce(
     (acc, l) => acc + (l.unrealizedPnl ?? 0),
     0,
@@ -474,11 +490,19 @@ export default function StrategiesOverviewDesk() {
     cbeQuery.isFetching ||
     commodityQuery.isFetching;
 
+  // Tab-aware freshness: the inventory tab renders the 32-lane registry, whose
+  // real "as of" is the registry generated_at — NOT the auction snapshot time
+  // (which always read "no data" here). Other tabs keep the auction quote time.
+  const auctionAsOf = auctionSnapQuery.data?.request?.quote?.timestamp as string | undefined;
+  const inventoryAsOf = laneReg.data?.summary?.generated_at ?? null;
+
   return (
     <DeskShell
       title="Strategies Overview"
       description="Every strategy lane at a glance — running state, last scan, live open book, latest signal and regime, aggregated read-only across the desk."
-      asOf={auctionSnapQuery.data?.request?.quote?.timestamp as string | undefined}
+      asOf={activeTab === "inventory" ? inventoryAsOf : auctionAsOf}
+      asOfLabel="Updated"
+      asOfStaleSeconds={activeTab === "inventory" ? 120 : undefined}
       isFetching={isFetching}
       tabs={TABS}
       activeTab={activeTab}
@@ -497,7 +521,11 @@ export default function StrategiesOverviewDesk() {
             value={`${runningCount} / ${lanes.length}`}
             detail="active loops / scanners"
           />
-          <MetricTile label="Open positions" value={String(totalOpen)} detail="live across lanes" />
+          <MetricTile
+            label="Open positions"
+            value={String(totalOpen)}
+            detail="canonical · all 9 books"
+          />
           <MetricTile
             label="Open P&L"
             value={formatSignedMoney(totalUnreal)}
@@ -509,11 +537,17 @@ export default function StrategiesOverviewDesk() {
       ) : null}
 
       {activeTab === "overview" ? (
-        <section className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {lanes.map((lane) => (
-            <LaneSummaryCard key={lane.key} lane={lane} />
-          ))}
-        </section>
+        <>
+          <section className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {lanes.map((lane) => (
+              <LaneSummaryCard key={lane.key} lane={lane} />
+            ))}
+          </section>
+          <PortfolioReconciliation
+            snapshot={posStream.data}
+            overviewDisplayedOpen={overviewScopeOpen}
+          />
+        </>
       ) : null}
 
       {activeTab === "inventory" ? <LaneInventoryTab /> : null}

@@ -20,6 +20,7 @@ import {
   buildOpenPositionRows,
   fetchAppStrategyPortfolioSnapshot,
 } from "@/lib/strategy-position-ledger";
+import { PortfolioReconciliation } from "@/components/strategies/overview/PortfolioReconciliation";
 
 type PositionScope = "all" | "options" | "futures";
 
@@ -613,6 +614,8 @@ export default function PositionsPage() {
           <MetricTile label="Active Desks" value={String(desksActive)} detail="strategy-owned books only" />
         </div>
       </section>
+
+      <PortfolioReconciliation snapshot={data?.portfolio} />
 
       <section className="rounded-[24px] border border-bg-border bg-bg-secondary/20 p-4">
         <div className="flex items-center justify-between gap-3">
