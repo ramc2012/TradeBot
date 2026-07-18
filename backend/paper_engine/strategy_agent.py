@@ -1069,9 +1069,35 @@ class PaperStrategyAgent(StrategyExitMixin, StrategyEntryMixin, BaseStrategyAgen
             self._task = None
 
     async def _loop(self) -> None:
+        # ── Lane-seam wiring (audit 2026-07-18) ──────────────────────────────
+        # S1 runs its OWN asyncio task outside supervisor dispatch, so it never
+        # entered the lane_broker_profile contextvar (set only at
+        # market_hours_paper_supervisor._run_runner) nor the SLOW_LANES_ENABLED
+        # kill switch consulted by RunnerRuntime.is_due. Wire the SAME seam
+        # here: S1 is a 30m cadence lane ⇒ SLOW profile. Latent no-op while
+        # LANE_BROKER_ROUTING_ENABLED=False (route_order returns the identical
+        # global order) and SLOW_LANES_ENABLED defaults True — but the seam
+        # must be closed BEFORE the routing flag flips.
+        from brokers.rate_limiter import LANE_PROFILE_SLOW, lane_broker_profile
+
+        last_slow_lanes_state: Optional[bool] = None
         while True:
+            slow_lanes_enabled = bool(getattr(settings, "SLOW_LANES_ENABLED", True))
+            if slow_lanes_enabled != last_slow_lanes_state:
+                # Log once per state-change, not per skipped cycle.
+                if not slow_lanes_enabled:
+                    logger.warning(
+                        "[Strategy] SLOW_LANES_ENABLED=False — S1 cycles paused until re-enabled"
+                    )
+                elif last_slow_lanes_state is False:
+                    logger.info("[Strategy] SLOW_LANES_ENABLED=True — S1 cycles resumed")
+                last_slow_lanes_state = slow_lanes_enabled
+            if not slow_lanes_enabled:
+                await asyncio.sleep(self.scan_interval_seconds)
+                continue
             try:
-                await self.run_once(force=False)
+                with lane_broker_profile(LANE_PROFILE_SLOW):
+                    await self.run_once(force=False)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

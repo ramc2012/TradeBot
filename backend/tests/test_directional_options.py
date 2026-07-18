@@ -1074,3 +1074,96 @@ def test_live_data_status_uses_loaded_feature_time_when_health_spot_map_lags() -
 
     assert status["latest_spot_time"] == now.isoformat()
     assert status["degraded_reason"] is None
+
+
+# ── Degenerate-bar gate (audit 2026-07-18) ────────────────────────────────────
+# A flat zero-volume OHLC bar (high==low, volume==0) previously passed the
+# presence+age-only execution_ready gate. These tests pin the new gate.
+
+
+def _degenerate_gate_health(now: pd.Timestamp) -> dict:
+    return {
+        "ready": True,
+        "watchlist_rows_today": 12,
+        "latest_watchlist_time": now.isoformat(),
+        "watchlist_age_seconds": 10.0,
+        "latest_spot_rows": {"NIFTY": now.isoformat()},
+    }
+
+
+def _degenerate_gate_row(now: pd.Timestamp, **overrides) -> dict:
+    row = {
+        "time": now,
+        "open": 22500.0,
+        "high": 22540.0,
+        "low": 22495.0,
+        "close": 22530.0,
+        "volume": 1400.0,
+        "atr": 68.0,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_degenerate_flat_zero_volume_bar_blocks_execution_ready() -> None:
+    service = DirectionalOptionsService()
+    now = pd.Timestamp.utcnow()
+    feature_frame = pd.DataFrame(
+        [
+            _degenerate_gate_row(
+                now, open=22500.0, high=22500.0, low=22500.0, close=22500.0, volume=0.0
+            )
+        ]
+    )
+
+    status = service._build_live_data_status(
+        underlying="NIFTY",
+        feature_frame=feature_frame,
+        strategy_health=_degenerate_gate_health(now),
+        history_source="timescaledb_spot_1minute",
+        history_symbol="NIFTY",
+    )
+
+    assert status["execution_ready"] is False
+    assert status["degraded_reason"] == "degenerate_bar"
+
+
+def test_normal_bar_stays_execution_ready() -> None:
+    service = DirectionalOptionsService()
+    now = pd.Timestamp.utcnow()
+    feature_frame = pd.DataFrame([_degenerate_gate_row(now)])
+
+    status = service._build_live_data_status(
+        underlying="NIFTY",
+        feature_frame=feature_frame,
+        strategy_health=_degenerate_gate_health(now),
+        history_source="timescaledb_spot_1minute",
+        history_symbol="NIFTY",
+    )
+
+    assert status["execution_ready"] is True
+    assert status["degraded_reason"] is None
+
+
+def test_zero_atr_window_blocks_execution_ready() -> None:
+    service = DirectionalOptionsService()
+    now = pd.Timestamp.utcnow()
+    rows = [
+        _degenerate_gate_row(
+            now - pd.Timedelta(minutes=5 * (13 - i)),
+            atr=0.0,
+        )
+        for i in range(14)
+    ]
+    feature_frame = pd.DataFrame(rows)
+
+    status = service._build_live_data_status(
+        underlying="NIFTY",
+        feature_frame=feature_frame,
+        strategy_health=_degenerate_gate_health(now),
+        history_source="timescaledb_spot_1minute",
+        history_symbol="NIFTY",
+    )
+
+    assert status["execution_ready"] is False
+    assert status["degraded_reason"] == "degenerate_bar"

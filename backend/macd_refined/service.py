@@ -93,7 +93,57 @@ class MacdRefinedService:
         return self.live.positioning_snapshot()
 
     async def run_live_cycle(self, *, allow_entries: bool = True) -> dict[str, Any]:
-        return await self.live.run_cycle(allow_entries=allow_entries)
+        result = await self.live.run_cycle(allow_entries=allow_entries)
+        # Per-session data-audit re-run (audit 2026-07-18): the audit used to be
+        # manual-only, so data_audit_latest.json went stale for days. Piggyback
+        # on the supervisor-driven live cycle (no new scheduling infrastructure)
+        # and re-run at most ONCE per session.
+        self._maybe_schedule_session_data_audit()
+        return result
+
+    def _maybe_schedule_session_data_audit(self, *, now_ist=None) -> bool:
+        """Kick a background data_audit once per session, late-session only.
+
+        Guards (all must pass): india lane (the US lane is parked — no Alpaca
+        source); MACD_REFINED_DATA_AUDIT_PER_SESSION enabled; IST >= 14:45 so
+        the full-universe chain sweep never competes with the open-window broker
+        budget (the starvation class the 2026-07-17 incidents traced to); the
+        last report's ran_at is from a prior date; no audit task already
+        in-flight. Fire-and-forget — the audit writes data_audit_latest.json
+        itself. Returns True when a run was scheduled (for tests)."""
+        try:
+            if str(self.config.get("market") or "india").lower() == "us":
+                return False
+            from core.config import settings as _settings
+
+            if not bool(getattr(_settings, "MACD_REFINED_DATA_AUDIT_PER_SESSION", True)):
+                return False
+            if now_ist is None:
+                from datetime import datetime as _dt
+                from zoneinfo import ZoneInfo as _ZoneInfo
+
+                now_ist = _dt.now(_ZoneInfo("Asia/Kolkata"))
+            if (now_ist.hour, now_ist.minute) < (14, 45):
+                return False
+            import json as _json
+            from pathlib import Path as _Path
+
+            report_path = _Path(self.live.tracking_root).parent / "data_audit_latest.json"
+            if report_path.exists():
+                ran_at = str(_json.loads(report_path.read_text()).get("ran_at") or "")
+                # ran_at is UTC; at a >=14:45 IST trigger the UTC and IST dates
+                # coincide, so a plain date-prefix compare is session-accurate.
+                if ran_at[:10] == now_ist.date().isoformat():
+                    return False
+            task = getattr(self, "_session_audit_task", None)
+            if task is not None and not task.done():
+                return False
+            import asyncio as _asyncio
+
+            self._session_audit_task = _asyncio.create_task(self.data_audit())
+            return True
+        except Exception:  # noqa: BLE001 — never let the audit kick break the cycle
+            return False
 
     async def refresh_paper_marks(self) -> dict[str, Any]:
         """Seconds-cadence protective-exit heartbeat for open positions.

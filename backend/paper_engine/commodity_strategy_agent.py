@@ -2189,14 +2189,53 @@ class CommodityStrategyAgent(BaseStrategyAgent):
         return max(DEFAULT_COMMODITY_SCAN_TIMEOUT_SECONDS, scaled_timeout)
 
     async def _loop(self) -> None:
+        # ── Lane-seam wiring (audit 2026-07-18) ──────────────────────────────
+        # The commodity agent runs its OWN asyncio task outside supervisor
+        # dispatch, so it never entered the lane_broker_profile contextvar nor
+        # the cadence-group kill switches consulted by RunnerRuntime.is_due.
+        # Wire the SAME seam here, but keep the profile a SETTING
+        # (COMMODITY_AGENT_BROKER_PROFILE, default "default"): slow/fast
+        # tagging for MCX is an OWNER decision — MCX resolution is forced-
+        # hybrid (Upstox-only) regardless of profile. Kill-switch mapping:
+        # profile "slow" → SLOW_LANES_ENABLED, "fast" → FAST_LANES_ENABLED,
+        # "default" → never killed by either switch. Latent no-op while
+        # LANE_BROKER_ROUTING_ENABLED=False (route_order is the identical
+        # global order), but the seam must exist before that flag flips.
+        from brokers.rate_limiter import lane_broker_profile
+
+        last_lane_gate_state: Optional[bool] = None
         try:
             while self._enabled and not self._kill_switch_active and not self._start_required:
+                profile = str(
+                    getattr(settings, "COMMODITY_AGENT_BROKER_PROFILE", "default") or "default"
+                ).strip().lower()
+                lane_gate_open = True
+                if profile == "slow":
+                    lane_gate_open = bool(getattr(settings, "SLOW_LANES_ENABLED", True))
+                elif profile == "fast":
+                    lane_gate_open = bool(getattr(settings, "FAST_LANES_ENABLED", True))
+                if lane_gate_open != last_lane_gate_state:
+                    # Log once per state-change, not per skipped cycle.
+                    if not lane_gate_open:
+                        logger.warning(
+                            "[CommodityStrategy] lane kill switch for profile "
+                            f"'{profile}' is off — cycles paused until re-enabled"
+                        )
+                    elif last_lane_gate_state is False:
+                        logger.info(
+                            "[CommodityStrategy] lane kill switch released — cycles resumed"
+                        )
+                    last_lane_gate_state = lane_gate_open
+                if not lane_gate_open:
+                    await asyncio.sleep(self.scan_interval_seconds)
+                    continue
                 scan_timeout_seconds = self._scan_timeout_seconds()
                 try:
-                    await asyncio.wait_for(
-                        self.run_once(force=False),
-                        timeout=scan_timeout_seconds,
-                    )
+                    with lane_broker_profile(profile):
+                        await asyncio.wait_for(
+                            self.run_once(force=False),
+                            timeout=scan_timeout_seconds,
+                        )
                 except asyncio.CancelledError:
                     raise
                 except asyncio.TimeoutError:
@@ -4693,6 +4732,30 @@ class CommodityStrategyAgent(BaseStrategyAgent):
             "rollover_events": list(self._runtime.rollover_events),
             "data_health": self._last_data_health,
         }
+
+    def get_signal_audit(
+        self, *, offset: int = 0, limit: int | None = None
+    ) -> dict[str, Any]:
+        """Full signal-audit history with offset/limit pagination.
+
+        The hot /strategy-agent/status payload caps signal_audit to the most
+        recent records (payload de-dup, audit 2026-07-18); this accessor backs
+        the paginated /api/commodity/strategy-agent/signal-audit endpoint that
+        serves the complete retained history (most recent first, up to
+        DEFAULT_COMMODITY_SIGNAL_AUDIT_MAX)."""
+        self._refresh_state_from_store()
+        records = [
+            {key: value for key, value in entry.items() if key != "audit_key"}
+            for entry in self._runtime.signal_audit
+        ]
+        total = len(records)
+        offset = max(int(offset or 0), 0)
+        if limit is not None:
+            limit = max(int(limit), 0)
+            page = records[offset : offset + limit]
+        else:
+            page = records[offset:]
+        return {"total": total, "offset": offset, "limit": limit, "records": page}
 
     def get_orders(self) -> list[dict[str, Any]]:
         self._refresh_state_from_store()

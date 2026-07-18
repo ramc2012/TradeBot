@@ -56,11 +56,20 @@ class Settings(BaseSettings):
     DATABASE_POOL_TIMEOUT_SECONDS: int = 15
     DATABASE_POOL_RECYCLE_SECONDS: int = 900
     REDIS_URL: str = "redis://localhost:6383/0"
-    # Bound the Redis connection pool well under the server's maxclients (10000).
-    # Unbounded, the pool grew without limit under tick-cache SET bursts (amplified
-    # when the loop blocks on heavy scans) until it exhausted maxclients and tick
-    # pub/sub failed (2026-06-05). Idle connections are reused, so this is headroom.
+    # DEPRECATED (2026-07-18): the single 1000-cap client pool is replaced by the
+    # two bounded blocking pools below. Kept so stale env overrides don't crash.
     REDIS_MAX_CONNECTIONS: int = 1000
+    # Redis P0 (2026-07-18): commands and pub/sub ride SEPARATE bounded
+    # BlockingConnectionPools. At the cap a caller WAITS (up to the acquire
+    # timeout) for a free connection instead of raising "Too many connections"
+    # — the 07-17 failure mode was the CLIENT pool ceiling raising while the
+    # server sat at rejected_connections=0. 200 command connections is ample
+    # steady-state headroom (tick fan-out is now coalesced to ~1 pipeline per
+    # 150ms); pub/sub connections are held one-per-WS-client, so 150 bounds
+    # concurrent UI sockets without letting them starve command traffic.
+    REDIS_COMMAND_MAX_CONNECTIONS: int = 200
+    REDIS_PUBSUB_MAX_CONNECTIONS: int = 150
+    REDIS_POOL_ACQUIRE_TIMEOUT_SECONDS: float = 3.0
     RESEARCH_SYNC_AUTO_ENABLED: bool = False
     RESEARCH_SYNC_EMBEDDED_ENABLED: bool = False
     STRATEGY_SPOT_SYNC_ENABLED: bool = False
@@ -100,6 +109,12 @@ class Settings(BaseSettings):
     # exits, so a breached stop is caught in seconds instead of waiting up to
     # 30 minutes. Mirrors CBE_MARKS_REFRESH_INTERVAL_SECONDS.
     MACD_REFINED_MARKS_REFRESH_INTERVAL_SECONDS: int = 45
+    # Per-session data-audit re-run (audit 2026-07-18): the data-sufficiency
+    # sweep was manual-only and its report went stale for days. When True the
+    # india live cycle kicks ONE background data_audit per session, gated to
+    # >=14:45 IST so the full-universe chain sweep never competes with the
+    # open-window broker budget.
+    MACD_REFINED_DATA_AUDIT_PER_SESSION: bool = True
     # NSE MACD Strategy 1 (macd_strategy) max simultaneous positions. Default
     # 1000 = effectively NO cap — the strategy trades the full ATM watchlist
     # (~216 contracts) one position per underlying-side. (The shared live-risk
@@ -226,6 +241,13 @@ class Settings(BaseSettings):
     # flag (they gate SCHEDULING, not broker choice). Default True = no effect.
     SLOW_LANES_ENABLED: bool = True
     FAST_LANES_ENABLED: bool = True
+    # Lane profile for the commodity strategy agent's self-owned loop (it runs
+    # outside supervisor dispatch, so it wires the lane seam itself — audit
+    # 2026-07-18). Whether the MCX lane is tagged slow/fast is an OWNER decision:
+    # MCX contract/quote resolution is forced-hybrid (Upstox-only regardless of
+    # profile), so "default" (= global broker order, never darkened by either
+    # cadence kill switch) is the safe out-of-the-box value.
+    COMMODITY_AGENT_BROKER_PROFILE: str = "default"
     # Option-flow watchdog: fast lanes now depend on the Fyers tick path, and WS
     # Fyers-format option ticks have never persisted (dormant defect). This
     # watchdog flags zero option-bucket persists over a window during market

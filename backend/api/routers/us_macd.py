@@ -17,14 +17,14 @@ class ResetRequest(BaseModel):
     actor: str | None = None
 
 
-@router.get("/summary")
-async def summary() -> dict[str, object]:
-    return await asyncio.to_thread(_service.summary)
+async def _alpaca_source_health() -> dict[str, object]:
+    """Alpaca connectivity probe shared by /summary and /data-source-health.
 
-
-@router.get("/data-source-health")
-async def data_source_health() -> dict[str, object]:
-    """Alpaca connectivity for the US lane (keys present? SPY quote fetch?)."""
+    On this deployment ``brokers.alpaca`` does not exist (analysis/alpaca_data.py
+    also points at a non-existent local parquet path), so this reports
+    configured=False — the lane is honestly PARKED (audit 2026-07-18: the
+    /summary previously presented a full ready lane payload while the data
+    source reported configured=false)."""
     try:
         from brokers.alpaca import alpaca_adapter
         if not alpaca_adapter.has_credentials:
@@ -34,6 +34,35 @@ async def data_source_health() -> dict[str, object]:
         return {"provider": "alpaca", "configured": True, **h}
     except Exception as exc:  # noqa: BLE001
         return {"provider": "alpaca", "configured": False, "error": str(exc)[:160]}
+
+
+@router.get("/summary")
+async def summary() -> dict[str, object]:
+    payload = dict(await asyncio.to_thread(_service.summary))
+    health = await _alpaca_source_health()
+    # Additive keys only — the UI (UsMacdDesk.tsx) reads params/automation/
+    # timeframe/live_universe and must keep rendering; status/status_reason/
+    # data_source are new, so unconfigured surfaces as "unavailable" instead
+    # of a full ready lane (audit 2026-07-18).
+    if not health.get("configured"):
+        payload["status"] = "unavailable"
+        payload["status_reason"] = str(
+            health.get("error") or health.get("note") or "Alpaca data source not configured."
+        )
+    else:
+        payload["status"] = "ready"
+        payload["status_reason"] = None
+    payload["data_source"] = health
+    return payload
+
+
+@router.get("/data-source-health")
+async def data_source_health() -> dict[str, object]:
+    """Alpaca connectivity for the US lane (keys present? SPY quote fetch?)."""
+    health = await _alpaca_source_health()
+    # Additive status key mirroring /summary (UI reads configured/ok directly).
+    health["status"] = "ready" if health.get("configured") else "unavailable"
+    return health
 
 
 @router.get("/positioning")

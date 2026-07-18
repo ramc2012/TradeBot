@@ -1349,8 +1349,39 @@ class DirectionalOptionsService:
 
         _exchange = "BSE" if str(underlying).upper() in ("SENSEX", "BANKEX") else "NSE"
         latest_session_ok = using_latest_session and not _cal.is_exchange_open(_exchange)
+        # ── Degenerate-bar gate (audit 2026-07-18) ────────────────────────────
+        # execution_ready previously validated only presence + age, so a flat
+        # zero-volume OHLC bar (high==low, volume==0 — observed live on NIFTY)
+        # passed as "ready". Material now that the 50-stock NIFTY-50 universe is
+        # live: illiquid names emit exactly these bars. Require the latest
+        # feature row to carry market information: reject a flat zero-volume
+        # bar, and reject an all-zero/NaN ATR over the recent window (no true
+        # range at all). Skip-and-report (degraded_reason="degenerate_bar"),
+        # consistent with the existing degraded_reason vocabulary. Checks are
+        # column-defensive: frames lacking high/low/volume/atr (research paths,
+        # minimal fixtures) are left to the other gates.
+        degenerate_bar = False
+        if not feature_frame.empty:
+            _last_row = feature_frame.iloc[-1]
+            _cols = set(feature_frame.columns)
+            if {"high", "low", "volume"}.issubset(_cols):
+                try:
+                    _high = float(_last_row["high"])
+                    _low = float(_last_row["low"])
+                    _vol = float(_last_row["volume"])
+                except (TypeError, ValueError):
+                    _high = _low = _vol = float("nan")
+                if _high == _low and _vol == 0.0:
+                    degenerate_bar = True
+            if not degenerate_bar and "atr" in _cols:
+                _atr_window = pd.to_numeric(
+                    feature_frame["atr"].tail(14), errors="coerce"
+                )
+                if _atr_window.isna().all() or float(_atr_window.fillna(0.0).abs().max()) <= 0.0:
+                    degenerate_bar = True
         execution_ready = bool(
             not feature_frame.empty
+            and not degenerate_bar
             and latest_spot_time
             and watchlist_rows
             and market_intelligence_ready
@@ -1368,6 +1399,8 @@ class DirectionalOptionsService:
         degraded_reason = None
         if feature_frame.empty:
             degraded_reason = "missing_spot_history"
+        elif degenerate_bar:
+            degraded_reason = "degenerate_bar"
         elif not latest_spot_time:
             degraded_reason = "shared_spot_store_missing_symbol"
         elif not watchlist_rows:

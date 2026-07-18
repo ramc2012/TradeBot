@@ -106,15 +106,55 @@ async def reset_commodity_paper_account(body: ResetPaperRequest):
     return await commodity_strategy_agent.archive_and_reset_paper_account(actor=actor)
 
 
+# ── Hot-payload slimming (audit 2026-07-18) ──────────────────────────────────
+# /overview + /strategy-agent/status weighed ~846KB/825KB: signal_audit alone
+# was ~455KB (600 records) and two key pairs were byte-identical duplicates.
+# UI field audit (frontend-v2 only — legacy /frontend was retired 2026-06-07):
+#   * futures_watchlist is READ (page.tsx reads `status.futures_watchlist ??
+#     status.watchlist`) → keep futures_watchlist, DROP the `watchlist` dup.
+#   * trade_history is READ (page.tsx, reports-ledger.ts, strategy-position-
+#     ledger.ts); historical_trades appears only in type decls and as a
+#     LOWER-priority fallback (`trade_history || historical_trades`) → keep
+#     trade_history + today_trades, DROP the `historical_trades` dup slice.
+#   * signal_audit is never read from this payload (type decl only) → cap the
+#     hot copy to the most recent N; the FULL history moves to the paginated
+#     /strategy-agent/signal-audit endpoint below.
+# Additive keys signal_audit_total/_capped let any consumer detect the cap.
+_HOT_SIGNAL_AUDIT_CAP = 50
+
+
+def _slim_agent_status(status: dict) -> dict:
+    slim = dict(status or {})
+    slim.pop("watchlist", None)  # exact duplicate of futures_watchlist
+    slim.pop("historical_trades", None)  # duplicate slice of trade_history
+    audit = slim.get("signal_audit")
+    if isinstance(audit, list):
+        slim["signal_audit_total"] = len(audit)
+        slim["signal_audit_capped"] = len(audit) > _HOT_SIGNAL_AUDIT_CAP
+        if len(audit) > _HOT_SIGNAL_AUDIT_CAP:
+            slim["signal_audit"] = audit[:_HOT_SIGNAL_AUDIT_CAP]
+    return slim
+
+
 @router.get("/strategy-agent/status")
 async def commodity_strategy_status():
-    return commodity_strategy_agent.get_status()
+    return _slim_agent_status(commodity_strategy_agent.get_status())
+
+
+@router.get("/strategy-agent/signal-audit")
+async def commodity_signal_audit(
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=600),
+):
+    """Paginated FULL signal-audit history (the hot status payload carries only
+    the most recent records — see _slim_agent_status)."""
+    return commodity_strategy_agent.get_signal_audit(offset=offset, limit=limit)
 
 
 @router.get("/overview")
 async def commodity_overview():
     return {
-        "status": commodity_strategy_agent.get_status(),
+        "status": _slim_agent_status(commodity_strategy_agent.get_status()),
         "kill_switch_state": commodity_strategy_agent.get_control_state(),
         "orders": commodity_strategy_agent.get_orders()[:40],
         "positions": commodity_strategy_agent.get_positions(),
