@@ -170,4 +170,41 @@ class BrokerCircuit:
         return out
 
 
+def cadence_datatype(base: str) -> str:
+    """Scope a circuit datatype by the active lane broker profile so a broker's
+    degradation trips ONLY its cadence group's breaker (fast vs slow), never the
+    other's — structural isolation with zero new breaker code.
+
+    An Upstox chain degradation while a SLOW lane is fetching records under
+    ``upstox:slow_chain`` and only reorders the slow group; a Fyers degradation
+    under a FAST lane records ``fyers:fast_chain`` and only reorders the fast
+    group. Flag-off OR the DEFAULT profile → the base datatype (byte-identical
+    breaker keys to pre-routing behaviour). Must be applied identically at the
+    record site (brokers/*.py) and the read site (source_policy) so the keys
+    agree. Fail-safe: any error → base datatype (no isolation, never a crash).
+
+    SCOPE — only ``chain`` is cadence-scoped. It is the sole datatype the read
+    site (``source_policy.route_order`` → ``cadence_datatype("chain")``) and the
+    ``/api/system/rate-budget`` telemetry actually consult, so scoping
+    ``history``/``quote`` would only mint ``{fast,slow}_history`` /
+    ``{fast,slow}_quote`` breaker keys nobody reads — fragmenting the circuit
+    telemetry for zero routing benefit. Non-chain datatypes therefore keep their
+    base key (identical to pre-routing) under every profile."""
+    if base != "chain":
+        return base
+    try:
+        from core.config import settings
+
+        if not bool(getattr(settings, "LANE_BROKER_ROUTING_ENABLED", False)):
+            return base
+        from brokers.rate_limiter import current_lane_profile, LANE_PROFILE_DEFAULT
+
+        prof = current_lane_profile()
+        if prof and prof != LANE_PROFILE_DEFAULT:
+            return f"{prof}_{base}"
+    except Exception:  # noqa: BLE001
+        pass
+    return base
+
+
 broker_circuit = BrokerCircuit()

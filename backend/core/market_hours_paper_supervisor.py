@@ -146,6 +146,15 @@ class RunnerConfig:
     # transition-anchored offset (e.g. macd_refined must not start before
     # 09:45 even if the backend restarts at 09:20 and re-stamps the open).
     no_start_before: time | None = None
+    # Per-lane broker profile (owner directive 2026-07-17, cadence axis). SLOW
+    # (30m) lanes prefer Upstox for their REST; FAST (3m + tick) lanes prefer
+    # Fyers. Set once here at dispatch — the contextvar propagates through the
+    # whole callback subtree so every route_order() fetch the lane makes inherits
+    # it. "default" = the global failover order, unchanged. Gated at the READ
+    # seam by settings.LANE_BROKER_ROUTING_ENABLED, so tagging a runner with a
+    # profile is a provable no-op while the flag is off. See
+    # market_data.source_policy.route_order and brokers.rate_limiter.
+    broker_profile: str = "default"
 
 
 @dataclass
@@ -202,6 +211,18 @@ class RunnerRuntime:
 
     def is_due(self, now: datetime) -> bool:
         if not self.config.enabled or self.running:
+            return False
+        # Per-cadence-group kill switch ("work independently"): dark an entire
+        # broker-dependent group in one move when that broker degrades, without
+        # touching each lane's own *_AUTO_ENABLED flag. Orthogonal to
+        # LANE_BROKER_ROUTING_ENABLED (this gates SCHEDULING, not broker choice);
+        # both default True so this is a no-op out of the box. Keyed off the
+        # runner's own broker_profile so the cadence group and the routing group
+        # are the same set by construction.
+        profile = str(self.config.broker_profile or "default").strip().lower()
+        if profile == "slow" and not bool(getattr(settings, "SLOW_LANES_ENABLED", True)):
+            return False
+        if profile == "fast" and not bool(getattr(settings, "FAST_LANES_ENABLED", True)):
             return False
         if not self.stagger_clear(now):
             return False
@@ -461,6 +482,13 @@ class MarketHoursPaperSupervisor:
         async def _token_readiness_runner() -> dict[str, Any]:
             from api.routers.auth import morning_token_readiness
             return await morning_token_readiness()
+
+        async def _option_flow_watchdog_runner() -> dict[str, Any]:
+            # Detection/telemetry only (default OFF): flags a frozen REST premium
+            # feed once the FAST lanes lean on the Fyers tick path. See
+            # market_data/option_flow_watchdog.py.
+            from market_data.option_flow_watchdog import run_option_flow_watchdog
+            return await run_option_flow_watchdog()
 
         async def _auction_runner() -> dict[str, Any]:
             return await run_auction_market_cycle()
@@ -904,6 +932,36 @@ class MarketHoursPaperSupervisor:
                 "funnel": result.get("funnel") or {},
             }
 
+        async def _macd_refined_marks_runner() -> dict[str, Any]:
+            """Seconds-cadence protective-exit heartbeat for open macd_refined
+            positions (owner directive 2026-07-17: "position updates must be in
+            SECONDS"). The 30m _macd_refined_runner sets the entry SIDE; this
+            re-marks held positions off the REAL-TIME plane (Fyers-WS tick →
+            Redis tick:{symbol} → shared oc: chain cache — never a broker REST /
+            route_order fetch) and fires ONLY the existing stop/target/trail/
+            window exits, so a breached stop is caught in seconds instead of
+            waiting up to 30 minutes. Market-hours only (post_close_catchup=
+            False); nothing to re-mark on frozen post-close bars."""
+            try:
+                result = await asyncio.wait_for(
+                    macd_refined_service.refresh_paper_marks(),
+                    timeout=60.0,
+                )
+            except asyncio.TimeoutError:
+                return {
+                    "status": "timeout", "result_count": 0, "failure_count": 1,
+                    "failures": {"macd_refined_marks": "timed out after 60s"}, "results": [],
+                }
+            refreshed = int(result.get("refreshed") or 0)
+            return {
+                "status": "ok",
+                "result_count": refreshed,
+                "actionable_count": int(result.get("exits") or 0),
+                "failure_count": 0,
+                "positions": int(result.get("positions") or 0),
+                "paper_summary": dict(result.get("paper_summary") or {}),
+            }
+
         async def _cbe_runner() -> dict[str, Any]:
             """Run one CBE scan + sync the cash-equity paper book.
 
@@ -1038,6 +1096,24 @@ class MarketHoursPaperSupervisor:
 
         return [
             RunnerConfig(
+                key="option_flow_watchdog",
+                label="Option-Flow Freshness Watchdog",
+                interval_seconds=getattr(
+                    settings, "OPTION_FLOW_WATCHDOG_INTERVAL_SECONDS", 60
+                ),
+                callback=_option_flow_watchdog_runner,
+                # Default OFF (OPTION_FLOW_WATCHDOG_ENABLED) — opt-in monitor.
+                enabled=getattr(settings, "OPTION_FLOW_WATCHDOG_ENABLED", False),
+                # NSE session hours: option_premium_candles is the NSE-options
+                # feed. broker_profile left DEFAULT so neither cadence-group kill
+                # switch (SLOW/FAST_LANES_ENABLED) darks the monitor — it must
+                # keep watching even when a lane group is disabled.
+                market_hours_fn=_in_nse_market_hours,
+                next_open_fn=_next_nse_market_open,
+                # A stall watcher has nothing to catch up after the close.
+                post_close_catchup=False,
+            ),
+            RunnerConfig(
                 key="token_readiness",
                 label="Pre-open Broker Token Readiness",
                 interval_seconds=900,
@@ -1057,6 +1133,7 @@ class MarketHoursPaperSupervisor:
                 label="Market Intelligence Refresh",
                 interval_seconds=settings.MARKET_INTELLIGENCE_REFRESH_INTERVAL_SECONDS,
                 callback=_market_intelligence_runner,
+                broker_profile="slow",
                 enabled=settings.MARKET_INTELLIGENCE_AUTO_ENABLED,
             ),
             RunnerConfig(
@@ -1064,6 +1141,7 @@ class MarketHoursPaperSupervisor:
                 label="Auction Intelligence Paper Cycle",
                 interval_seconds=settings.AUCTION_INTELLIGENCE_AUTO_INTERVAL_SECONDS,
                 callback=_auction_runner,
+                broker_profile="fast",
                 enabled=settings.AUCTION_INTELLIGENCE_AUTO_ENABLED,
                 # This lane can create paper positions. Never run the generic
                 # post-close recovery pass against frozen end-of-day bars.
@@ -1084,6 +1162,7 @@ class MarketHoursPaperSupervisor:
                 label="Auction Intelligence Commodity Cycle",
                 interval_seconds=settings.AUCTION_INTELLIGENCE_COMMODITY_INTERVAL_SECONDS,
                 callback=_auction_commodity_runner,
+                broker_profile="fast",
                 enabled=settings.AUCTION_INTELLIGENCE_COMMODITY_ENABLED,
                 # Same MP+OF machinery as the NSE index lane, but over the MCX
                 # session (09:00-23:30) — the evening/extended hours when NSE is
@@ -1107,6 +1186,7 @@ class MarketHoursPaperSupervisor:
                 label="Institutional Convergence Shadow Cycle",
                 interval_seconds=settings.INSTITUTIONAL_CONVERGENCE_AUTO_INTERVAL_SECONDS,
                 callback=_institutional_convergence_runner,
+                broker_profile="fast",
                 enabled=settings.INSTITUTIONAL_CONVERGENCE_AUTO_ENABLED,
                 market_hours_fn=_in_institutional_convergence_window,
                 next_open_fn=_next_institutional_convergence_open,
@@ -1119,6 +1199,7 @@ class MarketHoursPaperSupervisor:
                 label="Institutional Convergence Commodity Cycle",
                 interval_seconds=settings.INSTITUTIONAL_CONVERGENCE_COMMODITY_INTERVAL_SECONDS,
                 callback=_institutional_convergence_commodity_runner,
+                broker_profile="fast",
                 enabled=settings.INSTITUTIONAL_CONVERGENCE_COMMODITY_ENABLED,
                 market_hours_fn=_in_commodity_convergence_window,
                 next_open_fn=_next_commodity_convergence_open,
@@ -1131,6 +1212,7 @@ class MarketHoursPaperSupervisor:
                 label="Fractal Market Profile Paper Cycle",
                 interval_seconds=settings.FRACTAL_MARKET_PROFILE_AUTO_INTERVAL_SECONDS,
                 callback=_fmp_runner,
+                broker_profile="fast",
                 enabled=settings.FRACTAL_MARKET_PROFILE_AUTO_ENABLED,
                 market_hours_fn=_in_gann_market_hours,
                 next_open_fn=_next_gann_market_open,
@@ -1140,6 +1222,7 @@ class MarketHoursPaperSupervisor:
                 label="Directional Options Paper Cycle",
                 interval_seconds=settings.DIRECTIONAL_OPTIONS_AUTO_INTERVAL_SECONDS,
                 callback=_directional_runner,
+                broker_profile="fast",
                 enabled=settings.DIRECTIONAL_OPTIONS_AUTO_ENABLED,
                 # NSE index + NIFTY-50 stock options — trade during the session,
                 # never on the post-close frozen `live_tick` heartbeat (last
@@ -1161,6 +1244,7 @@ class MarketHoursPaperSupervisor:
                     settings, "DIRECTIONAL_POSITIONING_REFRESH_INTERVAL_SECONDS", 3600
                 ),
                 callback=_directional_positioning_runner,
+                broker_profile="fast",
                 # Only run when the positional lane is live (else the feed is unused).
                 enabled=settings.DIRECTIONAL_POSITIONAL_OPTIONS_ENABLED,
                 # Guaranteed once-a-day post-15:35 EOD write so the feed is fresh
@@ -1177,6 +1261,7 @@ class MarketHoursPaperSupervisor:
                     settings, "COMMODITY_MP_HISTORY_AUTO_INTERVAL_SECONDS", 21600
                 ),
                 callback=_commodity_mp_history_runner,
+                broker_profile="fast",
                 enabled=settings.COMMODITY_MP_HISTORY_AUTO_ENABLED,
                 timeout_seconds=420.0,
                 # Data-maintenance from the durable MCX 1-min spot store; MCX
@@ -1191,6 +1276,7 @@ class MarketHoursPaperSupervisor:
                 label="MACD Refined Paper Cycle",
                 interval_seconds=settings.MACD_REFINED_AUTO_INTERVAL_SECONDS,
                 callback=_macd_refined_runner,
+                broker_profile="slow",
                 enabled=settings.MACD_REFINED_AUTO_ENABLED,
                 # Full F&O universe × current+next expiry needs more than the
                 # 300s global ceiling for a cold-start cycle.
@@ -1209,10 +1295,30 @@ class MarketHoursPaperSupervisor:
                 no_start_before=time(9, 45),
             ),
             RunnerConfig(
+                key="macd_refined_marks",
+                label="MACD Refined Paper Marks / Protective Exits",
+                interval_seconds=settings.MACD_REFINED_MARKS_REFRESH_INTERVAL_SECONDS,
+                callback=_macd_refined_marks_runner,
+                enabled=settings.MACD_REFINED_AUTO_ENABLED,
+                # broker_profile left DEFAULT deliberately: this pass reads the
+                # real-time Fyers-WS plane (no Upstox / route_order fetch), so it
+                # must NOT be darked by the SLOW_LANES_ENABLED cadence-group kill
+                # switch — held positions still need seconds-cadence stop/target
+                # protection even when the slow DECISION group is degraded. Same
+                # reasoning as option_flow_watchdog. Runs from the open (no
+                # start_offset / no_start_before) so a position opened early is
+                # protected immediately; market-hours only.
+                market_hours_fn=_in_nse_market_hours,
+                next_open_fn=_next_nse_market_open,
+                post_close_catchup=False,
+                timeout_seconds=90.0,
+            ),
+            RunnerConfig(
                 key="cbe_scanner",
                 label="CBE Scanner Paper Cycle",
                 interval_seconds=settings.CBE_SCANNER_AUTO_INTERVAL_SECONDS,
                 callback=_cbe_runner,
+                broker_profile="slow",
                 enabled=settings.CBE_SCANNER_AUTO_ENABLED,
                 # The hourly in-session passes use the previous completed
                 # session (CBE's _completed_session_cutoff excludes today until
@@ -1229,6 +1335,7 @@ class MarketHoursPaperSupervisor:
                 label="CBE Paper Marks Refresh",
                 interval_seconds=settings.CBE_MARKS_REFRESH_INTERVAL_SECONDS,
                 callback=_cbe_marks_runner,
+                broker_profile="slow",
                 enabled=settings.CBE_SCANNER_AUTO_ENABLED,
                 market_hours_fn=_in_nse_market_hours,
                 next_open_fn=_next_nse_market_open,
@@ -1239,6 +1346,7 @@ class MarketHoursPaperSupervisor:
                 label="Gann TP Delta Paper Cycle",
                 interval_seconds=settings.GANN_TP_DELTA_AUTO_INTERVAL_SECONDS,
                 callback=_gann_runner,
+                broker_profile="slow",
                 enabled=settings.GANN_TP_DELTA_AUTO_ENABLED,
                 market_hours_fn=_in_gann_market_hours,
                 next_open_fn=_next_gann_market_open,
@@ -1559,7 +1667,19 @@ class MarketHoursPaperSupervisor:
         )
         try:
             try:
-                result = await asyncio.wait_for(runtime.config.callback(), timeout=timeout_s)
+                # Per-lane broker routing: set the cadence profile for the whole
+                # callback subtree (contextvars copy into child tasks/to_thread).
+                # A no-op while LANE_BROKER_ROUTING_ENABLED is off — the READ
+                # seams (source_policy.route_order, broker_circuit.cadence_datatype)
+                # only consult the profile behind that flag. lane_broker_profile
+                # coerces an unknown/empty profile to DEFAULT rather than raising,
+                # so a mistyped RunnerConfig.broker_profile can never crash dispatch.
+                from brokers.rate_limiter import lane_broker_profile
+
+                with lane_broker_profile(runtime.config.broker_profile):
+                    result = await asyncio.wait_for(
+                        runtime.config.callback(), timeout=timeout_s
+                    )
             except (asyncio.TimeoutError, TimeoutError) as _timeout:
                 raise RuntimeError(
                     f"runner exceeded {timeout_s:g}s timeout — killed to protect the supervisor loop"

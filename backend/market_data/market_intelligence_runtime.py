@@ -1555,13 +1555,26 @@ class MarketIntelligenceRuntime:
                 "detail": "unknown app symbol",
             }
 
+        # Broker iteration order comes from route_order("option_chain") via
+        # ordered_live_adapters, NOT a hardcoded (upstox, fyers) literal, so this
+        # shared index-chain writer honours the active lane broker profile (this
+        # runs under the SLOW market-intelligence runner ⇒ Upstox-first when the
+        # routing flag is on) and the per-cadence circuit failover (an OPEN
+        # preferred broker yields to the healthy one). Flag-off ⇒ route_order
+        # returns the global order (upstox,fyers) — byte-identical to the former
+        # literal. Per-source lookup symbol still differs by broker vendor format.
+        from market_data.source_policy import ordered_live_adapters
+
+        _lookup_by_source = {
+            "upstox": to_broker_symbol(app_symbol),
+            "fyers": to_fyers_symbol(app_symbol),
+        }
         errors: list[str] = []
-        for source, adapter, lookup_symbol in (
-            ("upstox", upstox_adapter, to_broker_symbol(app_symbol)),
-            ("fyers", fyers_adapter, to_fyers_symbol(app_symbol)),
+        for source, adapter in ordered_live_adapters(
+            "option_chain",
+            {"upstox": upstox_adapter, "fyers": fyers_adapter},
         ):
-            if adapter is None:
-                continue
+            lookup_symbol = _lookup_by_source[source]
             try:
                 chain = await adapter.get_option_chain(lookup_symbol, expiry_iso)
             except Exception as exc:

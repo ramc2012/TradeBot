@@ -91,6 +91,15 @@ class Settings(BaseSettings):
     # broker-throttled sweep. Match its cadence to the 30-minute signal bar so
     # completed cycles do not immediately start another redundant sweep.
     MACD_REFINED_AUTO_INTERVAL_SECONDS: int = 1800
+    # Seconds-cadence protective-exit heartbeat for OPEN macd_refined positions
+    # (owner directive 2026-07-17: "position updates must be in SECONDS"). The
+    # 1800s decision cycle above sets the SIDE; this separate lightweight pass
+    # re-marks held positions off the REAL-TIME plane (Fyers-WS tick buffer →
+    # Redis tick:{symbol} → shared oc: chain cache — never a broker REST /
+    # route_order fetch) and fires ONLY the existing stop/target/trail/window
+    # exits, so a breached stop is caught in seconds instead of waiting up to
+    # 30 minutes. Mirrors CBE_MARKS_REFRESH_INTERVAL_SECONDS.
+    MACD_REFINED_MARKS_REFRESH_INTERVAL_SECONDS: int = 45
     # NSE MACD Strategy 1 (macd_strategy) max simultaneous positions. Default
     # 1000 = effectively NO cap — the strategy trades the full ATM watchlist
     # (~216 contracts) one position per underlying-side. (The shared live-risk
@@ -199,6 +208,32 @@ class Settings(BaseSettings):
     # FAIL-OPEN: only trips on sustained failure; informs routing, never hard-
     # blocks. Surfaced at GET /api/system/rate-budget → circuit.
     BROKER_CIRCUIT_ENABLED: bool = True
+    # ── Per-lane broker routing (owner directive 2026-07-17) ──────────────────
+    # Route SLOW lanes (30m: S1 MACD, MACD Refined, CBE, Gann) to Upstox for
+    # their spot/chain/premium REST, and FAST lanes (3m + tick: directional,
+    # auction, convergence, MP+OF) to Fyers (WS ticks + Fyers REST chains).
+    # Mechanism: a `lane_broker_profile` contextvar (brokers/rate_limiter.py) set
+    # once at runner dispatch reorders the source_policy.route_order failover list
+    # (SLOW → upstox-first, FAST → fyers-first). Reorder ONLY — never drops a
+    # source, so failover is preserved and a broker circuit-OPEN still wins over
+    # the profile. DEFAULT OFF ⇒ route_order returns the identical global order
+    # (provable no-op). Commodity MCX contract/quote resolution stays Upstox-only
+    # regardless of profile (upstox_commodity.py, forced-hybrid — see exc-a).
+    LANE_BROKER_ROUTING_ENABLED: bool = False
+    # Per-cadence-group kill switches ("work independently"): dark an entire
+    # broker-dependent group in one move when that broker degrades, without
+    # touching each lane's own *_AUTO_ENABLED flag. Orthogonal to the routing
+    # flag (they gate SCHEDULING, not broker choice). Default True = no effect.
+    SLOW_LANES_ENABLED: bool = True
+    FAST_LANES_ENABLED: bool = True
+    # Option-flow watchdog: fast lanes now depend on the Fyers tick path, and WS
+    # Fyers-format option ticks have never persisted (dormant defect). This
+    # watchdog flags zero option-bucket persists over a window during market
+    # hours while options are subscribed, so the defect becoming load-bearing is
+    # visible. Detection/telemetry only; default OFF (opt-in).
+    OPTION_FLOW_WATCHDOG_ENABLED: bool = False
+    OPTION_FLOW_WATCHDOG_INTERVAL_SECONDS: int = 60
+    OPTION_FLOW_WATCHDOG_STALE_SECONDS: int = 300
     # Pre-open broker token readiness sweep (07:00-09:20 IST, NSE session days):
     # validates Fyers (auto-refresh via saved refresh token + PIN when the daily
     # access token is dead) + checks Upstox expiry, and logs/alerts BEFORE open

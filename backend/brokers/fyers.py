@@ -67,9 +67,17 @@ class FyersAdapter(BrokerAdapter):
         """
         from brokers.rate_limiter import FYERS_DATA_LIMITER, parse_first_json
         from brokers.http_client import get_shared_async_client
-        from market_data.broker_circuit import broker_circuit
+        from market_data.broker_circuit import broker_circuit, cadence_datatype
 
         dt = "chain" if "chain" in path else "history" if "history" in path else "quote"
+        # Cadence-scope the circuit datatype under the active lane profile
+        # (fast_chain / slow_chain / …) so a broker degradation trips ONLY its
+        # cadence group's breaker — MUST match the READ site
+        # (source_policy.route_order → cadence_datatype("chain")); recording under
+        # the bare `dt` while the read side queries the scoped key silently
+        # defeats the per-cadence isolation. Flag-off / DEFAULT profile → base dt
+        # (byte-identical breaker keys to pre-routing).
+        circuit_dt = cadence_datatype(dt)
         last_error: Optional[str] = None
         for attempt in range(5):
             await FYERS_DATA_LIMITER.acquire()
@@ -117,15 +125,15 @@ class FyersAdapter(BrokerAdapter):
                 continue
             if response.status_code != 200:
                 message = payload.get("message") if isinstance(payload, dict) else response.text[:240]
-                broker_circuit.record_failure("fyers", dt)
+                broker_circuit.record_failure("fyers", circuit_dt)
                 raise ValueError(f"Fyers data API error {response.status_code}: {message}")
             if isinstance(payload, dict) and payload.get("s") == "error":
-                broker_circuit.record_failure("fyers", dt)
+                broker_circuit.record_failure("fyers", circuit_dt)
                 raise ValueError(payload.get("message") or "Fyers data API returned an error")
-            broker_circuit.record_success("fyers", dt)
+            broker_circuit.record_success("fyers", circuit_dt)
             return payload
 
-        broker_circuit.record_failure("fyers", dt)
+        broker_circuit.record_failure("fyers", circuit_dt)
         raise ValueError(f"Fyers data API failed after retries on {path}: {last_error}")
 
     @staticmethod

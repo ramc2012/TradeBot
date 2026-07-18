@@ -223,6 +223,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # process-global limiter still caps aggregate REST admission.
         "max_concurrent_names": 6,
         "broker_timeout_seconds": 12.0,
+        # Max age (seconds) a real-time tick / chain-cache mark may have before
+        # the seconds-cadence protective-exit pass treats a held position as
+        # having NO fresh mark (fresh=False → its price exits are skipped, the
+        # 30m cycle stays its backstop). Sits just above the ~45s marks cadence.
+        "marks_max_age_seconds": 60.0,
     },
 }
 

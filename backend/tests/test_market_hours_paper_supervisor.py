@@ -388,6 +388,32 @@ def test_open_stagger_does_not_delay_post_close_catchup() -> None:
     assert runner["market_open_since"] is None
 
 
+def test_macd_refined_marks_runner_is_seconds_cadence_and_unkilled() -> None:
+    """GAP 1: the protective-exit heartbeat is a separate seconds-cadence
+    runner from the 30m decision cycle, market-hours only, and NOT tagged with
+    a slow/fast profile — so the SLOW_LANES_ENABLED cadence-group kill switch
+    can never dark held-position stop/target protection (it reads the Fyers-WS
+    real-time plane, not an Upstox decision fetch)."""
+    supervisor = MarketHoursPaperSupervisor(enabled=False)
+
+    marks = supervisor._runners["macd_refined_marks"].config
+    decision = supervisor._runners["macd_refined"].config
+
+    # Seconds cadence, far below the 30m decision cycle.
+    assert marks.interval_seconds <= 60
+    assert marks.interval_seconds < decision.interval_seconds
+    # Runs from the open (no stagger) so an early position is protected at once.
+    assert marks.start_offset_seconds == 0.0
+    assert marks.no_start_before is None
+    # Market-hours only — nothing to re-mark on frozen post-close bars.
+    assert marks.post_close_catchup is False
+    # DEFAULT profile: neither cadence-group kill switch darks the safety pass.
+    assert marks.broker_profile == "default"
+    # The decision cycle itself is unchanged (still the slow 30m lane).
+    assert decision.broker_profile == "slow"
+    assert decision.interval_seconds == 1800
+
+
 def test_default_runner_stagger_configuration() -> None:
     supervisor = MarketHoursPaperSupervisor(enabled=False)
 

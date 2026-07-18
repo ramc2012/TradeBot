@@ -72,21 +72,82 @@ def _parse_order(raw: str | None) -> list[str]:
     return order
 
 
+def _prefer(order: list[str], broker: str) -> list[str]:
+    """Stable move-to-front: hoist ``broker`` to the head if present, keeping the
+    relative order of every other source. Reorder ONLY — never drops a source, so
+    failover is preserved and a broker not in the list leaves ``order`` unchanged.
+    """
+    if broker not in order:
+        return list(order)
+    return [broker] + [source for source in order if source != broker]
+
+
+# Only DECISION-data purposes are cadence-rerouted. The REAL-TIME plane
+# (live_ticks / market_profile / order_flow — held-position marks, quote-bus
+# tape, tick MP/OF construction) stays on the GLOBAL order for EVERY lane,
+# including slow ones (owner refinement 2026-07-17: "market watch, position
+# updates need to be in seconds" → always Fyers-WS, never rerouted to Upstox
+# REST). Scoping the reorder here makes that guarantee STRUCTURAL rather than
+# incidental — a slow lane can never drag its second-level marks onto Upstox.
+_DECISION_PURPOSES: frozenset[str] = frozenset({"option_chain", "historical"})
+
+
+def _profile_reorder(order: list[str], normalized: str) -> list[str]:
+    """Reorder the failover list by the active lane broker profile (SLOW →
+    upstox-first, FAST → fyers-first), but ONLY for decision-data purposes
+    (option_chain / historical). The real-time plane (live_ticks / market_profile
+    / order_flow) is never rerouted — see _DECISION_PURPOSES. Gated by
+    LANE_BROKER_ROUTING_ENABLED: flag-off returns ``order`` unchanged (provable
+    no-op regardless of profile). Fail-safe: any error → the unmodified order."""
+    try:
+        if normalized not in _DECISION_PURPOSES:
+            return order
+        if not bool(getattr(settings, "LANE_BROKER_ROUTING_ENABLED", False)):
+            return order
+        from brokers.rate_limiter import (
+            current_lane_profile,
+            LANE_PROFILE_SLOW,
+            LANE_PROFILE_FAST,
+        )
+
+        prof = current_lane_profile()
+        if prof == LANE_PROFILE_SLOW:
+            return _prefer(order, "upstox")
+        if prof == LANE_PROFILE_FAST:
+            return _prefer(order, "fyers")
+    except Exception:  # noqa: BLE001
+        pass
+    return order
+
+
 def route_order(purpose: str) -> list[str]:
     normalized = str(purpose or "").strip().lower()
     setting_name = _PURPOSE_SETTING.get(normalized, "")
     value = getattr(settings, setting_name, "") if setting_name else ""
     order = _parse_order(value)
-    # Circuit-aware failover: when a broker's chain REST is circuit-OPEN
-    # (sustained 429s/errors), prefer the healthy broker. Applied HERE (not just
-    # in choose_active_adapter, which is only called for live_ticks) so the real
-    # option-chain consumers that iterate route_order() directly — the market
-    # router's chain endpoint — actually fail over. Reorder only; never drops a
-    # source, and a fully-healthy circuit leaves the order unchanged.
+    # (1) Per-lane cadence routing FIRST: SLOW lanes prefer Upstox, FAST lanes
+    # prefer Fyers (owner directive 2026-07-17). Reorder only; flag-off no-op.
+    # Scoped to DECISION purposes (option_chain / historical) — the real-time
+    # plane (live_ticks / market_profile / order_flow) is passed through
+    # unchanged so slow-lane marks/quote-tape stay Fyers-WS at seconds cadence.
+    order = _profile_reorder(order, normalized)
+    # (2) Circuit-aware failover SECOND: when a broker's chain REST is circuit-
+    # OPEN (sustained 429s/errors), prefer the healthy broker. Applied HERE (not
+    # just in choose_active_adapter, which is only called for live_ticks) so the
+    # real option-chain consumers that iterate route_order() directly — the
+    # market router's chain endpoint — actually fail over. Reorder only; never
+    # drops a source, and a fully-healthy circuit leaves the order unchanged.
+    # ORDER MATTERS: circuit runs AFTER the profile so an OPEN preferred broker
+    # (e.g. a slow lane pinned to Upstox while Upstox is circuit-OPEN) still
+    # fails over to the healthy broker — the circuit wins over the profile. The
+    # circuit datatype is cadence-scoped (fast_chain / slow_chain) so a Fyers
+    # degradation trips only the fast group and an Upstox degradation only the
+    # slow group (structural isolation) — matching the record site in
+    # brokers/{fyers,upstox}.py.
     if normalized == "option_chain":
         try:
-            from market_data.broker_circuit import broker_circuit
-            order = broker_circuit.preferred_order(order, "chain")
+            from market_data.broker_circuit import broker_circuit, cadence_datatype
+            order = broker_circuit.preferred_order(order, cadence_datatype("chain"))
         except Exception:  # noqa: BLE001
             pass
     return order
@@ -109,6 +170,33 @@ def choose_active_adapter(
             return adapter, source, decisions
         decisions.append({"source": source, "selected": False, "reason": "adapter_not_connected"})
     return None, None, decisions
+
+
+def ordered_live_adapters(
+    purpose: str,
+    adapters: Mapping[str, Any],
+) -> list[tuple[str, Any]]:
+    """Resolve ``route_order(purpose)`` into an ordered ``(source, adapter)`` list
+    limited to the two LIVE brokers (fyers/upstox) that actually have a connected
+    adapter, dropping metadata/offline sources.
+
+    This is the single seam that lets a shared chain WRITER honour the active lane
+    broker profile without threading any signature: because ``route_order`` applies
+    the (flag-gated) cadence reorder + circuit failover, a writer that iterates
+    THIS instead of a hardcoded ``(upstox, fyers)`` tuple inherits SLOW→upstox /
+    FAST→fyers automatically, and falls back to a circuit-healthy broker on an
+    OPEN preferred one. Flag-off ⇒ ``route_order`` returns the global order, so the
+    iteration is byte-identical to the pre-routing literal for callers whose
+    literal already matched the configured order (e.g. option_chain = upstox,fyers).
+    """
+    ordered: list[tuple[str, Any]] = []
+    for source in route_order(purpose):
+        if source not in {"fyers", "upstox"}:
+            continue
+        adapter = adapters.get(source)
+        if adapter is not None:
+            ordered.append((source, adapter))
+    return ordered
 
 
 def source_policy_snapshot(

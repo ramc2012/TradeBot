@@ -95,6 +95,15 @@ class MacdRefinedService:
     async def run_live_cycle(self, *, allow_entries: bool = True) -> dict[str, Any]:
         return await self.live.run_cycle(allow_entries=allow_entries)
 
+    async def refresh_paper_marks(self) -> dict[str, Any]:
+        """Seconds-cadence protective-exit heartbeat for open positions.
+
+        Reads the real-time plane (Fyers-WS tick / shared oc: chain cache) and
+        fires only the existing stop/target/trail/window exits — never opens a
+        position, never runs a broker REST decision fetch. See
+        ``MacdRefinedLiveEngine.refresh_paper_marks``."""
+        return await self.live.refresh_paper_marks()
+
     async def data_audit(
         self,
         *,

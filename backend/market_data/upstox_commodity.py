@@ -118,6 +118,15 @@ async def resolve_active_upstox_mcx_future(
     *,
     session_date: date,
 ) -> Optional[dict[str, Any]]:
+    # EXCEPTION-a to the cadence broker-routing rule (owner directive 2026-07-17):
+    # MCX contract/quote resolution is UPSTOX-ONLY and must NEVER be rerouted to
+    # Fyers by the lane broker profile. Commodity lanes run under the FAST profile
+    # (Fyers WS ticks feed their MP/OF), but Fyers does not expose MCX contract
+    # discovery — so commodity is a FORCED HYBRID: Fyers tick plane + Upstox MCX
+    # contracts/quotes here. This path resolves the Upstox adapter directly
+    # (get_upstox_adapter / _load_mcx_instruments) and does NOT consult
+    # source_policy.route_order, so the FAST profile's fyers-first reorder cannot
+    # touch it. Do not "unify" this onto route_order — that would break MCX.
     return select_active_mcx_future_contract(
         await _load_mcx_instruments(),
         symbol_or_root,

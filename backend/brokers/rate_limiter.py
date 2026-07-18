@@ -132,6 +132,51 @@ def broker_class(request_class: str):
         _request_class.reset(token)
 
 
+# ── Per-lane broker profile (contextvar, cadence axis) ────────────────────────
+# Orthogonal to priority and class: those rank/ration waiters WITHIN a broker;
+# this steers WHICH broker a lane prefers. Set once at runner dispatch
+# (core/market_hours_paper_supervisor._run_runner) and read inside
+# market_data.source_policy.route_order to reorder the failover list:
+#   SLOW (30m: S1/MACD Refined/CBE/Gann) → upstox-first
+#   FAST (3m + tick: directional/auction/convergence/MP+OF) → fyers-first
+# Reorder ONLY (never drops a source). Propagates into child tasks / to_thread
+# via contextvars copy semantics — the exact guarantee broker_priority/
+# broker_class already rely on. Gated by settings.LANE_BROKER_ROUTING_ENABLED at
+# the READ seam, so setting this contextvar with the flag off is a no-op.
+LANE_PROFILE_DEFAULT = "default"  # global order, unchanged
+LANE_PROFILE_SLOW = "slow"        # upstox-preferred
+LANE_PROFILE_FAST = "fast"        # fyers-preferred
+
+_KNOWN_LANE_PROFILES = (LANE_PROFILE_DEFAULT, LANE_PROFILE_SLOW, LANE_PROFILE_FAST)
+
+_lane_broker_profile: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "lane_broker_profile", default=LANE_PROFILE_DEFAULT
+)
+
+
+@contextlib.contextmanager
+def lane_broker_profile(profile: str):
+    """Set the per-lane broker profile for the current context (and any child
+    tasks/threads spawned under it). Restores the previous value on exit.
+
+    An unknown/empty profile is coerced to DEFAULT rather than raising, so a
+    mistyped RunnerConfig.broker_profile degrades to the global order (safe) —
+    the routing layer must never crash a runner dispatch."""
+    value = str(profile or "").strip().lower()
+    if value not in _KNOWN_LANE_PROFILES:
+        value = LANE_PROFILE_DEFAULT
+    token = _lane_broker_profile.set(value)
+    try:
+        yield
+    finally:
+        _lane_broker_profile.reset(token)
+
+
+def current_lane_profile() -> str:
+    """Read the active lane broker profile (DEFAULT when unset)."""
+    return _lane_broker_profile.get()
+
+
 class RateLimitDayExceeded(RuntimeError):
     """Raised when a per-day cap is hit — sleeping until tomorrow is pointless."""
 

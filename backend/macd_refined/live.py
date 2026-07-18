@@ -855,6 +855,189 @@ class MacdRefinedLiveEngine:
             }
         return marks
 
+    # ── Seconds-cadence protective-exit heartbeat ─────────────────────────
+    async def _live_option_mark(
+        self,
+        position: dict[str, Any],
+        max_age_seconds: float,
+        chain_cache: dict[tuple[str, str], dict | None],
+    ) -> tuple[Optional[float], Optional[float]]:
+        """Freshest (premium, spot) for one held leg off the REAL-TIME plane.
+
+        Order, all read-only and NEVER a broker REST / route_order fetch:
+          1) ``data_router.get_live_mark`` — the in-process Fyers-WS tick
+             buffer, then the cross-process Redis ``tick:{symbol}`` last-value
+             (returns None past its own freshness budget).
+          2) the shared ``oc:`` option-chain cache the desks already maintain
+             (also a real-time snapshot, no fetch here).
+        Returns (None, spot_or_None) when no fresh premium exists so the caller
+        marks the position ``fresh=False`` (price exits skipped)."""
+        from market_data import live_marks
+        from market_data.data_router import data_router
+
+        candidates: list[str] = []
+        for fld in ("instrument_key", "trading_symbol"):
+            val = str(position.get(fld) or "").strip()
+            if not val:
+                continue
+            mapped = live_marks.registered_app_symbol(val)
+            if mapped:
+                candidates.append(mapped)
+            candidates.append(val)
+
+        premium: Optional[float] = None
+        for sym in dict.fromkeys(candidates):
+            try:
+                live = await data_router.get_live_mark(sym, max_age_seconds=max_age_seconds)
+            except Exception:  # noqa: BLE001 — a dead feed simply yields no mark
+                live = None
+            if live and live > 0:
+                premium = float(live)
+                break
+
+        spot: Optional[float] = None
+        try:
+            und_sym = self._underlying_symbol(str(position.get("underlying") or ""))
+            s = await data_router.get_live_mark(und_sym, max_age_seconds=max_age_seconds)
+            if s and s > 0:
+                spot = float(s)
+        except Exception:  # noqa: BLE001
+            spot = None
+
+        if premium is None:
+            entry_ltp, chain_spot = await self._chain_cache_mark(position, chain_cache)
+            if entry_ltp is not None and entry_ltp > 0:
+                premium = float(entry_ltp)
+            if spot is None and chain_spot:
+                spot = float(chain_spot)
+        return premium, spot
+
+    async def _chain_cache_mark(
+        self,
+        position: dict[str, Any],
+        chain_cache: dict[tuple[str, str], dict | None],
+    ) -> tuple[Optional[float], Optional[float]]:
+        """(ltp, spot) for the held strike from the shared ``oc:`` chain cache.
+
+        Read-only Redis lookup (no broker call). The cache is only populated
+        for tracked chains (mostly indices), so a miss is expected and simply
+        yields None — the position then stays on its 30m-cycle backstop."""
+        from market_data.option_chain import option_chain_service
+
+        underlying = str(position.get("underlying") or "").upper()
+        expiry = str(position.get("expiry") or "").strip()
+        otype = str(position.get("option_type") or "").upper()
+        try:
+            strike = float(position.get("strike") or 0.0)
+        except (TypeError, ValueError):
+            strike = 0.0
+        if not (underlying and expiry and otype in ("CE", "PE") and strike > 0):
+            return None, None
+        key = (underlying, expiry)
+        if key not in chain_cache:
+            try:
+                chain_cache[key] = await option_chain_service.get_cached(underlying, expiry)
+            except Exception:  # noqa: BLE001
+                chain_cache[key] = None
+        payload = chain_cache.get(key)
+        if not payload:
+            return None, None
+        spot_raw = payload.get("spot_price")
+        spot = float(spot_raw) if spot_raw else None
+        for entry in payload.get("entries") or []:
+            try:
+                if (
+                    float(entry.get("strike")) == strike
+                    and str(entry.get("option_type") or "").upper() == otype
+                ):
+                    ltp = entry.get("ltp")
+                    return (float(ltp) if ltp else None), spot
+            except (TypeError, ValueError):
+                continue
+        return None, spot
+
+    async def refresh_paper_marks(
+        self,
+        today: Optional[date] = None,
+        *,
+        max_age_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Seconds-cadence protective-exit pass over OPEN macd_refined positions.
+
+        Owner directive 2026-07-17: the 30-minute ``run_cycle`` sets the entry
+        SIDE, but held-position updates must be in SECONDS. This lightweight
+        pass re-marks every open position off the REAL-TIME plane (Fyers-WS
+        tick buffer → Redis ``tick:{symbol}`` → shared ``oc:`` chain cache —
+        never a broker REST / route_order decision fetch) and fires ONLY the
+        existing protective exits (hard stop / partial book / trailing / window
+        end) via ``paper.sync_cycle(allow_entries=False)``. Entry cadence and
+        entry logic are untouched, so a breached stop/target is caught in
+        seconds instead of waiting up to 30 minutes for the next decision cycle.
+
+        A leg with no fresh real-time mark is passed ``fresh=False`` so its
+        PRICE exits are skipped (matching ``_manage``'s stale-mark guard) — the
+        30m cycle stays its backstop and only the time-based window_end fires.
+        """
+        today = today or datetime.now(timezone.utc).date()
+        if max_age_seconds is None:
+            max_age_seconds = float(self.config["live"].get("marks_max_age_seconds", 60.0))
+        window_days = int(self.config["filters"]["entry_window_days_before_expiry"])
+        positions = self.paper.list_positions(status="open", limit=500).get("open_positions", [])
+        if not positions:
+            return {
+                "status": "ok", "refreshed": 0, "positions": 0, "exits": 0,
+                "paper_summary": self.paper.capital_status(),
+            }
+
+        marks: dict[str, dict[str, Any]] = {}
+        fresh_count = 0
+        chain_cache: dict[tuple[str, str], dict | None] = {}
+        for p in positions:
+            pid = str(p.get("position_id") or "")
+            if not pid:
+                continue
+            ref_premium = float(p.get("latest_premium") or p.get("entry_premium") or 0.0)
+            spot = float(p.get("latest_spot") or 0.0)
+            premium, live_spot = await self._live_option_mark(p, max_age_seconds, chain_cache)
+            fresh = premium is not None and premium > 0
+            if fresh:
+                # Ratio guard against a cross-wired broker tick (an index-magnitude
+                # value mis-attributed to an option symbol) — reject and fall back
+                # to the last displayed premium with fresh=False so no wrong exit
+                # fires. Mirrors market_data.live_marks.MAX_LIVE_DIVERGENCE_RATIO.
+                if ref_premium > 0 and (
+                    premium > ref_premium * 4.0 or premium < ref_premium / 4.0
+                ):
+                    fresh = False
+                else:
+                    ref_premium = float(premium)
+                    fresh_count += 1
+            if live_spot and live_spot > 0:
+                spot = float(live_spot)
+            expiry = str(p.get("expiry") or "")
+            window_passed = False
+            try:
+                window_passed = today >= (date.fromisoformat(expiry) - timedelta(days=window_days))
+            except Exception:  # noqa: BLE001
+                pass
+            marks[pid] = {
+                "premium": ref_premium, "spot": spot,
+                "window_end_passed": window_passed, "fresh": fresh,
+            }
+
+        open_before = len(positions)
+        summary = self.paper.sync_cycle(
+            proposals=[], marks=marks, now=_utc_now(), allow_entries=False
+        )
+        open_after = int(summary.get("open_positions") or 0)
+        return {
+            "status": "ok",
+            "refreshed": fresh_count,
+            "positions": open_before,
+            "exits": max(0, open_before - open_after),
+            "paper_summary": summary,
+        }
+
     async def data_audit(
         self,
         *,

@@ -62,9 +62,15 @@ class UpstoxAdapter(BrokerAdapter):
         """
         from brokers.rate_limiter import UPSTOX_DATA_LIMITER
         from brokers.http_client import get_shared_async_client
-        from market_data.broker_circuit import broker_circuit
+        from market_data.broker_circuit import broker_circuit, cadence_datatype
 
         dt = "chain" if "chain" in path else "history" if "history" in path else "quote"
+        # Cadence-scope the circuit datatype under the active lane profile so an
+        # Upstox degradation trips ONLY the slow group's breaker (slow_chain) and
+        # never the fast group's — MUST match the READ site
+        # (source_policy.route_order → cadence_datatype("chain")). Flag-off /
+        # DEFAULT profile → base dt (byte-identical breaker keys to pre-routing).
+        circuit_dt = cadence_datatype(dt)
         last_error: Optional[str] = None
         for attempt in range(5):
             await UPSTOX_DATA_LIMITER.acquire()
@@ -107,14 +113,14 @@ class UpstoxAdapter(BrokerAdapter):
                 await asyncio.sleep(min(2 ** attempt, 20))
                 continue
             if response.status_code != 200:
-                broker_circuit.record_failure("upstox", dt)
+                broker_circuit.record_failure("upstox", circuit_dt)
                 raise ValueError(
                     f"Upstox {path} failed ({response.status_code}): {self._error_detail(body, response)}"
                 )
-            broker_circuit.record_success("upstox", dt)
+            broker_circuit.record_success("upstox", circuit_dt)
             return body if isinstance(body, dict) else {"data": body}
 
-        broker_circuit.record_failure("upstox", dt)
+        broker_circuit.record_failure("upstox", circuit_dt)
         raise ValueError(f"Upstox {path} failed after retries: {last_error}")
 
     def get_auth_url(self) -> str:
