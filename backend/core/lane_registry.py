@@ -125,6 +125,7 @@ def get_registry() -> tuple[LaneSpec, ...]:
         ),
         LaneSpec(
             key="auction_intelligence",
+            audit_lane_key="auction_intelligence",
             label="Auction Intelligence Paper Cycle",
             kind="scheduler-runner",
             execution_mode="paper",
@@ -153,6 +154,7 @@ def get_registry() -> tuple[LaneSpec, ...]:
         ),
         LaneSpec(
             key="institutional_convergence",
+            audit_lane_key="institutional_convergence",
             label="Institutional Convergence Shadow Cycle",
             kind="scheduler-runner",
             execution_mode="paper",
@@ -197,6 +199,7 @@ def get_registry() -> tuple[LaneSpec, ...]:
         ),
         LaneSpec(
             key="directional_options",
+            audit_lane_key="directional_options",
             label="Directional Options Paper Cycle",
             kind="scheduler-runner",
             execution_mode="paper",
@@ -240,6 +243,7 @@ def get_registry() -> tuple[LaneSpec, ...]:
         ),
         LaneSpec(
             key="macd_refined",
+            audit_lane_key="macd_refined",
             label="MACD Refined Paper Cycle",
             kind="scheduler-runner",
             execution_mode="paper",
@@ -367,6 +371,7 @@ def get_registry() -> tuple[LaneSpec, ...]:
         ),
         LaneSpec(
             key="commodity_mp_orderflow",
+            audit_lane_key="commodity_mp_orderflow",
             label="Commodity MP + Order Flow",
             kind="strategy-engine",
             execution_mode="paper",

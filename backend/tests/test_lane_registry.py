@@ -82,18 +82,35 @@ def test_audit_coverage_true_only_for_audited_lanes() -> None:
         for spec in get_registry()
         if spec.audit_lane_key and spec.audit_lane_key in audit_keys
     }
-    # Today only S1 has a formal auditor — the visible gap is the point.
-    assert covered == {"s1_atm_30m_macd"}
+    # 2026-07-18: the execution-capable lanes now carry registered auditors
+    # (backend/audits/lanes/). Parked lanes (s2_index_mp_macd, us_macd_refined,
+    # chain_candle_builder) and pure daemons/monitors stay uncovered — that
+    # visible gap is the point.
+    assert covered == {
+        "s1_atm_30m_macd",
+        "directional_options",
+        "macd_refined",
+        "auction_intelligence",
+        "institutional_convergence",
+        "commodity_mp_orderflow",
+    }
     payload = lane_registry._spec_payload(
         next(spec for spec in get_registry() if spec.key == "s1_atm_30m_macd"),
         audit_keys,
     )
     assert payload["audit_coverage"] is True
-    other = lane_registry._spec_payload(
+    # macd_refined now carries a registered auditor -> covered.
+    covered_spec = lane_registry._spec_payload(
         next(spec for spec in get_registry() if spec.key == "macd_refined"),
         audit_keys,
     )
-    assert other["audit_coverage"] is False
+    assert covered_spec["audit_coverage"] is True
+    # A parked lane with no auditor stays uncovered — the visible gap.
+    uncovered = lane_registry._spec_payload(
+        next(spec for spec in get_registry() if spec.key == "us_macd_refined"),
+        audit_keys,
+    )
+    assert uncovered["audit_coverage"] is False
 
 
 # ---------------------------------------------------------------------------
