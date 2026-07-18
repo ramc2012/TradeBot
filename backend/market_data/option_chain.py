@@ -12,7 +12,10 @@ from sqlalchemy import text
 from brokers.base import BrokerAdapter, OptionChain
 from db.database import AsyncSessionLocal
 from db.redis_client import get_redis
-from market_data.symbols import to_broker_symbol, to_fyers_symbol
+from market_data.symbols import (
+    resolve_upstox_option_underlying_key,
+    to_fyers_option_symbol,
+)
 from market_data.validated_snapshots import validate_option_chain_rows
 
 
@@ -110,7 +113,23 @@ class OptionChainService:
             return
         try:
             broker_name = getattr(self._broker, "broker_name", "")
-            lookup_symbol = to_fyers_symbol(symbol) if broker_name == "fyers" else to_broker_symbol(symbol)
+            if broker_name == "fyers":
+                lookup_symbol = to_fyers_option_symbol(symbol)
+            else:
+                # Broker-canonical resolution (2026-07-18, defect 7c): indices
+                # resolve via the static map exactly as before; a STOCK resolves
+                # its fo_underlying_catalog.underlying_key. A stock with no
+                # catalog key FAILS CLOSED here — raising inside the try counts
+                # toward consecutive-failure eviction WITHOUT ever sending the
+                # bare name to Upstox (guaranteed 400 "Invalid Instrument key",
+                # the 2026-07-17 budget-storm shape).
+                lookup_symbol = await resolve_upstox_option_underlying_key(symbol)
+                if not lookup_symbol:
+                    raise LookupError(
+                        f"no canonical Upstox key for {symbol!r} "
+                        "(fo_underlying_catalog.underlying_key missing) — "
+                        "refusing known-invalid broker call"
+                    )
             chain: OptionChain = await self._broker.get_option_chain(lookup_symbol, expiry)
             source = getattr(self._broker, "broker_name", "unknown")
             payload, validated_chain = await self.build_validated_payload(
