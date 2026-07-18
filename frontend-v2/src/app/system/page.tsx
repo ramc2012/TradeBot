@@ -33,7 +33,7 @@ const TABS = [
 
 type SystemOverview = {
   generated_at?: string;
-  health?: { services?: Array<{ name?: string; state?: string; latency_ms?: number; detail?: string }> };
+  health?: { services?: Array<{ key?: string; label?: string; status?: string; detail?: string; meta?: Record<string, unknown> }> };
   books?: { combined?: { equity?: number; realized_pnl?: number; open_pnl?: number; open_positions?: number } };
   risk?: { trading_allowed?: boolean; open_positions?: number; max_positions?: number; daily_loss?: number; max_daily_loss?: number };
   blockers?: Array<{ key?: string; label?: string; status?: string; detail?: string }>;
@@ -107,19 +107,17 @@ export default function SystemPage() {
                 <thead className="text-[10.5px] uppercase tracking-wide text-text-muted">
                   <tr className="border-b border-bg-border/60">
                     <th className="px-2 py-2 text-left">Service</th>
-                    <th className="px-2 py-2 text-left">State</th>
-                    <th className="px-2 py-2 text-right">Latency</th>
+                    <th className="px-2 py-2 text-left">Status</th>
                     <th className="px-2 py-2 text-left">Detail</th>
                   </tr>
                 </thead>
                 <tbody>
                   {services.map((s, i) => (
-                    <tr key={i} className="border-b border-bg-border/30">
-                      <td className="px-2 py-2 font-semibold text-text-primary">{s.name ?? "—"}</td>
+                    <tr key={s.key ?? i} className="border-b border-bg-border/30">
+                      <td className="px-2 py-2 font-semibold text-text-primary">{s.label ?? s.key ?? "—"}</td>
                       <td className="px-2 py-2">
-                        <span className={clsx("rounded-full border px-2 py-0.5 text-[10.5px] font-semibold uppercase", serviceStateTone(s.state))}>{s.state ?? "—"}</span>
+                        <span className={clsx("rounded-full border px-2 py-0.5 text-[10.5px] font-semibold uppercase", serviceStateTone(s.status))}>{s.status ?? "—"}</span>
                       </td>
-                      <td className="px-2 py-2 text-right font-mono">{s.latency_ms != null ? `${s.latency_ms}ms` : "—"}</td>
                       <td className="px-2 py-2 text-[11px] text-text-secondary">{s.detail ?? "—"}</td>
                     </tr>
                   ))}

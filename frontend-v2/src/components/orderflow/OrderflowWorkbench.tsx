@@ -232,8 +232,15 @@ export default function OrderflowWorkbench() {
     queryFn: async () =>
       (
         await apiClient.get("/api/orderflow/snapshot", {
-          params: { symbols: symbol, intervals: "3,5,15,30", history_sessions: 5 },
-          timeout: 60_000,
+          // Slim the request to only what this desk renders. The `timeframes`
+          // multi-TF history was 99% of a ~2MB payload and is never read here —
+          // footprint (the rendered series) is built independently of intervals.
+          params: {
+            symbols: symbol,
+            intervals: "30",
+            history_sessions: 1,
+            include_timeframes: false,
+          },
         })
       ).data as Snapshot,
     refetchInterval: REFRESH_MS.snapshot,
@@ -252,7 +259,12 @@ export default function OrderflowWorkbench() {
     <DeskShell
       title="Order-flow Workbench"
       description="Institutional microstructure: footprint delta, CVD, DOM ladder, time-and-sales tape, and market-profile reference levels."
-      asOf={snap?.as_of}
+      // Freshness reflects the DATA timestamp, not the server render time
+      // (snap.as_of is "now" on every poll and would always read "1s ago").
+      asOf={inst?.timestamp ?? snap?.as_of}
+      asOfLabel="Data"
+      asOfStaleSeconds={90}
+      asOfCriticalSeconds={300}
       isFetching={snapQuery.isFetching}
       tabs={TABS}
       activeTab={activeTab}
@@ -344,6 +356,9 @@ export default function OrderflowWorkbench() {
               priceLines={profilePriceLines(inst?.market_profile, m.vwap)}
               height={400}
               showVolume
+              // Re-fit the viewport only on symbol change — never on a periodic
+              // data refresh, so trader pan/zoom is preserved across polls.
+              fitKey={symbol}
             />
           </Section>
 
@@ -394,6 +409,45 @@ export default function OrderflowWorkbench() {
 
 // ─── Data-quality / source row ──────────────────────────────────────────────
 
+// Order-flow sources that represent genuine live microstructure. Anything else
+// (bar_inference / historical_replay) is reconstructed, NOT tick-driven.
+const LIVE_OF_SOURCES = new Set(["market_ticks"]);
+// Max data age (seconds) for intraday microstructure to count as live.
+const MAX_LIVE_AGE_SEC = 90;
+
+/** Strict readiness: live source AND fresh data AND real microstructure. */
+export function evaluateReadiness(dq: DataQuality, inst?: Instrument): {
+  ready: boolean;
+  notLiveReason: string | null;
+} {
+  const ofSource = String(dq.order_flow_source || inst?.source?.order_flow || "");
+  const ageSec = Number(inst?.age_seconds ?? Infinity);
+  const hasMicro =
+    Number(dq.tick_history_count ?? 0) > 0 &&
+    Number(dq.trade_print_count ?? 0) > 0 &&
+    inst?.synthetic_quote !== true;
+
+  const isLiveSource = dq.live_mode === true && LIVE_OF_SOURCES.has(ofSource);
+  const isFresh = Number.isFinite(ageSec) && ageSec <= MAX_LIVE_AGE_SEC;
+  const executionReady = dq.execution_ready !== false && !dq.degraded_reason;
+
+  const ready = isLiveSource && isFresh && hasMicro && executionReady;
+
+  const notLiveReason = ready
+    ? null
+    : !isLiveSource
+      ? dq.snapshot_mode === "historical_replay"
+        ? "REPLAY"
+        : `SOURCE: ${ofSource || "—"}`
+      : !isFresh
+        ? `STALE ${formatAge(ageSec)}`
+        : !hasMicro
+          ? "NO MICROSTRUCTURE"
+          : dq.degraded_reason || "DEGRADED";
+
+  return { ready, notLiveReason };
+}
+
 function DataQualityRow({
   dq,
   inst,
@@ -403,12 +457,12 @@ function DataQualityRow({
   inst?: Instrument;
   chgUp: boolean;
 }) {
-  const ready = dq.execution_ready !== false && !dq.degraded_reason;
+  const { ready, notLiveReason } = evaluateReadiness(dq, inst);
   return (
     <div className="flex flex-wrap items-center gap-2 text-[11px] text-text-muted">
       <StatusBadge
-        label={ready ? "execution ready" : "degraded"}
-        variant={ready ? "success" : "warn"}
+        label={ready ? "LIVE · EXECUTION READY" : `NOT LIVE · ${notLiveReason}`}
+        variant={ready ? "success" : "error"}
       />
       <StatusBadge label={chgUp ? "up bar" : "down bar"} variant={chgUp ? "success" : "error"} />
       {dq.degraded_reason ? (

@@ -421,7 +421,7 @@ export default function ChartsWorkbench() {
                 </div>
               }
             >
-              <CandleChart bars={candleBars} priceLines={priceLines} overlays={overlays} height={460} showVolume />
+              <CandleChart bars={candleBars} priceLines={priceLines} overlays={overlays} height={460} showVolume fitKey={`${underlying}:${timeframe}`} />
               <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] uppercase tracking-[0.12em] text-text-muted">
                 <Legend color={CHART.blue} label="BB ±2σ(20)" />
                 <Legend color={CHART.amber} label="EMA(50)" />

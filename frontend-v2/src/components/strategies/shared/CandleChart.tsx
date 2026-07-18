@@ -34,6 +34,7 @@ export function CandleChart({
   height = 420,
   showVolume = true,
   tzOffsetMinutes = 330,
+  fitKey,
 }: {
   bars: CandleBar[];
   priceLines?: ChartPriceLine[];
@@ -44,10 +45,17 @@ export function CandleChart({
    *  lightweight-charts renders the axis in UTC, so we shift the plotted
    *  timestamps by the offset to show local session times (no DST for IST). */
   tzOffsetMinutes?: number;
+  /** When this changes (e.g. `${symbol}:${timeframe}`) the viewport re-fits to
+   *  the new series. On a periodic data refresh with the same key the viewport
+   *  is left alone, preserving the trader's pan/zoom. Omit to fit only once. */
+  fitKey?: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const refs = useRef<{ chart?: any; candle?: any; vol?: any; lines: any[]; overlays: any[] }>({ lines: [], overlays: [] });
+  // Tracks the fitKey the viewport was last fitted for. null until the first
+  // non-empty push, so we always fit once on initial load.
+  const fitRef = useRef<string | null>(null);
 
   // create chart once
   useEffect(() => {
@@ -150,14 +158,20 @@ export function CandleChart({
     refs.current.lines = priceLines
       .filter((pl) => Number.isFinite(pl.price))
       .map((pl) => candle.createPriceLine({ price: pl.price, color: pl.color, lineWidth: 1, lineStyle: pl.dashed ? 2 : 0, axisLabelVisible: true, title: pl.title }));
-    chart?.timeScale().fitContent();
+    // Fit the viewport only on first load or when fitKey changes (symbol /
+    // timeframe switch). A periodic data refresh keeps the same key, so the
+    // trader's pan/zoom is preserved instead of snapping back to full extent.
+    if (data.length && fitRef.current !== (fitKey ?? "")) {
+      chart.timeScale().fitContent();
+      fitRef.current = fitKey ?? "";
+    }
   }
 
   // update on data / overlay change
   useEffect(() => {
     pushData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bars, priceLines, overlays]);
+  }, [bars, priceLines, overlays, fitKey]);
 
   // The container div must always render so the create-once effect can attach
   // the chart even when the first render has no bars yet (async data). When
